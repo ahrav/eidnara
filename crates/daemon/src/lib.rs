@@ -27,6 +27,7 @@ pub mod harness_sources;
 pub mod healing;
 pub(crate) mod history_segment_coverage;
 pub mod history_summarizer;
+pub mod history_summarizer_archive;
 pub mod history_summarizer_chunk;
 pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
@@ -5132,6 +5133,7 @@ impl HandlerCore {
                 ..not_fired
             });
         }
+        let window_at_cap = history_summarizer_archive::WindowSize::of(projection).at_cap();
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             blocked("busy");
             return PreparedHistorySummarizerAction::Busy {
@@ -5236,6 +5238,16 @@ impl HandlerCore {
                         != HistorySummarizerPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
+                    window_cap_cut: window_at_cap
+                        .then(|| {
+                            history_summarizer_archive::archive_cut(
+                                projection,
+                                last_history_segment_end_ordinal,
+                                |mid| projection.identity_by_mid.contains_key(mid),
+                            )
+                        })
+                        .flatten()
+                        .map(|cut| cut.end),
                 },
                 &mut formatted_token_estimator,
             )
@@ -17092,7 +17104,7 @@ fn firing_trigger(
 ) -> FiringTrigger {
     FiringTrigger {
         source,
-        reason: reason.map(boundary::TriggerReason::timeline),
+        reason: reason.and_then(boundary::TriggerReason::timeline),
         usage: Some(FiringUsage {
             input_tokens: input_tokens as u64,
             context_limit_tokens: context_limit as u64,
@@ -17577,6 +17589,8 @@ mod tests {
     mod revision_3;
     #[path = "transform/revision_goldens.rs"]
     mod revision_goldens;
+    #[path = "window_cap_tests.rs"]
+    mod window_cap_tests;
     #[path = "window_coverage/dispatch_tests.rs"]
     mod window_coverage_dispatch_tests;
 
@@ -18490,6 +18504,7 @@ mod tests {
                     history_segment_in_progress: false,
                     commit_cluster_trigger_enabled: true,
                     min_commit_clusters: 2,
+                    window_cap_cut: None,
                 };
                 let mut reference_context = context.clone();
                 reference_context.projected_post_drop_percentage = reference_projection;
@@ -18564,6 +18579,7 @@ mod tests {
             history_segment_in_progress: false,
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: 2,
+            window_cap_cut: None,
         };
         let mut before_cold = Vec::new();
         let mut before_warm = Vec::new();
@@ -18765,6 +18781,7 @@ mod tests {
             history_segment_in_progress: false,
             commit_cluster_trigger_enabled: false,
             min_commit_clusters: 2,
+            window_cap_cut: None,
         };
         let initial = boundary::check_history_segment_trigger(&messages, &context);
         assert!(initial.fire, "initial trigger decision: {initial:?}");

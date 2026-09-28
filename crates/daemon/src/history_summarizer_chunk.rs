@@ -357,7 +357,14 @@ impl Builder {
     }
 }
 
-fn completed_tool_arc_ranges(blocks: &[FlatBlock]) -> Vec<MessageRange> {
+/// Tool arcs by message ordinal: each invocation paired with its first later result, and the
+/// invocations no result follows yet.
+pub(crate) struct ToolArcs {
+    pub completed: Vec<MessageRange>,
+    pub open_invocations: Vec<u64>,
+}
+
+pub(crate) fn tool_arcs(blocks: &[FlatBlock]) -> ToolArcs {
     #[derive(Default)]
     struct PartialArc {
         invocations: Vec<u64>,
@@ -377,23 +384,29 @@ fn completed_tool_arc_ranges(blocks: &[FlatBlock]) -> Vec<MessageRange> {
         }
     }
 
-    let mut ranges = Vec::new();
+    let mut completed = Vec::new();
+    let mut open_invocations = Vec::new();
     for mut arc in partial.into_values() {
         arc.invocations.sort_unstable();
         arc.results.sort_unstable();
         for invocation in arc.invocations {
             let Some(result_index) = arc.results.iter().position(|result| *result >= invocation)
             else {
+                open_invocations.push(invocation);
                 continue;
             };
-            ranges.push(MessageRange {
+            completed.push(MessageRange {
                 start: invocation,
                 end: arc.results.remove(result_index),
             });
         }
     }
-    ranges.sort_by_key(|range| (range.start, range.end));
-    ranges
+    completed.sort_by_key(|range| (range.start, range.end));
+    open_invocations.sort_unstable();
+    ToolArcs {
+        completed,
+        open_invocations,
+    }
 }
 
 /// Builds the next history_summarizer chunk before `eligible_end_ordinal`.
@@ -492,7 +505,7 @@ pub fn build_history_summarizer_chunk(
             aliases,
             present_ordinals,
             tool_only_ranges,
-            completed_tool_arcs: completed_tool_arc_ranges(blocks),
+            completed_tool_arcs: tool_arcs(blocks).completed,
         },
         snapshot,
         end_message_id: builder.last_message_id,

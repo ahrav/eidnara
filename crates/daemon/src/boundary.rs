@@ -281,6 +281,9 @@ pub struct TriggerContext {
     pub projected_post_drop_percentage: Option<f64>,
     pub commit_cluster_trigger_enabled: bool,
     pub min_commit_clusters: usize,
+    /// The last ordinal of the half-cap cut when the window is at its cap; `WindowCap` then
+    /// fires with an eligible head that reaches at least through it.
+    pub window_cap_cut: Option<u64>,
 }
 
 impl Default for TriggerContext {
@@ -291,6 +294,7 @@ impl Default for TriggerContext {
             projected_post_drop_percentage: None,
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER,
+            window_cap_cut: None,
         }
     }
 }
@@ -305,6 +309,8 @@ pub enum TriggerReason {
     CommitClusters,
     /// `TailSize` fires when `eligible_chunk_tokens` reaches `tail_size_bar`.
     TailSize,
+    /// `WindowCap` fires when the window reaches its block or byte cap.
+    WindowCap,
 }
 
 impl TriggerReason {
@@ -314,15 +320,17 @@ impl TriggerReason {
             TriggerReason::ForceBand => "force_band",
             TriggerReason::CommitClusters => "commit_clusters",
             TriggerReason::TailSize => "tail_size",
+            TriggerReason::WindowCap => "window_cap",
         }
     }
 
-    pub fn timeline(self) -> FiringTriggerReason {
+    pub fn timeline(self) -> Option<FiringTriggerReason> {
         match self {
-            TriggerReason::ProjectedHeadroom => FiringTriggerReason::ProjectedHeadroom,
-            TriggerReason::ForceBand => FiringTriggerReason::ForceBand,
-            TriggerReason::CommitClusters => FiringTriggerReason::CommitClusters,
-            TriggerReason::TailSize => FiringTriggerReason::TailSize,
+            TriggerReason::ProjectedHeadroom => Some(FiringTriggerReason::ProjectedHeadroom),
+            TriggerReason::ForceBand => Some(FiringTriggerReason::ForceBand),
+            TriggerReason::CommitClusters => Some(FiringTriggerReason::CommitClusters),
+            TriggerReason::TailSize => Some(FiringTriggerReason::TailSize),
+            TriggerReason::WindowCap => None,
         }
     }
 }
@@ -826,6 +834,19 @@ fn check_history_segment_trigger_with_index(
         || chunk.message_count >= MIN_PROACTIVE_TAIL_MESSAGE_COUNT;
     let relative_post_drop_target =
         ctx.boundary.execute_threshold_percentage * POST_DROP_TARGET_RATIO;
+
+    if let Some(cut) = ctx
+        .window_cap_cut
+        .filter(|cut| *cut >= boundary.eligible_head.start)
+    {
+        let mut capped = boundary;
+        if capped.eligible_head.end <= cut {
+            capped.eligible_head.end = cut + 1;
+            capped.protected_start_ordinal = cut + 1;
+            capped.boundary_reason = "window_cap".to_string();
+        }
+        return fire_with_progress(TriggerReason::WindowCap, &capped, progress);
+    }
 
     let force_materialization_percentage =
         escalation_bands(ctx.boundary.execute_threshold_percentage).force_materialize_percentage;
@@ -2182,6 +2203,7 @@ mod tests {
                 projected_post_drop_percentage: case.ctx.projected_post_drop_percentage,
                 commit_cluster_trigger_enabled: case.ctx.commit_cluster_trigger_enabled,
                 min_commit_clusters: case.ctx.min_commit_clusters,
+                window_cap_cut: None,
             };
             let got = check_history_segment_trigger(&msgs, &ctx);
             assert_eq!(got.fire, case.expected.fire, "fire in {}", case.label);
