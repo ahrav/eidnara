@@ -731,6 +731,42 @@ describe.if(platform() === "linux")(
                 }
             });
 
+            it("drops a warning still queued behind an active turn once the conflict clears", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => true);
+                const { client } = sessionWith({});
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(client, directory, POLLED, SIBLING, SERVER);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([
+                        formatConflictShort(SIBLING),
+                    ]);
+
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        LATER_BIND,
+                        SERVER,
+                    );
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([
+                        formatConflictShort(LATER_BIND),
+                    ]);
+
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
+                    expect(deletes.deletedUrls).toEqual([]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
             it("does not let a live warning suppress the startup warning", async () => {
                 const directory = seedDesktopSession();
                 __ignoredNotificationTest.setMidTurnDetector(() => false);

@@ -400,6 +400,14 @@ export function clearIgnoredMessages(sessionId: string): void {
     flushingIgnoredNotifications.delete(sessionId);
 }
 
+export function dropQueuedIgnoredMessages(sessionId: string, prefixes: readonly string[]): void {
+    const queued = queuedIgnoredNotifications.get(sessionId);
+    if (!queued) return;
+    const kept = queued.filter((item) => !prefixes.some((prefix) => item.text.startsWith(prefix)));
+    if (kept.length === 0) queuedIgnoredNotifications.delete(sessionId);
+    else queuedIgnoredNotifications.set(sessionId, kept);
+}
+
 /** Propagates session prompt failures so callers replacing user input can report the loss. */
 export async function sendUserPrompt(
     client: unknown,

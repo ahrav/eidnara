@@ -8,7 +8,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "../hooks/context/read-session-db";
-import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
+import {
+    dropQueuedIgnoredMessages,
+    sendIgnoredMessage,
+} from "../hooks/context/send-session-notification";
 import {
     CONFLICT_DISABLED_HEADER,
     CONFLICT_WARNING_HEADER,
@@ -344,6 +347,9 @@ export async function reconcileFoldAuthorityWarning(
     serverUrl?: string,
 ): Promise<void> {
     const text = warning === undefined ? undefined : formatConflictShort(warning);
+    // Dropping queued fold-authority warnings keeps the idle flush consistent with the warning
+    // this poll reports.
+    dropQueuedIgnoredMessages(sessionId, FOLD_AUTHORITY_WARNING_MARKERS);
     const markers =
         text === undefined
             ? FOLD_AUTHORITY_WARNING_MARKERS
