@@ -6,7 +6,11 @@ import { createMemo } from "solid-js";
 import packageJson from "../../package.json";
 import { loadPluginConfig } from "../config";
 import { isCompactionEnabled } from "../config/agent-disable";
-import { detectConflicts, resolveCompactionForBoot } from "../shared/conflict-detector";
+import {
+    type ConflictResult,
+    detectConflicts,
+    resolveCompactionForBoot,
+} from "../shared/conflict-detector";
 import { fixConflicts } from "../shared/conflict-fixer";
 import { formatThresholdPercent } from "../shared/format-threshold";
 import { formatMemoryCount } from "../shared/rpc-types";
@@ -76,20 +80,23 @@ function showToast(
 function showConflictDialog(
     api: TuiPluginApi,
     directory: string,
-    reasons: string[],
-    conflicts: ReturnType<typeof detectConflicts>["conflicts"],
+    result: ConflictResult,
+    redetect: () => ConflictResult,
 ) {
+    const disabled = result.disposition === "disable";
+    const findings = [...result.reasons, ...result.unresolved].join("\n");
+    const stillWord = disabled ? "Disabled" : "Warning";
     api.ui.dialog.replace(() => (
         <api.ui.DialogConfirm
-            title="⚠️ Eidnara Disabled"
-            message={`${reasons.join("\n")}\n\nFix these conflicts automatically?`}
+            title={disabled ? "⚠️ Eidnara Disabled" : "⚠️ Eidnara Warning"}
+            message={`${findings}\n\nFix these conflicts automatically?`}
             onConfirm={() => {
                 // `fixConflicts` edits only existing files and lets `writeFileSync` errors escape, so both
                 // an empty action list and a thrown error mean the conflict stands.
                 let actions: string[] = [];
                 let failure: string | null = null;
                 try {
-                    actions = fixConflicts(directory, conflicts);
+                    actions = fixConflicts(directory, result);
                 } catch (error) {
                     failure = error instanceof Error ? error.message : String(error);
                 }
@@ -102,12 +109,13 @@ function showConflictDialog(
                                 : "No configuration file could be edited, so nothing changed.";
                         api.ui.dialog.replace(() => (
                             <api.ui.DialogAlert
-                                title="⚠️ Eidnara Still Disabled"
-                                message={`${outcome}\n\n${reasons.join("\n")}\n\nResolve these by hand (for native compaction, set compaction.auto and compaction.prune to false in opencode.json), then restart OpenCode.`}
+                                title={`⚠️ Eidnara Still ${stillWord}`}
+                                message={`${outcome}\n\n${findings}\n\nResolve these by hand, then restart OpenCode. Run \`eidnara doctor\` for the settings each conflict needs.`}
                                 onConfirm={() => {
                                     showToast(api, {
-                                        message:
-                                            "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor",
+                                        message: disabled
+                                            ? "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor"
+                                            : "The configuration warning remains. Run: npx @eidnara/opencode@latest doctor",
                                         variant: "warning",
                                     });
                                 }}
@@ -116,13 +124,29 @@ function showConflictDialog(
                         return;
                     }
                     const actionSummary = actions.map((a) => `• ${a}`).join("\n");
+                    const remaining = redetect();
+                    // An unresolved source outlives any file edit, including one only the host observed.
+                    const remainingFindings = [
+                        ...remaining.reasons,
+                        ...new Set([...result.unresolved, ...remaining.unresolved]),
+                    ];
                     api.ui.dialog.replace(() => (
                         <api.ui.DialogAlert
-                            title="✅ Configuration Fixed"
-                            message={`${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`}
+                            title={
+                                remainingFindings.length === 0
+                                    ? "✅ Configuration Fixed"
+                                    : "⚠️ Configuration Partly Fixed"
+                            }
+                            message={`${actionSummary}${
+                                remainingFindings.length > 0
+                                    ? `\n\nStill unresolved:\n${remainingFindings.map((f) => `• ${f}`).join("\n")}`
+                                    : ""
+                            }\n\nPlease restart OpenCode for changes to take effect.`}
                             onConfirm={() => {
                                 showToast(api, {
-                                    message: "Restart OpenCode to enable Eidnara",
+                                    message: disabled
+                                        ? "Restart OpenCode to enable Eidnara"
+                                        : "Restart OpenCode to apply the fix",
                                     variant: "warning",
                                     durationOverrideMs: 10_000,
                                 });
@@ -133,7 +157,9 @@ function showConflictDialog(
             }}
             onCancel={() => {
                 showToast(api, {
-                    message: "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor",
+                    message: disabled
+                        ? "Eidnara remains disabled. Run: npx @eidnara/opencode@latest doctor"
+                        : "The configuration warning remains. Run: npx @eidnara/opencode@latest doctor",
                     variant: "warning",
                 });
             }}
@@ -1062,14 +1088,18 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     if (pluginConfig?.enabled === false) return;
     // `resolveCompactionForBoot` uses host-resolved config because the scanner treats missing config as enabled.
     const resolvedCompaction = await resolveCompactionForBoot(api.client);
+    const compactionEnabled = isCompactionEnabled(pluginConfig ?? {});
     const conflictResult = detectConflicts(directory, {
-        compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
+        compactionEnabled,
         resolvedCompaction: resolvedCompaction ?? undefined,
     });
-    if (conflictResult.hasConflict) {
-        showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts);
-        return;
+    if (conflictResult.disposition !== "none") {
+        // The running host keeps its boot configuration, so the repair is re-checked against the files.
+        showConflictDialog(api, directory, conflictResult, () =>
+            detectConflicts(directory, { compactionEnabled }),
+        );
     }
+    if (conflictResult.disposition === "disable") return;
 
     initRpcClient(directory);
 

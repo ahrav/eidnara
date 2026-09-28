@@ -11,20 +11,29 @@ interface OpenCodeConfig {
     plugin?: unknown;
 }
 
+export type ConflictDisposition = "none" | "warn" | "disable";
+
+export interface CompactionPatch {
+    auto?: boolean;
+    prune?: boolean;
+}
+
 export interface ConflictResult {
-    /* */
-    hasConflict: boolean;
+    disposition: ConflictDisposition;
     /** Each `reasons` entry describes a conflict in human-readable text. */
     reasons: string[];
     /* */
     conflicts: {
         compactionAuto: boolean;
         compactionPrune: boolean;
+        noFoldAuthority: boolean;
         dcpPlugin: boolean;
         omoPreemptiveCompaction: boolean;
         omoContextWindowMonitor: boolean;
         omoAnthropicRecovery: boolean;
     };
+    compactionPatch: CompactionPatch;
+    unresolved: string[];
     /**
      * `nativeCompaction` records the resolved native compaction state observed during detection.
      * `auto` and `prune` reflect the detector's resolved OpenCode compaction state.
@@ -84,30 +93,36 @@ export function detectConflicts(
     const conflicts: ConflictResult["conflicts"] = {
         compactionAuto: false,
         compactionPrune: false,
+        noFoldAuthority: false,
         dcpPlugin: false,
         omoPreemptiveCompaction: false,
         omoContextWindowMonitor: false,
         omoAnthropicRecovery: false,
     };
     const reasons: string[] = [];
+    const target: CompactionPatch = {};
+    const resolvedSuffix = options?.resolvedCompaction ? " (resolved config)" : "";
 
     const compactionResult = options?.resolvedCompaction ?? checkCompaction(directory);
     if (compactionEnabled && compactionResult.auto) {
         conflicts.compactionAuto = true;
-        reasons.push(
-            options?.resolvedCompaction
-                ? "OpenCode auto-compaction is enabled (compaction.auto=true) (resolved config)"
-                : "OpenCode auto-compaction is enabled (compaction.auto=true)",
-        );
+        target.auto = false;
+        reasons.push(`OpenCode auto-compaction is enabled (compaction.auto=true)${resolvedSuffix}`);
     }
     if (compactionEnabled && compactionResult.prune) {
         conflicts.compactionPrune = true;
-        reasons.push(
-            options?.resolvedCompaction
-                ? "OpenCode prune is enabled (compaction.prune=true) (resolved config)"
-                : "OpenCode prune is enabled (compaction.prune=true)",
-        );
+        target.prune = false;
+        reasons.push(`OpenCode prune is enabled (compaction.prune=true)${resolvedSuffix}`);
     }
+    if (!compactionEnabled && !compactionResult.auto) {
+        conflicts.noFoldAuthority = true;
+        target.auto = true;
+        reasons.push(NO_FOLD_AUTHORITY_REASON);
+    }
+    const { compactionPatch, unresolved } = splitCompactionPatch(
+        target,
+        options?.resolvedCompaction ? checkCompaction(directory) : compactionResult,
+    );
 
     const dcpFound = checkDcpPlugin(directory);
     if (dcpFound) {
@@ -136,11 +151,56 @@ export function detectConflicts(
     }
 
     return {
-        hasConflict: reasons.length > 0,
+        disposition: conflictDisposition(conflicts),
         reasons,
         conflicts,
+        compactionPatch,
+        unresolved,
         nativeCompaction: { auto: compactionResult.auto, prune: compactionResult.prune },
     };
+}
+
+export const NO_FOLD_AUTHORITY_REASON =
+    "no fold authority: Eidnara compaction is off (no summarizer model is configured, or Eidnara's compaction is turned off in its config) and OpenCode's compaction.auto is false";
+
+export function conflictDisposition(conflicts: ConflictResult["conflicts"]): ConflictDisposition {
+    const { noFoldAuthority, ...disabling } = conflicts;
+    if (Object.values(disabling).some(Boolean)) return "disable";
+    return noFoldAuthority ? "warn" : "none";
+}
+
+function splitCompactionPatch(
+    target: CompactionPatch,
+    fileView: ResolvedCompaction,
+): { compactionPatch: CompactionPatch; unresolved: string[] } {
+    const compactionPatch: CompactionPatch = {};
+    const unresolved: string[] = [];
+    for (const key of ["auto", "prune"] as const) {
+        const value = target[key];
+        if (value === undefined) continue;
+        const source =
+            compactionOverrideSource(key) ??
+            (fileView[key] === value
+                ? "a host configuration layer outside the config files"
+                : null);
+        if (source === null) {
+            compactionPatch[key] = value;
+        } else {
+            unresolved.push(
+                `compaction.${key} is set by ${source}; a config file edit cannot change it to ${value}`,
+            );
+        }
+    }
+    return { compactionPatch, unresolved };
+}
+
+function compactionOverrideSource(key: "auto" | "prune"): string | null {
+    const flag = key === "auto" ? "OPENCODE_DISABLE_AUTOCOMPACT" : "OPENCODE_DISABLE_PRUNE";
+    if (hostFlagEnabled(flag)) return flag;
+    const compaction = readInlineConfig()?.compaction;
+    return isRecord(compaction) && typeof compaction[key] === "boolean"
+        ? "OPENCODE_CONFIG_CONTENT"
+        : null;
 }
 
 /**
@@ -263,16 +323,21 @@ function readOpenCodeConfigLayers(directory: string): OpenCodeConfig[] {
         const config = readJsoncFile<unknown>(configPath);
         if (isRecord(config)) layers.push(config);
     }
-    const inline = process.env.OPENCODE_CONFIG_CONTENT;
-    if (inline) {
-        try {
-            const config = parseConfigJsonc<unknown>(inline);
-            if (isRecord(config)) layers.push(config);
-        } catch {
-            /* The host rejects the same malformed content, so it contributes nothing. */
-        }
-    }
+    const inline = readInlineConfig();
+    if (inline) layers.push(inline);
     return layers;
+}
+
+/** The host rejects malformed `OPENCODE_CONFIG_CONTENT`, so it contributes nothing. */
+function readInlineConfig(): OpenCodeConfig | null {
+    const inline = process.env.OPENCODE_CONFIG_CONTENT;
+    if (!inline) return null;
+    try {
+        const config = parseConfigJsonc<unknown>(inline);
+        return isRecord(config) ? config : null;
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -386,15 +451,8 @@ export function pluginEntriesOutside(directory: string, excludePath?: string): u
         const config = readJsoncFile<unknown>(configPath);
         if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
     }
-    const inline = process.env.OPENCODE_CONFIG_CONTENT;
-    if (inline) {
-        try {
-            const config = parseConfigJsonc<unknown>(inline);
-            if (isRecord(config) && Array.isArray(config.plugin)) entries.push(...config.plugin);
-        } catch {
-            /* The host rejects the same malformed content, so it contributes nothing. */
-        }
-    }
+    const inline = readInlineConfig();
+    if (inline && Array.isArray(inline.plugin)) entries.push(...inline.plugin);
     return entries;
 }
 
@@ -541,15 +599,21 @@ function readOmoDisabledHooks(directory: string): Set<string> {
 
 /**
  */
+export const CONFLICT_DISABLED_HEADER = "⚠️ Eidnara is disabled due to conflicting configuration:";
+export const CONFLICT_WARNING_HEADER = "⚠️ Eidnara is running with a configuration warning:";
+
 export function formatConflictShort(result: ConflictResult): string {
-    if (!result.hasConflict) return "";
+    if (result.disposition === "none") return "";
 
     const lines = [
-        "⚠️ Eidnara is disabled due to conflicting configuration:",
+        result.disposition === "disable" ? CONFLICT_DISABLED_HEADER : CONFLICT_WARNING_HEADER,
         "",
         ...result.reasons.map((r) => `• ${r}`),
+        ...result.unresolved.map((r) => `• ${r}`),
         "",
-        "Fix: run `eidnara doctor`",
+        result.unresolved.length > 0
+            ? "Fix: change the listed source; `opencode debug config` shows the resolved values"
+            : "Fix: run `eidnara doctor`",
     ];
     return lines.join("\n");
 }

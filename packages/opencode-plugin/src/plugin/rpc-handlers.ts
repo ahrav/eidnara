@@ -772,9 +772,7 @@ export function registerRpcHandlers(
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
     const ownership: CompactionOwnership = {
         enabled: isCompactionEnabled(config),
-        nativeActive: args.nativeCompaction
-            ? args.nativeCompaction.auto || args.nativeCompaction.prune
-            : undefined,
+        nativeActive: args.nativeCompaction?.auto,
     };
     // The same maps the hooks share, so a metadata read here pins the route root and records child classification for them too.
     const sessionDirectoryDeps: Omit<SessionDirectoryDeps, "directory"> = {

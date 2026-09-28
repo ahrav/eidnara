@@ -199,4 +199,38 @@ describe("plugin entry bundle", () => {
             });
         }
     }, 30_000);
+
+    test("a configuration with no fold authority boots with a warning and keeps the RPC server", async () => {
+        const module = (await import(built.outfile)) as {
+            default: { server: (ctx: unknown) => Promise<Record<string, unknown>> };
+        };
+        const userTier = join(configHome, "eidnara", "eidnara.jsonc");
+        const folding = readFileSync(userTier, "utf8");
+        const nativeProject = mkdtempSync(join(tmpdir(), "eidnara-entry-native-"));
+        writeFileSync(userTier, "{}");
+        try {
+            // `fakeClient` resolves `compaction.auto = false`, so neither side folds.
+            const hooks = await module.default.server({
+                directory: nativeProject,
+                client: fakeClient(),
+            });
+            try {
+                expect(Object.keys(hooks.tool as Record<string, unknown>).sort()).toEqual(
+                    EXPECTED_TOOLS.filter((id) => id !== "eidnara_reduce"),
+                );
+                expect(existsSync(rpcPortDir(getEidnaraStorageDir(), nativeProject))).toBe(true);
+            } finally {
+                const event = hooks.event as (input: { event: unknown }) => Promise<void>;
+                await event({
+                    event: {
+                        type: "server.instance.disposed",
+                        properties: { directory: nativeProject },
+                    },
+                });
+            }
+        } finally {
+            writeFileSync(userTier, folding);
+            rmSync(nativeProject, { recursive: true, force: true });
+        }
+    }, 30_000);
 });

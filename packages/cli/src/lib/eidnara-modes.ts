@@ -32,6 +32,16 @@ export function readEidnaraModes(
     };
 }
 
+export function compactionEnabledWithSummarizer(
+    configPath: string | undefined,
+    model: string | null,
+): boolean {
+    const { config } = loadUserTierConfigDetailed(configPath);
+    if (model === null) return compactionEnabledFor(config);
+    const block = isRecord(config.history_summarizer) ? config.history_summarizer : {};
+    return compactionEnabledFor({ ...config, history_summarizer: { ...block, model } });
+}
+
 /**
  * Host native settings are global, so setup decides from the shared config
  * and only reports a project-tier disagreement.

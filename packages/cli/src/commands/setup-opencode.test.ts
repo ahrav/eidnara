@@ -6,7 +6,9 @@ import { pathToFileURL } from "node:url";
 import {
     type ConflictResult,
     DCP_CONFLICT_REASON,
+    detectConflicts,
 } from "@eidnara/opencode/shared/conflict-detector";
+import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import { getOpenCodeConfigPaths } from "@eidnara/opencode/shared/opencode-config-dir";
 import { parse as parseJsonc } from "comment-json";
 import { assertJsoncConfigsParseable } from "../lib/jsonc-config";
@@ -14,6 +16,7 @@ import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
     assertPluginListShape,
+    conflictsForWrittenTier,
     findDcpPluginIndexes,
     hasAnthropicModel,
     hasExistingOpenCodeSetup,
@@ -417,7 +420,9 @@ describe("reportRemainingConflicts", () => {
             message: (message: string) => messages.push(`message:${message}`),
         };
 
-        expect(reportRemainingConflicts(root, true, output)).toBe(true);
+        expect(
+            reportRemainingConflicts(detectConflicts(root, { compactionEnabled: true }), output),
+        ).toBe(true);
         expect(messages.join("\n")).toContain("warn:Conflicts remain after the automatic fixes");
         expect(messages.join("\n")).toContain("oh-my-opencode");
 
@@ -432,8 +437,82 @@ describe("reportRemainingConflicts", () => {
             }),
         );
         messages.length = 0;
-        expect(reportRemainingConflicts(root, true, output)).toBe(false);
+        expect(
+            reportRemainingConflicts(detectConflicts(root, { compactionEnabled: true }), output),
+        ).toBe(false);
         expect(messages).toEqual([]);
+    });
+
+    it("reports a warning left after a repair, naming the source a file edit cannot change", () => {
+        const root = tempDir();
+        writeFileSync(join(root, "opencode.json"), JSON.stringify({ compaction: { auto: true } }));
+        process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
+        const messages: string[] = [];
+        const output = {
+            warn: (message: string) => messages.push(`warn:${message}`),
+            message: (message: string) => messages.push(`message:${message}`),
+        };
+
+        expect(
+            reportRemainingConflicts(detectConflicts(root, { compactionEnabled: false }), output),
+        ).toBe(true);
+        const text = messages.join("\n");
+        expect(text).toContain("Eidnara runs with a warning");
+        expect(text).toContain("no fold authority");
+        expect(text).toContain("compaction.auto is set by OPENCODE_DISABLE_AUTOCOMPACT");
+    });
+
+    it("leaves compaction.auto false when the summarizer setup writes gives Eidnara the folds", () => {
+        const root = tempDir();
+        const opencode = join(root, "opencode.json");
+        writeFileSync(
+            opencode,
+            JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"], compaction: { auto: false } }),
+        );
+        // Setup detects before the model pick, so no summarizer is configured yet.
+        const detected = detectConflicts(root, { compactionEnabled: false });
+        expect(detected.disposition).toBe("disable");
+        const messages: string[] = [];
+        const output = {
+            warn: (message: string) => messages.push(`warn:${message}`),
+            message: (message: string) => messages.push(`message:${message}`),
+        };
+
+        fixConflicts(root, conflictsForWrittenTier(detected, false, true));
+
+        const written = parseJsonc(readFileSync(opencode, "utf8")) as {
+            plugin?: unknown[];
+            compaction?: { auto?: boolean };
+        };
+        expect(written.compaction?.auto).toBe(false);
+        expect(written.plugin).toEqual([]);
+        // The next boot reads the written summarizer, so Eidnara folds against these files.
+        expect(detectConflicts(root, { compactionEnabled: true }).disposition).toBe("none");
+        const remaining = conflictsForWrittenTier(
+            detectConflicts(root, { compactionEnabled: false }),
+            false,
+            true,
+        );
+        expect(reportRemainingConflicts(remaining, output)).toBe(false);
+        expect(messages).toEqual([]);
+    });
+
+    it("keeps the auto = true repair when the written tier still leaves the folds to OpenCode", () => {
+        const root = tempDir();
+        const opencode = join(root, "opencode.json");
+        writeFileSync(
+            opencode,
+            JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"], compaction: { auto: false } }),
+        );
+        const detected = detectConflicts(root, { compactionEnabled: false });
+
+        fixConflicts(root, conflictsForWrittenTier(detected, false, false));
+
+        const written = parseJsonc(readFileSync(opencode, "utf8")) as {
+            compaction?: { auto?: boolean };
+        };
+        expect(written.compaction?.auto).toBe(true);
+        expect(detectConflicts(root, { compactionEnabled: false }).disposition).toBe("none");
     });
 });
 
@@ -593,7 +672,7 @@ describe("setup-opencode DCP preflight", () => {
 
     it("keeps a retained DCP plugin out of the broader automatic-fix pass", () => {
         const detected: ConflictResult = {
-            hasConflict: true,
+            disposition: "disable",
             reasons: [
                 "OpenCode auto-compaction is enabled (compaction.auto=true)",
                 DCP_CONFLICT_REASON,
@@ -601,11 +680,14 @@ describe("setup-opencode DCP preflight", () => {
             conflicts: {
                 compactionAuto: true,
                 compactionPrune: false,
+                noFoldAuthority: false,
                 dcpPlugin: true,
                 omoPreemptiveCompaction: false,
                 omoContextWindowMonitor: false,
                 omoAnthropicRecovery: false,
             },
+            compactionPatch: { auto: false },
+            unresolved: [],
             nativeCompaction: { auto: true, prune: false },
         };
 
@@ -615,7 +697,7 @@ describe("setup-opencode DCP preflight", () => {
         expect(masked.reasons).toEqual([
             "OpenCode auto-compaction is enabled (compaction.auto=true)",
         ]);
-        expect(masked.hasConflict).toBe(true);
+        expect(masked.disposition).toBe("disable");
         expect(detected.conflicts.dcpPlugin).toBe(true);
 
         const dcpOnly = withoutDcpConflict({
@@ -623,7 +705,7 @@ describe("setup-opencode DCP preflight", () => {
             reasons: [DCP_CONFLICT_REASON],
             conflicts: { ...detected.conflicts, compactionAuto: false },
         });
-        expect(dcpOnly.hasConflict).toBe(false);
+        expect(dcpOnly.disposition).toBe("none");
         expect(dcpOnly.reasons).toEqual([]);
     });
 });

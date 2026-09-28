@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseJsonc } from "comment-json";
-import { detectConflicts } from "./conflict-detector";
+import { type ConflictResult, detectConflicts } from "./conflict-detector";
 import { fixConflicts } from "./conflict-fixer";
 
 const noOmoConflicts = {
@@ -25,6 +25,30 @@ const noOmoConflicts = {
     omoContextWindowMonitor: false,
     omoAnthropicRecovery: false,
 };
+
+type ConflictFlags = Omit<ConflictResult["conflicts"], "noFoldAuthority">;
+
+function eidnaraRepair(conflicts: ConflictFlags) {
+    return {
+        conflicts: { ...conflicts, noFoldAuthority: false },
+        compactionPatch: {
+            ...(conflicts.compactionAuto ? { auto: false } : {}),
+            ...(conflicts.compactionPrune ? { prune: false } : {}),
+        },
+    };
+}
+
+function nativeRepair(conflicts: ConflictFlags) {
+    return {
+        conflicts: {
+            ...conflicts,
+            compactionAuto: false,
+            compactionPrune: false,
+            noFoldAuthority: false,
+        },
+        compactionPatch: {},
+    };
+}
 
 describe("fixConflicts", () => {
     let root: string;
@@ -89,12 +113,15 @@ describe("fixConflicts", () => {
 `,
         );
 
-        const actions = fixConflicts(projectDir, {
-            compactionAuto: true,
-            compactionPrune: true,
-            dcpPlugin: true,
-            ...noOmoConflicts,
-        });
+        const actions = fixConflicts(
+            projectDir,
+            eidnaraRepair({
+                compactionAuto: true,
+                compactionPrune: true,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            }),
+        );
 
         const updatedText = readFileSync(configPath, "utf-8");
         const updated = parseJsonc(updatedText) as Record<string, unknown>;
@@ -113,12 +140,15 @@ describe("fixConflicts", () => {
     });
 
     it("skips non-existent target files instead of creating user config", () => {
-        const actions = fixConflicts(projectDir, {
-            compactionAuto: true,
-            compactionPrune: true,
-            dcpPlugin: true,
-            ...noOmoConflicts,
-        });
+        const actions = fixConflicts(
+            projectDir,
+            eidnaraRepair({
+                compactionAuto: true,
+                compactionPrune: true,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            }),
+        );
 
         expect(actions).toEqual([]);
         expect(existsSync(join(userConfigDir, "opencode.json"))).toBe(false);
@@ -139,12 +169,15 @@ describe("fixConflicts", () => {
         process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
         let actions: string[];
         try {
-            actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
         } finally {
             if (prev === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG;
             else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = prev;
@@ -171,12 +204,15 @@ describe("fixConflicts", () => {
             }),
         );
 
-        const actions = fixConflicts(projectDir, {
-            compactionAuto: false,
-            compactionPrune: false,
-            dcpPlugin: true,
-            ...noOmoConflicts,
-        });
+        const actions = fixConflicts(
+            projectDir,
+            eidnaraRepair({
+                compactionAuto: false,
+                compactionPrune: false,
+                dcpPlugin: true,
+                ...noOmoConflicts,
+            }),
+        );
 
         const updated = parseJsonc(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
         expect(actions).toEqual([]);
@@ -201,12 +237,15 @@ describe("fixConflicts", () => {
                 JSON.stringify({ plugin: ["@tarquinen/opencode-dcp@latest", "@keep/one"] }),
             );
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual(["Removed opencode-dcp plugin"]);
             expect(JSON.parse(readFileSync(jsonPath, "utf-8")).plugin).toEqual(["@keep/one"]);
@@ -222,12 +261,15 @@ describe("fixConflicts", () => {
             writeFileSync(jsoncPath, JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }));
             writeFileSync(jsonPath, JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"] }));
 
-            fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(JSON.parse(readFileSync(jsoncPath, "utf-8")).plugin).toEqual([]);
             expect(JSON.parse(readFileSync(jsonPath, "utf-8")).plugin).toEqual([]);
@@ -252,7 +294,7 @@ describe("fixConflicts", () => {
             const projectPath = join(projectDir, "opencode.json");
             writeFileSync(projectPath, JSON.stringify({ compaction: { auto: true } }));
 
-            const actions = fixConflicts(projectDir, compactionConflict);
+            const actions = fixConflicts(projectDir, eidnaraRepair(compactionConflict));
 
             expect(actions).toEqual(["Disabled auto-compaction"]);
             expect(readFileSync(userPath, "utf-8")).toBe(userOriginal);
@@ -268,7 +310,7 @@ describe("fixConflicts", () => {
             const projectOriginal = `{\n  "plugin": ["@eidnara/opencode"]\n}\n`;
             writeFileSync(projectPath, projectOriginal);
 
-            const actions = fixConflicts(projectDir, compactionConflict);
+            const actions = fixConflicts(projectDir, eidnaraRepair(compactionConflict));
 
             expect(actions).toEqual(["Disabled auto-compaction"]);
             expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({
@@ -284,7 +326,7 @@ describe("fixConflicts", () => {
             const projectPath = join(projectDir, "opencode.json");
             writeFileSync(projectPath, JSON.stringify({ plugin: ["@eidnara/opencode"] }));
 
-            const actions = fixConflicts(projectDir, compactionConflict);
+            const actions = fixConflicts(projectDir, eidnaraRepair(compactionConflict));
 
             expect(actions).toEqual(["Disabled auto-compaction"]);
             expect(readFileSync(userPath, "utf-8")).toBe(userOriginal);
@@ -300,7 +342,7 @@ describe("fixConflicts", () => {
                 JSON.stringify({ compaction: { auto: true, prune: false } }),
             );
 
-            fixConflicts(projectDir, compactionConflict);
+            fixConflicts(projectDir, eidnaraRepair(compactionConflict));
 
             expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
                 auto: false,
@@ -315,11 +357,14 @@ describe("fixConflicts", () => {
                 JSON.stringify({ compaction: { auto: false, prune: true } }),
             );
 
-            const actions = fixConflicts(projectDir, {
-                ...compactionConflict,
-                compactionAuto: false,
-                compactionPrune: true,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    ...compactionConflict,
+                    compactionAuto: false,
+                    compactionPrune: true,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled prune"]);
             expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
@@ -332,10 +377,13 @@ describe("fixConflicts", () => {
             const projectPath = join(projectDir, "opencode.json");
             writeFileSync(projectPath, JSON.stringify({ compaction: "legacy", theme: "dark" }));
 
-            const actions = fixConflicts(projectDir, {
-                ...compactionConflict,
-                compactionPrune: true,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    ...compactionConflict,
+                    compactionPrune: true,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled auto-compaction", "Disabled prune"]);
             expect(JSON.parse(readFileSync(projectPath, "utf-8"))).toEqual({
@@ -350,10 +398,13 @@ describe("fixConflicts", () => {
             const projectPath = join(projectDir, "opencode.json");
             writeFileSync(projectPath, JSON.stringify({ compaction: { auto: true } }));
 
-            const actions = fixConflicts(projectDir, {
-                ...compactionConflict,
-                compactionPrune: true,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    ...compactionConflict,
+                    compactionPrune: true,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled auto-compaction", "Disabled prune"]);
             expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({
@@ -362,7 +413,7 @@ describe("fixConflicts", () => {
             expect(JSON.parse(readFileSync(projectPath, "utf-8")).compaction).toEqual({
                 auto: false,
             });
-            expect(detectConflicts(projectDir).hasConflict).toBe(false);
+            expect(detectConflicts(projectDir).disposition).toBe("none");
         });
     });
 
@@ -393,7 +444,7 @@ describe("fixConflicts", () => {
 `,
             );
 
-            const actions = fixConflicts(projectDir, omoConflicts);
+            const actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
 
@@ -435,7 +486,7 @@ describe("fixConflicts", () => {
 `,
             );
 
-            const actions = fixConflicts(projectDir, omoConflicts);
+            const actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
 
@@ -470,7 +521,7 @@ describe("fixConflicts", () => {
             const configPath = join(omoDir, filename);
             writeFileSync(configPath, JSON.stringify({ "[opencode]": {} }));
 
-            const actions = fixConflicts(projectDir, omoConflicts);
+            const actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
             const updated = parseJsonc(readFileSync(configPath, "utf-8")) as Record<
@@ -494,7 +545,7 @@ describe("fixConflicts", () => {
             writeFileSync(jsoncPath, JSON.stringify({ "[opencode]": {} }));
             writeFileSync(jsonPath, jsonOriginal);
 
-            const actions = fixConflicts(projectDir, omoConflicts);
+            const actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
             expect(
@@ -527,7 +578,7 @@ describe("fixConflicts", () => {
 
             let actions: string[] = [];
             expect(() => {
-                actions = fixConflicts(projectDir, omoConflicts);
+                actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
             }).not.toThrow();
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
@@ -566,7 +617,7 @@ describe("fixConflicts", () => {
                 }),
             );
 
-            const actions = fixConflicts(projectDir, omoConflicts);
+            const actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
 
@@ -589,8 +640,65 @@ describe("fixConflicts", () => {
 
         it("skips non-existent unified paths (no create)", () => {
             // Without a .omo directory, the fixer finds no targets.
-            const actions = fixConflicts(projectDir, omoConflicts);
+            const actions = fixConflicts(projectDir, eidnaraRepair(omoConflicts));
             expect(actions).toEqual([]);
+        });
+    });
+
+    describe("native-folds repair writes the patch's target values", () => {
+        function detectNative() {
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                return detectConflicts(projectDir, { compactionEnabled: false });
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
+        }
+
+        it("turns auto back on in the winning layer, leaves prune, and re-detects clean", () => {
+            const userPath = join(userConfigDir, "opencode.json");
+            writeFileSync(userPath, JSON.stringify({ compaction: { auto: true } }));
+            const projectPath = join(projectDir, "opencode.jsonc");
+            writeFileSync(
+                projectPath,
+                `{\n  // keep comment\n  "compaction": { "auto": false, "prune": true }\n}\n`,
+            );
+
+            const detected = detectNative();
+            expect(detected.disposition).toBe("warn");
+            expect(fixConflicts(projectDir, detected)).toEqual(["Enabled auto-compaction"]);
+
+            const text = readFileSync(projectPath, "utf-8");
+            expect(text).toContain("keep comment");
+            expect(parseJsonc(text)).toMatchObject({ compaction: { auto: true, prune: true } });
+            expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({ auto: true });
+            expect(detectNative().disposition).toBe("none");
+        });
+
+        it("writes through a symlink to the shared file", () => {
+            const realPath = join(root, "shared-opencode.json");
+            writeFileSync(realPath, JSON.stringify({ compaction: { auto: false } }));
+            symlinkSync(realPath, join(projectDir, "opencode.json"));
+
+            expect(fixConflicts(projectDir, detectNative())).toEqual(["Enabled auto-compaction"]);
+            expect(JSON.parse(readFileSync(realPath, "utf-8")).compaction).toEqual({ auto: true });
+            expect(lstatSync(join(projectDir, "opencode.json")).isSymbolicLink()).toBe(true);
+        });
+
+        it("edits no file for an environment-forced auto=false", () => {
+            const projectPath = join(projectDir, "opencode.json");
+            const original = JSON.stringify({ compaction: { auto: true } });
+            writeFileSync(projectPath, original);
+            process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
+            try {
+                const detected = detectConflicts(projectDir, { compactionEnabled: false });
+                expect(detected.unresolved).toHaveLength(1);
+                expect(fixConflicts(projectDir, detected)).toEqual([]);
+                expect(readFileSync(projectPath, "utf-8")).toBe(original);
+            } finally {
+                delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            }
         });
     });
 
@@ -609,13 +717,12 @@ describe("fixConflicts", () => {
 
             const actions = fixConflicts(
                 projectDir,
-                {
+                nativeRepair({
                     compactionAuto: true,
                     compactionPrune: true,
                     dcpPlugin: false,
                     ...noOmoConflicts,
-                },
-                { compactionEnabled: false },
+                }),
             );
 
             expect(actions).toEqual([]);
@@ -634,8 +741,12 @@ describe("fixConflicts", () => {
 
             const actions = fixConflicts(
                 projectDir,
-                { compactionAuto: true, compactionPrune: true, dcpPlugin: true, ...noOmoConflicts },
-                { compactionEnabled: false },
+                nativeRepair({
+                    compactionAuto: true,
+                    compactionPrune: true,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
             );
 
             expect(actions).toEqual(["Removed opencode-dcp plugin"]);
@@ -657,15 +768,14 @@ describe("fixConflicts", () => {
 
             const actions = fixConflicts(
                 projectDir,
-                {
+                nativeRepair({
                     compactionAuto: false,
                     compactionPrune: false,
                     dcpPlugin: false,
                     omoPreemptiveCompaction: true,
                     omoContextWindowMonitor: true,
                     omoAnthropicRecovery: true,
-                },
-                { compactionEnabled: false },
+                }),
             );
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
@@ -678,12 +788,15 @@ describe("fixConflicts", () => {
             writeFileSync(configPath, JSON.stringify({ compaction: { auto: true } }));
             chmodSync(configPath, 0o600);
 
-            fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(JSON.parse(readFileSync(configPath, "utf-8")).compaction).toEqual({
                 auto: false,
@@ -730,12 +843,15 @@ describe("fixConflicts", () => {
                 "}\r\n";
             writeFileSync(configPath, original);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: true,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: true,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual([
                 "Disabled auto-compaction",
@@ -772,12 +888,15 @@ describe("fixConflicts", () => {
 `;
             writeFileSync(configPath, original);
 
-            fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(readFileSync(configPath, "utf-8")).toBe(expected);
         });
@@ -802,12 +921,15 @@ describe("fixConflicts", () => {
                 "}\r\n";
             writeFileSync(configPath, original);
 
-            fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(readFileSync(configPath, "utf-8")).toBe(expected);
         });
@@ -817,12 +939,15 @@ describe("fixConflicts", () => {
             const original = '// preserve every byte\r\n{\r\n\t"plugin": ["@keep/one",],\r\n}\r\n';
             writeFileSync(configPath, original);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual([]);
             expect(readFileSync(configPath, "utf-8")).toBe(original);
@@ -855,14 +980,17 @@ describe("fixConflicts", () => {
 `;
             writeFileSync(configPath, original);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: false,
-                omoPreemptiveCompaction: false,
-                omoContextWindowMonitor: true,
-                omoAnthropicRecovery: false,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    omoPreemptiveCompaction: false,
+                    omoContextWindowMonitor: true,
+                    omoAnthropicRecovery: false,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
             expect(readFileSync(configPath, "utf-8")).toBe(expected);
@@ -891,14 +1019,17 @@ describe("fixConflicts", () => {
 `;
             writeFileSync(configPath, original);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: false,
-                compactionPrune: false,
-                dcpPlugin: false,
-                omoPreemptiveCompaction: false,
-                omoContextWindowMonitor: true,
-                omoAnthropicRecovery: false,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: false,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    omoPreemptiveCompaction: false,
+                    omoContextWindowMonitor: true,
+                    omoAnthropicRecovery: false,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled conflicting oh-my-opencode hooks"]);
             const text = readFileSync(configPath, "utf-8");
@@ -918,12 +1049,15 @@ describe("fixConflicts", () => {
             const projectOriginal = `{"compaction":{"auto":false},"compaction":{"auto":true}}`;
             writeFileSync(projectPath, projectOriginal);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual([]);
             expect(readFileSync(userPath, "utf-8")).toBe(userOriginal);
@@ -938,12 +1072,15 @@ describe("fixConflicts", () => {
             const projectOriginal = `{"theme":"a","theme":"b"}`;
             writeFileSync(projectPath, projectOriginal);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled auto-compaction"]);
             expect(JSON.parse(readFileSync(userPath, "utf-8")).compaction).toEqual({ auto: false });
@@ -963,12 +1100,15 @@ describe("fixConflicts", () => {
             symlinkSync(realPath, join(userConfigDir, "opencode.json"));
             symlinkSync(realPath, join(projectDir, "opencode.json"));
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: true,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: true,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled auto-compaction", "Removed opencode-dcp plugin"]);
             expect(JSON.parse(readFileSync(realPath, "utf-8"))).toEqual({
@@ -996,12 +1136,15 @@ describe("fixConflicts", () => {
             process.env.OPENCODE_CONFIG_DIR = aliasDir;
             let actions: string[];
             try {
-                actions = fixConflicts(projectDir, {
-                    compactionAuto: true,
-                    compactionPrune: false,
-                    dcpPlugin: true,
-                    ...noOmoConflicts,
-                });
+                actions = fixConflicts(
+                    projectDir,
+                    eidnaraRepair({
+                        compactionAuto: true,
+                        compactionPrune: false,
+                        dcpPlugin: true,
+                        ...noOmoConflicts,
+                    }),
+                );
             } finally {
                 if (prevConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
                 else process.env.OPENCODE_CONFIG_DIR = prevConfigDir;
@@ -1018,12 +1161,15 @@ describe("fixConflicts", () => {
             const projectPath = join(projectDir, "opencode.json");
             writeFileSync(projectPath, '\uFEFF{\n  "compaction": { "auto": true }\n}\n');
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled auto-compaction"]);
             const bytes = readFileSync(projectPath);
@@ -1041,12 +1187,15 @@ describe("fixConflicts", () => {
             ]);
             writeFileSync(projectPath, original);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual([]);
             expect(readFileSync(projectPath)).toEqual(original);
@@ -1060,12 +1209,15 @@ describe("fixConflicts", () => {
                 JSON.stringify({ compaction: { auto: true } }),
             );
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual(["Disabled auto-compaction"]);
             expect(lstatSync(fifoPath).isFIFO()).toBe(true);
@@ -1080,12 +1232,15 @@ describe("fixConflicts", () => {
                 detectConflicts(projectDir, { compactionEnabled: true }).conflicts.compactionAuto,
             ).toBe(true);
 
-            const actions = fixConflicts(projectDir, {
-                compactionAuto: true,
-                compactionPrune: false,
-                dcpPlugin: false,
-                ...noOmoConflicts,
-            });
+            const actions = fixConflicts(
+                projectDir,
+                eidnaraRepair({
+                    compactionAuto: true,
+                    compactionPrune: false,
+                    dcpPlugin: false,
+                    ...noOmoConflicts,
+                }),
+            );
 
             expect(actions).toEqual([]);
             expect(readFileSync(configPath, "utf-8")).toBe(original);

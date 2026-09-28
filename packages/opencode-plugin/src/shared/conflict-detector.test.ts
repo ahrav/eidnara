@@ -6,8 +6,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+    type CompactionPatch,
+    type ConflictDisposition,
     detectConflicts,
+    formatConflictShort,
     hasOmoPlugin,
+    NO_FOLD_AUTHORITY_REASON,
     omoConfigCandidatePaths,
     openCodeConfigLayerPaths,
     pluginEntriesOutside,
@@ -81,8 +85,10 @@ describe("detectConflicts", () => {
         }
         try {
             rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-        } catch {
-            /* */
+        } catch (error) {
+            console.warn(
+                `temp root ${root} left behind: ${error instanceof Error ? error.message : String(error)}`,
+            );
         }
     });
 
@@ -206,7 +212,7 @@ describe("detectConflicts", () => {
             expect(result.conflicts.omoContextWindowMonitor).toBe(expected.omo);
             expect(result.conflicts.omoAnthropicRecovery).toBe(expected.omo);
             // `OPENCODE_DISABLE_AUTOCOMPACT=1` from `beforeEach` rules out a compaction conflict.
-            expect(result.hasConflict).toBe(expected.dcp || expected.omo);
+            expect(result.disposition).toBe(expected.dcp || expected.omo ? "disable" : "none");
         });
     });
 
@@ -274,7 +280,7 @@ describe("detectConflicts", () => {
                 JSON.stringify(wrapped ? { "[opencode]": disabled } : disabled),
             );
             const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
+            expect(result.disposition).toBe("none");
         });
 
         it("ignores a legacy oh-my-opencode.json at the project root, which OMO never reads", () => {
@@ -351,7 +357,7 @@ describe("detectConflicts", () => {
             );
             const result = detectConflicts(projectDir);
             // Together, the legacy and unified configs disable all three OMO hooks.
-            expect(result.hasConflict).toBe(false);
+            expect(result.disposition).toBe("none");
         });
 
         it("ignores disabled_hooks in a shadowed omo.json when omo.jsonc exists", () => {
@@ -391,7 +397,7 @@ describe("detectConflicts", () => {
                 }),
             );
             const result = detectConflicts(projectDir);
-            expect(result.hasConflict).toBe(false);
+            expect(result.disposition).toBe("none");
         });
     });
 
@@ -415,7 +421,7 @@ describe("detectConflicts", () => {
             expect(() => {
                 result = detectConflicts(projectDir);
             }).not.toThrow();
-            expect(result?.hasConflict).toBe(false);
+            expect(result?.disposition).toBe("none");
         });
 
         it.each([
@@ -493,53 +499,154 @@ describe("detectConflicts", () => {
             }
         }
 
-        // `nativeCompaction` reports the file state in both modes; a conflict flag is raised
-        // only when Eidnara compaction is enabled.
         it.each([
             [
-                "Eidnara ON + auto=true → conflict fires, plugin would be disabled",
+                "Eidnara folds + auto=true → disable, patch auto=false",
                 true,
                 true,
                 false,
+                "disable",
+                { auto: false },
+            ],
+            ["Eidnara folds + auto=false → none", true, false, false, "none", {}],
+            [
+                "Eidnara folds + auto=false, prune=true → disable, patch prune=false",
                 true,
+                false,
+                true,
+                "disable",
+                { prune: false },
             ],
             [
-                "Eidnara ON + auto=false → no compaction conflict, plugin stays enabled",
-                true,
-                false,
-                false,
-                false,
-            ],
-            [
-                "Eidnara OFF + auto=true → NO conflict, plugin stays enabled (native compaction active)",
+                "native folds + auto=true → none (native compaction folds)",
                 false,
                 true,
                 false,
-                false,
+                "none",
+                {},
             ],
             [
-                "Eidnara OFF + auto=false → NO conflict, no-manager configuration reported honestly",
+                "native folds + auto=false → warn, patch auto=true",
                 false,
                 false,
                 false,
-                false,
+                "warn",
+                { auto: true },
             ],
             [
-                "Eidnara OFF + prune=true → NO conflict (prune is not a conflict in compaction-off mode)",
+                "native folds + auto=false, prune=true → warn (prune is not a fold)",
                 false,
                 false,
                 true,
-                false,
+                "warn",
+                { auto: true },
             ],
+            ["native folds + auto=true, prune=true → none", false, true, true, "none", {}],
         ] as Array<
-            [string, boolean, boolean, boolean, boolean]
-        >)("%s", (_title, compactionEnabled, auto, prune, conflicts) => {
+            [string, boolean, boolean, boolean, ConflictDisposition, CompactionPatch]
+        >)("%s", (_title, compactionEnabled, auto, prune, disposition, patch) => {
             writeCompactionConfig(auto, prune);
             const result = detectWithMode(compactionEnabled);
-            expect(result.conflicts.compactionAuto).toBe(conflicts && auto);
-            expect(result.conflicts.compactionPrune).toBe(conflicts && prune);
-            expect(result.hasConflict).toBe(conflicts);
+            expect(result.disposition).toBe(disposition);
+            expect(result.compactionPatch).toEqual(patch);
+            expect(result.unresolved).toEqual([]);
+            expect(result.conflicts.noFoldAuthority).toBe(disposition === "warn");
+            expect(result.reasons.includes(NO_FOLD_AUTHORITY_REASON)).toBe(disposition === "warn");
             expect(result.nativeCompaction).toEqual({ auto, prune });
+        });
+
+        it.each([
+            ["DCP", ["@tarquinen/opencode-dcp"]],
+            ["OMO", ["oh-my-opencode"]],
+        ])("native folds + auto=false + %s → disable, keeping the auto=true patch", (_name, plugins) => {
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                writeFileSync(
+                    join(projectDir, "opencode.json"),
+                    JSON.stringify({ plugin: plugins, compaction: { auto: false } }),
+                );
+                const result = detectConflicts(projectDir, { compactionEnabled: false });
+                expect(result.conflicts.noFoldAuthority).toBe(true);
+                expect(result.disposition).toBe("disable");
+                expect(result.compactionPatch).toEqual({ auto: true });
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
+        });
+
+        it("reports an environment-forced auto=false under native folds as unresolved by its source", () => {
+            writeCompactionConfig(true);
+            process.env.OPENCODE_DISABLE_AUTOCOMPACT = "1";
+            const result = detectConflicts(projectDir, { compactionEnabled: false });
+            expect(result.disposition).toBe("warn");
+            expect(result.compactionPatch).toEqual({});
+            expect(result.unresolved).toEqual([
+                "compaction.auto is set by OPENCODE_DISABLE_AUTOCOMPACT; a config file edit cannot change it to true",
+            ]);
+        });
+
+        it("reports an inline OPENCODE_CONFIG_CONTENT auto=false under native folds as unresolved by its source", () => {
+            const prevInline = process.env.OPENCODE_CONFIG_CONTENT;
+            process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ compaction: { auto: false } });
+            try {
+                writeCompactionConfig(true);
+                const result = detectWithMode(false);
+                expect(result.disposition).toBe("warn");
+                expect(result.compactionPatch).toEqual({});
+                expect(result.unresolved).toEqual([
+                    "compaction.auto is set by OPENCODE_CONFIG_CONTENT; a config file edit cannot change it to true",
+                ]);
+            } finally {
+                if (prevInline === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+                else process.env.OPENCODE_CONFIG_CONTENT = prevInline;
+            }
+        });
+
+        it("reports a host-resolved auto=false the config files do not set as unresolved", () => {
+            writeCompactionConfig(true);
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                const result = detectConflicts(projectDir, {
+                    compactionEnabled: false,
+                    resolvedCompaction: { auto: false, prune: false },
+                });
+                expect(result.disposition).toBe("warn");
+                expect(result.compactionPatch).toEqual({});
+                expect(result.unresolved).toEqual([
+                    "compaction.auto is set by a host configuration layer outside the config files; a config file edit cannot change it to true",
+                ]);
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
+        });
+
+        it("formats a warning without claiming Eidnara is disabled", () => {
+            writeCompactionConfig(false);
+            const text = formatConflictShort(detectWithMode(false));
+            expect(text).toContain("running with a configuration warning");
+            expect(text).toContain(NO_FOLD_AUTHORITY_REASON);
+            expect(text).not.toContain("disabled");
+            expect(text).toContain("Fix: run `eidnara doctor`");
+        });
+
+        it("points an unresolved source at the host's resolved config instead of file-based doctor", () => {
+            writeCompactionConfig(true);
+            const prev = process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
+            try {
+                const text = formatConflictShort(
+                    detectConflicts(projectDir, {
+                        compactionEnabled: false,
+                        resolvedCompaction: { auto: false, prune: false },
+                    }),
+                );
+                expect(text).toContain("opencode debug config");
+                expect(text).not.toContain("eidnara doctor");
+            } finally {
+                if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
+            }
         });
 
         // DCP and OMO conflicts disable the plugin whether compactionEnabled is true or false.
@@ -547,14 +654,14 @@ describe("detectConflicts", () => {
             writeProjectConfig(["@tarquinen/opencode-dcp"]);
             const result = detectWithMode(false);
             expect(result.conflicts.dcpPlugin).toBe(true);
-            expect(result.hasConflict).toBe(true);
+            expect(result.disposition).toBe("disable");
         });
 
         it("Eidnara OFF + OMO hooks → OMO conflicts still fire in both modes", () => {
             writeProjectConfig(["oh-my-opencode"]);
             const result = detectWithMode(false);
             expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
-            expect(result.hasConflict).toBe(true);
+            expect(result.disposition).toBe("disable");
         });
 
         // `detectConflicts` defaults `compactionEnabled` to `true` when options omit it.
@@ -566,7 +673,7 @@ describe("detectConflicts", () => {
             try {
                 const result = detectConflicts(projectDir);
                 expect(result.conflicts.compactionAuto).toBe(true);
-                expect(result.hasConflict).toBe(true);
+                expect(result.disposition).toBe("disable");
             } finally {
                 if (prev !== undefined) process.env.OPENCODE_DISABLE_AUTOCOMPACT = prev;
             }
@@ -594,7 +701,7 @@ describe("detectConflicts", () => {
                     resolvedCompaction: { auto: false, prune: false },
                 });
                 expect(result.conflicts.compactionAuto).toBe(false);
-                expect(result.hasConflict).toBe(false);
+                expect(result.disposition).toBe("none");
                 expect(result.nativeCompaction.auto).toBe(false);
             });
         });
@@ -606,7 +713,7 @@ describe("detectConflicts", () => {
                     resolvedCompaction: { auto: true, prune: false },
                 });
                 expect(result.conflicts.compactionAuto).toBe(true);
-                expect(result.hasConflict).toBe(true);
+                expect(result.disposition).toBe("disable");
                 expect(result.reasons.join("; ")).toContain("(resolved config)");
             });
         });
@@ -618,7 +725,7 @@ describe("detectConflicts", () => {
                     resolvedCompaction: { auto: false, prune: true },
                 });
                 expect(result.conflicts.compactionPrune).toBe(true);
-                expect(result.hasConflict).toBe(true);
+                expect(result.disposition).toBe("disable");
                 expect(result.reasons.join("; ")).toContain("(resolved config)");
             });
         });
@@ -627,7 +734,7 @@ describe("detectConflicts", () => {
             withoutAutoCompactEnv(() => {
                 const result = detectConflicts(projectDir, { compactionEnabled: true });
                 expect(result.conflicts.compactionAuto).toBe(true);
-                expect(result.hasConflict).toBe(true);
+                expect(result.disposition).toBe("disable");
                 // `resolvedCompaction` is not reported for file-based detection.
                 expect(result.reasons.join("; ")).not.toContain("(resolved config)");
             });
@@ -644,7 +751,7 @@ describe("detectConflicts", () => {
                 });
                 expect(result.conflicts.compactionAuto).toBe(false);
                 expect(result.conflicts.compactionPrune).toBe(true);
-                expect(result.hasConflict).toBe(true);
+                expect(result.disposition).toBe("disable");
                 expect(result.nativeCompaction.auto).toBe(false);
                 expect(result.nativeCompaction.prune).toBe(true);
             } finally {
@@ -659,7 +766,7 @@ describe("detectConflicts", () => {
                     resolvedCompaction: { auto: true, prune: false },
                 });
                 expect(result.conflicts.compactionAuto).toBe(false);
-                expect(result.hasConflict).toBe(false);
+                expect(result.disposition).toBe("none");
                 // Native compaction state remains reported when compactionEnabled is false.
                 expect(result.nativeCompaction.auto).toBe(true);
             });
@@ -702,7 +809,7 @@ describe("detectConflicts", () => {
             );
             const result = detect();
             expect(result.nativeCompaction).toEqual({ auto: false, prune: false });
-            expect(result.hasConflict).toBe(false);
+            expect(result.disposition).toBe("none");
         });
 
         it("merges keys across layers: project auto=false + user prune=true → prune conflict only", () => {
@@ -797,7 +904,7 @@ describe("detectConflicts", () => {
                 JSON.stringify({ plugin: ["oh-my-opencode"] }),
             );
             const result = withFlag(() => detectConflicts(projectDir));
-            expect(result.hasConflict).toBe(false);
+            expect(result.disposition).toBe("none");
         });
 
         it("still reads the user layer", () => {
@@ -977,7 +1084,7 @@ describe("detectConflicts", () => {
             const result = detectWithEnv("1");
             expect(result.conflicts.compactionAuto).toBe(false);
             expect(result.conflicts.compactionPrune).toBe(true);
-            expect(result.hasConflict).toBe(true);
+            expect(result.disposition).toBe("disable");
             expect(result.nativeCompaction).toEqual({ auto: false, prune: true });
         });
     });
@@ -999,7 +1106,7 @@ describe("detectConflicts", () => {
             const result = detectWithEnv(value);
             expect(result.conflicts.compactionPrune).toBe(conflicts);
             expect(result.nativeCompaction.prune).toBe(conflicts);
-            expect(result.hasConflict).toBe(conflicts);
+            expect(result.disposition).toBe(conflicts ? "disable" : "none");
         });
 
         it("leaves auto untouched: OPENCODE_DISABLE_PRUNE=1 + auto=true still conflicts on auto", () => {

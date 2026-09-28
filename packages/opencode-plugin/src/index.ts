@@ -35,6 +35,7 @@ import { createToolRegistry } from "./plugin/tool-registry";
 import {
     type ConflictResult,
     detectConflicts,
+    type ResolvedCompaction,
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
 import { getEidnaraStorageDir } from "./shared/data-path";
@@ -97,8 +98,9 @@ const server: Plugin = async (ctx) => {
     // File-based detection can disable the plugin when `auto=false` is defined in an unresolved configuration layer.
     // If the resolved-config fetch fails or times out, conflict detection uses the file-based check.
     let conflictResult: ConflictResult | null = null;
+    let resolvedCompaction: ResolvedCompaction | null = null;
     if (pluginConfig.enabled) {
-        const resolvedCompaction = await resolveCompactionForBoot(ctx.client);
+        resolvedCompaction = await resolveCompactionForBoot(ctx.client);
         if (resolvedCompaction === null) {
             log(
                 "[eidnara] resolved-config fetch failed; using file-based compaction detection (the running server's resolved config may differ — `opencode debug config` is authoritative)",
@@ -108,9 +110,12 @@ const server: Plugin = async (ctx) => {
             compactionEnabled: isCompactionEnabled(pluginConfig),
             resolvedCompaction: resolvedCompaction ?? undefined,
         });
-        if (conflictResult.hasConflict) {
+        const findings = [...conflictResult.reasons, ...conflictResult.unresolved].join("; ");
+        if (conflictResult.disposition === "disable") {
             pluginConfig.enabled = false;
-            log(`[eidnara] disabled due to conflicts: ${conflictResult.reasons.join("; ")}`);
+            log(`[eidnara] disabled due to conflicts: ${findings}`);
+        } else if (conflictResult.disposition === "warn") {
+            log(`[eidnara] configuration warning, plugin enabled: ${findings}`);
         } else {
             log("[eidnara] no conflicts detected, plugin enabled");
         }
@@ -152,7 +157,7 @@ const server: Plugin = async (ctx) => {
             client: ctx.client,
             liveSessionState,
             rustModeModuleClient: moduleClient,
-            nativeCompaction: conflictResult?.nativeCompaction,
+            nativeCompaction: resolvedCompaction ?? undefined,
         });
         rpcServer.start().catch((err) => {
             log(`[eidnara] RPC server failed to start: ${err}`);
@@ -170,19 +175,20 @@ const server: Plugin = async (ctx) => {
     }
 
     // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
-    if (conflictResult?.hasConflict) {
+    const serverUrl = (ctx as Record<string, unknown>).serverUrl;
+    const serverUrlStr =
+        serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
+    if (conflictResult && conflictResult.disposition !== "none") {
         // The handler sends the warning to the project's last active session without awaiting it.
         // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
         void sendConflictWarning(
             ctx.client as unknown as Record<string, unknown>,
             ctx.directory,
             conflictResult,
+            serverUrlStr,
         );
     } else if (pluginConfig.enabled) {
         // The handler removes leftover conflict warnings only when no conflict exists and pluginConfig.enabled.
-        const serverUrl = (ctx as Record<string, unknown>).serverUrl;
-        const serverUrlStr =
-            serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
         // SAFETY: same narrowed SDK-client shape as `sendConflictWarning`.
         void cleanupConflictWarnings(
             ctx.client as unknown as Record<string, unknown>,

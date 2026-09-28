@@ -60,9 +60,10 @@ function titledClient() {
 }
 
 const CONFLICT: ConflictResult = {
-    hasConflict: true,
+    disposition: "disable",
     reasons: ["another eidnara install is active"],
-} as ConflictResult;
+    unresolved: [],
+} as unknown as ConflictResult;
 
 // The Desktop state file location is platform-specific; only the Linux
 // location is env-relocatable for an isolated test.
@@ -152,6 +153,85 @@ describe.if(platform() === "linux")(
             await sendConflictWarning(client, directory, CONFLICT);
 
             expect(prompt).not.toHaveBeenCalled();
+        });
+
+        it("recognizes a persisted configuration warning as an existing conflict warning", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const prompt = mock(async () => ({}));
+            const warning = {
+                ...CONFLICT,
+                disposition: "warn",
+            } as unknown as ConflictResult;
+            const client = {
+                session: {
+                    prompt,
+                    get: mock(async () => ({ title: REAL_TITLE })),
+                    messages: mock(async () => [
+                        {
+                            info: { id: "msg_warning", role: "user" },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: formatConflictShort(warning),
+                                    ignored: true,
+                                },
+                            ],
+                        },
+                    ]),
+                },
+            };
+
+            await sendConflictWarning(client, directory, warning);
+
+            expect(prompt).not.toHaveBeenCalled();
+        });
+
+        it("replaces a warning the other disposition left instead of keeping both", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const deletedUrls: string[] = [];
+            const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                input: string | URL | Request,
+            ) => {
+                deletedUrls.push(String(input));
+                return new Response("{}", { status: 200 });
+            }) as unknown as typeof fetch);
+            const warning = {
+                ...CONFLICT,
+                disposition: "warn",
+                reasons: ["no fold authority"],
+            } as unknown as ConflictResult;
+            try {
+                const prompt = mock(async () => ({}));
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages: mock(async () => [
+                            {
+                                info: { id: "msg_disabled", role: "user" },
+                                parts: [
+                                    {
+                                        type: "text",
+                                        text: formatConflictShort(CONFLICT),
+                                        ignored: true,
+                                    },
+                                ],
+                            },
+                        ]),
+                    },
+                };
+
+                await sendConflictWarning(client, directory, warning, "http://127.0.0.1:1");
+
+                expect(deletedUrls).toEqual([
+                    `http://127.0.0.1:1/session/${SESSION_ID}/message/msg_disabled`,
+                ]);
+                expect(prompt).toHaveBeenCalledTimes(1);
+            } finally {
+                fetchSpy.mockRestore();
+            }
         });
 
         it("persists the conflict warning even when a TUI is connected", async () => {
@@ -380,6 +460,50 @@ describe.if(platform() === "linux")(
                 await cleanupConflictWarnings(client, directory, "http://127.0.0.1:1");
 
                 expect(fetchSpy).toHaveBeenCalledTimes(1);
+                expect(prompt).not.toHaveBeenCalled();
+            } finally {
+                fetchSpy.mockRestore();
+            }
+        });
+
+        it("deletes a resolved configuration warning without announcing a re-enable", async () => {
+            // A `warn` disposition keeps the plugin enabled, so cleanup clears its
+            // message silently.
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const warning = { ...CONFLICT, disposition: "warn" } as unknown as ConflictResult;
+            const deletedUrls: string[] = [];
+            const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                input: string | URL | Request,
+            ) => {
+                deletedUrls.push(String(input));
+                return new Response("{}", { status: 200 });
+            }) as unknown as typeof fetch);
+            try {
+                const prompt = mock(async () => ({}));
+                const messages = mock(async () => ({
+                    data: [
+                        {
+                            info: { id: "msg_warning", role: "user" },
+                            parts: [
+                                { type: "text", text: formatConflictShort(warning), ignored: true },
+                            ],
+                        },
+                    ],
+                }));
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages,
+                    },
+                };
+
+                await cleanupConflictWarnings(client, directory, "http://127.0.0.1:1");
+
+                expect(deletedUrls).toEqual([
+                    `http://127.0.0.1:1/session/${SESSION_ID}/message/msg_warning`,
+                ]);
                 expect(prompt).not.toHaveBeenCalled();
             } finally {
                 fetchSpy.mockRestore();

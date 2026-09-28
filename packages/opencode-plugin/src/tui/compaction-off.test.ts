@@ -52,7 +52,7 @@ test("uses the native-window percentage, not inputTokens over the reserved conte
         }),
     );
 
-    expect(value).toBe("Context: 40.0% · native compaction");
+    expect(value).toBe("Context: 40.0% · compaction owner unknown");
 });
 
 test("falls back to inputTokens over contextLimit when the native percentage is absent", () => {
@@ -64,15 +64,15 @@ test("falls back to inputTokens over contextLimit when the native percentage is 
         }),
     );
 
-    expect(value).toBe("Context: 50.0% · native compaction");
+    expect(value).toBe("Context: 50.0% · compaction owner unknown");
     expect(
         nativeCompactionContextLabel(
             snapshot({ contextLimit: 0, native_context_usage_percentage: undefined }),
         ),
-    ).toBe("Context: unknown · native compaction");
+    ).toBe("Context: unknown · compaction owner unknown");
 });
 
-test("names no owner when the host reports neither compaction.auto nor compaction.prune", () => {
+test("names the owner from compaction.auto alone and marks an absent observation unknown", () => {
     expect(nativeCompactionContextLabel(snapshot({ native_compaction_active: false }))).toBe(
         "Context: 41.0% · no active compaction",
     );
@@ -85,9 +85,8 @@ test("names no owner when the host reports neither compaction.auto nor compactio
             }),
         ),
     ).toBe("Context: unknown · no active compaction");
-    // A producer that did not resolve the host setting keeps the native-compaction wording.
     expect(nativeCompactionContextLabel(snapshot({ native_compaction_active: undefined }))).toBe(
-        "Context: 41.0% · native compaction",
+        "Context: 41.0% · compaction owner unknown",
     );
     expect(nativeCompactionContextLabel(snapshot({ native_compaction_active: true }))).toBe(
         "Context: 41.0% · native compaction",

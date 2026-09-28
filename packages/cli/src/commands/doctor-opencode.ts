@@ -509,13 +509,16 @@ export async function runDoctor(
         "Compaction check: file-based; the running server's resolved config may differ — `opencode debug config` is authoritative",
     );
 
+    for (const source of conflictResult?.unresolved ?? []) {
+        warn(`Not repairable by a config file edit: ${source}`);
+    }
     if (conflictDetectionError !== null) {
         fail(`Conflict detection unavailable: ${conflictDetectionError}`);
     } else if (conflictResult === null) {
         pass(
             "Eidnara is disabled (enabled: false); native compaction, DCP, and OMO hooks are left in place",
         );
-    } else if (conflictResult.hasConflict) {
+    } else if (conflictResult.disposition === "disable") {
         for (const reason of conflictResult.reasons) {
             fail(`Conflict: ${reason}`);
         }
@@ -531,7 +534,7 @@ export async function runDoctor(
             );
         } else if (options.force) {
             try {
-                const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
+                const actions = fixConflicts(cwd, conflictResult);
                 for (const action of actions) {
                     pass(`Fixed: ${action}`);
                     fixed++;
@@ -553,21 +556,20 @@ export async function runDoctor(
         } else {
             log.info("  Run 'doctor --force' to repair these conflicts");
         }
-    } else {
-        // When compaction is off, native `compaction.auto=true` activates native compaction and is not a conflict.
-        if (!compactionEnabled) {
-            if (conflictResult.nativeCompaction.auto || conflictResult.nativeCompaction.prune) {
-                pass(
-                    "No conflicts detected (compaction, DCP, OMO hooks) — native compaction active (compaction-off mode)",
-                );
-            } else {
-                warn(
-                    "No compaction manager is active: Eidnara compaction is off and OpenCode auto-compaction is disabled",
-                );
-            }
-        } else {
-            pass("No conflicts detected (compaction, DCP, OMO hooks)");
+    } else if (conflictResult.disposition === "warn") {
+        warn(
+            "No compaction manager is active: Eidnara compaction is off and OpenCode auto-compaction is disabled",
+        );
+        for (const reason of conflictResult.reasons) {
+            log.info(`  ${reason}`);
         }
+    } else if (!compactionEnabled) {
+        // When compaction is off, native `compaction.auto=true` activates native compaction and is not a conflict.
+        pass(
+            "No conflicts detected (compaction, DCP, OMO hooks) — native compaction active (compaction-off mode)",
+        );
+    } else {
+        pass("No conflicts detected (compaction, DCP, OMO hooks)");
     }
 
     if (userPathsAvailable && paths.tuiConfigFormat === "none") {

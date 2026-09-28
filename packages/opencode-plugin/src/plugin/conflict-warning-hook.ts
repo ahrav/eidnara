@@ -9,14 +9,18 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "../hooks/context/read-session-db";
 import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
-import type { ConflictResult } from "../shared/conflict-detector";
-import { formatConflictShort } from "../shared/conflict-detector";
+import {
+    CONFLICT_DISABLED_HEADER,
+    CONFLICT_WARNING_HEADER,
+    type ConflictResult,
+    formatConflictShort,
+} from "../shared/conflict-detector";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
 import type { SqliteReader } from "../shared/sqlite";
 import { jsonField } from "../shared/sqlite-helpers";
 
-const CONFLICT_WARNING_MARKER = "⚠️ Eidnara is disabled due to conflicting configuration:";
+const CONFLICT_WARNING_MARKERS = [CONFLICT_DISABLED_HEADER, CONFLICT_WARNING_HEADER];
 const ENABLED_MARKER = "✨ Eidnara is now enabled";
 
 function getDesktopStatePath(): string | null {
@@ -68,7 +72,11 @@ function readDesktopState(directory: string): DesktopState {
                 if (typeof serverState.currentSidecarUrl === "string") {
                     sidecarUrl = serverState.currentSidecarUrl;
                 }
-            } catch {}
+            } catch (error) {
+                log(
+                    `[eidnara] conflict-warning: Desktop server state is malformed; continuing without a sidecar URL: ${error instanceof Error ? error.message : String(error)}`,
+                );
+            }
         }
 
         let sessionId: string | null = null;
@@ -225,12 +233,12 @@ export function findIgnoredMarkerMessageIdsFromDb(
 async function findMarkerMessageIds(
     client: unknown,
     sessionId: string,
-    marker: string,
-): Promise<string[]> {
+    markers: readonly string[],
+): Promise<string[][]> {
     if (refreshOpenCodeDbPresence()) {
         try {
             return withReadOnlySessionDb((db) =>
-                findIgnoredMarkerMessageIdsFromDb(db, sessionId, marker),
+                markers.map((marker) => findIgnoredMarkerMessageIdsFromDb(db, sessionId, marker)),
             );
         } catch (error) {
             log(
@@ -238,7 +246,8 @@ async function findMarkerMessageIds(
             );
         }
     }
-    return findIgnoredMarkerMessageIds(await getSessionMessages(client, sessionId), marker);
+    const messages = await getSessionMessages(client, sessionId);
+    return markers.map((marker) => findIgnoredMarkerMessageIds(messages, marker));
 }
 
 /**
@@ -266,15 +275,34 @@ export async function sendConflictWarning(
     client: unknown,
     directory: string,
     conflictResult: ConflictResult,
+    serverUrl?: string,
 ): Promise<void> {
-    const { sessionId } = readDesktopState(directory);
+    const { sessionId, sidecarUrl } = readDesktopState(directory);
     if (!sessionId) {
         log("[eidnara] conflict-warning: could not find active session for Desktop warning");
         return;
     }
 
+    const disabled = conflictResult.disposition === "disable";
+    const [header, otherHeader] = disabled
+        ? [CONFLICT_DISABLED_HEADER, CONFLICT_WARNING_HEADER]
+        : [CONFLICT_WARNING_HEADER, CONFLICT_DISABLED_HEADER];
+    const [existing = [], superseded = []] = await findMarkerMessageIds(client, sessionId, [
+        header,
+        otherHeader,
+    ]);
+    // A persisted message under the other header states the other disposition, which no longer holds.
+    const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
+    if (superseded.length > 0 && deleteUrl) {
+        const failedIds = await deleteMessages(deleteUrl, sessionId, superseded);
+        if (failedIds.length > 0) {
+            log(
+                `[eidnara] conflict-warning: ${failedIds.length} superseded warning message(s) still present in session ${sessionId}`,
+            );
+        }
+    }
+
     // Conflict detection re-fires on every startup; a warning already in the session is not repeated.
-    const existing = await findMarkerMessageIds(client, sessionId, CONFLICT_WARNING_MARKER);
     if (existing.length > 0) {
         log(
             `[eidnara] conflict-warning: session ${sessionId} already carries ${existing.length} warning(s); not sending another`,
@@ -298,7 +326,9 @@ export async function sendConflictWarning(
 }
 
 /**
- * The plugin removes leftover conflict-warning messages from disabled runs.
+ * The plugin removes leftover conflict-warning messages from disabled and warning runs.
+ * The "enabled" confirmation follows a removed disabled-run message; a warning run
+ * kept the plugin enabled, so its message is removed silently.
  */
 export async function cleanupConflictWarnings(
     client: unknown,
@@ -311,11 +341,12 @@ export async function cleanupConflictWarnings(
         return;
     }
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
-    const warningMessageIds = await findMarkerMessageIds(
+    const [disabledMessageIds = [], configurationWarningIds = []] = await findMarkerMessageIds(
         client,
         sessionId,
-        CONFLICT_WARNING_MARKER,
+        CONFLICT_WARNING_MARKERS,
     );
+    const warningMessageIds = [...disabledMessageIds, ...configurationWarningIds];
 
     if (warningMessageIds.length === 0) {
         await cleanupEnabledMessages(client, deleteUrl, sessionId);
@@ -343,6 +374,7 @@ export async function cleanupConflictWarnings(
         );
         return;
     }
+    if (disabledMessageIds.length === 0) return;
 
     // Send a brief "enabled" confirmation so the user sees the conflict is
     // resolved. The confirmation is transient by design (the timer below
@@ -375,7 +407,9 @@ async function cleanupEnabledMessages(
     sessionId: string,
 ): Promise<void> {
     if (!serverUrl) return;
-    const enabledMessageIds = await findMarkerMessageIds(client, sessionId, ENABLED_MARKER);
+    const [enabledMessageIds = []] = await findMarkerMessageIds(client, sessionId, [
+        ENABLED_MARKER,
+    ]);
     if (enabledMessageIds.length === 0) return;
     await deleteMessages(serverUrl, sessionId, enabledMessageIds);
 }
