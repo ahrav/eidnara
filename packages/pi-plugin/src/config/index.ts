@@ -8,6 +8,7 @@ import {
     type ConfigAdmission,
     rejectedAuthorityKeys,
     screenUserTier,
+    withdrawUnresolvedFoldAuthority,
 } from "@eidnara/opencode/config/fold-authority";
 import type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 import {
@@ -355,78 +356,9 @@ function parsePiConfig(
 }
 
 export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult {
-    const cwd = opts.cwd ?? process.cwd();
-    const loadedFiles: LoadedConfigFile[] = [];
-    const warnings: string[] = [];
-
-    const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-    if (projectPath) {
-        const loaded = loadConfigFile(projectPath, "project");
-        if (loaded) loadedFiles.push(loaded);
-    }
-
-    const userPath = resolveFirstExisting(getUserConfigPaths());
-    if (userPath) {
-        const loaded = loadConfigFile(userPath, "user");
-        if (loaded) loadedFiles.push(loaded);
-    }
-
-    let rawConfig: Record<string, unknown> = {};
-    const mergeFiles = [...loadedFiles].sort((a, b) => {
-        if (a.scope === b.scope) return 0;
-        return a.scope === "user" ? -1 : 1;
-    });
-    const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
-    // Removed keys are dropped once, here, so the trusted-base parse and the merge loop both see a clean file and the warning is recorded once.
-    if (userRaw) {
-        warnings.push(
-            ...dropRemovedConfigKeys(userRaw).map((warning) => `[user config] ${warning}`),
-        );
-    }
-    // The threshold trust boundary uses the effective USER/default config as its baseline.
-    const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
-    let userTierFallback: Map<string, unknown> | undefined;
-
-    for (const loaded of mergeFiles) {
-        const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
-        warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-        // Removed keys are dropped before the unknown-key gate so a stale file still loads.
-        warnings.push(
-            ...dropRemovedConfigKeys(loaded.config).map((warning) => `${prefix} ${warning}`),
-        );
-
-        if (loaded.scope === "project") {
-            // The loader sanitizes the untrusted project config before merging it.
-            assertKnownConfigKeys(loaded.config);
-            const projectRaw = { ...loaded.config };
-            for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-                warnings.push(`${prefix} ${warning}`);
-            }
-            userTierFallback = userTierFallbackFor(projectRaw, userRaw, trustedBaseConfig);
-            rawConfig = mergeRawConfigs(rawConfig, projectRaw);
-            for (const warning of constrainProjectThresholdOverrides({
-                mergedRaw: rawConfig,
-                projectRaw,
-                trustedBaseConfig,
-            })) {
-                warnings.push(`${prefix} ${warning}`);
-            }
-        } else {
-            rawConfig = mergeRawConfigs(rawConfig, loaded.config);
-        }
-    }
-
-    const parsed = parsePiConfig(rawConfig, { userTierFallback });
-    setOutputReserveConfig(parsed.config.output_reserve);
-    setWindowOverlayPath(parsed.config.models?.window_overlay_path);
-    warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
-
-    return {
-        config: parsed.config,
-        registrationPromptSurface: trustedBaseConfig.prompt_surface,
-        warnings,
-        loadedFromPaths: loadedFiles.map((loaded) => loaded.path),
-    };
+    const { config, registrationPromptSurface, warnings, loadedFromPaths } =
+        loadPiConfigDetailed(opts);
+    return { config, registrationPromptSurface, warnings, loadedFromPaths };
 }
 
 function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
@@ -545,6 +477,12 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
+    const admission = admissionOf(loadedFiles);
+    warnings.push(
+        ...withdrawUnresolvedFoldAuthority(parsed.config, admission).map(
+            (warning) => `[config] ${warning}`,
+        ),
+    );
     const substitutionFailures = loadedFiles.flatMap(bindSubstitutionFailures);
     const userLoaded = loadedFiles.find((loaded) => loaded.scope === "user");
     const projectLoaded = loadedFiles.find((loaded) => loaded.scope === "project");
@@ -563,7 +501,7 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
             substitutionFailures,
             recoveredTopLevelKeys,
         }),
-        admission: admissionOf(loadedFiles),
+        admission,
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,

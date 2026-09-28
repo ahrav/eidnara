@@ -2,7 +2,7 @@
     "description": "Shared fold-authority parity fixture. The Rust daemon (crates/daemon/src/config.rs) and the TypeScript plugin (packages/opencode-plugin/src/config/index.ts) load every row through their production loaders and must produce the same summarizer chain, admission, and Eidnara-folds predicate.",
     "contract": [
         "A row's user_tier_files are written to $XDG_CONFIG_HOME/eidnara and its project_tier_files to <project>/.eidnara; each key is a file name and each value is the file's text. env holds the only variables {env:} substitution may read.",
-        "expected_chain is the ordered, deduplicated user-tier summarizer chain. expected_admission is admitted or unresolved. expected_eidnara_folds is compaction.enabled !== false and a non-empty chain. An unresolved row withholds its documents, so its chain and predicate are null.",
+        "expected_chain is the ordered, deduplicated user-tier summarizer chain. expected_admission is admitted or unresolved. expected_eidnara_folds is an admitted configuration with compaction.enabled !== false and a non-empty chain. An unresolved row withholds its documents' chain, so expected_chain is null, and it leaves folding to the host's native compaction, so expected_eidnara_folds is false.",
         "Chain values are trimmed of ECMAScript whitespace (String.prototype.trim), which includes U+FEFF and excludes U+0085.",
         "Supported input, the limit parity is claimed for: every tier file is a regular UTF-8 file of at most 1 MiB (1,048,576 bytes) whose final path component is not a symlink, and the user tier is valid JSONC before variable substitution. The daemon reads each tier with O_NOFOLLOW and that bound and reports a larger or symlinked tier as unreadable; the plugin follows symlinks and reads any size.",
         "A malformed or non-object tier, a summarizer or compaction block the user tier does not hold as an object, an unknown key inside history_summarizer or compaction in either tier, a user-tier key holding a variable reference, a non-boolean compaction.enabled, and a mistyped chain key are unresolved on both sides. Known keys are the plugin schema's properties (assets/eidnara.schema.json). The plugin also rejects unknown keys outside those two blocks, while the daemon ignores them and reads its own keys the plugin schema lacks (for example memory.user_profile_budget_tokens), so keys outside those two blocks are outside the parity contract.",
@@ -122,7 +122,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "compaction disabled with a model",
@@ -226,7 +226,7 @@
             },
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a string compaction.enabled is unresolved",
@@ -237,7 +237,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "an unquoted env reference in compaction.enabled is unresolved",
@@ -250,7 +250,7 @@
             },
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a malformed user tier is unresolved",
@@ -261,7 +261,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a malformed project tier is unresolved",
@@ -274,7 +274,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a non-object project tier is unresolved",
@@ -287,7 +287,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a null summarizer block is unresolved",
@@ -298,7 +298,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a non-object compaction block is unresolved",
@@ -309,7 +309,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "null blocks in the project tier are ignored",
@@ -335,7 +335,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "an unknown key in the compaction block is unresolved",
@@ -346,7 +346,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "an unknown summarizer key in the project tier is unresolved",
@@ -359,7 +359,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "an invalid preferred .jsonc beside a valid .json is unresolved",
@@ -371,7 +371,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a .json user tier",
@@ -397,7 +397,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a non-object user tier is unresolved",
@@ -408,7 +408,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a non-string model is unresolved",
@@ -419,7 +419,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "substitution elsewhere in the document keeps working",
@@ -488,7 +488,7 @@
             },
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "an env reference in a top-level key is unresolved",
@@ -501,7 +501,7 @@
             },
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "the daemon's summarizer context limit is a known key",
@@ -551,7 +551,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a prototype-pollution key in a project summarizer block is unresolved",
@@ -564,7 +564,7 @@
             "env": {},
             "expected_chain": null,
             "expected_admission": "unresolved",
-            "expected_eidnara_folds": null
+            "expected_eidnara_folds": false
         },
         {
             "name": "a duplicate chain key keeps its last literal value",

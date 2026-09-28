@@ -11,7 +11,12 @@ import { isRecord } from "../shared/record-type-guard";
 import { readRegularFileSync } from "../shared/regular-file";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
-import { type ConfigAdmission, rejectedAuthorityKeys, screenUserTier } from "./fold-authority";
+import {
+    type ConfigAdmission,
+    rejectedAuthorityKeys,
+    screenUserTier,
+    withdrawUnresolvedFoldAuthority,
+} from "./fold-authority";
 import type { LoadOutcome } from "./load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -532,6 +537,11 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         );
     }
 
+    const admission = admissionOf(userLoaded, projectLoaded);
+    allWarnings.push(
+        ...withdrawUnresolvedFoldAuthority(config, admission).map((w) => `[config] ${w}`),
+    );
+
     if (allWarnings.length > 0) {
         config.configWarnings = allWarnings;
     } else if ("configWarnings" in config) {
@@ -561,7 +571,7 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         config,
         registrationPromptSurface: trustedBaseConfig.prompt_surface,
         loadOutcome: combinedOutcome({ sources, substitutionFailures, recoveredTopLevelKeys }),
-        admission: admissionOf(userLoaded, projectLoaded),
+        admission,
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
@@ -580,15 +590,20 @@ export function loadUserTierConfigDetailed(configPath: string | undefined): {
     admission: ConfigAdmission;
 } {
     const loaded = configPath === undefined ? null : loadConfigFileDetailed(configPath, "user");
+    let config: EidnaraPluginConfig & { configWarnings?: string[] };
+    let admission: ConfigAdmission;
     try {
-        return { config: parsePluginConfig(loaded?.config ?? {}), admission: admissionOf(loaded) };
+        config = parsePluginConfig(loaded?.config ?? {});
+        admission = admissionOf(loaded);
     } catch (error) {
-        return {
-            config: parsePluginConfig({}),
-            admission: {
-                status: "unresolved",
-                reason: error instanceof Error ? error.message : String(error),
-            },
+        config = parsePluginConfig({});
+        admission = {
+            status: "unresolved",
+            reason: error instanceof Error ? error.message : String(error),
         };
     }
+    const withdrawn = withdrawUnresolvedFoldAuthority(config, admission);
+    if (withdrawn.length > 0)
+        config.configWarnings = [...(config.configWarnings ?? []), ...withdrawn];
+    return { config, admission };
 }

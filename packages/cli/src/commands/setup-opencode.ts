@@ -510,7 +510,6 @@ export async function runSetup(dryRun = false): Promise<number> {
     const hadExistingSetup = hasExistingOpenCodeSetup(paths, process.cwd());
     // With Eidnara disabled nothing conflicts, so no conflict repair is offered in that mode.
     const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd());
-    const compactionEnabled = modes.compactionEnabled;
     const omoConfigs = collectOmoConfigPaths(process.cwd());
     const firstTimeOmoRepair = modes.enabled && omoConfigs.length > 0 && !hadExistingSetup;
     const omoRepairReachable = modes.enabled && (hasOmoPlugin(process.cwd()) || firstTimeOmoRepair);
@@ -526,6 +525,13 @@ export async function runSetup(dryRun = false): Promise<number> {
         outro("Setup stopped — fix the malformed config and rerun setup.");
         return 1;
     }
+
+    const history_summarizerModel = await pickModel(promptIO, allModels, "history_summarizer");
+    log.success(`HistorySummarizer: ${history_summarizerModel}`);
+    // Setup writes this model, so the native-compaction decision follows the written config.
+    const compactionEnabled = readEidnaraModes(paths.eidnaraConfig, {
+        summarizerModel: history_summarizerModel,
+    }).compactionEnabled;
 
     const dcpDecision: DcpDecision =
         dryRun || !modes.enabled
@@ -573,9 +579,6 @@ export async function runSetup(dryRun = false): Promise<number> {
             }
         }
     }
-
-    const history_summarizerModel = await pickModel(promptIO, allModels, "history_summarizer");
-    log.success(`HistorySummarizer: ${history_summarizerModel}`);
 
     const context_researcherEnabled = await confirm("Enable context_researcher?", false);
     let context_researcherModel: string | null = null;

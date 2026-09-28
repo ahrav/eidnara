@@ -13,7 +13,9 @@
 //! (`packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json`) covers. Each
 //! tier is `eidnara.jsonc`, or `eidnara.json` when no `.jsonc` file exists. The four chain keys
 //! take literal model ids: a blank value, or one holding a `{env:` or `{file:` reference, is
-//! excluded with a warning.
+//! excluded with a warning. An unresolved configuration keeps the last admitted tier documents,
+//! or a rejected tier's settings outside `history_summarizer` and `compaction` when none was
+//! admitted, and leaves folding to the host's native compaction.
 
 use std::fs;
 use std::io;
@@ -174,7 +176,9 @@ pub struct ResolvedCacheTtl {
 
 impl DaemonConfig {
     pub fn eidnara_folds(&self) -> bool {
-        self.compaction_enabled && !self.model_chain.is_empty()
+        self.admission == ConfigAdmission::Admitted
+            && self.compaction_enabled
+            && !self.model_chain.is_empty()
     }
 
     /// The resolver preserves whether the model walk matched an entry while resolving the effective cache TTL.
@@ -326,23 +330,31 @@ impl ConfigCache {
             self.admitted_user = Some(user.clone());
             user
         } else {
-            self.admitted_user.clone().flatten()
+            match &self.admitted_user {
+                Some(admitted) => admitted.clone(),
+                None => user.as_ref().and_then(without_authority_blocks),
+            }
         };
         let retained = self
             .admitted_projects
             .iter()
             .position(|(root, _)| root == project_root)
-            .and_then(|index| self.admitted_projects.remove(index));
-        let project = if project_rejections.is_empty() {
-            project
+            .and_then(|index| self.admitted_projects.remove(index))
+            .map(|(_, project)| project);
+        let (project, admitted_project) = if project_rejections.is_empty() {
+            (project.clone(), Some(project))
+        } else if let Some(retained) = retained {
+            (retained.clone(), Some(retained))
         } else {
-            retained.and_then(|(_, project)| project)
+            (project.as_ref().and_then(without_authority_blocks), None)
         };
-        if self.admitted_projects.len() == ADMITTED_PROJECT_CAPACITY {
-            self.admitted_projects.pop_front();
+        if let Some(admitted_project) = admitted_project {
+            if self.admitted_projects.len() == ADMITTED_PROJECT_CAPACITY {
+                self.admitted_projects.pop_front();
+            }
+            self.admitted_projects
+                .push_back((project_root.to_path_buf(), admitted_project));
         }
-        self.admitted_projects
-            .push_back((project_root.to_path_buf(), project.clone()));
 
         let (mut effective, mut warnings) =
             merge_tiers_with_warnings(user.as_ref(), project.as_ref());
@@ -356,7 +368,7 @@ impl ConfigCache {
         if !rejections.is_empty() {
             let reason = rejections.join("; ");
             warnings.push(format!(
-                "configuration unresolved ({reason}); the last admitted tier documents stay in effect"
+                "configuration unresolved ({reason}); the last admitted tier documents stay in effect and the host's native compaction owns folding"
             ));
             effective.admission = ConfigAdmission::Unresolved { reason };
         }
@@ -1073,6 +1085,14 @@ fn module_model_selected(tier: &Value) -> bool {
 }
 
 const AUTHORITY_BLOCKS: [&str; 2] = ["history_summarizer", "compaction"];
+
+fn without_authority_blocks(tier: &Value) -> Option<Value> {
+    let mut entries = tier.as_object()?.clone();
+    for block in AUTHORITY_BLOCKS {
+        entries.remove(block);
+    }
+    Some(Value::Object(entries))
+}
 
 const PLUGIN_CONFIG_SCHEMA: &str = include_str!("../../../assets/eidnara.schema.json");
 
@@ -2480,7 +2500,9 @@ mod fold_authority_parity {
                 "admitted".to_string(),
                 Some(config.eidnara_folds()),
             ),
-            ConfigAdmission::Unresolved { .. } => (None, "unresolved".to_string(), None),
+            ConfigAdmission::Unresolved { .. } => {
+                (None, "unresolved".to_string(), Some(config.eidnara_folds()))
+            }
         }
     }
 
@@ -2634,6 +2656,83 @@ mod fold_authority_parity {
     }
 
     #[test]
+    fn a_first_load_rejection_keeps_the_tier_outside_the_authority_blocks() {
+        for (user_text, project_text) in [
+            (
+                r#"{
+                    "memory": { "enabled": false },
+                    "execute_threshold_percentage": 80,
+                    "compaction": { "enabled": "false" },
+                    "history_summarizer": { "model": "a/b" }
+                }"#,
+                "{}",
+            ),
+            (
+                r#"{ "history_summarizer": { "model": "a/b" } }"#,
+                r#"{
+                    "memory": { "enabled": false },
+                    "execute_threshold_percentage": 80,
+                    "history_summarizer": { "modle": "c/d" }
+                }"#,
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            write_tier(
+                &home.path().join("eidnara"),
+                &serde_json::json!({ "eidnara.jsonc": user_text }),
+            );
+            write_tier(
+                &project.path().join(".eidnara"),
+                &serde_json::json!({ "eidnara.jsonc": project_text }),
+            );
+
+            let (config, _) = load(home.path(), project.path());
+
+            assert!(
+                matches!(config.admission, ConfigAdmission::Unresolved { .. }),
+                "{user_text} {project_text}"
+            );
+            assert!(!config.memory_enabled, "{user_text} {project_text}");
+            assert_eq!(
+                config.execute_threshold_percentage, 80.0,
+                "{user_text} {project_text}"
+            );
+            assert!(!config.eidnara_folds(), "{user_text} {project_text}");
+        }
+    }
+
+    #[test]
+    fn an_unresolved_configuration_withdraws_fold_authority_from_the_retained_documents() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user = home.path().join("eidnara").join("eidnara.jsonc");
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        let mut cache = ConfigCache::default();
+        let mut load = |text: &str, mtime: i64| {
+            std::fs::write(&user, text).unwrap();
+            filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(mtime, 0)).unwrap();
+            cache
+                .effective_for_env(home.path().to_str(), None, project.path())
+                .0
+        };
+
+        let admitted = load(r#"{ "history_summarizer": { "model": "a/b" } }"#, 1_000);
+        assert!(admitted.eidnara_folds());
+
+        let rejected = load(
+            r#"{ "history_summarizer": { "model": "a/b", "modle": "c" } }"#,
+            2_000,
+        );
+        assert_eq!(rejected.model_chain, vec!["a/b"]);
+        assert!(
+            !rejected.eidnara_folds(),
+            "the plugin cannot see the daemon's retained documents, so an unresolved \
+             configuration leaves folding to the host on both sides"
+        );
+    }
+
+    #[test]
     fn retained_project_documents_are_bounded_and_the_user_document_survives_churn() {
         let home = tempfile::tempdir().unwrap();
         let user = home.path().join("eidnara").join("eidnara.jsonc");
@@ -2665,7 +2764,8 @@ mod fold_authority_parity {
             ConfigAdmission::Unresolved { .. }
         ));
         assert!(broken_project.memory_enabled);
-        assert!(broken_project.eidnara_folds());
+        assert_eq!(broken_project.model_chain, vec!["model-a"]);
+        assert!(!broken_project.eidnara_folds());
 
         std::fs::write(&user, r#"{ "history_summarizer": { "model": 5 } }"#).unwrap();
         filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(2_000, 0)).unwrap();
