@@ -92,6 +92,8 @@ jobs:
               - 'docs/payload-pool-protocol.md'
               # The daemon's loader-parity test reads the plugin's shared fixture.
               - 'packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json'
+              # `crates/daemon/src/fold_authority.rs` embeds the status fixture.
+              - 'packages/opencode-plugin/src/shared/__fixtures__/fold-authority-status.json'
               - 'docs/properties/search-projection/*/fault-map.md'
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
