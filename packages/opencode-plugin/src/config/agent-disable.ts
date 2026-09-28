@@ -1,3 +1,5 @@
+import { normalizeSummarizerChain } from "./fold-authority";
+
 /**
  */
 export const COMPACTION_ENABLED_PATH = `compaction${"."}enabled`;
@@ -18,6 +20,10 @@ export function isHistorySummarizerRunnable(config: {
  */
 export function isCompactionEnabled(config: {
     compaction?: { enabled?: boolean } | null;
+    history_summarizer?: unknown;
 }): boolean {
-    return config.compaction?.enabled !== false;
+    return (
+        config.compaction?.enabled !== false &&
+        normalizeSummarizerChain(config.history_summarizer).length > 0
+    );
 }

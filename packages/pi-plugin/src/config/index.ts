@@ -4,6 +4,12 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
+import {
+    type ConfigAdmission,
+    rejectedAuthorityKeys,
+    screenUserTier,
+    withdrawUnresolvedFoldAuthority,
+} from "@eidnara/opencode/config/fold-authority";
 import type { LoadOutcome } from "@eidnara/opencode/config/load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -40,6 +46,7 @@ export interface LoadPiConfigResult {
 
 export interface LoadPiConfigResultDetailed extends LoadPiConfigResult {
     loadOutcome: LoadOutcome;
+    admission: ConfigAdmission;
     sources: {
         userConfig: LoadOutcome;
         projectConfig: LoadOutcome;
@@ -58,6 +65,7 @@ interface LoadedConfigFile {
     config: Record<string, unknown>;
     warnings: string[];
     loadOutcome: LoadOutcome;
+    authorityRejections: string[];
 }
 
 function getProjectConfigPaths(cwd: string): string[] {
@@ -81,16 +89,20 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
         // A FIFO without a writer would block a plain read; the regular-file reader rejects it and
         // a directory, so either becomes this file's load warning instead of a hang.
         const rawText = readRegularFileSync(path);
+        const screen =
+            scope === "user"
+                ? screenUserTier(rawText)
+                : { text: rawText, rejections: [], warnings: [] };
         const substituted = substituteConfigVariables({
-            text: rawText,
+            text: screen.text,
             configPath: path,
             // Project configs cannot expand `{env:}` or `{file:}` tokens because they may expose secrets.
             // Project configs cannot expand `{env:}` or `{file:}` tokens because they may expose secrets.
             isProjectConfig: scope === "project",
         });
-        const rejectedKeyPaths: string[] = [];
+        const rejectedKeyPaths: (string | number)[][] = [];
         const parsed = parseConfigJsonc<unknown>(substituted.text, {
-            onRejectedKey: (keyPath) => rejectedKeyPaths.push(keyPath.join(".")),
+            onRejectedKey: (keyPath) => rejectedKeyPaths.push([...keyPath]),
         });
         // Reject non-object roots because `removedKeyWarnings` and the raw merge index them by key.
         if (!isPlainObject(parsed)) {
@@ -99,15 +111,19 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
         const config = parsed;
         const unsafeKeyWarnings = rejectedKeyPaths.map(
             (keyPath) =>
-                `Ignored unsafe config key "${keyPath}" (security: prototype-pollution keys are not allowed).`,
+                `Ignored unsafe config key "${keyPath.join(".")}" (security: prototype-pollution keys are not allowed).`,
         );
         return {
             path,
             scope,
             config,
-            warnings: [...substituted.warnings, ...unsafeKeyWarnings].map(
+            warnings: [...substituted.warnings, ...unsafeKeyWarnings, ...screen.warnings].map(
                 (warning) => `${path}: ${warning}`,
             ),
+            authorityRejections: [
+                ...screen.rejections,
+                ...rejectedAuthorityKeys(rejectedKeyPaths),
+            ].map((rejection) => `${path}: ${rejection}`),
             loadOutcome:
                 rejectedKeyPaths.length > 0
                     ? "schema-recovery"
@@ -117,11 +133,13 @@ function loadConfigFile(path: string, scope: "user" | "project"): LoadedConfigFi
         };
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const warning = `${path}: failed to load config: ${message}; using defaults for this file.`;
         return {
             path,
             scope,
             config: {},
-            warnings: [`${path}: failed to load config: ${message}; using defaults for this file.`],
+            warnings: [warning],
+            authorityRejections: [warning],
             loadOutcome:
                 typeof (error as { code?: unknown }).code === "string"
                     ? "project-file-io-error"
@@ -241,7 +259,7 @@ function parsePiConfig(
 
     for (const key of errorPaths) {
         recoveredTopLevelKeys.push(key);
-        const isAgentConfig = key === "history_summarizer" || key === "context_researcher";
+        const isAgentConfig = key === "context_researcher";
 
         // A project config key with a user-tier fallback restores that fallback instead
         // of forcing the schema default.
@@ -282,6 +300,7 @@ function parsePiConfig(
                 ...(rawValue as Record<string, unknown>),
             };
             const prunedLeaves: string[] = [];
+            const removedPaths: PropertyKey[][] = [];
             for (const p of issuePaths) {
                 // Recovery prunes the deepest invalid leaf so valid siblings remain.
                 // Recovery preserves a sibling `enabled: false`.
@@ -289,12 +308,21 @@ function parsePiConfig(
                 const result = pruneNestedConfigLeaf(prunedBlock, relative);
                 if (result) {
                     prunedBlock = result.block;
+                    removedPaths.push([...result.removed]);
                     // The rendered leaf omits `key`, which the warning names separately.
                     prunedLeaves.push(
                         redactConfigIssuePath([key, ...result.removed])
                             .slice(1)
                             .join("."),
                     );
+                    continue;
+                }
+                // An earlier prune already removed this leaf with its container.
+                if (
+                    removedPaths.some((removed) =>
+                        removed.every((segment, index) => relative[index] === segment),
+                    )
+                ) {
                     continue;
                 }
                 // A missing required leaf has nothing to prune, so the whole block goes.
@@ -328,78 +356,9 @@ function parsePiConfig(
 }
 
 export function loadPiConfig(opts: LoadPiConfigOptions = {}): LoadPiConfigResult {
-    const cwd = opts.cwd ?? process.cwd();
-    const loadedFiles: LoadedConfigFile[] = [];
-    const warnings: string[] = [];
-
-    const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
-    if (projectPath) {
-        const loaded = loadConfigFile(projectPath, "project");
-        if (loaded) loadedFiles.push(loaded);
-    }
-
-    const userPath = resolveFirstExisting(getUserConfigPaths());
-    if (userPath) {
-        const loaded = loadConfigFile(userPath, "user");
-        if (loaded) loadedFiles.push(loaded);
-    }
-
-    let rawConfig: Record<string, unknown> = {};
-    const mergeFiles = [...loadedFiles].sort((a, b) => {
-        if (a.scope === b.scope) return 0;
-        return a.scope === "user" ? -1 : 1;
-    });
-    const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
-    // Removed keys are dropped once, here, so the trusted-base parse and the merge loop both see a clean file and the warning is recorded once.
-    if (userRaw) {
-        warnings.push(
-            ...dropRemovedConfigKeys(userRaw).map((warning) => `[user config] ${warning}`),
-        );
-    }
-    // The threshold trust boundary uses the effective USER/default config as its baseline.
-    const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
-    let userTierFallback: Map<string, unknown> | undefined;
-
-    for (const loaded of mergeFiles) {
-        const prefix = loaded.scope === "user" ? "[user config]" : "[project config]";
-        warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
-        // Removed keys are dropped before the unknown-key gate so a stale file still loads.
-        warnings.push(
-            ...dropRemovedConfigKeys(loaded.config).map((warning) => `${prefix} ${warning}`),
-        );
-
-        if (loaded.scope === "project") {
-            // The loader sanitizes the untrusted project config before merging it.
-            assertKnownConfigKeys(loaded.config);
-            const projectRaw = { ...loaded.config };
-            for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-                warnings.push(`${prefix} ${warning}`);
-            }
-            userTierFallback = userTierFallbackFor(projectRaw, userRaw, trustedBaseConfig);
-            rawConfig = mergeRawConfigs(rawConfig, projectRaw);
-            for (const warning of constrainProjectThresholdOverrides({
-                mergedRaw: rawConfig,
-                projectRaw,
-                trustedBaseConfig,
-            })) {
-                warnings.push(`${prefix} ${warning}`);
-            }
-        } else {
-            rawConfig = mergeRawConfigs(rawConfig, loaded.config);
-        }
-    }
-
-    const parsed = parsePiConfig(rawConfig, { userTierFallback });
-    setOutputReserveConfig(parsed.config.output_reserve);
-    setWindowOverlayPath(parsed.config.models?.window_overlay_path);
-    warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
-
-    return {
-        config: parsed.config,
-        registrationPromptSurface: trustedBaseConfig.prompt_surface,
-        warnings,
-        loadedFromPaths: loadedFiles.map((loaded) => loaded.path),
-    };
+    const { config, registrationPromptSurface, warnings, loadedFromPaths } =
+        loadPiConfigDetailed(opts);
+    return { config, registrationPromptSurface, warnings, loadedFromPaths };
 }
 
 function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
@@ -518,6 +477,12 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
     setOutputReserveConfig(parsed.config.output_reserve);
     setWindowOverlayPath(parsed.config.models?.window_overlay_path);
     warnings.push(...parsed.warnings.map((warning) => `[merged config] ${warning}`));
+    const admission = admissionOf(loadedFiles);
+    warnings.push(
+        ...withdrawUnresolvedFoldAuthority(parsed.config, admission).map(
+            (warning) => `[config] ${warning}`,
+        ),
+    );
     const substitutionFailures = loadedFiles.flatMap(bindSubstitutionFailures);
     const userLoaded = loadedFiles.find((loaded) => loaded.scope === "user");
     const projectLoaded = loadedFiles.find((loaded) => loaded.scope === "project");
@@ -536,8 +501,16 @@ export function loadPiConfigDetailed(opts: LoadPiConfigOptions = {}): LoadPiConf
             substitutionFailures,
             recoveredTopLevelKeys,
         }),
+        admission,
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
     };
+}
+
+function admissionOf(loadedFiles: readonly LoadedConfigFile[]): ConfigAdmission {
+    const rejections = loadedFiles.flatMap((loaded) => loaded.authorityRejections);
+    return rejections.length === 0
+        ? { status: "admitted" }
+        : { status: "unresolved", reason: rejections.join("; ") };
 }

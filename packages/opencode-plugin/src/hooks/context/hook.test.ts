@@ -163,11 +163,13 @@ function createClientMock(promptMock = mock(() => undefined), sessionDirectory?:
     } as unknown as EidnaraDeps["client"];
 }
 
+const FOLDING_SUMMARIZER = { model: "anthropic/claude-haiku-4-5", disallowed_tools: [] };
+
 function createDeps(overrides: Partial<EidnaraDeps> = {}): EidnaraDeps {
     return {
         client: createClientMock(),
         directory: "/tmp",
-        config: { protected_tags: 3, cache_ttl: "5m" },
+        config: { protected_tags: 3, cache_ttl: "5m", history_summarizer: FOLDING_SUMMARIZER },
         rustModeModuleClient: createFakeModuleClient().client,
         ...overrides,
     };
@@ -1525,6 +1527,7 @@ describe("eidnara hook", () => {
                 config: {
                     protected_tags: 3,
                     cache_ttl: "5m",
+                    history_summarizer: FOLDING_SUMMARIZER,
                     allow_home_project: false,
                 },
             }),
@@ -2110,6 +2113,7 @@ describe("eidnara hook", () => {
                     config: {
                         protected_tags: 3,
                         cache_ttl: "5m",
+                        history_summarizer: FOLDING_SUMMARIZER,
                         ...kernelConfig,
                     },
                 }),
@@ -2389,6 +2393,7 @@ describe("rust-mode guidance fetch", () => {
                     config: {
                         protected_tags: 3,
                         cache_ttl: "5m",
+                        history_summarizer: FOLDING_SUMMARIZER,
                         prompt_surface: {
                             default: "light",
                             tool_descriptions: { eidnara_search: "x" },

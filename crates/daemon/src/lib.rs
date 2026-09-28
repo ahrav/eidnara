@@ -8794,7 +8794,7 @@ impl HandlerCore {
             user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
             now_ms: *pass_now,
             execute_threshold_percentage: scheduler_execute_threshold(parsed, &binding.config),
-            compaction_enabled: binding.config.compaction_enabled,
+            compaction_enabled: binding.config.eidnara_folds(),
             smart_drops: binding.config.smart_drops,
             // Claude Code omits the value, so the host resolves the request model and records whether lookup matched.
             cache_ttl: resolved_cache_ttl.value,
@@ -23609,6 +23609,7 @@ mod tests {
             prompt_surface_guidance_override: None,
             smart_drops: false,
             cache_ttl: "5m".to_string(),
+            admission: crate::config::ConfigAdmission::Admitted,
         }
     }
 

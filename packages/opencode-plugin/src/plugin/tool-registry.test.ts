@@ -43,6 +43,10 @@ const DAEMON_GUIDANCE_ASSETS = [
     ["PRIMARY light (reduce=off)", "guidance_light_no_reduce.txt"],
 ] as const;
 
+const FOLDING_SUMMARIZER = {
+    model: "anthropic/claude-haiku-4-5",
+} as EidnaraPluginConfig["history_summarizer"];
+
 function buildRegistry(
     config: Partial<EidnaraPluginConfig>,
     rustToolBackends: RustToolBackends = {},
@@ -50,7 +54,11 @@ function buildRegistry(
     registrationPromptSurface?: EidnaraPluginConfig["prompt_surface"],
 ): Record<string, ToolDefinition> {
     return createToolRegistry({
-        pluginConfig: { enabled: true, ...config } as EidnaraPluginConfig,
+        pluginConfig: {
+            enabled: true,
+            history_summarizer: FOLDING_SUMMARIZER,
+            ...config,
+        } as EidnaraPluginConfig,
         rustToolBackends,
         promptSurfaceRuntime,
         registrationPromptSurface,
@@ -141,6 +149,12 @@ describe("createToolRegistry — compaction-off mode (#266 S4)", () => {
             tool.schema.object(modeOff.eidnara_search?.args ?? {}),
         ) as { properties?: Record<string, unknown> };
         expect(Object.keys(searchSchema.properties ?? {})).toContain("query");
+    });
+
+    it("an empty summarizer chain registers the compaction-off tool set", () => {
+        const noChain = buildRegistry({ history_summarizer: undefined });
+        const modeOff = buildRegistry({ compaction: { enabled: false } as never });
+        expect(Object.keys(noChain).sort()).toEqual(Object.keys(modeOff).sort());
     });
 
     it("compaction { enabled: true } is identical to default (back-compat)", () => {

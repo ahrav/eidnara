@@ -233,7 +233,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
         ]
     });
 
-    let first = FixtureProcess::start_at(root.path().to_path_buf());
+    let first = FixtureProcess::start_folding_at(root.path().to_path_buf());
     let client = first.client().await;
     let route = first
         .open_route(
@@ -261,7 +261,7 @@ async fn direct_primary_replays_transform_state_across_fixture_restart() {
     // A recomputed m0 would render the mutated history_segment; only the frozen m0 persisted by the first pass still carries the original summary.
     seed_history_segment("MUTATED-SUMMARY");
 
-    let second = FixtureProcess::start_at(root.path().to_path_buf());
+    let second = FixtureProcess::start_folding_at(root.path().to_path_buf());
     let client = second.client().await;
     let route = second
         .open_route(

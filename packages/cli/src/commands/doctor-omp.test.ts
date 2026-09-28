@@ -6,6 +6,8 @@ import { join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runDoctor } from "./doctor-omp";
 
+const FOLDING_USER_TIER = `${JSON.stringify({ history_summarizer: { model: "anthropic/claude-haiku-4-5" } })}\n`;
+
 class MockPrompts implements PromptIO {
     readonly messages: string[] = [];
     readonly log = {
@@ -73,7 +75,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -212,7 +214,7 @@ describe("OMP doctor", () => {
         mkdirSync(agentDir, { recursive: true });
         mkdirSync(configDir, { recursive: true });
         mkdirSync(logDir, { recursive: true });
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -319,7 +321,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -414,7 +416,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         writeFileSync(join(root, ".eidnara", "eidnara.jsonc"), "{ nope\n");
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -452,7 +454,7 @@ describe("OMP doctor", () => {
         const agentDir = join(root, ".omp", "agent");
         mkdirSync(agentDir, { recursive: true });
         mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
-        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -493,7 +495,7 @@ describe("OMP doctor", () => {
         mkdirSync(pluginDir, { recursive: true });
         mkdirSync(join(root, ".config", "eidnara"), { recursive: true });
         writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ omp: { extensions: [] } }));
-        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(root, ".config", "eidnara", "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -665,7 +667,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -705,7 +707,7 @@ describe("OMP doctor", () => {
         const configDir = join(root, ".config", "eidnara");
         mkdirSync(agentDir, { recursive: true });
         mkdirSync(configDir, { recursive: true });
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -749,7 +751,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         // One OMP session whose header names the project; the project holds one dump.
         const slugDir = join(agentDir, "sessions", "--tmp-omp-project--");
         mkdirSync(slugDir, { recursive: true });
@@ -801,7 +803,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -842,7 +844,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -908,7 +910,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -999,7 +1001,7 @@ describe("OMP doctor", () => {
         mkdirSync(agentDir, { recursive: true });
         mkdirSync(pluginDir, { recursive: true });
         mkdirSync(configDir, { recursive: true });
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -1047,7 +1049,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -1105,7 +1107,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
@@ -1151,7 +1153,7 @@ describe("OMP doctor", () => {
             join(pluginDir, "package.json"),
             JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
         );
-        writeFileSync(join(configDir, "eidnara.jsonc"), "{}\n");
+        writeFileSync(join(configDir, "eidnara.jsonc"), FOLDING_USER_TIER);
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");

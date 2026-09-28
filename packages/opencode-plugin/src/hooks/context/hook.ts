@@ -1,5 +1,5 @@
 import { isCompactionEnabled, isContextResearcherRunnable } from "../../config/agent-disable";
-import type { ContextResearcherConfig } from "../../config/schema/eidnara";
+import type { ContextResearcherConfig, HistorySummarizerConfig } from "../../config/schema/eidnara";
 import {
     clearHookInitFailure,
     recordHookInitFailure,
@@ -97,6 +97,7 @@ export interface EidnaraDeps {
          *  session-hook construction boundary via isCompactionEnabled; the
          *  resolved boolean is threaded to the transform phases. */
         compaction?: { enabled?: boolean };
+        history_summarizer?: HistorySummarizerConfig;
     };
     /** Registration owns `promptSurfaceRuntime` and shares it with the tool registry. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;

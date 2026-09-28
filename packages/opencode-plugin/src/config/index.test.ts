@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { parseConfigJsonc } from "../shared/jsonc-parser";
+import { isCompactionEnabled } from "./agent-disable";
+import { type ConfigAdmission, normalizeSummarizerChain } from "./fold-authority";
 import { loadPluginConfig, loadPluginConfigDetailed } from "./index";
 import { REMOVED_CONFIG_KEYS } from "./schema/eidnara";
 
@@ -87,14 +91,30 @@ function loadDetailedWithUserAndProjectConfig(
     projectConfigText: string,
     extraEnv: Record<string, string> = {},
 ) {
+    return loadDetailedWithTierFiles(
+        { "eidnara.jsonc": userConfigText },
+        { "eidnara.jsonc": projectConfigText },
+        extraEnv,
+    );
+}
+
+function loadDetailedWithTierFiles(
+    userFiles: Record<string, string>,
+    projectFiles: Record<string, string>,
+    extraEnv: Record<string, string> = {},
+) {
     const xdg = mkdtempSync(join(tmpdir(), "eidnara-config-test-"));
     const projectDir = mkdtempSync(join(tmpdir(), "eidnara-config-proj-"));
     const fs = require("node:fs") as typeof import("node:fs");
     const configDir = join(xdg, "eidnara");
     fs.mkdirSync(configDir, { recursive: true });
     fs.mkdirSync(join(projectDir, ".eidnara"), { recursive: true });
-    writeFileSync(join(configDir, "eidnara.jsonc"), userConfigText, "utf-8");
-    writeFileSync(join(projectDir, ".eidnara", "eidnara.jsonc"), projectConfigText, "utf-8");
+    for (const [name, text] of Object.entries(userFiles)) {
+        writeFileSync(join(configDir, name), text, "utf-8");
+    }
+    for (const [name, text] of Object.entries(projectFiles)) {
+        writeFileSync(join(projectDir, ".eidnara", name), text, "utf-8");
+    }
 
     const origXdg = process.env.XDG_CONFIG_HOME;
     const savedEnv: Record<string, string | undefined> = {};
@@ -561,23 +581,23 @@ describe("loadPluginConfigDetailed — combined outcome", () => {
 
     it("binds two fields that reference the same missing token to distinct paths", () => {
         const result = loadDetailedWithUserConfig(
-            '{"history_summarizer": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}, "context_researcher": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}}',
+            '{"history_summarizer": {"variant": "{env:EIDNARA_TEST_UNSET_SHARED}"}, "context_researcher": {"model": "{env:EIDNARA_TEST_UNSET_SHARED}"}}',
         );
 
         expect(result.substitutionFailures.map((failure) => failure.keyPath)).toEqual([
-            "history_summarizer.model",
+            "history_summarizer.variant",
             "context_researcher.model",
         ]);
     });
 
     it("binds a failure inside an array-valued setting to its indexed path", () => {
         const result = loadDetailedWithUserConfig(
-            '{"history_summarizer": {"fallback_models": ["a/b", "{env:EIDNARA_TEST_UNSET_FALLBACK}"]}, "prompt_surface": {"default": ""}}',
+            '{"context_researcher": {"fallback_models": ["a/b", "{env:EIDNARA_TEST_UNSET_FALLBACK}"]}, "prompt_surface": {"default": ""}}',
         );
 
         // The legitimately empty `prompt_surface.default` must not absorb the array failure.
         expect(result.substitutionFailures).toEqual([
-            expect.objectContaining({ keyPath: "history_summarizer.fallback_models.[1]" }),
+            expect.objectContaining({ keyPath: "context_researcher.fallback_models.[1]" }),
         ]);
     });
 });
@@ -1041,5 +1061,135 @@ describe("loadPluginConfigDetailed — prompt-surface registration owner", () =>
             rmSync(xdg, { recursive: true, force: true });
             rmSync(projectDir, { recursive: true, force: true });
         }
+    });
+});
+
+describe("fold-authority parity fixture", () => {
+    interface ParityRow {
+        name: string;
+        user_tier_files: Record<string, string>;
+        project_tier_files: Record<string, string>;
+        env: Record<string, string>;
+        expected_chain: string[] | null;
+        expected_admission: "admitted" | "unresolved";
+        expected_eidnara_folds: boolean;
+    }
+    const fixture = JSON.parse(
+        readFileSync(join(import.meta.dir, "__fixtures__", "fold-authority-parity.json"), "utf-8"),
+    ) as { rows: ParityRow[] };
+
+    interface Outcome {
+        chain: string[] | null;
+        admission: string;
+        folds: boolean;
+    }
+
+    function outcome(load: () => { config: unknown; admission: ConfigAdmission }): Outcome {
+        let loaded: { config: unknown; admission: ConfigAdmission };
+        try {
+            loaded = load();
+        } catch (error) {
+            // The throw is the plugin's startup refusal, so no Eidnara fold runs.
+            expect(String(error)).toContain("Unknown Eidnara configuration key");
+            return { chain: null, admission: "unresolved", folds: false };
+        }
+        const config = loaded.config as Parameters<typeof isCompactionEnabled>[0];
+        const folds = isCompactionEnabled(config);
+        if (loaded.admission.status === "unresolved") {
+            return { chain: null, admission: "unresolved", folds };
+        }
+        return {
+            chain: normalizeSummarizerChain(config.history_summarizer),
+            admission: "admitted",
+            folds,
+        };
+    }
+
+    const expected = (row: ParityRow): Outcome => ({
+        chain: row.expected_chain,
+        admission: row.expected_admission,
+        folds: row.expected_eidnara_folds,
+    });
+
+    it("every row matches through the production loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            const actual = outcome(() =>
+                loadDetailedWithTierFiles(row.user_tier_files, row.project_tier_files, row.env),
+            );
+            expect({ name: row.name, ...actual }).toEqual({ name: row.name, ...expected(row) });
+        }
+    });
+
+    it("withdraws fold authority and says so when the configuration is unresolved", () => {
+        const result = loadDetailedWithUserConfig(
+            JSON.stringify({
+                compaction: { enabled: "false" },
+                memory: { enabled: false },
+                history_summarizer: { model: "a/b" },
+            }),
+        );
+
+        expect(result.admission.status).toBe("unresolved");
+        expect(isCompactionEnabled(result.config)).toBe(false);
+        expect(result.config.memory.enabled).toBe(false);
+        expect(
+            result.config.configWarnings?.some((warning) =>
+                warning.includes("leaves folding to the host's native compaction"),
+            ),
+        ).toBe(true);
+    });
+
+    it("skips substitution of an excluded chain value, so a FIFO target never blocks", () => {
+        const fifoDir = mkdtempSync(join(tmpdir(), "eidnara-config-fifo-"));
+        try {
+            const fifo = join(fifoDir, "model");
+            execFileSync("mkfifo", [fifo]);
+            const user = JSON.stringify({
+                history_summarizer: { model: `{file:${fifo}}`, fallback_models: ["a/fallback"] },
+            });
+            const actual = outcome(() => loadDetailedWithTierFiles({ "eidnara.jsonc": user }, {}));
+            expect(actual).toEqual({ chain: ["a/fallback"], admission: "admitted", folds: true });
+        } finally {
+            rmSync(fifoDir, { recursive: true, force: true });
+        }
+    });
+
+    it("warns for every excluded chain value with its key", () => {
+        for (const [name, key] of [
+            ["a blank model", "history_summarizer.model"],
+            ["a whitespace model with a fallback", "history_summarizer.model"],
+            ["an env reference in model is excluded", "history_summarizer.model"],
+            ["a file reference in a fallback is excluded", "history_summarizer.fallback_models"],
+        ] as const) {
+            const row = fixture.rows.find((candidate) => candidate.name === name);
+            if (row === undefined) throw new Error(`fixture row ${name}`);
+            const { config } = loadDetailedWithTierFiles(
+                row.user_tier_files,
+                row.project_tier_files,
+                row.env,
+            );
+            expect([name, config.configWarnings?.some((w) => w.includes(key))]).toEqual([
+                name,
+                true,
+            ]);
+        }
+    });
+
+    it("rejects a raw lenient read that skips the loader pipeline", () => {
+        const mismatches = fixture.rows.filter((row) => {
+            const actual = outcome(() => {
+                const text = row.user_tier_files["eidnara.jsonc"];
+                let config: unknown = {};
+                try {
+                    config = text === undefined ? {} : parseConfigJsonc(text);
+                } catch {
+                    config = {};
+                }
+                return { config, admission: { status: "admitted" } as const };
+            });
+            return !Bun.deepEquals(actual, expected(row));
+        });
+        expect(mismatches.length).toBeGreaterThan(0);
     });
 });

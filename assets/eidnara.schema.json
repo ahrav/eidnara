@@ -269,6 +269,30 @@
             }
           ]
         },
+        "module_model": {
+          "description": "USER-LEVEL ONLY. Model the Eidnara daemon runs the history_summarizer with. When set to a non-blank literal model id, it and module_fallback_models replace model and fallback_models as the summarizer chain. {env:} and {file:} references are not supported in chain keys.",
+          "type": "string"
+        },
+        "module_fallback_models": {
+          "description": "USER-LEVEL ONLY. Fallback models for module_model, used only when module_model is set.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "context_limit_tokens": {
+          "description": "USER-LEVEL ONLY. Context window, in tokens, the Eidnara daemon assumes for the history_summarizer model when sizing its chunks (default 128000).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
         "thinking_level": {
           "description": "Pi only: explicit thinking level passed as --thinking <level> to Pi history_summarizer subagent invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4) because Pi's default thinking-level resolution can pick a value the provider rejects. OpenCode users set variant instead. Valid: off | minimal | low | medium | high | xhigh | max",
           "type": "string",

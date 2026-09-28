@@ -24,6 +24,9 @@ const HIDDEN_AGENT_ACTIVATION_FIELDS = ["disable"] as const;
 const HISTORY_SUMMARIZER_USER_ONLY_FIELDS = [
     "model",
     "fallback_models",
+    "module_model",
+    "module_fallback_models",
+    "context_limit_tokens",
     "disallowed_tools",
 ] as const;
 const PROMPT_SURFACE_USER_ONLY_FIELDS = ["guidance_override_path", "tool_descriptions"] as const;
@@ -521,7 +524,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring history_summarizer.${removed.join("/")} from project config ` +
-                    "(security: history_summarizer model selection, tool restrictions, are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
+                    "(security: history_summarizer model selection, context budget, and tool restrictions are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
             );
         }
     }

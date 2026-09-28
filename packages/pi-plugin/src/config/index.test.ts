@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { normalizeSummarizerChain } from "@eidnara/opencode/config/fold-authority";
 import { EidnaraConfigSchema } from "@eidnara/opencode/config/schema/eidnara";
 import { loadPiConfig, loadPiConfigDetailed } from "./index";
 
@@ -218,7 +220,11 @@ describe("loadPiConfig", () => {
 
         const result = loadPiConfig({ cwd });
 
-        expect(result.config).toEqual(EidnaraConfigSchema.parse({}));
+        // The unreadable tier leaves the configuration unresolved, which withdraws fold authority.
+        expect(result.config).toEqual({
+            ...EidnaraConfigSchema.parse({}),
+            compaction: { enabled: false },
+        });
         expect(result.loadedFromPaths).toEqual([projectPath]);
         expect(result.warnings.join("\n")).toContain("failed to load config");
         expect(result.warnings.join("\n")).toContain("using defaults");
@@ -609,19 +615,24 @@ describe("loadPiConfig", () => {
         expect(warnings).not.toContain("Config recovery failed");
     });
 
-    it("drops an agent block the USER config alone makes invalid", () => {
+    it("prunes an invalid history_summarizer leaf and keeps the summarizer chain", () => {
         const cwd = makeTempRoot("eidnara-pi-cwd-");
         const home = makeTempRoot("eidnara-pi-home-");
         withHome(home);
-        writeUserConfig(home, JSON.stringify({ history_summarizer: { disable: "not-a-boolean" } }));
+        writeUserConfig(
+            home,
+            JSON.stringify({ history_summarizer: { model: "p/m", disable: "not-a-boolean" } }),
+        );
 
         const result = loadPiConfigDetailed({ cwd });
 
-        expect(result.config.history_summarizer).toBeUndefined();
+        expect(result.config.history_summarizer?.model).toBe("p/m");
+        expect(result.config.history_summarizer?.disable).toBeUndefined();
         expect(result.recoveredTopLevelKeys).toEqual(["history_summarizer"]);
         expect(result.warnings.join("\n")).toContain(
-            '[merged config] "history_summarizer": invalid agent configuration, ignoring. Check your eidnara.jsonc.',
+            '[merged config] "history_summarizer": invalid nested field(s) "disable", using defaults for those.',
         );
+        expect(result.admission).toEqual({ status: "admitted" });
     });
 
     it("rejects the whole USER context_researcher block when disable is invalid", () => {
@@ -680,7 +691,11 @@ describe("loadPiConfig", () => {
 
         const result = loadPiConfigDetailed({ cwd });
 
-        expect(result.config).toEqual(EidnaraConfigSchema.parse({}));
+        expect(result.admission.status).toBe("unresolved");
+        expect(result.config).toEqual({
+            ...EidnaraConfigSchema.parse({}),
+            compaction: { enabled: false },
+        });
         expect(result.sources.userConfig).toBe("project-file-parse-error");
         expect(result.sources.projectConfig).toBe("project-file-parse-error");
         expect(result.loadOutcome).toBe("project-file-parse-error");
@@ -689,5 +704,73 @@ describe("loadPiConfig", () => {
         expect(warnings).toContain("config root must be a JSON object, got null");
         expect(warnings).toContain("[project config]");
         expect(warnings).toContain("config root must be a JSON object, got array, 2 items");
+    });
+});
+
+describe("fold-authority parity fixture", () => {
+    interface ParityRow {
+        name: string;
+        user_tier_files: Record<string, string>;
+        project_tier_files: Record<string, string>;
+        env: Record<string, string>;
+        expected_chain: string[] | null;
+        expected_admission: "admitted" | "unresolved";
+        expected_eidnara_folds: boolean;
+    }
+    const fixture = JSON.parse(
+        readFileSync(
+            join(
+                import.meta.dir,
+                "../../../opencode-plugin/src/config/__fixtures__/fold-authority-parity.json",
+            ),
+            "utf-8",
+        ),
+    ) as { rows: ParityRow[] };
+
+    function load(row: ParityRow) {
+        const cwd = makeTempRoot("eidnara-pi-cwd-");
+        const home = makeTempRoot("eidnara-pi-home-");
+        withHome(home);
+        for (const [name, text] of Object.entries(row.user_tier_files)) {
+            writeConfig(join(home, ".config", "eidnara", name), text);
+        }
+        for (const [name, text] of Object.entries(row.project_tier_files)) {
+            writeConfig(join(cwd, ".eidnara", name), text);
+        }
+        const saved = Object.keys(row.env).map((key) => [key, process.env[key]] as const);
+        Object.assign(process.env, row.env);
+        try {
+            const result = loadPiConfigDetailed({ cwd });
+            const folds = isCompactionEnabled(result.config);
+            if (result.admission.status === "unresolved") {
+                return { chain: null, admission: "unresolved", folds };
+            }
+            return {
+                chain: normalizeSummarizerChain(result.config.history_summarizer),
+                admission: "admitted",
+                folds,
+            };
+        } catch (error) {
+            // The throw is the plugin's startup refusal, so no Eidnara fold runs.
+            expect(String(error)).toContain("Unknown Eidnara configuration key");
+            return { chain: null, admission: "unresolved", folds: false };
+        } finally {
+            for (const [key, value] of saved) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+        }
+    }
+
+    it("every row matches through the Pi loader", () => {
+        expect(fixture.rows.length).toBeGreaterThan(0);
+        for (const row of fixture.rows) {
+            expect({ name: row.name, ...load(row) }).toEqual({
+                name: row.name,
+                chain: row.expected_chain,
+                admission: row.expected_admission,
+                folds: row.expected_eidnara_folds,
+            });
+        }
     });
 });

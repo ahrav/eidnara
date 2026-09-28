@@ -19,6 +19,7 @@ const ALLOWED_READERS = new Set<string>([
     "packages/opencode-plugin/src/config/schema/eidnara.ts",
     // `project-security.ts` only names `compaction.enabled` in a warning while deleting a raw project-tier key.
     "packages/opencode-plugin/src/config/project-security.ts",
+    "packages/opencode-plugin/src/config/fold-authority.ts",
     // OMP's own setting key appears only as an external CLI string literal;
     // `omp-helpers.ts`, `setup-omp.ts`, and `doctor-omp.ts` never read Eidnara's parsed compaction config.
     "packages/cli/src/lib/omp-helpers.ts",
@@ -63,12 +64,20 @@ describe("compaction.enabled accessor exclusivity (issue #266)", () => {
         expect(offenders).toEqual([]);
     });
 
-    it("isCompactionEnabled resolves default-on for absent block and explicit true, off for false", async () => {
+    it("isCompactionEnabled requires a summarizer chain and a compaction setting that is not false", async () => {
         const { isCompactionEnabled } = await import("../config/agent-disable");
-        expect(isCompactionEnabled({})).toBe(true);
-        expect(isCompactionEnabled({ compaction: {} })).toBe(true);
-        expect(isCompactionEnabled({ compaction: { enabled: true } })).toBe(true);
-        expect(isCompactionEnabled({ compaction: { enabled: false } })).toBe(false);
-        expect(isCompactionEnabled({ compaction: null })).toBe(true);
+        const history_summarizer = { model: "anthropic/claude-haiku-4-5" };
+        expect(isCompactionEnabled({ history_summarizer })).toBe(true);
+        expect(isCompactionEnabled({ compaction: {}, history_summarizer })).toBe(true);
+        expect(isCompactionEnabled({ compaction: { enabled: true }, history_summarizer })).toBe(
+            true,
+        );
+        expect(isCompactionEnabled({ compaction: { enabled: false }, history_summarizer })).toBe(
+            false,
+        );
+        expect(isCompactionEnabled({ compaction: null, history_summarizer })).toBe(true);
+        expect(isCompactionEnabled({})).toBe(false);
+        expect(isCompactionEnabled({ compaction: { enabled: true } })).toBe(false);
+        expect(isCompactionEnabled({ history_summarizer: { model: "  " } })).toBe(false);
     });
 });

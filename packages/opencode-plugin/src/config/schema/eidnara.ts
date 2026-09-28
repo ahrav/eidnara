@@ -119,6 +119,26 @@ export const ContextResearcherConfigSchema = AgentOverrideConfigSchema.extend({
 export type ContextResearcherConfig = NonNullable<z.infer<typeof ContextResearcherConfigSchema>>;
 
 export const HistorySummarizerConfigSchema = AgentOverrideConfigSchema.extend({
+    module_model: z
+        .string()
+        .optional()
+        .describe(
+            "USER-LEVEL ONLY. Model the Eidnara daemon runs the history_summarizer with. When set to a non-blank literal model id, it and module_fallback_models replace model and fallback_models as the summarizer chain. {env:} and {file:} references are not supported in chain keys.",
+        ),
+    module_fallback_models: z
+        .union([z.string(), z.array(z.string())])
+        .optional()
+        .describe(
+            "USER-LEVEL ONLY. Fallback models for module_model, used only when module_model is set.",
+        ),
+    context_limit_tokens: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+            "USER-LEVEL ONLY. Context window, in tokens, the Eidnara daemon assumes for the history_summarizer model when sizing its chunks (default 128000).",
+        ),
     thinking_level: PiThinkingLevelSchema.describe(
         "Pi only: explicit thinking level passed as --thinking <level> to Pi history_summarizer subagent invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4) because Pi's default thinking-level resolution can pick a value the provider rejects. OpenCode users set variant instead. Valid: off | minimal | low | medium | high | xhigh | max",
     ),

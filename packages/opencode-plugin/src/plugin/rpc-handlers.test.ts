@@ -516,7 +516,12 @@ describe("registerRpcHandlers", () => {
         expect(unknown.native_compaction_active).toBeUndefined();
 
         // Eidnara owns the window: the host's setting is irrelevant and not reported.
-        const eidnara = await call(build({}, { auto: true, prune: true }));
+        const eidnara = await call(
+            build(
+                { history_summarizer: { model: "anthropic/claude-haiku-4-5" } },
+                { auto: true, prune: true },
+            ),
+        );
         expect(eidnara.compaction_enabled).toBe(true);
         expect(eidnara.native_compaction_active).toBeUndefined();
     });
