@@ -350,6 +350,65 @@ describe("doctor OpenCode conflict repair", () => {
             }
         },
     );
+
+    it("reports the fold authority and repairs a native-folds auto=false without a registered plugin", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(join(configDir, "..", "eidnara", "eidnara.jsonc"), {});
+        writeJsonc(opencodeConfigPath, { plugin: [], compaction: { auto: false } });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const { errors, successes, restore } = captureDoctorLog();
+        const infos: string[] = [];
+        const warns: string[] = [];
+        const infoSpy = spyOn(log, "info").mockImplementation((m: string) => {
+            infos.push(m);
+        });
+        const warnSpy = spyOn(log, "warn").mockImplementation((m: string) => {
+            warns.push(m);
+        });
+
+        try {
+            await runDoctor({ force: true, cwd });
+
+            expect(infos).toContain(
+                "Fold authority: OpenCode's native compaction folds (no summarizer model is configured)",
+            );
+            expect(infos.some((m) => m.includes("eidnara daemon restart"))).toBe(true);
+            expect(warns.some((m) => m.includes("no fold authority"))).toBe(true);
+            expect(successes).toContain("Fixed: Enabled auto-compaction");
+            expect(errors.some((m) => m.startsWith("Leaving conflicts in place:"))).toBe(false);
+            const repaired = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                compaction?: { auto?: boolean };
+            };
+            expect(repaired.compaction?.auto).toBe(true);
+            expect(warns.some((m) => m.startsWith("Still unresolved after repair:"))).toBe(false);
+        } finally {
+            infoSpy.mockRestore();
+            warnSpy.mockRestore();
+            restore();
+        }
+    });
+
+    it("treats a configuration that does not load as unresolved and leaves host settings alone", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(join(configDir, "..", "eidnara", "eidnara.jsonc"), {
+            compaction: { enabled: "false" },
+        });
+        const original = { plugin: ["@eidnara/opencode"], compaction: { auto: false } };
+        writeJsonc(opencodeConfigPath, original);
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            expect(await runDoctor({ force: true })).toBe(1);
+
+            expect(errors.some((m) => m.includes("the fold authority is unresolved"))).toBe(true);
+            expect(successes.some((m) => m.startsWith("Fixed:"))).toBe(false);
+            expect(parseJsonc(readFileSync(opencodeConfigPath, "utf-8"))).toEqual(original);
+        } finally {
+            restore();
+        }
+    });
 });
 
 describe("doctor OpenCode read-only checks", () => {

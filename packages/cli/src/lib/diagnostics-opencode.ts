@@ -4,7 +4,7 @@
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { loadPluginConfig } from "@eidnara/opencode/config";
+import { loadPluginConfigDetailed } from "@eidnara/opencode/config";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
@@ -31,7 +31,7 @@ import {
 import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
-import { compactionEnabledFor } from "./eidnara-modes";
+import { describeFoldAuthority, type FoldAuthority, foldAuthorityOf } from "./eidnara-modes";
 import { type HistorySummarizerDumpSummary, listDumpsInDir } from "./history_summarizer-dumps";
 import { codeFenceFor } from "./issue-body";
 import { detectOpenCodeInstallations } from "./opencode-detect";
@@ -108,6 +108,7 @@ export interface DiagnosticReport {
         eidnaraEnabled: boolean;
         /** `compactionEnabled` stores the resolved Eidnara compaction mode used by the writer and fixer. */
         compactionEnabled: boolean;
+        foldAuthority: FoldAuthority;
         /** `nativeCompaction` stores the resolved native OpenCode `auto` and `prune` states. */
         nativeCompaction: {
             auto: boolean;
@@ -493,19 +494,19 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         logFileSize = null;
     }
 
-    let compactionEnabled = false;
+    let foldAuthority: FoldAuthority;
     let eidnaraEnabled = true;
     try {
-        const config = loadPluginConfig(cwd);
+        const { config, admission } = loadPluginConfigDetailed(cwd);
         eidnaraEnabled = config.enabled !== false;
-        compactionEnabled = compactionEnabledFor(config);
+        foldAuthority = foldAuthorityOf({ config, admission });
     } catch (error) {
-        console.warn(
-            `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
-                `preserving existing native compaction fields. ` +
-                `(${error instanceof Error ? error.message : String(error)})`,
-        );
+        foldAuthority = {
+            kind: "unresolved",
+            reason: error instanceof Error ? error.message : String(error),
+        };
     }
+    const compactionEnabled = foldAuthority.kind === "eidnara";
     // `detectConflicts` reads the `.omo` config through an unguarded home lookup; a host without a
     // home directory must still get the rest of the report.
     let conflictResult: Pick<
@@ -565,6 +566,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
             reasons,
             eidnaraEnabled,
             compactionEnabled,
+            foldAuthority,
             nativeCompaction: conflictResult.nativeCompaction,
             ...(conflictsError ? { detectionError: conflictsError } : {}),
         },
@@ -698,6 +700,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         }`,
         `- Eidnara enabled: ${report.conflicts.eidnaraEnabled}`,
         `- Eidnara compaction mode: ${report.conflicts.compactionEnabled ? "on" : "off"}`,
+        `- Fold authority: ${sanitizeDiagnosticText(describeFoldAuthority(report.conflicts.foldAuthority))}`,
         `- Native compaction: auto=${report.conflicts.nativeCompaction?.auto ?? "unknown"}, prune=${report.conflicts.nativeCompaction?.prune ?? "unknown"}`,
         ...openCodeInstallationTable,
         "",
