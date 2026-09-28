@@ -466,6 +466,50 @@ describe.if(platform() === "linux")(
             }
         });
 
+        it("deletes a resolved configuration warning without announcing a re-enable", async () => {
+            // A `warn` disposition keeps the plugin enabled, so cleanup clears its
+            // message silently.
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const warning = { ...CONFLICT, disposition: "warn" } as unknown as ConflictResult;
+            const deletedUrls: string[] = [];
+            const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                input: string | URL | Request,
+            ) => {
+                deletedUrls.push(String(input));
+                return new Response("{}", { status: 200 });
+            }) as unknown as typeof fetch);
+            try {
+                const prompt = mock(async () => ({}));
+                const messages = mock(async () => ({
+                    data: [
+                        {
+                            info: { id: "msg_warning", role: "user" },
+                            parts: [
+                                { type: "text", text: formatConflictShort(warning), ignored: true },
+                            ],
+                        },
+                    ],
+                }));
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages,
+                    },
+                };
+
+                await cleanupConflictWarnings(client, directory, "http://127.0.0.1:1");
+
+                expect(deletedUrls).toEqual([
+                    `http://127.0.0.1:1/session/${SESSION_ID}/message/msg_warning`,
+                ]);
+                expect(prompt).not.toHaveBeenCalled();
+            } finally {
+                fetchSpy.mockRestore();
+            }
+        });
+
         it("issues every warning DELETE concurrently so one stalled endpoint costs one timeout", async () => {
             const directory = seedDesktopSession();
             __ignoredNotificationTest.setMidTurnDetector(() => false);

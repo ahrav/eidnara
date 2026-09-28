@@ -541,6 +541,11 @@ export async function runDoctor(
         );
     } else if (conflictResult.disposition !== "none") {
         const disabling = conflictResult.disposition === "disable";
+        if (!disabling) {
+            warn(
+                "No compaction manager is active: Eidnara compaction is off and OpenCode auto-compaction is disabled",
+            );
+        }
         for (const reason of conflictResult.reasons) {
             if (disabling) fail(`Conflict: ${reason}`);
             else warn(`Conflict: ${reason}`);

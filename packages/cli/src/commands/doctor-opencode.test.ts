@@ -587,6 +587,33 @@ describe("doctor OpenCode read-only checks", () => {
         }
     });
 
+    it("reports no fold authority when Eidnara compaction is off and only prune is on", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(opencodeConfigPath, {
+            plugin: ["@eidnara/opencode"],
+            compaction: { auto: false, prune: true },
+        });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        writeJsonc(join(configDir, "..", "eidnara", "eidnara.jsonc"), {});
+        const warnings: string[] = [];
+        const warnSpy = spyOn(log, "warn").mockImplementation((message: string) => {
+            warnings.push(message);
+        });
+        const { successes, restore } = captureDoctorLog();
+
+        try {
+            await runDoctor({ force: false });
+
+            expect(warnings.some((m) => m.startsWith("No compaction manager is active"))).toBe(
+                true,
+            );
+            expect(successes.some((m) => m.includes("native compaction active"))).toBe(false);
+        } finally {
+            warnSpy.mockRestore();
+            restore();
+        }
+    });
+
     it("leaves DCP and OMO hooks in place under --force when Eidnara is disabled", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(opencodeConfigPath, {
