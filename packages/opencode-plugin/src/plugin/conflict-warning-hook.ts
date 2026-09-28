@@ -321,12 +321,10 @@ export async function sendConflictWarning(
     await sendIgnoredMessage(client, sessionId, warningText, {}, true);
 }
 
-async function findConflictWarningIds(client: unknown, sessionId: string): Promise<string[]> {
-    return (await findMarkerMessageIds(client, sessionId, CONFLICT_WARNING_MARKERS)).flat();
-}
-
 /**
  * The plugin removes leftover conflict-warning messages from disabled and warning runs.
+ * The "enabled" confirmation follows a removed disabled-run message; a warning run
+ * kept the plugin enabled, so its message is removed silently.
  */
 export async function cleanupConflictWarnings(
     client: unknown,
@@ -339,7 +337,12 @@ export async function cleanupConflictWarnings(
         return;
     }
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
-    const warningMessageIds = await findConflictWarningIds(client, sessionId);
+    const [disabledMessageIds = [], configurationWarningIds = []] = await findMarkerMessageIds(
+        client,
+        sessionId,
+        CONFLICT_WARNING_MARKERS,
+    );
+    const warningMessageIds = [...disabledMessageIds, ...configurationWarningIds];
 
     if (warningMessageIds.length === 0) {
         await cleanupEnabledMessages(client, deleteUrl, sessionId);
@@ -367,6 +370,7 @@ export async function cleanupConflictWarnings(
         );
         return;
     }
+    if (disabledMessageIds.length === 0) return;
 
     // Send a brief "enabled" confirmation so the user sees the conflict is
     // resolved. The confirmation is transient by design (the timer below

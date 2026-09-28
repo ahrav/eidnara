@@ -161,7 +161,7 @@ export function detectConflicts(
 }
 
 export const NO_FOLD_AUTHORITY_REASON =
-    "no fold authority: no summarizer model is configured and OpenCode's compaction is off";
+    "no fold authority: Eidnara compaction is off (no summarizer model is configured, or Eidnara's compaction is turned off in its config) and OpenCode's compaction.auto is false";
 
 export function conflictDisposition(conflicts: ConflictResult["conflicts"]): ConflictDisposition {
     const { noFoldAuthority, ...disabling } = conflicts;
