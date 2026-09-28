@@ -333,13 +333,35 @@ export async function sendConflictWarning(
     await sendIgnoredMessage(client, sessionId, warningText, {}, true);
 }
 
+/** One in-flight reconciliation per session; a later poll waits for the earlier one. */
+const reconciling = new Map<string, Promise<void>>();
+
 /**
  * Keeps at most one live fold-authority message in the session, equal to `warning`. A changed
  * warning replaces the message an earlier poll persisted, a cleared warning deletes it, and startup
- * warnings under the same header stay in place. A message that cannot be deleted blocks the
- * replacement, so the session never carries two fold-authority messages.
+ * warnings under the same header stay in place. A failed deletion blocks the replacement, which
+ * preserves the one-message bound. Polls of one session reconcile in call order.
  */
-export async function reconcileFoldAuthorityWarning(
+export function reconcileFoldAuthorityWarning(
+    client: unknown,
+    directory: string,
+    sessionId: string,
+    warning: ConflictWarning | undefined,
+    serverUrl?: string,
+): Promise<void> {
+    const previous = reconciling.get(sessionId) ?? Promise.resolve();
+    const run = previous
+        .catch(() => {})
+        .then(() => reconcileNow(client, directory, sessionId, warning, serverUrl));
+    reconciling.set(sessionId, run);
+    const settle = () => {
+        if (reconciling.get(sessionId) === run) reconciling.delete(sessionId);
+    };
+    run.then(settle, settle);
+    return run;
+}
+
+async function reconcileNow(
     client: unknown,
     directory: string,
     sessionId: string,

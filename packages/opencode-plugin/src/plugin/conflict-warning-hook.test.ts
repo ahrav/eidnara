@@ -767,6 +767,66 @@ describe.if(platform() === "linux")(
                 }
             });
 
+            it("serializes reconciliations so a slower warning poll cannot outlive a later clean poll", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                let releaseFirstLookup = (): void => {};
+                const firstLookup = new Promise<void>((resolve) => {
+                    releaseFirstLookup = resolve;
+                });
+                let lookups = 0;
+                // A stateful session: a prompt persists a message, a DELETE removes it.
+                const stored = new Map<string, string>();
+                const prompt = mock(async (input: { body: { parts: Array<{ text: string }> } }) => {
+                    stored.set(`msg_${stored.size + 1}`, input.body.parts[0]?.text ?? "");
+                    return {};
+                });
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages: mock(async () => {
+                            lookups += 1;
+                            if (lookups === 1) await firstLookup;
+                            return [...stored].map(([id, text]) => ({
+                                info: { id, role: "user" },
+                                parts: [{ type: "text", text, ignored: true }],
+                            }));
+                        }),
+                    },
+                };
+                const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                    input: string | URL | Request,
+                ) => {
+                    stored.delete(String(input).split("/").at(-1) ?? "");
+                    return new Response("{}", { status: 200 });
+                }) as unknown as typeof fetch);
+                try {
+                    const warningPoll = reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        SIBLING,
+                        SERVER,
+                    );
+                    const cleanPoll = reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+                    await Promise.race([cleanPoll, new Promise((r) => setTimeout(r, 50))]);
+                    releaseFirstLookup();
+                    await Promise.all([warningPoll, cleanPoll]);
+
+                    expect([...stored.values()]).toEqual([]);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
+                } finally {
+                    fetchSpy.mockRestore();
+                }
+            });
+
             it("does not let a live warning suppress the startup warning", async () => {
                 const directory = seedDesktopSession();
                 __ignoredNotificationTest.setMidTurnDetector(() => false);
