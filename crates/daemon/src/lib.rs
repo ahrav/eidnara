@@ -5133,39 +5133,34 @@ impl HandlerCore {
                 ..not_fired
             });
         }
-        let window_at_cap = history_summarizer_archive::WindowSize::of(projection).at_cap();
-        if window_at_cap {
-            match history_summarizer_archive::archive_window(
-                &store,
-                &loaded,
-                &parsed.session_id,
-                project_path,
-                projection,
-                now,
-            ) {
-                Ok(Some(archived)) => {
-                    self.cancel_history_summarizer_work(&parsed.session_id);
-                    eprintln!(
-                        "daemon: history_summarizer archived session={} range={}..={} sequence={} cause={:?}",
-                        parsed.session_id,
-                        archived.cut.start,
-                        archived.cut.end,
-                        archived.sequence,
-                        archived.cause
-                    );
-                    return PreparedHistorySummarizerAction::Complete(
-                        HistorySummarizerDiagnostics {
-                            no_fire: Some("archived".to_string()),
-                            ..not_fired
-                        },
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => eprintln!(
-                    "daemon: history_summarizer archive failed session={}: {error}",
-                    parsed.session_id
-                ),
+        match history_summarizer_archive::archive_window(
+            &store,
+            &loaded,
+            &parsed.session_id,
+            project_path,
+            projection,
+            now,
+        ) {
+            Ok(Some(archived)) => {
+                self.cancel_history_summarizer_work(&parsed.session_id);
+                eprintln!(
+                    "daemon: history_summarizer archived session={} range={}..={} sequence={} cause={:?}",
+                    parsed.session_id,
+                    archived.cut.start,
+                    archived.cut.end,
+                    archived.sequence,
+                    archived.cause
+                );
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
+                    no_fire: Some("archived".to_string()),
+                    ..not_fired
+                });
             }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "daemon: history_summarizer archive failed session={}: {error}",
+                parsed.session_id
+            ),
         }
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             blocked("busy");
@@ -5271,16 +5266,20 @@ impl HandlerCore {
                         != HistorySummarizerPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
-                    window_cap_cut: window_at_cap
-                        .then(|| {
-                            history_summarizer_archive::archive_cut(
-                                projection,
-                                last_history_segment_end_ordinal,
-                                |mid| projection.identity_by_mid.contains_key(mid),
-                            )
-                        })
-                        .flatten()
-                        .map(|cut| cut.end),
+                    window_cap_cut: history_summarizer_archive::WindowSize::after(
+                        projection,
+                        last_history_segment_end_ordinal,
+                    )
+                    .at_cap()
+                    .then(|| {
+                        history_summarizer_archive::archive_cut(
+                            projection,
+                            last_history_segment_end_ordinal,
+                            |mid| loaded.meta.block_identity_by_mid.contains_key(mid),
+                        )
+                    })
+                    .flatten()
+                    .map(|cut| cut.end),
                 },
                 &mut formatted_token_estimator,
             )

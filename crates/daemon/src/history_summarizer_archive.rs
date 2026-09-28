@@ -35,11 +35,15 @@ impl Add for WindowSize {
 }
 
 impl WindowSize {
-    pub fn of(projection: &FlatProjection) -> Self {
+    /// A segment summarizes messages through `covered_end`, so the window starts after that
+    /// boundary.
+    pub fn after(projection: &FlatProjection, covered_end: Option<u64>) -> Self {
         projection
             .blocks
             .iter()
-            .filter(|block| !block.synthetic())
+            .filter(|block| {
+                !block.synthetic() && covered_end.is_none_or(|end| block.ordinal() > end)
+            })
             .fold(Self::default(), |size, block| size + Self::block(block))
     }
 
@@ -196,6 +200,9 @@ pub fn archive_window(
         .max_end_message
         .and_then(|end| u64::try_from(end).ok())
         .filter(|end| *end > 0);
+    if !WindowSize::after(projection, covered_end).at_cap() {
+        return Ok(None);
+    }
     let durable = &loaded.meta.block_identity_by_mid;
     let Some(cut) = archive_cut(projection, covered_end, |mid| durable.contains_key(mid)) else {
         return Ok(None);
@@ -305,13 +312,7 @@ mod tests {
 
     /// The window the next HARD serves: every message after the archive's end.
     fn window_after(window: &FlatProjection, end: u64) -> WindowSize {
-        window
-            .blocks
-            .iter()
-            .filter(|block| !block.synthetic() && block.ordinal() > end)
-            .fold(WindowSize::default(), |size, block| {
-                size + WindowSize::block(block)
-            })
+        WindowSize::after(window, Some(end))
     }
 
     const LAST: u64 = WINDOW_CAP_BLOCKS as u64 + 100;
@@ -400,9 +401,12 @@ mod tests {
                 .map(|ordinal| item(&format!("m{ordinal}"), ordinal, &"x".repeat(large)))
                 .collect(),
         );
-        let size = WindowSize::of(&window);
+        let size = WindowSize::after(&window, None);
         assert_eq!(size.blocks, 6);
         assert!(size.bytes >= 6 * large && size.at_cap(), "{size:?}");
+        let uncovered = WindowSize::after(&window, Some(1));
+        assert_eq!(uncovered.blocks, 5);
+        assert!(!uncovered.at_cap(), "{uncovered:?}");
         let (start, end) = cut_of(&window, None).unwrap();
         assert_eq!((start, end), (1, 4));
         assert!(window_after(&window, end).within_half_cap());

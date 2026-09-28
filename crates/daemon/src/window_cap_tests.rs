@@ -32,6 +32,110 @@ async fn wait_for_phase(store: &MemoryStore, phase: HistorySummarizerPhase) {
     }
 }
 
+fn chunk_range(store: &MemoryStore) -> memory_store::HistorySummarizerChunkRange {
+    store
+        .load("ses")
+        .unwrap()
+        .meta
+        .history_summarizer
+        .chunk_range
+        .expect("the firing records its chunk")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_published_cap_firing_fires_again_only_once_the_uncovered_window_reaches_the_cap() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    let last = WINDOW_CAP_BLOCKS as u64 + 100;
+    let first = pass(&handler, &window(last)).await;
+    assert_eq!(
+        first["history_summarizer"]["reason"], "window_cap",
+        "{first}"
+    );
+    let covered = last - HALF_CAP_BLOCKS as u64;
+    let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+    while store.max_history_segment_end_ordinal("ses").unwrap() < covered as i64
+        || store.load("ses").unwrap().meta.history_summarizer.state != HistorySummarizerPhase::Idle
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cap firing did not publish through the cut"
+        );
+        tokio::time::sleep(TEST_WAIT_POLL).await;
+    }
+    assert_eq!(
+        store.max_history_segment_end_ordinal("ses").unwrap(),
+        covered as i64
+    );
+
+    let starts = producer.starts.load(Ordering::SeqCst);
+    for grown in [last + 2, covered + WINDOW_CAP_BLOCKS as u64 - 1] {
+        let response = pass(&handler, &window(grown)).await;
+        assert_ne!(
+            response["history_summarizer"]["fired"], true,
+            "{grown} messages: {response}"
+        );
+        assert_eq!(
+            producer.starts.load(Ordering::SeqCst),
+            starts,
+            "{grown} messages start a producer run"
+        );
+    }
+
+    producer.block_output.store(true, Ordering::SeqCst);
+    let rearmed = pass(&handler, &window(covered + WINDOW_CAP_BLOCKS as u64)).await;
+    assert_eq!(
+        rearmed["history_summarizer"]["reason"], "window_cap",
+        "{rearmed}"
+    );
+    wait_for_phase(&store, HistorySummarizerPhase::AwaitingProducer).await;
+    assert_eq!(chunk_range(&store).from_ordinal, covered + 1);
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
+/// The projection retains the cut message after the hook removes its committed identities
+/// from the store.
+#[tokio::test(flavor = "current_thread")]
+async fn the_cap_firing_ends_its_head_on_a_message_with_durable_identities() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    let messages = window(WINDOW_CAP_BLOCKS as u64 + 100);
+    let cut = messages.len() as u64 - HALF_CAP_BLOCKS as u64;
+    {
+        let store = Arc::clone(&store);
+        *handler
+            .between_transform_and_prepare
+            .lock()
+            .expect("interleave hook mutex") = Some(Box::new(move || {
+            let loaded = store.load("ses").unwrap();
+            let mut meta = loaded.meta;
+            assert!(
+                meta.block_identity_by_mid
+                    .remove(&format!("m{cut}"))
+                    .is_some()
+            );
+            store
+                .commit("ses", loaded.row_version, &loaded.core, &meta)
+                .unwrap();
+        }));
+    }
+
+    let first = pass(&handler, &messages).await;
+    assert_eq!(
+        first["history_summarizer"]["reason"], "window_cap",
+        "{first}"
+    );
+    wait_for_phase(&store, HistorySummarizerPhase::AwaitingProducer).await;
+    let range = chunk_range(&store);
+    assert_eq!((range.from_ordinal, range.to_ordinal), (1, cut + 1));
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
 fn expire_firing_deadline(store: &MemoryStore) {
     let loaded = store.load("ses").unwrap();
     let mut meta = loaded.meta;
