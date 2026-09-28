@@ -126,6 +126,13 @@ export function rejectedAuthorityKeys(paths: readonly (readonly PropertyKey[])[]
         .map((path) => `a prototype-pollution key inside ${String(path[0])}`);
 }
 
+/** A refused tier still contributes its settings outside `AUTHORITY_BLOCKS`. */
+export function withoutAuthorityBlocks(written: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(
+        Object.entries(written).filter(([key]) => !AUTHORITY_BLOCKS.includes(key)),
+    );
+}
+
 /** Unresolved configuration leaves folding to the host's native compaction. */
 export function withdrawUnresolvedFoldAuthority(
     config: { compaction?: { enabled?: boolean } },

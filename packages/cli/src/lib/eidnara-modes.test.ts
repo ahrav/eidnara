@@ -95,6 +95,21 @@ describe("readEidnaraModes", () => {
         });
     });
 
+    it("keeps the opt-outs of a tier the schema refuses for an unknown authority key", () => {
+        const modes = readEidnaraModes(
+            write(
+                "typo.jsonc",
+                `{"enabled":false,"memory":{"enabled":false},"history_summarizer":{"model":"a/b","modle":"c/d"}}`,
+            ),
+        );
+        expect(modes).toEqual({
+            enabled: false,
+            compactionEnabled: false,
+            memoryEnabled: false,
+            admission: expect.objectContaining({ status: "unresolved" }),
+        });
+    });
+
     it("resolves the compaction mode setup produces once it writes the summarizer model", () => {
         const planned = "anthropic/claude-haiku-4-5";
         const missing = join(tmpdir(), "missing-eidnara.jsonc");

@@ -16,6 +16,7 @@ import {
     rejectedAuthorityKeys,
     screenUserTier,
     withdrawUnresolvedFoldAuthority,
+    withoutAuthorityBlocks,
 } from "./fold-authority";
 import type { LoadOutcome } from "./load-outcome";
 import {
@@ -585,6 +586,17 @@ function admissionOf(...loaded: (LoadedConfigFileDetailed | null)[]): ConfigAdmi
         : { status: "unresolved", reason: rejections.join("; ") };
 }
 
+/** A tier the schema refuses still contributes its settings outside the authority blocks; a refusal there too yields the defaults. */
+function parseRefusedTier(
+    written: Record<string, unknown>,
+): EidnaraPluginConfig & { configWarnings?: string[] } {
+    try {
+        return parsePluginConfig(withoutAuthorityBlocks(written));
+    } catch {
+        return parsePluginConfig({});
+    }
+}
+
 export function loadUserTierConfigDetailed(configPath: string | undefined): {
     config: EidnaraPluginConfig & { configWarnings?: string[] };
     admission: ConfigAdmission;
@@ -596,7 +608,7 @@ export function loadUserTierConfigDetailed(configPath: string | undefined): {
         config = parsePluginConfig(loaded?.config ?? {});
         admission = admissionOf(loaded);
     } catch (error) {
-        config = parsePluginConfig({});
+        config = parseRefusedTier(loaded?.config ?? {});
         admission = {
             status: "unresolved",
             reason: error instanceof Error ? error.message : String(error),
