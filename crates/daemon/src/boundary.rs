@@ -281,8 +281,8 @@ pub struct TriggerContext {
     pub projected_post_drop_percentage: Option<f64>,
     pub commit_cluster_trigger_enabled: bool,
     pub min_commit_clusters: usize,
-    /// The last ordinal of the half-cap cut when the window is at its cap; `WindowCap` then
-    /// fires with an eligible head that reaches at least through it.
+    /// The last ordinal of the half-cap cut, set only when the messages after the last history
+    /// segment reach the window cap.
     pub window_cap_cut: Option<u64>,
 }
 
@@ -309,7 +309,8 @@ pub enum TriggerReason {
     CommitClusters,
     /// `TailSize` fires when `eligible_chunk_tokens` reaches `tail_size_bar`.
     TailSize,
-    /// `WindowCap` fires when the window reaches its block or byte cap.
+    /// `WindowCap` fires when the messages after the last history segment reach the block or
+    /// byte cap.
     WindowCap,
 }
 

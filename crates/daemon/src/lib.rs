@@ -5133,7 +5133,6 @@ impl HandlerCore {
                 ..not_fired
             });
         }
-        let window_at_cap = history_summarizer_archive::WindowSize::of(projection).at_cap();
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             blocked("busy");
             return PreparedHistorySummarizerAction::Busy {
@@ -5238,16 +5237,20 @@ impl HandlerCore {
                         != HistorySummarizerPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
-                    window_cap_cut: window_at_cap
-                        .then(|| {
-                            history_summarizer_archive::archive_cut(
-                                projection,
-                                last_history_segment_end_ordinal,
-                                |mid| projection.identity_by_mid.contains_key(mid),
-                            )
-                        })
-                        .flatten()
-                        .map(|cut| cut.end),
+                    window_cap_cut: history_summarizer_archive::WindowSize::after(
+                        projection,
+                        last_history_segment_end_ordinal,
+                    )
+                    .at_cap()
+                    .then(|| {
+                        history_summarizer_archive::archive_cut(
+                            projection,
+                            last_history_segment_end_ordinal,
+                            |mid| projection.identity_by_mid.contains_key(mid),
+                        )
+                    })
+                    .flatten()
+                    .map(|cut| cut.end),
                 },
                 &mut formatted_token_estimator,
             )
