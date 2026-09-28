@@ -90,7 +90,8 @@ jobs:
               - 'release/**'
               - 'docs/host-wire-protocol.md'
               - 'docs/payload-pool-protocol.md'
-              # The daemon's loader-parity test reads the plugin's shared fixture.
+              # The daemon's loader-parity test reads the plugin's shared
+              # fixture.
               - 'packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json'
               # `crates/daemon/src/fold_authority.rs` embeds the status fixture.
               - 'packages/opencode-plugin/src/shared/__fixtures__/fold-authority-status.json'
@@ -225,7 +226,7 @@ jobs:
           status=0
           git grep -n -I -E \
             \( -e 'Repositor[y]Provenance' \
-               -e '(^[[:space:]]*|[{,][[:space:]]*)provenanc[e][[:space:]]*[,:}]' \
+            -e '(^[[:space:]]*|[{,][[:space:]]*)provenanc[e][[:space:]]*[,:}]' \
             \) \
             --and --not -e 'provenanc[e]:[[:space:]]*None' \
             -- ':(glob)crates/kernel/src/review_staging.rs' \
@@ -643,7 +644,8 @@ jobs:
           EIDNARA_EVAL_S0_BUDGET_MS: "1800000"
         run: >
           cargo +1.98 nextest run --profile ci -p daemon --all-features --locked
-          --test eval_campaign --test eval_aging --test eval_fault --test eval_growth --run-ignored all
+          --test eval_campaign --test eval_aging --test eval_fault
+          --test eval_growth --run-ignored all
 
   stable:
     name: lint and test (stable)
@@ -941,8 +943,10 @@ jobs:
         # directory the variables are resolved from.
         env:
           EIDNARA_E2E_REQUIRE_PI: "1"
-          EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN: ${{ github.workspace }}/target/debug/examples/direct_host_fixture
-          EIDNARA_E2E_EVAL_RUNNER_BIN: ${{ github.workspace }}/target/debug/examples/eval_runner
+          EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN: "${{ github.workspace }}\
+            /target/debug/examples/direct_host_fixture"
+          EIDNARA_E2E_EVAL_RUNNER_BIN: "${{ github.workspace }}\
+            /target/debug/examples/eval_runner"
         run: |
           npm install -g opencode-ai@1.18.22
           cargo +1.98 build -p daemon --example direct_host_fixture \
