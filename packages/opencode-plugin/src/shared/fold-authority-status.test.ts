@@ -310,10 +310,10 @@ describe("publishOnChange", () => {
 
     it("forwards a session's first state and every change, and nothing else", () => {
         const delivered: Array<[ConflictWarning | undefined, string]> = [];
-        const publish = publishOnChange(
-            (warning, sessionId) => delivered.push([warning, sessionId]),
-            8,
-        );
+        const publish = publishOnChange(async (warning, sessionId) => {
+            delivered.push([warning, sessionId]);
+            return true;
+        }, 8);
 
         publish(undefined, "ses_a");
         publish(undefined, "ses_a");
@@ -330,6 +330,25 @@ describe("publishOnChange", () => {
             [undefined, "ses_a"],
             [pending, "ses_b"],
         ]);
+    });
+
+    it("forwards an unchanged state again after a delivery that failed or threw", async () => {
+        const outcomes = [Promise.resolve(false), Promise.reject(new Error("prompt down"))];
+        let delivered = 0;
+        const publish = publishOnChange(() => {
+            delivered += 1;
+            return outcomes.shift() ?? Promise.resolve(true);
+        }, 8);
+
+        publish(pending, "ses_a");
+        await Promise.resolve();
+        publish(pending, "ses_a");
+        await Promise.resolve();
+        publish(pending, "ses_a");
+        await Promise.resolve();
+        publish(pending, "ses_a");
+
+        expect(delivered).toBe(3);
     });
 });
 

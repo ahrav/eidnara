@@ -36,6 +36,12 @@ export interface PluginFoldAuthority {
     publish: (warning: ConflictWarning | undefined, sessionId: string) => void;
 }
 
+/** Resolves `true` once the session reflects the warning; `false` or a rejection asks for a retry. */
+export type FoldAuthorityDelivery = (
+    warning: ConflictWarning | undefined,
+    sessionId: string,
+) => Promise<boolean>;
+
 export interface FoldAuthorityStatus {
     /** The authority the configuration on disk derives; only the surfaces that print it read the files. */
     disk?: string;
@@ -72,11 +78,12 @@ export function pluginFoldAuthority(
 }
 
 /**
- * Forwards a session's first reported state and each later change, so a repeated poll costs no
- * delivery while a session's first report still clears a warning an earlier process left.
+ * Delivers a session's state when it differs from the recorded one, including an `undefined`
+ * state for a session with no record. A failed delivery removes the record while it still holds
+ * the attempted state's text, allowing a later call with that text to trigger delivery again.
  */
 export function publishOnChange(
-    deliver: PluginFoldAuthority["publish"],
+    deliver: FoldAuthorityDelivery,
     maxSessions: number,
 ): PluginFoldAuthority["publish"] {
     const published = new BoundedSessionMap<string>(maxSessions);
@@ -84,7 +91,12 @@ export function publishOnChange(
         const text = warning === undefined ? "" : formatConflictShort(warning);
         if (published.get(sessionId) === text) return;
         published.set(sessionId, text);
-        deliver(warning, sessionId);
+        const forget = () => {
+            if (published.get(sessionId) === text) published.delete(sessionId);
+        };
+        deliver(warning, sessionId).then((delivered) => {
+            if (!delivered) forget();
+        }, forget);
     };
 }
 

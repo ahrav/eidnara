@@ -86,15 +86,16 @@ const server: Plugin = async (ctx) => {
                 );
             }
             // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
-            reconcileFoldAuthorityWarning(
+            return reconcileFoldAuthorityWarning(
                 ctx.client as unknown as Record<string, unknown>,
                 ctx.directory,
                 sessionId,
                 warning,
                 desktopServerUrl(ctx),
-            ).catch((error) =>
-                log(`[eidnara] fold authority warning for ${sessionId} failed:`, error),
-            );
+            ).catch((error) => {
+                log(`[eidnara] fold authority warning for ${sessionId} failed:`, error);
+                return false;
+            });
         }, MAX_LIVE_USAGE_SESSIONS),
     );
     const promptSurfaceRuntime = createPromptSurfaceRuntime({

@@ -334,13 +334,14 @@ export async function sendConflictWarning(
 }
 
 /** One in-flight reconciliation per session; a later poll waits for the earlier one. */
-const reconciling = new Map<string, Promise<void>>();
+const reconciling = new Map<string, Promise<boolean>>();
 
 /**
  * Keeps at most one live fold-authority message in the session, equal to `warning`. A changed
  * warning replaces the message an earlier poll persisted, a cleared warning deletes it, and startup
- * warnings under the same header stay in place. A failed deletion blocks the replacement, which
- * preserves the one-message bound. Polls of one session reconcile in call order.
+ * warnings under the same header stay in place. A failed deletion blocks replacement. Polls of one
+ * session reconcile in call order. Resolves `true` when the session's messages match `warning`,
+ * or the message is queued for the idle flush.
  */
 export function reconcileFoldAuthorityWarning(
     client: unknown,
@@ -348,8 +349,8 @@ export function reconcileFoldAuthorityWarning(
     sessionId: string,
     warning: ConflictWarning | undefined,
     serverUrl?: string,
-): Promise<void> {
-    const previous = reconciling.get(sessionId) ?? Promise.resolve();
+): Promise<boolean> {
+    const previous = reconciling.get(sessionId) ?? Promise.resolve(false);
     const run = previous
         .catch(() => {})
         .then(() => reconcileNow(client, directory, sessionId, warning, serverUrl));
@@ -367,7 +368,7 @@ async function reconcileNow(
     sessionId: string,
     warning: ConflictWarning | undefined,
     serverUrl?: string,
-): Promise<void> {
+): Promise<boolean> {
     const text = warning === undefined ? undefined : formatConflictShort(warning);
     // Dropping queued fold-authority warnings keeps the idle flush consistent with the warning
     // this poll reports.
@@ -389,12 +390,13 @@ async function reconcileNow(
             log(
                 `[eidnara] fold-authority warning: ${failed.length} outdated message(s) remain in session ${sessionId}; not sending a replacement`,
             );
-            return;
+            return false;
         }
     }
-    if (text === undefined || current.length > 0) return;
+    if (text === undefined || current.length > 0) return true;
     log(`[eidnara] sending fold-authority warning to session ${sessionId}`);
-    await sendIgnoredMessage(client, sessionId, text, {}, true);
+    const disposition = await sendIgnoredMessage(client, sessionId, text, {}, true);
+    return disposition === "sent" || disposition === "queued";
 }
 
 /**
