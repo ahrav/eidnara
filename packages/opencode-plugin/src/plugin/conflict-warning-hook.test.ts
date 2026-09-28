@@ -127,6 +127,19 @@ describe.if(platform() === "linux")(
             expect(sessionIds).toEqual([SESSION_ID, "ses_conflict_hook_reopened"]);
         });
 
+        it("sends a session-scoped warning to the named session instead of Desktop's last one", async () => {
+            const directory = seedDesktopSession();
+            __ignoredNotificationTest.setMidTurnDetector(() => false);
+            const { client, prompt } = titledClient();
+
+            await sendConflictWarning(client, directory, CONFLICT, undefined, "ses_polled");
+
+            expect(prompt).toHaveBeenCalledTimes(1);
+            expect((prompt.mock.calls[0]?.[0] as { path: { id: string } }).path.id).toBe(
+                "ses_polled",
+            );
+        });
+
         it("does not persist a second warning while one is already in the session", async () => {
             const directory = seedDesktopSession();
             __ignoredNotificationTest.setMidTurnDetector(() => false);

@@ -478,6 +478,13 @@ function combinedOutcome(args: {
 }
 
 export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
+    const loaded = inspectPluginConfig(directory);
+    setOutputReserveConfig(loaded.config.output_reserve);
+    setWindowOverlayPath(loaded.config.models?.window_overlay_path);
+    return loaded;
+}
+
+export function inspectPluginConfig(directory: string): LoadResultDetailed {
     // Without an absolute home from the environment there is no user tier to read.
     const userBasePath = eidnaraUserConfigBasePath();
     const userDetected = userBasePath === undefined ? undefined : detectConfigFile(userBasePath);
@@ -533,8 +540,6 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     const mergedRecoveries: ConfigRecovery[] = [];
     const config = parsePluginConfig(mergedRaw, mergedRecoveries);
-    setOutputReserveConfig(config.output_reserve);
-    setWindowOverlayPath(config.models?.window_overlay_path);
     if (userLoaded && projectLoaded) {
         // A project override can hide an invalid user field from the merged parse.
         // The user-tier warning is kept unless the merged parse emitted the same warning.

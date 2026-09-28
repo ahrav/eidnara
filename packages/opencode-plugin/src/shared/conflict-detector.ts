@@ -602,7 +602,9 @@ function readOmoDisabledHooks(directory: string): Set<string> {
 export const CONFLICT_DISABLED_HEADER = "⚠️ Eidnara is disabled due to conflicting configuration:";
 export const CONFLICT_WARNING_HEADER = "⚠️ Eidnara is running with a configuration warning:";
 
-export function formatConflictShort(result: ConflictResult): string {
+export type ConflictWarning = Pick<ConflictResult, "disposition" | "reasons" | "unresolved">;
+
+export function formatConflictShort(result: ConflictWarning): string {
     if (result.disposition === "none") return "";
 
     const lines = [

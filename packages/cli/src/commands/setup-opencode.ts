@@ -6,7 +6,11 @@ import {
     loadUserTierConfigText,
 } from "@eidnara/opencode/config";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
-import { normalizeSummarizerChain } from "@eidnara/opencode/config/fold-authority";
+import {
+    describeFoldAuthority,
+    foldAuthorityOf,
+    normalizeSummarizerChain,
+} from "@eidnara/opencode/config/fold-authority";
 import {
     type CompactionPatch,
     type ConflictResult,
@@ -33,13 +37,7 @@ import {
 } from "../adapters/opencode";
 import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
-import {
-    describeFoldAuthority,
-    type EidnaraModes,
-    foldAuthorityOf,
-    projectModeOverrides,
-    readEidnaraModes,
-} from "../lib/eidnara-modes";
+import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
 import { restoreFiles, snapshotFiles } from "../lib/file-snapshot";
 import {
     assertJsoncConfigsParseable,

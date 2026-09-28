@@ -8,6 +8,11 @@ import {
     formatCompactionTimingLines,
     summarizeCompactionTiming,
 } from "../../shared/compaction-timing";
+import {
+    formatFoldAuthorityLines,
+    type PluginFoldAuthority,
+    reportFoldAuthority,
+} from "../../shared/fold-authority-status";
 import type { KernelClientResolver } from "../../shared/kernel-client";
 import {
     formatMemoryMarkOutcome,
@@ -411,6 +416,7 @@ async function executeMemoryMark(
 export function createEidnaraCommandHandler(deps: {
     /** Command paths use boot-resolved mode and must not reread configuration. */
     compactionOff?: boolean;
+    foldAuthority?: PluginFoldAuthority;
     getLiveModelKey?: (sessionId: string) => string | undefined;
     /** The `session.wrapup` request carries no subagent flag, so the handler gates `/eidnara-wrapup` on this predicate. */
     isSubagentSession: (sessionId: string) => boolean | Promise<boolean>;
@@ -588,11 +594,23 @@ export function createEidnaraCommandHandler(deps: {
                 if (deps.compactionOff) {
                     lines.push(
                         "",
-                        `**Compaction:** disabled (${COMPACTION_ENABLED_PATH}: false) — native compaction owns the context window.`,
+                        `**Compaction:** disabled (${COMPACTION_ENABLED_PATH}: false) at plugin startup — the Fold Authority section shows the authority the daemon applies.`,
                     );
                 }
                 if (rustStatus) {
                     lines.push("", formatRustStatusText(rustStatus));
+                    if (deps.foldAuthority) {
+                        lines.push(
+                            "",
+                            ...formatFoldAuthorityLines(
+                                reportFoldAuthority(
+                                    deps.foldAuthority,
+                                    rustStatus.summary,
+                                    sessionId,
+                                ),
+                            ),
+                        );
+                    }
                     if (windowGeometry) {
                         lines.push(
                             `- ${formatWindowDerivationLine(statusInputTokens(rustStatus), windowGeometry)}`,

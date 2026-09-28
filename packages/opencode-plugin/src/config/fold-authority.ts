@@ -144,3 +144,39 @@ export function withdrawUnresolvedFoldAuthority(
         `configuration unresolved (${admission.reason}); Eidnara leaves folding to the host's native compaction until the configuration is fixed.`,
     ];
 }
+
+export type FoldAuthority =
+    | { kind: "eidnara"; reason: string }
+    | { kind: "native"; reason: string }
+    | { kind: "unresolved"; reason: string };
+
+export function foldAuthorityOf(load: {
+    config: { enabled?: unknown; compaction?: unknown; history_summarizer?: unknown };
+    admission: ConfigAdmission;
+}): FoldAuthority {
+    if (load.admission.status === "unresolved") {
+        return { kind: "unresolved", reason: load.admission.reason };
+    }
+    if (load.config.enabled === false) {
+        return { kind: "native", reason: "Eidnara is disabled (`enabled: false`)" };
+    }
+    const chain = normalizeSummarizerChain(load.config.history_summarizer);
+    if (chain.length === 0) {
+        return { kind: "native", reason: "no summarizer model is configured" };
+    }
+    if (isRecord(load.config.compaction) && load.config.compaction.enabled === false) {
+        return { kind: "native", reason: "Eidnara compaction is turned off" };
+    }
+    return { kind: "eidnara", reason: `summarizer chain: ${chain.join(", ")}` };
+}
+
+export function describeFoldAuthority(authority: FoldAuthority): string {
+    switch (authority.kind) {
+        case "eidnara":
+            return `Eidnara folds (${authority.reason})`;
+        case "native":
+            return `OpenCode's native compaction folds (${authority.reason})`;
+        case "unresolved":
+            return `unresolved (${authority.reason})`;
+    }
+}

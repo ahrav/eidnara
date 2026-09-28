@@ -11,9 +11,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadUserTierConfigDetailed } from "@eidnara/opencode/config";
+import { foldAuthorityOf } from "@eidnara/opencode/config/fold-authority";
 import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { parse as parseJsonc } from "comment-json";
-import { foldAuthorityOf } from "../lib/eidnara-modes";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { proposeEidnaraConfig, runSetup } from "./setup-opencode";
 

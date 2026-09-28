@@ -268,6 +268,50 @@ describe("createEidnaraCommandHandler", () => {
             ]);
         });
 
+        it("renders the fold authorities by source and raises a pending authority", async () => {
+            const raised: string[][] = [];
+            const { run, texts } = setup(
+                () => ({
+                    ...STATUS_RESPONSE,
+                    summary: `fold authority native; fold authority pending eidnara: another binding is open on this session; user config /daemon/eidnara.jsonc; ${STATUS_RESPONSE.summary}`,
+                }),
+                {
+                    foldAuthority: {
+                        startup: { kind: "eidnara", reason: "summarizer chain: test/model" },
+                        userConfigPath: "/plugin/eidnara.jsonc",
+                        readDisk: () => ({
+                            kind: "eidnara",
+                            reason: "summarizer chain: test/model",
+                        }),
+                        raise: (conflict) => raised.push(conflict.reasons),
+                    },
+                },
+            );
+
+            await expectSentinel(run("eidnara-status", "ses-status"), "eidnara-status");
+
+            const [text] = texts();
+            expect(text).toContain("### Fold Authority");
+            expect(text).toContain("- On disk: Eidnara folds (summarizer chain: test/model)");
+            expect(text).toContain(
+                "- Plugin startup: Eidnara folds (summarizer chain: test/model)",
+            );
+            expect(text).toContain(
+                "- Daemon applied (session.status): OpenCode's native compaction folds",
+            );
+            expect(text).toContain(
+                "- Pending: eidnara (another binding is open on this session); restart other OpenCode instances",
+            );
+            expect(text).toContain(
+                "- User config: daemon /daemon/eidnara.jsonc, plugin /plugin/eidnara.jsonc",
+            );
+            expect(raised).toHaveLength(1);
+            expect(raised[0]?.map((reason) => reason.split(/[.:]/)[0])).toEqual([
+                "authority pending",
+                "configuration root mismatch",
+            ]);
+        });
+
         it("sends session.status and renders the daemon text", async () => {
             const { run, calls, texts } = setup(() => STATUS_RESPONSE);
 

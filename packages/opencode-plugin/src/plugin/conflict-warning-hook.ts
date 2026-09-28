@@ -12,7 +12,7 @@ import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
 import {
     CONFLICT_DISABLED_HEADER,
     CONFLICT_WARNING_HEADER,
-    type ConflictResult,
+    type ConflictWarning,
     formatConflictShort,
 } from "../shared/conflict-detector";
 import { log } from "../shared/logger";
@@ -274,10 +274,13 @@ async function deleteMessages(
 export async function sendConflictWarning(
     client: unknown,
     directory: string,
-    conflictResult: ConflictResult,
+    conflictResult: ConflictWarning,
     serverUrl?: string,
+    targetSessionId?: string,
 ): Promise<void> {
-    const { sessionId, sidecarUrl } = readDesktopState(directory);
+    const desktop = readDesktopState(directory);
+    const sessionId = targetSessionId ?? desktop.sessionId;
+    const { sidecarUrl } = desktop;
     if (!sessionId) {
         log("[eidnara] conflict-warning: could not find active session for Desktop warning");
         return;

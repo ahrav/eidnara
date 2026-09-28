@@ -665,6 +665,12 @@ const SidebarContent = (props: {
                 </box>
             )}
 
+            {s()?.fold_authority?.label && (
+                <box marginTop={1} width="100%">
+                    <text fg={props.theme.warning}>⚠ {s()!.fold_authority!.label}</text>
+                </box>
+            )}
+
             {s()?.memory_classifierProgress && (
                 <box marginTop={1} width="100%">
                     <text fg={props.theme.warning}>

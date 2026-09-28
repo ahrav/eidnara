@@ -4,6 +4,7 @@ import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
 import { createEidnaraHookAsync } from "../../hooks/context";
 import type { LiveSessionState } from "../../hooks/context/live-session-state";
 import type { RustModeModuleClient } from "../../hooks/context/rust-mode-transform";
+import type { PluginFoldAuthority } from "../../shared/fold-authority-status";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { PluginContext } from "../types";
 
@@ -23,6 +24,7 @@ export async function createSessionHooksAsync(args: {
     liveSessionState: LiveSessionState;
     rustModeModuleClient: RustModeModuleClient;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
+    foldAuthority?: PluginFoldAuthority;
 }) {
     const { ctx, pluginConfig, liveSessionState } = args;
 
@@ -40,6 +42,7 @@ export async function createSessionHooksAsync(args: {
         liveSessionState,
         rustModeModuleClient: args.rustModeModuleClient,
         promptSurfaceRuntime: args.promptSurfaceRuntime,
+        foldAuthority: args.foldAuthority,
         config: buildEidnaraHookConfig(pluginConfig),
     });
 

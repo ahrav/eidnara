@@ -926,3 +926,38 @@ async fn bounded_operation_histories_follow_the_authority_model() {
         run_authority_history(seed, 32).await;
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix() {
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let _ = quiet_transform(&handler, big_messages()).await;
+    let loaded = store.load("ses").unwrap();
+    assert_eq!(loaded.meta.eidnara_folds, Some(true));
+    let mut stalled = loaded.meta.clone();
+    stalled.history_summarizer.last_no_fire = Some("no_models".to_string());
+    store
+        .commit("ses", loaded.row_version, &loaded.core, &stalled)
+        .unwrap();
+
+    let summary = status_summary(&handler, 7).await;
+
+    assert!(
+        summary.starts_with(
+            "fold authority eidnara, summarizer stalled (no models at the last pass); user config "
+        ),
+        "{summary}"
+    );
+}
+
+#[test]
+fn status_paths_are_percent_encoded_for_the_summary() {
+    assert_eq!(
+        status_path(Path::new("/home/a  b/x;y%z/eidnara.jsonc")),
+        "/home/a%20%20b/x%3By%25z/eidnara.jsonc"
+    );
+    assert_eq!(
+        status_path(Path::new("/home/u/.config/eidnara/eidnara.jsonc")),
+        "/home/u/.config/eidnara/eidnara.jsonc"
+    );
+}

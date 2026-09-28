@@ -12,6 +12,7 @@ import {
 import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { projectConfigDisabled } from "../../shared/conflict-detector";
+import type { PluginFoldAuthority } from "../../shared/fold-authority-status";
 import { log, sessionLog } from "../../shared/logger";
 import {
     CAPTURE_MAX_AGE_MS,
@@ -101,6 +102,7 @@ export interface EidnaraDeps {
     };
     /** Registration owns `promptSurfaceRuntime` and shares it with the tool registry. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;
+    foldAuthority?: PluginFoldAuthority;
     /** The daemon client the caller owns and disconnects; the hook never dials a transport of its own. */
     rustModeModuleClient: RustModeModuleClient;
 }
@@ -601,6 +603,7 @@ export function createEidnaraHook(deps: EidnaraDeps) {
         moduleClient,
         kernelClient: kernelClientResolver(deps.config),
         compactionOff,
+        foldAuthority: deps.foldAuthority,
         resolveProjectRoot: projectRootForCommand,
         isSessionDeleted: (sessionId) => deletedSessions.has(sessionId),
         isSubagentSession,

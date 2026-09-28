@@ -3,6 +3,7 @@
  * Both sides import these — no SQLite dependency.
  */
 
+import type { FoldAuthorityStatus } from "./fold-authority-status";
 import type { LoggerDiagnostics } from "./logger";
 
 export interface TailHygieneStatus {
@@ -38,6 +39,7 @@ export interface SidebarSnapshot {
      * compaction.auto owns the window. Absent when the host's setting is unknown.
      */
     native_compaction_active?: boolean;
+    fold_authority?: FoldAuthorityStatus;
     systemPromptTokens: number;
     history_segmentCount: number;
     /** Historical history_segment rows retained while native compaction owns the window. */
@@ -203,6 +205,7 @@ export interface StatusDetail extends SidebarSnapshot {
     loggerDiagnostics: LoggerDiagnostics;
     /** The compaction-timing lines `/eidnara-status` prints, heading first; absent when the daemon reported no summarizer timeline. */
     compactionTiming?: string[];
+    foldAuthorityLines?: string[];
 }
 
 export interface RpcNotificationMessage {
