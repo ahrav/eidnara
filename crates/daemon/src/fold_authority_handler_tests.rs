@@ -380,7 +380,7 @@ async fn session_status_names_the_applied_authority_and_the_user_config_path() {
 
     assert!(
         summary.starts_with(&format!(
-            "fold authority native; user config {}; session",
+            "fold authority native; user config encoded:{}; session",
             user_config.display()
         )),
         "{summary}"
@@ -954,10 +954,10 @@ async fn session_status_names_a_stalled_eidnara_summarizer_in_the_authority_pref
 fn status_paths_are_percent_encoded_for_the_summary() {
     assert_eq!(
         status_path(Path::new("/home/a  b/x;y%z/eidnara.jsonc")),
-        "/home/a%20%20b/x%3By%25z/eidnara.jsonc"
+        "encoded:/home/a%20%20b/x%3By%25z/eidnara.jsonc"
     );
     assert_eq!(
         status_path(Path::new("/home/u/.config/eidnara/eidnara.jsonc")),
-        "/home/u/.config/eidnara/eidnara.jsonc"
+        "encoded:/home/u/.config/eidnara/eidnara.jsonc"
     );
 }

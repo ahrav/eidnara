@@ -74,9 +74,12 @@ const LEGACY_STALL = "last history_summarizer: no fire: no_models";
 const USER_CONFIG = "user config ";
 const SESSION = "; session ";
 
+const ENCODED = "encoded:";
+
 function decodedPath(text: string): string | undefined {
+    if (!text.startsWith(ENCODED)) return /\s/.test(text) ? undefined : text;
     try {
-        return decodeURIComponent(text);
+        return decodeURIComponent(text.slice(ENCODED.length));
     } catch {
         return undefined;
     }

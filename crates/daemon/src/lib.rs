@@ -16889,7 +16889,7 @@ fn format_traffic_age(observed_at_ms: i64, now: i64) -> String {
 }
 
 fn status_path(path: &Path) -> String {
-    let mut encoded = String::new();
+    let mut encoded = String::from("encoded:");
     for ch in path.display().to_string().chars() {
         if ch == '%' || ch == ';' || ch.is_whitespace() || ch.is_control() {
             let mut bytes = [0; 4];

@@ -69,11 +69,14 @@ describe("parseDaemonFoldAuthority", () => {
         });
     });
 
-    it("reads `none` as an unknown path and keeps a path with spaces whole", () => {
-        expect(parseDaemonFoldAuthority(summary("native", "none")).userConfigPath).toBeUndefined();
-        expect(
-            parseDaemonFoldAuthority(summary("native", "/Users/a b/eidnara.jsonc")).userConfigPath,
-        ).toBe("/Users/a b/eidnara.jsonc");
+    it("decodes a marked path and reads an unmarked one literally", () => {
+        const path = (text: string) =>
+            parseDaemonFoldAuthority(summary("native", text)).userConfigPath;
+        expect(path("none")).toBeUndefined();
+        expect(path("encoded:/Users/a%20b/eidnara.jsonc")).toBe("/Users/a b/eidnara.jsonc");
+        expect(path("encoded:/Users/%E0%A4%A/eidnara.jsonc")).toBeUndefined();
+        expect(path("/Users/a%20b/eidnara.jsonc")).toBe("/Users/a%20b/eidnara.jsonc");
+        expect(path("/Users/a b/eidnara.jsonc")).toBeUndefined();
     });
 
     it("reads a stalled summarizer from the authority prefix", () => {
@@ -189,13 +192,13 @@ describe("foldAuthorityStatus", () => {
         const spacedRoot = "/home/a  b;c/.config/eidnara/eidnara.jsonc";
         const same = foldAuthorityStatus(
             plugin({ userConfigPath: spacedRoot }),
-            summary("eidnara", "/home/a%20%20b%3Bc/.config/eidnara/eidnara.jsonc"),
+            summary("eidnara", "encoded:/home/a%20%20b%3Bc/.config/eidnara/eidnara.jsonc"),
         );
         expect(same.daemon_user_config).toBe(spacedRoot);
         expect(same.warnings).toEqual([]);
         const distinct = foldAuthorityStatus(
             plugin({ userConfigPath: "/home/a b;c/.config/eidnara/eidnara.jsonc" }),
-            summary("eidnara", "/home/a%20%20b%3Bc/.config/eidnara/eidnara.jsonc"),
+            summary("eidnara", "encoded:/home/a%20%20b%3Bc/.config/eidnara/eidnara.jsonc"),
         );
         expect(distinct.warnings[0]).toStartWith(ROOT_MISMATCH_WARNING);
     });
