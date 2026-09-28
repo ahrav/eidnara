@@ -1,5 +1,6 @@
 import { type ConfigAdmission, loadUserTierConfigDetailed } from "@eidnara/opencode/config";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
+import { normalizeSummarizerChain } from "@eidnara/opencode/config/fold-authority";
 import { isRecord } from "@eidnara/opencode/shared/record-type-guard";
 import { readJsoncLenient } from "./jsonc-config";
 
@@ -32,16 +33,6 @@ export function readEidnaraModes(
     };
 }
 
-export function compactionEnabledWithSummarizer(
-    configPath: string | undefined,
-    model: string | null,
-): boolean {
-    const { config } = loadUserTierConfigDetailed(configPath);
-    if (model === null) return compactionEnabledFor(config);
-    const block = isRecord(config.history_summarizer) ? config.history_summarizer : {};
-    return compactionEnabledFor({ ...config, history_summarizer: { ...block, model } });
-}
-
 /**
  * Host native settings are global, so setup decides from the shared config
  * and only reports a project-tier disagreement.
@@ -71,4 +62,40 @@ export function compactionEnabledFor(config: {
         compaction: isRecord(config.compaction) ? config.compaction : null,
         history_summarizer: config.history_summarizer,
     });
+}
+
+export type FoldAuthority =
+    | { kind: "eidnara"; reason: string }
+    | { kind: "native"; reason: string }
+    | { kind: "unresolved"; reason: string };
+
+export function foldAuthorityOf(load: {
+    config: { enabled?: unknown; compaction?: unknown; history_summarizer?: unknown };
+    admission: ConfigAdmission;
+}): FoldAuthority {
+    if (load.admission.status === "unresolved") {
+        return { kind: "unresolved", reason: load.admission.reason };
+    }
+    if (load.config.enabled === false) {
+        return { kind: "native", reason: "Eidnara is disabled (`enabled: false`)" };
+    }
+    const chain = normalizeSummarizerChain(load.config.history_summarizer);
+    if (chain.length === 0) {
+        return { kind: "native", reason: "no summarizer model is configured" };
+    }
+    if (!compactionEnabledFor(load.config)) {
+        return { kind: "native", reason: "Eidnara compaction is turned off" };
+    }
+    return { kind: "eidnara", reason: `summarizer chain: ${chain.join(", ")}` };
+}
+
+export function describeFoldAuthority(authority: FoldAuthority): string {
+    switch (authority.kind) {
+        case "eidnara":
+            return `Eidnara folds (${authority.reason})`;
+        case "native":
+            return `OpenCode's native compaction folds (${authority.reason})`;
+        case "unresolved":
+            return `unresolved (${authority.reason})`;
+    }
 }

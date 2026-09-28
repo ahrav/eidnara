@@ -8,7 +8,6 @@ import {
     DCP_CONFLICT_REASON,
     detectConflicts,
 } from "@eidnara/opencode/shared/conflict-detector";
-import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import { getOpenCodeConfigPaths } from "@eidnara/opencode/shared/opencode-config-dir";
 import { parse as parseJsonc } from "comment-json";
 import { assertJsoncConfigsParseable } from "../lib/jsonc-config";
@@ -16,18 +15,22 @@ import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
     assertPluginListShape,
-    conflictsForWrittenTier,
+    EIDNARA_FOLDS_COMPACTION,
     findDcpPluginIndexes,
     hasAnthropicModel,
     hasExistingOpenCodeSetup,
     preflightConfigPaths,
+    proposeEidnaraConfig,
     reportRemainingConflicts,
     withClaudeMaxCacheTtl,
     withoutDcpConflict,
-    writeEidnaraConfig,
 } from "./setup-opencode";
 
 const tempDirs: string[] = [];
+
+function writeProposal(path: string, options: Parameters<typeof proposeEidnaraConfig>[1]): void {
+    writeFileSync(path, proposeEidnaraConfig(path, options));
+}
 
 function tempDir(): string {
     const path = mkdtempSync(join(tmpdir(), "eidnara-opencode-setup-"));
@@ -46,8 +49,8 @@ describe("setup-opencode config safety", () => {
         writeFileSync(path, malformed);
 
         expect(() =>
-            writeEidnaraConfig(path, {
-                history_summarizerModel: "anthropic/claude-sonnet-4-6",
+            writeProposal(path, {
+                summarizer: { kind: "model", model: "anthropic/claude-sonnet-4-6" },
                 context_researcherEnabled: false,
                 context_researcherModel: null,
                 claudeMax: false,
@@ -59,8 +62,8 @@ describe("setup-opencode config safety", () => {
     it("writes the schema URL, history_summarizer model, and context_researcher block into a new config", () => {
         const path = join(tempDir(), "eidnara.jsonc");
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-mini",
             claudeMax: false,
@@ -73,8 +76,8 @@ describe("setup-opencode config safety", () => {
         expect(written.history_summarizer).toEqual({ model: "anthropic/claude-haiku-4-5" });
         expect(written.context_researcher).toEqual({ model: "openai/gpt-5-mini" });
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-nano",
             claudeMax: false,
@@ -89,8 +92,8 @@ describe("setup-opencode config safety", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(path, `{"cache_ttl":"10m","history_summarizer":{"model":"openai/gpt-5"}}`);
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: false,
             context_researcherModel: null,
             claudeMax: true,
@@ -112,8 +115,8 @@ describe("setup-opencode config safety", () => {
             `{\n  // top keep\n  "history_summarizer": {\n    // inner keep\n    "model": "old"\n  },\n  "context_researcher": {\n    // context_researcher keep\n    "disable": true\n  }\n}\n`,
         );
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: false,
             context_researcherModel: null,
             claudeMax: false,
@@ -134,8 +137,8 @@ describe("setup-opencode config safety", () => {
             `{"history_summarizer":{"disable":true,"enabled":false,"model":"old"},"context_researcher":{"disable":true}}`,
         );
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: false,
             context_researcherModel: null,
             claudeMax: false,
@@ -153,8 +156,8 @@ describe("setup-opencode config safety", () => {
             `{"history_summarizer":{"temperature":"hot","top_p":0.5},"context_researcher":{"color":"red","prompt":"keep"}}`,
         );
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-mini",
             claudeMax: false,
@@ -172,8 +175,8 @@ describe("setup-opencode config safety", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(path, `{"history_summarizer":"old-model","context_researcher":["stale"]}`);
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: "anthropic/claude-haiku-4-5",
+        writeProposal(path, {
+            summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-mini",
             claudeMax: false,
@@ -212,8 +215,8 @@ describe("setup-opencode config safety", () => {
             `{\n  "cache_ttl": {\n    // ttl keep\n    "default": "10m",\n    "openai/gpt-5": 30\n  }\n}\n`,
         );
 
-        writeEidnaraConfig(path, {
-            history_summarizerModel: null,
+        writeProposal(path, {
+            summarizer: { kind: "keep" },
             context_researcherEnabled: false,
             context_researcherModel: null,
             claudeMax: true,
@@ -272,19 +275,25 @@ describe("setup-opencode config safety", () => {
             JSON.stringify({ name: "@eidnara/opencode" }),
         );
 
-        addPluginToOpenCodeConfig(path, "jsonc", false, true, [pathToFileURL(devPlugin).href]);
+        addPluginToOpenCodeConfig(path, "jsonc", false, EIDNARA_FOLDS_COMPACTION, [
+            pathToFileURL(devPlugin).href,
+        ]);
         expect(parseJsonc(readFileSync(path, "utf-8"))).toMatchObject({
             plugin: ["other"],
             compaction: { auto: false, prune: false },
         });
 
-        addPluginToOpenCodeConfig(path, "jsonc", false, true, ["@eidnara/opencode@latest"]);
+        addPluginToOpenCodeConfig(path, "jsonc", false, EIDNARA_FOLDS_COMPACTION, [
+            "@eidnara/opencode@latest",
+        ]);
         expect((parseJsonc(readFileSync(path, "utf-8")) as { plugin: string[] }).plugin).toEqual([
             "other",
         ]);
 
         const fresh = join(root, "fresh", "opencode.jsonc");
-        addPluginToOpenCodeConfig(fresh, "none", false, true, ["@eidnara/opencode"]);
+        addPluginToOpenCodeConfig(fresh, "none", false, EIDNARA_FOLDS_COMPACTION, [
+            "@eidnara/opencode",
+        ]);
         expect(parseJsonc(readFileSync(fresh, "utf-8"))).toEqual({
             compaction: { auto: false, prune: false },
         });
@@ -460,59 +469,6 @@ describe("reportRemainingConflicts", () => {
         expect(text).toContain("Eidnara runs with a warning");
         expect(text).toContain("no fold authority");
         expect(text).toContain("compaction.auto is set by OPENCODE_DISABLE_AUTOCOMPACT");
-    });
-
-    it("leaves compaction.auto false when the summarizer setup writes gives Eidnara the folds", () => {
-        const root = tempDir();
-        const opencode = join(root, "opencode.json");
-        writeFileSync(
-            opencode,
-            JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"], compaction: { auto: false } }),
-        );
-        // Setup detects before the model pick, so no summarizer is configured yet.
-        const detected = detectConflicts(root, { compactionEnabled: false });
-        expect(detected.disposition).toBe("disable");
-        const messages: string[] = [];
-        const output = {
-            warn: (message: string) => messages.push(`warn:${message}`),
-            message: (message: string) => messages.push(`message:${message}`),
-        };
-
-        fixConflicts(root, conflictsForWrittenTier(detected, false, true));
-
-        const written = parseJsonc(readFileSync(opencode, "utf8")) as {
-            plugin?: unknown[];
-            compaction?: { auto?: boolean };
-        };
-        expect(written.compaction?.auto).toBe(false);
-        expect(written.plugin).toEqual([]);
-        // The next boot reads the written summarizer, so Eidnara folds against these files.
-        expect(detectConflicts(root, { compactionEnabled: true }).disposition).toBe("none");
-        const remaining = conflictsForWrittenTier(
-            detectConflicts(root, { compactionEnabled: false }),
-            false,
-            true,
-        );
-        expect(reportRemainingConflicts(remaining, output)).toBe(false);
-        expect(messages).toEqual([]);
-    });
-
-    it("keeps the auto = true repair when the written tier still leaves the folds to OpenCode", () => {
-        const root = tempDir();
-        const opencode = join(root, "opencode.json");
-        writeFileSync(
-            opencode,
-            JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"], compaction: { auto: false } }),
-        );
-        const detected = detectConflicts(root, { compactionEnabled: false });
-
-        fixConflicts(root, conflictsForWrittenTier(detected, false, false));
-
-        const written = parseJsonc(readFileSync(opencode, "utf8")) as {
-            compaction?: { auto?: boolean };
-        };
-        expect(written.compaction?.auto).toBe(true);
-        expect(detectConflicts(root, { compactionEnabled: false }).disposition).toBe("none");
     });
 });
 
@@ -716,14 +672,14 @@ describe("setup-opencode compaction-off writer (issue #266)", () => {
         const configPath = join(root, "opencode.jsonc");
         writeFileSync(configPath, JSON.stringify({ compaction: { auto: true, prune: true } }));
 
-        addPluginToOpenCodeConfig(configPath, "jsonc", false, false);
+        addPluginToOpenCodeConfig(configPath, "jsonc", false, {});
         const afterOff = parseJsonc(readFileSync(configPath, "utf-8")) as {
             compaction?: { auto?: boolean; prune?: boolean };
         };
         expect(afterOff.compaction).toEqual({ auto: true, prune: true });
 
         // The same config is rewritten with the mode on, so only the mode flag can explain the change.
-        addPluginToOpenCodeConfig(configPath, "jsonc", false, true);
+        addPluginToOpenCodeConfig(configPath, "jsonc", false, EIDNARA_FOLDS_COMPACTION);
         const afterOn = parseJsonc(readFileSync(configPath, "utf-8")) as {
             compaction?: { auto?: boolean; prune?: boolean };
         };
@@ -733,7 +689,7 @@ describe("setup-opencode compaction-off writer (issue #266)", () => {
     it("does not create a compaction block when compactionEnabled=false and none exists", () => {
         const root = tempDir();
         const configPath = join(root, "opencode.jsonc");
-        addPluginToOpenCodeConfig(configPath, "jsonc", false, false);
+        addPluginToOpenCodeConfig(configPath, "jsonc", false, {});
 
         const merged = parseJsonc(readFileSync(configPath, "utf-8")) as {
             compaction?: unknown;

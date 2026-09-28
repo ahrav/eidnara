@@ -92,6 +92,21 @@ function describeRejectedKeyPath(path: readonly (string | number)[]): string {
     return path.length > 1 ? `"${key}" at depth ${path.length}` : `"${key}"`;
 }
 
+function failedLoad(
+    source: "user" | "project",
+    warning: string,
+    outcome: LoadOutcome,
+): LoadedConfigFileDetailed {
+    return {
+        config: {},
+        warnings: [warning],
+        outcome,
+        source,
+        substitutionFailures: [],
+        authorityRejections: [warning],
+    };
+}
+
 function loadConfigFileDetailed(
     configPath: string,
     source: "user" | "project",
@@ -100,25 +115,24 @@ function loadConfigFileDetailed(
         return null;
     }
 
-    const failed = (warning: string, outcome: LoadOutcome): LoadedConfigFileDetailed => ({
-        config: {},
-        warnings: [warning],
-        outcome,
-        source,
-        substitutionFailures: [],
-        authorityRejections: [warning],
-    });
-
     let rawText: string;
     try {
         rawText = readRegularFileSync(configPath);
     } catch (error) {
-        return failed(
+        return failedLoad(
+            source,
             `${configPath}: failed to read config: ${error instanceof Error ? error.message : String(error)}`,
             "project-file-io-error",
         );
     }
+    return loadConfigTextDetailed(configPath, rawText, source);
+}
 
+function loadConfigTextDetailed(
+    configPath: string,
+    rawText: string,
+    source: "user" | "project",
+): LoadedConfigFileDetailed {
     try {
         const screen =
             source === "user"
@@ -172,7 +186,8 @@ function loadConfigFileDetailed(
             ].map(prefix),
         };
     } catch (error) {
-        return failed(
+        return failedLoad(
+            source,
             `${configPath}: failed to load config: ${error instanceof Error ? error.message : String(error)}`,
             "project-file-parse-error",
         );
@@ -610,11 +625,42 @@ function parseRefusedTier(
     }
 }
 
-export function loadUserTierConfigDetailed(configPath: string | undefined): {
+export interface UserTierLoad {
     config: EidnaraPluginConfig & { configWarnings?: string[] };
     admission: ConfigAdmission;
-} {
-    const loaded = configPath === undefined ? null : loadConfigFileDetailed(configPath, "user");
+}
+
+export function loadUserTierConfigDetailed(configPath: string | undefined): UserTierLoad {
+    return parseUserTier(
+        configPath === undefined ? null : loadConfigFileDetailed(configPath, "user"),
+    );
+}
+
+/** Runs `text` through the user-tier pipeline as if it were the file at `configPath`. */
+export function loadUserTierConfigText(configPath: string, text: string): UserTierLoad {
+    return parseUserTier(loadConfigTextDetailed(configPath, text, "user"));
+}
+
+/** The project tier's verdict alone, including the unknown-key refusal that stops plugin startup. */
+export function loadProjectTierAdmission(directory: string): ConfigAdmission {
+    const detected = detectConfigFile(eidnaraProjectConfigBasePath(directory));
+    if (detected.format === "none") return { status: "admitted" };
+    const loaded = loadConfigFileDetailed(detected.path, "project");
+    try {
+        if (loaded) {
+            dropRemovedConfigKeys(loaded.config);
+            assertKnownConfigKeys(loaded.config);
+        }
+    } catch (error) {
+        return {
+            status: "unresolved",
+            reason: `${detected.path}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+    }
+    return admissionOf(loaded);
+}
+
+function parseUserTier(loaded: LoadedConfigFileDetailed | null): UserTierLoad {
     let config: EidnaraPluginConfig & { configWarnings?: string[] };
     let admission: ConfigAdmission;
     try {

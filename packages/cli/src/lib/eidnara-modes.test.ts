@@ -2,11 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-    compactionEnabledWithSummarizer,
-    projectModeOverrides,
-    readEidnaraModes,
-} from "./eidnara-modes";
+import { projectModeOverrides, readEidnaraModes } from "./eidnara-modes";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -155,35 +151,6 @@ describe("readEidnaraModes", () => {
                 },
             ).compactionEnabled,
         ).toBe(true);
-    });
-});
-
-describe("compactionEnabledWithSummarizer", () => {
-    const picked = "anthropic/claude-haiku-4-5";
-
-    it("resolves the mode the shared config reaches once setup writes the picked summarizer", () => {
-        expect(
-            compactionEnabledWithSummarizer(join(tmpdir(), "missing-eidnara.jsonc"), picked),
-        ).toBe(true);
-        expect(
-            compactionEnabledWithSummarizer(
-                write("keep.jsonc", `{"memory":{"enabled":true}}`),
-                picked,
-            ),
-        ).toBe(true);
-        expect(
-            compactionEnabledWithSummarizer(
-                write("opt-out.jsonc", `{"compaction":{"enabled":false}}`),
-                picked,
-            ),
-        ).toBe(false);
-        expect(
-            compactionEnabledWithSummarizer(write("off.jsonc", `{"enabled":false}`), picked),
-        ).toBe(false);
-    });
-
-    it("keeps the configured chain when setup writes no summarizer", () => {
-        expect(compactionEnabledWithSummarizer(write("none.jsonc", "{}"), null)).toBe(false);
     });
 });
 

@@ -1,13 +1,19 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import {
+    loadProjectTierAdmission,
+    loadUserTierConfigDetailed,
+    loadUserTierConfigText,
+} from "@eidnara/opencode/config";
+import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
+import { normalizeSummarizerChain } from "@eidnara/opencode/config/fold-authority";
+import {
+    type CompactionPatch,
     type ConflictResult,
     conflictDisposition,
     DCP_CONFLICT_REASON,
     detectConflicts,
     hasOmoPlugin,
-    NO_FOLD_AUTHORITY_REASON,
     openCodeConfigLayerPaths,
     pluginEntriesOutside,
 } from "@eidnara/opencode/shared/conflict-detector";
@@ -28,8 +34,9 @@ import {
 import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
 import {
-    compactionEnabledWithSummarizer,
+    describeFoldAuthority,
     type EidnaraModes,
+    foldAuthorityOf,
     projectModeOverrides,
     readEidnaraModes,
 } from "../lib/eidnara-modes";
@@ -43,7 +50,7 @@ import { pickModel } from "../lib/model-picker";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getAvailableModels, getOpenCodeVersion } from "../lib/opencode-helpers";
 import { type ConfigPaths, detectConfigPaths } from "../lib/paths";
-import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
+import { log, type PromptIO, type PromptLog, promptIO } from "../lib/prompts";
 import { compareVersionStrings } from "../lib/version";
 
 const PLUGIN_NAME = "@eidnara/opencode";
@@ -52,7 +59,11 @@ const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 export const OPENCODE_MINIMUM_VERSION = "1.15.0";
 
 /** With `enabled: false` the plugin skips every hook at startup, so native compaction must stay on. */
-function resolveWriterModes(sharedConfigPath: string, directory: string): EidnaraModes {
+function resolveWriterModes(
+    sharedConfigPath: string,
+    directory: string,
+    log: PromptLog,
+): EidnaraModes {
     const modes = readEidnaraModes(sharedConfigPath);
     if (!modes.enabled) {
         log.warn(
@@ -79,11 +90,8 @@ export function addPluginToOpenCodeConfig(
     configPath: string,
     _format: "json" | "jsonc" | "none",
     removeDcp = false,
-    /**
-     * When compactionEnabled is false, the writer does not write compaction.auto or compaction.prune.
-     * When compactionEnabled is false, the writer does not change compaction fields.
-     */
-    compactionEnabled = true,
+    /** The `compaction` keys to write and their target values; keys it omits are left as found. */
+    compaction: CompactionPatch = EIDNARA_FOLDS_COMPACTION,
     /** Plugin entries already effective from other config layers, such as a project config's dev path; an Eidnara entry among them suppresses the global one so OpenCode does not load the plugin twice. */
     effectiveElsewhere: readonly unknown[] = [],
 ): void {
@@ -103,8 +111,8 @@ export function addPluginToOpenCodeConfig(
         const created: Record<string, unknown> = registeredElsewhere
             ? {}
             : { plugin: [PLUGIN_NAME] };
-        if (compactionEnabled) {
-            created.compaction = { auto: false, prune: false };
+        if (Object.keys(compaction).length > 0) {
+            created.compaction = { ...compaction };
         }
         writeFileAtomic(configPath, `${stringifyJsonc(created, null, 2)}\n`);
         return;
@@ -154,23 +162,15 @@ export function addPluginToOpenCodeConfig(
         changed = true;
     }
 
-    // When compactionEnabled is false, the writer does not change compaction fields.
-    // When compactionEnabled is true, the writer sets compaction.auto and compaction.prune to false.
-    if (compactionEnabled) {
-        const compaction = existing.compaction;
-        const hasCompactionObject =
-            typeof compaction === "object" && compaction !== null && !Array.isArray(compaction);
-        if (!hasCompactionObject) {
-            text = setJsoncValue(text, ["compaction"], { auto: false, prune: false });
+    const targets = Object.entries(compaction);
+    if (targets.length > 0) {
+        if (!isRecord(existing.compaction)) {
+            text = setJsoncValue(text, ["compaction"], { ...compaction });
             changed = true;
         } else {
-            const fields = compaction as Record<string, unknown>;
-            if (fields.auto !== false) {
-                text = setJsoncValue(text, ["compaction", "auto"], false);
-                changed = true;
-            }
-            if (fields.prune !== false) {
-                text = setJsoncValue(text, ["compaction", "prune"], false);
+            for (const [key, value] of targets) {
+                if (existing.compaction[key] === value) continue;
+                text = setJsoncValue(text, ["compaction", key], value);
                 changed = true;
             }
         }
@@ -231,6 +231,7 @@ type DcpDecision = "absent" | "remove" | "keep";
 async function resolveDcpConflictBeforeSetup(
     configPath: string,
     format: "json" | "jsonc" | "none",
+    { log, confirm }: Pick<PromptIO, "log" | "confirm">,
 ): Promise<DcpDecision> {
     if (format === "none") return "absent";
     const ocConfig = readJsoncConfigForUpdate(configPath);
@@ -264,25 +265,49 @@ export function withoutDcpConflict(result: ConflictResult): ConflictResult {
     };
 }
 
-export function writeEidnaraConfig(
-    configPath: string,
-    options: {
-        history_summarizerModel: string | null;
-        context_researcherEnabled: boolean;
-        context_researcherModel: string | null;
-        claudeMax: boolean;
-    },
-): void {
+export const EIDNARA_FOLDS_COMPACTION: CompactionPatch = { auto: false, prune: false };
+export const NATIVE_FOLDS_COMPACTION: CompactionPatch = { auto: true };
+
+/** `keep` leaves every summarizer chain key as found; `remove` deletes all four. */
+export type SummarizerChoice =
+    | { kind: "model"; model: string }
+    | { kind: "keep" }
+    | { kind: "remove" };
+
+const SUMMARIZER_CHAIN_KEYS = [
+    "model",
+    "fallback_models",
+    "module_model",
+    "module_fallback_models",
+] as const;
+
+export interface EidnaraConfigOptions {
+    summarizer: SummarizerChoice;
+    context_researcherEnabled: boolean;
+    context_researcherModel: string | null;
+    claudeMax: boolean;
+}
+
+/** Returns the exact text setup would write to `configPath`. */
+export function proposeEidnaraConfig(configPath: string, options: EidnaraConfigOptions): string {
     const config = readJsoncConfigForUpdate(configPath);
+    const summarizerModel = options.summarizer.kind === "model" ? options.summarizer.model : null;
 
     if (!config.$schema) {
         config.$schema =
             "https://raw.githubusercontent.com/ahrav/eidnara/main/assets/eidnara.schema.json";
     }
 
-    if (options.history_summarizerModel) {
+    if (options.summarizer.kind === "remove" && isRecord(config.history_summarizer)) {
+        for (const key of SUMMARIZER_CHAIN_KEYS) delete config.history_summarizer[key];
+    }
+    if (summarizerModel) {
         const history_summarizer = asPlainRecord(config.history_summarizer);
-        history_summarizer.model = options.history_summarizerModel;
+        history_summarizer.model = summarizerModel;
+        // `module_model` takes precedence over `model` in the summarizer chain, so the picked model
+        // replaces it.
+        delete history_summarizer.module_model;
+        delete history_summarizer.module_fallback_models;
         delete history_summarizer.disable;
         delete history_summarizer.enabled;
         warnPrunedAgentFields(
@@ -312,12 +337,12 @@ export function writeEidnaraConfig(
 
     if (options.claudeMax) {
         config.cache_ttl = withClaudeMaxCacheTtl(config.cache_ttl, [
-            options.history_summarizerModel,
+            summarizerModel,
             options.context_researcherModel,
         ]);
     }
 
-    writeFileAtomic(configPath, `${stringifyJsonc(config, null, 2)}\n`);
+    return `${stringifyJsonc(config, null, 2)}\n`;
 }
 
 /**
@@ -390,23 +415,12 @@ export function hasExistingOpenCodeSetup(
     );
 }
 
-export function conflictsForWrittenTier(
-    detected: ConflictResult,
-    detectedCompactionEnabled: boolean,
-    writtenCompactionEnabled: boolean,
-): ConflictResult {
-    if (detectedCompactionEnabled || !writtenCompactionEnabled) return detected;
-    const conflicts = { ...detected.conflicts, noFoldAuthority: false };
-    return {
-        ...detected,
-        disposition: conflictDisposition(conflicts),
-        reasons: detected.reasons.filter((reason) => reason !== NO_FOLD_AUTHORITY_REASON),
-        conflicts,
-        compactionPatch: {},
-        unresolved: [],
-    };
-}
-
+/**
+ * Reports the conflicts a re-detection still finds after a repair. The fixer edits only files
+ * that exist and that its editor accepts, so an accepted repair can leave a conflict in place (an
+ * OMO plugin entry with no OMO config file, or a config the editor refused). Returns whether any
+ * conflict remains.
+ */
 export function reportRemainingConflicts(
     remaining: ConflictResult,
     output: Pick<typeof log, "warn" | "message"> = log,
@@ -465,13 +479,24 @@ function assertPluginListValue(configPath: string, plugin: unknown): void {
     }
 }
 
-export async function runSetup(dryRun = false): Promise<number> {
-    intro("Eidnara — Setup");
+export interface SetupDependencies {
+    io: PromptIO;
+    /** `betweenWrites` runs between the OpenCode and Eidnara config writes, regardless of write order. */
+    betweenWrites?: () => void;
+}
+
+export async function runSetup(
+    dryRun = false,
+    { io, betweenWrites }: SetupDependencies = { io: promptIO },
+): Promise<number> {
+    const { log } = io;
+    const confirm = (message: string, defaultYes?: boolean) => io.confirm(message, defaultYes);
+    io.intro("Eidnara — Setup");
     if (dryRun) {
         log.warn("Dry run — no files will be written and no config will be changed.");
     }
 
-    const s = spinner();
+    const s = io.spinner();
     s.start("Checking OpenCode installation");
 
     const detection = detectOpenCode();
@@ -483,11 +508,10 @@ export async function runSetup(dryRun = false): Promise<number> {
         );
         if (!shouldContinue) {
             log.info("Install OpenCode: https://opencode.ai");
-            outro("Setup cancelled");
+            io.outro("Setup cancelled");
             return 1;
         }
     } else if (detection.kind === "desktop") {
-        // absent.
         s.stop("OpenCode Desktop detected (CLI not installed)");
         log.info(
             "Model auto-discovery needs the OpenCode CLI; you will enter models manually. Install the CLI to auto-populate: https://opencode.ai",
@@ -501,7 +525,7 @@ export async function runSetup(dryRun = false): Promise<number> {
             );
             const proceed = await confirm("Continue with setup anyway?", false);
             if (!proceed) {
-                outro("Setup cancelled — upgrade OpenCode and try again.");
+                io.outro("Setup cancelled — upgrade OpenCode and try again.");
                 return 1;
             }
         }
@@ -522,94 +546,48 @@ export async function runSetup(dryRun = false): Promise<number> {
         log.error(
             "No user configuration directory: set HOME (or XDG_CONFIG_HOME) to an absolute path so eidnara.jsonc has a location.",
         );
-        outro("Setup stopped.");
+        io.outro("Setup stopped.");
         return 1;
     }
     // The guard above narrows the user config path for every write and preflight that follows.
     const paths = { ...detected, eidnaraConfig: detected.eidnaraConfig };
     const hadExistingSetup = hasExistingOpenCodeSetup(paths, process.cwd());
     // With Eidnara disabled nothing conflicts, so no conflict repair is offered in that mode.
-    const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd());
+    const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd(), log);
     const omoConfigs = collectOmoConfigPaths(process.cwd());
-    const firstTimeOmoRepair = modes.enabled && omoConfigs.length > 0 && !hadExistingSetup;
-    const omoRepairReachable = modes.enabled && (hasOmoPlugin(process.cwd()) || firstTimeOmoRepair);
+    const omoReachableWhenEnabled =
+        hasOmoPlugin(process.cwd()) || (omoConfigs.length > 0 && !hadExistingSetup);
 
     // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
     try {
         assertJsoncConfigsParseable(
-            preflightConfigPaths(paths, process.cwd(), { omoRepairReachable }),
+            preflightConfigPaths(paths, process.cwd(), {
+                omoRepairReachable: modes.enabled && omoReachableWhenEnabled,
+            }),
         );
         assertPluginListShape([paths.opencodeConfig, paths.tuiConfig]);
     } catch (error) {
         log.error(error instanceof Error ? error.message : String(error));
-        outro("Setup stopped — fix the malformed config and rerun setup.");
+        io.outro("Setup stopped — fix the malformed config and rerun setup.");
         return 1;
     }
 
-    const history_summarizerModel = await pickModel(promptIO, allModels, "history_summarizer");
-    log.success(`HistorySummarizer: ${history_summarizerModel}`);
-    // Setup writes this model, so the native-compaction decision follows the written config.
-    const compactionEnabled = readEidnaraModes(paths.eidnaraConfig, {
-        summarizerModel: history_summarizerModel,
-    }).compactionEnabled;
-
-    const dcpDecision: DcpDecision =
-        dryRun || !modes.enabled
-            ? "absent"
-            : await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
-    const removeDcp = dcpDecision === "remove";
-
-    if (dryRun) {
-        log.message(
-            compactionEnabled
-                ? `[dry-run] would add the plugin to ${paths.opencodeConfig} and disable compaction`
-                : `[dry-run] would add the plugin to ${paths.opencodeConfig} (compaction-off mode — native compaction fields left untouched)`,
-        );
-    }
-
-    let conflictFix: ConflictResult | null = null;
-    // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
-    let keepNativeCompaction = false;
-    if (hadExistingSetup && modes.enabled) {
-        const detected = detectConflicts(process.cwd(), {
-            compactionEnabled,
-        });
-        const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
-        if (conflicts.disposition === "disable") {
-            log.warn("Found conflicting configuration that can disable Eidnara:");
-            for (const reason of [...conflicts.reasons, ...conflicts.unresolved]) {
-                log.message(`  • ${reason}`);
-            }
-
-            if (dryRun) {
-                log.message("[dry-run] would offer to apply automatic conflict fixes");
-            } else {
-                const shouldFixConflicts = await confirm(
-                    "Apply automatic conflict fixes to your OpenCode and OMO config files?",
-                    true,
-                );
-
-                if (shouldFixConflicts) {
-                    conflictFix = conflicts;
-                } else {
-                    keepNativeCompaction =
-                        conflicts.conflicts.compactionAuto || conflicts.conflicts.compactionPrune;
-                    log.warn("Skipped automatic conflict fixes — Eidnara may remain disabled");
-                }
-            }
-        }
-    }
+    const existingChain = normalizeSummarizerChain(
+        loadUserTierConfigDetailed(paths.eidnaraConfig).config.history_summarizer,
+    );
+    const summarizer = await pickSummarizer(io, allModels, existingChain);
+    const summarizerModel = summarizer.kind === "model" ? summarizer.model : null;
 
     const context_researcherEnabled = await confirm("Enable context_researcher?", false);
     let context_researcherModel: string | null = null;
     if (context_researcherEnabled) {
-        context_researcherModel = await pickModel(promptIO, allModels, "context-researcher");
+        context_researcherModel = await pickModel(io, allModels, "context-researcher");
         log.success(`ContextResearcher: ${context_researcherModel}`);
     }
 
     const hasAnthropic = hasAnthropicModel([
         ...allModels,
-        history_summarizerModel,
+        summarizerModel,
         context_researcherModel,
     ]);
     let claudeMax = false;
@@ -624,8 +602,105 @@ export async function runSetup(dryRun = false): Promise<number> {
         }
     }
 
+    // The fold authority comes from the exact document setup writes, validated the way the plugin
+    // loads it, before any conflict question or host edit.
+    const source = readSourceText(paths.eidnaraConfig);
+    const proposal = proposeEidnaraConfig(paths.eidnaraConfig, {
+        summarizer,
+        context_researcherEnabled,
+        context_researcherModel,
+        claudeMax,
+    });
+    const proposed = loadUserTierConfigText(paths.eidnaraConfig, proposal);
+    const authority = foldAuthorityOf(proposed);
+    const enabled = proposed.config.enabled !== false;
+    const firstTimeOmoRepair = enabled && omoConfigs.length > 0 && !hadExistingSetup;
+    const omoRepairReachable = enabled && omoReachableWhenEnabled;
+    log.info(`Fold authority: ${describeFoldAuthority(authority)}`);
+    const projectAdmission = loadProjectTierAdmission(process.cwd());
+    const rejection =
+        authority.kind === "unresolved"
+            ? `the proposed ${paths.eidnaraConfig} does not load: ${authority.reason}`
+            : projectAdmission.status === "unresolved"
+              ? `the project Eidnara config does not load: ${projectAdmission.reason}`
+              : null;
+    if (rejection !== null || authority.kind === "unresolved") {
+        log.error(`Setup edits no host setting because ${rejection}`);
+        io.outro("Setup stopped — fix the Eidnara config and rerun setup.");
+        return 1;
+    }
+    if (omoRepairReachable && !modes.enabled) {
+        try {
+            assertJsoncConfigsParseable(omoConfigs);
+        } catch (error) {
+            log.error(error instanceof Error ? error.message : String(error));
+            io.outro("Setup stopped — fix the malformed config and rerun setup.");
+            return 1;
+        }
+    }
     if (dryRun) {
-        log.message(`[dry-run] would write Eidnara config to ${paths.eidnaraConfig}`);
+        log.message(`[dry-run] proposed ${paths.eidnaraConfig}:\n${proposal}`);
+    }
+
+    const dcpDecision: DcpDecision =
+        dryRun || !enabled
+            ? "absent"
+            : await resolveDcpConflictBeforeSetup(
+                  paths.opencodeConfig,
+                  paths.opencodeConfigFormat,
+                  io,
+              );
+    const removeDcp = dcpDecision === "remove";
+    const eidnaraFolds = authority.kind === "eidnara";
+    const compactionTarget: CompactionPatch = !enabled
+        ? {}
+        : eidnaraFolds
+          ? EIDNARA_FOLDS_COMPACTION
+          : NATIVE_FOLDS_COMPACTION;
+
+    let conflictFix: ConflictResult | null = null;
+    // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
+    let keepNativeCompaction = false;
+    if (hadExistingSetup && enabled) {
+        const detected = detectConflicts(process.cwd(), { compactionEnabled: eidnaraFolds });
+        const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
+        if (conflicts.disposition !== "none") {
+            log.warn(
+                conflicts.disposition === "disable"
+                    ? "Found conflicting configuration that can disable Eidnara:"
+                    : "Found configuration that leaves the session without a fold authority:",
+            );
+            for (const reason of [...conflicts.reasons, ...conflicts.unresolved]) {
+                log.message(`  • ${reason}`);
+            }
+
+            if (dryRun) {
+                log.message("[dry-run] would offer to apply automatic conflict fixes");
+            } else if (
+                await confirm(
+                    "Apply automatic conflict fixes to your OpenCode and OMO config files?",
+                    true,
+                )
+            ) {
+                conflictFix = conflicts;
+            } else {
+                const { compactionAuto, compactionPrune, noFoldAuthority } = conflicts.conflicts;
+                keepNativeCompaction = compactionAuto || compactionPrune || noFoldAuthority;
+                log.warn(
+                    "Skipped automatic conflict fixes — the fold authority stays as configured and OpenCode's settings stay as they are",
+                );
+            }
+        }
+    }
+    const hostCompaction = keepNativeCompaction ? {} : compactionTarget;
+
+    if (dryRun) {
+        log.message(
+            `[dry-run] would add the plugin to ${paths.opencodeConfig}; ${describeCompactionWrite(hostCompaction)}`,
+        );
+        log.message(
+            `[dry-run] would write Eidnara config to ${paths.eidnaraConfig} (${describeFoldAuthority(authority)})`,
+        );
         log.message(`[dry-run] would add the TUI sidebar plugin to ${paths.tuiConfig}`);
     }
 
@@ -649,19 +724,25 @@ export async function runSetup(dryRun = false): Promise<number> {
         }
     }
 
-    const disableNativeCompaction = compactionEnabled && !keepNativeCompaction;
     let repairIncomplete = false;
-    if (!dryRun) {
-        const writtenCompactionEnabled = compactionEnabledWithSummarizer(
-            paths.eidnaraConfig,
-            history_summarizerModel,
+    if (!dryRun && readSourceText(paths.eidnaraConfig) !== source) {
+        log.error(
+            `${paths.eidnaraConfig} changed while setup was running; setup wrote nothing so that edit is kept.`,
         );
-        const remainingForWrittenTier = () =>
-            conflictsForWrittenTier(
-                detectConflicts(process.cwd(), { compactionEnabled }),
-                compactionEnabled,
-                writtenCompactionEnabled,
-            );
+        io.outro("Setup stopped — rerun setup to build a proposal from the current file.");
+        return 1;
+    }
+    const finalProjectAdmission = dryRun
+        ? projectAdmission
+        : loadProjectTierAdmission(process.cwd());
+    if (finalProjectAdmission.status === "unresolved") {
+        log.error(
+            `Setup edits no host setting because the project Eidnara config does not load: ${finalProjectAdmission.reason}`,
+        );
+        io.outro("Setup stopped — fix the Eidnara config and rerun setup.");
+        return 1;
+    }
+    if (!dryRun) {
         // Every file a later step may write is captured first, so a failure part-way (a read-only
         // directory, for example) restores the OpenCode registration and compaction flags instead
         // of leaving the plugin active without its config.
@@ -673,58 +754,47 @@ export async function runSetup(dryRun = false): Promise<number> {
             ]);
         } catch (error) {
             log.error(error instanceof Error ? error.message : String(error));
-            outro("Setup stopped before writing — make the file readable, then rerun setup.");
+            io.outro("Setup stopped before writing — make the file readable, then rerun setup.");
             return 1;
         }
         try {
-            addPluginToOpenCodeConfig(
-                paths.opencodeConfig,
-                paths.opencodeConfigFormat,
-                removeDcp,
-                disableNativeCompaction,
-                pluginEntriesOutside(process.cwd(), paths.opencodeConfig),
-            );
-            log.success(`Plugin added to ${paths.opencodeConfig}`);
-            if (removeDcp) log.success("Removed opencode-dcp from plugin list");
-            if (disableNativeCompaction) {
-                log.info("Disabled built-in compaction (auto=false, prune=false)");
-                log.message(
-                    "Eidnara handles context management — built-in compaction would interfere",
+            const writeHost = () => {
+                addPluginToOpenCodeConfig(
+                    paths.opencodeConfig,
+                    paths.opencodeConfigFormat,
+                    removeDcp,
+                    hostCompaction,
+                    pluginEntriesOutside(process.cwd(), paths.opencodeConfig),
                 );
-            } else if (keepNativeCompaction) {
-                log.warn(
-                    "Left built-in compaction unchanged because automatic conflict fixes were declined — Eidnara stays disabled until compaction.auto and compaction.prune are false",
-                );
+                log.success(`Plugin added to ${paths.opencodeConfig}`);
+                if (removeDcp) log.success("Removed opencode-dcp from plugin list");
+                log.info(describeCompactionWrite(hostCompaction));
+
+                if (conflictFix) {
+                    const actions = fixConflicts(process.cwd(), conflictFix);
+                    if (actions.length > 0) {
+                        for (const action of actions) log.success(action);
+                    } else {
+                        log.info("No additional conflict changes were needed");
+                    }
+                }
+            };
+            const writeEidnara = () => {
+                writeFileAtomic(paths.eidnaraConfig, proposal);
+                log.success(`Config written to ${paths.eidnaraConfig}`);
+            };
+            // A process killed between config writes leaves the first write persisted. Under Eidnara
+            // folds the summarizer chain is written before `compaction.auto=false`, so that state
+            // leaves OpenCode's previous compaction setting in effect alongside the new chain.
+            if (eidnaraFolds) {
+                writeEidnara();
+                betweenWrites?.();
+                writeHost();
             } else {
-                log.info("Compaction-off mode active — leaving native compaction config untouched");
+                writeHost();
+                betweenWrites?.();
+                writeEidnara();
             }
-
-            if (conflictFix) {
-                const actions = fixConflicts(
-                    process.cwd(),
-                    conflictsForWrittenTier(
-                        conflictFix,
-                        compactionEnabled,
-                        writtenCompactionEnabled,
-                    ),
-                );
-                if (actions.length > 0) {
-                    for (const action of actions) log.success(action);
-                } else {
-                    log.info("No additional conflict changes were needed");
-                }
-                if (reportRemainingConflicts(remainingForWrittenTier())) {
-                    repairIncomplete = true;
-                }
-            }
-
-            writeEidnaraConfig(paths.eidnaraConfig, {
-                history_summarizerModel,
-                context_researcherEnabled,
-                context_researcherModel,
-                claudeMax,
-            });
-            log.success(`Config written to ${paths.eidnaraConfig}`);
             addPluginToTuiConfig(paths.tuiConfig, paths.tuiConfigFormat);
             log.success(`TUI sidebar plugin added to ${basename(paths.tuiConfig)}`);
 
@@ -744,61 +814,135 @@ export async function runSetup(dryRun = false): Promise<number> {
                 if (actions.includes("Disabled conflicting oh-my-opencode hooks")) {
                     log.success("Hooks disabled in oh-my-opencode config");
                 }
-                // The editor refuses some parseable files (duplicate keys, for one), in which case the
-                // accepted repair wrote nothing; re-detect so the run does not report success.
-                if (reportRemainingConflicts(remainingForWrittenTier())) {
-                    repairIncomplete = true;
-                }
             }
         } catch (error) {
             log.error(error instanceof Error ? error.message : String(error));
+            let rolledBack = true;
             try {
                 restoreFiles(snapshot);
             } catch (rollbackError) {
+                rolledBack = false;
                 log.error(
                     rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
                 );
-                outro(
-                    "Setup stopped — changes were only partly rolled back; restore the files above by hand.",
-                );
-                return 1;
             }
-            outro("Setup stopped — rolled back OpenCode changes.");
+            reportReadBack(paths, proposal, hostCompaction, log);
+            io.outro(
+                rolledBack
+                    ? "Setup stopped — rolled back OpenCode changes."
+                    : "Setup stopped — changes were only partly rolled back; restore the files above by hand.",
+            );
             return 1;
+        }
+        // The editor refuses some parseable files (duplicate keys, for one), so an accepted repair
+        // can write nothing; re-detection reports what the files still hold.
+        if (
+            enabled &&
+            reportRemainingConflicts(
+                detectConflicts(process.cwd(), { compactionEnabled: eidnaraFolds }),
+                { warn: log.warn, message: log.message },
+            )
+        ) {
+            repairIncomplete = true;
+        }
+        if (reportReadBack(paths, proposal, hostCompaction, log)) {
+            log.info("Written, restart required: OpenCode reads these files at startup.");
+        } else {
+            repairIncomplete = true;
         }
     }
 
     const summary = [
         `Plugin: ${PLUGIN_NAME}`,
-        disableNativeCompaction
-            ? "Compaction: disabled (Eidnara manages the window)"
-            : keepNativeCompaction
-              ? "Compaction: built-in compaction left on (conflict fixes declined)"
-              : modes.enabled
-                ? "Compaction: native settings left unchanged (Eidnara compaction is off)"
-                : "Compaction: native settings left unchanged (Eidnara is disabled)",
-        history_summarizerModel
-            ? `HistorySummarizer: ${history_summarizerModel}`
-            : "HistorySummarizer: fallback chain",
+        `Fold authority: ${describeFoldAuthority(authority)}`,
+        `Compaction: ${describeCompactionWrite(hostCompaction)}`,
+        summarizer.kind === "model"
+            ? `HistorySummarizer: ${summarizer.model}`
+            : summarizer.kind === "keep"
+              ? "HistorySummarizer: existing chain kept"
+              : "HistorySummarizer: none",
         context_researcherEnabled
             ? `ContextResearcher: enabled${context_researcherModel ? ` (${context_researcherModel})` : ""}`
             : "ContextResearcher: disabled",
     ].join("\n");
 
-    note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
+    io.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
 
     if (dryRun) {
-        outro("Dry run complete — nothing was written.");
+        io.outro("Dry run complete — nothing was written.");
         return 0;
     }
 
     if (repairIncomplete) {
-        outro(
-            "Setup finished with warnings — resolve the remaining conflicts, then run 'opencode'.",
+        io.outro(
+            "Setup finished with warnings — resolve the remaining conflicts, then restart OpenCode.",
         );
         return 1;
     }
-    outro("Run 'opencode' to start!");
+    io.outro("Written; restart OpenCode to apply the changes.");
 
     return 0;
+}
+
+function readSourceText(path: string): string | null {
+    return existsSync(path) ? readRegularFileSync(path) : null;
+}
+
+function describeCompactionWrite(compaction: CompactionPatch): string {
+    if (compaction.auto === false) {
+        return "OpenCode compaction.auto=false and compaction.prune=false (Eidnara folds; OpenCode's compaction would interfere)";
+    }
+    if (compaction.auto === true) {
+        return "OpenCode compaction.auto=true, compaction.prune left as found (OpenCode's native compaction folds; prune is OpenCode's own tool-output policy)";
+    }
+    return "OpenCode compaction settings left unchanged";
+}
+
+function reportReadBack(
+    paths: Pick<ConfigPaths, "opencodeConfig"> & { eidnaraConfig: string },
+    proposal: string,
+    compaction: CompactionPatch,
+    log: PromptLog,
+): boolean {
+    const written = foldAuthorityOf(loadUserTierConfigDetailed(paths.eidnaraConfig));
+    const host = readJsoncLenient(paths.opencodeConfig).value.compaction;
+    const hostFields = isRecord(host) ? host : {};
+    const hostMatches = Object.entries(compaction).every(
+        ([key, value]) => hostFields[key] === value,
+    );
+    const eidnaraMatches = readSourceText(paths.eidnaraConfig) === proposal;
+    log.message(
+        `Read back: ${paths.eidnaraConfig} → ${describeFoldAuthority(written)}; ${paths.opencodeConfig} → compaction.auto=${String(hostFields.auto ?? "unset")}, compaction.prune=${String(hostFields.prune ?? "unset")}`,
+    );
+    if (eidnaraMatches && hostMatches) return true;
+    log.warn(
+        "The files do not both hold the proposed settings; the next OpenCode start runs with the read-back values above. Rerun setup, or run `eidnara doctor`.",
+    );
+    return false;
+}
+
+async function pickSummarizer(
+    io: PromptIO,
+    allModels: string[],
+    existingChain: readonly string[],
+): Promise<SummarizerChoice> {
+    const choice = await io.selectOne("History summarizer", [
+        { label: "Choose a summarizer model (Eidnara folds)", value: "model", recommended: true },
+        {
+            label:
+                existingChain.length > 0
+                    ? `Keep the existing summarizer chain (${existingChain.join(", ")})`
+                    : "Keep the existing summarizer settings (no model is configured)",
+            value: "keep",
+        },
+        {
+            label: "No summarizer: remove every summarizer model field (OpenCode's native compaction folds)",
+            value: "remove",
+        },
+    ]);
+    if (choice === "keep") return { kind: "keep" };
+    if (choice === "remove") return { kind: "remove" };
+    const model = await pickModel(io, allModels, "history_summarizer");
+    io.log.success(`HistorySummarizer: ${model}`);
+    return { kind: "model", model };
 }

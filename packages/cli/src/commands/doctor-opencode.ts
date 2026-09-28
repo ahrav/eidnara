@@ -2,13 +2,13 @@ import { execSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename } from "node:path";
-import { loadPluginConfig } from "@eidnara/opencode/config";
+import { loadPluginConfigDetailed } from "@eidnara/opencode/config";
 import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
-import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import { type ConflictResult, detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
@@ -26,7 +26,7 @@ import {
     readProjectOpenCodeConfigs,
     resolveUserLevelPaths,
 } from "../lib/diagnostics-opencode";
-import { compactionEnabledFor } from "../lib/eidnara-modes";
+import { describeFoldAuthority, type FoldAuthority, foldAuthorityOf } from "../lib/eidnara-modes";
 import { parseJsoncObject } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { bundleIssueReport } from "../lib/logs-opencode";
@@ -52,28 +52,41 @@ import { OPENCODE_MINIMUM_VERSION } from "./setup-opencode";
 
 const PLUGIN_NAME = "@eidnara/opencode";
 
-/**
- * On load failure, the helper returns false so native compaction fields are left untouched.
- */
-interface DoctorEidnaraModes {
-    enabled: boolean;
-    compactionEnabled: boolean;
+function nativeEnablementOnly(result: ConflictResult): ConflictResult {
+    return {
+        ...result,
+        conflicts: {
+            compactionAuto: false,
+            compactionPrune: false,
+            noFoldAuthority: result.conflicts.noFoldAuthority,
+            dcpPlugin: false,
+            omoPreemptiveCompaction: false,
+            omoContextWindowMonitor: false,
+            omoAnthropicRecovery: false,
+        },
+        compactionPatch: result.compactionPatch.auto === true ? { auto: true } : {},
+    };
 }
 
-function resolveEidnaraModesForDoctor(cwd: string): DoctorEidnaraModes {
+/** A load failure is an unresolved authority, which leaves every host setting as found. */
+function resolveFoldAuthorityForDoctor(cwd: string): {
+    enabled: boolean;
+    authority: FoldAuthority;
+} {
     try {
-        const config = loadPluginConfig(cwd);
+        const { config, admission } = loadPluginConfigDetailed(cwd);
         return {
             enabled: config.enabled !== false,
-            compactionEnabled: compactionEnabledFor(config),
+            authority: foldAuthorityOf({ config, admission }),
         };
     } catch (error) {
-        console.warn(
-            `[eidnara] Could not load Eidnara config to resolve compaction mode; ` +
-                `preserving existing native compaction fields. ` +
-                `(${error instanceof Error ? error.message : String(error)})`,
-        );
-        return { enabled: true, compactionEnabled: false };
+        return {
+            enabled: true,
+            authority: {
+                kind: "unresolved",
+                reason: error instanceof Error ? error.message : String(error),
+            },
+        };
     }
 }
 
@@ -442,7 +455,7 @@ export async function runDoctor(
     }
     if (eidnaraConfigTiers.length > 0) {
         try {
-            const result = loadPluginConfig(cwd);
+            const result = loadPluginConfigDetailed(cwd).config;
             const warnings = result.configWarnings ?? [];
             if (warnings.length > 0) {
                 // The issue report carries no loader warnings, so the doctor is where they surface.
@@ -489,13 +502,17 @@ export async function runDoctor(
         serverPluginRegistered = true;
     }
 
-    const modes = resolveEidnaraModesForDoctor(cwd);
-    const compactionEnabled = modes.compactionEnabled;
+    const { enabled, authority } = resolveFoldAuthorityForDoctor(cwd);
+    const compactionEnabled = authority.kind === "eidnara";
+    log.info(`Fold authority: ${describeFoldAuthority(authority)}`);
+    log.info(
+        "A running Eidnara daemon applies a changed fold authority at a session's next quiescent bind; if an OpenCode instance started the daemon from a different configuration root, run `eidnara daemon restart`.",
+    );
     // With `enabled: false` the plugin skips every hook, so nothing here would
     // replace native compaction, DCP, or the OMO hooks; they are left in place.
     let conflictResult: ReturnType<typeof detectConflicts> | null = null;
     let conflictDetectionError: string | null = null;
-    if (modes.enabled) {
+    if (enabled && authority.kind !== "unresolved") {
         try {
             conflictResult = detectConflicts(cwd, { compactionEnabled });
         } catch (error) {
@@ -512,29 +529,42 @@ export async function runDoctor(
     for (const source of conflictResult?.unresolved ?? []) {
         warn(`Not repairable by a config file edit: ${source}`);
     }
-    if (conflictDetectionError !== null) {
+    if (authority.kind === "unresolved") {
+        fail(
+            `The Eidnara configuration does not load, so the fold authority is unresolved and OpenCode's compaction settings are left as they are: ${authority.reason}`,
+        );
+    } else if (conflictDetectionError !== null) {
         fail(`Conflict detection unavailable: ${conflictDetectionError}`);
     } else if (conflictResult === null) {
         pass(
             "Eidnara is disabled (enabled: false); native compaction, DCP, and OMO hooks are left in place",
         );
-    } else if (conflictResult.disposition === "disable") {
-        for (const reason of conflictResult.reasons) {
-            fail(`Conflict: ${reason}`);
+    } else if (conflictResult.disposition !== "none") {
+        const disabling = conflictResult.disposition === "disable";
+        if (!disabling) {
+            warn(
+                "No compaction manager is active: Eidnara compaction is off and OpenCode auto-compaction is disabled",
+            );
         }
-        if (options.force && !serverPluginRegistered) {
-            // Disabling native compaction with no registered plugin would leave
-            // the installation with no context-window manager at all.
+        for (const reason of conflictResult.reasons) {
+            if (disabling) fail(`Conflict: ${reason}`);
+            else warn(`Conflict: ${reason}`);
+        }
+        // Disabling native compaction needs a plugin that loads to replace it; turning
+        // `compaction.auto` back on under native folds needs neither, so that repair still runs.
+        const blocked =
+            disabling && options.force && (!serverPluginRegistered || !openCodeSupported);
+        if (blocked) {
             fail(
-                `Leaving conflicts in place: ${PLUGIN_NAME} is not registered in the OpenCode config, so nothing would replace native compaction. Run 'setup' first.`,
+                !serverPluginRegistered
+                    ? `Leaving conflicts in place: ${PLUGIN_NAME} is not registered in the OpenCode config, so nothing would replace native compaction. Run 'setup' first.`
+                    : `Leaving conflicts in place: ${unsupportedReason}, so the plugin may not load to replace native compaction.`,
             );
-        } else if (options.force && !openCodeSupported) {
-            fail(
-                `Leaving conflicts in place: ${unsupportedReason}, so the plugin may not load to replace native compaction.`,
-            );
-        } else if (options.force) {
+        }
+        if (options.force) {
+            const repair = blocked ? nativeEnablementOnly(conflictResult) : conflictResult;
             try {
-                const actions = fixConflicts(cwd, conflictResult);
+                const actions = fixConflicts(cwd, repair);
                 for (const action of actions) {
                     pass(`Fixed: ${action}`);
                     fixed++;
@@ -550,23 +580,20 @@ export async function runDoctor(
                 );
             }
             const remaining = detectConflicts(cwd, { compactionEnabled });
-            repairedCount = conflictResult.reasons.filter(
-                (reason) => !remaining.reasons.includes(reason),
-            ).length;
+            if (disabling) {
+                repairedCount = conflictResult.reasons.filter(
+                    (reason) => !remaining.reasons.includes(reason),
+                ).length;
+            }
+            for (const reason of [...remaining.reasons, ...remaining.unresolved]) {
+                warn(`Still unresolved after repair: ${reason}`);
+            }
         } else {
             log.info("  Run 'doctor --force' to repair these conflicts");
         }
-    } else if (conflictResult.disposition === "warn") {
-        warn(
-            "No compaction manager is active: Eidnara compaction is off and OpenCode auto-compaction is disabled",
-        );
-        for (const reason of conflictResult.reasons) {
-            log.info(`  ${reason}`);
-        }
     } else if (!compactionEnabled) {
-        // When compaction is off, native `compaction.auto=true` activates native compaction and is not a conflict.
         pass(
-            "No conflicts detected (compaction, DCP, OMO hooks) — native compaction active (compaction-off mode)",
+            "No conflicts detected (compaction, DCP, OMO hooks) — OpenCode's native compaction folds (compaction.auto=true)",
         );
     } else {
         pass("No conflicts detected (compaction, DCP, OMO hooks)");
