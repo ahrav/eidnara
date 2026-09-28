@@ -95,19 +95,27 @@ describe("readEidnaraModes", () => {
         });
     });
 
-    it("keeps the opt-outs of a tier the schema refuses for an unknown authority key", () => {
-        const modes = readEidnaraModes(
-            write(
-                "typo.jsonc",
+    it("keeps the opt-outs of a tier the schema refuses for unknown keys", () => {
+        for (const [name, body] of [
+            [
+                "authority-typo.jsonc",
                 `{"enabled":false,"memory":{"enabled":false},"history_summarizer":{"model":"a/b","modle":"c/d"}}`,
-            ),
-        );
-        expect(modes).toEqual({
-            enabled: false,
-            compactionEnabled: false,
-            memoryEnabled: false,
-            admission: expect.objectContaining({ status: "unresolved" }),
-        });
+            ],
+            [
+                "two-typos.jsonc",
+                `{"enabled":false,"memroy":1,"memory":{"enabled":false,"auto_promot":true},"history_summarizer":{"modle":"c/d"}}`,
+            ],
+        ] as const) {
+            expect([name, readEidnaraModes(write(name, body))]).toEqual([
+                name,
+                {
+                    enabled: false,
+                    compactionEnabled: false,
+                    memoryEnabled: false,
+                    admission: expect.objectContaining({ status: "unresolved" }),
+                },
+            ]);
+        }
     });
 
     it("resolves the compaction mode setup produces once it writes the summarizer model", () => {

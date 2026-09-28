@@ -586,12 +586,25 @@ function admissionOf(...loaded: (LoadedConfigFileDetailed | null)[]): ConfigAdmi
         : { status: "unresolved", reason: rejections.join("; ") };
 }
 
-/** A tier the schema refuses still contributes its settings outside the authority blocks; a refusal there too yields the defaults. */
+/** A refused tier contributes its settings outside the authority blocks once its unknown keys are pruned; a remainder the schema still refuses contributes defaults. */
 function parseRefusedTier(
     written: Record<string, unknown>,
 ): EidnaraPluginConfig & { configWarnings?: string[] } {
+    let retained = withoutAuthorityBlocks(written);
+    for (let round = 0; round < 8; round++) {
+        const parsed = EidnaraConfigSchema.safeParse(retained);
+        const unknown = parsed.success
+            ? []
+            : parsed.error.issues.filter((issue) => issue.code === "unrecognized_keys");
+        if (unknown.length === 0) break;
+        for (const issue of unknown) {
+            for (const key of issue.keys) {
+                retained = pruneNestedConfigLeaf(retained, [...issue.path, key])?.block ?? retained;
+            }
+        }
+    }
     try {
-        return parsePluginConfig(withoutAuthorityBlocks(written));
+        return parsePluginConfig(retained);
     } catch {
         return parsePluginConfig({});
     }
