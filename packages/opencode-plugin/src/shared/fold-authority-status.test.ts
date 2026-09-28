@@ -85,6 +85,9 @@ describe("parseDaemonFoldAuthority", () => {
         expect(path("encoded:/Users/%E0%A4%A/eidnara.jsonc")).toBeUndefined();
         expect(path("/Users/a%20b/eidnara.jsonc")).toBe("/Users/a%20b/eidnara.jsonc");
         expect(path("/Users/a b/eidnara.jsonc")).toBeUndefined();
+        // A decoded control character would reach the status text the daemon sanitized.
+        expect(path("encoded:/Users/a%1B%5B31mb/eidnara.jsonc")).toBeUndefined();
+        expect(path("encoded:/Users/a%0Ab/eidnara.jsonc")).toBeUndefined();
     });
 
     it("reads a stalled summarizer from the authority prefix", () => {

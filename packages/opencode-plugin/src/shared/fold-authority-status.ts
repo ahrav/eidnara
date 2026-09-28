@@ -116,7 +116,8 @@ const ENCODED = "encoded:";
 function decodedPath(text: string): string | undefined {
     if (!text.startsWith(ENCODED)) return /\s/.test(text) ? undefined : text;
     try {
-        return decodeURIComponent(text.slice(ENCODED.length));
+        const decoded = decodeURIComponent(text.slice(ENCODED.length));
+        return /\p{Cc}/u.test(decoded) ? undefined : decoded;
     } catch {
         return undefined;
     }
