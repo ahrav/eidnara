@@ -732,16 +732,19 @@ fn measure_native(rows: usize) -> Measured {
     ctx.fold_authority.eidnara_folds = false;
     let run = |request: &TransformRequest| {
         let request = crate::transform::tests::resolved(&store, request);
-        transform_with_projection_cached(&store, &request, &ctx).expect("native pass");
+        transform_with_projection_cached(&store, &request, &ctx)
+            .expect("native pass")
+            .response
+            .action
     };
     let mut phases = Vec::new();
-    for (phase, request) in [
-        ("native first", first_request(100, "cfg0")),
-        ("native steady", first_request(100, "cfg0")),
-        ("native HARD", first_request(100, "cfg1")),
+    for (phase, request, action) in [
+        ("native first", first_request(100, "cfg0"), "HARD"),
+        ("native steady", first_request(100, "cfg0"), "SOFT+"),
+        ("native HARD", first_request(100, "cfg1"), "HARD"),
     ] {
         store.start_statement_work_ledger();
-        run(&request);
+        assert_eq!(run(&request), action, "{phase} took another path");
         phases.push((phase, totals(phase, rows, &store.take_statement_work())));
     }
     assert!(

@@ -121,6 +121,10 @@ async fn wrapup_is_refused_under_native_authority() {
 
     assert_eq!(response["ok"], false, "{response}");
     assert_eq!(response["reason"], "native_authority", "{response}");
+    assert_eq!(
+        response["detail"], "the session's fold authority is the host's native compaction",
+        "{response}"
+    );
     assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
 }
 

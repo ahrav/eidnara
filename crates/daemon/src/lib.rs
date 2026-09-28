@@ -7123,8 +7123,8 @@ impl HandlerCore {
                 "ok": false,
                 "disposition": "failed",
                 "reason": NATIVE_AUTHORITY,
-                "detail": "the session's fold authority is OpenCode's native compaction",
-                "summary": "No summarizer model folds this session: OpenCode's native compaction does. Configure a summarizer model to use /eidnara-wrapup.",
+                "detail": "the session's fold authority is the host's native compaction",
+                "summary": "No summarizer model folds this session: the host's native compaction does. Configure a summarizer model to use /eidnara-wrapup.",
                 "rounds": 0,
             }));
         }
