@@ -42,6 +42,22 @@ fn expire_firing_deadline(store: &MemoryStore) {
         .unwrap();
 }
 
+/// Ordinals of the fixture's original messages that `response` serves, in order.
+fn served_ordinals(response: &Value) -> Vec<u64> {
+    response["messages"]
+        .as_array()
+        .expect("the response serves messages")
+        .iter()
+        .filter_map(|message| {
+            message["meta"]["harness_id"]
+                .as_str()?
+                .strip_prefix('m')?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
 fn rendered(store: &MemoryStore) -> Option<memory_store::HistorySegmentEdge> {
     store.coverage_snapshot("ses", None, &[]).unwrap().rendered
 }
@@ -85,7 +101,16 @@ async fn a_stalled_summarizer_archives_the_window_to_half_the_cap_through_the_ne
         ordinary["history_summarizer"]["reason"], "window_cap",
         "{ordinary}"
     );
-    wait_for_phase(&store, HistorySummarizerPhase::Idle).await;
+    let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+    while store.load_history_segments("ses").unwrap().is_empty()
+        || store.load("ses").unwrap().meta.history_summarizer.state != HistorySummarizerPhase::Idle
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the ordinary segment was not published"
+        );
+        tokio::time::sleep(TEST_WAIT_POLL).await;
+    }
     producer.block_output.store(true, Ordering::SeqCst);
     let first_fold = pass(&handler, &messages).await;
     assert_eq!(first_fold["action"], "HARD", "{first_fold}");
@@ -132,7 +157,7 @@ async fn a_stalled_summarizer_archives_the_window_to_half_the_cap_through_the_ne
         Some(memory_store::ARCHIVE_EPISODE_TYPE)
     );
     assert_eq!(archive.legacy, 0);
-    let end = messages.len() as u64 - HALF_CAP_BLOCKS as u64 + 1;
+    let end = messages.len() as u64 - HALF_CAP_BLOCKS as u64;
     assert_eq!(
         (archive.start_message, archive.end_message),
         (11, end as i64)
@@ -174,11 +199,13 @@ async fn a_stalled_summarizer_archives_the_window_to_half_the_cap_through_the_ne
         (boundary.sequence, boundary.end_message),
         (archive.sequence, archive.end_message)
     );
-    let window_after_hard = messages
-        .iter()
-        .filter(|message| message.ordinal >= boundary.end_message as u64)
-        .count();
-    assert_eq!(window_after_hard, HALF_CAP_BLOCKS);
+    let served = served_ordinals(&folding);
+    assert_eq!(
+        served,
+        (end + 1..=messages.len() as u64).collect::<Vec<_>>(),
+        "the HARD serves every message after the archive's end"
+    );
+    assert_eq!(served.len(), HALF_CAP_BLOCKS);
     assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
     assert!(
         store
@@ -215,6 +242,58 @@ async fn a_stalled_summarizer_archives_the_window_to_half_the_cap_through_the_ne
     );
     producer.block_output.store(false, Ordering::SeqCst);
     producer.notify.notify_waiters();
+}
+
+/// An idle summarizer in failure backoff cannot fire, so a capped window is archived without
+/// ending a firing and the next pass folds it with a HARD.
+#[tokio::test(flavor = "current_thread")]
+async fn an_idle_summarizer_in_backoff_archives_the_capped_window() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    let quiet = pass(&handler, &window(10)).await;
+    assert_ne!(quiet["history_summarizer"]["fired"], true, "{quiet}");
+    let loaded = store.load("ses").unwrap();
+    let mut meta = loaded.meta;
+    meta.history_summarizer.failure_backoff_at_ms = Some(now_ms() + 3_600_000);
+    store
+        .commit("ses", loaded.row_version, &loaded.core, &meta)
+        .unwrap();
+
+    let messages = window(WINDOW_CAP_BLOCKS as u64 + 100);
+    let archiving = pass(&handler, &messages).await;
+    assert_eq!(
+        archiving["history_summarizer"]["no_fire"], "archived",
+        "{archiving}"
+    );
+    let end = messages.len() as u64 - HALF_CAP_BLOCKS as u64;
+    let segments = store.load_history_segments("ses").unwrap();
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| (
+                segment.start_message,
+                segment.end_message,
+                segment.is_archive()
+            ))
+            .collect::<Vec<_>>(),
+        [(1, end as i64, true)]
+    );
+    let summarizer = store.load("ses").unwrap().meta.history_summarizer;
+    assert_eq!(summarizer.state, HistorySummarizerPhase::Idle);
+    assert_eq!(summarizer.last_abandon, None);
+
+    let folding = pass(&handler, &messages).await;
+    assert_eq!(folding["action"], "HARD", "{folding}");
+    assert_eq!(
+        served_ordinals(&folding),
+        (end + 1..=messages.len() as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        store.load("ses").unwrap().meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle,
+        "no firing starts while the backoff holds"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

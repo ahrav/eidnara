@@ -15,7 +15,7 @@ use std::ops::Range;
 
 use context_core::decay::{Tier, compute_budget_pressure, rendered_tier};
 use context_core::redaction::redact_durable_text;
-use memory_store::{ARCHIVE_EPISODE_TYPE, Claim, StoredHistorySegment};
+use memory_store::{Claim, StoredHistorySegment};
 
 /// Default hard budget measured by the caller's token estimator.
 pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
@@ -258,7 +258,7 @@ impl From<&StoredHistorySegment> for DecayRenderHistorySegment {
             p4: c.p4.clone(),
             importance: Some(c.importance),
             legacy: Some(c.legacy),
-            archive: c.episode_type.as_deref() == Some(ARCHIVE_EPISODE_TYPE),
+            archive: c.is_archive(),
             corrections: Vec::new(),
         }
     }
@@ -598,6 +598,8 @@ pub fn extract_m0_block(m0_text: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use memory_store::ARCHIVE_EPISODE_TYPE;
+
     use super::*;
 
     /// Archive rows interleaved anywhere leave the decayed render byte-identical, so they
@@ -617,12 +619,21 @@ mod tests {
             episode_type: episode_type.map(str::to_string),
             ..Default::default()
         };
+        let archive_row = |start: i64| StoredHistorySegment {
+            start_message: start,
+            end_message: start,
+            end_message_id: format!("m{start}#0"),
+            title: format!("Archived messages {start}-{start}"),
+            importance: 1,
+            episode_type: Some(ARCHIVE_EPISODE_TYPE.to_string()),
+            ..Default::default()
+        };
         let plain: Vec<StoredHistorySegment> = (0..300).map(|i| row(2 * i, None)).collect();
         let mut with_archives = Vec::new();
         for (i, segment) in plain.iter().enumerate() {
             with_archives.push(segment.clone());
             if i % 7 == 3 {
-                with_archives.push(row(segment.start_message + 1, Some(ARCHIVE_EPISODE_TYPE)));
+                with_archives.push(archive_row(segment.start_message + 1));
             }
         }
         let tokens = |text: &str| text.len() / 4;
@@ -635,13 +646,17 @@ mod tests {
                 "budget {budget}"
             );
         }
-        let archive = DecayRenderHistorySegment::from(&row(1, Some(ARCHIVE_EPISODE_TYPE)));
+        let archive = DecayRenderHistorySegment::from(&archive_row(1));
         assert!(archive.archive);
         assert_eq!(render_history_segment_at_tier(&archive, 1), "");
         assert_eq!(
             crate::memory_render::render_new_history_segments(&[&archive]),
             ""
         );
+
+        let model_row = DecayRenderHistorySegment::from(&row(1, Some(ARCHIVE_EPISODE_TYPE)));
+        assert!(!model_row.archive);
+        assert!(render_history_segment_at_tier(&model_row, 1).contains("full paraphrase 1"));
     }
     use serde::Deserialize;
     use sha2::{Digest, Sha256};

@@ -1387,9 +1387,19 @@ pub struct HistorySummarizerPublishResult {
     pub memory_reviewer_activation: Option<MemoryReviewerActivationOutcome>,
 }
 
-/// The `episode_type` of an archive segment: written without a model call, rendered empty,
-/// and left out of decay pressure. Model output cannot claim it.
+/// The `episode_type` of an archive segment: written without a model call with empty content,
+/// rendered empty, and left out of decay pressure. Model output cannot claim it; a stored model
+/// row that already carries it keeps its content and renders as written.
 pub const ARCHIVE_EPISODE_TYPE: &str = "archive";
+
+/// The SQL filter that keeps every row except archive segments.
+const NOT_ARCHIVE_SQL: &str = "NOT (episode_type IS 'archive' AND content = '')";
+
+impl StoredHistorySegment {
+    pub fn is_archive(&self) -> bool {
+        self.episode_type.as_deref() == Some(ARCHIVE_EPISODE_TYPE) && self.content.is_empty()
+    }
+}
 
 /// One archive over `start_message..=end_message`, whose ids are the anchor block ids of the
 /// first and last archived messages, with the fences it commits under.
@@ -11082,8 +11092,10 @@ impl MemoryStore {
             let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?;
             let mut rows = query_history_segments_tx(
                 conn,
-                "WHERE session_id = ?1 AND legacy <> 1 AND episode_type IS NOT 'archive'
-                 ORDER BY sequence DESC LIMIT ?2",
+                &format!(
+                    "WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
+                     ORDER BY sequence DESC LIMIT ?2"
+                ),
                 params![session_id, sql_limit(pressure_window)],
             )?;
             let wanted = horizon(&rows);
@@ -11093,9 +11105,11 @@ impl MemoryStore {
             {
                 let older = query_history_segments_tx(
                     conn,
-                    "WHERE session_id = ?1 AND legacy <> 1 AND episode_type IS NOT 'archive'
-                       AND sequence < ?2
-                     ORDER BY sequence DESC LIMIT ?3",
+                    &format!(
+                        "WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
+                           AND sequence < ?2
+                         ORDER BY sequence DESC LIMIT ?3"
+                    ),
                     params![session_id, last, sql_limit(wanted - rows.len())],
                 )?;
                 rows.extend(older);
@@ -12424,6 +12438,9 @@ impl MemoryStore {
             if let Some(seqs) = meta.legacy_history_segment_seqs.as_mut() {
                 seqs.retain(|sequence| *sequence <= keep_through_seq);
             }
+            meta.archive_fold_seq = meta
+                .archive_fold_seq
+                .filter(|sequence| *sequence <= keep_through_seq);
             let lineage_reset = surviving_tail.is_none();
             if lineage_reset {
                 meta.forget_lineage_continuation();
@@ -24734,6 +24751,34 @@ mod tests {
             end_message_id: "m20#0",
             now_ms: 900,
         }
+    }
+
+    /// A revert that keeps the archive keeps its fold marker; one that drops it retires the
+    /// marker, so the ordinary row that later takes its sequence forces no HARD.
+    #[test]
+    fn a_revert_that_drops_the_archive_retires_its_fold_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let archived = store
+            .publish_history_archive(archive_request(Some(version), None, 1, 20))
+            .unwrap();
+        assert_eq!(archived.sequence, 1);
+
+        store
+            .truncate_history_segments_for_revert("ses", 1, Some(archived.row_version))
+            .unwrap();
+        let kept = store.load("ses").unwrap();
+        assert_eq!(kept.meta.archive_fold_seq, Some(1));
+
+        store
+            .truncate_history_segments_for_revert("ses", 0, kept.row_version)
+            .unwrap();
+        let dropped = store.load("ses").unwrap();
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
+        assert_eq!(dropped.meta.archive_fold_seq, None);
     }
 
     /// The archive publication refuses a moved row version, a re-cut session, a moved segment

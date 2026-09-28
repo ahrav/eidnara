@@ -251,7 +251,7 @@ mod tests {
     };
     use memory_store::{
         HistorySummarizerAbandonReason, HistorySummarizerChunkRange, HistorySummarizerDurableState,
-        HistorySummarizerPhase, MemoryReviewerReservation, ModuleMeta,
+        HistorySummarizerPhase, MemoryReviewerReservation, ModuleMeta, PendingPublication,
     };
 
     use super::*;
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn the_summarizer_cannot_publish_past_its_deadline_or_in_backoff() {
+    fn archive_cause_starts_at_the_deadline_and_holds_during_backoff() {
         let budget = i64::try_from(completion_wait_budget().as_millis()).unwrap();
         let in_flight = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::AwaitingProducer,
@@ -471,7 +471,7 @@ mod tests {
             .unwrap()
             .expect("an idle summarizer in backoff cannot publish");
         assert_eq!(archived.cause, ArchiveCause::IdleBackoff);
-        assert_eq!((archived.cut.start, archived.cut.end), (1, FIRST_KEPT));
+        assert_eq!((archived.cut.start, archived.cut.end), (1, LAST_ARCHIVED));
         let loaded = store.load("ses").unwrap();
         assert_eq!(
             loaded.meta.history_summarizer.state,
@@ -483,6 +483,30 @@ mod tests {
         );
         assert_eq!(loaded.meta.history_summarizer.last_abandon, None);
         assert_eq!(loaded.meta.archive_fold_seq, Some(archived.sequence));
+        assert_eq!(
+            loaded.meta.publication_floor_ordinal,
+            Some(LAST_ARCHIVED + 1)
+        );
+        let segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| (
+                    segment.sequence,
+                    segment.start_message,
+                    segment.end_message,
+                    segment.is_archive(),
+                    segment.end_message_id.as_str(),
+                ))
+                .collect::<Vec<_>>(),
+            [(
+                archived.sequence,
+                1,
+                LAST_ARCHIVED as i64,
+                true,
+                format!("m{LAST_ARCHIVED}#0").as_str()
+            )]
+        );
 
         let (_dir, expired) = store_with(&window, summarizer);
         assert_eq!(
@@ -521,7 +545,7 @@ mod tests {
         };
         let budget = i64::try_from(completion_wait_budget().as_millis()).unwrap();
         let stalled = HistorySummarizerDurableState {
-            state: HistorySummarizerPhase::AwaitingProducer,
+            state: HistorySummarizerPhase::Publishing,
             firing_seq: 5,
             chunk_range: Some(HistorySummarizerChunkRange {
                 from_ordinal: 1,
@@ -529,22 +553,39 @@ mod tests {
             }),
             producer_run_id: Some("run-5".to_string()),
             fired_at_ms: Some(NOW - budget),
-            memory_reviewer_reservation: Some(MemoryReviewerReservation {
-                firing_seq: 5,
-                causal_identity: job.causal_identity.clone(),
-                candidate_id: "candidate".to_string(),
-                payload_digest: "digest".to_string(),
-                kernel_incarnation: "kernel".to_string(),
-                queue_deadline_ms: job.queue_deadline_ms,
-            }),
             ..HistorySummarizerDurableState::default()
         };
         let loaded = store.load("ses").unwrap();
         let mut meta = loaded.meta.clone();
         meta.history_summarizer = stalled.clone();
-        store
+        let row_version = store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
             .unwrap();
+        store
+            .record_memory_reviewer_reservation(
+                "ses",
+                row_version,
+                &MemoryReviewerReservation {
+                    firing_seq: 5,
+                    causal_identity: job.causal_identity.clone(),
+                    candidate_id: "candidate".to_string(),
+                    payload_digest: "digest".to_string(),
+                    kernel_incarnation: "kernel".to_string(),
+                    queue_deadline_ms: job.queue_deadline_ms,
+                },
+                &PendingPublication {
+                    validated_json: "{}".to_string(),
+                    aliases_json: "{}".to_string(),
+                    chunk_transcript: "U: retained".to_string(),
+                    boundary_dates: BTreeMap::new(),
+                    publication_floor_ordinal: 41,
+                    collect_user_memory_candidates: false,
+                    created_at_ms: NOW,
+                },
+            )
+            .unwrap();
+        assert!(store.load_pending_publication("ses").unwrap().is_some());
+        let stalled = store.load("ses").unwrap().meta.history_summarizer;
 
         let archived = archive_window(&store, "ses", "git:proj", &window, NOW)
             .unwrap()
