@@ -7,6 +7,7 @@ import {
     DCP_CONFLICT_REASON,
     detectConflicts,
     hasOmoPlugin,
+    NO_FOLD_AUTHORITY_REASON,
     openCodeConfigLayerPaths,
     pluginEntriesOutside,
 } from "@eidnara/opencode/shared/conflict-detector";
@@ -26,7 +27,12 @@ import {
 } from "../adapters/opencode";
 import { type AgentBlockKind, pruneInvalidAgentFields } from "../lib/agent-config";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { type EidnaraModes, projectModeOverrides, readEidnaraModes } from "../lib/eidnara-modes";
+import {
+    compactionEnabledWithSummarizer,
+    type EidnaraModes,
+    projectModeOverrides,
+    readEidnaraModes,
+} from "../lib/eidnara-modes";
 import { restoreFiles, snapshotFiles } from "../lib/file-snapshot";
 import {
     assertJsoncConfigsParseable,
@@ -384,18 +390,27 @@ export function hasExistingOpenCodeSetup(
     );
 }
 
-/**
- * Re-detects conflicts after a repair and reports any that remain. The fixer edits only files
- * that exist and that its editor accepts, so an accepted repair can leave a conflict in place (an
- * OMO plugin entry with no OMO config file, or a config the editor refused). Returns whether any
- * conflict remains.
- */
+export function conflictsForWrittenTier(
+    detected: ConflictResult,
+    detectedCompactionEnabled: boolean,
+    writtenCompactionEnabled: boolean,
+): ConflictResult {
+    if (detectedCompactionEnabled || !writtenCompactionEnabled) return detected;
+    const conflicts = { ...detected.conflicts, noFoldAuthority: false };
+    return {
+        ...detected,
+        disposition: conflictDisposition(conflicts),
+        reasons: detected.reasons.filter((reason) => reason !== NO_FOLD_AUTHORITY_REASON),
+        conflicts,
+        compactionPatch: {},
+        unresolved: [],
+    };
+}
+
 export function reportRemainingConflicts(
-    directory: string,
-    compactionEnabled: boolean,
+    remaining: ConflictResult,
     output: Pick<typeof log, "warn" | "message"> = log,
 ): boolean {
-    const remaining = detectConflicts(directory, { compactionEnabled });
     if (remaining.disposition === "none") return false;
     output.warn(
         remaining.disposition === "disable"
@@ -634,6 +649,16 @@ export async function runSetup(dryRun = false): Promise<number> {
     const disableNativeCompaction = compactionEnabled && !keepNativeCompaction;
     let repairIncomplete = false;
     if (!dryRun) {
+        const writtenCompactionEnabled = compactionEnabledWithSummarizer(
+            paths.eidnaraConfig,
+            history_summarizerModel,
+        );
+        const remainingForWrittenTier = () =>
+            conflictsForWrittenTier(
+                detectConflicts(process.cwd(), { compactionEnabled }),
+                compactionEnabled,
+                writtenCompactionEnabled,
+            );
         // Every file a later step may write is captured first, so a failure part-way (a read-only
         // directory, for example) restores the OpenCode registration and compaction flags instead
         // of leaving the plugin active without its config.
@@ -672,13 +697,20 @@ export async function runSetup(dryRun = false): Promise<number> {
             }
 
             if (conflictFix) {
-                const actions = fixConflicts(process.cwd(), conflictFix);
+                const actions = fixConflicts(
+                    process.cwd(),
+                    conflictsForWrittenTier(
+                        conflictFix,
+                        compactionEnabled,
+                        writtenCompactionEnabled,
+                    ),
+                );
                 if (actions.length > 0) {
                     for (const action of actions) log.success(action);
                 } else {
                     log.info("No additional conflict changes were needed");
                 }
-                if (reportRemainingConflicts(process.cwd(), compactionEnabled)) {
+                if (reportRemainingConflicts(remainingForWrittenTier())) {
                     repairIncomplete = true;
                 }
             }
@@ -711,7 +743,7 @@ export async function runSetup(dryRun = false): Promise<number> {
                 }
                 // The editor refuses some parseable files (duplicate keys, for one), in which case the
                 // accepted repair wrote nothing; re-detect so the run does not report success.
-                if (reportRemainingConflicts(process.cwd(), compactionEnabled)) {
+                if (reportRemainingConflicts(remainingForWrittenTier())) {
                     repairIncomplete = true;
                 }
             }
