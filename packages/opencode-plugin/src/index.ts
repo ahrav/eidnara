@@ -175,6 +175,9 @@ const server: Plugin = async (ctx) => {
     }
 
     // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
+    const serverUrl = (ctx as Record<string, unknown>).serverUrl;
+    const serverUrlStr =
+        serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
     if (conflictResult && conflictResult.disposition !== "none") {
         // The handler sends the warning to the project's last active session without awaiting it.
         // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
@@ -182,12 +185,10 @@ const server: Plugin = async (ctx) => {
             ctx.client as unknown as Record<string, unknown>,
             ctx.directory,
             conflictResult,
+            serverUrlStr,
         );
     } else if (pluginConfig.enabled) {
         // The handler removes leftover conflict warnings only when no conflict exists and pluginConfig.enabled.
-        const serverUrl = (ctx as Record<string, unknown>).serverUrl;
-        const serverUrlStr =
-            serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
         // SAFETY: same narrowed SDK-client shape as `sendConflictWarning`.
         void cleanupConflictWarnings(
             ctx.client as unknown as Record<string, unknown>,

@@ -412,17 +412,15 @@ export function hasExistingOpenCodeSetup(
 }
 
 /**
- * Re-detects conflicts after a repair and reports any that remain. The fixer edits only files
+ * Reports the conflicts a re-detection still finds after a repair. The fixer edits only files
  * that exist and that its editor accepts, so an accepted repair can leave a conflict in place (an
  * OMO plugin entry with no OMO config file, or a config the editor refused). Returns whether any
  * conflict remains.
  */
 export function reportRemainingConflicts(
-    directory: string,
-    compactionEnabled: boolean,
+    remaining: ConflictResult,
     output: Pick<typeof log, "warn" | "message"> = log,
 ): boolean {
-    const remaining = detectConflicts(directory, { compactionEnabled });
     if (remaining.disposition === "none") return false;
     output.warn(
         remaining.disposition === "disable"
@@ -836,10 +834,10 @@ export async function runSetup(
         // can write nothing; re-detection reports what the files still hold.
         if (
             enabled &&
-            reportRemainingConflicts(process.cwd(), eidnaraFolds, {
-                warn: log.warn,
-                message: log.message,
-            })
+            reportRemainingConflicts(
+                detectConflicts(process.cwd(), { compactionEnabled: eidnaraFolds }),
+                { warn: log.warn, message: log.message },
+            )
         ) {
             repairIncomplete = true;
         }

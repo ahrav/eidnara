@@ -58,12 +58,13 @@ class ScriptedPrompts implements PromptIO {
     spinner(): PromptSpinner {
         return { start() {}, stop() {}, message() {} };
     }
-    async confirm(message: string): Promise<boolean> {
+    // `resolveDcpConflictBeforeSetup` destructures `confirm` off the PromptIO, so it is bound here.
+    confirm = async (message: string): Promise<boolean> => {
         this.beforePrompt(message);
         const answer = this.confirms.shift();
         if (answer === undefined) throw new Error(`unexpected confirm: ${message}`);
         return answer;
-    }
+    };
     async text(message: string): Promise<string> {
         throw new Error(`unexpected text: ${message}`);
     }
@@ -170,6 +171,27 @@ describe("runSetup derives the fold authority from the proposed document", () =>
         expect(prompts.transcript()).toContain(
             `Fold authority: Eidnara folds (summarizer chain: ${MODEL})`,
         );
+    });
+
+    it("repairs an existing native-folds host for the summarizer it is about to write", async () => {
+        // The current file leaves the folds to OpenCode, which would target `auto = true`; the
+        // repair follows the proposed document instead.
+        writeFileSync(
+            opencodeConfig,
+            JSON.stringify({ plugin: ["@tarquinen/opencode-dcp"], compaction: { auto: false } }),
+        );
+        const prompts = new ScriptedPrompts([false, false, true, true], ["model", MODEL]);
+        expect(await runSetup(false, { io: prompts })).toBe(0);
+
+        const written = readJson(opencodeConfig);
+        expect(written.compaction).toEqual({ auto: false, prune: false });
+        expect(written.plugin).not.toContain("@tarquinen/opencode-dcp");
+        expect(detectConflicts(process.cwd(), { compactionEnabled: true }).disposition).toBe(
+            "none",
+        );
+        const text = prompts.transcript();
+        expect(text).toContain(`Fold authority: Eidnara folds (summarizer chain: ${MODEL})`);
+        expect(text).not.toContain("Conflicts remain");
     });
 
     it("keeps prune as found and re-enables auto under native folds", async () => {

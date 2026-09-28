@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import {
     type ConflictResult,
     DCP_CONFLICT_REASON,
+    detectConflicts,
 } from "@eidnara/opencode/shared/conflict-detector";
 import { getOpenCodeConfigPaths } from "@eidnara/opencode/shared/opencode-config-dir";
 import { parse as parseJsonc } from "comment-json";
@@ -428,7 +429,9 @@ describe("reportRemainingConflicts", () => {
             message: (message: string) => messages.push(`message:${message}`),
         };
 
-        expect(reportRemainingConflicts(root, true, output)).toBe(true);
+        expect(
+            reportRemainingConflicts(detectConflicts(root, { compactionEnabled: true }), output),
+        ).toBe(true);
         expect(messages.join("\n")).toContain("warn:Conflicts remain after the automatic fixes");
         expect(messages.join("\n")).toContain("oh-my-opencode");
 
@@ -443,7 +446,9 @@ describe("reportRemainingConflicts", () => {
             }),
         );
         messages.length = 0;
-        expect(reportRemainingConflicts(root, true, output)).toBe(false);
+        expect(
+            reportRemainingConflicts(detectConflicts(root, { compactionEnabled: true }), output),
+        ).toBe(false);
         expect(messages).toEqual([]);
     });
 
@@ -457,7 +462,9 @@ describe("reportRemainingConflicts", () => {
             message: (message: string) => messages.push(`message:${message}`),
         };
 
-        expect(reportRemainingConflicts(root, false, output)).toBe(true);
+        expect(
+            reportRemainingConflicts(detectConflicts(root, { compactionEnabled: false }), output),
+        ).toBe(true);
         const text = messages.join("\n");
         expect(text).toContain("Eidnara runs with a warning");
         expect(text).toContain("no fold authority");
