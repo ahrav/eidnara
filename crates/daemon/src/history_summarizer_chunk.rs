@@ -402,7 +402,6 @@ pub(crate) fn tool_arcs(blocks: &[FlatBlock]) -> ToolArcs {
         }
     }
     completed.sort_by_key(|range| (range.start, range.end));
-    open_invocations.sort_unstable();
     ToolArcs {
         completed,
         open_invocations,

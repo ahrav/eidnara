@@ -84,6 +84,11 @@ pub struct ArchiveCut {
     pub end_message_id: String,
 }
 
+/// The archive over the messages after `covered_end`. It ends on the message before the newest
+/// suffix that fits within half the cap, since the HARD that folds it serves only the messages
+/// after its end. An unpersisted message or a tool arc it would split moves the end later, or
+/// earlier when no later edge exists, so a live tool call keeps its arc served whole. A tool
+/// call at or after the half-cap edge with no result yet is live; an older one is abandoned.
 pub fn archive_cut(
     projection: &FlatProjection,
     covered_end: Option<u64>,
@@ -100,7 +105,7 @@ pub fn archive_cut(
         kept_from -= 1;
         kept = kept + messages[kept_from].size;
     }
-    if kept_from < first {
+    if kept_from <= first {
         return None;
     }
     let blocks: Vec<FlatBlock> = projection
@@ -110,7 +115,7 @@ pub fn archive_cut(
         .cloned()
         .collect();
     let arcs = tool_arcs(&blocks);
-    let live_open_from = messages[kept_from].ordinal;
+    let live_open_from = messages[kept_from - 1].ordinal;
     let valid = |index: usize| {
         let ordinal = messages[index].ordinal;
         persisted(messages[index].mid)
@@ -123,13 +128,9 @@ pub fn archive_cut(
                 .iter()
                 .any(|invocation| *invocation >= live_open_from && *invocation <= ordinal)
     };
-    let cut = (kept_from..newest)
+    let cut = (kept_from - 1..newest)
         .find(|index| valid(*index))
-        .or_else(|| {
-            (first..kept_from.min(newest))
-                .rev()
-                .find(|index| valid(*index))
-        })?;
+        .or_else(|| (first..kept_from - 1).rev().find(|index| valid(*index)))?;
     Some(ArchiveCut {
         start: messages[first].ordinal,
         end: messages[cut].ordinal,
@@ -174,40 +175,52 @@ mod tests {
         .map(|cut| (cut.start, cut.end))
     }
 
-    /// The window after the next HARD: the archive's end message, which becomes the boundary
-    /// message, and every message after it.
+    /// The messages the next HARD serves: those after the archive's end message, which the
+    /// boundary render replaces.
+    fn served_after(window: &FlatProjection, end: u64) -> Vec<&str> {
+        let mut mids: Vec<&str> = window
+            .blocks
+            .iter()
+            .filter(|block| !block.synthetic() && block.ordinal() > end)
+            .map(|block| block.mid.as_str())
+            .collect();
+        mids.dedup();
+        mids
+    }
+
+    /// The window the next HARD serves: every message after the archive's end.
     fn window_after(window: &FlatProjection, end: u64) -> WindowSize {
         window
             .blocks
             .iter()
-            .filter(|block| !block.synthetic() && block.ordinal() >= end)
+            .filter(|block| !block.synthetic() && block.ordinal() > end)
             .fold(WindowSize::default(), |size, block| {
                 size + WindowSize::block(block)
             })
     }
 
     const LAST: u64 = WINDOW_CAP_BLOCKS as u64 + 100;
-    const FIRST_KEPT: u64 = LAST - HALF_CAP_BLOCKS as u64 + 1;
+    const LAST_ARCHIVED: u64 = LAST - HALF_CAP_BLOCKS as u64;
 
     #[test]
-    fn the_cut_leaves_half_the_cap_counting_the_boundary_message() {
+    fn the_cut_leaves_half_the_cap_after_its_end() {
         let window = window_with(LAST, |_| None);
         let cut = archive_cut(&window, None, |_| true).unwrap();
-        assert_eq!((cut.start, cut.end), (1, FIRST_KEPT));
+        assert_eq!((cut.start, cut.end), (1, LAST_ARCHIVED));
         assert_eq!(cut.start_message_id, "m1#0");
-        assert_eq!(cut.end_message_id, format!("m{FIRST_KEPT}#0"));
+        assert_eq!(cut.end_message_id, format!("m{LAST_ARCHIVED}#0"));
         assert_eq!(window_after(&window, cut.end).blocks, HALF_CAP_BLOCKS);
-        assert_eq!(cut_of(&window, Some(100)), Some((101, FIRST_KEPT)));
+        assert_eq!(cut_of(&window, Some(100)), Some((101, LAST_ARCHIVED)));
         assert_eq!(
-            cut_of(&window, Some(FIRST_KEPT - 1)),
-            Some((FIRST_KEPT, FIRST_KEPT))
+            cut_of(&window, Some(LAST_ARCHIVED - 1)),
+            Some((LAST_ARCHIVED, LAST_ARCHIVED))
         );
-        assert_eq!(cut_of(&window, Some(FIRST_KEPT)), None);
+        assert_eq!(cut_of(&window, Some(LAST_ARCHIVED)), None);
     }
 
     #[test]
     fn the_cut_ends_outside_every_tool_arc_and_on_a_persisted_message() {
-        let call = FIRST_KEPT;
+        let call = LAST_ARCHIVED;
         let arc = window_with(LAST, |ordinal| match ordinal {
             o if o == call => Some(assistant_tool_call(&format!("m{o}"), o, "call")),
             o if o == call + 1 => Some(tool_result(&format!("m{o}"), o, "call", "ok")),
@@ -217,21 +230,25 @@ mod tests {
         assert!(window_after(&arc, call + 2).within_half_cap());
 
         let live_open = window_with(LAST, |ordinal| {
-            (ordinal == FIRST_KEPT)
+            (ordinal == LAST_ARCHIVED)
                 .then(|| assistant_tool_call(&format!("m{ordinal}"), ordinal, "open"))
         });
-        assert_eq!(cut_of(&live_open, None), Some((1, FIRST_KEPT - 1)));
+        assert_eq!(cut_of(&live_open, None), Some((1, LAST_ARCHIVED - 1)));
+        assert_eq!(
+            window_after(&live_open, LAST_ARCHIVED - 1).blocks,
+            HALF_CAP_BLOCKS + 1
+        );
 
         let stale_open = window_with(LAST, |ordinal| {
             (ordinal == 300).then(|| assistant_tool_call("m300", 300, "abandoned"))
         });
-        assert_eq!(cut_of(&stale_open, None), Some((1, FIRST_KEPT)));
+        assert_eq!(cut_of(&stale_open, None), Some((1, LAST_ARCHIVED)));
 
         let mut unpersisted = window_with(LAST, |_| None);
         unpersisted
             .identity_by_mid
-            .remove(&format!("m{FIRST_KEPT}"));
-        assert_eq!(cut_of(&unpersisted, None), Some((1, FIRST_KEPT + 1)));
+            .remove(&format!("m{LAST_ARCHIVED}"));
+        assert_eq!(cut_of(&unpersisted, None), Some((1, LAST_ARCHIVED + 1)));
     }
 
     #[test]
@@ -242,7 +259,9 @@ mod tests {
         let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
         let mut messages: Vec<IngressMessage> = (1..=9).map(text).collect();
         messages.push(wire_item("user", "m10", 10, &texts));
-        assert_eq!(cut_of(&projection(messages), None), Some((1, 9)));
+        let window = projection(messages);
+        assert_eq!(cut_of(&window, None), Some((1, 9)));
+        assert_eq!(served_after(&window, 9), ["m10"]);
     }
 
     #[test]
@@ -262,7 +281,7 @@ mod tests {
         assert_eq!(size.blocks, 6);
         assert!(size.bytes >= 6 * large && size.at_cap(), "{size:?}");
         let (start, end) = cut_of(&window, None).unwrap();
-        assert_eq!((start, end), (1, 5));
+        assert_eq!((start, end), (1, 4));
         assert!(window_after(&window, end).within_half_cap());
         assert!(!window_after(&window, end - 1).within_half_cap());
     }

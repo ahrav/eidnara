@@ -55,7 +55,7 @@ async fn a_window_at_the_cap_fires_a_chunk_that_reaches_the_half_cap_cut() {
         "{first}"
     );
     wait_for_phase(&store, HistorySummarizerPhase::AwaitingProducer).await;
-    let cut = messages.len() as u64 - HALF_CAP_BLOCKS as u64 + 1;
+    let cut = messages.len() as u64 - HALF_CAP_BLOCKS as u64;
     let range = store
         .load("ses")
         .unwrap()
