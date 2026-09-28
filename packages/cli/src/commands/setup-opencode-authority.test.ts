@@ -10,7 +10,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadUserTierConfigDetailed } from "@eidnara/opencode/config";
+import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { parse as parseJsonc } from "comment-json";
+import { foldAuthorityOf } from "../lib/eidnara-modes";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { runSetup } from "./setup-opencode";
 
@@ -33,6 +36,7 @@ class ScriptedPrompts implements PromptIO {
     constructor(
         private readonly confirms: boolean[],
         private readonly selections: string[],
+        private readonly beforeConfirm: (message: string) => void = () => {},
     ) {}
     readonly log = {
         info: (m: string) => this.messages.push(`info:${m}`),
@@ -55,6 +59,7 @@ class ScriptedPrompts implements PromptIO {
         return { start() {}, stop() {}, message() {} };
     }
     async confirm(message: string): Promise<boolean> {
+        this.beforeConfirm(message);
         const answer = this.confirms.shift();
         if (answer === undefined) throw new Error(`unexpected confirm: ${message}`);
         return answer;
@@ -176,27 +181,63 @@ describe("runSetup derives the fold authority from the proposed document", () =>
     });
 
     it("keep and remove derive the authority from the resulting document", async () => {
-        writeFileSync(
-            eidnaraConfig,
-            JSON.stringify({
-                history_summarizer: {
-                    model: MODEL,
-                    fallback_models: ["openai/gpt-5.6-mini"],
-                    variant: "high",
-                },
-            }),
-        );
+        const chain = {
+            model: "openai/gpt-5.6",
+            fallback_models: ["openai/gpt-5.6-mini"],
+            module_model: MODEL,
+            module_fallback_models: "google/gemini-3.5-flash",
+            variant: "high",
+        };
+        writeFileSync(eidnaraConfig, JSON.stringify({ history_summarizer: chain }));
         const keep = new ScriptedPrompts([false, false], ["keep"]);
-        expect(await runSetup(true, { io: keep })).toBe(0);
+        expect(await runSetup(false, { io: keep })).toBe(0);
+        expect(readJson(eidnaraConfig).history_summarizer).toEqual(chain);
         expect(keep.transcript()).toContain(
-            `Fold authority: Eidnara folds (summarizer chain: ${MODEL}, openai/gpt-5.6-mini)`,
+            `Fold authority: Eidnara folds (summarizer chain: ${MODEL}, google/gemini-3.5-flash)`,
         );
-        expect(keep.transcript()).toContain("compaction.auto=false and compaction.prune=false");
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: false, prune: false });
 
-        const remove = new ScriptedPrompts([false, false], ["remove"]);
+        const remove = new ScriptedPrompts([false, false, true], ["remove"]);
         expect(await runSetup(false, { io: remove })).toBe(0);
         expect(readJson(eidnaraConfig).history_summarizer).toEqual({ variant: "high" });
-        expect(readJson(opencodeConfig).compaction).toEqual({ auto: true });
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: true, prune: false });
+    });
+
+    it("a dry run prints the proposed document itself", async () => {
+        const prompts = new ScriptedPrompts([false, false], ["model", MODEL]);
+        expect(await runSetup(true, { io: prompts })).toBe(0);
+        const text = prompts.transcript();
+        expect(text).toContain(`[dry-run] proposed ${eidnaraConfig}:`);
+        expect(text).toContain(`"model": "${MODEL}"`);
+        expect(text).toContain("compaction.auto=false and compaction.prune=false");
+    });
+
+    it("an edit made while a prompt is open stops setup before any write", async () => {
+        writeFileSync(opencodeConfig, JSON.stringify({ compaction: { auto: false } }));
+        const prompts = new ScriptedPrompts([false, false, true], ["remove"], (message) => {
+            if (message.startsWith("Apply automatic conflict fixes")) {
+                writeFileSync(eidnaraConfig, JSON.stringify({ language: "fr" }));
+            }
+        });
+        expect(await runSetup(false, { io: prompts })).toBe(1);
+
+        expect(readJson(eidnaraConfig)).toEqual({ language: "fr" });
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: false });
+        expect(prompts.transcript()).toContain("changed while setup was running");
+    });
+
+    it("a project tier that stops the plugin blocks every host edit", async () => {
+        const project = process.cwd();
+        mkdirSync(join(project, ".eidnara"));
+        writeFileSync(
+            join(project, ".eidnara", "eidnara.jsonc"),
+            JSON.stringify({ history_summarizer: { bogus: true } }),
+        );
+        const prompts = new ScriptedPrompts([false, false], ["model", MODEL]);
+        expect(await runSetup(false, { io: prompts })).toBe(1);
+
+        expect(existsSync(opencodeConfig)).toBe(false);
+        expect(prompts.transcript()).toContain("the project Eidnara config does not load");
     });
 
     it("declining the OpenCode edit leaves the authority and the host settings as they are", async () => {
@@ -238,7 +279,66 @@ describe("runSetup derives the fold authority from the proposed document", () =>
 
         expect(existsSync(opencodeConfig)).toBe(false);
         expect(prompts.transcript()).toContain("Fold authority: unresolved");
-        expect(prompts.transcript()).toContain("setup edits no host setting");
+        expect(prompts.transcript()).toContain("edits no host setting");
+    });
+
+    it("a process killed between the two writes leaves a mismatch detection reports", async () => {
+        writeFileSync(
+            opencodeConfig,
+            JSON.stringify({ compaction: { auto: false, prune: false } }),
+        );
+        writeFileSync(eidnaraConfig, JSON.stringify({ history_summarizer: { model: MODEL } }));
+        const child = join(root, "setup-child.ts");
+        writeFileSync(
+            child,
+            `import { runSetup } from ${JSON.stringify(join(import.meta.dir, "setup-opencode.ts"))};
+const confirms = [false, false, true];
+const selections = ["remove"];
+const noop = () => {};
+const io = {
+    intro: noop, outro: noop, note: noop,
+    log: { info: noop, success: noop, warn: noop, error: noop, message: noop, step: noop },
+    spinner: () => ({ start: noop, stop: noop, message: noop }),
+    confirm: async () => confirms.shift() ?? false,
+    text: async () => "",
+    selectOne: async () => selections.shift() ?? "",
+    selectMany: async () => [],
+    selectAutocomplete: async () => selections.shift() ?? "",
+};
+await runSetup(false, { io, betweenWrites: () => process.kill(process.pid, "SIGKILL") });
+`,
+        );
+        const result = Bun.spawnSync([process.execPath, child], {
+            cwd: process.cwd(),
+            env: process.env,
+        });
+        expect(result.signalCode).toBe("SIGKILL");
+
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: true, prune: false });
+        expect(readJson(eidnaraConfig).history_summarizer).toEqual({ model: MODEL });
+        const authority = foldAuthorityOf(loadUserTierConfigDetailed(eidnaraConfig));
+        expect(authority.kind).toBe("eidnara");
+        expect(detectConflicts(process.cwd(), { compactionEnabled: true }).disposition).toBe(
+            "disable",
+        );
+    });
+
+    it("a rolled-back write of the same authority is not reported as written", async () => {
+        writeFileSync(
+            opencodeConfig,
+            JSON.stringify({ compaction: { auto: false, prune: false } }),
+        );
+        writeFileSync(eidnaraConfig, JSON.stringify({ history_summarizer: { model: MODEL } }));
+        const prompts = new ScriptedPrompts([false, false], ["model", MODEL]);
+        const code = await runSetup(false, {
+            io: prompts,
+            betweenWrites: () => {
+                throw new Error("simulated failure between the two writes");
+            },
+        });
+        expect(code).toBe(1);
+        expect(prompts.transcript()).not.toContain("Written, restart required");
+        expect(readJson(eidnaraConfig).history_summarizer).toEqual({ model: MODEL });
     });
 
     it("a failure between the two writes reports the read-back of both files", async () => {

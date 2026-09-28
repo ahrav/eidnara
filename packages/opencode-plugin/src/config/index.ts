@@ -606,6 +606,22 @@ export function loadUserTierConfigText(configPath: string, text: string): UserTi
     return parseUserTier(loadConfigTextDetailed(configPath, text, "user"));
 }
 
+/** The project tier's verdict alone, including the unknown-key refusal that stops plugin startup. */
+export function loadProjectTierAdmission(directory: string): ConfigAdmission {
+    const detected = detectConfigFile(eidnaraProjectConfigBasePath(directory));
+    if (detected.format === "none") return { status: "admitted" };
+    const loaded = loadConfigFileDetailed(detected.path, "project");
+    try {
+        if (loaded) assertKnownConfigKeys(loaded.config);
+    } catch (error) {
+        return {
+            status: "unresolved",
+            reason: `${detected.path}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+    }
+    return admissionOf(loaded);
+}
+
 function parseUserTier(loaded: LoadedConfigFileDetailed | null): UserTierLoad {
     try {
         return { config: parsePluginConfig(loaded?.config ?? {}), admission: admissionOf(loaded) };

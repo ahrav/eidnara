@@ -19,13 +19,17 @@ import {
     hasAnthropicModel,
     hasExistingOpenCodeSetup,
     preflightConfigPaths,
+    proposeEidnaraConfig,
     reportRemainingConflicts,
     withClaudeMaxCacheTtl,
     withoutDcpConflict,
-    writeEidnaraConfig,
 } from "./setup-opencode";
 
 const tempDirs: string[] = [];
+
+function writeProposal(path: string, options: Parameters<typeof proposeEidnaraConfig>[1]): void {
+    writeFileSync(path, proposeEidnaraConfig(path, options));
+}
 
 function tempDir(): string {
     const path = mkdtempSync(join(tmpdir(), "eidnara-opencode-setup-"));
@@ -44,7 +48,7 @@ describe("setup-opencode config safety", () => {
         writeFileSync(path, malformed);
 
         expect(() =>
-            writeEidnaraConfig(path, {
+            writeProposal(path, {
                 summarizer: { kind: "model", model: "anthropic/claude-sonnet-4-6" },
                 context_researcherEnabled: false,
                 context_researcherModel: null,
@@ -57,7 +61,7 @@ describe("setup-opencode config safety", () => {
     it("writes the schema URL, history_summarizer model, and context_researcher block into a new config", () => {
         const path = join(tempDir(), "eidnara.jsonc");
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-mini",
@@ -71,7 +75,7 @@ describe("setup-opencode config safety", () => {
         expect(written.history_summarizer).toEqual({ model: "anthropic/claude-haiku-4-5" });
         expect(written.context_researcher).toEqual({ model: "openai/gpt-5-mini" });
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-nano",
@@ -87,7 +91,7 @@ describe("setup-opencode config safety", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(path, `{"cache_ttl":"10m","history_summarizer":{"model":"openai/gpt-5"}}`);
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: false,
             context_researcherModel: null,
@@ -110,7 +114,7 @@ describe("setup-opencode config safety", () => {
             `{\n  // top keep\n  "history_summarizer": {\n    // inner keep\n    "model": "old"\n  },\n  "context_researcher": {\n    // context_researcher keep\n    "disable": true\n  }\n}\n`,
         );
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: false,
             context_researcherModel: null,
@@ -132,7 +136,7 @@ describe("setup-opencode config safety", () => {
             `{"history_summarizer":{"disable":true,"enabled":false,"model":"old"},"context_researcher":{"disable":true}}`,
         );
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: false,
             context_researcherModel: null,
@@ -151,7 +155,7 @@ describe("setup-opencode config safety", () => {
             `{"history_summarizer":{"temperature":"hot","top_p":0.5},"context_researcher":{"color":"red","prompt":"keep"}}`,
         );
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-mini",
@@ -170,7 +174,7 @@ describe("setup-opencode config safety", () => {
         const path = join(tempDir(), "eidnara.jsonc");
         writeFileSync(path, `{"history_summarizer":"old-model","context_researcher":["stale"]}`);
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "model", model: "anthropic/claude-haiku-4-5" },
             context_researcherEnabled: true,
             context_researcherModel: "openai/gpt-5-mini",
@@ -210,7 +214,7 @@ describe("setup-opencode config safety", () => {
             `{\n  "cache_ttl": {\n    // ttl keep\n    "default": "10m",\n    "openai/gpt-5": 30\n  }\n}\n`,
         );
 
-        writeEidnaraConfig(path, {
+        writeProposal(path, {
             summarizer: { kind: "keep" },
             context_researcherEnabled: false,
             context_researcherModel: null,

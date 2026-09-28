@@ -13,6 +13,7 @@ import {
     type ConflictDisposition,
     type ConflictResult,
     detectConflicts,
+    NO_FOLD_AUTHORITY_REASON,
     pluginEntriesOutside,
     projectConfigDisabled,
     projectOpenCodeConfigPaths,
@@ -527,7 +528,17 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
     }
     // With `enabled: false` the plugin skips every hook, so DCP and the OMO
     // hooks are not conflicts; the doctor skips this detector in that mode too.
-    const reasons = eidnaraEnabled ? [...conflictResult.reasons, ...conflictResult.unresolved] : [];
+    // Without a resolved authority the native-folds warning has no basis, so it is not reported.
+    const authorityKnown = foldAuthority.kind !== "unresolved";
+    const reasons = eidnaraEnabled
+        ? [...conflictResult.reasons, ...conflictResult.unresolved].filter(
+              (reason) => authorityKnown || reason !== NO_FOLD_AUTHORITY_REASON,
+          )
+        : [];
+    const disposition =
+        !eidnaraEnabled || (!authorityKnown && conflictResult.disposition === "warn")
+            ? "none"
+            : conflictResult.disposition;
     const discovery = await collectRecentSessions();
     const recentSessions = discovery.sessions;
     const opencodeInstallations = describeOpenCodeInstallations(detectOpenCodeInstallations());
@@ -562,7 +573,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
         eidnaraConfig,
         projectConfig,
         conflicts: {
-            disposition: eidnaraEnabled ? conflictResult.disposition : "none",
+            disposition,
             reasons,
             eidnaraEnabled,
             compactionEnabled,

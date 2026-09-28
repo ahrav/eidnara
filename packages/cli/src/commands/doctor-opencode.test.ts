@@ -389,6 +389,33 @@ describe("doctor OpenCode conflict repair", () => {
         }
     });
 
+    it("turns auto back on under native folds even when a DCP conflict blocks the other repairs", async () => {
+        const { configDir, opencodeConfigPath } = installIsolatedHome();
+        writeJsonc(join(configDir, "..", "eidnara", "eidnara.jsonc"), {});
+        writeJsonc(opencodeConfigPath, {
+            plugin: ["@tarquinen/opencode-dcp"],
+            compaction: { auto: false },
+        });
+        writeJsonc(join(configDir, "tui.jsonc"), REGISTERED_TUI);
+        const cwd = makeTempDir("eidnara-doctor-project-");
+        const { errors, successes, restore } = captureDoctorLog();
+
+        try {
+            expect(await runDoctor({ force: true, cwd })).toBe(1);
+
+            expect(errors.some((m) => m.startsWith("Leaving conflicts in place:"))).toBe(true);
+            expect(successes).toContain("Fixed: Enabled auto-compaction");
+            const repaired = parseJsonc(readFileSync(opencodeConfigPath, "utf-8")) as {
+                plugin?: unknown[];
+                compaction?: { auto?: boolean };
+            };
+            expect(repaired.compaction?.auto).toBe(true);
+            expect(repaired.plugin).toEqual(["@tarquinen/opencode-dcp"]);
+        } finally {
+            restore();
+        }
+    });
+
     it("treats a configuration that does not load as unresolved and leaves host settings alone", async () => {
         const { configDir, opencodeConfigPath } = installIsolatedHome();
         writeJsonc(join(configDir, "..", "eidnara", "eidnara.jsonc"), {

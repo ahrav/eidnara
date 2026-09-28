@@ -8,7 +8,7 @@ import {
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
-import { detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
+import { type ConflictResult, detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
@@ -51,6 +51,22 @@ import { compareVersionStrings } from "../lib/version";
 import { OPENCODE_MINIMUM_VERSION } from "./setup-opencode";
 
 const PLUGIN_NAME = "@eidnara/opencode";
+
+function nativeEnablementOnly(result: ConflictResult): ConflictResult {
+    return {
+        ...result,
+        conflicts: {
+            compactionAuto: false,
+            compactionPrune: false,
+            noFoldAuthority: result.conflicts.noFoldAuthority,
+            dcpPlugin: false,
+            omoPreemptiveCompaction: false,
+            omoContextWindowMonitor: false,
+            omoAnthropicRecovery: false,
+        },
+        compactionPatch: result.compactionPatch.auto === true ? { auto: true } : {},
+    };
+}
 
 /** A load failure is an unresolved authority, which leaves every host setting as found. */
 function resolveFoldAuthorityForDoctor(cwd: string): {
@@ -530,18 +546,20 @@ export async function runDoctor(
             else warn(`Conflict: ${reason}`);
         }
         // Disabling native compaction needs a plugin that loads to replace it; turning
-        // `compaction.auto` back on under native folds needs neither.
-        if (disabling && options.force && !serverPluginRegistered) {
+        // `compaction.auto` back on under native folds needs neither, so that repair still runs.
+        const blocked =
+            disabling && options.force && (!serverPluginRegistered || !openCodeSupported);
+        if (blocked) {
             fail(
-                `Leaving conflicts in place: ${PLUGIN_NAME} is not registered in the OpenCode config, so nothing would replace native compaction. Run 'setup' first.`,
+                !serverPluginRegistered
+                    ? `Leaving conflicts in place: ${PLUGIN_NAME} is not registered in the OpenCode config, so nothing would replace native compaction. Run 'setup' first.`
+                    : `Leaving conflicts in place: ${unsupportedReason}, so the plugin may not load to replace native compaction.`,
             );
-        } else if (disabling && options.force && !openCodeSupported) {
-            fail(
-                `Leaving conflicts in place: ${unsupportedReason}, so the plugin may not load to replace native compaction.`,
-            );
-        } else if (options.force) {
+        }
+        if (options.force) {
+            const repair = blocked ? nativeEnablementOnly(conflictResult) : conflictResult;
             try {
-                const actions = fixConflicts(cwd, conflictResult);
+                const actions = fixConflicts(cwd, repair);
                 for (const action of actions) {
                     pass(`Fixed: ${action}`);
                     fixed++;
@@ -557,7 +575,7 @@ export async function runDoctor(
                 );
             }
             const remaining = detectConflicts(cwd, { compactionEnabled });
-            if (disabling) {
+            if (disabling && !blocked) {
                 repairedCount = conflictResult.reasons.filter(
                     (reason) => !remaining.reasons.includes(reason),
                 ).length;

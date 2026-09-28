@@ -1,6 +1,10 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { loadUserTierConfigDetailed, loadUserTierConfigText } from "@eidnara/opencode/config";
+import {
+    loadProjectTierAdmission,
+    loadUserTierConfigDetailed,
+    loadUserTierConfigText,
+} from "@eidnara/opencode/config";
 import { resolveEidnaraProjectConfigPath } from "@eidnara/opencode/config/config-paths";
 import { normalizeSummarizerChain } from "@eidnara/opencode/config/fold-authority";
 import {
@@ -32,7 +36,6 @@ import { writeFileAtomic } from "../lib/atomic-write";
 import {
     describeFoldAuthority,
     type EidnaraModes,
-    type FoldAuthority,
     foldAuthorityOf,
     projectModeOverrides,
     readEidnaraModes,
@@ -283,10 +286,6 @@ export interface EidnaraConfigOptions {
     context_researcherEnabled: boolean;
     context_researcherModel: string | null;
     claudeMax: boolean;
-}
-
-export function writeEidnaraConfig(configPath: string, options: EidnaraConfigOptions): void {
-    writeFileAtomic(configPath, proposeEidnaraConfig(configPath, options));
 }
 
 /** Returns the exact text setup would write to `configPath`. */
@@ -569,16 +568,6 @@ export async function runSetup(
         return 1;
     }
 
-    const dcpDecision: DcpDecision =
-        dryRun || !modes.enabled
-            ? "absent"
-            : await resolveDcpConflictBeforeSetup(
-                  paths.opencodeConfig,
-                  paths.opencodeConfigFormat,
-                  io,
-              );
-    const removeDcp = dcpDecision === "remove";
-
     const existingChain = normalizeSummarizerChain(
         loadUserTierConfigDetailed(paths.eidnaraConfig).config.history_summarizer,
     );
@@ -611,6 +600,7 @@ export async function runSetup(
 
     // The fold authority comes from the exact document setup writes, validated the way the plugin
     // loads it, before any conflict question or host edit.
+    const source = readSourceText(paths.eidnaraConfig);
     const proposal = proposeEidnaraConfig(paths.eidnaraConfig, {
         summarizer,
         context_researcherEnabled,
@@ -619,13 +609,31 @@ export async function runSetup(
     });
     const authority = foldAuthorityOf(loadUserTierConfigText(paths.eidnaraConfig, proposal));
     log.info(`Fold authority: ${describeFoldAuthority(authority)}`);
-    if (authority.kind === "unresolved") {
-        log.error(
-            `The proposed ${paths.eidnaraConfig} does not load, so setup edits no host setting: ${authority.reason}`,
-        );
+    const projectAdmission = loadProjectTierAdmission(process.cwd());
+    const rejection =
+        authority.kind === "unresolved"
+            ? `the proposed ${paths.eidnaraConfig} does not load: ${authority.reason}`
+            : projectAdmission.status === "unresolved"
+              ? `the project Eidnara config does not load: ${projectAdmission.reason}`
+              : null;
+    if (rejection !== null || authority.kind === "unresolved") {
+        log.error(`Setup edits no host setting because ${rejection}`);
         io.outro("Setup stopped — fix the Eidnara config and rerun setup.");
         return 1;
     }
+    if (dryRun) {
+        log.message(`[dry-run] proposed ${paths.eidnaraConfig}:\n${proposal}`);
+    }
+
+    const dcpDecision: DcpDecision =
+        dryRun || !modes.enabled
+            ? "absent"
+            : await resolveDcpConflictBeforeSetup(
+                  paths.opencodeConfig,
+                  paths.opencodeConfigFormat,
+                  io,
+              );
+    const removeDcp = dcpDecision === "remove";
     const eidnaraFolds = authority.kind === "eidnara";
     const compactionTarget: CompactionPatch = !modes.enabled
         ? {}
@@ -700,6 +708,13 @@ export async function runSetup(
     }
 
     let repairIncomplete = false;
+    if (!dryRun && readSourceText(paths.eidnaraConfig) !== source) {
+        log.error(
+            `${paths.eidnaraConfig} changed while setup was running; setup wrote nothing so that edit is kept.`,
+        );
+        io.outro("Setup stopped — rerun setup to build a proposal from the current file.");
+        return 1;
+    }
     if (!dryRun) {
         // Every file a later step may write is captured first, so a failure part-way (a read-only
         // directory, for example) restores the OpenCode registration and compaction flags instead
@@ -770,7 +785,7 @@ export async function runSetup(
                     rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
                 );
             }
-            reportWrittenState(paths, authority, hostCompaction, log);
+            reportWrittenState(paths, proposal, hostCompaction, log);
             io.outro(
                 rolledBack
                     ? "Setup stopped — rolled back OpenCode changes."
@@ -789,7 +804,7 @@ export async function runSetup(
         ) {
             repairIncomplete = true;
         }
-        if (!reportWrittenState(paths, authority, hostCompaction, log)) {
+        if (!reportWrittenState(paths, proposal, hostCompaction, log)) {
             repairIncomplete = true;
         }
     }
@@ -826,6 +841,10 @@ export async function runSetup(
     return 0;
 }
 
+function readSourceText(path: string): string | null {
+    return existsSync(path) ? readRegularFileSync(path) : null;
+}
+
 function describeCompactionWrite(compaction: CompactionPatch): string {
     if (compaction.auto === false) {
         return "OpenCode compaction.auto=false and compaction.prune=false (Eidnara folds; OpenCode's compaction would interfere)";
@@ -842,7 +861,7 @@ function describeCompactionWrite(compaction: CompactionPatch): string {
  */
 function reportWrittenState(
     paths: Pick<ConfigPaths, "opencodeConfig"> & { eidnaraConfig: string },
-    intended: FoldAuthority,
+    proposal: string,
     compaction: CompactionPatch,
     log: PromptLog,
 ): boolean {
@@ -852,7 +871,7 @@ function reportWrittenState(
     const hostMatches = Object.entries(compaction).every(
         ([key, value]) => hostFields[key] === value,
     );
-    const eidnaraMatches = written.kind === intended.kind;
+    const eidnaraMatches = readSourceText(paths.eidnaraConfig) === proposal;
     log.message(
         `Read back: ${paths.eidnaraConfig} → ${describeFoldAuthority(written)}; ${paths.opencodeConfig} → compaction.auto=${String(hostFields.auto ?? "unset")}, compaction.prune=${String(hostFields.prune ?? "unset")}`,
     );
