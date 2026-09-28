@@ -5134,6 +5134,43 @@ impl HandlerCore {
             });
         }
         let window_at_cap = history_summarizer_archive::WindowSize::of(projection).at_cap();
+        if window_at_cap {
+            match history_summarizer_archive::archive_window(
+                &store,
+                &parsed.session_id,
+                project_path,
+                projection,
+                now,
+            ) {
+                Ok(Some(archived)) => {
+                    if matches!(
+                        archived.cause,
+                        history_summarizer_archive::ArchiveCause::InFlightFiring { .. }
+                    ) {
+                        self.cancel_history_summarizer_work(&parsed.session_id);
+                    }
+                    eprintln!(
+                        "daemon: history_summarizer archived session={} range={}..={} sequence={} cause={:?}",
+                        parsed.session_id,
+                        archived.cut.start,
+                        archived.cut.end,
+                        archived.sequence,
+                        archived.cause
+                    );
+                    return PreparedHistorySummarizerAction::Complete(
+                        HistorySummarizerDiagnostics {
+                            no_fire: Some("archived".to_string()),
+                            ..not_fired
+                        },
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!(
+                    "daemon: history_summarizer archive failed session={}: {error}",
+                    parsed.session_id
+                ),
+            }
+        }
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             blocked("busy");
             return PreparedHistorySummarizerAction::Busy {
@@ -38499,6 +38536,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38539,6 +38577,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)

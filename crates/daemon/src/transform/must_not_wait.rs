@@ -288,7 +288,7 @@ fn a_project_memory_revision_is_a_hard_member_too() {
 }
 
 /// Each path's hard-fold and veto formula, written out independently of `activation_gates`.
-fn ordinary_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (bool, bool) {
+fn ordinary_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
     let [
         active,
         initialized,
@@ -301,12 +301,13 @@ fn ordinary_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (
         epoch,
         latch,
         reconcile,
+        archive,
     ] = bits;
     let emergency = matches!(
         pass,
         scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
     ) || latch;
-    let hard = first || ttl || absorb || external || epoch;
+    let hard = first || ttl || absorb || external || epoch || archive;
     let veto = active
         && pass == scheduler::PassDecision::Execute
         && !hard
@@ -318,7 +319,7 @@ fn ordinary_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (
     (hard, veto)
 }
 
-fn additive_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (bool, bool) {
+fn additive_path_reference(bits: [bool; 12], pass: scheduler::PassDecision) -> (bool, bool) {
     let [
         active,
         initialized,
@@ -329,6 +330,7 @@ fn additive_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (
         _,
         external,
         epoch,
+        _,
         _,
         _,
     ] = bits;
@@ -346,8 +348,8 @@ fn additive_path_reference(bits: [bool; 11], pass: scheduler::PassDecision) -> (
 fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
     use scheduler::PassDecision::*;
     for pass in [Defer, Execute, Force85, Emergency95] {
-        for mask in 0u32..1 << 11 {
-            let bits: [bool; 11] = std::array::from_fn(|index| mask & (1 << index) != 0);
+        for mask in 0u32..1 << 12 {
+            let bits: [bool; 12] = std::array::from_fn(|index| mask & (1 << index) != 0);
             let [
                 active,
                 initialized,
@@ -360,6 +362,7 @@ fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
                 epoch,
                 latch,
                 reconcile,
+                archive,
             ] = bits;
             let ordinary = activation_gates(&ActivationGateInputs {
                 pass,
@@ -372,6 +375,7 @@ fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
                 system_absorb_hard_due: absorb,
                 external_revision_changed: external,
                 project_memory_epoch_hard_due: epoch,
+                archive_fold_due: archive,
                 emergency_arm_engaged: matches!(pass, Force85 | Emergency95) || latch,
                 reconcile_hard_due: reconcile,
             });
@@ -394,6 +398,7 @@ fn the_shared_gate_matches_each_paths_reference_formula_for_every_input() {
                 system_absorb_hard_due: false,
                 external_revision_changed: external,
                 project_memory_epoch_hard_due: epoch,
+                archive_fold_due: false,
                 emergency_arm_engaged: false,
                 reconcile_hard_due: false,
             });

@@ -1,6 +1,14 @@
 use std::ops::Add;
 
+use memory_store::{
+    HistoryArchiveRequest, HistorySummarizerDurableState, HistorySummarizerPhase,
+    HistorySummarizerPublishError, MemoryStore,
+};
+
 use crate::boundary::completed_tool_arc_crosses_boundary;
+use crate::history_summarizer::{
+    HistorySummarizerStateError, completion_wait_budget, settle_reservation,
+};
 use crate::history_summarizer_chunk::tool_arcs;
 use crate::wire::{FlatBlock, FlatProjection};
 
@@ -140,13 +148,118 @@ pub fn archive_cut(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveCause {
+    InFlightFiring { firing_seq: u64 },
+    IdleBackoff,
+}
+
+pub fn archive_cause(
+    summarizer: &HistorySummarizerDurableState,
+    now_ms: i64,
+) -> Option<ArchiveCause> {
+    let in_backoff = summarizer
+        .failure_backoff_at_ms
+        .is_some_and(|backoff_at_ms| now_ms < backoff_at_ms);
+    if summarizer.state == HistorySummarizerPhase::Idle {
+        return in_backoff.then_some(ArchiveCause::IdleBackoff);
+    }
+    let budget_ms = i64::try_from(completion_wait_budget().as_millis()).unwrap_or(i64::MAX);
+    let past_deadline = summarizer
+        .fired_at_ms
+        .is_some_and(|fired_at_ms| now_ms >= fired_at_ms.saturating_add(budget_ms));
+    (past_deadline || in_backoff).then_some(ArchiveCause::InFlightFiring {
+        firing_seq: summarizer.firing_seq,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Archived {
+    pub sequence: i64,
+    pub cut: ArchiveCut,
+    pub cause: ArchiveCause,
+}
+
+pub fn archive_window(
+    store: &MemoryStore,
+    session_id: &str,
+    project_path: &str,
+    projection: &FlatProjection,
+    now_ms: i64,
+) -> Result<Option<Archived>, HistorySummarizerStateError> {
+    let loaded = store.load(session_id)?;
+    let Some(cause) = archive_cause(&loaded.meta.history_summarizer, now_ms) else {
+        return Ok(None);
+    };
+    let snapshot = store.load_history_summarizer_assembly_snapshot(session_id, 1)?;
+    let covered_end = snapshot
+        .max_end_message
+        .and_then(|end| u64::try_from(end).ok())
+        .filter(|end| *end > 0);
+    let durable = &loaded.meta.block_identity_by_mid;
+    let Some(cut) = archive_cut(projection, covered_end, |mid| durable.contains_key(mid)) else {
+        return Ok(None);
+    };
+    let published = store.publish_history_archive(HistoryArchiveRequest {
+        session_id,
+        expected_row_version: loaded.row_version,
+        expected_revert_epoch: snapshot.revert_epoch,
+        history_segment_set_generation: snapshot.history_segment_set_generation,
+        abandons_firing_seq: match cause {
+            ArchiveCause::InFlightFiring { firing_seq } => Some(firing_seq),
+            ArchiveCause::IdleBackoff => None,
+        },
+        start_message: cut.start,
+        end_message: cut.end,
+        start_message_id: &cut.start_message_id,
+        end_message_id: &cut.end_message_id,
+        now_ms,
+    });
+    let published = match published {
+        Ok(published) => published,
+        Err(
+            HistorySummarizerPublishError::CasConflict { .. }
+            | HistorySummarizerPublishError::FenceRejected { .. }
+            | HistorySummarizerPublishError::InvalidState { .. }
+            | HistorySummarizerPublishError::HistorySegmentOverlap { .. },
+        ) => return Ok(None),
+        Err(error) => return Err(HistorySummarizerStateError::Publish(error)),
+    };
+    if let Some(reservation) = &published.abandoned_reservation
+        && let Err(error) = settle_reservation(store, session_id, project_path, reservation, now_ms)
+    {
+        eprintln!(
+            "daemon: history_summarizer archive left reservation {} unsettled session={session_id}: {error}",
+            reservation.causal_identity
+        );
+    }
+    Ok(Some(Archived {
+        sequence: published.sequence,
+        cut,
+        cause,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use memory_store::memory_reviewer_jobs::{
+        CausalInputs, MemoryReviewerJobOutcome, MemoryReviewerJobState, ProducerBinding,
+        ReserveOutcome, ReviewTarget,
+    };
+    use memory_store::{
+        HistorySummarizerAbandonReason, HistorySummarizerChunkRange, HistorySummarizerDurableState,
+        HistorySummarizerPhase, MemoryReviewerReservation, ModuleMeta,
+    };
+
     use super::*;
+    use crate::history_summarizer::persist_history_summarizer_state;
     use crate::transform::tests::{assistant_tool_call, item, tool_result, wire_item};
     use crate::wire::{IngressMessage, project_messages};
+
+    const NOW: i64 = 10_000_000;
 
     fn text(ordinal: u64) -> IngressMessage {
         item(
@@ -293,5 +406,182 @@ mod tests {
         assert_eq!((start, end), (1, 4));
         assert!(window_after(&window, end).within_half_cap());
         assert!(!window_after(&window, end - 1).within_half_cap());
+    }
+
+    #[test]
+    fn the_summarizer_cannot_publish_past_its_deadline_or_in_backoff() {
+        let budget = i64::try_from(completion_wait_budget().as_millis()).unwrap();
+        let in_flight = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
+            firing_seq: 7,
+            fired_at_ms: Some(1_000),
+            ..HistorySummarizerDurableState::default()
+        };
+        let firing = Some(ArchiveCause::InFlightFiring { firing_seq: 7 });
+        assert_eq!(archive_cause(&in_flight, 1_000 + budget - 1), None);
+        assert_eq!(archive_cause(&in_flight, 1_000 + budget), firing);
+        let retained_in_backoff = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Publishing,
+            failure_backoff_at_ms: Some(5_000),
+            ..in_flight.clone()
+        };
+        assert_eq!(archive_cause(&retained_in_backoff, 4_999), firing);
+        let idle = HistorySummarizerDurableState {
+            failure_backoff_at_ms: Some(5_000),
+            ..HistorySummarizerDurableState::default()
+        };
+        assert_eq!(archive_cause(&idle, 4_999), Some(ArchiveCause::IdleBackoff));
+        assert_eq!(archive_cause(&idle, 5_000), None);
+        assert_eq!(
+            archive_cause(&HistorySummarizerDurableState::default(), 0),
+            None
+        );
+    }
+
+    fn store_with(
+        window: &FlatProjection,
+        summarizer: HistorySummarizerDurableState,
+    ) -> (tempfile::TempDir, MemoryStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&MemoryStore::test_descriptor(
+            dir.path(),
+            "eidnara-archive-test",
+        ))
+        .unwrap();
+        let meta = ModuleMeta {
+            block_identity_by_mid: window.identity_by_mid.clone(),
+            history_summarizer: summarizer,
+            ..ModuleMeta::default()
+        };
+        store
+            .commit("ses", None, &cache_stability::CoreState::empty(), &meta)
+            .unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn an_idle_summarizer_in_backoff_archives_the_window() {
+        let window = window_with(LAST, |_| None);
+        let summarizer = HistorySummarizerDurableState {
+            failure_backoff_at_ms: Some(NOW + 1),
+            ..HistorySummarizerDurableState::default()
+        };
+        let (_dir, store) = store_with(&window, summarizer.clone());
+        let archived = archive_window(&store, "ses", "git:proj", &window, NOW)
+            .unwrap()
+            .expect("an idle summarizer in backoff cannot publish");
+        assert_eq!(archived.cause, ArchiveCause::IdleBackoff);
+        assert_eq!((archived.cut.start, archived.cut.end), (1, FIRST_KEPT));
+        let loaded = store.load("ses").unwrap();
+        assert_eq!(
+            loaded.meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        assert_eq!(
+            loaded.meta.history_summarizer.failure_backoff_at_ms,
+            Some(NOW + 1)
+        );
+        assert_eq!(loaded.meta.history_summarizer.last_abandon, None);
+        assert_eq!(loaded.meta.archive_fold_seq, Some(archived.sequence));
+
+        let (_dir, expired) = store_with(&window, summarizer);
+        assert_eq!(
+            archive_window(&expired, "ses", "git:proj", &window, NOW + 1).unwrap(),
+            None
+        );
+        assert!(expired.load_history_segments("ses").unwrap().is_empty());
+    }
+
+    /// A firing past its deadline that holds a reserved review job is ended by the archive,
+    /// its job is closed through the settle path, and its later transitions are refused.
+    #[test]
+    fn an_archive_settles_the_reservation_of_the_firing_it_ends() {
+        let window = window_with(LAST, |_| None);
+        let (_dir, store) = store_with(&window, HistorySummarizerDurableState::default());
+        let producer = ProducerBinding {
+            producer: "history_summarizer".to_string(),
+            firing_id: "archived#5".to_string(),
+            ordinal: 1,
+        };
+        let inputs = CausalInputs {
+            target: ReviewTarget::Memory {
+                object_id: "memory-1".to_string(),
+                source_revision: 1,
+            },
+            question_template: "extracted_facts".to_string(),
+            signals: Vec::new(),
+            required_evidence: Vec::new(),
+            policy_versions: BTreeMap::new(),
+        };
+        let ReserveOutcome::Reserved(job) = store
+            .reserve_memory_reviewer_job("git:proj", &producer, &inputs, NOW)
+            .unwrap()
+        else {
+            panic!("a fresh job is reserved");
+        };
+        let budget = i64::try_from(completion_wait_budget().as_millis()).unwrap();
+        let stalled = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::AwaitingProducer,
+            firing_seq: 5,
+            chunk_range: Some(HistorySummarizerChunkRange {
+                from_ordinal: 1,
+                to_ordinal: 40,
+            }),
+            producer_run_id: Some("run-5".to_string()),
+            fired_at_ms: Some(NOW - budget),
+            memory_reviewer_reservation: Some(MemoryReviewerReservation {
+                firing_seq: 5,
+                causal_identity: job.causal_identity.clone(),
+                candidate_id: "candidate".to_string(),
+                payload_digest: "digest".to_string(),
+                kernel_incarnation: "kernel".to_string(),
+                queue_deadline_ms: job.queue_deadline_ms,
+            }),
+            ..HistorySummarizerDurableState::default()
+        };
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.history_summarizer = stalled.clone();
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let archived = archive_window(&store, "ses", "git:proj", &window, NOW)
+            .unwrap()
+            .expect("a firing past its deadline cannot publish");
+        assert_eq!(
+            archived.cause,
+            ArchiveCause::InFlightFiring { firing_seq: 5 }
+        );
+        let after = store.load("ses").unwrap();
+        let summarizer = &after.meta.history_summarizer;
+        assert_eq!(summarizer.state, HistorySummarizerPhase::Idle);
+        assert_eq!(summarizer.memory_reviewer_reservation, None);
+        assert_eq!(
+            summarizer
+                .last_abandon
+                .as_ref()
+                .map(|abandon| (abandon.firing_seq, abandon.reason)),
+            Some((5, HistorySummarizerAbandonReason::WindowArchived))
+        );
+        let settled = store
+            .lookup_memory_reviewer_job("git:proj", &job.causal_identity)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settled.state,
+            MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
+        );
+        assert_eq!(store.load_pending_publication("ses").unwrap(), None);
+
+        let resumed = HistorySummarizerDurableState {
+            state: HistorySummarizerPhase::Validating,
+            ..stalled
+        };
+        assert!(matches!(
+            persist_history_summarizer_state(&store, "ses", resumed),
+            Err(HistorySummarizerStateError::InvalidTransition { .. })
+        ));
+        assert_eq!(store.load("ses").unwrap().row_version, after.row_version);
     }
 }

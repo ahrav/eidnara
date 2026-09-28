@@ -15,7 +15,7 @@ use std::ops::Range;
 
 use context_core::decay::{Tier, compute_budget_pressure, rendered_tier};
 use context_core::redaction::redact_durable_text;
-use memory_store::{Claim, StoredHistorySegment};
+use memory_store::{ARCHIVE_EPISODE_TYPE, Claim, StoredHistorySegment};
 
 /// Default hard budget measured by the caller's token estimator.
 pub const DEFAULT_HISTORY_BUDGET_TOKENS: u32 = 60_000;
@@ -37,6 +37,8 @@ pub struct DecayRenderHistorySegment {
     pub p4: Option<String>,
     pub importance: Option<i32>,
     pub legacy: Option<i32>,
+    /// An archive row renders empty at every tier and carries no decay pressure.
+    pub archive: bool,
     /// The row's superseded claims, from [`corrections_for`]; empty renders as before.
     pub corrections: Vec<Correction>,
 }
@@ -256,6 +258,7 @@ impl From<&StoredHistorySegment> for DecayRenderHistorySegment {
             p4: c.p4.clone(),
             importance: Some(c.importance),
             legacy: Some(c.legacy),
+            archive: c.episode_type.as_deref() == Some(ARCHIVE_EPISODE_TYPE),
             corrections: Vec::new(),
         }
     }
@@ -408,8 +411,8 @@ pub fn render_history_segment_at_tier(c: &DecayRenderHistorySegment, tier: u8) -
 }
 
 fn render_one_history_segment(c: &DecayRenderHistorySegment, tier: u8) -> String {
-    if tier >= 5 {
-        return String::new(); // archived
+    if tier >= 5 || c.archive {
+        return String::new();
     }
     let heading = history_segment_heading(c);
 
@@ -489,7 +492,7 @@ fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget:
     let v2_indices: Vec<usize> = history_segments
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.legacy != Some(1))
+        .filter(|(_, c)| c.legacy != Some(1) && !c.archive)
         .map(|(i, _)| i)
         .collect();
     let v2_total = v2_indices.len();
@@ -512,7 +515,9 @@ fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget:
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            if c.legacy == Some(1) {
+            if c.archive {
+                tier_ordinal(Tier::P5)
+            } else if c.legacy == Some(1) {
                 legacy_tier(c)
             } else {
                 tier_ordinal(rendered_tier(
@@ -594,6 +599,50 @@ pub fn extract_m0_block(m0_text: &str, tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Archive rows interleaved anywhere leave the decayed render byte-identical, so they
+    /// render empty and shift no curve index or pressure.
+    #[test]
+    fn archive_rows_render_empty_and_carry_no_decay_pressure() {
+        let row = |start: i64, episode_type: Option<&str>| StoredHistorySegment {
+            start_message: start,
+            end_message: start,
+            end_message_id: format!("m{start}#0"),
+            title: format!("segment {start}"),
+            content: format!("content {start}"),
+            p1: Some(format!("full paraphrase {start} {}", "word ".repeat(40))),
+            p2: Some(format!("short paraphrase {start}")),
+            p3: Some(format!("tag {start}")),
+            importance: 30 + (start % 60) as i32,
+            episode_type: episode_type.map(str::to_string),
+            ..Default::default()
+        };
+        let plain: Vec<StoredHistorySegment> = (0..300).map(|i| row(2 * i, None)).collect();
+        let mut with_archives = Vec::new();
+        for (i, segment) in plain.iter().enumerate() {
+            with_archives.push(segment.clone());
+            if i % 7 == 3 {
+                with_archives.push(row(segment.start_message + 1, Some(ARCHIVE_EPISODE_TYPE)));
+            }
+        }
+        let tokens = |text: &str| text.len() / 4;
+        for budget in [2_000.0, 20_000.0, 0.0] {
+            let expected = render_stored_history_segments(&plain, budget, tokens);
+            assert!(!expected.is_empty());
+            assert_eq!(
+                render_stored_history_segments(&with_archives, budget, tokens),
+                expected,
+                "budget {budget}"
+            );
+        }
+        let archive = DecayRenderHistorySegment::from(&row(1, Some(ARCHIVE_EPISODE_TYPE)));
+        assert!(archive.archive);
+        assert_eq!(render_history_segment_at_tier(&archive, 1), "");
+        assert_eq!(
+            crate::memory_render::render_new_history_segments(&[&archive]),
+            ""
+        );
+    }
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
 
@@ -851,6 +900,7 @@ mod tests {
                     p4: r.p4.clone(),
                     importance: r.importance,
                     legacy: r.legacy,
+                    archive: false,
                     corrections: r
                         .corrections
                         .iter()
@@ -913,6 +963,7 @@ mod tests {
                 p4: raw.p4.clone(),
                 importance: raw.importance,
                 legacy: raw.legacy,
+                archive: false,
                 corrections: Vec::new(),
             })
             .collect();
@@ -1017,6 +1068,7 @@ mod tests {
                     p4: r.p4.clone(),
                     importance: r.importance,
                     legacy: r.legacy,
+                    archive: false,
                     corrections: Vec::new(),
                 })
                 .collect();

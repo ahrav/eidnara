@@ -2682,6 +2682,7 @@ fn apply_additive_only(
         system_absorb_hard_due: false,
         external_revision_changed,
         project_memory_epoch_hard_due,
+        archive_fold_due: false,
         emergency_arm_engaged: false,
         reconcile_hard_due: false,
     });
@@ -3668,6 +3669,7 @@ fn apply_once(
     let (render_config_changed, identity_observed, coordinator_identity) =
         render_config_change(&loaded.meta, req, &effective_render_config, transition_due);
     let reconcile_hard_due = loaded.core.reconcile_pending && !boundary_present;
+    let archive_fold_due = archive_fold_due(&loaded.meta, m1_signal.max_history_segment_seq);
     let system_absorb_hard_due = if serializer_profile
         == Some(SerializerProfile::ClaudeCodeAnthropic)
         && history_segment_seq_changed_since_meta
@@ -3696,6 +3698,7 @@ fn apply_once(
         system_absorb_hard_due,
         external_revision_changed,
         project_memory_epoch_hard_due,
+        archive_fold_due,
         emergency_arm_engaged: matches!(
             scheduler_outcome.pass,
             scheduler::PassDecision::Force85 | scheduler::PassDecision::Emergency95
@@ -3918,7 +3921,7 @@ fn apply_once(
         profile_transition,
         first_fold_due,
         ttl_expired: scheduler_outcome.idle_ttl_fired,
-        coverage_fold_due: system_absorb_hard_due,
+        coverage_fold_due: system_absorb_hard_due || archive_fold_due,
         project_memory_delta: external_revision_changed || project_memory_epoch_hard_due,
         reconcile_hard_due,
         coverage_delta: history_segment_seq_changed_since_meta,
@@ -5579,9 +5582,17 @@ struct ActivationGateInputs {
     system_absorb_hard_due: bool,
     external_revision_changed: bool,
     project_memory_epoch_hard_due: bool,
+    /// An archive segment above the fold waits for the HARD that folds it.
+    archive_fold_due: bool,
     /// Force85, Emergency95, or the drain latch.
     emergency_arm_engaged: bool,
     reconcile_hard_due: bool,
+}
+
+fn archive_fold_due(meta: &ModuleMeta, newest_sequence: i64) -> bool {
+    meta.archive_fold_seq.is_some_and(|sequence| {
+        sequence > meta.folded_history_segment_seq && sequence <= newest_sequence
+    })
 }
 
 struct ActivationGates {
@@ -5595,7 +5606,8 @@ fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
         || input.idle_ttl_fired
         || input.system_absorb_hard_due
         || input.external_revision_changed
-        || input.project_memory_epoch_hard_due;
+        || input.project_memory_epoch_hard_due
+        || input.archive_fold_due;
     let ordinary_history_summarizer_veto = input.history_summarizer_active
         && input.pass == scheduler::PassDecision::Execute
         && !hard_fold_requested
