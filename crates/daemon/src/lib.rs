@@ -5133,6 +5133,35 @@ impl HandlerCore {
                 ..not_fired
             });
         }
+        match history_summarizer_archive::archive_window(
+            &store,
+            &loaded,
+            &parsed.session_id,
+            project_path,
+            projection,
+            now,
+        ) {
+            Ok(Some(archived)) => {
+                self.cancel_history_summarizer_work(&parsed.session_id);
+                eprintln!(
+                    "daemon: history_summarizer archived session={} range={}..={} sequence={} cause={:?}",
+                    parsed.session_id,
+                    archived.cut.start,
+                    archived.cut.end,
+                    archived.sequence,
+                    archived.cause
+                );
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
+                    no_fire: Some("archived".to_string()),
+                    ..not_fired
+                });
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "daemon: history_summarizer archive failed session={}: {error}",
+                parsed.session_id
+            ),
+        }
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             blocked("busy");
             return PreparedHistorySummarizerAction::Busy {
@@ -21526,6 +21555,8 @@ mod tests {
         block_status: std::sync::atomic::AtomicBool,
         /// `connect` waits on `notify` while `block_connect` is set.
         block_connect: std::sync::atomic::AtomicBool,
+        close_attempts: AtomicUsize,
+        block_close_attempt: std::sync::atomic::AtomicBool,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
@@ -21752,6 +21783,14 @@ mod tests {
 
         async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
+        }
+
+        async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {
+            self.state.close_attempts.fetch_add(1, Ordering::SeqCst);
+            while self.state.block_close_attempt.load(Ordering::SeqCst) {
+                self.state.notify.notified().await;
+            }
+            self.close().await
         }
 
         async fn close(&mut self) -> Result<(), HistorySummarizerProducerError> {
@@ -38503,6 +38542,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38543,6 +38583,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)

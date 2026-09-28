@@ -1150,6 +1150,13 @@ fn validate_parsed_history_segments(
                 history_segment.start_message, history_segment.end_message
             ));
         }
+        if history_segment.episode_type.as_deref() == Some(memory_store::ARCHIVE_EPISODE_TYPE) {
+            return Some(format!(
+                "history_segment {} claims the reserved episode_type {:?}; choose another episode type",
+                index + 1,
+                memory_store::ARCHIVE_EPISODE_TYPE
+            ));
+        }
         if history_segment.start_message < chunk_start || history_segment.end_message > chunk_end {
             return Some(format!(
                 "range {}-{} is outside chunk {}-{}",
@@ -1613,6 +1620,36 @@ mod tests {
                 case.label
             );
         }
+    }
+
+    #[test]
+    fn model_output_cannot_claim_the_archive_episode_type() {
+        let feature = xml(&[(1, 2, "arc")], 3, "");
+        assert!(
+            validate_history_summarizer_output(
+                &feature,
+                &chunk(1, 2),
+                &[],
+                ValidateOptions::default()
+            )
+            .is_ok()
+        );
+        let archive = feature.replace(
+            r#"episode_type="feature""#,
+            &format!(r#"episode_type="{}""#, memory_store::ARCHIVE_EPISODE_TYPE),
+        );
+        let error = validate_history_summarizer_output(
+            &archive,
+            &chunk(1, 2),
+            &[],
+            ValidateOptions::default(),
+        )
+        .expect_err("the archive episode type is reserved");
+        assert!(
+            error.message.contains("reserved episode_type"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

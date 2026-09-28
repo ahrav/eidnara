@@ -1012,6 +1012,26 @@ pub struct HistorySummarizerDurableState {
     /// Set by the first pass that could have fired while no run could start; the next pressure-path fire consumes it. Survives every other transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_eligibility: Option<summarizer_timeline::PendingEligibility>,
+    /// The newest firing an archive ended in flight, and why. Survives every transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_abandon: Option<HistorySummarizerAbandon>,
+}
+
+/// A firing an archive ended before it published. The archive commits in the same
+/// transaction, so the firing's later publication finds the state idle and is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistorySummarizerAbandon {
+    pub firing_seq: u64,
+    pub reason: HistorySummarizerAbandonReason,
+    pub abandoned_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySummarizerAbandonReason {
+    /// The window reached its cap while the firing was past its completion deadline or in
+    /// failure backoff, and an archive covered its span.
+    WindowArchived,
 }
 
 impl Default for HistorySummarizerDurableState {
@@ -1039,12 +1059,13 @@ impl Default for HistorySummarizerDurableState {
             recent_firings: Vec::new(),
             counters: summarizer_timeline::FiringCounters::default(),
             pending_eligibility: None,
+            last_abandon: None,
         }
     }
 }
 
 impl HistorySummarizerDurableState {
-    /// The default state holding only what every reset, fire, and abandon keeps: the timeline, the counters, the pending eligibility, and the nonadmission facts. Each constructor sets its own other fields over it. The destructuring names every field, so a new one must be placed on one side.
+    /// The default state holding only what every reset, fire, and abandon keeps: the timeline, the counters, the pending eligibility, the nonadmission facts, and the last archive abandon. Each constructor sets its own other fields over it. The destructuring names every field, so a new one must be placed on one side.
     pub fn carried_forward(&self) -> Self {
         let HistorySummarizerDurableState {
             state: _,
@@ -1069,12 +1090,14 @@ impl HistorySummarizerDurableState {
             recent_firings,
             counters,
             pending_eligibility,
+            last_abandon,
         } = self;
         HistorySummarizerDurableState {
             memory_reviewer_nonadmission: *memory_reviewer_nonadmission,
             recent_firings: recent_firings.clone(),
             counters: *counters,
             pending_eligibility: pending_eligibility.clone(),
+            last_abandon: last_abandon.clone(),
             ..HistorySummarizerDurableState::default()
         }
     }
@@ -1364,6 +1387,64 @@ pub struct HistorySummarizerPublishResult {
     pub memory_reviewer_activation: Option<MemoryReviewerActivationOutcome>,
 }
 
+/// The `episode_type` of an archive segment: written without a model call with empty content,
+/// rendered empty, and left out of decay pressure. Model output cannot claim it; a stored model
+/// row that already carries it keeps its content and renders as written.
+pub const ARCHIVE_EPISODE_TYPE: &str = "archive";
+
+/// The SQL filter that keeps every row except archive segments.
+const NOT_ARCHIVE_SQL: &str = "NOT (episode_type IS 'archive' AND content = '')";
+
+impl StoredHistorySegment {
+    pub fn is_archive(&self) -> bool {
+        self.episode_type.as_deref() == Some(ARCHIVE_EPISODE_TYPE) && self.content.is_empty()
+    }
+}
+
+/// One archive over `start_message..=end_message`, whose ids are the anchor block ids of the
+/// first and last archived messages, with the fences it commits under.
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryArchiveRequest<'a> {
+    pub session_id: &'a str,
+    pub expected_row_version: Option<u64>,
+    pub expected_revert_epoch: u64,
+    pub history_segment_set_generation: HistorySegmentSetGeneration,
+    /// The in-flight firing the archive ends; `None` requires an idle state.
+    pub abandons_firing_seq: Option<u64>,
+    pub start_message: u64,
+    pub end_message: u64,
+    pub start_message_id: &'a str,
+    pub end_message_id: &'a str,
+    pub now_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryArchiveResult {
+    pub row_version: u64,
+    pub sequence: i64,
+    /// The reservation the ended firing held, still on the idle state until it is settled.
+    pub abandoned_reservation: Option<MemoryReviewerReservation>,
+}
+
+fn archive_history_segment(request: &HistoryArchiveRequest<'_>) -> StoredHistorySegment {
+    let ordinal = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    StoredHistorySegment {
+        start_message: ordinal(request.start_message),
+        end_message: ordinal(request.end_message),
+        start_message_id: request.start_message_id.to_string(),
+        end_message_id: request.end_message_id.to_string(),
+        title: format!(
+            "Archived messages {}-{}",
+            request.start_message, request.end_message
+        ),
+        importance: 1,
+        episode_type: Some(ARCHIVE_EPISODE_TYPE.to_string()),
+        legacy: 0,
+        created_at: request.now_ms,
+        ..StoredHistorySegment::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HistorySummarizerSideChannelDrainResult {
     pub attempted: usize,
@@ -1429,6 +1510,9 @@ pub struct TruncateOutcome {
     /// No segment survived, so the lineage continuation was cleared with them; a caller that
     /// commits its own meta over the result clears it too.
     pub lineage_reset: bool,
+    /// The archive fold marker this transaction left, `None` once its archive is gone; a caller
+    /// that commits its own meta over the result carries it forward.
+    pub archive_fold_seq: Option<i64>,
 }
 
 pub struct HistorySummarizerPublishRequest<'a> {
@@ -2048,6 +2132,11 @@ pub struct ModuleMeta {
     /// tail-trim point, which advances on a coverage-extending SOFT too).
     #[serde(default)]
     pub folded_history_segment_seq: i64,
+    /// The sequence of the newest archive segment appended above the fold. While it exceeds
+    /// `folded_history_segment_seq`, a transform pass classifies HARD and folds it, so the
+    /// rendered boundary reaches the archive's end only through that HARD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_fold_seq: Option<i64>,
     /// Sequences of the session's `legacy = 1` history_segments, which a decay fold reads by key.
     /// `None` until a fold captures it with one scan. Writers that may add a legacy row clear it
     /// and truncation filters it: extra sequences are harmless, a missing one is not.
@@ -6178,6 +6267,8 @@ type AbandonHistorySummarizerHook =
 #[cfg(any(test, feature = "test-support"))]
 type BeforeMaxHistorySegmentEndReadHook =
     std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnMut(&MemoryStore) + Send>>>>;
+#[cfg(any(test, feature = "test-support"))]
+type BeforeHistoryArchiveHook = std::sync::Mutex<Option<Box<dyn FnOnce(&MemoryStore) + Send>>>;
 
 /// The memory store: one single-writer SQLite handle for the daemon's lifetime.
 struct FacadeAuthorityScope {
@@ -6442,6 +6533,8 @@ pub struct MemoryStore {
     before_max_history_segment_end_read_hook: BeforeMaxHistorySegmentEndReadHook,
     #[cfg(any(test, feature = "test-support"))]
     coverage_snapshot_hook: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    before_history_archive_hook: BeforeHistoryArchiveHook,
     #[cfg(any(test, feature = "test-support"))]
     tag_number_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
@@ -6922,6 +7015,8 @@ impl MemoryStore {
             )),
             #[cfg(any(test, feature = "test-support"))]
             coverage_snapshot_hook: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            before_history_archive_hook: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             tag_number_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -7493,6 +7588,17 @@ impl MemoryStore {
             });
         }
         Ok(())
+    }
+
+    /// Install a one-shot callback that [`Self::publish_history_archive`] runs before its
+    /// transaction, so a test can commit a competing publication between the archive's
+    /// snapshot and its fences.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_before_history_archive_hook(&self, hook: Box<dyn FnOnce(&MemoryStore) + Send>) {
+        *self
+            .before_history_archive_hook
+            .lock()
+            .expect("history archive hook mutex") = Some(hook);
     }
 
     /// Install a one-shot callback immediately before the max-history_segment-end query. It lets
@@ -10965,7 +11071,8 @@ impl MemoryStore {
 
     /// Reads, in one snapshot, only the rows a decay fold can render. `horizon` gets the newest
     /// `pressure_window` non-legacy rows, newest first, and returns how many newest non-legacy
-    /// rows the fold needs. Legacy rows are read by `legacy_seqs`, which must name every legacy
+    /// rows the fold needs. Archive rows render empty and carry no pressure, so neither count
+    /// includes them. Legacy rows are read by `legacy_seqs`, which must name every legacy
     /// row (extras are ignored), or by one scan when `None`; the result returns the exact list.
     /// The scan also refuses a set whose ranges do not strictly increase by sequence with
     /// [`MemoryStoreError::HistorySegmentRangesOutOfOrder`].
@@ -10988,7 +11095,10 @@ impl MemoryStore {
             let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?;
             let mut rows = query_history_segments_tx(
                 conn,
-                "WHERE session_id = ?1 AND legacy <> 1 ORDER BY sequence DESC LIMIT ?2",
+                &format!(
+                    "WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
+                     ORDER BY sequence DESC LIMIT ?2"
+                ),
                 params![session_id, sql_limit(pressure_window)],
             )?;
             let wanted = horizon(&rows);
@@ -10998,8 +11108,11 @@ impl MemoryStore {
             {
                 let older = query_history_segments_tx(
                     conn,
-                    "WHERE session_id = ?1 AND legacy <> 1 AND sequence < ?2
-                     ORDER BY sequence DESC LIMIT ?3",
+                    &format!(
+                        "WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
+                           AND sequence < ?2
+                         ORDER BY sequence DESC LIMIT ?3"
+                    ),
                     params![session_id, last, sql_limit(wanted - rows.len())],
                 )?;
                 rows.extend(older);
@@ -12208,6 +12321,7 @@ impl MemoryStore {
                 row_version: next_version,
                 history_summarizer: reset_meta.history_summarizer,
                 lineage_reset: true,
+                archive_fold_seq: reset_meta.archive_fold_seq,
             })))
         })?;
         match outcome {
@@ -12268,6 +12382,7 @@ impl MemoryStore {
                     row_version: current.max(0) as u64,
                     history_summarizer: meta.history_summarizer,
                     lineage_reset: false,
+                    archive_fold_seq: meta.archive_fold_seq,
                 })));
             }
 
@@ -12328,6 +12443,9 @@ impl MemoryStore {
             if let Some(seqs) = meta.legacy_history_segment_seqs.as_mut() {
                 seqs.retain(|sequence| *sequence <= keep_through_seq);
             }
+            meta.archive_fold_seq = meta
+                .archive_fold_seq
+                .filter(|sequence| *sequence <= keep_through_seq);
             let lineage_reset = surviving_tail.is_none();
             if lineage_reset {
                 meta.forget_lineage_continuation();
@@ -12394,6 +12512,7 @@ impl MemoryStore {
                 row_version: next,
                 history_summarizer: meta.history_summarizer,
                 lineage_reset,
+                archive_fold_seq: meta.archive_fold_seq,
             })))
         })?;
 
@@ -13132,6 +13251,156 @@ impl MemoryStore {
             }
             PublishTxnOutcome::Serde(e) => Err(HistorySummarizerPublishError::Serde(e)),
         }
+    }
+
+    /// Appends one archive segment over `start_message..=end_message` without a model call,
+    /// fenced like [`Self::publish_history_summarizer_chunk`] on the row version, the revert
+    /// epoch, and the segment-set generation. In the same transaction it ends the in-flight
+    /// firing `abandons_firing_seq` names, recording why, advances the publication floor past
+    /// the archive, and marks the archive for the next HARD. The ended firing's later
+    /// publication finds the state idle and is refused; its reservation stays on the idle
+    /// state and is returned for the caller to settle.
+    pub fn publish_history_archive(
+        &self,
+        request: HistoryArchiveRequest<'_>,
+    ) -> Result<HistoryArchiveResult, HistorySummarizerPublishError> {
+        let session_id = request.session_id;
+        let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
+        write.domain_owner("session", session_id, "history_summarizer");
+        write.existing_identity("session_id", session_id)?;
+        let archive = archive_history_segment(&request);
+        let history_segments =
+            prepare_history_segments(&mut write, std::slice::from_ref(&archive))?;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let hook = self
+                .before_history_archive_hook
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook(self);
+            }
+        }
+        let outcome = write.execute(&self.inner, |coordinated| {
+            let tx = coordinated.tx;
+            let outcome =
+                (|| -> rusqlite::Result<Result<HistoryArchiveResult, PublishTxnOutcome>> {
+                    let (current, mut meta) = match fenced_publication_row_tx(
+                        tx,
+                        session_id,
+                        request.expected_row_version,
+                    )? {
+                        Ok(row) => row,
+                        Err(outcome) => return Ok(Err(outcome)),
+                    };
+                    let summarizer = &meta.history_summarizer;
+                    let in_flight = summarizer.state != HistorySummarizerPhase::Idle;
+                    if in_flight != request.abandons_firing_seq.is_some()
+                        || request
+                            .abandons_firing_seq
+                            .is_some_and(|firing_seq| firing_seq != summarizer.firing_seq)
+                    {
+                        return Ok(Err(PublishTxnOutcome::InvalidState(
+                            summarizer.state.as_str().to_string(),
+                        )));
+                    }
+                    if let Some(outcome) = history_publication_fence_tx(
+                        tx,
+                        session_id,
+                        current,
+                        &meta,
+                        request.expected_revert_epoch,
+                        request.history_segment_set_generation,
+                    )? {
+                        return Ok(Err(outcome));
+                    }
+                    meta.publication_floor_ordinal = Some(
+                        meta.publication_floor_ordinal
+                            .unwrap_or(1)
+                            .max(request.end_message.saturating_add(1)),
+                    );
+                    let abandoned_reservation = match request.abandons_firing_seq {
+                        Some(firing_seq) => {
+                            let summarizer = &mut meta.history_summarizer;
+                            summarizer.record_outcome(
+                                summarizer_timeline::FiringOutcome::Abandoned {
+                                    class: summarizer_timeline::AbandonClass::Invalidated,
+                                },
+                            );
+                            let reservation = summarizer.memory_reviewer_reservation.clone();
+                            *summarizer = HistorySummarizerDurableState {
+                                memory_reviewer_reservation: reservation.clone(),
+                                last_abandon: Some(HistorySummarizerAbandon {
+                                    firing_seq,
+                                    reason: HistorySummarizerAbandonReason::WindowArchived,
+                                    abandoned_at_ms: request.now_ms,
+                                }),
+                                ..summarizer.cleared_of_in_flight_firing()
+                            };
+                            reservation
+                        }
+                        None => None,
+                    };
+                    let sequence = next_history_segment_sequence_tx(tx, session_id)?;
+                    meta.archive_fold_seq = Some(sequence);
+                    let meta_json = match published_meta_json(coordinated, &meta)? {
+                        Ok(json) => json,
+                        Err(outcome) => return Ok(Err(outcome)),
+                    };
+                    if let AppendHistorySegmentsTxnOutcome::Overlap {
+                        existing_sequence,
+                        incoming_start_message,
+                        incoming_end_message,
+                    } = append_history_segments_tx(tx, session_id, &history_segments)?
+                    {
+                        return Ok(Err(PublishTxnOutcome::HistorySegmentOverlap {
+                            existing_sequence,
+                            incoming_start_message,
+                            incoming_end_message,
+                        }));
+                    }
+                    let row_version =
+                        commit_published_meta_tx(tx, session_id, current, &meta_json)?;
+                    Ok(Ok(HistoryArchiveResult {
+                        row_version,
+                        sequence,
+                        abandoned_reservation,
+                    }))
+                })()?;
+            Ok(match outcome {
+                Ok(result) => WriteDisposition::Applied(Ok(result)),
+                Err(outcome) => WriteDisposition::Replay(Err(outcome)),
+            })
+        })?;
+        outcome.map_err(|outcome| match outcome {
+            PublishTxnOutcome::CasConflict { found, reason } => {
+                HistorySummarizerPublishError::CasConflict {
+                    expected: request.expected_row_version,
+                    found,
+                    reason,
+                }
+            }
+            PublishTxnOutcome::FenceRejected(reason) => {
+                HistorySummarizerPublishError::FenceRejected { reason }
+            }
+            PublishTxnOutcome::HistorySegmentOverlap {
+                existing_sequence,
+                incoming_start_message,
+                incoming_end_message,
+            } => HistorySummarizerPublishError::HistorySegmentOverlap {
+                existing_sequence,
+                incoming_start_message,
+                incoming_end_message,
+            },
+            PublishTxnOutcome::InvalidState(state) => {
+                HistorySummarizerPublishError::InvalidState { state }
+            }
+            PublishTxnOutcome::Serde(e) => HistorySummarizerPublishError::Serde(e),
+            PublishTxnOutcome::Committed(_) | PublishTxnOutcome::StateMismatch(_) => {
+                unreachable!("the archive transaction returns neither")
+            }
+        })
     }
 
     /// Drain due history_summarizer side-channel work without coupling any target table to another.
@@ -23309,6 +23578,7 @@ mod tests {
                 recent_firings: Vec::new(),
                 counters: Default::default(),
                 pending_eligibility: None,
+                last_abandon: None,
             },
             ..Default::default()
         }
@@ -24466,6 +24736,235 @@ mod tests {
         assert_eq!(
             facts.allowance_bytes, allowance,
             "only the frozen page still holds an allowance"
+        );
+    }
+
+    fn archive_request(
+        expected_row_version: Option<u64>,
+        abandons_firing_seq: Option<u64>,
+        start_message: u64,
+        end_message: u64,
+    ) -> HistoryArchiveRequest<'static> {
+        HistoryArchiveRequest {
+            session_id: "ses",
+            expected_row_version,
+            expected_revert_epoch: 0,
+            history_segment_set_generation: HistorySegmentSetGeneration::default(),
+            abandons_firing_seq,
+            start_message,
+            end_message,
+            start_message_id: "m1#0",
+            end_message_id: "m20#0",
+            now_ms: 900,
+        }
+    }
+
+    /// A revert that keeps the archive keeps its fold marker; one that drops it retires the
+    /// marker, so the ordinary row that later takes its sequence forces no HARD.
+    #[test]
+    fn a_revert_that_drops_the_archive_retires_its_fold_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let archived = store
+            .publish_history_archive(archive_request(Some(version), None, 1, 20))
+            .unwrap();
+        assert_eq!(archived.sequence, 1);
+        store
+            .append_history_segments(
+                "ses",
+                &[StoredHistorySegment {
+                    start_message: 21,
+                    end_message: 30,
+                    end_message_id: "m30#0".into(),
+                    title: "after the archive".into(),
+                    content: "summary".into(),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        let sequences = |store: &MemoryStore| {
+            store
+                .load_history_segments("ses")
+                .unwrap()
+                .iter()
+                .map(|segment| segment.sequence)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sequences(&store), [1, 2]);
+
+        let row_version = store.load("ses").unwrap().row_version;
+        let kept = store
+            .truncate_history_segments_for_revert("ses", 1, row_version)
+            .unwrap();
+        assert_eq!(sequences(&store), [1]);
+        assert_eq!(kept.archive_fold_seq, Some(1));
+        assert_eq!(store.load("ses").unwrap().meta.archive_fold_seq, Some(1));
+
+        let dropped = store
+            .truncate_history_segments_for_revert("ses", 0, Some(kept.row_version))
+            .unwrap();
+        assert!(sequences(&store).is_empty());
+        assert_eq!(dropped.archive_fold_seq, None);
+        assert_eq!(store.load("ses").unwrap().meta.archive_fold_seq, None);
+    }
+
+    /// The archive publication refuses a moved row version, a re-cut session, a moved segment
+    /// set, an overlapping range, and a state that does not match the firing it names, writing
+    /// nothing; a committed archive ends the named firing and keeps its reservation for the
+    /// settle path, advances the floor, marks the archive for the next HARD, and refuses the
+    /// ended firing's publication.
+    #[test]
+    fn the_archive_publication_is_fenced_and_ends_the_in_flight_firing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let reservation = MemoryReviewerReservation {
+            firing_seq: 7,
+            causal_identity: "job".into(),
+            candidate_id: "candidate".into(),
+            payload_digest: "digest".into(),
+            kernel_incarnation: "kernel".into(),
+            queue_deadline_ms: 10_000,
+        };
+        let mut meta = publishing_meta();
+        meta.history_summarizer.memory_reviewer_reservation = Some(reservation.clone());
+        meta.legacy_history_segment_seqs = Some(Vec::new());
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let before = store.load("ses").unwrap();
+        let untouched = |store: &MemoryStore| {
+            assert!(store.load_history_segments("ses").unwrap().is_empty());
+            let now = store.load("ses").unwrap();
+            assert_eq!(
+                (now.row_version, &now.meta),
+                (before.row_version, &before.meta)
+            );
+        };
+
+        let refused = [
+            (archive_request(Some(version + 1), Some(7), 1, 20), "cas"),
+            (
+                HistoryArchiveRequest {
+                    expected_revert_epoch: 1,
+                    ..archive_request(Some(version), Some(7), 1, 20)
+                },
+                "epoch",
+            ),
+            (
+                HistoryArchiveRequest {
+                    history_segment_set_generation: HistorySegmentSetGeneration::new(3),
+                    ..archive_request(Some(version), Some(7), 1, 20)
+                },
+                "generation",
+            ),
+            (archive_request(Some(version), None, 1, 20), "idle required"),
+            (
+                archive_request(Some(version), Some(6), 1, 20),
+                "other firing",
+            ),
+        ];
+        for (request, case) in refused {
+            let error = store.publish_history_archive(request).unwrap_err();
+            let expected = match case {
+                "cas" | "epoch" => {
+                    matches!(error, HistorySummarizerPublishError::CasConflict { .. })
+                }
+                "generation" => {
+                    matches!(error, HistorySummarizerPublishError::FenceRejected { .. })
+                }
+                _ => matches!(error, HistorySummarizerPublishError::InvalidState { .. }),
+            };
+            assert!(expected, "{case}: {error:?}");
+            untouched(&store);
+        }
+
+        let archived = store
+            .publish_history_archive(archive_request(Some(version), Some(7), 1, 20))
+            .unwrap();
+        assert_eq!(archived.sequence, 1);
+        assert_eq!(archived.row_version, version + 1);
+        assert_eq!(archived.abandoned_reservation, Some(reservation.clone()));
+        let loaded = store.load("ses").unwrap();
+        assert_eq!(loaded.row_version, Some(archived.row_version));
+        assert_eq!(loaded.meta.archive_fold_seq, Some(1));
+        assert_eq!(loaded.meta.publication_floor_ordinal, Some(21));
+        assert_eq!(loaded.meta.legacy_history_segment_seqs, Some(Vec::new()));
+        let summarizer = &loaded.meta.history_summarizer;
+        assert_eq!(summarizer.state, HistorySummarizerPhase::Idle);
+        assert_eq!(summarizer.firing_seq, 7);
+        assert_eq!(summarizer.memory_reviewer_reservation, Some(reservation));
+        assert_eq!(
+            summarizer.last_abandon,
+            Some(HistorySummarizerAbandon {
+                firing_seq: 7,
+                reason: HistorySummarizerAbandonReason::WindowArchived,
+                abandoned_at_ms: 900,
+            })
+        );
+        assert_eq!(
+            summarizer
+                .recent_firings
+                .last()
+                .and_then(|firing| firing.outcome),
+            Some(summarizer_timeline::FiringOutcome::Abandoned {
+                class: summarizer_timeline::AbandonClass::Invalidated,
+            })
+        );
+        let segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(segments.len(), 1);
+        let archive = &segments[0];
+        assert_eq!(
+            (archive.start_message, archive.end_message, archive.legacy),
+            (1, 20, 0)
+        );
+        assert_eq!(archive.episode_type.as_deref(), Some(ARCHIVE_EPISODE_TYPE));
+        assert_eq!(archive.end_message_id, "m20#0");
+
+        let stale = store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+            session_id: "ses",
+            expected_row_version: loaded.row_version,
+            expected_revert_epoch: 0,
+            predicate: &publish_predicate(),
+            project_path: "git:proj",
+            history_segments: &[publish_history_segment()],
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 21,
+            chunk_transcript: None,
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: None,
+            published_at_ms: 0,
+        });
+        assert!(
+            matches!(
+                stale,
+                Err(HistorySummarizerPublishError::InvalidState { .. })
+            ),
+            "{stale:?}"
+        );
+
+        let overlap = store
+            .publish_history_archive(HistoryArchiveRequest {
+                history_segment_set_generation: HistorySegmentSetGeneration::new(1),
+                ..archive_request(loaded.row_version, None, 15, 30)
+            })
+            .unwrap_err();
+        assert!(
+            matches!(
+                overlap,
+                HistorySummarizerPublishError::HistorySegmentOverlap { .. }
+            ),
+            "{overlap:?}"
+        );
+        assert_eq!(store.load_history_segments("ses").unwrap(), segments);
+        let now = store.load("ses").unwrap();
+        assert_eq!(
+            (now.row_version, &now.meta),
+            (loaded.row_version, &loaded.meta)
         );
     }
 
