@@ -123,6 +123,8 @@ pub struct DaemonConfig {
     /// Per-model TTL overrides use exact, bare, dash-stripped, provider-wildcard, then default matching.
     pub cache_ttl_by_model: std::collections::BTreeMap<String, String>,
     pub admission: ConfigAdmission,
+    /// The user-tier file this resolution read, or would read when it does not exist.
+    pub user_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -158,6 +160,7 @@ impl Default for DaemonConfig {
             cache_ttl: "5m".to_string(),
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             admission: ConfigAdmission::Admitted,
+            user_config_path: None,
         }
     }
 }
@@ -358,6 +361,7 @@ impl ConfigCache {
 
         let (mut effective, mut warnings) =
             merge_tiers_with_warnings(user.as_ref(), project.as_ref());
+        effective.user_config_path = user_path.map(Path::to_path_buf);
         for tier in [&self.user, &self.project] {
             warnings.extend(tier.warning.iter().cloned());
         }
@@ -2625,6 +2629,7 @@ mod fold_authority_parity {
             assert_eq!(
                 DaemonConfig {
                     admission: ConfigAdmission::Admitted,
+                    user_config_path: None,
                     ..never_admitted
                 },
                 DaemonConfig::default(),

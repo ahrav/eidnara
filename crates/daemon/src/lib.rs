@@ -18,6 +18,11 @@ pub mod dispatch;
 pub(crate) mod divergence;
 pub mod edit_receipts;
 pub mod edit_recipe;
+pub mod fold_authority;
+use fold_authority::FoldAuthorityIntent;
+
+/// The no-fire reason of a session whose fold authority is the harness's native compaction.
+const NATIVE_AUTHORITY: &str = "native_authority";
 pub mod embedding_dispatch;
 pub mod embedding_publication;
 pub mod embedding_supervisor;
@@ -244,8 +249,42 @@ pub const OBSERVATIONAL_HARNESS: &str = "cli";
 
 #[derive(Default)]
 pub(crate) struct RouteBindings {
-    by_route: HashMap<RouteHandle, (u64, SessionBinding)>,
+    by_route: HashMap<RouteHandle, BoundRoute>,
     next_bind_seq: u64,
+}
+
+struct BoundRoute {
+    seq: u64,
+    binding: SessionBinding,
+    first_pass_settled: bool,
+}
+
+/// `BindingAuthority` records a pass's fold-authority intent and the bind sequence of the
+/// binding the pass read.
+#[derive(Debug, Clone, Copy, Default)]
+struct BindingAuthority {
+    bind_seq: u64,
+    intent: FoldAuthorityIntent,
+}
+
+struct BindingFence<'a> {
+    bindings: &'a Mutex<RouteBindings>,
+    bind_seq: u64,
+}
+
+impl fold_authority::SiblingFence for BindingFence<'_> {
+    fn without_sibling(
+        &self,
+        change: &mut dyn FnMut() -> fold_authority::AuthorityReset,
+    ) -> Option<fold_authority::AuthorityReset> {
+        let bindings = self.bindings.lock().expect("bindings mutex");
+        bindings
+            .by_route
+            .values()
+            .find(|route| route.seq == self.bind_seq)
+            .is_some_and(|route| !bindings.has_sibling(route))
+            .then(change)
+    }
 }
 
 impl RouteBindings {
@@ -255,20 +294,61 @@ impl RouteBindings {
         let seq = self.next_bind_seq;
         self.next_bind_seq += 1;
         self.by_route
-            .insert(channel, (seq, binding))
-            .map(|(_, previous)| previous)
+            .insert(
+                channel,
+                BoundRoute {
+                    seq,
+                    binding,
+                    first_pass_settled: false,
+                },
+            )
+            .map(|previous| previous.binding)
     }
 
     fn remove(&mut self, channel: &RouteHandle) -> Option<SessionBinding> {
-        self.by_route.remove(channel).map(|(_, binding)| binding)
+        self.by_route.remove(channel).map(|route| route.binding)
+    }
+
+    fn fold_authority_intent(&self, channel: RouteHandle) -> Option<BindingAuthority> {
+        let route = self.by_route.get(&channel)?;
+        Some(BindingAuthority {
+            bind_seq: route.seq,
+            intent: FoldAuthorityIntent {
+                eidnara_folds: route.binding.config.eidnara_folds(),
+                admitted: route.binding.config.admission == config::ConfigAdmission::Admitted,
+                sibling_bound: self.has_sibling(route),
+                first_pass: !route.first_pass_settled,
+            },
+        })
+    }
+
+    /// Whether another participating binding holds `route`'s session.
+    fn has_sibling(&self, route: &BoundRoute) -> bool {
+        self.by_route.values().any(|other| {
+            other.seq != route.seq
+                && other.binding.session == route.binding.session
+                && !other.binding.is_observational()
+        })
+    }
+
+    /// Later passes of the binding at `bind_seq` report a disagreeing authority as pending
+    /// until the next bind.
+    fn settle_first_pass(&mut self, bind_seq: u64) {
+        if let Some(route) = self
+            .by_route
+            .values_mut()
+            .find(|route| route.seq == bind_seq)
+        {
+            route.first_pass_settled = true;
+        }
     }
 
     fn get(&self, channel: &RouteHandle) -> Option<&SessionBinding> {
-        self.by_route.get(channel).map(|(_, binding)| binding)
+        self.by_route.get(channel).map(|route| &route.binding)
     }
 
     fn values(&self) -> impl Iterator<Item = &SessionBinding> {
-        self.by_route.values().map(|(_, binding)| binding)
+        self.by_route.values().map(|route| &route.binding)
     }
 
     fn clear(&mut self) {
@@ -279,8 +359,8 @@ impl RouteBindings {
     fn participating(&self) -> impl Iterator<Item = (u64, &SessionBinding)> {
         self.by_route
             .values()
-            .filter(|(_, binding)| !binding.is_observational())
-            .map(|(seq, binding)| (*seq, binding))
+            .filter(|route| !route.binding.is_observational())
+            .map(|route| (route.seq, &route.binding))
     }
 
     /// The newest participating binding on `route_root`.
@@ -3142,6 +3222,7 @@ struct PassIntake {
     store: Arc<MemoryStore>,
     parsed: TransformRequest,
     binding: SessionBinding,
+    fold_authority: BindingAuthority,
     lineage_root: PathBuf,
     pass_load: Result<ModuleMeta, MemoryStoreError>,
     snapshot_generation: u64,
@@ -3155,6 +3236,7 @@ struct PassEnv {
     store: Arc<MemoryStore>,
     parsed: Arc<TransformRequest>,
     binding: SessionBinding,
+    fold_authority: BindingAuthority,
     route_project_root: String,
     project_path: String,
     note_project_path: String,
@@ -6388,6 +6470,44 @@ impl HandlerCore {
         }
     }
 
+    /// The applied fold authority and any pending change, as `session.status` reports them.
+    fn status_fold_authority(
+        &self,
+        store: &MemoryStore,
+        session_id: &str,
+        channel: RouteHandle,
+    ) -> String {
+        let intent = self
+            .bindings
+            .lock()
+            .expect("bindings mutex")
+            .fold_authority_intent(channel)
+            .unwrap_or_default()
+            .intent;
+        let record = match store.load_fold_authority(session_id) {
+            Ok(record) => record,
+            Err(error) => return format!("fold authority unknown ({error})"),
+        };
+        let plan = fold_authority::plan(record, intent);
+        let applied = match record.applied {
+            Some(applied) => fold_authority::authority_name(applied).to_string(),
+            None => format!(
+                "unadopted (intent {})",
+                fold_authority::authority_name(intent.eidnara_folds)
+            ),
+        };
+        let pending = plan
+            .pending
+            .or(plan.change.map(|target| fold_authority::PendingAuthority {
+                target,
+                reason: fold_authority::PendingReason::LaterBind,
+            }));
+        match pending {
+            Some(pending) => format!("fold authority {applied}; {}", pending.describe()),
+            None => format!("fold authority {applied}"),
+        }
+    }
+
     fn handle_session_status_value(
         &self,
         channel: RouteHandle,
@@ -6551,9 +6671,15 @@ impl HandlerCore {
                 "computed_at_ms": baseline.computed_at_ms,
             })
         });
+        let fold_authority = self.status_fold_authority(&store, &session_id, channel);
+        let user_config = binding
+            .config
+            .user_config_path
+            .as_deref()
+            .map_or_else(|| "none".to_string(), |path| path.display().to_string());
         let summary = sanitize_status_text(
             &format!(
-                "session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}, {} pending {}, {} {}, pending m1 delta {}, last history_summarizer: {history_summarizer}, {publish_health}, surface {surface}",
+                "{fold_authority}; user config {user_config}; session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}, {} pending {}, {} {}, pending m1 delta {}, last history_summarizer: {history_summarizer}, {publish_health}, surface {surface}",
                 history_segment_count,
                 plural_word(history_segment_count, "history_segment"),
                 pending_drop_count,
@@ -6911,6 +7037,20 @@ impl HandlerCore {
                 };
             }
         };
+        let eidnara_folds = entry_state
+            .meta
+            .applied_eidnara_folds(!entry_state.meta.block_identity_by_mid.is_empty())
+            .unwrap_or_else(|| binding.config.eidnara_folds());
+        if !eidnara_folds {
+            return respond(json!({
+                "ok": false,
+                "disposition": "failed",
+                "reason": NATIVE_AUTHORITY,
+                "detail": "the session's fold authority is OpenCode's native compaction",
+                "summary": "No summarizer model folds this session: OpenCode's native compaction does. Configure a summarizer model to use /eidnara-wrapup.",
+                "rounds": 0,
+            }));
+        }
         let entry_now = now_ms();
         if let Some(until) = entry_state.meta.history_summarizer.failure_backoff_at_ms
             && until > entry_now
@@ -8415,10 +8555,17 @@ impl HandlerCore {
         ) {
             self.spawn_tracked_task(checkpoint.run());
         }
+        let fold_authority = self
+            .bindings
+            .lock()
+            .expect("bindings mutex")
+            .fold_authority_intent(channel)
+            .unwrap_or_default();
         let intake = PassIntake {
             store,
             parsed,
             binding,
+            fold_authority,
             lineage_root,
             pass_load,
             snapshot_generation: 0,
@@ -8504,18 +8651,17 @@ impl HandlerCore {
             Ok(pass) => pass,
             Err(outcome) => return UnitOutcome::Terminal(outcome),
         };
+        if pass.result.fold_authority.settles_first_pass {
+            self.bindings
+                .lock()
+                .expect("bindings mutex")
+                .settle_first_pass(env.fold_authority.bind_seq);
+        }
         let emergency = pass.result.scheduler_pass == scheduler::PassDecision::Emergency95;
         let action = if env.parsed.is_subagent {
-            PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
-                fired: false,
-                started: None,
-                reason: Some("subagent_session".to_string()),
-                no_fire: Some("subagent_session".to_string()),
-                state: "disabled".to_string(),
-                progress: None,
-                last_failure: None,
-                project_memory: None,
-            })
+            PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics::disabled(
+                "subagent_session",
+            ))
         } else {
             self.prepare_history_summarizer(&env, &mut pass)
         };
@@ -8692,6 +8838,7 @@ impl HandlerCore {
             store,
             mut parsed,
             binding,
+            fold_authority,
             lineage_root,
             pass_load,
             snapshot_generation,
@@ -8728,6 +8875,7 @@ impl HandlerCore {
             store,
             parsed,
             binding,
+            fold_authority,
             route_project_root,
             project_path,
             note_project_path,
@@ -8761,6 +8909,7 @@ impl HandlerCore {
             store,
             parsed,
             binding,
+            fold_authority,
             route_project_root,
             project_path,
             note_project_path,
@@ -8794,7 +8943,15 @@ impl HandlerCore {
             user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
             now_ms: *pass_now,
             execute_threshold_percentage: scheduler_execute_threshold(parsed, &binding.config),
-            compaction_enabled: binding.config.eidnara_folds(),
+            fold_authority: FoldAuthorityIntent {
+                first_pass: fold_authority.intent.first_pass
+                    && !matches!(pass_state, PassState::Reload),
+                ..fold_authority.intent
+            },
+            sibling_fence: &BindingFence {
+                bindings: &self.bindings,
+                bind_seq: fold_authority.bind_seq,
+            },
             smart_drops: binding.config.smart_drops,
             // Claude Code omits the value, so the host resolves the request model and records whether lookup matched.
             cache_ttl: resolved_cache_ttl.value,
@@ -8966,6 +9123,12 @@ impl HandlerCore {
         env: &PassEnv,
         pass: &mut TransformedPass,
     ) -> PreparedHistorySummarizerAction {
+        // Under native folds the harness folds; no fold work runs and no no-fire is recorded.
+        if !pass.result.fold_authority.eidnara_folds {
+            return PreparedHistorySummarizerAction::Complete(
+                HistorySummarizerDiagnostics::disabled(NATIVE_AUTHORITY),
+            );
+        }
         self.prepare_history_summarizer_fire(
             Arc::clone(&env.store),
             pass.result.served_request.as_deref().unwrap_or(&env.parsed),
@@ -9025,6 +9188,14 @@ impl HandlerCore {
         let lineage_anchor_mid = result.lineage_anchor_mid;
         let tag_numbers = result.tag_numbers;
         let mut response = result.response;
+        let mut diagnostics = diagnostics;
+        if let Some(pending) = result.fold_authority.pending {
+            let pending = pending.describe();
+            diagnostics.reason = Some(match diagnostics.reason.take() {
+                Some(reason) => format!("{reason}; {pending}"),
+                None => pending,
+            });
+        }
         response.history_summarizer = Some(diagnostics);
         let Some(output_revision) = self.output_revisions.allocate() else {
             return revision_exhausted_error();
@@ -17571,6 +17742,8 @@ impl Handler {
 mod tests {
     #[path = "transform_unit/tests.rs"]
     mod blocking_unit_tests;
+    #[path = "fold_authority_handler_tests.rs"]
+    mod fold_authority_handler_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
     #[path = "transform/revision_3.rs"]
@@ -23610,6 +23783,7 @@ mod tests {
             smart_drops: false,
             cache_ttl: "5m".to_string(),
             admission: crate::config::ConfigAdmission::Admitted,
+            user_config_path: None,
         }
     }
 
@@ -24395,6 +24569,32 @@ mod tests {
         assert_eq!(response["status"], "ok", "{response}");
     }
 
+    fn lineage_summary_user() -> IngressMessage {
+        let summary = "This session is being continued from a previous conversation.\n\nSummary:\nDurable summary alpha\n\nFull transcript: /tmp/session.jsonl";
+        IngressMessage {
+            mid: "lineage-summary".to_string(),
+            ordinal: 1,
+            ck: WireMessage::from_parts(
+                "user",
+                vec![
+                    WireBlock::bare(BlockKind::Text {
+                        text: "<system-reminder>Today's date: 2026-08-10</system-reminder>"
+                            .to_string(),
+                    }),
+                    WireBlock::bare(BlockKind::Text {
+                        text: summary.to_string(),
+                    }),
+                ],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta {
+                    harness_id: Some("lineage-summary".to_string()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn lineage_descent_on_the_whole_array_forces_full_projection() {
         let target = "projection-lineage-target";
@@ -24430,29 +24630,7 @@ mod tests {
             )
             .unwrap();
         let source_epoch = store.load(source).unwrap().meta.revert_epoch;
-        let summary = "This session is being continued from a previous conversation.\n\nSummary:\nDurable summary alpha\n\nFull transcript: /tmp/session.jsonl";
-        let compaction_user = IngressMessage {
-            mid: "lineage-summary".to_string(),
-            ordinal: 1,
-            ck: WireMessage::from_parts(
-                "user",
-                vec![
-                    WireBlock::bare(BlockKind::Text {
-                        text: "<system-reminder>Today's date: 2026-08-10</system-reminder>"
-                            .to_string(),
-                    }),
-                    WireBlock::bare(BlockKind::Text {
-                        text: summary.to_string(),
-                    }),
-                ],
-                None,
-                ProviderExtras::new(),
-                HarnessMeta {
-                    harness_id: Some("lineage-summary".to_string()),
-                    ..Default::default()
-                },
-            ),
-        };
+        let compaction_user = lineage_summary_user();
         let initial_messages = vec![
             compaction_user,
             wire_with_role("lineage-tail", 2, "assistant", "continued answer"),
@@ -38270,7 +38448,8 @@ mod tests {
                 temporal_awareness: true,
                 now_ms: now_ms(),
                 execute_threshold_percentage: 65.0,
-                compaction_enabled: true,
+                fold_authority: FoldAuthorityIntent::default(),
+                sibling_fence: &fold_authority::NoSiblings,
                 smart_drops: false,
                 cache_ttl: "5m".to_string(),
                 cache_ttl_provenance: config::CacheTtlProvenance::Default,

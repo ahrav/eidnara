@@ -707,3 +707,68 @@ fn every_pass_read_is_bounded_independent_of_history_size() {
         memories,
     );
 }
+
+fn measure_native(rows: usize) -> Measured {
+    let dir = tempfile::tempdir().expect("store dir");
+    let store = Arc::new(store(dir.path()));
+    seed_overlays(&store, SESSION, rows);
+    store
+        .execute_tag_sql_for_test(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {rows})
+             INSERT INTO tags
+                 (session_id, tag_number, block_id, kind, token_count, created_at_ms, source_bytes)
+             SELECT '{SESSION}', i, 'history-' || i || '#0', 'message', 1, 1, X'61' FROM n;"
+        ))
+        .expect("seed tags");
+    let empty = store.load(SESSION).expect("load empty");
+    let native = memory_store::ModuleMeta {
+        eidnara_folds: Some(false),
+        ..empty.meta.clone()
+    };
+    store
+        .commit(SESSION, None, &empty.core, &native)
+        .expect("seed the native authority");
+    let mut ctx = pctx("git:read-bound", "/nonexistent-docs", 1_700_000_000_000);
+    ctx.fold_authority.eidnara_folds = false;
+    let run = |request: &TransformRequest| {
+        let request = crate::transform::tests::resolved(&store, request);
+        transform_with_projection_cached(&store, &request, &ctx).expect("native pass");
+    };
+    let mut phases = Vec::new();
+    for (phase, request) in [
+        ("native first", first_request(100, "cfg0")),
+        ("native steady", first_request(100, "cfg0")),
+        ("native HARD", first_request(100, "cfg1")),
+    ] {
+        store.start_statement_work_ledger();
+        run(&request);
+        phases.push((phase, totals(phase, rows, &store.take_statement_work())));
+    }
+    assert!(
+        store
+            .load(SESSION)
+            .unwrap()
+            .meta
+            .block_identity_by_mid
+            .is_empty()
+    );
+    phases
+}
+
+#[test]
+fn native_pass_reads_are_bounded_independent_of_stored_rows() {
+    let small = measure_native(100);
+    let large = measure_native(5_000);
+    report("native", "rows=100", &small);
+    report("native", "rows=5000", &large);
+    for (phase, totals) in small.iter().chain(&large) {
+        assert!(
+            !totals.contains_key(UNCLASSIFIED),
+            "{phase} ran a statement no inventory row names"
+        );
+        for row in ["m0 segments", "m1 segments", "summarizer assembly"] {
+            assert!(!totals.contains_key(row), "{phase} read {row}");
+        }
+    }
+    assert_same("native", &small, &large, |_| false);
+}

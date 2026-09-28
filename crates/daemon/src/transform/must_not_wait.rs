@@ -268,7 +268,7 @@ fn explicit_flush_on_the_additive_only_path_reports_m1_delta() {
     let dir = tempfile::tempdir().unwrap();
     let s = store(dir.path());
     let mut ctx = live_run("/nonexistent-docs", 0);
-    ctx.compaction_enabled = false;
+    ctx.fold_authority.eidnara_folds = false;
     let messages = vec![item("a", 1, "x")];
     transform(&s, &quiet(&messages, "cfg0"), &ctx).unwrap();
     s.arm_soft_refresh(SESSION).unwrap();
