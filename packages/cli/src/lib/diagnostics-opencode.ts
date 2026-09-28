@@ -528,13 +528,13 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<Diagnosti
     }
     // With `enabled: false` the plugin skips every hook, so DCP and the OMO
     // hooks are not conflicts; the doctor skips this detector in that mode too.
-    // Without a resolved authority the native-folds warning has no basis, so it is not reported.
+    // The native-folds warning and its repair targets assume a resolved authority.
     const authorityKnown = foldAuthority.kind !== "unresolved";
-    const reasons = eidnaraEnabled
-        ? [...conflictResult.reasons, ...conflictResult.unresolved].filter(
-              (reason) => authorityKnown || reason !== NO_FOLD_AUTHORITY_REASON,
-          )
-        : [];
+    const reasons = !eidnaraEnabled
+        ? []
+        : authorityKnown
+          ? [...conflictResult.reasons, ...conflictResult.unresolved]
+          : conflictResult.reasons.filter((reason) => reason !== NO_FOLD_AUTHORITY_REASON);
     const disposition =
         !eidnaraEnabled || (!authorityKnown && conflictResult.disposition === "warn")
             ? "none"

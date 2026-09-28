@@ -612,7 +612,10 @@ export function loadProjectTierAdmission(directory: string): ConfigAdmission {
     if (detected.format === "none") return { status: "admitted" };
     const loaded = loadConfigFileDetailed(detected.path, "project");
     try {
-        if (loaded) assertKnownConfigKeys(loaded.config);
+        if (loaded) {
+            dropRemovedConfigKeys(loaded.config);
+            assertKnownConfigKeys(loaded.config);
+        }
     } catch (error) {
         return {
             status: "unresolved",

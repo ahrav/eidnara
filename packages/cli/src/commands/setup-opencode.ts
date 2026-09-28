@@ -607,7 +607,9 @@ export async function runSetup(
         context_researcherModel,
         claudeMax,
     });
-    const authority = foldAuthorityOf(loadUserTierConfigText(paths.eidnaraConfig, proposal));
+    const proposed = loadUserTierConfigText(paths.eidnaraConfig, proposal);
+    const authority = foldAuthorityOf(proposed);
+    const enabled = proposed.config.enabled !== false;
     log.info(`Fold authority: ${describeFoldAuthority(authority)}`);
     const projectAdmission = loadProjectTierAdmission(process.cwd());
     const rejection =
@@ -626,7 +628,7 @@ export async function runSetup(
     }
 
     const dcpDecision: DcpDecision =
-        dryRun || !modes.enabled
+        dryRun || !enabled
             ? "absent"
             : await resolveDcpConflictBeforeSetup(
                   paths.opencodeConfig,
@@ -635,7 +637,7 @@ export async function runSetup(
               );
     const removeDcp = dcpDecision === "remove";
     const eidnaraFolds = authority.kind === "eidnara";
-    const compactionTarget: CompactionPatch = !modes.enabled
+    const compactionTarget: CompactionPatch = !enabled
         ? {}
         : eidnaraFolds
           ? EIDNARA_FOLDS_COMPACTION
@@ -644,7 +646,7 @@ export async function runSetup(
     let conflictFix: ConflictResult | null = null;
     // A declined fix covers the native compaction flags too; the writer must not apply them anyway.
     let keepNativeCompaction = false;
-    if (hadExistingSetup && modes.enabled) {
+    if (hadExistingSetup && enabled) {
         const detected = detectConflicts(process.cwd(), { compactionEnabled: eidnaraFolds });
         const conflicts = dcpDecision === "keep" ? withoutDcpConflict(detected) : detected;
         if (conflicts.disposition !== "none") {
@@ -713,6 +715,16 @@ export async function runSetup(
             `${paths.eidnaraConfig} changed while setup was running; setup wrote nothing so that edit is kept.`,
         );
         io.outro("Setup stopped — rerun setup to build a proposal from the current file.");
+        return 1;
+    }
+    const finalProjectAdmission = dryRun
+        ? projectAdmission
+        : loadProjectTierAdmission(process.cwd());
+    if (finalProjectAdmission.status === "unresolved") {
+        log.error(
+            `Setup edits no host setting because the project Eidnara config does not load: ${finalProjectAdmission.reason}`,
+        );
+        io.outro("Setup stopped — fix the Eidnara config and rerun setup.");
         return 1;
     }
     if (!dryRun) {
@@ -796,7 +808,7 @@ export async function runSetup(
         // The editor refuses some parseable files (duplicate keys, for one), so an accepted repair
         // can write nothing; re-detection reports what the files still hold.
         if (
-            modes.enabled &&
+            enabled &&
             reportRemainingConflicts(process.cwd(), eidnaraFolds, {
                 warn: log.warn,
                 message: log.message,

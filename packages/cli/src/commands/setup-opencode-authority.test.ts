@@ -36,7 +36,7 @@ class ScriptedPrompts implements PromptIO {
     constructor(
         private readonly confirms: boolean[],
         private readonly selections: string[],
-        private readonly beforeConfirm: (message: string) => void = () => {},
+        private readonly beforePrompt: (message: string) => void = () => {},
     ) {}
     readonly log = {
         info: (m: string) => this.messages.push(`info:${m}`),
@@ -59,7 +59,7 @@ class ScriptedPrompts implements PromptIO {
         return { start() {}, stop() {}, message() {} };
     }
     async confirm(message: string): Promise<boolean> {
-        this.beforeConfirm(message);
+        this.beforePrompt(message);
         const answer = this.confirms.shift();
         if (answer === undefined) throw new Error(`unexpected confirm: ${message}`);
         return answer;
@@ -68,6 +68,7 @@ class ScriptedPrompts implements PromptIO {
         throw new Error(`unexpected text: ${message}`);
     }
     async selectOne(message: string, options: SelectOption[]): Promise<string> {
+        this.beforePrompt(message);
         const value = this.selections.shift();
         if (value === undefined || !options.some((option) => option.value === value)) {
             throw new Error(`unexpected select: ${message} -> ${value}`);
@@ -224,6 +225,36 @@ describe("runSetup derives the fold authority from the proposed document", () =>
         expect(readJson(eidnaraConfig)).toEqual({ language: "fr" });
         expect(readJson(opencodeConfig).compaction).toEqual({ auto: false });
         expect(prompts.transcript()).toContain("changed while setup was running");
+    });
+
+    it("a project edit made while a prompt is open stops setup before any write", async () => {
+        writeFileSync(opencodeConfig, JSON.stringify({ compaction: { auto: false } }));
+        const project = process.cwd();
+        const prompts = new ScriptedPrompts([false, false, true], ["remove"], (message) => {
+            if (message.startsWith("Apply automatic conflict fixes")) {
+                mkdirSync(join(project, ".eidnara"));
+                writeFileSync(
+                    join(project, ".eidnara", "eidnara.jsonc"),
+                    JSON.stringify({ compaction: { bogus: true } }),
+                );
+            }
+        });
+        expect(await runSetup(false, { io: prompts })).toBe(1);
+
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: false });
+        expect(existsSync(eidnaraConfig)).toBe(false);
+        expect(prompts.transcript()).toContain("the project Eidnara config does not load");
+    });
+
+    it("enablement follows the proposal when the file changes before it is built", async () => {
+        writeFileSync(opencodeConfig, JSON.stringify({ compaction: { auto: false } }));
+        writeFileSync(eidnaraConfig, JSON.stringify({ enabled: false }));
+        const prompts = new ScriptedPrompts([false, false, true], ["remove"], (message) => {
+            if (message === "History summarizer") writeFileSync(eidnaraConfig, "{}");
+        });
+        expect(await runSetup(false, { io: prompts })).toBe(0);
+
+        expect(readJson(opencodeConfig).compaction).toEqual({ auto: true });
     });
 
     it("a project tier that stops the plugin blocks every host edit", async () => {
