@@ -2288,20 +2288,20 @@ pub struct ModuleMeta {
 impl ModuleMeta {
     /// A row written before `eidnara_folds` existed holds coordinates only Eidnara folding
     /// builds when it carries any of these; such a row applies Eidnara folds until it adopts.
-    pub fn has_fold_artifacts(&self, has_stored_identity: bool) -> bool {
+    /// Stored block identities are not an artifact: a row that no fold touched can hold them.
+    pub fn has_fold_artifacts(&self) -> bool {
         fold_artifacts_present(
             self.coverage_ordinal.is_some(),
             self.folded_history_segment_seq,
             self.history_summarizer.state == HistorySummarizerPhase::Idle,
-            has_stored_identity,
         )
     }
 
     /// The authority a pass applies: the adopted value, else Eidnara for a row that carries
     /// fold artifacts, else none yet.
-    pub fn applied_eidnara_folds(&self, has_stored_identity: bool) -> Option<bool> {
+    pub fn applied_eidnara_folds(&self) -> Option<bool> {
         self.eidnara_folds
-            .or_else(|| self.has_fold_artifacts(has_stored_identity).then_some(true))
+            .or_else(|| self.has_fold_artifacts().then_some(true))
     }
 
     /// The highest history_segment sequence the m0 and m1 watermarks record.
@@ -5856,9 +5856,8 @@ fn fold_artifacts_present(
     has_coverage: bool,
     folded_history_segment_seq: i64,
     summarizer_idle: bool,
-    has_stored_identity: bool,
 ) -> bool {
-    has_coverage || folded_history_segment_seq > 0 || !summarizer_idle || has_stored_identity
+    has_coverage || folded_history_segment_seq > 0 || !summarizer_idle
 }
 
 /// The fields [`ModuleMeta::applied_eidnara_folds`] and the quiescence check read, by SQL JSON
@@ -5866,7 +5865,6 @@ fn fold_artifacts_present(
 const FOLD_AUTHORITY_SELECT: &str = "SELECT row_version, json_type(meta, '$.eidnara_folds'), \
      coalesce(json_type(meta, '$.coverage_ordinal'), 'null') != 'null', \
      coalesce(meta ->> '$.folded_history_segment_seq', 0), meta ->> '$.history_summarizer.state', \
-     EXISTS(SELECT 1 FROM block_identities WHERE session_id = ?1), \
      EXISTS(SELECT 1 FROM history_summarizer_pending_publications WHERE session_id = ?1) \
      FROM cache_state WHERE session_id = ?1";
 
@@ -12102,13 +12100,11 @@ impl MemoryStore {
                         r.get::<_, i64>(3)?,
                         r.get::<_, Option<String>>(4)?,
                         r.get::<_, bool>(5)?,
-                        r.get::<_, bool>(6)?,
                     ))
                 })
                 .optional()
         })?;
-        let Some((version, adopted, has_coverage, folded_seq, state, has_identity, pending)) = row
-        else {
+        let Some((version, adopted, has_coverage, folded_seq, state, pending)) = row else {
             return Ok(FoldAuthorityRecord {
                 row_version: None,
                 applied: None,
@@ -12127,8 +12123,7 @@ impl MemoryStore {
             }
         };
         let summarizer_idle = state.as_deref().is_none_or(|state| state == "idle");
-        let artifacts =
-            fold_artifacts_present(has_coverage, folded_seq, summarizer_idle, has_identity);
+        let artifacts = fold_artifacts_present(has_coverage, folded_seq, summarizer_idle);
         Ok(FoldAuthorityRecord {
             row_version: Some(version as u64),
             applied: adopted.or(artifacts.then_some(true)),
@@ -26788,6 +26783,29 @@ mod tests {
             store.load_fold_authority("ses"),
             Err(MemoryStoreError::Serde(_))
         ));
+    }
+
+    #[test]
+    fn a_legacy_row_with_only_stored_identities_carries_no_fold_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = ModuleMeta::default();
+        meta.block_identity_by_mid.insert(
+            "m1".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "fp-m1".to_string(),
+            }],
+        );
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let loaded = store.load("ses").unwrap();
+        assert!(!loaded.meta.block_identity_by_mid.is_empty());
+
+        let record = store.load_fold_authority("ses").unwrap();
+        assert_eq!((record.applied, record.adopted), (None, None));
+        assert_eq!(loaded.meta.applied_eidnara_folds(), None);
     }
 
     #[test]

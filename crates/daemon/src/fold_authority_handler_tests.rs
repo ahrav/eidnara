@@ -322,9 +322,15 @@ async fn an_ordinary_recomp_reset_preserves_the_adopted_authority() {
 async fn legacy_rows_adopt_by_their_fold_artifacts() {
     let producer = Arc::new(ProducerState::default());
     let (handler, store, _dir, project) = handler_with_store(producer, default_test_config());
+    let _ = call_transform(&handler, big_messages()).await;
+    wait_for_idle(&store).await;
     let _ = quiet_transform(&handler, big_messages()).await;
     let folded = store.load("ses").unwrap();
     assert!(!folded.meta.block_identity_by_mid.is_empty());
+    assert!(
+        folded.meta.has_fold_artifacts(),
+        "the folded row carries fold coordinates"
+    );
     let mut legacy = folded.meta.clone();
     legacy.eidnara_folds = None;
     store
@@ -359,6 +365,37 @@ async fn legacy_rows_adopt_by_their_fold_artifacts() {
         stored_authority(&store),
         Some(false),
         "no artifacts adopt the binding"
+    );
+
+    // A legacy row that holds block identities and no fold coordinates.
+    let (handler, store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    bind_with(&handler, &project, 7, native_config());
+    let _ = call_transform(&handler, big_messages()).await;
+    let additive = store.load("ses").unwrap();
+    let mut legacy = additive.meta.clone();
+    legacy.eidnara_folds = None;
+    legacy.block_identity_by_mid = folded.meta.block_identity_by_mid.clone();
+    store
+        .commit("ses", additive.row_version, &additive.core, &legacy)
+        .unwrap();
+    bind_with(&handler, &project, 7, native_config());
+    let mut appended = big_messages();
+    appended.push(ck("m81", 81, "turn 81"));
+    let response = call_transform(&handler, appended).await;
+    assert_eq!(
+        stored_authority(&store),
+        Some(false),
+        "stored identities alone adopt the binding"
+    );
+    assert_eq!(
+        response["history_summarizer"]["no_fire"], "native_authority",
+        "{response}"
+    );
+    assert_eq!(
+        store.load("ses").unwrap().meta.revert_epoch,
+        additive.meta.revert_epoch,
+        "adoption over the legacy row runs no authority reset"
     );
 }
 
@@ -629,6 +666,48 @@ async fn an_emergency_rerun_after_publication_keeps_the_change_pending() {
         status_summary(&handler, 7)
             .await
             .contains("fold authority pending native"),
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_pass_whose_route_is_unbound_while_it_waits_keeps_its_binding_intent() {
+    let session = "authority-unbound-wait";
+    let (handler, store, _dir, project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let mut bound = binding(project.to_str().unwrap(), session);
+    bound.config = native_config();
+    handler.bind_route(test_route(8), bound);
+    let units = Arc::clone(&handler.transform_units)
+        .acquire_many_owned(crate::transform_unit::TRANSFORM_UNITS_AT_ONCE as u32)
+        .await
+        .unwrap();
+    let mut request = request(big_messages());
+    request["session_id"] = json!(session);
+    let mut waiting = Box::pin(call_transform_request_on_channel(&handler, 8, request));
+    std::future::poll_fn(|cx| {
+        assert!(waiting.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+
+    handler.unbind_route(test_route(8));
+    drop(units);
+    let response = waiting.await;
+
+    assert_eq!(response["status"], "ok", "{response}");
+    assert_eq!(
+        store.load(session).unwrap().meta.eidnara_folds,
+        Some(false),
+        "the pass adopts its own binding's authority"
+    );
+    assert_eq!(
+        response["history_summarizer"]["no_fire"], "native_authority",
+        "{response}"
+    );
+    let bindings = handler.bindings.lock().expect("bindings mutex");
+    assert!(
+        !bindings.by_route[&test_route(7)].first_pass_settled,
+        "another session's binding keeps its first pass"
     );
 }
 
