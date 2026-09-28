@@ -125,3 +125,22 @@ export function rejectedAuthorityKeys(paths: readonly (readonly PropertyKey[])[]
         .filter((path) => path.length === 2 && AUTHORITY_BLOCKS.includes(String(path[0])))
         .map((path) => `a prototype-pollution key inside ${String(path[0])}`);
 }
+
+/** A refused tier still contributes its settings outside `AUTHORITY_BLOCKS`. */
+export function withoutAuthorityBlocks(written: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(
+        Object.entries(written).filter(([key]) => !AUTHORITY_BLOCKS.includes(key)),
+    );
+}
+
+/** Unresolved configuration leaves folding to the host's native compaction. */
+export function withdrawUnresolvedFoldAuthority(
+    config: { compaction?: { enabled?: boolean } },
+    admission: ConfigAdmission,
+): string[] {
+    if (admission.status === "admitted") return [];
+    config.compaction = { ...config.compaction, enabled: false };
+    return [
+        `configuration unresolved (${admission.reason}); Eidnara leaves folding to the host's native compaction until the configuration is fixed.`,
+    ];
+}

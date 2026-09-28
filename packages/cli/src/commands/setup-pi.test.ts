@@ -529,6 +529,51 @@ describe("runSetup", () => {
         },
     );
 
+    it("gives the host hook the compaction mode of the config setup writes", async () => {
+        const root = makeTempRoot();
+        const agentDir = join(root, ".pi", "agent");
+        setConfigEnv(root, agentDir);
+        mkdirSync(agentDir, { recursive: true });
+        const configPath = join(root, ".config", "eidnara", "eidnara.jsonc");
+
+        const env: SetupEnvironment = {
+            detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
+            getPiVersion: () => "0.80.2",
+            getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+            paths: {
+                getPiAgentConfigDir: () => agentDir,
+                getPiUserConfigPath: () => configPath,
+                getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+            },
+        };
+        let seen: { compactionEnabled: boolean } | undefined;
+        const host: PiCompatibleSetupHost = {
+            displayName: "Fake",
+            cliName: "fake",
+            packageSource: "npm:fake",
+            ensurePluginEntry: async () => ({
+                ok: true,
+                action: "already_present",
+                message: "present",
+                configPath: "unused",
+            }),
+            beforeWrite: async ({ eidnara }) => {
+                seen = eidnara;
+                return async () => {};
+            },
+        };
+        const prompts = new MockPrompts({ confirms: [true, false] });
+
+        const code = await runSetup({ prompts, env, host });
+
+        expect(code).toBe(0);
+        expect(seen?.compactionEnabled).toBe(true);
+        const config = parseJsonc(readFileSync(configPath, "utf-8")) as {
+            history_summarizer?: { model?: string };
+        };
+        expect(config.history_summarizer?.model).toBe("anthropic/claude-haiku-4-5");
+    });
+
     it("passes the shared config's compaction and memory modes to the host hook", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");

@@ -524,7 +524,7 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         if (removed.length > 0) {
             warnings.push(
                 `Ignoring history_summarizer.${removed.join("/")} from project config ` +
-                    "(security: history_summarizer model selection, tool restrictions, are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
+                    "(security: history_summarizer model selection, context budget, and tool restrictions are user-level only; a repository cannot force extra compaction cost or re-enable a tool the user removed).",
             );
         }
     }

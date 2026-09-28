@@ -13,6 +13,7 @@ use crate::memory_reviewer::handoff::{
     Handoff, HandoffError, HandoffRequest, HandoffTarget, PRODUCER, SUBJECT_SOURCE_KIND,
     handoff_key, reserve_and_stage, review_binding, review_policy_versions, review_subject,
 };
+use crate::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
 use kernel::{
     ByteRange, KernelStore, ReviewPayload, ReviewReadError, ReviewReadRefusal,
     ReviewStagedReference,
@@ -44,6 +45,7 @@ struct Rig {
     kernel: Arc<KernelStore>,
     store: MemoryStore,
     kernel_incarnation: String,
+    gate: Arc<MemoryReviewerStatus>,
 }
 
 impl Rig {
@@ -60,11 +62,14 @@ impl Rig {
             "eidnara-history-summarizer-handoff-test",
         ))
         .unwrap();
+        let gate = Arc::new(MemoryReviewerStatus::default());
+        gate.set_activation(ActivationState::Open);
         let rig = Rig {
             _dirs: vec![kernel_dir, store_dir],
             kernel,
             store,
             kernel_incarnation,
+            gate,
         };
         // The session is in Publishing for firing 3 over messages 2..=4 with its selected identities recorded, as the live path leaves it before publication.
         let mut meta = ModuleMeta::default();
@@ -85,7 +90,15 @@ impl Rig {
             project_digest: PROJECT_DIGEST.to_string(),
             domain_id: DOMAIN.to_string(),
             kernel_incarnation: self.kernel_incarnation.clone(),
+            gate: Arc::clone(&self.gate),
         }
+    }
+
+    fn close_gate(&self) {
+        self.gate.set_closed(
+            ActivationState::Closed("identity_mismatch"),
+            "activation record names another memory store baseline".to_string(),
+        );
     }
 
     fn state(&self) -> HistorySummarizerDurableState {
@@ -329,25 +342,7 @@ fn publishing_state(firing_seq: u64) -> HistorySummarizerDurableState {
 }
 
 fn aliases() -> FrozenAliasTable {
-    let mut table = FrozenAliasTable::default();
-    for (ordinal, presented) in [
-        (2u64, "bun install runs before every build"),
-        (3, "the workspace uses bun"),
-        (4, "done"),
-    ] {
-        table.issue(FrozenAlias {
-            message_id: format!("m{ordinal}"),
-            ordinal,
-            block_ids: vec![format!("m{ordinal}#0"), format!("m{ordinal}#1")],
-            block_hashes: vec![
-                format!("{:064x}", ordinal),
-                format!("{:064x}", ordinal * 100),
-            ],
-            presented: presented.to_string(),
-            ..FrozenAlias::default()
-        });
-    }
-    table
+    aliases_from(2)
 }
 
 /// Two facts citing one block: the first cites `s1` twice at distinct ranges and `s2`; the second cites `s1` again at a range the first already cited.
@@ -957,6 +952,326 @@ fn identical_inputs_neither_duplicate_a_job_nor_reopen_a_settled_one() {
     );
 }
 
+/// A frozen alias table for the three messages from `start`, cited as `s1`..`s3`.
+fn aliases_from(start: u64) -> FrozenAliasTable {
+    let mut table = FrozenAliasTable::default();
+    for (ordinal, presented) in (start..).zip([
+        "bun install runs before every build",
+        "the workspace uses bun",
+        "done",
+    ]) {
+        table.issue(FrozenAlias {
+            message_id: format!("m{ordinal}"),
+            ordinal,
+            block_ids: vec![format!("m{ordinal}#0"), format!("m{ordinal}#1")],
+            block_hashes: vec![
+                format!("{:064x}", ordinal),
+                format!("{:064x}", ordinal * 100),
+            ],
+            presented: presented.to_string(),
+            ..FrozenAlias::default()
+        });
+    }
+    table
+}
+
+/// The chunk over the three messages from `start`, each anchorable and none tool-only.
+fn chunk_from(
+    start: u64,
+    aliases: FrozenAliasTable,
+) -> crate::history_summarizer_validate::HistorySummarizerChunk {
+    use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk};
+    let end = start + 2;
+    HistorySummarizerChunk {
+        aliases,
+        start_index: start,
+        end_index: end,
+        lines: (start..=end)
+            .map(|ordinal| ChunkLine {
+                ordinal,
+                message_id: format!("m{ordinal}"),
+                anchorable: true,
+            })
+            .collect(),
+        present_ordinals: (start..=end).collect(),
+        tool_only_ranges: vec![],
+        completed_tool_arcs: vec![],
+    }
+}
+
+/// Publishes the firing awaiting its producer over messages `start..=start + 2` through the production path, with an accepted fact set that cites `s1` and `s2` and history over `start..=start + 1`.
+fn publish_accepted_chunk(
+    rig: &Rig,
+    target: &HandoffTarget,
+    start: u64,
+) -> Result<(), HistorySummarizerDriveError> {
+    use crate::history_summarizer_producer::ProducerOutput;
+    use crate::history_summarizer_validate::ValidateOptions;
+
+    let end = start + 2;
+    let chunk = chunk_from(start, aliases_from(start));
+    let text = format!(
+        r#"<output><history_segments><history_segment start="{start}" end="{}" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
+* [s1:0-11] [s2:0-22] Run bun install before building.
+</PROJECT_RULES></facts><meta><unprocessed_from>{end}</unprocessed_from></meta></output>"#,
+        start + 1
+    );
+    publish_output_from_awaiting(PublishOutputRequest {
+        store: &rig.store,
+        session_id: SESSION,
+        project_path: PROJECT,
+        awaiting: rig.state(),
+        output: ProducerOutput {
+            text,
+            length_capped: false,
+        },
+        observed_chunk_fingerprint: "fp",
+        validation_chunk: &chunk,
+        chunk_transcript: "U: transcript",
+        boundary_dates: &BTreeMap::new(),
+        prior_history_segments: &[],
+        validate_options: ValidateOptions {
+            in_emergency: true,
+            ..ValidateOptions::default()
+        },
+        created_at_ms: t0(),
+        failure_started_at_ms: t0(),
+        failure_backoff_at_ms: 0,
+        completion_now_ms: t0,
+        publication_fence: None,
+        memory_reviewer_handoff: Some(target),
+        model: "test/model",
+    })
+    .map(|_| ())
+}
+
+/// Moves the rig's gate into one state.
+type GateSetter = fn(&Rig);
+
+/// Runs `step` `per_state` times under each gate state that is not `open`: unevaluated, closed, and an `open` evaluation gone stale. The index passed to `step` counts every call.
+fn for_each_state_that_is_not_open(rig: &mut Rig, per_state: u64, mut step: impl FnMut(&Rig, u64)) {
+    let cases: [(&str, GateSetter); 3] = [
+        ("unknown", |_| {}),
+        ("identity_mismatch", Rig::close_gate),
+        ("stale", |rig| {
+            rig.gate.set_activation(ActivationState::Open);
+            rig.gate.expire_for_test();
+        }),
+    ];
+    rig.gate = Arc::new(MemoryReviewerStatus::default());
+    let mut index = 0;
+    for (expected, set_gate) in cases {
+        set_gate(rig);
+        for _ in 0..per_state {
+            assert_eq!(
+                rig.gate.activation_state(),
+                ActivationState::Closed(expected)
+            );
+            step(rig, index);
+            index += 1;
+        }
+    }
+}
+
+/// While the activation gate is not `open`, 3,000 distinct accepted chunks reach the reservation decision the publication path takes before it publishes; none reserves, charges, or persists a reservation, and each carries `memory_reviewer_unavailable` into its publication.
+#[test]
+fn a_gate_that_is_not_open_reserves_no_job_for_any_accepted_chunk() {
+    let mut rig = Rig::open();
+    let facts_before = rig.store.memory_reviewer_status_facts().unwrap();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
+    for_each_state_that_is_not_open(&mut rig, 1_000, |rig, chunk| {
+        let mut validated = validated_range(2, 4);
+        validated.extraction = crate::history_summarizer_citations::ExtractionOutcome::Accepted {
+            count: validated.facts.len(),
+        };
+        for fact in &mut validated.facts {
+            fact.content = format!("{} (chunk {chunk})", fact.content);
+        }
+        let loaded = rig.store.load(SESSION).unwrap();
+        let publishing_row_version = loaded.row_version.unwrap();
+        let target = rig.target();
+        let decision = memory_reviewer_decision_before_publish(MemoryReviewerDecisionRequest {
+            store: &rig.store,
+            session_id: SESSION,
+            project_path: PROJECT,
+            publishing: &loaded.meta.history_summarizer,
+            publishing_row_version,
+            validated: &validated,
+            aliases: &aliases(),
+            pending: pending_publication(&validated),
+            memory_reviewer_handoff: Some(&target),
+            failure_started_at_ms: t0(),
+            failure_backoff_at_ms: 0,
+            completion_now_ms: t0,
+        })
+        .unwrap_or_else(|error| panic!("chunk {chunk}: {error}"));
+        assert_eq!(
+            decision.memory_reviewer_nonadmission,
+            Some(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable),
+            "chunk {chunk}"
+        );
+        assert!(
+            decision.memory_reviewer_activation.is_none(),
+            "chunk {chunk}"
+        );
+        assert_eq!(decision.publishing_row_version, publishing_row_version);
+        assert_eq!(
+            rig.state().memory_reviewer_reservation,
+            None,
+            "chunk {chunk}"
+        );
+    });
+    assert_eq!(rig.pending(), None);
+    assert_eq!(
+        rig.store.memory_reviewer_status_facts().unwrap(),
+        facts_before,
+        "no job row exists in any state and nothing is charged"
+    );
+    assert_eq!(
+        rig.store.memory_reviewer_headroom(PROJECT).unwrap(),
+        headroom_before
+    );
+}
+
+/// Successive accepted chunks published through the production path while the gate is not `open` each record `memory_reviewer_unavailable` under their own firing, and no job row appears.
+#[test]
+fn every_accepted_chunk_published_while_the_gate_is_not_open_records_the_nonadmission() {
+    let mut rig = Rig::open();
+    let facts_before = rig.store.memory_reviewer_status_facts().unwrap();
+    for_each_state_that_is_not_open(&mut rig, 10, |rig, chunk| {
+        let firing_seq = 3 + chunk;
+        let start = 2 + 2 * chunk;
+        let prior = rig.state();
+        let mut awaiting = publishing_state(firing_seq);
+        awaiting.state = HistorySummarizerPhase::AwaitingProducer;
+        awaiting.chunk_range = Some(HistorySummarizerChunkRange {
+            from_ordinal: start,
+            to_ordinal: start + 2,
+        });
+        awaiting.history_segment_set_generation =
+            HistorySegmentSetGeneration::new(i64::try_from(chunk).unwrap());
+        awaiting.memory_reviewer_nonadmission = prior.memory_reviewer_nonadmission;
+        rig.persist(awaiting);
+
+        publish_accepted_chunk(rig, &rig.target(), start)
+            .unwrap_or_else(|error| panic!("chunk {chunk}: {error}"));
+        let state = rig.state();
+        assert_eq!(state.state, HistorySummarizerPhase::Idle, "chunk {chunk}");
+        assert_eq!(state.memory_reviewer_reservation, None, "chunk {chunk}");
+        assert_eq!(state.memory_reviewer_nonadmission.count, chunk + 1);
+        let latest = state.memory_reviewer_nonadmission.latest.unwrap();
+        assert_eq!(latest.firing_seq, firing_seq);
+        assert_eq!(
+            latest.code,
+            MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable
+        );
+    });
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 30);
+    assert_eq!(
+        rig.store.memory_reviewer_status_facts().unwrap(),
+        memory_store::MemoryReviewerStatusFacts {
+            nonadmissions: 30,
+            latest_nonadmission_memory_reviewer_unavailable: 1,
+            ..facts_before
+        },
+        "no job row exists in any state and nothing is charged"
+    );
+}
+
+/// A job an abandoned firing left reserved is not adopted while the gate is closed: the next firing with identical facts records `memory_reviewer_unavailable` and the job keeps its binding.
+#[test]
+fn a_closed_gate_adopts_no_orphaned_reservation() {
+    let rig = Rig::open();
+    let first = activation(rig.handoff(t0()).unwrap());
+    rig.persist(abandon_with_detail(
+        &rig.state(),
+        t0() + 1,
+        Some("crash".to_string()),
+        AbandonClass::ProducerFailed,
+    ));
+    rig.persist(next_publishing_firing(&rig, 2, 4));
+    rig.close_gate();
+    let headroom_before = rig.store.memory_reviewer_headroom(PROJECT).unwrap();
+    assert_eq!(
+        rig.handoff(t0() + 10).unwrap(),
+        Handoff::Nonadmission(MemoryReviewerNonadmissionCode::MemoryReviewerUnavailable)
+    );
+    assert_eq!(rig.state().memory_reviewer_reservation, None);
+    let job = rig.job(&first.causal_identity);
+    assert_eq!(job.state, MemoryReviewerJobState::Reserved);
+    assert_eq!(job.producer, first.producer);
+    assert_eq!(
+        rig.store.memory_reviewer_headroom(PROJECT).unwrap(),
+        headroom_before
+    );
+}
+
+/// A reservation taken while the gate was open is reused, republished, and activated after the gate closes, and settles through its existing path when it can never publish.
+#[test]
+fn a_reservation_held_when_the_gate_closes_still_republishes_and_settles() {
+    let mut rig = Rig::open();
+    let reserved = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.close_gate();
+    let reused = activation(rig.handoff(t0() + 1).unwrap());
+    assert_eq!(reused.causal_identity, reserved.causal_identity);
+    assert_eq!(reused.producer, reserved.producer);
+    assert_eq!(rig.reservation(), reservation);
+
+    rig.reopen();
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::RepublishReserved { firing_seq: 3 }
+    );
+    let target = rig.target();
+    assert_eq!(
+        rig.republish(Some(&target), t0() + 2),
+        RepublishOutcome::Published
+    );
+    assert!(matches!(
+        rig.job(&reservation.causal_identity).state,
+        MemoryReviewerJobState::Ready(_)
+    ));
+    let after = rig.store.load(SESSION).unwrap();
+    assert_eq!(after.meta.publication_floor_ordinal, Some(5));
+    assert_eq!(
+        after.meta.history_summarizer.state,
+        HistorySummarizerPhase::Idle
+    );
+    assert_eq!(
+        after.meta.history_summarizer.memory_reviewer_reservation,
+        None
+    );
+    assert_eq!(rig.pending(), None);
+    assert_eq!(rig.store.load_history_segments(SESSION).unwrap().len(), 1);
+    assert_eq!(
+        handle_restart_load(&rig.store, SESSION, t0() + 60_000).unwrap(),
+        RestartAction::Done
+    );
+
+    let rig = Rig::open();
+    let _ = activation(rig.handoff(t0()).unwrap());
+    let reservation = rig.reservation();
+    rig.close_gate();
+    let reincarnated = HandoffTarget {
+        kernel_incarnation: "f".repeat(64),
+        ..rig.target()
+    };
+    assert_eq!(
+        rig.republish(Some(&reincarnated), t0() + 1),
+        RepublishOutcome::Settled
+    );
+    assert_eq!(
+        rig.job(&reservation.causal_identity).state,
+        MemoryReviewerJobState::Terminal(MemoryReviewerJobOutcome::Nonadmitted)
+    );
+    let after = rig.state();
+    assert_eq!(after.state, HistorySummarizerPhase::Idle);
+    assert_eq!(after.memory_reviewer_reservation, None);
+    assert_eq!(rig.pending(), None);
+    assert!(rig.store.load_history_segments(SESSION).unwrap().is_empty());
+}
+
 #[test]
 fn capacity_refusal_before_the_reservation_is_the_recorded_nonadmission() {
     let rig = Rig::open();
@@ -1049,7 +1364,7 @@ fn the_predicate_is_unchanged_by_the_reservation() {
 fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     use crate::history_summarizer_producer::ProducerOutput;
     use crate::history_summarizer_validate::{
-        ChunkLine, HistorySummarizerChunk, StoredHistorySegmentRange, ValidateOptions,
+        HistorySummarizerChunk, StoredHistorySegmentRange, ValidateOptions,
     };
     use memory_store::ExtractionFailure;
 
@@ -1058,21 +1373,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     awaiting.state = HistorySummarizerPhase::AwaitingProducer;
     awaiting.history_segment_set_generation = HistorySegmentSetGeneration::default();
     rig.persist(awaiting);
-    let chunk = HistorySummarizerChunk {
-        aliases: aliases(),
-        start_index: 2,
-        end_index: 4,
-        lines: (2..=4)
-            .map(|ordinal| ChunkLine {
-                ordinal,
-                message_id: format!("m{ordinal}"),
-                anchorable: true,
-            })
-            .collect(),
-        present_ordinals: vec![2, 3, 4],
-        tool_only_ranges: vec![],
-        completed_tool_arcs: vec![],
-    };
+    let chunk = chunk_from(2, aliases());
     let output = |facts: &str| ProducerOutput {
         text: format!(
             r#"<output><history_segments><history_segment start="2" end="3" title="arc" episode_type="feature" importance="60"><p1>arc</p1><p2>arc</p2><p3>arc</p3><p4 /></history_segment></history_segments><facts><PROJECT_RULES>
@@ -1188,21 +1489,7 @@ fn the_publication_path_hands_accepted_facts_off_and_records_rejected_ones() {
     next.history_segment_set_generation = HistorySegmentSetGeneration::new(1);
     next.memory_reviewer_nonadmission = after.meta.history_summarizer.memory_reviewer_nonadmission;
     rig.persist(next);
-    let later = HistorySummarizerChunk {
-        aliases: FrozenAliasTable::default(),
-        start_index: 4,
-        end_index: 6,
-        lines: (4..=6)
-            .map(|ordinal| ChunkLine {
-                ordinal,
-                message_id: format!("m{ordinal}"),
-                anchorable: true,
-            })
-            .collect(),
-        present_ordinals: vec![4, 5, 6],
-        tool_only_ranges: vec![],
-        completed_tool_arcs: vec![],
-    };
+    let later = chunk_from(4, FrozenAliasTable::default());
     let rejected = output("* [s9:0-4] unknown alias")
         .text
         .replace(r#"start="2" end="3""#, r#"start="4" end="5""#)
@@ -1454,7 +1741,7 @@ fn restart_settles_a_reserved_firing_whose_input_changed_or_expired() {
 #[test]
 fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_carried() {
     use crate::history_summarizer_producer::ProducerOutput;
-    use crate::history_summarizer_validate::{ChunkLine, HistorySummarizerChunk, ValidateOptions};
+    use crate::history_summarizer_validate::ValidateOptions;
 
     // The production path reserves and retains, then the store fails to activate (the activation names the wrong producer), which keeps the firing in Publishing with the failure recorded.
     let mut rig = Rig::open();
@@ -1462,21 +1749,7 @@ fn a_production_reservation_republishes_after_a_restart_and_a_stale_one_is_not_c
     awaiting.state = HistorySummarizerPhase::AwaitingProducer;
     awaiting.history_segment_set_generation = HistorySegmentSetGeneration::default();
     rig.persist(awaiting);
-    let chunk = HistorySummarizerChunk {
-        aliases: aliases(),
-        start_index: 2,
-        end_index: 4,
-        lines: (2..=4)
-            .map(|ordinal| ChunkLine {
-                ordinal,
-                message_id: format!("m{ordinal}"),
-                anchorable: true,
-            })
-            .collect(),
-        present_ordinals: vec![2, 3, 4],
-        tool_only_ranges: vec![],
-        completed_tool_arcs: vec![],
-    };
+    let chunk = chunk_from(2, aliases());
     let target = rig.target();
     // A fence that refuses once, as a retired transform snapshot does, and then admits.
     struct RefuseOnce(std::sync::atomic::AtomicBool);

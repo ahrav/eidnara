@@ -394,7 +394,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         ? await pickCopilotThinkingLevel(prompts, "context-researcher", context_researcherModel)
         : undefined;
 
-    const eidnara = readEidnaraModes(configPath);
+    const eidnara = readEidnaraModes(configPath, { summarizerModel: history_summarizerModel });
     if (!eidnara.enabled) {
         prompts.log.warn(
             `Eidnara is disabled (\`enabled: false\`) in ${configPath}; setup keeps that setting and leaves ${host.displayName}'s native context managers on.`,

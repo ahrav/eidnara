@@ -11,7 +11,13 @@ import { isRecord } from "../shared/record-type-guard";
 import { readRegularFileSync } from "../shared/regular-file";
 import { setWindowOverlayPath } from "../shared/window-geometry";
 import { eidnaraProjectConfigBasePath, eidnaraUserConfigBasePath } from "./config-paths";
-import { type ConfigAdmission, rejectedAuthorityKeys, screenUserTier } from "./fold-authority";
+import {
+    type ConfigAdmission,
+    rejectedAuthorityKeys,
+    screenUserTier,
+    withdrawUnresolvedFoldAuthority,
+    withoutAuthorityBlocks,
+} from "./fold-authority";
 import type { LoadOutcome } from "./load-outcome";
 import {
     constrainProjectThresholdOverrides,
@@ -547,6 +553,11 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         );
     }
 
+    const admission = admissionOf(userLoaded, projectLoaded);
+    allWarnings.push(
+        ...withdrawUnresolvedFoldAuthority(config, admission).map((w) => `[config] ${w}`),
+    );
+
     if (allWarnings.length > 0) {
         config.configWarnings = allWarnings;
     } else if ("configWarnings" in config) {
@@ -576,7 +587,7 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         config,
         registrationPromptSurface: trustedBaseConfig.prompt_surface,
         loadOutcome: combinedOutcome({ sources, substitutionFailures, recoveredTopLevelKeys }),
-        admission: admissionOf(userLoaded, projectLoaded),
+        admission,
         sources,
         substitutionFailures,
         recoveredTopLevelKeys,
@@ -588,6 +599,30 @@ function admissionOf(...loaded: (LoadedConfigFileDetailed | null)[]): ConfigAdmi
     return rejections.length === 0
         ? { status: "admitted" }
         : { status: "unresolved", reason: rejections.join("; ") };
+}
+
+/** A refused tier contributes its settings outside the authority blocks once its unknown keys are pruned; a remainder the schema still refuses contributes defaults. */
+function parseRefusedTier(
+    written: Record<string, unknown>,
+): EidnaraPluginConfig & { configWarnings?: string[] } {
+    let retained = withoutAuthorityBlocks(written);
+    for (let round = 0; round < 8; round++) {
+        const parsed = EidnaraConfigSchema.safeParse(retained);
+        const unknown = parsed.success
+            ? []
+            : parsed.error.issues.filter((issue) => issue.code === "unrecognized_keys");
+        if (unknown.length === 0) break;
+        for (const issue of unknown) {
+            for (const key of issue.keys) {
+                retained = pruneNestedConfigLeaf(retained, [...issue.path, key])?.block ?? retained;
+            }
+        }
+    }
+    try {
+        return parsePluginConfig(retained);
+    } catch {
+        return parsePluginConfig({});
+    }
 }
 
 export interface UserTierLoad {
@@ -626,15 +661,20 @@ export function loadProjectTierAdmission(directory: string): ConfigAdmission {
 }
 
 function parseUserTier(loaded: LoadedConfigFileDetailed | null): UserTierLoad {
+    let config: EidnaraPluginConfig & { configWarnings?: string[] };
+    let admission: ConfigAdmission;
     try {
-        return { config: parsePluginConfig(loaded?.config ?? {}), admission: admissionOf(loaded) };
+        config = parsePluginConfig(loaded?.config ?? {});
+        admission = admissionOf(loaded);
     } catch (error) {
-        return {
-            config: parsePluginConfig({}),
-            admission: {
-                status: "unresolved",
-                reason: error instanceof Error ? error.message : String(error),
-            },
+        config = parseRefusedTier(loaded?.config ?? {});
+        admission = {
+            status: "unresolved",
+            reason: error instanceof Error ? error.message : String(error),
         };
     }
+    const withdrawn = withdrawUnresolvedFoldAuthority(config, admission);
+    if (withdrawn.length > 0)
+        config.configWarnings = [...(config.configWarnings ?? []), ...withdrawn];
+    return { config, admission };
 }

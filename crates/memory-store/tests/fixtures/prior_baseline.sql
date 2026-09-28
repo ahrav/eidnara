@@ -143,10 +143,8 @@ CREATE TABLE chunk_transcripts (
             history_segment_seq     INTEGER NOT NULL,
             start_ordinal       INTEGER NOT NULL,
             end_ordinal         INTEGER NOT NULL,
-            created_at_ms       INTEGER NOT NULL,
-            transcript_bytes    INTEGER NOT NULL
-                GENERATED ALWAYS AS (LENGTH(transcript_deflate)) STORED,
             transcript_deflate  BLOB NOT NULL,
+            created_at_ms       INTEGER NOT NULL,
             PRIMARY KEY (session_id, history_segment_seq)
         );
 
@@ -833,36 +831,59 @@ CREATE INDEX idx_history_summarizer_side_channel_outbox_order
                 firing_seq, source_start, source_end, item_index, next_attempt_at_ms
             );
 
-CREATE TABLE chunk_transcript_totals (
-            session_id       TEXT PRIMARY KEY,
-            compressed_bytes INTEGER NOT NULL DEFAULT 0
+CREATE TABLE tag_cache_generations (
+            session_id TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL DEFAULT 0,
+            tag_count INTEGER NOT NULL DEFAULT 0,
+            max_tag_number INTEGER NOT NULL DEFAULT 0
         );
 
-CREATE INDEX idx_chunk_transcripts_session_age
-            ON chunk_transcripts(session_id, created_at_ms, history_segment_seq);
-
-CREATE TRIGGER chunk_transcripts_total_insert AFTER INSERT ON chunk_transcripts BEGIN
-            INSERT INTO chunk_transcript_totals(session_id, compressed_bytes)
-            VALUES (NEW.session_id, NEW.transcript_bytes)
+CREATE TRIGGER tags_cache_generation_insert AFTER INSERT ON tags BEGIN
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (NEW.session_id, 1, 1, NEW.tag_number)
             ON CONFLICT(session_id) DO UPDATE SET
-                compressed_bytes = compressed_bytes + excluded.compressed_bytes;
+                generation = generation + 1,
+                tag_count = tag_count + 1,
+                max_tag_number = MAX(max_tag_number, NEW.tag_number);
         END;
 
-CREATE TRIGGER chunk_transcripts_total_delete AFTER DELETE ON chunk_transcripts BEGIN
-            UPDATE chunk_transcript_totals
-               SET compressed_bytes = compressed_bytes - OLD.transcript_bytes
-             WHERE session_id = OLD.session_id;
+CREATE TRIGGER tags_cache_generation_delete AFTER DELETE ON tags BEGIN
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (
+                OLD.session_id,
+                1,
+                (SELECT COUNT(*) FROM tags WHERE session_id = OLD.session_id),
+                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = OLD.session_id)
+            )
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation = generation + 1,
+                tag_count = excluded.tag_count,
+                max_tag_number = excluded.max_tag_number;
         END;
 
-CREATE TRIGGER chunk_transcripts_total_update
-            AFTER UPDATE OF session_id, transcript_deflate ON chunk_transcripts BEGIN
-            UPDATE chunk_transcript_totals
-               SET compressed_bytes = compressed_bytes - OLD.transcript_bytes
-             WHERE session_id = OLD.session_id;
-            INSERT INTO chunk_transcript_totals(session_id, compressed_bytes)
-            VALUES (NEW.session_id, NEW.transcript_bytes)
+CREATE TRIGGER tags_cache_generation_update AFTER UPDATE ON tags BEGIN
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (
+                OLD.session_id,
+                1,
+                (SELECT COUNT(*) FROM tags WHERE session_id = OLD.session_id),
+                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = OLD.session_id)
+            )
             ON CONFLICT(session_id) DO UPDATE SET
-                compressed_bytes = compressed_bytes + excluded.compressed_bytes;
+                generation = generation + 1,
+                tag_count = excluded.tag_count,
+                max_tag_number = excluded.max_tag_number;
+            INSERT INTO tag_cache_generations(session_id, generation, tag_count, max_tag_number)
+            VALUES (
+                NEW.session_id,
+                1,
+                (SELECT COUNT(*) FROM tags WHERE session_id = NEW.session_id),
+                (SELECT COALESCE(MAX(tag_number), 0) FROM tags WHERE session_id = NEW.session_id)
+            )
+            ON CONFLICT(session_id) DO UPDATE SET
+                generation = generation + 1,
+                tag_count = excluded.tag_count,
+                max_tag_number = excluded.max_tag_number;
         END;
 
 

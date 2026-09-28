@@ -13,13 +13,21 @@ export interface EidnaraModes {
 
 /**
  * Reads the shared user config only: setup edits global host settings, so a project-tier opt-out must not switch a native manager back on for every other project.
+ * `planned.summarizerModel` supplies the `history_summarizer.model` setup writes, so the compaction mode reflects the post-setup config.
  */
-export function readEidnaraModes(configPath: string | undefined): EidnaraModes {
+export function readEidnaraModes(
+    configPath: string | undefined,
+    planned: { summarizerModel?: string } = {},
+): EidnaraModes {
     const { config, admission } = loadUserTierConfigDetailed(configPath);
     const enabled = config.enabled !== false;
+    const history_summarizer =
+        planned.summarizerModel === undefined
+            ? config.history_summarizer
+            : { ...config.history_summarizer, model: planned.summarizerModel };
     return {
         enabled,
-        compactionEnabled: compactionEnabledFor(config),
+        compactionEnabled: compactionEnabledFor({ ...config, history_summarizer }),
         memoryEnabled: enabled && config.memory.enabled !== false,
         admission,
     };

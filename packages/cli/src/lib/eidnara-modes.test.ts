@@ -71,11 +71,86 @@ describe("readEidnaraModes", () => {
             ["unknown.jsonc", `{"history_summarizer":{"model":"a/b","modle":"c/d"}}`],
             ["string-flag.jsonc", `{"compaction":{"enabled":"false"},${model}}`],
         ] as const) {
-            expect([name, readEidnaraModes(write(name, body)).admission.status]).toEqual([
+            const modes = readEidnaraModes(write(name, body));
+            expect([name, modes.admission.status, modes.compactionEnabled]).toEqual([
                 name,
                 "unresolved",
+                false,
             ]);
         }
+    });
+
+    it("keeps a rejected tier's memory opt-out", () => {
+        const modes = readEidnaraModes(
+            write(
+                "opt-out.jsonc",
+                `{"memory":{"enabled":false},"compaction":{"enabled":"false"},${model}}`,
+            ),
+        );
+        expect(modes).toEqual({
+            enabled: true,
+            compactionEnabled: false,
+            memoryEnabled: false,
+            admission: expect.objectContaining({ status: "unresolved" }),
+        });
+    });
+
+    it("keeps the opt-outs of a tier the schema refuses for unknown keys", () => {
+        for (const [name, body] of [
+            [
+                "authority-typo.jsonc",
+                `{"enabled":false,"memory":{"enabled":false},"history_summarizer":{"model":"a/b","modle":"c/d"}}`,
+            ],
+            [
+                "two-typos.jsonc",
+                `{"enabled":false,"memroy":1,"memory":{"enabled":false,"auto_promot":true},"history_summarizer":{"modle":"c/d"}}`,
+            ],
+        ] as const) {
+            expect([name, readEidnaraModes(write(name, body))]).toEqual([
+                name,
+                {
+                    enabled: false,
+                    compactionEnabled: false,
+                    memoryEnabled: false,
+                    admission: expect.objectContaining({ status: "unresolved" }),
+                },
+            ]);
+        }
+    });
+
+    it("resolves the compaction mode setup produces once it writes the summarizer model", () => {
+        const planned = "anthropic/claude-haiku-4-5";
+        const missing = join(tmpdir(), "missing-eidnara.jsonc");
+        expect(readEidnaraModes(missing, { summarizerModel: planned }).compactionEnabled).toBe(
+            true,
+        );
+        expect(
+            readEidnaraModes(write("empty.jsonc", "{}"), { summarizerModel: planned })
+                .compactionEnabled,
+        ).toBe(true);
+        expect(
+            readEidnaraModes(write("off.jsonc", `{"compaction":{"enabled":false}}`), {
+                summarizerModel: planned,
+            }).compactionEnabled,
+        ).toBe(false);
+        expect(
+            readEidnaraModes(write("disabled.jsonc", `{"enabled":false}`), {
+                summarizerModel: planned,
+            }).compactionEnabled,
+        ).toBe(false);
+        expect(
+            readEidnaraModes(write("unresolved.jsonc", `{"compaction":{"enabled":"x"}}`), {
+                summarizerModel: planned,
+            }).compactionEnabled,
+        ).toBe(false);
+        expect(
+            readEidnaraModes(
+                write("module.jsonc", `{"history_summarizer":{"module_model":"m/n"}}`),
+                {
+                    summarizerModel: planned,
+                },
+            ).compactionEnabled,
+        ).toBe(true);
     });
 });
 

@@ -208,13 +208,15 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
     assert_eq!(run.report.samples.attempted(), 12 - skipped);
 
     // Surface 1 serves history segments and nothing else, and only the
-    // summarizer writes them: under raw history no arm has a unit for any
-    // truth, so every task is lost at the candidate window on both arms (with
-    // no segment at all the window cannot hold the truth; this pins that the
-    // three hint gates passed and the store held no unit), the pairs are
-    // concordant, the paired gates see no loss, and the floor, which asks the
-    // control to deliver at all, fails. The short control never reaches the
-    // pressure the summarizer fires at, so its structured arm is as empty.
+    // summarizer writes them. A raw arm configures no summarizer chain, so the
+    // daemon leaves folding to the host and serves the window additively:
+    // surface 1 never runs, its entry stage is unreached, and the ledger
+    // attributes nothing. The structured control does run surface 1 but its
+    // short history never reaches the pressure the summarizer fires at, so
+    // the store holds no unit and every task is lost at the candidate window
+    // (this pins that the three hint gates passed). Both raw arms fail, the
+    // pairs are concordant, the paired gates see no loss, and the floor, which
+    // asks the control to deliver at all, fails.
     let by_task: BTreeMap<&str, _> = run
         .outcomes
         .iter()
@@ -227,13 +229,18 @@ fn campaign(scale: Scale, aged_messages: u32, elapsed_bound_ms: u64) -> Run {
             (ArmResult::Fail, ArmResult::Fail),
             "{name} raw"
         );
-        for label in ["aged", "fresh", "fresh/structured"] {
+        for label in ["aged", "fresh"] {
             assert_eq!(
                 run.verdicts[&(name.to_string(), label)],
-                StageVerdict::FirstLoss(Surface1Stage::CandidateWindow),
+                StageVerdict::Indeterminate,
                 "{name} {label}"
             );
         }
+        assert_eq!(
+            run.verdicts[&(name.to_string(), "fresh/structured")],
+            StageVerdict::FirstLoss(Surface1Stage::CandidateWindow),
+            "{name} fresh/structured"
+        );
     }
     let analysis = &gated.analysis;
     assert_eq!(

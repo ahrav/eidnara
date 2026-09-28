@@ -220,7 +220,11 @@ describe("loadPiConfig", () => {
 
         const result = loadPiConfig({ cwd });
 
-        expect(result.config).toEqual(EidnaraConfigSchema.parse({}));
+        // The unreadable tier leaves the configuration unresolved, which withdraws fold authority.
+        expect(result.config).toEqual({
+            ...EidnaraConfigSchema.parse({}),
+            compaction: { enabled: false },
+        });
         expect(result.loadedFromPaths).toEqual([projectPath]);
         expect(result.warnings.join("\n")).toContain("failed to load config");
         expect(result.warnings.join("\n")).toContain("using defaults");
@@ -687,7 +691,11 @@ describe("loadPiConfig", () => {
 
         const result = loadPiConfigDetailed({ cwd });
 
-        expect(result.config).toEqual(EidnaraConfigSchema.parse({}));
+        expect(result.admission.status).toBe("unresolved");
+        expect(result.config).toEqual({
+            ...EidnaraConfigSchema.parse({}),
+            compaction: { enabled: false },
+        });
         expect(result.sources.userConfig).toBe("project-file-parse-error");
         expect(result.sources.projectConfig).toBe("project-file-parse-error");
         expect(result.loadOutcome).toBe("project-file-parse-error");
@@ -707,7 +715,7 @@ describe("fold-authority parity fixture", () => {
         env: Record<string, string>;
         expected_chain: string[] | null;
         expected_admission: "admitted" | "unresolved";
-        expected_eidnara_folds: boolean | null;
+        expected_eidnara_folds: boolean;
     }
     const fixture = JSON.parse(
         readFileSync(
@@ -733,17 +741,19 @@ describe("fold-authority parity fixture", () => {
         Object.assign(process.env, row.env);
         try {
             const result = loadPiConfigDetailed({ cwd });
+            const folds = isCompactionEnabled(result.config);
             if (result.admission.status === "unresolved") {
-                return { chain: null, admission: "unresolved", folds: null };
+                return { chain: null, admission: "unresolved", folds };
             }
             return {
                 chain: normalizeSummarizerChain(result.config.history_summarizer),
                 admission: "admitted",
-                folds: isCompactionEnabled(result.config),
+                folds,
             };
         } catch (error) {
+            // The throw is the plugin's startup refusal, so no Eidnara fold runs.
             expect(String(error)).toContain("Unknown Eidnara configuration key");
-            return { chain: null, admission: "unresolved", folds: null };
+            return { chain: null, admission: "unresolved", folds: false };
         } finally {
             for (const [key, value] of saved) {
                 if (value === undefined) delete process.env[key];

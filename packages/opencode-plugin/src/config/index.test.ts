@@ -1072,7 +1072,7 @@ describe("fold-authority parity fixture", () => {
         env: Record<string, string>;
         expected_chain: string[] | null;
         expected_admission: "admitted" | "unresolved";
-        expected_eidnara_folds: boolean | null;
+        expected_eidnara_folds: boolean;
     }
     const fixture = JSON.parse(
         readFileSync(join(import.meta.dir, "__fixtures__", "fold-authority-parity.json"), "utf-8"),
@@ -1081,7 +1081,7 @@ describe("fold-authority parity fixture", () => {
     interface Outcome {
         chain: string[] | null;
         admission: string;
-        folds: boolean | null;
+        folds: boolean;
     }
 
     function outcome(load: () => { config: unknown; admission: ConfigAdmission }): Outcome {
@@ -1089,17 +1089,19 @@ describe("fold-authority parity fixture", () => {
         try {
             loaded = load();
         } catch (error) {
+            // The throw is the plugin's startup refusal, so no Eidnara fold runs.
             expect(String(error)).toContain("Unknown Eidnara configuration key");
-            return { chain: null, admission: "unresolved", folds: null };
-        }
-        if (loaded.admission.status === "unresolved") {
-            return { chain: null, admission: "unresolved", folds: null };
+            return { chain: null, admission: "unresolved", folds: false };
         }
         const config = loaded.config as Parameters<typeof isCompactionEnabled>[0];
+        const folds = isCompactionEnabled(config);
+        if (loaded.admission.status === "unresolved") {
+            return { chain: null, admission: "unresolved", folds };
+        }
         return {
             chain: normalizeSummarizerChain(config.history_summarizer),
             admission: "admitted",
-            folds: isCompactionEnabled(config),
+            folds,
         };
     }
 
@@ -1117,6 +1119,25 @@ describe("fold-authority parity fixture", () => {
             );
             expect({ name: row.name, ...actual }).toEqual({ name: row.name, ...expected(row) });
         }
+    });
+
+    it("withdraws fold authority and says so when the configuration is unresolved", () => {
+        const result = loadDetailedWithUserConfig(
+            JSON.stringify({
+                compaction: { enabled: "false" },
+                memory: { enabled: false },
+                history_summarizer: { model: "a/b" },
+            }),
+        );
+
+        expect(result.admission.status).toBe("unresolved");
+        expect(isCompactionEnabled(result.config)).toBe(false);
+        expect(result.config.memory.enabled).toBe(false);
+        expect(
+            result.config.configWarnings?.some((warning) =>
+                warning.includes("leaves folding to the host's native compaction"),
+            ),
+        ).toBe(true);
     });
 
     it("skips substitution of an excluded chain value, so a FIFO target never blocks", () => {
