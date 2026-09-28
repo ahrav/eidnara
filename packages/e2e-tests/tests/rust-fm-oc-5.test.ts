@@ -14,7 +14,11 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-5: transport han
     beforeEach(async () => {
         h = await RustTestHarness.create({
             modelContextLimit: 100_000,
-            eidnaraConfig: { execute_threshold_percentage: 40, protected_tags: 1 },
+            eidnaraConfig: {
+                history_summarizer: { model: "fixture/deterministic" },
+                execute_threshold_percentage: 40,
+                protected_tags: 1,
+            },
         });
     });
 

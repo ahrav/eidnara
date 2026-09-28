@@ -48,6 +48,7 @@ const DEFER_USAGE = DEFAULT_SCRIPTED_TOOL_USAGE;
 export const FIRST_RENDER_HARNESS_OPTIONS = {
     modelContextLimit: 100_000,
     eidnaraConfig: {
+        history_summarizer: { model: "fixture/deterministic" },
         execute_threshold_percentage: 20,
         protected_tags: 1,
         memory: {
