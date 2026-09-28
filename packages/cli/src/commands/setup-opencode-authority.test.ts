@@ -257,6 +257,23 @@ describe("runSetup derives the fold authority from the proposed document", () =>
         expect(readJson(opencodeConfig).compaction).toEqual({ auto: true });
     });
 
+    it("OMO repair follows the proposal's enablement", async () => {
+        writeFileSync(eidnaraConfig, JSON.stringify({ enabled: false }));
+        const omo = join(root, ".config", "opencode", "oh-my-opencode.json");
+        writeFileSync(omo, JSON.stringify({ disabled_hooks: [] }));
+        const prompts = new ScriptedPrompts([false, false, true], ["remove"], (message) => {
+            if (message === "History summarizer") writeFileSync(eidnaraConfig, "{}");
+        });
+        expect(await runSetup(false, { io: prompts })).toBe(0);
+
+        expect(prompts.transcript()).toContain("Found oh-my-opencode config");
+        expect(readJson(omo).disabled_hooks).toEqual([
+            "context-window-monitor",
+            "preemptive-compaction",
+            "anthropic-context-window-limit-recovery",
+        ]);
+    });
+
     it("a project tier that stops the plugin blocks every host edit", async () => {
         const project = process.cwd();
         mkdirSync(join(project, ".eidnara"));

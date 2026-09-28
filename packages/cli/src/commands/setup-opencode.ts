@@ -553,13 +553,15 @@ export async function runSetup(
     // With Eidnara disabled nothing conflicts, so no conflict repair is offered in that mode.
     const modes = resolveWriterModes(paths.eidnaraConfig, process.cwd(), log);
     const omoConfigs = collectOmoConfigPaths(process.cwd());
-    const firstTimeOmoRepair = modes.enabled && omoConfigs.length > 0 && !hadExistingSetup;
-    const omoRepairReachable = modes.enabled && (hasOmoPlugin(process.cwd()) || firstTimeOmoRepair);
+    const omoReachableWhenEnabled =
+        hasOmoPlugin(process.cwd()) || (omoConfigs.length > 0 && !hadExistingSetup);
 
     // The preflight is read-only, so a dry run performs it too and predicts the refusal a real run would make.
     try {
         assertJsoncConfigsParseable(
-            preflightConfigPaths(paths, process.cwd(), { omoRepairReachable }),
+            preflightConfigPaths(paths, process.cwd(), {
+                omoRepairReachable: modes.enabled && omoReachableWhenEnabled,
+            }),
         );
         assertPluginListShape([paths.opencodeConfig, paths.tuiConfig]);
     } catch (error) {
@@ -610,6 +612,8 @@ export async function runSetup(
     const proposed = loadUserTierConfigText(paths.eidnaraConfig, proposal);
     const authority = foldAuthorityOf(proposed);
     const enabled = proposed.config.enabled !== false;
+    const firstTimeOmoRepair = enabled && omoConfigs.length > 0 && !hadExistingSetup;
+    const omoRepairReachable = enabled && omoReachableWhenEnabled;
     log.info(`Fold authority: ${describeFoldAuthority(authority)}`);
     const projectAdmission = loadProjectTierAdmission(process.cwd());
     const rejection =
@@ -622,6 +626,15 @@ export async function runSetup(
         log.error(`Setup edits no host setting because ${rejection}`);
         io.outro("Setup stopped — fix the Eidnara config and rerun setup.");
         return 1;
+    }
+    if (omoRepairReachable && !modes.enabled) {
+        try {
+            assertJsoncConfigsParseable(omoConfigs);
+        } catch (error) {
+            log.error(error instanceof Error ? error.message : String(error));
+            io.outro("Setup stopped — fix the malformed config and rerun setup.");
+            return 1;
+        }
     }
     if (dryRun) {
         log.message(`[dry-run] proposed ${paths.eidnaraConfig}:\n${proposal}`);
