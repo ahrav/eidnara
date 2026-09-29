@@ -5092,6 +5092,7 @@ fn apply_once(
         ctx.now_ms,
         first_fold_due,
     );
+    withdraw_selection_outside_window(&mut meta, req, plan);
     let state_changed =
         core != loaded.core || meta != loaded.meta || !window_identities.delta.is_empty();
     if state_changed {
@@ -5324,6 +5325,46 @@ impl WindowIdentities {
             self.delta.deletes.insert(mid.to_string());
         }
     }
+}
+
+fn withdraw_selection_outside_window(
+    meta: &mut ModuleMeta,
+    req: &TransformRequest,
+    plan: PassPlan,
+) {
+    let firing = &meta.history_summarizer;
+    if firing.state == memory_store::HistorySummarizerPhase::Idle
+        || firing.selected_range_identities.is_empty()
+        || firing.withdrawn_selected_mid.is_some()
+    {
+        return;
+    }
+    let coverage = req.coverage.as_deref();
+    let revert = matches!(
+        coverage.map(|coverage| coverage.resolved.resolution),
+        Some(crate::window_coverage::Resolution::Revert { .. })
+    );
+    if revert && !matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
+        return;
+    }
+    let cut_prefix = coverage.map_or(&[][..], |coverage| &coverage.cut_prefix[..]);
+    let mut absent: BTreeSet<&str> = firing
+        .selected_range_identities
+        .iter()
+        .map(|selected| selected.mid.as_str())
+        .collect();
+    for message in cut_prefix.iter().chain(&req.messages) {
+        absent.remove(message.mid.as_str());
+        if absent.is_empty() {
+            return;
+        }
+    }
+    let withdrawn = firing
+        .selected_range_identities
+        .iter()
+        .find(|selected| absent.contains(selected.mid.as_str()))
+        .map(|selected| selected.mid.clone());
+    meta.history_summarizer.withdrawn_selected_mid = withdrawn;
 }
 
 fn enforce_block_identity(
@@ -20139,23 +20180,45 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_window_that_omits_the_selected_message_keeps_its_identity_for_the_publication() {
+    fn a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows() {
         let session = "identity-window-omission";
         let dir = tempfile::tempdir().unwrap();
         let s = Arc::new(store(dir.path()));
-        let (_, predicate, window) = pinned_firing(&s, session);
+        let (version, predicate, window) = pinned_firing(&s, session);
         let before = identity_mids(&s, session);
+        let hook_store = Arc::clone(&s);
+        let barrier = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = Arc::clone(&barrier);
+        install_transform_attempt_hook(session, move || {
+            assert_eq!(hook_store.load(session).unwrap().row_version, Some(version));
+            reached.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
 
-        run(&s, &window, &spine());
+        let dropped = run(&s, &window, &spine());
 
+        assert!(barrier.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(dropped.committed);
         assert_eq!(
             identity_mids(&s, session),
             before,
             "omitted mids keep their rows"
         );
+        assert!(matches!(
+            publish_race_chunk(&s, session, version, &predicate),
+            Err(memory_store::HistorySummarizerPublishError::CasConflict { .. })
+        ));
         let reloaded = s.load(session).unwrap().row_version.unwrap();
-        publish_race_chunk(&s, session, reloaded, &predicate).unwrap();
-        assert_eq!(s.load_history_segments(session).unwrap().len(), 3);
+        let fenced = publish_race_chunk(&s, session, reloaded, &predicate);
+        assert!(
+            matches!(
+                &fenced,
+                Err(memory_store::HistorySummarizerPublishError::FenceRejected { reason })
+                    if reason.contains("m6")
+            ),
+            "{fenced:?}"
+        );
+        assert_eq!(s.load_history_segments(session).unwrap().len(), 2);
+        assert_eq!(identity_mids(&s, session), before);
     }
 
     /// WP-P06 publish first: the publication commits between the transform's reads and its

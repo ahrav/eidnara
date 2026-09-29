@@ -948,6 +948,8 @@ pub struct HistorySummarizerDurableState {
     /// transaction, allowing later tail extension while rejecting selected-byte drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_range_identities: Vec<HistorySummarizerSelectedMessageIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn_selected_mid: Option<String>,
     /// The token budget the fired prompt was presented under, after any retry shrink; a reattachment presents the frozen range under it rather than under the current configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presented_token_budget: Option<usize>,
@@ -1022,6 +1024,7 @@ impl Default for HistorySummarizerDurableState {
             chunk_range: None,
             chunk_fingerprint: String::new(),
             selected_range_identities: Vec::new(),
+            withdrawn_selected_mid: None,
             presented_token_budget: None,
             producer_session_id: None,
             producer_run_id: None,
@@ -1052,6 +1055,7 @@ impl HistorySummarizerDurableState {
             chunk_range: _,
             chunk_fingerprint: _,
             selected_range_identities: _,
+            withdrawn_selected_mid: _,
             presented_token_budget: _,
             producer_session_id: _,
             producer_run_id: _,
@@ -3328,14 +3332,18 @@ fn json_id_array<'a>(ids: impl IntoIterator<Item = &'a str>) -> rusqlite::Result
     })
 }
 
-/// Retires the domain owners in one scope, optionally narrowed to an owner kind and key,
-/// then prunes only the audit rows those owners held.
+#[derive(Clone, Copy)]
+enum RetiredOwners<'a> {
+    Scope,
+    Kind(&'a str),
+    Owner { kind: &'a str, key: &'a str },
+}
+
 fn retire_active_scan_domain_owners(
     tx: &GuardedConn<'_>,
     scope_kind: &str,
     scope_key: &str,
-    owner_kind: Option<&str>,
-    owner_key: Option<&str>,
+    selection: RetiredOwners<'_>,
 ) -> rusqlite::Result<()> {
     let private_scope_key = active_scan_private_key(scope_kind, scope_key);
     let owner_scope_id: Option<String> = tx
@@ -3348,35 +3356,61 @@ fn retire_active_scan_domain_owners(
     let Some(owner_scope_id) = owner_scope_id else {
         return Ok(());
     };
-    let private_owner_key =
-        owner_key.map(|key| active_scan_private_key(owner_kind.unwrap_or(scope_kind), key));
 
-    let retired_scans = {
-        let mut statement = tx.prepare_cached(
-            "SELECT DISTINCT copies.scan_id, scans.scan_batch_id
-               FROM scan_owner_copies copies
-               JOIN scan_domain_owners owners USING(domain_owner_id)
-               JOIN field_scans scans ON scans.scan_id = copies.scan_id
-              WHERE owners.owner_scope_id = ?1
-                AND (?2 IS NULL OR owners.owner_kind = ?2)
-                AND (?3 IS NULL OR owners.owner_key = ?3)",
-        )?;
-
-        statement
+    macro_rules! retired_scans_sql {
+        ($owner_filter:literal) => {
+            concat!(
+                "SELECT DISTINCT copies.scan_id, scans.scan_batch_id
+                   FROM scan_owner_copies copies
+                   JOIN scan_domain_owners owners USING(domain_owner_id)
+                   JOIN field_scans scans ON scans.scan_id = copies.scan_id
+                  WHERE owners.owner_scope_id = ?1",
+                $owner_filter
+            )
+        };
+    }
+    let scan_row =
+        |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
+    let retired_scans = match selection {
+        RetiredOwners::Scope => tx
+            .prepare_cached(retired_scans_sql!(""))?
+            .query_map(params![owner_scope_id], scan_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        RetiredOwners::Kind(kind) => tx
+            .prepare_cached(retired_scans_sql!(" AND owners.owner_kind = ?2"))?
+            .query_map(params![owner_scope_id, kind], scan_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        RetiredOwners::Owner { kind, key } => tx
+            .prepare_cached(retired_scans_sql!(
+                " AND owners.owner_kind = ?2 AND owners.owner_key = ?3"
+            ))?
             .query_map(
-                params![owner_scope_id, owner_kind, private_owner_key],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                params![owner_scope_id, kind, active_scan_private_key(kind, key)],
+                scan_row,
             )?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
     };
 
-    tx.prepare_cached(
-        "DELETE FROM scan_domain_owners
-          WHERE owner_scope_id = ?1
-            AND (?2 IS NULL OR owner_kind = ?2)
-            AND (?3 IS NULL OR owner_key = ?3)",
-    )?
-    .execute(params![owner_scope_id, owner_kind, private_owner_key])?;
+    match selection {
+        RetiredOwners::Scope => tx
+            .prepare_cached("DELETE FROM scan_domain_owners WHERE owner_scope_id = ?1")?
+            .execute(params![owner_scope_id])?,
+        RetiredOwners::Kind(kind) => tx
+            .prepare_cached(
+                "DELETE FROM scan_domain_owners WHERE owner_scope_id = ?1 AND owner_kind = ?2",
+            )?
+            .execute(params![owner_scope_id, kind])?,
+        RetiredOwners::Owner { kind, key } => tx
+            .prepare_cached(
+                "DELETE FROM scan_domain_owners
+                  WHERE owner_scope_id = ?1 AND owner_kind = ?2 AND owner_key = ?3",
+            )?
+            .execute(params![
+                owner_scope_id,
+                kind,
+                active_scan_private_key(kind, key)
+            ])?,
+    };
     prune_retired_active_scan_audit(tx, &retired_scans, &owner_scope_id)
 }
 
@@ -3387,7 +3421,15 @@ fn retire_active_scan_domain_owner(
     owner_kind: &str,
     owner_key: &str,
 ) -> rusqlite::Result<()> {
-    retire_active_scan_domain_owners(tx, scope_kind, scope_key, Some(owner_kind), Some(owner_key))
+    retire_active_scan_domain_owners(
+        tx,
+        scope_kind,
+        scope_key,
+        RetiredOwners::Owner {
+            kind: owner_kind,
+            key: owner_key,
+        },
+    )
 }
 
 fn retire_active_scan_owner_kind(
@@ -3396,7 +3438,7 @@ fn retire_active_scan_owner_kind(
     scope_key: &str,
     owner_kind: &str,
 ) -> rusqlite::Result<()> {
-    retire_active_scan_domain_owners(tx, scope_kind, scope_key, Some(owner_kind), None)
+    retire_active_scan_domain_owners(tx, scope_kind, scope_key, RetiredOwners::Kind(owner_kind))
 }
 
 fn retire_active_scan_scope(
@@ -3404,7 +3446,7 @@ fn retire_active_scan_scope(
     scope_kind: &str,
     scope_key: &str,
 ) -> rusqlite::Result<()> {
-    retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
+    retire_active_scan_domain_owners(tx, scope_kind, scope_key, RetiredOwners::Scope)
 }
 
 /// Keeps the newest `keep` history-owner receipts for `field_ids` in the session's scope
@@ -3418,27 +3460,28 @@ fn evict_history_receipts_beyond(
     field_ids: &[&str],
     keep: usize,
 ) -> rusqlite::Result<()> {
-    let owner_keys = json_id_array(
-        [
-            DurableWriteFamily::CacheState.owner_kind(),
-            DurableWriteFamily::TransformDiagnostics.owner_kind(),
-        ]
-        .iter()
-        .map(|kind| active_scan_private_key(kind, CACHE_STATE_HISTORY_OWNER_KEY))
-        .collect::<Vec<_>>()
-        .iter()
-        .map(String::as_str),
-    )?;
+    let [cache_state, diagnostics] = [
+        DurableWriteFamily::CacheState.owner_kind(),
+        DurableWriteFamily::TransformDiagnostics.owner_kind(),
+    ];
     let owners: Vec<(String, String)> = tx
         .prepare_cached(
             "SELECT owners.owner_scope_id, owners.domain_owner_id
-               FROM scan_domain_owners owners
-               JOIN scan_owner_scopes scopes USING(owner_scope_id)
-              WHERE scopes.scope_kind = 'session' AND scopes.scope_key = ?1
-                AND owners.owner_key IN (SELECT value FROM json_each(?2))",
+               FROM scan_owner_scopes scopes
+               JOIN scan_domain_owners owners
+                 ON owners.owner_scope_id = scopes.owner_scope_id
+                AND ((owners.owner_kind = ?2 AND owners.owner_key = ?3)
+                  OR (owners.owner_kind = ?4 AND owners.owner_key = ?5))
+              WHERE scopes.scope_kind = 'session' AND scopes.scope_key = ?1",
         )?
         .query_map(
-            params![active_scan_private_key("session", session_id), owner_keys],
+            params![
+                active_scan_private_key("session", session_id),
+                cache_state,
+                active_scan_private_key(cache_state, CACHE_STATE_HISTORY_OWNER_KEY),
+                diagnostics,
+                active_scan_private_key(diagnostics, CACHE_STATE_HISTORY_OWNER_KEY),
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?
         .collect::<rusqlite::Result<_>>()?;
@@ -13062,6 +13105,11 @@ impl MemoryStore {
                 return Ok(PublishTxnOutcome::FenceRejected(
                     "history_summarizer firing has no selected-range content identities".to_string(),
                 ));
+            }
+            if let Some(mid) = &meta.history_summarizer.withdrawn_selected_mid {
+                return Ok(PublishTxnOutcome::FenceRejected(format!(
+                    "selected history_summarizer message {mid} left the window after firing"
+                )));
             }
             {
                 let selected_mids = predicate
@@ -23637,6 +23685,7 @@ mod tests {
                 }),
                 chunk_fingerprint: "fp".into(),
                 selected_range_identities,
+                withdrawn_selected_mid: None,
                 presented_token_budget: None,
                 producer_session_id: Some("producer-session".into()),
                 producer_run_id: Some("run-1".into()),
@@ -23800,6 +23849,51 @@ mod tests {
         );
         assert!(store.load_history_segments("ses").unwrap().is_empty());
         assert_eq!(store.load("ses").unwrap().row_version, before.row_version);
+    }
+
+    #[test]
+    fn publish_rejects_a_firing_whose_selected_message_left_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = publishing_meta();
+        meta.history_summarizer.withdrawn_selected_mid = Some("m10".to_string());
+        let version = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
+            .unwrap();
+
+        let refused = store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+            session_id: "ses",
+            expected_row_version: Some(version),
+            expected_revert_epoch: 0,
+            predicate: &publish_predicate(),
+            project_path: "git:proj",
+            history_segments: &[publish_history_segment()],
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 21,
+            chunk_transcript: None,
+            memory_reviewer_nonadmission: None,
+            memory_reviewer_activation: None,
+            published_at_ms: 0,
+        });
+
+        assert!(
+            matches!(
+                &refused,
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
+                    if reason.contains("m10")
+            ),
+            "{refused:?}"
+        );
+        assert!(store.load_history_segments("ses").unwrap().is_empty());
+        assert_eq!(store.load("ses").unwrap().row_version, Some(version));
     }
 
     fn publish_history_segment() -> StoredHistorySegment {
@@ -31352,6 +31446,55 @@ mod lineage_descent_tests {
         assert_eq!(
             small, large,
             "retirement work at 10 rows {small}, 5,000 rows {large}"
+        );
+    }
+
+    #[test]
+    fn commit_work_does_not_grow_with_the_retained_identity_owners() {
+        let commit_work = |owners: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let mut version = None;
+            for n in 0..owners {
+                version = Some(
+                    store
+                        .commit_with_block_identities_for_test(
+                            "ses",
+                            version,
+                            &CoreState::empty(),
+                            &ModuleMeta::default(),
+                            &upserts(&[(&format!("m{n}"), "fp")]),
+                        )
+                        .unwrap(),
+                );
+            }
+            assert_eq!(identity_document_receipts(&store, "ses"), owners as i64);
+            store.start_statement_work_ledger();
+            let version = store
+                .commit("ses", version, &CoreState::empty(), &ModuleMeta::default())
+                .unwrap();
+            store
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    Some(version),
+                    &CoreState::empty(),
+                    &ModuleMeta::default(),
+                    &upserts(&[("next", "fp")]),
+                )
+                .unwrap();
+            store
+                .take_statement_work()
+                .into_iter()
+                .map(|work| work.vm_steps)
+                .sum::<u64>()
+        };
+
+        let small = commit_work(10);
+        let large = commit_work(400);
+
+        assert!(
+            large <= small + small / 4,
+            "commit work with 10 retained owners {small}, with 400 {large}"
         );
     }
 
