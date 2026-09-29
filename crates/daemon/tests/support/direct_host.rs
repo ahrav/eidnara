@@ -365,6 +365,13 @@ impl FixtureProcess {
         assert!(status.success(), "SIGTERM delivery failed");
     }
 
+    /// SIGKILL terminates the fixture before its exit handlers run.
+    pub fn kill(&mut self) {
+        let mut child = self.child.take().expect("fixture child");
+        child.kill().expect("send SIGKILL");
+        child.wait().expect("reap the fixture");
+    }
+
     pub fn shutdown(self) -> CapturedOutput {
         let (status, output) = self.shutdown_with_status();
         assert!(

@@ -14,6 +14,7 @@ use crate::canonical_memory::{CanonicalMemory, CanonicalMemoryRead};
 use crate::config::{
     CacheTtlProvenance, DEFAULT_AUTO_SEARCH_MIN_PROMPT_CHARS, DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
 };
+use crate::derived_state::{DerivedState, ProposedDerivedState};
 use crate::divergence;
 pub use crate::divergence::FirstDivergence;
 use crate::fold_authority::{self, AppliedFoldAuthority, FoldAuthorityIntent, FoldAuthorityPlan};
@@ -41,9 +42,9 @@ use crate::selection::{
     SelectionOutcome, filter_reasoning_ineligible_decisions, select_reductions_with_outcome,
 };
 use crate::tail_hygiene::{
-    CHANNEL1_FLOOR_TOKENS, CHANNEL1_MIN_TOKENS, CHANNEL2_FLOOR_TOKENS, CHANNEL2_SEVERITY_THRESHOLD,
-    HygieneBand, effective_tail_hygiene, hygiene_band, measure_tail_hygiene,
-    refresh_tail_hygiene_baseline,
+    BaselineParts, CHANNEL1_FLOOR_TOKENS, CHANNEL1_MIN_TOKENS, CHANNEL2_FLOOR_TOKENS,
+    CHANNEL2_SEVERITY_THRESHOLD, HygieneBand, effective_tail_hygiene, hygiene_band,
+    measure_tail_hygiene, refresh_tail_hygiene_baseline,
 };
 use crate::wire;
 use cache_stability::{CoreState, FrozenUnit, PassInput};
@@ -54,8 +55,9 @@ use memory_store::{
     LineageDescentRequest, MaterializeReason, MemoryStore, MemoryStoreError, ModuleMeta,
     ModuleUsage, NoteDelivery, PassAction, PassRecord, PassSchedulerObservation, PendingAgentDrop,
     PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
-    ServedBlockFingerprint, TagMintInput, TagRow, TailHygieneBaseline, TemporalMarkInput,
-    TemporalMarkRow, TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
+    ServedBlockFingerprint, StablePassDivergence, TagMintInput, TagRow, TailHygieneBaseline,
+    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
+    UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -516,6 +518,7 @@ pub struct ReductionDecision {
     pub payload: String,
 }
 
+#[cfg_attr(test, derive(Clone))]
 pub struct ProducerContext<'a> {
     /// The canonical memory read pinned for this pass, already trimmed to the
     /// memory budget; every memory surface of the pass composes from it. `None`
@@ -553,6 +556,7 @@ pub struct ProducerContext<'a> {
     /// `wrapup_active` is true while `session.wrapup` owns this session's process-local round latch; `session.wrapup` releases the latch on every terminal path.
     /// Rows delayed by `wrapup_active` become eligible after latch release.
     pub wrapup_active: bool,
+    pub(crate) derived: Option<&'a DerivedState>,
     #[cfg(test)]
     pub injected_reductions: Vec<ReductionDecision>,
 }
@@ -1556,6 +1560,8 @@ pub struct TransformWithProjection {
     /// rebased it to the durable ordinal base; `None` when it served the request it was given.
     pub served_request: Option<Box<TransformRequest>>,
     pub fold_authority: AppliedFoldAuthority,
+    pub(crate) derived: Option<ProposedDerivedState>,
+    pub(crate) boundary_read_error: Option<TransformError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1728,6 +1734,15 @@ pub enum TransformError {
     CacheStability(#[from] cache_stability::StepError),
 }
 
+impl TransformWithProjection {
+    pub(crate) fn finished(mut self) -> Result<Self, TransformError> {
+        match self.boundary_read_error.take() {
+            Some(error) => Err(error),
+            None => Ok(self),
+        }
+    }
+}
+
 impl From<WireError> for TransformError {
     fn from(e: WireError) -> Self {
         TransformError::Wire(e)
@@ -1797,7 +1812,21 @@ pub(crate) fn transform_with_projection(
 ) -> Result<TransformWithProjection, TransformError> {
     let mut window = tests::plugin_window(store, req);
     resolve_window(store, &mut window)?;
-    transform_with_projection_cached(store, &window, ctx)
+    let retained = tests::retained_derived(store, &req.session_id);
+    let with_retained;
+    let ctx = match (&retained, ctx.derived) {
+        (Some(retained), None) => {
+            with_retained = ProducerContext {
+                derived: Some(retained),
+                ..ctx.clone()
+            };
+            &with_retained
+        }
+        _ => ctx,
+    };
+    let mut pass = transform_with_projection_cached(store, &window, ctx)?;
+    tests::retain_derived(store, &req.session_id, &mut pass);
+    pass.finished()
 }
 
 /// The production pipeline entry. The name is historical: the pass takes no cache now, and the
@@ -1822,10 +1851,24 @@ fn record_stable_pass_trace(
     if let Some(pass) = result.as_ref().ok().filter(|pass| {
         pass.response.status == TransformStatus::Ok
             && pass.response.messages.is_some()
-            && pass.response.first_divergence.is_none()
             && !pass.response.committed
+            && pass.boundary_read_error.is_none()
     }) {
-        let _ = store.trace_pass_stable(&req.session_id, &pass.pass_observation);
+        let first_divergence = pass
+            .response
+            .first_divergence
+            .as_ref()
+            .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
+        let _ = store.trace_pass_stable(
+            &req.session_id,
+            &pass.pass_observation,
+            first_divergence
+                .as_deref()
+                .map(|first_divergence| StablePassDivergence {
+                    first_divergence,
+                    request_observed_at_ms: req.request_observed_at_ms,
+                }),
+        );
     }
 }
 
@@ -2082,7 +2125,12 @@ fn apply_once_with_estimator(
                 // moves `core.boundary_id`, and a reset read here answers `null`, which is the
                 // reset's truth. A store error fails the committed pass: the plugin serves raw
                 // once and declares its retained anchor, which resolves against the new state.
-                output.response.boundary = Some(rendered_boundary(store, &req.session_id)?);
+                #[cfg(test)]
+                run_transform_attempt_hook(&format!("rendered_boundary:{}", req.session_id));
+                match rendered_boundary(store, &req.session_id) {
+                    Ok(boundary) => output.response.boundary = Some(boundary),
+                    Err(error) => output.boundary_read_error = Some(error),
+                }
                 if let Cow::Owned(served) = attempt_req
                     && output.served_request.is_none()
                 {
@@ -2285,7 +2333,7 @@ pub(crate) fn install_transform_attempt_hook(
 }
 
 #[cfg(test)]
-fn run_transform_attempt_hook(session_id: &str) {
+pub(crate) fn run_transform_attempt_hook(session_id: &str) {
     let hook = TRANSFORM_ATTEMPT_HOOKS.get().and_then(|hooks| {
         hooks
             .lock()
@@ -2558,6 +2606,8 @@ fn lineage_protocol_passthrough(
         lineage_anchor_mid: None,
         served_request: None,
         fold_authority: AppliedFoldAuthority::default(),
+        derived: None,
+        boundary_read_error: None,
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -3077,6 +3127,8 @@ fn apply_additive_only(
         lineage_anchor_mid: None,
         served_request: None,
         fold_authority: AppliedFoldAuthority::default(),
+        derived: None,
+        boundary_read_error: None,
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3454,39 +3506,10 @@ fn apply_once(
                 mutation_exempt_mid,
             );
             let served_fingerprints = served_output_fingerprints(&passthrough_messages);
-            let first_divergence = divergence::first_divergence(
-                &loaded.meta.served_output_fingerprint,
-                &served_fingerprints,
-            );
-            let first_divergence_json = first_divergence
-                .as_ref()
-                .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
-            let mut next_meta = loaded.meta.clone();
-            next_meta.served_output_fingerprint = served_fingerprints;
-            let fingerprint_changed = next_meta != loaded.meta;
+            let first_divergence = prior_served(ctx, &loaded.meta)
+                .and_then(|prior| divergence::first_divergence(prior, &served_fingerprints));
             let pass_observation =
                 pending_rewrite_pass_observation(req, loaded.meta.last_usage.as_ref(), ctx.now_ms);
-            let row_version = if fingerprint_changed {
-                #[cfg(test)]
-                run_transform_attempt_hook(&req.session_id);
-                store.commit_transform(
-                    &req.session_id,
-                    TransformCommit {
-                        expected: loaded.row_version,
-                        core: &loaded.core,
-                        meta: &next_meta,
-                        consumed_drop_ids: &[],
-                        first_applied_command_ids: &[],
-                        history_segment_max_seq: None,
-                        project_root: Some(ctx.project_directory),
-                        first_divergence: first_divergence_json.as_deref(),
-                        pass: Some(pass_record(req, pass_observation.clone())),
-                        overlays: TransformOverlayBatch::default(),
-                    },
-                )?
-            } else {
-                loaded.row_version.unwrap_or(0)
-            };
             if let Some(first_divergence) = &first_divergence {
                 let detail =
                     serde_json::to_string(first_divergence).expect("divergence is serializable");
@@ -3499,13 +3522,20 @@ fn apply_once(
                 projection,
                 tag_numbers,
                 mutation_exempt_mid: mutation_exempt_mid.map(str::to_string),
-                row_version,
-                project_memory: next_meta.project_memory.clone(),
-                revert_epoch: next_meta.revert_epoch,
-                reasoning_watermark: next_meta
+                row_version: loaded.row_version.unwrap_or(0),
+                project_memory: loaded.meta.project_memory.clone(),
+                revert_epoch: loaded.meta.revert_epoch,
+                reasoning_watermark: loaded
+                    .meta
                     .reasoning_cleared_through_tag
-                    .max(next_meta.reasoning_cleared_through_ordinal),
-                committed: fingerprint_changed,
+                    .max(loaded.meta.reasoning_cleared_through_ordinal),
+                derived: Some(carried_derived_state(
+                    ctx,
+                    &loaded,
+                    loaded.meta.revert_epoch,
+                    served_fingerprints,
+                )),
+                committed: false,
                 messages: passthrough_messages,
                 first_divergence,
                 surface_state,
@@ -3554,14 +3584,12 @@ fn apply_once(
             mutation_exempt_mid,
         );
         let served_fingerprints = served_output_fingerprints(&passthrough_messages);
-        let first_divergence = divergence::first_divergence(
-            &loaded.meta.served_output_fingerprint,
-            &served_fingerprints,
-        );
+        let first_divergence = prior_served(ctx, &loaded.meta)
+            .and_then(|prior| divergence::first_divergence(prior, &served_fingerprints));
         let first_divergence_json = first_divergence
             .as_ref()
             .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
-        meta.served_output_fingerprint = served_fingerprints;
+        let derived = carried_derived_state(ctx, &loaded, meta.revert_epoch, served_fingerprints);
         let pass_observation =
             pending_rewrite_pass_observation(req, loaded.meta.last_usage.as_ref(), ctx.now_ms);
         #[cfg(test)]
@@ -3603,6 +3631,7 @@ fn apply_once(
             reasoning_watermark: meta
                 .reasoning_cleared_through_tag
                 .max(meta.reasoning_cleared_through_ordinal),
+            derived: Some(derived),
             committed: true,
             messages: passthrough_messages,
             first_divergence,
@@ -4141,9 +4170,12 @@ fn apply_once(
             }
         };
         if let Some((hint, trace)) = decided {
-            let deferred = !hint.hint_text.is_empty()
-                && user_hint_target_was_served(&loaded.meta, &hint.block_id)
-                && !is_bust_pass;
+            let deferred = user_hint_deferred(
+                &hint.hint_text,
+                prior_served(ctx, &loaded.meta),
+                &hint.block_id,
+                is_bust_pass,
+            );
             if deferred {
                 meta.pending_user_hint_block_ids
                     .insert(hint.block_id.clone());
@@ -4871,18 +4903,29 @@ fn apply_once(
         },
     );
     timings.tail_hygiene = elapsed_ms(tail_hygiene_started_at);
+    let prior_parts = prior_baseline_parts(ctx, &loaded.meta);
+    let mut measured_parts = None;
     let current_hygiene_baseline = if is_bust_pass {
         let refreshed = refresh_tail_hygiene_baseline(
             hygiene_measurement,
             true,
             loaded.meta.tail_hygiene_baseline.as_ref(),
+            prior_parts,
             ctx.now_ms,
         );
-        meta.tail_hygiene_baseline = Some(refreshed.clone());
-        Some(refreshed)
+        meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
+        measured_parts = refreshed.parts;
+        Some(refreshed.baseline)
     } else {
         loaded.meta.tail_hygiene_baseline.as_ref().map(|previous| {
-            refresh_tail_hygiene_baseline(hygiene_measurement, false, Some(previous), ctx.now_ms)
+            refresh_tail_hygiene_baseline(
+                hygiene_measurement,
+                false,
+                Some(previous),
+                prior_parts,
+                ctx.now_ms,
+            )
+            .baseline
         })
     };
     let refreshed_coverage = meta.coverage_ordinal;
@@ -5032,13 +5075,16 @@ fn apply_once(
     let finalize_started_at = Instant::now();
     let divergence_started_at = Instant::now();
     let served_fingerprints = served_output_fingerprints(&wire_messages);
-    let first_divergence =
-        divergence::first_divergence(&loaded.meta.served_output_fingerprint, &served_fingerprints);
+    let first_divergence = prior_served(ctx, &loaded.meta)
+        .and_then(|prior| divergence::first_divergence(prior, &served_fingerprints));
     timings.divergence = elapsed_ms(divergence_started_at);
     let first_divergence_json = first_divergence
         .as_ref()
         .map(|value| serde_json::to_string(value).expect("divergence is serializable"));
-    meta.served_output_fingerprint = served_fingerprints;
+    let mut derived = carried_derived_state(ctx, &loaded, meta.revert_epoch, served_fingerprints);
+    if let Some(parts) = measured_parts {
+        derived.baseline_parts = Some(parts);
+    }
 
     let channel2_output = channel2_directives(
         serializer_profile,
@@ -5219,6 +5265,8 @@ fn apply_once(
         },
         served_request: rebased_req.map(Box::new),
         fold_authority: AppliedFoldAuthority::default(),
+        derived: Some(derived),
+        boundary_read_error: None,
     })
 }
 
@@ -6710,6 +6758,7 @@ struct PendingPassthroughArgs {
     project_memory: Option<ProjectMemoryComposition>,
     revert_epoch: u64,
     reasoning_watermark: u64,
+    derived: Option<ProposedDerivedState>,
     committed: bool,
     messages: Vec<ServedMessage>,
     first_divergence: Option<FirstDivergence>,
@@ -6759,6 +6808,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         project_memory,
         revert_epoch,
         reasoning_watermark,
+        derived,
         committed,
         messages,
         first_divergence,
@@ -6790,6 +6840,8 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         lineage_anchor_mid: None,
         served_request: None,
         fold_authority: AppliedFoldAuthority::default(),
+        derived,
+        boundary_read_error: None,
         response,
     }
 }
@@ -7752,13 +7804,55 @@ fn eligible_authored_user_tail<'a>(req: &TransformIngress<'a>) -> Option<&'a Ing
     req.is_authored_user_message(tail).then_some(tail)
 }
 
-fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {
+fn user_hint_deferred(
+    hint_text: &str,
+    served: Option<&[ServedBlockFingerprint]>,
+    block_id: &str,
+    is_bust_pass: bool,
+) -> bool {
+    if hint_text.is_empty() || is_bust_pass {
+        return false;
+    }
+    let Some(served) = served else {
+        return true;
+    };
     let Some((message_id, block_index)) = split_block_id(block_id) else {
         return false;
     };
-    meta.served_output_fingerprint.iter().any(|served| {
+    served.iter().any(|served| {
         served.block_id == block_id || (block_index == 0 && served.block_id == message_id)
     })
+}
+
+fn prior_served<'a>(
+    ctx: &ProducerContext<'a>,
+    meta: &ModuleMeta,
+) -> Option<&'a [ServedBlockFingerprint]> {
+    ctx.derived?.served_for(meta.revert_epoch)
+}
+
+fn prior_baseline_parts<'a>(
+    ctx: &ProducerContext<'a>,
+    meta: &ModuleMeta,
+) -> Option<&'a BaselineParts> {
+    ctx.derived?
+        .parts_for(meta.revert_epoch, meta.tail_hygiene_baseline.as_ref())
+}
+
+fn carried_derived_state(
+    ctx: &ProducerContext<'_>,
+    loaded: &memory_store::LoadedState,
+    revert_epoch: u64,
+    served: Vec<ServedBlockFingerprint>,
+) -> ProposedDerivedState {
+    ProposedDerivedState {
+        revert_epoch,
+        read_row_version: loaded.row_version,
+        served,
+        baseline_parts: (revert_epoch == loaded.meta.revert_epoch)
+            .then(|| prior_baseline_parts(ctx, &loaded.meta).cloned())
+            .flatten(),
+    }
 }
 
 fn compute_active_overlay_decisions(
@@ -12674,6 +12768,7 @@ pub(crate) mod tests {
             guidance_date: Some("Today's date: Thu Jan 01 1970".to_string()),
             history_summarizer_active: false,
             wrapup_active: false,
+            derived: None,
             injected_reductions: Vec::new(),
         }
     }
@@ -12924,6 +13019,54 @@ pub(crate) mod tests {
         assert_no_orphaned_tool_arcs(&answered);
     }
 
+    type RetainedDerived = HashMap<(u64, String), Arc<DerivedState>>;
+
+    fn retained_derived_states() -> &'static Mutex<RetainedDerived> {
+        static RETAINED: OnceLock<Mutex<RetainedDerived>> = OnceLock::new();
+        RETAINED.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(crate) fn retained_derived(
+        store: &MemoryStore,
+        session_id: &str,
+    ) -> Option<Arc<DerivedState>> {
+        retained_derived_states()
+            .lock()
+            .unwrap()
+            .get(&(store.tag_cache_namespace(), session_id.to_string()))
+            .cloned()
+    }
+
+    pub(crate) fn retain_derived(
+        store: &MemoryStore,
+        session_id: &str,
+        pass: &mut TransformWithProjection,
+    ) {
+        let committed = pass.response.committed.then_some(pass.response.row_version);
+        let Some(accepted) = pass
+            .derived
+            .take()
+            .and_then(|proposal| proposal.accept(store, session_id, committed))
+        else {
+            return;
+        };
+        let mut retained = retained_derived_states().lock().unwrap();
+        let key = (store.tag_cache_namespace(), session_id.to_string());
+        if retained
+            .get(&key)
+            .is_none_or(|current| accepted.supersedes(current))
+        {
+            retained.insert(key, Arc::new(accepted));
+        }
+    }
+
+    pub(crate) fn forget_derived(store: &MemoryStore, session_id: &str) {
+        retained_derived_states()
+            .lock()
+            .unwrap()
+            .remove(&(store.tag_cache_namespace(), session_id.to_string()));
+    }
+
     pub(crate) fn run(
         s: &MemoryStore,
         req: &TransformRequest,
@@ -13084,6 +13227,93 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_new_hint_defers_only_when_its_target_may_have_been_served_outside_a_bust() {
+        let served = |block_id: &str| ServedBlockFingerprint {
+            block_id: block_id.to_string(),
+            content_hash: "h".to_string(),
+            serialized_len: 1,
+        };
+        let target = [served("m1#0")];
+        let whole_message = [served("m1")];
+        let other = [served("m2#0")];
+        type Case<'a> = (
+            &'a str,
+            Option<&'a [ServedBlockFingerprint]>,
+            &'a str,
+            bool,
+            bool,
+        );
+        let cases: [Case<'_>; 10] = [
+            ("unknown history", None, "m1#0", false, true),
+            ("unknown history, bust", None, "m1#0", true, false),
+            ("known empty", Some(&[]), "m1#0", false, false),
+            ("served block", Some(&target), "m1#0", false, true),
+            ("served block, bust", Some(&target), "m1#0", true, false),
+            (
+                "served as whole message",
+                Some(&whole_message),
+                "m1#0",
+                false,
+                true,
+            ),
+            (
+                "whole message, later block",
+                Some(&whole_message),
+                "m1#1",
+                false,
+                false,
+            ),
+            ("other block served", Some(&other), "m1#0", false, false),
+            ("empty hint, unknown", None, "m1#0", false, false),
+            ("empty hint, served", Some(&target), "m1#0", false, false),
+        ];
+        for (case, history, block_id, bust, expected) in cases {
+            let text = if case.starts_with("empty hint") {
+                ""
+            } else {
+                "hint"
+            };
+            assert_eq!(
+                user_hint_deferred(text, history, block_id, bust),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn divergence_reports_nothing_against_an_unknown_served_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "unknown-served-history";
+        let request = |middle: &str| {
+            active_cc_req(
+                session,
+                "cfg0",
+                vec![
+                    wire_item("user", "m0", 0, &["plan the work"]),
+                    wire_item("assistant", "m1", 1, &[middle]),
+                    wire_item("user", "m2", 2, &["continue with details"]),
+                ],
+            )
+        };
+        assert!(
+            run(&store, &request("first"), &spine())
+                .first_divergence
+                .is_none()
+        );
+        forget_derived(&store, session);
+        let unknown = run(&store, &request("second"), &spine());
+        assert!(unknown.first_divergence.is_none());
+        assert!(retained_derived(&store, session).is_some());
+        let known = run(&store, &request("third"), &spine());
+        assert_eq!(
+            known.first_divergence.map(|row| row.kind),
+            Some(divergence::DivergenceKind::ContentChanged)
+        );
+    }
+
+    #[test]
     fn served_fingerprint_records_cold_start_and_attributes_middle_changes() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -13093,14 +13323,7 @@ pub(crate) mod tests {
 
         let first = run(&store, &baseline_request, &spine());
         assert!(first.first_divergence.is_none());
-        assert!(
-            !store
-                .load(session)
-                .unwrap()
-                .meta
-                .served_output_fingerprint
-                .is_empty()
-        );
+        assert!(!retained_derived(&store, session).unwrap().served.is_empty());
 
         let stable = run(&store, &baseline_request, &spine());
         assert!(stable.first_divergence.is_none());
@@ -13820,7 +14043,6 @@ pub(crate) mod tests {
 
         // The diverged-pass fingerprints match a forced-rehash rebuild of the same served messages.
         // The diverged-pass fingerprints match a forced-rehash rebuild of the same served messages, so attribution rows use the same basis.
-        let loaded = store.load(session).unwrap();
         let forced_messages: Vec<ServedMessage> = third
             .messages()
             .iter()
@@ -13828,75 +14050,10 @@ pub(crate) mod tests {
             .collect();
         let forced_fps = served_output_fingerprints(&forced_messages);
         assert_eq!(
-            forced_fps, loaded.meta.served_output_fingerprint,
+            forced_fps,
+            retained_derived(&store, session).unwrap().served,
             "stored divergence fingerprints must match forced re-hash of served output"
         );
-    }
-
-    /// A row an earlier build wrote carries 64-hex block and hygiene part hashes. The next pass
-    /// reads it, attributes one content change without a HARD, and stores 32-hex block hashes;
-    /// the pass after is stable and not HARD. Neither pass busts the cache, so the stored 64-hex
-    /// hygiene baseline stays until a bust replaces it; `an_earlier_builds_64_hex_baseline_...`
-    /// in tail_hygiene covers how it measures meanwhile.
-    #[test]
-    fn a_row_with_64_hex_block_hashes_diverges_once_then_is_stable() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let session = "hash-width-upgrade";
-        let request = active_cc_req(
-            session,
-            "cfg0",
-            vec![
-                wire_item("user", "m0", 0, &["plan the work"]),
-                wire_item("assistant", "m1", 1, &["working on it"]),
-            ],
-        );
-        run(&store, &request, &spine());
-        let loaded = store.load(session).unwrap();
-        let mut meta = loaded.meta.clone();
-        let widen = |hash: &mut String| {
-            assert_eq!(hash.len(), 32);
-            hash.push_str(&"0".repeat(32));
-        };
-        assert!(!meta.served_output_fingerprint.is_empty());
-        meta.served_output_fingerprint
-            .iter_mut()
-            .for_each(|block| widen(&mut block.content_hash));
-        let baseline = meta.tail_hygiene_baseline.as_mut().unwrap();
-        assert!(!baseline.baseline_parts.is_empty());
-        baseline
-            .baseline_parts
-            .iter_mut()
-            .for_each(|part| widen(&mut part.content_hash));
-        store
-            .commit(session, loaded.row_version, &loaded.core, &meta)
-            .unwrap();
-
-        let upgraded = run(&store, &request, &spine());
-        let divergence = upgraded.first_divergence.as_ref().unwrap();
-        assert_eq!(divergence.index, 0);
-        assert_eq!(divergence.kind, divergence::DivergenceKind::ContentChanged);
-        assert_ne!(upgraded.action, "HARD");
-        let stored = store.load(session).unwrap().meta;
-        assert!(
-            stored
-                .served_output_fingerprint
-                .iter()
-                .all(|block| block.content_hash.len() == 32)
-        );
-        assert!(
-            stored
-                .tail_hygiene_baseline
-                .as_ref()
-                .unwrap()
-                .baseline_parts
-                .iter()
-                .all(|part| part.content_hash.len() == 64),
-            "a pass that does not bust the cache keeps the stored hygiene baseline"
-        );
-        let stable = run(&store, &request, &spine());
-        assert!(stable.first_divergence.is_none());
-        assert_ne!(stable.action, "HARD");
     }
 
     fn synthetic_text(r: &TransformResponse, index: usize) -> &str {

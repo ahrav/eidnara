@@ -1212,6 +1212,12 @@ pub struct PassRecord {
     pub applied_reductions: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StablePassDivergence<'a> {
+    pub first_divergence: &'a str,
+    pub request_observed_at_ms: Option<u64>,
+}
+
 /// Incident-worthy scheduler evidence retained independently of the recency ring.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InterestingPassSchedulerObservation {
@@ -1895,16 +1901,7 @@ pub struct TailHygieneBaseline {
     pub computed_at_ms: i64,
     pub evaluable: bool,
     pub generation_invalidated: bool,
-    /// The measured parts after the leading run of excluded parts. History-covered blocks
-    /// are always excluded, so this list grows with the live tail, not the whole session.
-    pub baseline_parts: Vec<TailHygienePartMeasurement>,
     pub content_signature: String,
-    /// Length of the leading run of excluded parts that `baseline_parts` omits.
-    #[serde(default)]
-    pub excluded_prefix_len: usize,
-    /// SHA-256 over the omitted parts, so a later walk still detects any change to them.
-    #[serde(default)]
-    pub excluded_prefix_digest: String,
 }
 
 /// The source of a project-memory block.
@@ -2249,10 +2246,6 @@ pub struct ModuleMeta {
     /// Sparse response-recency anchor, piggybacked only on passes already committing.
     #[serde(default)]
     pub last_committed_pass_at_ms: i64,
-    /// Fingerprints of the blocks most recently served to the provider. The vector is exactly
-    /// the served block set for that pass, so it stays bounded by the output size.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub served_output_fingerprint: Vec<ServedBlockFingerprint>,
     /// Covered system messages, one per distinct content in first-ordinal order. A fold
     /// window starts at its anchor; preceding system messages reach later folds only through
     /// this list.
@@ -3405,6 +3398,24 @@ fn retire_active_scan_scope(
     scope_key: &str,
 ) -> rusqlite::Result<()> {
     retire_active_scan_domain_owners(tx, scope_kind, scope_key, None, None)
+}
+
+fn evict_interesting_ring_receipts(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+    evict_history_receipts_beyond(
+        tx,
+        session_id,
+        &["scheduler_interesting"],
+        PASS_TRACE_HISTORY_RING_LEN - 1,
+    )?;
+    let stored_fingerprints: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history)
+          WHERE session_id = ?1
+            AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    let keep = usize::try_from(stored_fingerprints).unwrap_or(0);
+    evict_history_receipts_beyond(tx, session_id, &["scheduler_full_array_fingerprint"], keep)
 }
 
 /// Keeps the newest `keep` history-owner receipts for `field_ids` in the session's scope
@@ -8153,25 +8164,48 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Clear the current-pass divergence for a successful stable transform. This is separate
-    /// from `trace_pass_received` because direct module callers do not use the daemon receive
-    /// hook, while daemon callers must not count the same pass twice.
     pub fn trace_pass_stable(
         &self,
         session_id: &str,
         observation: &PassSchedulerObservation,
+        divergence: Option<StablePassDivergence<'_>>,
     ) -> Result<(), MemoryStoreError> {
         let observation_json = serialize_scheduler_observation(observation)?;
-        let interesting_json: Option<String> = None;
         let mut write = PreparedWrite::new(DurableWriteFamily::TransformDiagnostics);
         write.domain_owner("session", session_id, "pass_trace");
         write.existing_identity("session_id", session_id)?;
+        let history_scans_start = write.scans.len();
         let observation_json = write.content("scheduler_history", &observation_json)?;
-        // The observation joins the ring `commit_transform` also appends to, so its receipt
-        // shares that ring's owner and eviction.
-        let ring_scan = write.scans.len() - 1;
+        let first_divergence = divergence
+            .map(|divergence| {
+                write.json_content(
+                    "first_divergence",
+                    divergence.first_divergence,
+                    JsonScanPolicy::DurableRejectProtected,
+                )
+            })
+            .transpose()?;
+        let interesting_json = divergence
+            .map(|divergence| {
+                serialize_interesting_scheduler_observation(&PassRecord {
+                    observation: observation.clone(),
+                    request_observed_at_ms: divergence.request_observed_at_ms,
+                    supersession: SupersessionCounts::default(),
+                    applied_reductions: false,
+                })
+            })
+            .transpose()?
+            .map(|value| {
+                write.json_content(
+                    "scheduler_interesting",
+                    &value,
+                    JsonScanPolicy::DurableRejectProtected,
+                )
+            })
+            .transpose()?;
+        let history_scans = history_scans_start..write.scans.len();
         write.reassign_scans_in(
-            ring_scan..ring_scan + 1,
+            history_scans,
             "session",
             session_id,
             CACHE_STATE_HISTORY_OWNER_KEY,
@@ -8198,6 +8232,17 @@ impl MemoryStore {
                         })?;
                 }
             }
+            let pass_id: Option<i64> = first_divergence
+                .is_some()
+                .then(|| {
+                    tx.query_row(
+                        "SELECT COALESCE((SELECT row_version FROM cache_state
+                                           WHERE session_id = ?1), 0)",
+                        params![session_id],
+                        |row| row.get(0),
+                    )
+                })
+                .transpose()?;
             tx.execute(
                 "INSERT INTO pass_trace (
                      session_id,
@@ -8209,13 +8254,18 @@ impl MemoryStore {
                      receive_count,
                      first_divergence,
                      scheduler_history,
-                     scheduler_interesting_history
+                     scheduler_interesting_history,
+                     last_divergence
                  ) VALUES (
-                     ?1, 0, ?2, NULL, NULL, 0, 0, NULL, json_array(json(?3)),
-                     CASE WHEN ?4 IS NOT NULL THEN json_array(json(?4)) ELSE '[]' END
+                     ?1, 0, ?2, NULL, NULL, 0, 0, ?5, json_array(json(?3)),
+                     CASE WHEN ?4 IS NOT NULL THEN json_array(json(?4)) ELSE '[]' END,
+                     CASE WHEN ?5 IS NOT NULL THEN
+                         json_object('pass_id', ?6, 'timestamp_ms', ?2, 'divergence', json(?5))
+                     ELSE NULL END
                  )
                  ON CONFLICT(session_id) DO UPDATE SET
-                     first_divergence = NULL,
+                     first_divergence = excluded.first_divergence,
+                     last_divergence = COALESCE(excluded.last_divergence, pass_trace.last_divergence),
                      last_completed_at_ms = excluded.last_completed_at_ms,
                      scheduler_history = CASE
                          WHEN json_array_length(pass_trace.scheduler_history) < 256 THEN
@@ -8249,7 +8299,9 @@ impl MemoryStore {
                     session_id,
                     observation.timestamp_ms,
                     observation_json,
-                    interesting_json
+                    interesting_json,
+                    first_divergence,
+                    pass_id
                 ],
             )?;
             evict_history_receipts_beyond(
@@ -8258,6 +8310,12 @@ impl MemoryStore {
                 OBSERVATION_RING_FIELDS,
                 PASS_TRACE_HISTORY_RING_LEN - 1,
             )?;
+            if interesting_json.is_some() {
+                evict_interesting_ring_receipts(tx, session_id)?;
+            }
+            if first_divergence.is_some() {
+                evict_history_receipts_beyond(tx, session_id, &["first_divergence"], 0)?;
+            }
             Ok(WriteDisposition::Applied(()))
         })?;
         Ok(())
@@ -10191,33 +10249,18 @@ impl MemoryStore {
                      scheduler_interesting_json
                  ],
             )?;
-            // The UPSERT above dropped the oldest ring entry once the ring was full and
-            // replaced `last_divergence`; the receipts for those bytes go with them, before
-            // this pass's receipts are persisted. Only `commit_transform` appends interesting
-            // entries, so fingerprint receipts and fingerprint-bearing entries share one
-            // order. No pass writes a fingerprint any more; the receipts kept are the legacy
-            // entries still stored.
-            let mut evictions: Vec<(&[&str], usize)> = Vec::with_capacity(4);
+            let mut evictions: Vec<(&[&str], usize)> = Vec::with_capacity(2);
             if scheduler_observation_json.is_some() {
                 evictions.push((OBSERVATION_RING_FIELDS, PASS_TRACE_HISTORY_RING_LEN - 1));
-            }
-            if scheduler_interesting_json.is_some() {
-                evictions.push((&["scheduler_interesting"], PASS_TRACE_HISTORY_RING_LEN - 1));
-                let stored_fingerprints: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM pass_trace, json_each(scheduler_interesting_history)
-                      WHERE session_id = ?1
-                        AND json_extract(value, '$.full_array_fingerprint') IS NOT NULL",
-                    params![session_id],
-                    |row| row.get(0),
-                )?;
-                let keep = usize::try_from(stored_fingerprints).unwrap_or(0);
-                evictions.push((&["scheduler_full_array_fingerprint"], keep));
             }
             if first_divergence.is_some() {
                 evictions.push((&["first_divergence"], 0));
             }
             for (field_ids, keep) in evictions {
                 evict_history_receipts_beyond(tx, session_id, field_ids, keep)?;
+            }
+            if scheduler_interesting_json.is_some() {
+                evict_interesting_ring_receipts(tx, session_id)?;
             }
             if let Some(project_root) = canonical_project_root.as_deref() {
                 let stored: bool = tx.query_row(
@@ -11706,7 +11749,6 @@ impl MemoryStore {
             target_meta.pending_rewrite_trip_count = 0;
             target_meta.pending_rewrite_ambiguous = false;
             target_meta.pending_rewrite_last_failure = None;
-            target_meta.served_output_fingerprint.clear();
             target_meta.covered_system_messages.clear();
             target_meta.anchor_block_id = Some(anchor.block_id.clone());
             target_meta.anchor_content_hash = Some(anchor.content_hash.clone());
@@ -19274,6 +19316,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_stable_pass_records_its_divergence_as_a_commit_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let observation = |timestamp_ms| PassSchedulerObservation {
+            timestamp_ms,
+            scheduler_decision: "Defer".into(),
+            drain_latch_active: false,
+            ..Default::default()
+        };
+        let interesting = |store: &MemoryStore| -> i64 {
+            store
+                .inner
+                .with_conn(|conn| {
+                    conn.query_row(
+                        "SELECT json_array_length(scheduler_interesting_history) FROM pass_trace \
+                         WHERE session_id = 'ses'",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap()
+        };
+        store
+            .trace_pass_stable(
+                "ses",
+                &observation(7),
+                Some(StablePassDivergence {
+                    first_divergence: r#"{"where":"m1"}"#,
+                    request_observed_at_ms: Some(5),
+                }),
+            )
+            .unwrap();
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.first_divergence.as_deref(), Some(r#"{"where":"m1"}"#));
+        let last: serde_json::Value =
+            serde_json::from_str(trace.last_divergence.as_deref().unwrap()).unwrap();
+        assert_eq!(last["pass_id"], version);
+        assert_eq!(last["timestamp_ms"], 7);
+        assert_eq!(last["divergence"]["where"], "m1");
+        assert_eq!(trace.last_completed_at_ms, 7);
+        assert_eq!(interesting(&store), 1);
+        assert_eq!(
+            field_scan_ids(&store, "ses", &["first_divergence"]).len(),
+            1
+        );
+
+        store
+            .trace_pass_stable("ses", &observation(8), None)
+            .unwrap();
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.first_divergence, None);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(trace.last_divergence.as_deref().unwrap())
+                .unwrap()["timestamp_ms"],
+            7
+        );
+        assert_eq!(trace.last_completed_at_ms, 8);
+        assert_eq!(interesting(&store), 1);
+        assert_eq!(trace.scheduler_history.len(), 2);
+    }
+
     /// `trace_pass_stable` and `commit_transform` append to the same observation ring, so a
     /// commit's receipt leaves when stable passes push its entry out.
     #[test]
@@ -19301,7 +19408,7 @@ mod tests {
         let commit_receipt = field_scan_ids(&store, "ses", &fields);
         assert_eq!(commit_receipt.len(), 1);
         for _ in 0..PASS_TRACE_HISTORY_RING_LEN {
-            store.trace_pass_stable("ses", &observation).unwrap();
+            store.trace_pass_stable("ses", &observation, None).unwrap();
         }
         let history_len: i64 = store
             .inner
@@ -21584,8 +21691,12 @@ mod tests {
             drain_latch_active: true,
             ..Default::default()
         };
-        store.trace_pass_stable("scheduler-trace", &defer).unwrap();
-        store.trace_pass_stable("scheduler-trace", &force).unwrap();
+        store
+            .trace_pass_stable("scheduler-trace", &defer, None)
+            .unwrap();
+        store
+            .trace_pass_stable("scheduler-trace", &force, None)
+            .unwrap();
         let scheduler_trace = store.load_pass_trace("scheduler-trace").unwrap().unwrap();
         assert_eq!(
             scheduler_trace.scheduler_history,
@@ -21608,6 +21719,7 @@ mod tests {
                         drain_latch_active: false,
                         ..Default::default()
                     },
+                    None,
                 )
                 .unwrap();
         }
@@ -21659,6 +21771,7 @@ mod tests {
                         drain_latch_active: true,
                         ..Default::default()
                     },
+                    None,
                 )
                 .unwrap();
         }
@@ -21856,7 +21969,7 @@ mod tests {
             "Emergency95",
             MaterializeReason::BoundaryDivergenceRecut,
         );
-        store.trace_pass_stable("worst", &worst).unwrap();
+        store.trace_pass_stable("worst", &worst, None).unwrap();
         commit_scheduler_observation(
             &store,
             "worst",
@@ -21899,7 +22012,7 @@ mod tests {
             scheduler_decision: "Guessed".into(),
             ..Default::default()
         };
-        assert!(store.trace_pass_stable("vocab", &unknown).is_err());
+        assert!(store.trace_pass_stable("vocab", &unknown, None).is_err());
         let core = CoreState::empty();
         let meta = ModuleMeta::default();
         assert!(
@@ -27198,140 +27311,58 @@ mod tests {
         assert_eq!(kept.meta, meta);
     }
 
-    /// Rollback safety of the per-block meta entries only: a row this build writes, with
-    /// 128-bit hashes and absent tags omitted, deserializes into copies of the d68aedf34
-    /// per-block definitions, and a row those definitions wrote (64-hex hashes, explicit
-    /// nulls) loads here. The rest of `ModuleMeta` is not compared against d68aedf34.
     #[test]
-    fn per_block_meta_entries_read_both_ways_across_the_d68aedf34_definitions() {
-        #[derive(Debug, PartialEq, Serialize, Deserialize)]
-        struct BaseServedBlockFingerprint {
-            block_id: String,
-            content_hash: String,
-            serialized_len: usize,
-        }
-        #[derive(Debug, PartialEq, Serialize, Deserialize)]
-        struct BaseTailHygienePartMeasurement {
-            key: String,
-            content_hash: String,
-            kind: TailHygienePartKind,
-            tokens: i64,
-            u_tokens: i64,
-            tag_number: Option<i64>,
-            tag_status: Option<String>,
-            protected: bool,
-        }
-        let base_part = |part: &TailHygienePartMeasurement| BaseTailHygienePartMeasurement {
-            key: part.key.clone(),
-            content_hash: part.content_hash.clone(),
-            kind: part.kind,
-            tokens: part.tokens,
-            u_tokens: part.u_tokens,
-            tag_number: part.tag_number,
-            tag_status: part.tag_status.clone(),
-            protected: part.protected,
-        };
-        let base_block = |block: &ServedBlockFingerprint| BaseServedBlockFingerprint {
-            block_id: block.block_id.clone(),
-            content_hash: block.content_hash.clone(),
-            serialized_len: block.serialized_len,
-        };
-        let meta_with = |hash: &str| {
-            let part = |index: i64, tagged: bool| TailHygienePartMeasurement {
-                key: format!("m{index:07}#0\u{0}tool_call"),
-                content_hash: hash.to_string(),
-                kind: TailHygienePartKind::ToolInput,
-                tokens: 40,
-                u_tokens: if tagged { 40 } else { 0 },
-                tag_number: tagged.then_some(index),
-                tag_status: tagged.then(|| "active".to_string()),
-                protected: index == 0,
-            };
-            ModuleMeta {
-                tail_hygiene_baseline: Some(TailHygieneBaseline {
-                    baseline_parts: (0..4).map(|index| part(index, index % 2 == 0)).collect(),
-                    ..Default::default()
-                }),
-                served_output_fingerprint: (0..3)
-                    .map(|index| ServedBlockFingerprint {
-                        block_id: format!("m{index:07}#0"),
-                        content_hash: hash.to_string(),
-                        serialized_len: 182,
-                    })
-                    .collect(),
+    fn derived_output_state_is_absent_from_serialized_meta_and_legacy_rows_still_load() {
+        let meta = ModuleMeta {
+            tail_hygiene_baseline: Some(TailHygieneBaseline {
+                baseline_u: 120,
+                baseline_t: 400,
+                baseline_generation: 3,
+                evaluable: true,
+                content_signature: "sig".to_string(),
                 ..Default::default()
-            }
+            }),
+            ..Default::default()
         };
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
         let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
-        let stored = || -> serde_json::Value {
-            let text: String = raw
-                .query_row(
-                    "SELECT meta FROM cache_state WHERE session_id = 'ses'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            serde_json::from_str(&text).unwrap()
-        };
-
-        let new = meta_with("81aa6b79b3e4142e2e791c2bcd59fee2");
         store
-            .commit("ses", None, &CoreState::empty(), &new)
+            .commit("ses", None, &CoreState::empty(), &meta)
             .unwrap();
-        let row = stored();
-        let parts: Vec<BaseTailHygienePartMeasurement> =
-            serde_json::from_value(row["tail_hygiene_baseline"]["baseline_parts"].clone()).unwrap();
-        let blocks: Vec<BaseServedBlockFingerprint> =
-            serde_json::from_value(row["served_output_fingerprint"].clone()).unwrap();
-        let new_baseline = new.tail_hygiene_baseline.as_ref().unwrap();
-        assert_eq!(
-            parts,
-            new_baseline
-                .baseline_parts
-                .iter()
-                .map(base_part)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            blocks,
-            new.served_output_fingerprint
-                .iter()
-                .map(base_block)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            row["tail_hygiene_baseline"]["baseline_parts"][1]
-                .get("tag_number")
-                .is_none()
-        );
+        let text: String = raw
+            .query_row(
+                "SELECT meta FROM cache_state WHERE session_id = 'ses'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut row: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(row.get("served_output_fingerprint").is_none());
+        let baseline = &row["tail_hygiene_baseline"];
+        for removed in [
+            "baseline_parts",
+            "excluded_prefix_len",
+            "excluded_prefix_digest",
+        ] {
+            assert!(baseline.get(removed).is_none(), "{removed} is serialized");
+        }
+        assert_eq!(baseline["baseline_u"], 120);
+        assert_eq!(baseline["baseline_generation"], 3);
+        assert_eq!(baseline["evaluable"], true);
 
-        let old = meta_with(&"81aa6b79".repeat(8));
-        let mut row = serde_json::to_value(&old).unwrap();
-        let old_baseline = old.tail_hygiene_baseline.as_ref().unwrap();
-        row["tail_hygiene_baseline"]["baseline_parts"] = serde_json::to_value(
-            old_baseline
-                .baseline_parts
-                .iter()
-                .map(base_part)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        row["served_output_fingerprint"] = serde_json::to_value(
-            old.served_output_fingerprint
-                .iter()
-                .map(base_block)
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        assert!(row["tail_hygiene_baseline"]["baseline_parts"][1]["tag_number"].is_null());
+        row["served_output_fingerprint"] = serde_json::json!([
+            {"block_id": "m0000001#0", "content_hash": "81aa6b79", "serialized_len": 182}
+        ]);
+        row["tail_hygiene_baseline"]["baseline_parts"] = serde_json::json!([]);
+        row["tail_hygiene_baseline"]["excluded_prefix_len"] = serde_json::json!(2);
+        row["tail_hygiene_baseline"]["excluded_prefix_digest"] = serde_json::json!("digest");
         raw.execute(
             "UPDATE cache_state SET meta = ?1 WHERE session_id = 'ses'",
             [row.to_string()],
         )
         .unwrap();
-        assert_eq!(store.load("ses").unwrap().meta, old);
+        assert_eq!(store.load("ses").unwrap().meta, meta);
     }
 
     #[test]

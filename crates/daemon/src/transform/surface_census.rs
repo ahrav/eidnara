@@ -173,8 +173,8 @@ fn surface1_stages_are_anchored_to_production_symbols_in_pinned_order() {
         ),
         (
             Surface1Stage::Deferral,
-            "daemon::transform::user_hint_target_was_served",
-            type_name_of_val(&user_hint_target_was_served).to_string(),
+            "daemon::transform::user_hint_deferred",
+            type_name_of_val(&user_hint_deferred).to_string(),
         ),
         (
             Surface1Stage::OverlayApply,

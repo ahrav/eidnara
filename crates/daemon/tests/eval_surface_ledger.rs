@@ -17,9 +17,10 @@ use eval_core::{
 };
 use memory_store::StoredHistorySegment;
 use support::direct_host::FixtureProcess;
+use support::direct_host::{request_json, wait_for_store};
 use support::eval_surface::{
     EPOCH_MS, Knobs, Pass, SurfaceLedger, World, block_on, expected_id, identities, mid, observe,
-    pass, seed_store, segment, try_pass,
+    pass, seed_store, segment, tail, transform_request, try_pass,
 };
 
 const SUITE: &str = "crates/daemon/tests/eval_surface_ledger.rs::";
@@ -389,21 +390,17 @@ fn the_user_hint_pass_leaves_the_wire_response_bytes_unchanged() {
     );
 }
 
-/// A turn the host answers with an error is returned to the caller as the
-/// turn it refused, not panicked on: a session whose durable text is past its
-/// bound is refused at the transform itself.
 #[test]
 fn a_turn_the_host_refuses_is_returned_with_its_code() {
     block_on(async {
-        // Unfolded, this session's durable text passes its 512 KiB bound between 1,800 and
-        // 2,000 messages.
-        let world = world(2_400);
+        let mut world = world(6);
+        world.session = "password=hunter2-secret-session".to_string();
         let root = tempfile::tempdir().unwrap();
         let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
         let refused = try_pass(&fixture, &world, PROMPT, &Knobs::default())
             .await
             .err()
-            .expect("a session past the durable bound is refused");
+            .expect("a secret-bearing session is refused");
         let _ = fixture.shutdown();
         assert_eq!(refused.turn, world.messages.len() + 1);
         assert!(refused.code.starts_with("host."), "{refused:?}");
@@ -413,6 +410,108 @@ fn a_turn_the_host_refuses_is_returned_with_its_code() {
 /// A second pass over the same tail decides nothing because the first pass's
 /// decision is frozen; the shell must not read that as the tail being
 /// ineligible.
+async fn pass_with_tails(
+    fixture: &FixtureProcess,
+    client: &host_runtime::Client,
+    route: host_runtime::ClientRoute,
+    world: &World,
+    prompts: &[&str],
+    render_config: &str,
+) -> (serde_json::Value, Option<UserHintPass>) {
+    let upto = world.messages.len();
+    let mut request = transform_request(world, upto, Some(prompts[0]), &Knobs::default());
+    request["render_config"] = serde_json::json!(render_config);
+    for (offset, prompt) in prompts.iter().enumerate().skip(1) {
+        let (ingress, native) = tail(&world.session, prompt, (upto + 1 + offset) as u64);
+        request["messages"].as_array_mut().unwrap().push(ingress);
+        request["native_messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(native);
+    }
+    let response = request_json(client, route, request).await;
+    assert_eq!(response["status"], "ok", "{response}");
+    let control = fixture.control(41, "user-hint-outcome");
+    let outcome = control["result"]["outcome"]
+        .as_object()
+        .map(|_| serde_json::from_value(control["result"]["outcome"].clone()).unwrap());
+    (response, outcome)
+}
+
+#[test]
+fn a_new_hint_defers_after_a_restart_forgets_what_was_served() {
+    block_on(async {
+        let world = world(6);
+        let segments = segments(&world, only_second);
+        for restart in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            seed_store(root.path(), &world.session, &segments);
+            let mut fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
+            let mut client = fixture.client().await;
+            let mut route = fixture
+                .open_route(
+                    &client,
+                    "context",
+                    host_runtime::TargetKind::ToolProvider,
+                    &world.session,
+                )
+                .await;
+            wait_for_store(&client, route, &world.session).await;
+            let (_, first) =
+                pass_with_tails(&fixture, &client, route, &world, &["ok"], "surface-config").await;
+            assert!(
+                !matches!(&first, Some(UserHintPass::Decided(decided)) if !decided.hint_text.is_empty()),
+                "{first:?}"
+            );
+            if restart {
+                client.close_route(route).await.expect("route closes");
+                let _ = fixture.shutdown();
+                fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
+                client = fixture.client().await;
+                route = fixture
+                    .open_route(
+                        &client,
+                        "context",
+                        host_runtime::TargetKind::ToolProvider,
+                        &world.session,
+                    )
+                    .await;
+                wait_for_store(&client, route, &world.session).await;
+            }
+            let tails = ["ok", PROMPT];
+            let (served, second) =
+                pass_with_tails(&fixture, &client, route, &world, &tails, "surface-config").await;
+            let Some(UserHintPass::Decided(decided)) = second else {
+                panic!("the new tail decides a hint: {second:?}");
+            };
+            assert!(!decided.hint_text.is_empty());
+            assert_eq!(decided.deferred, restart, "restart={restart}");
+            assert_eq!(decided.attached, !restart, "restart={restart}");
+            let hints =
+                |response: &serde_json::Value| response.to_string().matches(HINT_OPEN).count();
+            assert_eq!(hints(&served), usize::from(!restart), "restart={restart}");
+            if restart {
+                let (repeated, _) =
+                    pass_with_tails(&fixture, &client, route, &world, &tails, "surface-config")
+                        .await;
+                assert_eq!(repeated["action"], "SOFT+", "{repeated}");
+                assert_eq!(
+                    hints(&repeated),
+                    0,
+                    "a non-bust pass keeps the hint deferred"
+                );
+                let (bust, _) =
+                    pass_with_tails(&fixture, &client, route, &world, &tails, "surface-config-2")
+                        .await;
+                assert_eq!(bust["action"], "HARD", "{bust}");
+                assert_eq!(hints(&bust), 1, "the bust serves the deferred hint once");
+            }
+            client.close_route(route).await.expect("route closes");
+            let _ = fixture.shutdown();
+        }
+    });
+}
+
 #[test]
 fn a_repeated_pass_reports_the_frozen_decision_as_unjoinable() {
     block_on(async {

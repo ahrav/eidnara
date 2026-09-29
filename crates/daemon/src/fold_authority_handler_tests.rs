@@ -23,7 +23,6 @@ fn assert_native_state(store: &MemoryStore, session: &str, context: &str) {
         store.all_block_identities_for_test(session).is_empty(),
         "{context}"
     );
-    assert!(meta.served_output_fingerprint.is_empty(), "{context}");
     assert_eq!(meta.tail_hygiene_baseline, None, "{context}");
     assert_eq!(meta.coverage_ordinal, None, "{context}");
     assert_eq!(meta.folded_history_segment_seq, 0, "{context}");

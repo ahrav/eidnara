@@ -1002,20 +1002,49 @@ fn parts_digest(parts: &[TailHygienePartMeasurement]) -> String {
     hex_digest(input)
 }
 
-/// Compares the stored baseline with a later walk part by part, the omitted excluded
-/// prefix through its digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BaselineParts {
+    pub(crate) baseline_generation: u64,
+    pub(crate) parts: Vec<TailHygienePartMeasurement>,
+    pub(crate) excluded_prefix_len: usize,
+    pub(crate) excluded_prefix_digest: String,
+}
+
+impl BaselineParts {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.excluded_prefix_digest.capacity())
+            .saturating_add(
+                self.parts
+                    .capacity()
+                    .saturating_mul(size_of::<TailHygienePartMeasurement>()),
+            )
+            .saturating_add(
+                self.parts
+                    .iter()
+                    .map(|part| {
+                        part.key
+                            .capacity()
+                            .saturating_add(part.content_hash.capacity())
+                            .saturating_add(part.tag_status.as_ref().map_or(0, String::capacity))
+                    })
+                    .sum::<usize>(),
+            )
+    }
+}
+
 fn same_measured_prefix(
-    baseline: &TailHygieneBaseline,
+    baseline: &BaselineParts,
     current: &[TailHygienePartMeasurement],
 ) -> Option<i64> {
     let prefix_len = baseline.excluded_prefix_len;
-    if current.len() < prefix_len.saturating_add(baseline.baseline_parts.len())
+    if current.len() < prefix_len.saturating_add(baseline.parts.len())
         || parts_digest(&current[..prefix_len]) != baseline.excluded_prefix_digest
     {
         return None;
     }
     let mut boundary_advance_u = 0i64;
-    for (before, after) in baseline.baseline_parts.iter().zip(&current[prefix_len..]) {
+    for (before, after) in baseline.parts.iter().zip(&current[prefix_len..]) {
         if before.key != after.key
             || before.content_hash != after.content_hash
             || before.kind != after.kind
@@ -1038,6 +1067,12 @@ fn same_measured_prefix(
     Some(boundary_advance_u)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshedBaseline {
+    pub(crate) baseline: TailHygieneBaseline,
+    pub(crate) parts: Option<BaselineParts>,
+}
+
 /// Refreshes a baseline after a full cache bust or an append-only defer pass.
 ///
 /// Non-append mutation invalidates evaluation until the next cache-busting
@@ -1046,46 +1081,68 @@ pub(crate) fn refresh_tail_hygiene_baseline(
     measured: TailHygieneMeasurement,
     cache_busting: bool,
     previous: Option<&TailHygieneBaseline>,
+    previous_parts: Option<&BaselineParts>,
     now_ms: i64,
-) -> TailHygieneBaseline {
+) -> RefreshedBaseline {
+    let invalidated =
+        |previous: &TailHygieneBaseline, content_signature: String| RefreshedBaseline {
+            baseline: TailHygieneBaseline {
+                evaluable: false,
+                generation_invalidated: true,
+                content_signature,
+                ..previous.clone()
+            },
+            parts: None,
+        };
     if !cache_busting && previous.is_some_and(|baseline| baseline.generation_invalidated) {
         let mut baseline = previous.expect("checked previous baseline").clone();
         baseline.content_signature = measured.content_signature;
-        return baseline;
+        return RefreshedBaseline {
+            baseline,
+            parts: None,
+        };
     }
     if cache_busting || previous.is_none() {
         let mut parts = measured.parts;
         let excluded_prefix_len = excluded_prefix_len(&parts);
         let excluded_prefix_digest = parts_digest(&parts[..excluded_prefix_len]);
         parts.drain(..excluded_prefix_len);
-        return TailHygieneBaseline {
-            baseline_u: measured.u,
-            baseline_t: measured.t,
-            turn_delta_u: 0,
-            turn_delta_t: 0,
-            baseline_generation: previous
-                .map_or(0, |baseline| baseline.baseline_generation)
-                .saturating_add(1),
-            computed_at_ms: now_ms,
-            evaluable: true,
-            generation_invalidated: false,
-            baseline_parts: parts,
-            content_signature: measured.content_signature,
-            excluded_prefix_len,
-            excluded_prefix_digest,
+        parts.shrink_to_fit();
+        let baseline_generation = previous
+            .map_or(0, |baseline| baseline.baseline_generation)
+            .saturating_add(1);
+        return RefreshedBaseline {
+            baseline: TailHygieneBaseline {
+                baseline_u: measured.u,
+                baseline_t: measured.t,
+                turn_delta_u: 0,
+                turn_delta_t: 0,
+                baseline_generation,
+                computed_at_ms: now_ms,
+                evaluable: true,
+                generation_invalidated: false,
+                content_signature: measured.content_signature,
+            },
+            parts: Some(BaselineParts {
+                baseline_generation,
+                parts,
+                excluded_prefix_len,
+                excluded_prefix_digest,
+            }),
         };
     }
 
     let previous = previous.expect("non-busting refresh has a previous baseline");
-    let Some(mut turn_delta_u) = same_measured_prefix(previous, &measured.parts) else {
-        let mut invalidated = previous.clone();
-        invalidated.evaluable = false;
-        invalidated.generation_invalidated = true;
-        invalidated.content_signature = measured.content_signature;
-        return invalidated;
+    let Some(previous_parts) =
+        previous_parts.filter(|parts| parts.baseline_generation == previous.baseline_generation)
+    else {
+        return invalidated(previous, measured.content_signature);
+    };
+    let Some(mut turn_delta_u) = same_measured_prefix(previous_parts, &measured.parts) else {
+        return invalidated(previous, measured.content_signature);
     };
     let mut turn_delta_t = 0i64;
-    let measured_len = previous.excluded_prefix_len + previous.baseline_parts.len();
+    let measured_len = previous_parts.excluded_prefix_len + previous_parts.parts.len();
     for part in &measured.parts[measured_len..] {
         turn_delta_t = turn_delta_t.saturating_add(part.tokens);
         // A just-completed output remains T-only in the newest recency reserve to prevent a defer pass from inflating U before the next full bust walk.
@@ -1094,13 +1151,16 @@ pub(crate) fn refresh_tail_hygiene_baseline(
             turn_delta_u = turn_delta_u.saturating_add(part.u_tokens);
         }
     }
-    TailHygieneBaseline {
-        turn_delta_u,
-        turn_delta_t,
-        evaluable: true,
-        generation_invalidated: false,
-        content_signature: measured.content_signature,
-        ..previous.clone()
+    RefreshedBaseline {
+        baseline: TailHygieneBaseline {
+            turn_delta_u,
+            turn_delta_t,
+            evaluable: true,
+            generation_invalidated: false,
+            content_signature: measured.content_signature,
+            ..previous.clone()
+        },
+        parts: None,
     }
 }
 
@@ -2102,8 +2162,8 @@ mod tests {
             &HashSet::new(),
             &mut memo,
         );
-        let baseline = refresh_tail_hygiene_baseline(measured, true, None, 10);
-        assert_eq!(baseline.baseline_u, 0);
+        let baseline = refresh(measured, true, None, 10);
+        assert_eq!(baseline.baseline.baseline_u, 0);
 
         let mut appended = base;
         appended.push(text("new", 3, &"new mass ".repeat(2_000)));
@@ -2118,59 +2178,58 @@ mod tests {
             &HashSet::new(),
             &mut memo,
         );
-        let defer = refresh_tail_hygiene_baseline(measured, false, Some(&baseline), 20);
+        let defer = refresh(measured, false, Some(&baseline), 20).baseline;
         assert!(defer.evaluable);
         assert!(defer.turn_delta_t > 0);
         assert!(
             defer.turn_delta_u > 0,
             "old protected mass should advance into U"
         );
-        assert_eq!(defer.baseline_generation, baseline.baseline_generation);
+        assert_eq!(
+            defer.baseline_generation,
+            baseline.baseline.baseline_generation
+        );
+    }
+
+    fn refresh(
+        measured: TailHygieneMeasurement,
+        cache_busting: bool,
+        previous: Option<&RefreshedBaseline>,
+        now_ms: i64,
+    ) -> RefreshedBaseline {
+        refresh_tail_hygiene_baseline(
+            measured,
+            cache_busting,
+            previous.map(|previous| &previous.baseline),
+            previous.and_then(|previous| previous.parts.as_ref()),
+            now_ms,
+        )
     }
 
     #[test]
     fn non_append_mutation_invalidates_until_a_bust() {
         let mut memo = TailHygieneMemo::default();
-        let messages = vec![text("m", 1, "original")];
         let tags = vec![tag(1, "m#0")];
-        let projection = project_messages(&messages).unwrap();
-        let baseline = refresh_tail_hygiene_baseline(
+        let mut measure = |content: &str| {
             measure_tail_hygiene(
-                &projection,
+                &project_messages(&[text("m", 1, content)]).unwrap(),
                 &CoreState::empty(),
                 None,
                 &tags,
                 0,
                 &HashSet::new(),
                 &mut memo,
-            ),
-            true,
-            None,
-            10,
-        );
-        let projection = project_messages(&[text("m", 1, "changed")]).unwrap();
-        let invalid = refresh_tail_hygiene_baseline(
-            measure_tail_hygiene(
-                &projection,
-                &CoreState::empty(),
-                None,
-                &tags,
-                0,
-                &HashSet::new(),
-                &mut memo,
-            ),
-            false,
-            Some(&baseline),
-            20,
-        );
-        assert!(!invalid.evaluable);
-        assert!(invalid.generation_invalidated);
+            )
+        };
+        let baseline = refresh(measure("original"), true, None, 10);
+        let invalid = refresh(measure("changed"), false, Some(&baseline), 20);
+        assert!(!invalid.baseline.evaluable);
+        assert!(invalid.baseline.generation_invalidated);
+        assert_eq!(invalid.parts, None);
     }
 
-    /// The stored baseline omits the covered prefix yet still compares it: an append after
-    /// it measures the same delta, and an edit inside it invalidates the baseline.
     #[test]
-    fn covered_prefix_is_digested_out_of_the_baseline_but_still_compared() {
+    fn covered_prefix_is_digested_out_of_the_parts_but_still_compared() {
         let mut memo = TailHygieneMemo::default();
         let mut messages = (1..=50)
             .map(|ordinal| text(&format!("m{ordinal}"), ordinal, "covered history"))
@@ -2189,91 +2248,119 @@ mod tests {
             )
         };
         let full = measure(&messages);
-        let baseline = refresh_tail_hygiene_baseline(full.clone(), true, None, 10);
-        assert_eq!(baseline.excluded_prefix_len, 50);
-        assert_eq!(baseline.baseline_parts, full.parts[50..]);
-        assert_eq!((baseline.baseline_u, baseline.baseline_t), (full.u, full.t));
+        let baseline = refresh(full.clone(), true, None, 10);
+        let parts = baseline.parts.as_ref().unwrap();
+        assert_eq!(parts.excluded_prefix_len, 50);
+        assert_eq!(parts.parts, full.parts[50..]);
+        assert_eq!(
+            parts.baseline_generation,
+            baseline.baseline.baseline_generation
+        );
+        assert_eq!(
+            (baseline.baseline.baseline_u, baseline.baseline.baseline_t),
+            (full.u, full.t)
+        );
 
         let mut appended = messages.clone();
         appended.push(text("next", 52, "next turn"));
-        let defer = refresh_tail_hygiene_baseline(measure(&appended), false, Some(&baseline), 20);
+        let defer = refresh(measure(&appended), false, Some(&baseline), 20).baseline;
         assert!(defer.evaluable);
         assert!(defer.turn_delta_t > 0);
 
         let mut edited = appended;
         edited[3] = text("m4", 4, "covered history, edited");
-        let invalid = refresh_tail_hygiene_baseline(measure(&edited), false, Some(&baseline), 30);
+        let invalid = refresh(measure(&edited), false, Some(&baseline), 30).baseline;
         assert!(!invalid.evaluable);
         assert!(invalid.generation_invalidated);
     }
 
-    /// An earlier build stored 64-hex part hashes and digested them in that form. Against it
-    /// a later walk measures invalid, the path any non-append change takes, and the next
-    /// cache-busting walk replaces it with an evaluable 32-hex baseline. With an excluded
-    /// prefix the digest mismatch invalidates first; without one the digest is empty in both
-    /// builds and the part-hash comparison invalidates.
     #[test]
-    fn an_earlier_builds_64_hex_baseline_invalidates_until_the_next_bust() {
-        let widen = |parts: &mut [TailHygienePartMeasurement]| {
-            for part in parts {
-                assert_eq!(part.content_hash.len(), 32);
-                part.content_hash.push_str(&"0".repeat(32));
-            }
+    fn durable_scalars_join_retained_parts_by_generation() {
+        let mut memo = TailHygieneMemo::default();
+        let tags = vec![tag(1, "a#0")];
+        let mut measure = |messages: &[Arc<IngressMessage>]| {
+            measure_tail_hygiene(
+                &project_messages(messages).unwrap(),
+                &CoreState::empty(),
+                None,
+                &tags,
+                0,
+                &HashSet::new(),
+                &mut memo,
+            )
         };
-        let messages = [
-            text("covered", 1, "covered history"),
-            text("live", 2, "live tail"),
-        ];
-        let tags = vec![tag(1, "live#0")];
-        for coverage in [Some(1), None] {
-            let mut memo = TailHygieneMemo::default();
-            let mut measure = || {
-                measure_tail_hygiene(
-                    &project_messages(&messages).unwrap(),
-                    &CoreState::empty(),
-                    coverage,
-                    &tags,
-                    0,
-                    &HashSet::new(),
-                    &mut memo,
-                )
-            };
-            let first = measure();
-            let mut earlier = refresh_tail_hygiene_baseline(first.clone(), true, None, 10);
-            let prefix_len = usize::from(coverage.is_some());
-            assert_eq!(earlier.excluded_prefix_len, prefix_len);
-            widen(&mut earlier.baseline_parts);
-            let mut earlier_prefix = first.parts[..prefix_len].to_vec();
-            widen(&mut earlier_prefix);
-            earlier.excluded_prefix_digest = parts_digest(&earlier_prefix);
-            assert_eq!(
-                earlier.excluded_prefix_digest.is_empty(),
-                coverage.is_none()
-            );
-            if coverage.is_some() {
-                let mut digest_only = refresh_tail_hygiene_baseline(first.clone(), true, None, 10);
-                digest_only
-                    .excluded_prefix_digest
-                    .clone_from(&earlier.excluded_prefix_digest);
-                let invalid =
-                    refresh_tail_hygiene_baseline(measure(), false, Some(&digest_only), 20);
-                assert!(!invalid.evaluable && invalid.generation_invalidated);
-            }
+        let first = [text("a", 1, "first turn")];
+        let appended = [text("a", 1, "first turn"), text("b", 2, "second turn")];
+        let established = refresh(measure(&first), true, None, 10);
+        let scalars = &established.baseline;
+        let parts = established.parts.clone().unwrap();
+        let wrong_generation = BaselineParts {
+            baseline_generation: parts.baseline_generation + 1,
+            ..parts.clone()
+        };
+        let empty = BaselineParts {
+            baseline_generation: parts.baseline_generation,
+            parts: Vec::new(),
+            excluded_prefix_len: 0,
+            excluded_prefix_digest: parts_digest(&[]),
+        };
 
-            let invalid = refresh_tail_hygiene_baseline(measure(), false, Some(&earlier), 20);
-            assert!(!invalid.evaluable, "{coverage:?}");
-            assert!(invalid.generation_invalidated, "{coverage:?}");
-            let rebuilt = refresh_tail_hygiene_baseline(measure(), true, Some(&invalid), 30);
-            assert!(rebuilt.evaluable && !rebuilt.generation_invalidated);
-            assert_eq!(rebuilt.baseline_generation, earlier.baseline_generation + 1);
-            assert!(
-                rebuilt
-                    .baseline_parts
-                    .iter()
-                    .all(|part| part.content_hash.len() == 32)
+        let fresh = refresh_tail_hygiene_baseline(measure(&appended), false, None, None, 20);
+        assert!(fresh.baseline.evaluable && !fresh.baseline.generation_invalidated);
+        assert_eq!(fresh.baseline.baseline_generation, 1);
+        assert!(fresh.parts.is_some());
+
+        for (case, retained) in [
+            ("missing", None),
+            ("wrong generation", Some(&wrong_generation)),
+        ] {
+            let joined = refresh_tail_hygiene_baseline(
+                measure(&appended),
+                false,
+                Some(scalars),
+                retained,
+                20,
             );
-            let next = refresh_tail_hygiene_baseline(measure(), false, Some(&rebuilt), 40);
-            assert!(next.evaluable, "{coverage:?}");
+            assert!(!joined.baseline.evaluable, "{case}");
+            assert!(joined.baseline.generation_invalidated, "{case}");
+            assert_eq!(joined.parts, None, "{case}");
+            let still_invalid = refresh_tail_hygiene_baseline(
+                measure(&appended),
+                false,
+                Some(&joined.baseline),
+                Some(&parts),
+                30,
+            );
+            assert!(!still_invalid.baseline.evaluable, "{case}");
+            let rebuilt = refresh_tail_hygiene_baseline(
+                measure(&appended),
+                true,
+                Some(&joined.baseline),
+                retained,
+                40,
+            );
+            assert!(rebuilt.baseline.evaluable, "{case}");
+            assert_eq!(
+                rebuilt
+                    .parts
+                    .as_ref()
+                    .map(|parts| parts.baseline_generation),
+                Some(scalars.baseline_generation + 1),
+                "{case}"
+            );
+        }
+
+        for (case, retained) in [("matching", &parts), ("present but empty", &empty)] {
+            let joined = refresh_tail_hygiene_baseline(
+                measure(&appended),
+                false,
+                Some(scalars),
+                Some(retained),
+                20,
+            );
+            assert!(joined.baseline.evaluable, "{case}");
+            assert!(!joined.baseline.generation_invalidated, "{case}");
+            assert!(joined.baseline.turn_delta_t > 0, "{case}");
         }
     }
 
