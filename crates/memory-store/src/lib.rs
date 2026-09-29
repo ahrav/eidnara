@@ -2367,9 +2367,32 @@ pub struct ModuleMeta {
     /// see one consistent state.
     #[serde(default)]
     pub shadow_acked_watermarks: Value,
+    /// The session's fold authority: `None` until the first accepted committing pass adopts
+    /// one, `Some(true)` when Eidnara's summarizer folds, `Some(false)` when the harness's
+    /// native compaction does. Only the epoch-fenced authority reset changes an adopted value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eidnara_folds: Option<bool>,
 }
 
 impl ModuleMeta {
+    /// A row written before `eidnara_folds` existed holds coordinates only Eidnara folding
+    /// builds when it carries any of these; such a row applies Eidnara folds until it adopts.
+    /// Stored block identities are not an artifact: a row that no fold touched can hold them.
+    pub fn has_fold_artifacts(&self) -> bool {
+        fold_artifacts_present(
+            self.coverage_ordinal.is_some(),
+            self.folded_history_segment_seq,
+            self.history_summarizer.state == HistorySummarizerPhase::Idle,
+        )
+    }
+
+    /// The authority a pass applies: the adopted value, else Eidnara for a row that carries
+    /// fold artifacts, else none yet.
+    pub fn applied_eidnara_folds(&self) -> Option<bool> {
+        self.eidnara_folds
+            .or_else(|| self.has_fold_artifacts().then_some(true))
+    }
+
     /// The highest history_segment sequence the m0 and m1 watermarks record.
     pub fn rendered_history_segment_seq(&self) -> i64 {
         self.m1_history_segment_seq
@@ -6016,6 +6039,31 @@ enum TruncateTxnOutcome {
     Committed(Box<TruncateOutcome>),
     CasConflict(u64),
     Serde(String),
+}
+
+fn fold_artifacts_present(
+    has_coverage: bool,
+    folded_history_segment_seq: i64,
+    summarizer_idle: bool,
+) -> bool {
+    has_coverage || folded_history_segment_seq > 0 || !summarizer_idle
+}
+
+/// The fields [`ModuleMeta::applied_eidnara_folds`] and the quiescence check read, by SQL JSON
+/// extraction so a pass does not deserialize the whole record for them.
+const FOLD_AUTHORITY_SELECT: &str = "SELECT row_version, json_type(meta, '$.eidnara_folds'), \
+     coalesce(json_type(meta, '$.coverage_ordinal'), 'null') != 'null', \
+     coalesce(meta ->> '$.folded_history_segment_seq', 0), meta ->> '$.history_summarizer.state', \
+     EXISTS(SELECT 1 FROM history_summarizer_pending_publications WHERE session_id = ?1) \
+     FROM cache_state WHERE session_id = ?1";
+
+/// See [`MemoryStore::load_fold_authority`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldAuthorityRecord {
+    pub row_version: Option<u64>,
+    pub applied: Option<bool>,
+    pub adopted: Option<bool>,
+    pub quiescent: bool,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -10526,8 +10574,14 @@ impl MemoryStore {
                     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             }
             let initialized_before_sync = meta.initialized;
+            let native_authority = meta.eidnara_folds == Some(false);
+            let history_segments: &[_] = if native_authority {
+                &[]
+            } else {
+                &history_segments
+            };
 
-            if !request.history_segments.is_empty()
+            if !history_segments.is_empty()
                 && meta.history_summarizer.state != HistorySummarizerPhase::Idle
             {
                 return Ok(WriteDisposition::Replay(ModuleStateSyncTxnOutcome::HistorySummarizerBusy {
@@ -10545,7 +10599,7 @@ impl MemoryStore {
                 }));
             }
 
-            if let Some(declared) = request.seed_boundary_id {
+            if let Some(declared) = request.seed_boundary_id.filter(|_| !native_authority) {
                 let adoption = match validated_seed_boundary(declared, request.history_segments) {
                     Ok(adoption) => adoption,
                     Err(detail) => {
@@ -10581,7 +10635,7 @@ impl MemoryStore {
             let written_history_segments = match validate_seed_history_segments_tx(
                 tx,
                 request.session_id,
-                &history_segments,
+                history_segments,
                 initialized_before_sync.then_some(meta.folded_history_segment_seq),
             )? {
                 Ok(written) => written,
@@ -10592,12 +10646,16 @@ impl MemoryStore {
                 }
             };
 
-            let drop_seeds_skipped = materialize_drop_seed_units(
-                &mut core,
-                request.session_id,
-                &drop_seeds,
-                request.drop_seed_skipped,
-            );
+            let drop_seeds_skipped = if native_authority {
+                request.drop_seed_skipped + drop_seeds.len()
+            } else {
+                materialize_drop_seed_units(
+                    &mut core,
+                    request.session_id,
+                    &drop_seeds,
+                    request.drop_seed_skipped,
+                )
+            };
             let mut pending_agent_drops_seeded = 0usize;
             let mut pending_agent_drops_skipped = request.pending_agent_drops_skipped;
             for seed in &pending_agent_drops {
@@ -10692,12 +10750,16 @@ impl MemoryStore {
             if let Some(state) = channel2_nudge_state.as_deref() {
                 meta.channel2_nudge_state = state.to_string();
             }
-            let strip_seeds_skipped = materialize_strip_seed_units(
-                &mut core,
-                request.session_id,
-                &strip_seeds,
-                request.strip_seed_skipped,
-            );
+            let strip_seeds_skipped = if native_authority {
+                request.strip_seed_skipped + strip_seeds.len()
+            } else {
+                materialize_strip_seed_units(
+                    &mut core,
+                    request.session_id,
+                    &strip_seeds,
+                    request.strip_seed_skipped,
+                )
+            };
 
             if written_history_segments.iter().any(|row| row.legacy == 1) {
                 meta.legacy_history_segment_seqs = None;
@@ -12218,6 +12280,77 @@ impl MemoryStore {
         session_id: &str,
         expected_row_version: Option<u64>,
     ) -> Result<TruncateOutcome, MemoryStoreError> {
+        Ok(self
+            .reset_session(session_id, expected_row_version, None)?
+            .expect("a reset that keeps the authority has no quiescence gate"))
+    }
+
+    /// The recomp reset with the replacement fold authority written in the same transaction.
+    /// Returns `None`, writing nothing, when the session is not durably quiescent: its
+    /// summarizer is not `Idle` or a publication is pending.
+    pub fn reset_session_for_authority(
+        &self,
+        session_id: &str,
+        expected_row_version: Option<u64>,
+        eidnara_folds: bool,
+    ) -> Result<Option<TruncateOutcome>, MemoryStoreError> {
+        self.reset_session(session_id, expected_row_version, Some(eidnara_folds))
+    }
+
+    /// The fold authority a pass applies, with the durable half of the quiescence an
+    /// authority change requires. An absent row reads as unadopted and quiescent.
+    pub fn load_fold_authority(
+        &self,
+        session_id: &str,
+    ) -> Result<FoldAuthorityRecord, MemoryStoreError> {
+        let row = self.inner.with_conn(|conn| {
+            conn.prepare_cached(FOLD_AUTHORITY_SELECT)?
+                .query_row(params![session_id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, bool>(5)?,
+                    ))
+                })
+                .optional()
+        })?;
+        let Some((version, adopted, has_coverage, folded_seq, state, pending)) = row else {
+            return Ok(FoldAuthorityRecord {
+                row_version: None,
+                applied: None,
+                adopted: None,
+                quiescent: true,
+            });
+        };
+        let adopted = match adopted.as_deref() {
+            None | Some("null") => None,
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            Some(kind) => {
+                return Err(MemoryStoreError::Serde(format!(
+                    "eidnara_folds is a JSON {kind}, expected a boolean"
+                )));
+            }
+        };
+        let summarizer_idle = state.as_deref().is_none_or(|state| state == "idle");
+        let artifacts = fold_artifacts_present(has_coverage, folded_seq, summarizer_idle);
+        Ok(FoldAuthorityRecord {
+            row_version: Some(version as u64),
+            applied: adopted.or(artifacts.then_some(true)),
+            adopted,
+            quiescent: summarizer_idle && !pending,
+        })
+    }
+
+    fn reset_session(
+        &self,
+        session_id: &str,
+        expected_row_version: Option<u64>,
+        replacement_authority: Option<bool>,
+    ) -> Result<Option<TruncateOutcome>, MemoryStoreError> {
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
                 .query_row(CACHE_STATE_META_SELECT, params![session_id], |r| {
@@ -12225,36 +12358,61 @@ impl MemoryStore {
                 })
                 .optional()?;
             let Some((current, meta_json)) = row else {
-                return Ok(TruncateTxnOutcome::CasConflict(0));
+                return Ok(Some(TruncateTxnOutcome::CasConflict(0)));
             };
             let cas_ok = match expected_row_version {
                 Some(version) => current == version as i64,
                 None => current == NO_ROW,
             };
             if !cas_ok {
-                return Ok(TruncateTxnOutcome::CasConflict(current.max(0) as u64));
+                return Ok(Some(TruncateTxnOutcome::CasConflict(current.max(0) as u64)));
             }
             let prior_meta: ModuleMeta = match serde_json::from_str(&meta_json) {
                 Ok(meta) => meta,
-                Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
+                Err(error) => return Ok(Some(TruncateTxnOutcome::Serde(error.to_string()))),
             };
+            if replacement_authority.is_some() {
+                let pending_publication: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM history_summarizer_pending_publications
+                                    WHERE session_id = ?1)",
+                    params![session_id],
+                    |r| r.get(0),
+                )?;
+                if prior_meta.history_summarizer.state != HistorySummarizerPhase::Idle
+                    || pending_publication
+                {
+                    return Ok(None);
+                }
+            }
             let next_epoch = prior_meta.revert_epoch.saturating_add(1);
             let mut reset_meta = ModuleMeta {
                 revert_epoch: next_epoch,
-                last_recut: Some(format!(
-                    "native recomp reset all history_segments; epoch {next_epoch}"
-                )),
+                last_recut: Some(match replacement_authority {
+                    Some(folds) => format!(
+                        "fold authority reset to {}; epoch {next_epoch}",
+                        if folds { "Eidnara" } else { "native" }
+                    ),
+                    None => format!("native recomp reset all history_segments; epoch {next_epoch}"),
+                }),
                 history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
+                eidnara_folds: replacement_authority.or(prior_meta.eidnara_folds),
                 ..ModuleMeta::default()
             };
             reset_meta.history_summarizer.forget_unrendered_above(0);
+            if replacement_authority.is_some() {
+                // The consumed descent edge survives an authority reset.
+                reset_meta.lineage_descent_target_key = prior_meta.lineage_descent_target_key;
+                reset_meta.lineage_descent_edge_id = prior_meta.lineage_descent_edge_id;
+                reset_meta.lineage_descent_disposition = prior_meta.lineage_descent_disposition;
+                reset_meta.lineage_descent_source_key = prior_meta.lineage_descent_source_key;
+            }
             let core_json = match serde_json::to_string(&CoreState::empty()) {
                 Ok(json) => json,
-                Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
+                Err(error) => return Ok(Some(TruncateTxnOutcome::Serde(error.to_string()))),
             };
             let reset_meta_json = match serde_json::to_string(&reset_meta) {
                 Ok(json) => json,
-                Err(error) => return Ok(TruncateTxnOutcome::Serde(error.to_string())),
+                Err(error) => return Ok(Some(TruncateTxnOutcome::Serde(error.to_string()))),
             };
             for owner_kind in [
                 "history_segments",
@@ -12315,17 +12473,22 @@ impl MemoryStore {
                     current
                 ],
             )?;
-            Ok(TruncateTxnOutcome::Committed(Box::new(TruncateOutcome {
-                revert_epoch: next_epoch,
-                last_recut: reset_meta.last_recut,
-                row_version: next_version,
-                history_summarizer: reset_meta.history_summarizer,
-                lineage_reset: true,
-                archive_fold_seq: reset_meta.archive_fold_seq,
-            })))
+            Ok(Some(TruncateTxnOutcome::Committed(Box::new(
+                TruncateOutcome {
+                    revert_epoch: next_epoch,
+                    last_recut: reset_meta.last_recut,
+                    row_version: next_version,
+                    history_summarizer: reset_meta.history_summarizer,
+                    lineage_reset: true,
+                    archive_fold_seq: reset_meta.archive_fold_seq,
+                },
+            ))))
         })?;
+        let Some(outcome) = outcome else {
+            return Ok(None);
+        };
         match outcome {
-            TruncateTxnOutcome::Committed(outcome) => Ok(*outcome),
+            TruncateTxnOutcome::Committed(outcome) => Ok(Some(*outcome)),
             TruncateTxnOutcome::CasConflict(found) => Err(MemoryStoreError::CasConflict {
                 expected: expected_row_version,
                 found,
@@ -22996,7 +23159,14 @@ mod tests {
         expected_shadow_seq: u64,
         rows: &[StoredHistorySegment],
     ) -> Result<ModuleStateSyncResult, ModuleStateSyncError> {
-        store.apply_authority_state_sync(ModuleStateSyncRequest {
+        store.apply_authority_state_sync(history_segment_sync(expected_shadow_seq, rows))
+    }
+
+    fn history_segment_sync(
+        expected_shadow_seq: u64,
+        rows: &[StoredHistorySegment],
+    ) -> ModuleStateSyncRequest<'_> {
+        ModuleStateSyncRequest {
             session_id: "ses",
             project_path: "git:proj",
             shadow_generation: 0,
@@ -23028,7 +23198,55 @@ mod tests {
             project_memory_epoch: None,
             user_profile_version: None,
             acked_watermarks: serde_json::json!({}),
-        })
+        }
+    }
+
+    #[test]
+    fn a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates() {
+        let sync_seeded = |authority: Option<bool>| {
+            let dir = tempfile::tempdir().unwrap();
+            let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+            let stored = ModuleMeta {
+                eidnara_folds: authority,
+                ..Default::default()
+            };
+            store
+                .commit("ses", None, &CoreState::empty(), &stored)
+                .unwrap();
+            let rows: Vec<_> = (1..=3).map(|seq| bounded_read_segment(seq, 0)).collect();
+            let drop_seeds = [ModuleDropSeedRow {
+                block_id: "m1#0".to_string(),
+                related_block_ids: Vec::new(),
+                drop_mode: "full".to_string(),
+                payload: None,
+            }];
+            let boundary = rows.last().unwrap().end_message_id.clone();
+            store
+                .apply_authority_state_sync(ModuleStateSyncRequest {
+                    seed_boundary_id: Some(&boundary),
+                    drop_seeds: &drop_seeds,
+                    ..history_segment_sync(0, &rows)
+                })
+                .unwrap();
+            (
+                store.load("ses").unwrap(),
+                store.load_history_segments("ses").unwrap().len(),
+            )
+        };
+
+        let (unadopted, unadopted_segments) = sync_seeded(None);
+        assert_eq!(unadopted_segments, 3, "the seed is valid");
+        assert!(unadopted.meta.coverage_ordinal.is_some());
+        assert_ne!(unadopted.core, CoreState::empty());
+
+        let (native, native_segments) = sync_seeded(Some(false));
+        assert_eq!(native_segments, 0);
+        assert_eq!(native.core, CoreState::empty());
+        assert_eq!(native.meta.eidnara_folds, Some(false));
+        assert!(!native.meta.initialized);
+        assert_eq!(native.meta.folded_history_segment_seq, 0);
+        assert_eq!(native.meta.coverage_ordinal, None);
+        assert_eq!(native.meta.last_todo_state.as_deref(), Some("sync 0"));
     }
 
     /// A state sync that would leave the stored ranges out of strict order is refused and
@@ -27100,6 +27318,146 @@ mod tests {
         .unwrap();
         drop(raw);
         assert_eq!(store.load("ses").unwrap().meta, meta);
+    }
+
+    #[test]
+    fn a_non_boolean_fold_authority_is_a_serde_error_on_every_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE cache_state SET meta = json_set(meta, '$.eidnara_folds', 'yes')
+              WHERE session_id = 'ses'",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+
+        assert!(matches!(store.load("ses"), Err(MemoryStoreError::Serde(_))));
+        assert!(matches!(
+            store.load_fold_authority("ses"),
+            Err(MemoryStoreError::Serde(_))
+        ));
+    }
+
+    #[test]
+    fn a_legacy_row_with_only_stored_identities_carries_no_fold_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = ModuleMeta::default();
+        meta.block_identity_by_mid.insert(
+            "m1".to_string(),
+            vec![BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: "fp-m1".to_string(),
+            }],
+        );
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let loaded = store.load("ses").unwrap();
+        assert!(!loaded.meta.block_identity_by_mid.is_empty());
+
+        let record = store.load_fold_authority("ses").unwrap();
+        assert_eq!((record.applied, record.adopted), (None, None));
+        assert_eq!(loaded.meta.applied_eidnara_folds(), None);
+    }
+
+    #[test]
+    fn the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            eidnara_folds: Some(true),
+            coverage_ordinal: Some(3),
+            lineage_descent_target_key: "ses".to_string(),
+            lineage_descent_disposition: "descended".to_string(),
+            ..Default::default()
+        };
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+
+        let reset = store
+            .reset_session_for_authority("ses", Some(version), false)
+            .unwrap()
+            .expect("an idle session is quiescent");
+        let native = store.load("ses").unwrap();
+        assert_eq!(native.meta.eidnara_folds, Some(false));
+        assert_eq!(native.meta.revert_epoch, reset.revert_epoch);
+        assert_eq!(native.meta.coverage_ordinal, None);
+        assert_eq!(native.meta.lineage_descent_disposition, "descended");
+        let record = store.load_fold_authority("ses").unwrap();
+        assert_eq!((record.applied, record.adopted), (Some(false), Some(false)));
+
+        store
+            .reset_session_for_recomp("ses", native.row_version)
+            .unwrap();
+        assert_eq!(store.load("ses").unwrap().meta.eidnara_folds, Some(false));
+    }
+
+    #[test]
+    fn a_busy_summarizer_refuses_the_authority_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let mut meta = ModuleMeta {
+            eidnara_folds: Some(true),
+            ..Default::default()
+        };
+        meta.history_summarizer.state = HistorySummarizerPhase::AwaitingProducer;
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+
+        assert!(
+            store
+                .load_fold_authority("ses")
+                .is_ok_and(|record| !record.quiescent)
+        );
+        assert!(
+            store
+                .reset_session_for_authority("ses", Some(version), false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.load("ses").unwrap().meta.eidnara_folds, Some(true));
+    }
+
+    #[test]
+    fn a_pending_publication_refuses_the_authority_reset_of_an_idle_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            eidnara_folds: Some(true),
+            coverage_ordinal: Some(4),
+            ..Default::default()
+        };
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "INSERT INTO history_summarizer_pending_publications(session_id, firing_seq, payload_deflate, created_at_ms)
+             VALUES ('ses', 1, x'00', 1)",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+
+        let record = store.load_fold_authority("ses").unwrap();
+        assert!(!record.quiescent);
+        assert!(
+            store
+                .reset_session_for_authority("ses", Some(version), false)
+                .unwrap()
+                .is_none()
+        );
+        let kept = store.load("ses").unwrap();
+        assert_eq!(kept.row_version, Some(version));
+        assert_eq!(kept.meta, meta);
     }
 
     /// Rollback safety of the per-block meta entries only: a row this build writes, with

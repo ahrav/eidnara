@@ -16,6 +16,7 @@ use crate::config::{
 };
 use crate::divergence;
 pub use crate::divergence::FirstDivergence;
+use crate::fold_authority::{self, AppliedFoldAuthority, FoldAuthorityIntent, FoldAuthorityPlan};
 use crate::healing::{self, SerializerProfile, quirk_residual};
 use crate::history_segment_coverage::{M0ContentEpoch, fold_m0_content_epoch};
 use crate::injection::{
@@ -531,7 +532,8 @@ pub struct ProducerContext<'a> {
     pub temporal_awareness: bool,
     pub now_ms: i64,
     pub execute_threshold_percentage: f64,
-    pub compaction_enabled: bool,
+    pub fold_authority: FoldAuthorityIntent,
+    pub sibling_fence: &'a dyn fold_authority::SiblingFence,
     /// Route binding freezes the smart-drop selector gate.
     pub smart_drops: bool,
     /// The host-side idle predicate uses this effective cache TTL.
@@ -1516,6 +1518,21 @@ pub struct HistorySummarizerDiagnostics {
     pub project_memory: Option<ProjectMemoryComposition>,
 }
 
+impl HistorySummarizerDiagnostics {
+    pub fn disabled(reason: &str) -> Self {
+        Self {
+            fired: false,
+            started: None,
+            reason: Some(reason.to_string()),
+            no_fire: Some(reason.to_string()),
+            state: "disabled".to_string(),
+            progress: None,
+            last_failure: None,
+            project_memory: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistorySummarizerTriggerProgress {
     pub eligible_chunk_tokens: f64,
@@ -1538,6 +1555,7 @@ pub struct TransformWithProjection {
     /// The window the pass served when a retry re-resolved it to another cut or a descent pass
     /// rebased it to the durable ordinal base; `None` when it served the request it was given.
     pub served_request: Option<Box<TransformRequest>>,
+    pub fold_authority: AppliedFoldAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1953,12 +1971,58 @@ fn apply_once_with_estimator(
     let mut attempt = 0;
     let mut reset_row_version = None;
     loop {
+        let record = store.load_fold_authority(&req.session_id)?;
+        let mut authority = fold_authority::plan(record, ctx.fold_authority);
+        #[cfg(test)]
+        run_transform_attempt_hook(&format!("fold_authority:{}", req.session_id));
+        if let Some(target) = authority.change {
+            if attempt >= MAX_CAS_RETRIES {
+                return Err(TransformError::Store(MemoryStoreError::CasConflict {
+                    expected: record.row_version,
+                    found: record.row_version.unwrap_or_default(),
+                }));
+            }
+            #[cfg(test)]
+            run_transform_attempt_hook(&req.session_id);
+            let reset = ctx.sibling_fence.without_sibling(&mut || {
+                store.reset_session_for_authority(&req.session_id, record.row_version, target)
+            });
+            match reset {
+                None => {
+                    authority.pending = Some(fold_authority::PendingAuthority {
+                        target,
+                        reason: fold_authority::PendingReason::SiblingBound,
+                    });
+                }
+                Some(Ok(Some(reset))) => {
+                    eprintln!(
+                        "daemon: fold authority of {} reset to {}; epoch {}",
+                        req.session_id,
+                        fold_authority::authority_name(target),
+                        reset.revert_epoch
+                    );
+                    attempt += 1;
+                    continue;
+                }
+                Some(Ok(None)) => {
+                    authority.pending = Some(fold_authority::PendingAuthority {
+                        target,
+                        reason: fold_authority::PendingReason::NotQuiescent,
+                    });
+                }
+                Some(Err(MemoryStoreError::CasConflict { .. })) if attempt < MAX_CAS_RETRIES => {
+                    attempt += 1;
+                    continue;
+                }
+                Some(Err(error)) => return Err(error.into()),
+            }
+        }
         // Every attempt resolves the submitted window from a fresh snapshot, whose row version
         // the pass's own load must match.
         let resolve_started_at = Instant::now();
         let (coverage_row_version, attempt_req) = resolve_attempt(store, req)?;
         let coverage_resolve = elapsed_ms(resolve_started_at);
-        if ctx.compaction_enabled
+        if authority.eidnara_folds
             && !req.lineage_switched
             && attempt_req
                 .coverage
@@ -1991,6 +2055,7 @@ fn apply_once_with_estimator(
             store,
             &attempt_req,
             ctx,
+            &authority,
             estimate_tokens,
             coverage_row_version,
         ) {
@@ -2002,6 +2067,11 @@ fn apply_once_with_estimator(
                 continue;
             }
             Ok(mut output) => {
+                output.fold_authority = AppliedFoldAuthority {
+                    eidnara_folds: authority.eidnara_folds,
+                    pending: authority.pending,
+                    settles_first_pass: output.response.committed || authority.pending.is_some(),
+                };
                 if let Some(timings) = output.response.timings.as_mut() {
                     timings.coverage_resolve = coverage_resolve;
                 }
@@ -2023,6 +2093,29 @@ fn apply_once_with_estimator(
             other => return other,
         }
     }
+}
+
+/// The attempt's plan read the stored authority before this load; a row another writer
+/// adopted in between retries under a fresh plan. Adoption rides the pass's commit, so a pass
+/// that commits nothing adopts nothing.
+fn stamp_fold_authority(
+    loaded: &mut memory_store::LoadedState,
+    authority: &FoldAuthorityPlan,
+) -> Result<(), TransformError> {
+    if loaded.row_version != authority.row_version {
+        return Err(TransformError::Store(MemoryStoreError::CasConflict {
+            expected: authority.row_version,
+            found: loaded.row_version.unwrap_or_default(),
+        }));
+    }
+    if let Some(eidnara_folds) = authority.adopt {
+        loaded.meta.eidnara_folds = Some(eidnara_folds);
+        // Native adoption clears the identities a legacy compaction-off row recorded.
+        if !eidnara_folds {
+            loaded.meta.block_identity_by_mid.clear();
+        }
+    }
+    Ok(())
 }
 
 const NO_SURVIVOR: crate::window_coverage::Resolution =
@@ -2468,6 +2561,7 @@ fn lineage_protocol_passthrough(
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         served_request: None,
+        fold_authority: AppliedFoldAuthority::default(),
         response: TransformResponse::passthrough(
             req.messages
                 .iter()
@@ -2534,6 +2628,7 @@ fn apply_additive_only(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
+    authority: &FoldAuthorityPlan,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
@@ -2574,7 +2669,8 @@ fn apply_additive_only(
         previous_ordinal = Some(message.ordinal);
     }
 
-    let loaded = store.load(&req.session_id)?;
+    let mut loaded = store.load(&req.session_id)?;
+    stamp_fold_authority(&mut loaded, authority)?;
     let serializer_profile = SerializerProfile::parse(&req.serializer_profile);
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
@@ -2732,17 +2828,7 @@ fn apply_additive_only(
         meta.last_upgrade_state = req.upgrade_state.clone();
         meta.last_render_config = effective_render_config.clone();
     }
-    let provisional_tail_mid =
-        provisional_tail_mid(&wire::MessageProjection::new(&req.messages), req.mid_turn);
-    apply_ingress_meta(
-        &mut meta,
-        req,
-        &projection,
-        provisional_tail_mid,
-        None,
-        &IdentityEnforcement::default(),
-    );
-    prune_block_identities(&mut meta, req, plan);
+    apply_ingress_scalars(&mut meta, req, &projection);
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -2975,6 +3061,12 @@ fn apply_additive_only(
     timings.store_notes = m1_revision_read_timings.notes_ms;
     record_token_cache_delta(&mut timings, token_cache_stats_at_start);
     timings.total = elapsed_ms(total_started_at);
+    // Descent edges recorded before the session switched to native authority count as replays.
+    let replayed_edge = (req.lineage_switched
+        && !meta.lineage_descent_disposition.is_empty()
+        && meta.lineage_descent_target_key == req.session_id
+        && meta.lineage_descent_edge_id == req.descent_edge_id)
+        .then_some(req.descent_edge_id);
 
     Ok(TransformWithProjection {
         tag_numbers: BTreeMap::new(),
@@ -2988,6 +3080,7 @@ fn apply_additive_only(
         mutation_exempt_mid: None,
         lineage_anchor_mid: None,
         served_request: None,
+        fold_authority: AppliedFoldAuthority::default(),
         response: TransformResponse {
             status: TransformStatus::Ok,
             served_from: ServedFrom::Transform,
@@ -3004,8 +3097,9 @@ fn apply_additive_only(
             committed: commit_required,
             boundary: None,
             project_memory: meta.project_memory.clone(),
-            lineage_switch_consumed_id: None,
-            lineage_descent_disposition: None,
+            lineage_switch_consumed_id: replayed_edge,
+            lineage_descent_disposition: replayed_edge
+                .map(|_| LineageDescentDisposition::Replay.as_str().to_string()),
             cache_ttl: None,
             history_summarizer: None,
             messages: Some(messages),
@@ -3026,12 +3120,14 @@ fn apply_once(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
+    authority: &FoldAuthorityPlan,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     mut coverage_row_version: Option<u64>,
 ) -> Result<TransformWithProjection, TransformError> {
-    if !ctx.compaction_enabled {
-        return apply_additive_only(store, req, ctx, estimate_tokens);
+    if !authority.eidnara_folds && !(req.lineage_switched && req.is_subagent) {
+        return apply_additive_only(store, req, ctx, authority, estimate_tokens);
     }
+    let mut authority = *authority;
     let total_started_at = Instant::now();
     let mut timings = TransformTimings::default();
     let token_cache_stats_at_start = crate::token_cache::local_stats();
@@ -3105,6 +3201,17 @@ fn apply_once(
                 initial_projection,
                 ctx.now_ms,
             ));
+        }
+        let carried = outcome.loaded.meta.eidnara_folds;
+        let descended = outcome.disposition == LineageDescentDisposition::Descended;
+        let own_metadata = !descended
+            && initial_state.row_version == authority.row_version
+            && carried == initial_state.meta.eidnara_folds;
+        if own_metadata || (descended && carried == Some(authority.eidnara_folds)) {
+            authority.row_version = outcome.loaded.row_version;
+            if descended {
+                authority.adopt = None;
+            }
         }
         lineage_state.acknowledge_edge = outcome.acknowledge.then_some(ingress_req.descent_edge_id);
         lineage_state.disposition = Some(outcome.disposition.as_str());
@@ -3192,6 +3299,7 @@ fn apply_once(
             found: loaded.row_version.unwrap_or(0),
         }));
     }
+    stamp_fold_authority(&mut loaded, &authority)?;
     let coverage = req.coverage.as_deref().expect("the request was resolved");
     let overlay_frontier = transform_snapshot.overlay_frontier;
     let transition_detection_started_at = Instant::now();
@@ -3982,14 +4090,14 @@ fn apply_once(
         }
     }
     let ingress_meta_started_at = Instant::now();
-    apply_ingress_meta(
+    apply_ingress_identities(
         &mut meta,
-        req,
         &projection,
         provisional_tail_mid,
         lineage_anchor_mid,
         &identity_enforcement,
     );
+    apply_ingress_scalars(&mut meta, req, &projection);
     timings.ingress_meta = elapsed_ms(ingress_meta_started_at);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -5112,6 +5220,7 @@ fn apply_once(
             note_deliveries: (!note_deliveries.is_empty()).then_some(note_deliveries),
         },
         served_request: rebased_req.map(Box::new),
+        fold_authority: AppliedFoldAuthority::default(),
     })
 }
 
@@ -5315,9 +5424,28 @@ fn prune_block_identities(meta: &mut ModuleMeta, req: &TransformRequest, plan: P
         .retain(|mid, _| window.contains(mid.as_str()));
 }
 
-fn apply_ingress_meta(
+/// The ingress facts every pass records, whichever authority folds.
+fn apply_ingress_scalars(
     meta: &mut ModuleMeta,
     req: &TransformRequest,
+    projection: &FlatProjection,
+) {
+    let newest_live = projection
+        .blocks
+        .iter()
+        .filter(|block| !block.synthetic)
+        .max_by_key(|block| block.ordinal);
+    meta.newest_live_block_id = newest_live.map(|block| block.id.clone());
+    meta.newest_live_ordinal = newest_live.map_or(meta.newest_live_ordinal, |block| block.ordinal);
+    if let Some(usage) = req.usage.as_ref().filter(|usage| usage.is_non_zero()) {
+        meta.last_usage = Some(usage.clone());
+    }
+}
+
+/// Identity adoption belongs to the folding path: only folds read stored identities, so a
+/// native-folds session keeps its identity map empty.
+fn apply_ingress_identities(
+    meta: &mut ModuleMeta,
     projection: &FlatProjection,
     provisional_tail_mid: Option<&str>,
     lineage_anchor_mid: Option<&str>,
@@ -5367,16 +5495,6 @@ fn apply_ingress_meta(
             meta.block_identity_by_mid
                 .insert(mid.clone(), vector.clone());
         }
-    }
-    let newest_live = projection
-        .blocks
-        .iter()
-        .filter(|block| !block.synthetic)
-        .max_by_key(|block| block.ordinal);
-    meta.newest_live_block_id = newest_live.map(|block| block.id.clone());
-    meta.newest_live_ordinal = newest_live.map_or(meta.newest_live_ordinal, |block| block.ordinal);
-    if let Some(usage) = req.usage.as_ref().filter(|usage| usage.is_non_zero()) {
-        meta.last_usage = Some(usage.clone());
     }
 }
 
@@ -6661,6 +6779,7 @@ fn pending_passthrough_result(args: PendingPassthroughArgs) -> TransformWithProj
         mutation_exempt_mid,
         lineage_anchor_mid: None,
         served_request: None,
+        fold_authority: AppliedFoldAuthority::default(),
         response,
     }
 }
@@ -12535,7 +12654,8 @@ pub(crate) mod tests {
             temporal_awareness: true,
             now_ms,
             execute_threshold_percentage: 65.0,
-            compaction_enabled: true,
+            fold_authority: FoldAuthorityIntent::default(),
+            sibling_fence: &fold_authority::NoSiblings,
             smart_drops: false,
             cache_ttl: "5m".to_string(),
             cache_ttl_provenance: CacheTtlProvenance::Default,
@@ -14239,6 +14359,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "identity-round-trip";
+        let ctx = |now| pctx("git:proj", "/nonexistent-docs", now);
+        let head = item("head", 1, "question");
+        let completed = assistant_form("tail", 2, &["partial", "completed"]);
+        let partial = assistant_form("tail", 2, &["partial"]);
+
+        transform(
+            &store,
+            &req(session, "cfg0", vec![head.clone(), completed.clone()]),
+            &ctx(0),
+        )
+        .unwrap();
+        let first = store.load(session).unwrap().meta;
+        let completed_identity = first.block_identity_by_mid["tail"].clone();
+        assert_eq!(completed_identity.len(), 2);
+
+        let mut provisional = req(session, "cfg0", vec![head.clone(), partial]);
+        provisional.mid_turn = true;
+        transform(&store, &provisional, &ctx(1)).unwrap();
+        let removed = store.load(session).unwrap().meta;
+        assert!(!removed.block_identity_by_mid.contains_key("tail"));
+        assert_eq!(
+            removed.block_identity_by_mid["head"],
+            first.block_identity_by_mid["head"]
+        );
+
+        transform(
+            &store,
+            &req(session, "cfg0", vec![head, completed]),
+            &ctx(2),
+        )
+        .unwrap();
+        let readopted = store.load(session).unwrap().meta;
+        assert_eq!(readopted.block_identity_by_mid["tail"], completed_identity);
+        assert_eq!(
+            readopted.block_identity_by_mid["head"],
+            first.block_identity_by_mid["head"]
+        );
+    }
+
+    #[test]
     fn mid_turn_tail_stays_provisional_and_re_adopts_completed_tail() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -14332,9 +14496,8 @@ pub(crate) mod tests {
         )
         .unwrap();
         let mut speculative_meta = before.meta.clone();
-        apply_ingress_meta(
+        apply_ingress_identities(
             &mut speculative_meta,
-            &mutated_request,
             &mutated_projection,
             None,
             None,
@@ -14431,22 +14594,14 @@ pub(crate) mod tests {
 
         let mut changed = before.meta.clone();
         changed.history_summarizer.chunk_retry = retry(1, 2);
-        apply_ingress_meta(
-            &mut changed,
-            &mutated_request,
-            &mutated_projection,
-            None,
-            None,
-            &enforcement,
-        );
+        apply_ingress_identities(&mut changed, &mutated_projection, None, None, &enforcement);
         assert_eq!(changed.history_summarizer.chunk_retry, None);
 
         // The failed chunk ended before the re-adopted message: the retried bytes are unchanged.
         let mut ended_before = before.meta.clone();
         ended_before.history_summarizer.chunk_retry = retry(1, 1);
-        apply_ingress_meta(
+        apply_ingress_identities(
             &mut ended_before,
-            &mutated_request,
             &mutated_projection,
             None,
             None,
@@ -14456,9 +14611,8 @@ pub(crate) mod tests {
 
         let mut unchanged = before.meta.clone();
         unchanged.history_summarizer.chunk_retry = retry(3, 5);
-        apply_ingress_meta(
+        apply_ingress_identities(
             &mut unchanged,
-            &mutated_request,
             &mutated_projection,
             None,
             None,
@@ -14889,7 +15043,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        ctx.compaction_enabled = false;
+        ctx.fold_authority.eidnara_folds = false;
         let first = transform(&s, &req("additive", "cfg0", vec![item("a", 1, "x")]), &ctx).unwrap();
         let loaded = s.load("additive").unwrap();
         let mut meta = loaded.meta.clone();
@@ -15027,8 +15181,14 @@ pub(crate) mod tests {
             "enabling state: no anchor survives in the window"
         );
 
+        // The session's stored authority is native; its archived segments stay.
+        let mut native = before.meta.clone();
+        native.eidnara_folds = Some(false);
+        s.commit(session, before.row_version, &before.core, &native)
+            .unwrap();
+        let before = s.load(session).unwrap();
         let mut off = pctx("git:proj", "/nonexistent-docs", 0);
-        off.compaction_enabled = false;
+        off.fold_authority.eidnara_folds = false;
         let served = transform(&s, &compacted, &off).unwrap();
         assert_eq!(served.status, TransformStatus::Ok);
         assert_eq!(s.load_history_segments(session).unwrap(), segments);
@@ -15110,7 +15270,7 @@ pub(crate) mod tests {
         let s = Arc::new(store(dir.path()));
         let session = "additive-set-moved";
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
-        ctx.compaction_enabled = false;
+        ctx.fold_authority.eidnara_folds = false;
         let mut request = req(session, "cfg0", vec![item("a", 1, "x")]);
         // A 1,024-token hard window caps m1 at four rows.
         request.geometry = Some(TransformGeometry {
@@ -15175,7 +15335,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let mut additive = pctx("git:proj", "/nonexistent-docs", 0);
-        additive.compaction_enabled = false;
+        additive.fold_authority.eidnara_folds = false;
         let messages = vec![item("a", 1, "x"), item("b", 2, "y")];
         transform(
             &s,
@@ -15218,10 +15378,19 @@ pub(crate) mod tests {
         assert!(!repeat.committed, "a repeat additive pass stays write-free");
         assert_eq!(s.load("toggle").unwrap().row_version, row_version);
 
+        // The additive passes ran before the session recorded a fold authority: a legacy row
+        // whose rendered watermark is a fold artifact adopts Eidnara without a reset.
+        let loaded = s.load("toggle").unwrap();
+        assert_eq!(loaded.meta.eidnara_folds, Some(false));
+        let mut legacy = loaded.meta.clone();
+        legacy.eidnara_folds = None;
+        s.commit("toggle", loaded.row_version, &loaded.core, &legacy)
+            .unwrap();
         let mut compaction = pctx("git:proj", "/nonexistent-docs", 0);
         compaction.now_ms = 42;
         let hard = transform(&s, &req("toggle", "cfg1", messages), &compaction).unwrap();
         assert_eq!((hard.action.as_str(), hard.committed), ("HARD", true));
+        assert_eq!(s.load("toggle").unwrap().meta.eidnara_folds, Some(true));
         assert!(
             serde_json::to_string(&hard.messages())
                 .unwrap()
