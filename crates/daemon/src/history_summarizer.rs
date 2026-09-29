@@ -492,6 +492,16 @@ pub fn persist_history_summarizer_state(
 ) -> Result<u64, HistorySummarizerStateError> {
     let loaded = store.load(session_id)?;
     let mut meta = loaded.meta.clone();
+    let current = &meta.history_summarizer;
+    if current.state == HistorySummarizerPhase::Idle
+        && next_state.state != HistorySummarizerPhase::Idle
+        && next_state.firing_seq == current.firing_seq
+    {
+        return Err(HistorySummarizerStateError::InvalidTransition {
+            from: HistorySummarizerPhase::Idle,
+            event: "resume_ended_firing",
+        });
+    }
     let durable = std::mem::replace(&mut meta.history_summarizer, next_state);
     keep_fields_other_writers_own(&durable, &mut meta.history_summarizer);
     if meta == loaded.meta {
@@ -509,6 +519,7 @@ fn keep_fields_other_writers_own(
         next.pending_eligibility = durable.pending_eligibility.clone();
     }
     next.chunk_retry = durable.chunk_retry.clone();
+    next.last_abandon = durable.last_abandon.clone();
     next.counters.published = durable.counters.published;
     next.counters.superseded_before_activation = durable.counters.superseded_before_activation;
     let in_flight = next.firing_seq;
@@ -828,7 +839,7 @@ fn settle_unpublishable_reservation(
 }
 
 /// Settles `held` in one store write; `Ok(false)` means the state no longer records it and nothing was touched. A refusal the store reports is a job this pass cannot close; the reservation is dropped either way.
-fn settle_reservation(
+pub(crate) fn settle_reservation(
     store: &MemoryStore,
     session_id: &str,
     project_path: &str,
@@ -3386,6 +3397,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         }
     }
 
@@ -5585,6 +5597,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         let rv = store
             .commit(

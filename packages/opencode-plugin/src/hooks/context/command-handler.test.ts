@@ -283,7 +283,9 @@ describe("createEidnaraCommandHandler", () => {
                             kind: "eidnara",
                             reason: "summarizer chain: test/model",
                         }),
-                        raise: (conflict) => raised.push(conflict.reasons),
+                        publish: (conflict) => {
+                            if (conflict) raised.push(conflict.reasons);
+                        },
                     },
                 },
             );

@@ -1,0 +1,21 @@
+{
+    "description": "Shared fold-authority status fixture. The Rust daemon (crates/daemon/src/fold_authority.rs and crates/daemon/src/fold_authority_handler_tests.rs) asserts that session.status emits each segment below, and the TypeScript plugin (packages/opencode-plugin/src/shared/fold-authority-status.ts) asserts that it parses each segment and names each row's next step. Changing a daemon segment fails the Rust tests until this file changes, and changing this file fails the plugin tests until the parser still routes every row.",
+    "pending": [
+        {
+            "reason": "sibling_bound",
+            "segment": "fold authority pending eidnara: another binding is open on this session",
+            "step": "restart other OpenCode instances"
+        },
+        {
+            "reason": "not_quiescent",
+            "segment": "fold authority pending eidnara: the summarizer is busy or a publication is pending",
+            "step": "wait for the summarizer to finish, then restart this OpenCode instance"
+        },
+        {
+            "reason": "later_bind",
+            "segment": "fold authority pending eidnara: it applies at the next bind while the session is quiescent",
+            "step": "keep other OpenCode instances on this session closed, then restart this one so it binds the session again"
+        }
+    ],
+    "stalled_applied": "eidnara, summarizer stalled (no models at the last pass)"
+}

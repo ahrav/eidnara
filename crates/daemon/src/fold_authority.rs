@@ -142,6 +142,47 @@ pub fn plan(record: FoldAuthorityRecord, intent: FoldAuthorityIntent) -> FoldAut
 mod tests {
     use super::*;
 
+    const STATUS_FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/shared/__fixtures__/fold-authority-status.json"
+    );
+
+    fn fixture_key(reason: PendingReason) -> &'static str {
+        match reason {
+            PendingReason::SiblingBound => "sibling_bound",
+            PendingReason::NotQuiescent => "not_quiescent",
+            PendingReason::LaterBind => "later_bind",
+        }
+    }
+
+    #[test]
+    fn pending_segments_match_the_plugin_status_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(STATUS_FIXTURE).expect("the status fixture parses");
+        let rows = fixture["pending"].as_array().expect("pending rows");
+        let reasons = [
+            PendingReason::SiblingBound,
+            PendingReason::NotQuiescent,
+            PendingReason::LaterBind,
+        ];
+        assert_eq!(rows.len(), reasons.len());
+        for reason in reasons {
+            let key = fixture_key(reason);
+            let row = rows
+                .iter()
+                .find(|row| row["reason"] == key)
+                .unwrap_or_else(|| panic!("the fixture names {key}"));
+            assert_eq!(
+                PendingAuthority {
+                    target: true,
+                    reason
+                }
+                .describe(),
+                row["segment"].as_str().expect("segment"),
+                "{key}"
+            );
+        }
+    }
+
     fn record(
         applied: Option<bool>,
         adopted: Option<bool>,

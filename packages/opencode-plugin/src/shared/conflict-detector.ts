@@ -619,3 +619,13 @@ export function formatConflictShort(result: ConflictWarning): string {
     ];
     return lines.join("\n");
 }
+
+/** The text every `warn` message begins with when its first reason starts with `reasonPrefix`. */
+export function warningTextPrefix(reasonPrefix: string): string {
+    const text = formatConflictShort({
+        disposition: "warn",
+        reasons: [reasonPrefix],
+        unresolved: [],
+    });
+    return text.slice(0, text.indexOf(reasonPrefix) + reasonPrefix.length);
+}

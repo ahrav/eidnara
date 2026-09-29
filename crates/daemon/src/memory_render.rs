@@ -231,18 +231,17 @@ pub fn assemble_m1(
 }
 
 /// Renders non-empty history_segment input at tier 1 inside `<new-history_segments>`.
-///
-/// Returns an empty string when `history_segments` is empty and preserves input order.
 pub fn render_new_history_segments(
     history_segments: &[&crate::decay_render::DecayRenderHistorySegment],
 ) -> String {
-    if history_segments.is_empty() {
-        return String::new();
-    }
     let bodies: Vec<String> = history_segments
         .iter()
         .map(|c| crate::decay_render::render_history_segment_at_tier(c, 1))
+        .filter(|body| !body.is_empty())
         .collect();
+    if bodies.is_empty() {
+        return String::new();
+    }
     format!(
         "<new-history_segments>\n{}\n</new-history_segments>",
         bodies.join("\n\n")

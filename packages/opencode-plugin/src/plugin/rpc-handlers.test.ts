@@ -161,11 +161,19 @@ describe("registerRpcHandlers", () => {
 
     const USER_CONFIG = "/home/u/.config/eidnara/eidnara.jsonc";
     const statusWith = (summary: string): RustSessionStatus => ({ ...DAEMON_STATUS, summary });
-    const foldAuthority = (raised: ConflictWarning[]): PluginFoldAuthority => ({
+    const foldAuthority = (
+        raised: ConflictWarning[],
+        onReadDisk: () => void = () => {},
+    ): PluginFoldAuthority => ({
         startup: { kind: "native", reason: "no summarizer model is configured" },
         userConfigPath: USER_CONFIG,
-        readDisk: () => ({ kind: "native", reason: "no summarizer model is configured" }),
-        raise: (conflict) => raised.push(conflict),
+        readDisk: () => {
+            onReadDisk();
+            return { kind: "native", reason: "no summarizer model is configured" };
+        },
+        publish: (conflict) => {
+            if (conflict) raised.push(conflict);
+        },
     });
 
     test("a pending authority reaches both RPCs and raises a warn conflict while they keep answering", async () => {
@@ -193,7 +201,7 @@ describe("registerRpcHandlers", () => {
         expect(snapshot.fold_authority?.label).toBe(
             "fold authority pending native: restart other OpenCode instances",
         );
-        expect(detail.fold_authority).toEqual(snapshot.fold_authority);
+        expect(detail.fold_authority).toMatchObject(snapshot.fold_authority ?? {});
         expect(detail.foldAuthorityLines).toContain(
             "- Daemon applied (session.status): Eidnara folds",
         );
@@ -203,6 +211,35 @@ describe("registerRpcHandlers", () => {
         expect(raised.map((conflict) => conflict.disposition)).toEqual(["warn", "warn"]);
         expect(raised[0]?.reasons[0]).toStartWith(
             "authority pending: restart other OpenCode instances",
+        );
+    });
+
+    test("the sidebar poll leaves the configuration on disk unread while the status detail shows it", async () => {
+        let diskReads = 0;
+        const { handlers } = register(
+            {},
+            statusWith(
+                `fold authority native; user config ${USER_CONFIG}; session ses (last active 0s ago): idle`,
+            ),
+            createLiveSessionState(),
+            foldAuthority([], () => {
+                diskReads += 1;
+            }),
+        );
+        const sessionId = "ses-handler-fold-disk";
+
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(diskReads).toBe(0);
+        expect(snapshot.fold_authority?.disk).toBeUndefined();
+
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+        expect(diskReads).toBe(1);
+        expect(detail.foldAuthorityLines).toContain(
+            "- On disk: OpenCode's native compaction folds (no summarizer model is configured)",
         );
     });
 

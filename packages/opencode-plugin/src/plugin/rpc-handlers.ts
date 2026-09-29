@@ -43,6 +43,7 @@ import {
     formatFoldAuthorityLines,
     type PluginFoldAuthority,
     reportFoldAuthority,
+    withDiskAuthority,
 } from "../shared/fold-authority-status";
 import {
     disabled,
@@ -886,6 +887,14 @@ export function registerRpcHandlers(
         const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "status detail unavailable" };
+        const { foldAuthority } = inputs.ownership;
+        const ownership =
+            foldAuthority && args.foldAuthority
+                ? {
+                      ...inputs.ownership,
+                      foldAuthority: withDiskAuthority(foldAuthority, args.foldAuthority),
+                  }
+                : inputs.ownership;
         // SAFETY: same JSON-serializable status-detail record as the snapshot above.
         return buildStatusDetail(
             sessionId,
@@ -895,7 +904,7 @@ export function registerRpcHandlers(
             liveSessionState,
             inputs.memory,
             inputs.moduleStatus,
-            inputs.ownership,
+            ownership,
         ) as unknown as Record<string, unknown>;
     });
 

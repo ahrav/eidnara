@@ -2771,7 +2771,7 @@ fn apply_additive_only(
         render_config_changed,
         first_fold_due: false,
         idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
-        system_absorb_hard_due: false,
+        coverage_fold_due: false,
         external_revision_changed,
         project_memory_epoch_hard_due,
         emergency_arm_engaged: false,
@@ -3046,7 +3046,12 @@ fn apply_additive_only(
                 project_root: Some(ctx.project_directory),
                 first_divergence: None,
                 pass: Some(pass_record(req, pass_observation.clone())),
-                overlays: TransformOverlayBatch::default(),
+                overlays: TransformOverlayBatch {
+                    // Native adoption clears the identity rows a legacy compaction-off row
+                    // recorded; the clear rides the adopting commit as the adoption does.
+                    clear_identities: authority.adopt == Some(false),
+                    ..TransformOverlayBatch::default()
+                },
             },
         )?
     } else {
@@ -3779,6 +3784,10 @@ fn apply_once(
     let (render_config_changed, identity_observed, coordinator_identity) =
         render_config_change(&loaded.meta, req, &effective_render_config, transition_due);
     let reconcile_hard_due = loaded.core.reconcile_pending && !boundary_present;
+    let archive_fold_due = loaded.meta.archive_fold_seq.is_some_and(|sequence| {
+        sequence > loaded.meta.folded_history_segment_seq
+            && sequence <= m1_signal.max_history_segment_seq
+    });
     let system_absorb_hard_due = if serializer_profile
         == Some(SerializerProfile::ClaudeCodeAnthropic)
         && history_segment_seq_changed_since_meta
@@ -3793,6 +3802,7 @@ fn apply_once(
     } else {
         false
     };
+    let coverage_fold_due = system_absorb_hard_due || archive_fold_due;
     let ActivationGates {
         hard_fold_requested,
         ordinary_history_summarizer_veto,
@@ -3804,7 +3814,7 @@ fn apply_once(
         render_config_changed,
         first_fold_due,
         idle_ttl_fired: scheduler_outcome.idle_ttl_fired,
-        system_absorb_hard_due,
+        coverage_fold_due,
         external_revision_changed,
         project_memory_epoch_hard_due,
         emergency_arm_engaged: matches!(
@@ -4029,7 +4039,7 @@ fn apply_once(
         profile_transition,
         first_fold_due,
         ttl_expired: scheduler_outcome.idle_ttl_fired,
-        coverage_fold_due: system_absorb_hard_due,
+        coverage_fold_due,
         project_memory_delta: external_revision_changed || project_memory_epoch_hard_due,
         reconcile_hard_due,
         coverage_delta: history_segment_seq_changed_since_meta,
@@ -4318,6 +4328,7 @@ fn apply_once(
                             meta.revert_epoch = outcome.revert_epoch;
                             meta.last_recut = outcome.last_recut;
                             meta.history_summarizer = outcome.history_summarizer;
+                            meta.archive_fold_seq = outcome.archive_fold_seq;
                             if outcome.lineage_reset {
                                 meta.forget_lineage_continuation();
                             }
@@ -5143,6 +5154,7 @@ fn apply_once(
                     user_hint: pending_overlays.user_hint.as_ref(),
                     channel1_append: pending_overlays.channel1_append.as_ref(),
                     identities: Some(&window_identities.delta),
+                    clear_identities: false,
                     created_at_ms: ctx.now_ms,
                 },
             },
@@ -5752,7 +5764,8 @@ struct ActivationGateInputs {
     render_config_changed: bool,
     first_fold_due: bool,
     idle_ttl_fired: bool,
-    system_absorb_hard_due: bool,
+    /// A system-prompt absorb or an archive above the fold, either of which only a HARD folds.
+    coverage_fold_due: bool,
     external_revision_changed: bool,
     project_memory_epoch_hard_due: bool,
     /// Force85, Emergency95, or the drain latch.
@@ -5769,7 +5782,7 @@ struct ActivationGates {
 fn activation_gates(input: &ActivationGateInputs) -> ActivationGates {
     let hard_fold_requested = input.first_fold_due
         || input.idle_ttl_fired
-        || input.system_absorb_hard_due
+        || input.coverage_fold_due
         || input.external_revision_changed
         || input.project_memory_epoch_hard_due;
     let ordinary_history_summarizer_veto = input.history_summarizer_active
@@ -20038,6 +20051,50 @@ pub(crate) mod tests {
             1,
             "segment 2 was rendered; segment 3 was not"
         );
+    }
+
+    /// The pass that truncates a marked archive commits its own meta over the truncation, so it
+    /// must carry the retired marker rather than restore it.
+    #[test]
+    fn a_reconcile_recut_through_an_archive_retires_its_marker_through_the_pass_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments(
+            "ses",
+            &[comp(1, 1, 1, "a", "S0"), comp(2, 2, 2, "t2", "S1")],
+        )
+        .unwrap();
+        let live_full = vec![
+            item("a", 1, "raw"),
+            item("t2", 2, "turn two"),
+            item("t3", 3, "tail"),
+        ];
+        assert_eq!(
+            run(&s, &req("ses", "cfg0", live_full), &spine()).action,
+            "HARD"
+        );
+        s.append_history_segments("ses", &[comp(3, 3, 3, "t3", "S2")])
+            .unwrap();
+        let loaded = s.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.archive_fold_seq = Some(3);
+        s.commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        let live_reverted = vec![item("a", 1, "raw"), item("t4", 2, "new turn")];
+        run(&s, &req("ses", "cfg0", live_reverted.clone()), &spine());
+        run(&s, &req("ses", "cfg0", live_reverted), &spine());
+        let loaded = s.load("ses").unwrap();
+        assert_eq!(loaded.meta.revert_epoch, 1);
+        assert_eq!(
+            s.load_history_segments("ses")
+                .unwrap()
+                .iter()
+                .map(|segment| segment.sequence)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(loaded.meta.archive_fold_seq, None);
     }
 
     /// `request` as the lineage owner sends it after a fake-compaction switch, the only request

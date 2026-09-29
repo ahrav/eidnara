@@ -32,6 +32,7 @@ pub mod harness_sources;
 pub mod healing;
 pub(crate) mod history_segment_coverage;
 pub mod history_summarizer;
+pub mod history_summarizer_archive;
 pub mod history_summarizer_chunk;
 pub mod history_summarizer_citations;
 pub mod history_summarizer_producer;
@@ -260,16 +261,39 @@ struct BoundRoute {
 }
 
 /// `BindingAuthority` records a pass's fold-authority intent and the bind sequence of the
-/// binding the pass read.
-#[derive(Debug, Clone, Copy, Default)]
+/// binding the pass read. A pass whose route no longer holds that binding is detached: it
+/// carries no bind sequence, so it neither changes the authority nor settles a first pass.
+#[derive(Debug, Clone, Copy)]
 struct BindingAuthority {
-    bind_seq: u64,
+    bind_seq: Option<u64>,
     intent: FoldAuthorityIntent,
+}
+
+impl BindingAuthority {
+    fn detached(binding: &SessionBinding) -> Self {
+        Self {
+            bind_seq: None,
+            intent: binding_intent(binding, false, false),
+        }
+    }
+}
+
+fn binding_intent(
+    binding: &SessionBinding,
+    sibling_bound: bool,
+    first_pass: bool,
+) -> FoldAuthorityIntent {
+    FoldAuthorityIntent {
+        eidnara_folds: binding.config.eidnara_folds(),
+        admitted: binding.config.admission == config::ConfigAdmission::Admitted,
+        sibling_bound,
+        first_pass,
+    }
 }
 
 struct BindingFence<'a> {
     bindings: &'a Mutex<RouteBindings>,
-    bind_seq: u64,
+    bind_seq: Option<u64>,
 }
 
 impl fold_authority::SiblingFence for BindingFence<'_> {
@@ -281,7 +305,7 @@ impl fold_authority::SiblingFence for BindingFence<'_> {
         bindings
             .by_route
             .values()
-            .find(|route| route.seq == self.bind_seq)
+            .find(|route| Some(route.seq) == self.bind_seq)
             .is_some_and(|route| !bindings.has_sibling(route))
             .then(change)
     }
@@ -312,13 +336,12 @@ impl RouteBindings {
     fn fold_authority_intent(&self, channel: RouteHandle) -> Option<BindingAuthority> {
         let route = self.by_route.get(&channel)?;
         Some(BindingAuthority {
-            bind_seq: route.seq,
-            intent: FoldAuthorityIntent {
-                eidnara_folds: route.binding.config.eidnara_folds(),
-                admitted: route.binding.config.admission == config::ConfigAdmission::Admitted,
-                sibling_bound: self.has_sibling(route),
-                first_pass: !route.first_pass_settled,
-            },
+            bind_seq: Some(route.seq),
+            intent: binding_intent(
+                &route.binding,
+                self.has_sibling(route),
+                !route.first_pass_settled,
+            ),
         })
     }
 
@@ -4439,12 +4462,22 @@ impl HandlerCore {
         channel: RouteHandle,
         request_session: &str,
     ) -> Result<SessionBinding, BindingError> {
+        self.resolve_bound_route(channel, request_session)
+            .map(|(binding, _)| binding)
+    }
+
+    /// [`Self::resolve_binding`] with the binding's bind sequence, read under the same lock.
+    fn resolve_bound_route(
+        &self,
+        channel: RouteHandle,
+        request_session: &str,
+    ) -> Result<(SessionBinding, u64), BindingError> {
         let map = self.bindings.lock().expect("bindings mutex");
-        let binding = map.get(&channel).ok_or(BindingError::Unbound)?;
-        if binding.session != request_session {
+        let route = map.by_route.get(&channel).ok_or(BindingError::Unbound)?;
+        if route.binding.session != request_session {
             return Err(BindingError::SessionMismatch);
         }
-        Ok(binding.clone())
+        Ok((route.binding.clone(), route.seq))
     }
 
     fn state_sync_binding(
@@ -5214,6 +5247,35 @@ impl HandlerCore {
                 ..not_fired
             });
         }
+        match history_summarizer_archive::archive_window(
+            &store,
+            &loaded,
+            &parsed.session_id,
+            project_path,
+            projection,
+            now,
+        ) {
+            Ok(Some(archived)) => {
+                self.cancel_history_summarizer_work(&parsed.session_id);
+                eprintln!(
+                    "daemon: history_summarizer archived session={} range={}..={} sequence={} cause={:?}",
+                    parsed.session_id,
+                    archived.cut.start,
+                    archived.cut.end,
+                    archived.sequence,
+                    archived.cause
+                );
+                return PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics {
+                    no_fire: Some("archived".to_string()),
+                    ..not_fired
+                });
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!(
+                "daemon: history_summarizer archive failed session={}: {error}",
+                parsed.session_id
+            ),
+        }
         if let Some(completion) = self.live_history_summarizer_completion_wait(&parsed.session_id) {
             blocked("busy");
             return PreparedHistorySummarizerAction::Busy {
@@ -5318,6 +5380,28 @@ impl HandlerCore {
                         != HistorySummarizerPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
+                    window_cap_cut: history_summarizer_archive::WindowSize::after(
+                        projection,
+                        last_history_segment_end_ordinal,
+                    )
+                    .at_cap()
+                    .then(|| {
+                        // A failed identity read leaves this pass without a cap cut; the
+                        // next pass evaluates it again.
+                        let durable = history_summarizer_archive::persisted_mids(
+                            &store,
+                            &parsed.session_id,
+                            projection,
+                        )
+                        .ok()?;
+                        history_summarizer_archive::archive_cut(
+                            projection,
+                            last_history_segment_end_ordinal,
+                            |mid| durable.contains(mid),
+                        )
+                    })
+                    .flatten()
+                    .map(|cut| cut.end),
                 },
                 &mut formatted_token_estimator,
             )
@@ -6476,6 +6560,7 @@ impl HandlerCore {
         store: &MemoryStore,
         session_id: &str,
         channel: RouteHandle,
+        binding: &SessionBinding,
         summarizer: &memory_store::HistorySummarizerDurableState,
     ) -> String {
         let intent = self
@@ -6483,7 +6568,7 @@ impl HandlerCore {
             .lock()
             .expect("bindings mutex")
             .fold_authority_intent(channel)
-            .unwrap_or_default()
+            .unwrap_or_else(|| BindingAuthority::detached(binding))
             .intent;
         let record = match store.load_fold_authority(session_id) {
             Ok(record) => record,
@@ -6679,6 +6764,7 @@ impl HandlerCore {
             &store,
             &session_id,
             channel,
+            &binding,
             &loaded.meta.history_summarizer,
         );
         let user_config = binding
@@ -7061,8 +7147,8 @@ impl HandlerCore {
                 "ok": false,
                 "disposition": "failed",
                 "reason": NATIVE_AUTHORITY,
-                "detail": "the session's fold authority is OpenCode's native compaction",
-                "summary": "No summarizer model folds this session: OpenCode's native compaction does. Configure a summarizer model to use /eidnara-wrapup.",
+                "detail": "the session's fold authority is the host's native compaction",
+                "summary": "No summarizer model folds this session: the host's native compaction does. Configure a summarizer model to use /eidnara-wrapup.",
                 "rounds": 0,
             }));
         }
@@ -8465,8 +8551,8 @@ impl HandlerCore {
                 };
             }
         };
-        let binding = match self.resolve_binding(channel, &parsed.session_id) {
-            Ok(b) => b,
+        let (binding, bind_seq) = match self.resolve_bound_route(channel, &parsed.session_id) {
+            Ok(bound) => bound,
             Err(BindingError::Unbound) => {
                 return PreparedOutcome::Error {
                     code: "route_unbound".to_string(),
@@ -8570,12 +8656,16 @@ impl HandlerCore {
         ) {
             self.spawn_tracked_task(checkpoint.run());
         }
+        // Read after the lane wait, so a preceding pass's first-pass settlement is visible. A
+        // route unbound or rebound during the waits no longer holds the resolved binding; the
+        // pass then serves that binding detached.
         let fold_authority = self
             .bindings
             .lock()
             .expect("bindings mutex")
             .fold_authority_intent(channel)
-            .unwrap_or_default();
+            .filter(|authority| authority.bind_seq == Some(bind_seq))
+            .unwrap_or_else(|| BindingAuthority::detached(&binding));
         let intake = PassIntake {
             store,
             parsed,
@@ -8666,11 +8756,13 @@ impl HandlerCore {
             Ok(pass) => pass,
             Err(outcome) => return UnitOutcome::Terminal(outcome),
         };
-        if pass.result.fold_authority.settles_first_pass {
+        if pass.result.fold_authority.settles_first_pass
+            && let Some(bind_seq) = env.fold_authority.bind_seq
+        {
             self.bindings
                 .lock()
                 .expect("bindings mutex")
-                .settle_first_pass(env.fold_authority.bind_seq);
+                .settle_first_pass(bind_seq);
         }
         let emergency = pass.result.scheduler_pass == scheduler::PassDecision::Emergency95;
         let action = if env.parsed.is_subagent {
@@ -17300,7 +17392,7 @@ fn firing_trigger(
 ) -> FiringTrigger {
     FiringTrigger {
         source,
-        reason: reason.map(boundary::TriggerReason::timeline),
+        reason: reason.and_then(boundary::TriggerReason::timeline),
         usage: Some(FiringUsage {
             input_tokens: input_tokens as u64,
             context_limit_tokens: context_limit as u64,
@@ -17787,6 +17879,8 @@ mod tests {
     mod revision_3;
     #[path = "transform/revision_goldens.rs"]
     mod revision_goldens;
+    #[path = "window_cap_tests.rs"]
+    mod window_cap_tests;
     #[path = "window_coverage/dispatch_tests.rs"]
     mod window_coverage_dispatch_tests;
 
@@ -18700,6 +18794,7 @@ mod tests {
                     history_segment_in_progress: false,
                     commit_cluster_trigger_enabled: true,
                     min_commit_clusters: 2,
+                    window_cap_cut: None,
                 };
                 let mut reference_context = context.clone();
                 reference_context.projected_post_drop_percentage = reference_projection;
@@ -18774,6 +18869,7 @@ mod tests {
             history_segment_in_progress: false,
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: 2,
+            window_cap_cut: None,
         };
         let mut before_cold = Vec::new();
         let mut before_warm = Vec::new();
@@ -18975,6 +19071,7 @@ mod tests {
             history_segment_in_progress: false,
             commit_cluster_trigger_enabled: false,
             min_commit_clusters: 2,
+            window_cap_cut: None,
         };
         let initial = boundary::check_history_segment_trigger(&messages, &context);
         assert!(initial.fire, "initial trigger decision: {initial:?}");
@@ -21716,6 +21813,8 @@ mod tests {
         block_status: std::sync::atomic::AtomicBool,
         /// `connect` waits on `notify` while `block_connect` is set.
         block_connect: std::sync::atomic::AtomicBool,
+        close_attempts: AtomicUsize,
+        block_close_attempt: std::sync::atomic::AtomicBool,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
@@ -21942,6 +22041,14 @@ mod tests {
 
         async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
             Ok(())
+        }
+
+        async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {
+            self.state.close_attempts.fetch_add(1, Ordering::SeqCst);
+            while self.state.block_close_attempt.load(Ordering::SeqCst) {
+                self.state.notify.notified().await;
+            }
+            self.close().await
         }
 
         async fn close(&mut self) -> Result<(), HistorySummarizerProducerError> {
@@ -38691,6 +38798,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
@@ -38734,6 +38842,7 @@ mod tests {
             recent_firings: Vec::new(),
             counters: Default::default(),
             pending_eligibility: None,
+            last_abandon: None,
         };
         store
             .commit("ses", loaded.row_version, &loaded.core, &meta)
