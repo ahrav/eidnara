@@ -5689,6 +5689,40 @@ pub enum ModuleStateSyncError {
     InvalidHistorySegments { detail: String },
     #[error("serde: {0}")]
     Serde(String),
+    #[error("state-sync {field} is {found}, over its bound of {bound}")]
+    OverBound {
+        field: &'static str,
+        bound: usize,
+        found: usize,
+    },
+}
+
+pub const MAX_NOTE_NUDGE_ANCHORS: usize = 8;
+pub const MAX_NOTE_NUDGE_ANCHOR_BYTES: usize = 1024;
+pub const MAX_ACKED_WATERMARKS_BYTES: usize = 4 * 1024;
+pub const MAX_TODO_STATE_BYTES: usize = 4 * 1024;
+pub const MAX_TODO_STATE_SERIALIZED_BYTES: usize = 2 * MAX_TODO_STATE_BYTES + 2;
+
+fn serialized_text_len(text: &str) -> usize {
+    serde_json::to_string(text).map_or(usize::MAX, |serialized| serialized.len())
+}
+pub const MAX_STATE_SYNC_DIRECTIVE_BYTES: usize = 256;
+pub const MAX_STATE_SYNC_ID_BYTES: usize = 128;
+pub const MAX_SYNTHETIC_TODO_PAIR_BYTES: usize = 24 * 1024;
+
+fn within_bound(
+    field: &'static str,
+    bound: usize,
+    found: usize,
+) -> Result<(), ModuleStateSyncError> {
+    if found > bound {
+        return Err(ModuleStateSyncError::OverBound {
+            field,
+            bound,
+            found,
+        });
+    }
+    Ok(())
 }
 
 struct PreparedStateSync {
@@ -5765,6 +5799,22 @@ fn prepare_state_sync(
         .workspace
         .map(|workspace| prepare_workspace(write, workspace))
         .transpose()?;
+    if let Some(anchors) = request.note_nudge_anchors {
+        within_bound(
+            "note_nudge_anchors count",
+            MAX_NOTE_NUDGE_ANCHORS,
+            anchors.len(),
+        )?;
+        for anchor in anchors {
+            let serialized = serde_json::to_vec(anchor)
+                .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
+            within_bound(
+                "note_nudge_anchor bytes",
+                MAX_NOTE_NUDGE_ANCHOR_BYTES,
+                serialized.len(),
+            )?;
+        }
+    }
     let note_nudge_anchors = request
         .note_nudge_anchors
         .map(|anchors| {
@@ -5783,6 +5833,11 @@ fn prepare_state_sync(
     if let Some(pair) = request.todo_synthetic_anchor {
         let pair_json = serde_json::to_string(pair)
             .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
+        within_bound(
+            "todo_synthetic_anchor bytes",
+            MAX_SYNTHETIC_TODO_PAIR_BYTES,
+            pair_json.len(),
+        )?;
         write.identity("todo_synthetic_anchor", &pair_json)?;
     }
     let pending_compaction_marker = request
@@ -5796,6 +5851,35 @@ fn prepare_state_sync(
                 .transpose()
         })
         .transpose()?;
+    if let Some(Some(marker)) = request.pending_compaction_marker {
+        within_bound(
+            "pending_compaction_marker end_message_id bytes",
+            MAX_STATE_SYNC_ID_BYTES,
+            marker.end_message_id.len(),
+        )?;
+    }
+    if let Some(Some(state)) = request.deferred_execute_state {
+        within_bound(
+            "deferred_execute_state reason bytes",
+            MAX_STATE_SYNC_DIRECTIVE_BYTES,
+            state.reason.len(),
+        )?;
+    }
+    if let Some(state) = request.channel2_nudge_state {
+        within_bound(
+            "channel2_nudge_state bytes",
+            MAX_STATE_SYNC_DIRECTIVE_BYTES,
+            state.len(),
+        )?;
+    }
+    if let Some(state) = request.last_todo_state.as_deref() {
+        within_bound("last_todo_state bytes", MAX_TODO_STATE_BYTES, state.len())?;
+        within_bound(
+            "last_todo_state serialized bytes",
+            MAX_TODO_STATE_SERIALIZED_BYTES,
+            serialized_text_len(state),
+        )?;
+    }
     let deferred_execute_state = request
         .deferred_execute_state
         .map(|state| {
@@ -5828,6 +5912,11 @@ fn prepare_state_sync(
         .transpose()?;
     let acked_watermarks_json = serde_json::to_string(&request.acked_watermarks)
         .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
+    within_bound(
+        "acked_watermarks bytes",
+        MAX_ACKED_WATERMARKS_BYTES,
+        acked_watermarks_json.len(),
+    )?;
     write.identity("acked_watermarks", &acked_watermarks_json)?;
     Ok(PreparedStateSync {
         drop_seeds,
@@ -9694,7 +9783,11 @@ impl MemoryStore {
         owner_message_id: &str,
         state_hash: &str,
     ) -> Result<TodoStateSetOutcome, MemoryStoreError> {
-        ensure_durable_text_bound(state_json)?;
+        if state_json.len() > MAX_TODO_STATE_BYTES
+            || serialized_text_len(state_json) > MAX_TODO_STATE_SERIALIZED_BYTES
+        {
+            return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
+        }
         reject_secret_text(owner_message_id)?;
         reject_secret_text(state_hash)?;
         let mut last_conflict = None;
@@ -23611,6 +23704,201 @@ mod tests {
             user_profile_version: None,
             acked_watermarks: serde_json::json!({}),
         }
+    }
+
+    #[test]
+    fn state_sync_refuses_anchors_and_watermarks_over_their_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let anchor = |bytes: usize| {
+            let anchor = NoteNudgeAnchorSeed {
+                message_id: "m1".to_string(),
+                text: "n".repeat(bytes - r#"{"message_id":"m1","text":""}"#.len()),
+            };
+            assert_eq!(serde_json::to_vec(&anchor).unwrap().len(), bytes);
+            anchor
+        };
+        let watermarks = |bytes: usize| {
+            let value = serde_json::json!({ "w": "x".repeat(bytes - r#"{"w":""}"#.len()) });
+            assert_eq!(serde_json::to_string(&value).unwrap().len(), bytes);
+            value
+        };
+        let sync = |anchors: &[NoteNudgeAnchorSeed], acked: serde_json::Value| {
+            let seq = store.load("ses").unwrap().meta.shadow_seq;
+            store.apply_authority_state_sync(ModuleStateSyncRequest {
+                note_nudge_anchors: Some(anchors),
+                acked_watermarks: acked,
+                ..history_segment_sync(seq, &[])
+            })
+        };
+        let full = vec![anchor(MAX_NOTE_NUDGE_ANCHOR_BYTES); MAX_NOTE_NUDGE_ANCHORS];
+        sync(&full, watermarks(MAX_ACKED_WATERMARKS_BYTES)).unwrap();
+        let stored = store.load("ses").unwrap().meta;
+        assert_eq!(stored.note_nudge_anchors.len(), MAX_NOTE_NUDGE_ANCHORS);
+        let at_directive = DeferredExecuteState {
+            reason: "r".repeat(MAX_STATE_SYNC_DIRECTIVE_BYTES),
+        };
+        let at_nudge = "n".repeat(MAX_STATE_SYNC_DIRECTIVE_BYTES);
+        let at_marker = PendingCompactionMarkerState {
+            ordinal: 3,
+            end_message_id: "e".repeat(MAX_STATE_SYNC_ID_BYTES),
+            published_at: 1,
+        };
+        let seq = store.load("ses").unwrap().meta.shadow_seq;
+        store
+            .apply_authority_state_sync(ModuleStateSyncRequest {
+                deferred_execute_state: Some(Some(&at_directive)),
+                channel2_nudge_state: Some(&at_nudge),
+                pending_compaction_marker: Some(Some(&at_marker)),
+                last_todo_state: Some("t".repeat(MAX_TODO_STATE_BYTES)),
+                ..history_segment_sync(seq, &[])
+            })
+            .unwrap();
+        let stored = store.load("ses").unwrap().meta;
+        assert_eq!(stored.deferred_execute_state, Some(at_directive));
+        assert_eq!(stored.channel2_nudge_state, at_nudge);
+        assert_eq!(stored.pending_compaction_marker, Some(at_marker));
+        assert_eq!(
+            stored.last_todo_state.map(|state| state.len()),
+            Some(MAX_TODO_STATE_BYTES)
+        );
+
+        let too_many = vec![anchor(40); MAX_NOTE_NUDGE_ANCHORS + 1];
+        let too_long = [anchor(MAX_NOTE_NUDGE_ANCHOR_BYTES + 1)];
+        let over_directive = DeferredExecuteState {
+            reason: "r".repeat(MAX_STATE_SYNC_DIRECTIVE_BYTES + 1),
+        };
+        let over_nudge = "n".repeat(MAX_STATE_SYNC_DIRECTIVE_BYTES + 1);
+        let over_marker = PendingCompactionMarkerState {
+            ordinal: 3,
+            end_message_id: "e".repeat(MAX_STATE_SYNC_ID_BYTES + 1),
+            published_at: 1,
+        };
+        let pair = |bytes: usize| {
+            let message = |role: &str| {
+                WireMessage::from_parts(
+                    role,
+                    Vec::new(),
+                    None,
+                    ProviderExtras::default(),
+                    HarnessMeta::default(),
+                )
+            };
+            let mut pair = FrozenSyntheticTodoPair {
+                call_id: String::new(),
+                anchor_mid: None,
+                assistant_msg: message("assistant"),
+                tool_msg: message("tool"),
+            };
+            let base = serde_json::to_vec(&pair).unwrap().len();
+            pair.call_id = "c".repeat(bytes - base);
+            assert_eq!(serde_json::to_vec(&pair).unwrap().len(), bytes);
+            pair
+        };
+        let at_pair = pair(MAX_SYNTHETIC_TODO_PAIR_BYTES);
+        let over_pair = pair(MAX_SYNTHETIC_TODO_PAIR_BYTES + 1);
+        let seq = store.load("ses").unwrap().meta.shadow_seq;
+        store
+            .apply_authority_state_sync(ModuleStateSyncRequest {
+                todo_synthetic_anchor: Some(&at_pair),
+                todo_synthetic_anchor_present: true,
+                ..history_segment_sync(seq, &[])
+            })
+            .unwrap();
+        assert_eq!(
+            store.load("ses").unwrap().meta.synthetic_todo,
+            Some(at_pair)
+        );
+        let before = {
+            let loaded = store.load("ses").unwrap();
+            (loaded.row_version, loaded.meta)
+        };
+        let with = |request: ModuleStateSyncRequest<'_>| {
+            let seq = store.load("ses").unwrap().meta.shadow_seq;
+            store.apply_authority_state_sync(ModuleStateSyncRequest {
+                expected_shadow_seq: seq,
+                ..request
+            })
+        };
+        for (case, result, field) in [
+            (
+                "deferred reason",
+                with(ModuleStateSyncRequest {
+                    deferred_execute_state: Some(Some(&over_directive)),
+                    ..history_segment_sync(0, &[])
+                }),
+                "deferred_execute_state reason bytes",
+            ),
+            (
+                "channel2 nudge",
+                with(ModuleStateSyncRequest {
+                    channel2_nudge_state: Some(&over_nudge),
+                    ..history_segment_sync(0, &[])
+                }),
+                "channel2_nudge_state bytes",
+            ),
+            (
+                "todo state",
+                with(ModuleStateSyncRequest {
+                    last_todo_state: Some("t".repeat(MAX_TODO_STATE_BYTES + 1)),
+                    ..history_segment_sync(0, &[])
+                }),
+                "last_todo_state bytes",
+            ),
+            (
+                "marker id",
+                with(ModuleStateSyncRequest {
+                    pending_compaction_marker: Some(Some(&over_marker)),
+                    ..history_segment_sync(0, &[])
+                }),
+                "pending_compaction_marker end_message_id bytes",
+            ),
+            (
+                "synthetic todo pair",
+                with(ModuleStateSyncRequest {
+                    todo_synthetic_anchor: Some(&over_pair),
+                    todo_synthetic_anchor_present: true,
+                    ..history_segment_sync(0, &[])
+                }),
+                "todo_synthetic_anchor bytes",
+            ),
+            (
+                "count",
+                sync(&too_many, serde_json::json!({})),
+                "note_nudge_anchors count",
+            ),
+            (
+                "anchor bytes",
+                sync(&too_long, serde_json::json!({})),
+                "note_nudge_anchor bytes",
+            ),
+            (
+                "watermark bytes",
+                sync(&[], watermarks(MAX_ACKED_WATERMARKS_BYTES + 1)),
+                "acked_watermarks bytes",
+            ),
+        ] {
+            assert!(
+                matches!(result, Err(ModuleStateSyncError::OverBound { field: refused, .. }) if refused == field),
+                "{case}: {result:?}"
+            );
+        }
+        let after = store.load("ses").unwrap();
+        assert_eq!(
+            (after.row_version, after.meta),
+            before,
+            "a refused sync writes nothing"
+        );
+        assert!(matches!(
+            store.set_todo_state("ses", &"t".repeat(MAX_TODO_STATE_BYTES + 1), "m1", "h"),
+            Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
+        ));
+        store
+            .set_todo_state("ses", &"t".repeat(MAX_TODO_STATE_BYTES), "m1", "h")
+            .unwrap();
     }
 
     #[test]

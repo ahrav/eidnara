@@ -5899,11 +5899,12 @@ impl HandlerCore {
         loaded: &memory_store::LoadedState,
         reason: &str,
     ) {
-        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason) {
+        let reason = history_summarizer::bounded_detail(reason);
+        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason.as_str()) {
             return;
         }
         let mut meta = loaded.meta.clone();
-        meta.history_summarizer.last_no_fire = Some(reason.to_string());
+        meta.history_summarizer.last_no_fire = Some(reason);
         let _ = store.commit(session_id, loaded.row_version, &loaded.core, &meta);
     }
 
@@ -36267,6 +36268,34 @@ mod tests {
             recovered["history_summarizer"]["publish_health_degraded"],
             false
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages: Vec<_> = (1..=4_000)
+            .map(|ordinal| {
+                let escaped_mid = format!("{}{ordinal}", "\u{1}".repeat(100));
+                wire_with_role(&escaped_mid, ordinal, "assistant", "k")
+            })
+            .collect();
+        let response = call_transform(&handler, messages).await;
+        let diagnostics = &response["history_summarizer"];
+        assert_eq!(diagnostics["fired"], false, "{diagnostics}");
+        assert!(
+            diagnostics["no_fire"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("assemble:IdentityBudget")),
+            "{diagnostics}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, memory_store::HistorySummarizerPhase::Idle);
+        assert_eq!(state.firing_seq, 0);
+        assert!(state.selected_range_identities.is_empty());
+        assert_eq!(state.chunk_range, None);
     }
 
     #[tokio::test(flavor = "current_thread")]

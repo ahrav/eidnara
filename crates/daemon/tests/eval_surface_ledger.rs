@@ -512,6 +512,126 @@ fn a_new_hint_defers_after_a_restart_forgets_what_was_served() {
     });
 }
 
+async fn open_session(
+    fixture: &FixtureProcess,
+    session: &str,
+) -> (host_runtime::Client, host_runtime::ClientRoute) {
+    let client = fixture.client().await;
+    let route = fixture
+        .open_route(
+            &client,
+            "context",
+            host_runtime::TargetKind::ToolProvider,
+            session,
+        )
+        .await;
+    wait_for_store(&client, route, session).await;
+    (client, route)
+}
+
+#[test]
+fn a_new_hint_is_skipped_while_every_deferral_slot_is_taken() {
+    block_on(async {
+        let world = world(6);
+        let segments = segments(&world, only_second);
+        let root = tempfile::tempdir().unwrap();
+        seed_store(root.path(), &world.session, &segments);
+        let pending = |root: &std::path::Path| {
+            let descriptor = daemon::managed_store_descriptor(root).unwrap();
+            memory_store::MemoryStore::open(&descriptor)
+                .unwrap()
+                .load(&world.session)
+                .unwrap()
+                .meta
+                .pending_user_hint_block_ids
+        };
+        let hints = |response: &serde_json::Value| response.to_string().matches(HINT_OPEN).count();
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
+        let (client, route) = open_session(&fixture, &world.session).await;
+        pass_with_tails(&fixture, &client, route, &world, &["ok"], "surface-config").await;
+        client.close_route(route).await.expect("route closes");
+        let _ = fixture.shutdown();
+
+        let descriptor = daemon::managed_store_descriptor(root.path()).unwrap();
+        let store = memory_store::MemoryStore::open(&descriptor).unwrap();
+        let loaded = store.load(&world.session).unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.pending_user_hint_block_ids = (1..daemon::transform::MAX_PENDING_USER_HINT_BLOCK_IDS)
+            .map(|index| format!("earlier-{index}#0"))
+            .collect();
+        store
+            .commit(&world.session, loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        drop(store);
+
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
+        let (client, route) = open_session(&fixture, &world.session).await;
+        let last_slot = ["ok", PROMPT];
+        let (served, deferred) = pass_with_tails(
+            &fixture,
+            &client,
+            route,
+            &world,
+            &last_slot,
+            "surface-config",
+        )
+        .await;
+        client.close_route(route).await.expect("route closes");
+        let _ = fixture.shutdown();
+        assert_eq!(served["action"], "SOFT+", "{served}");
+        let Some(UserHintPass::Decided(deferred)) = deferred else {
+            panic!("the last slot takes the new hint: {deferred:?}");
+        };
+        assert!(deferred.deferred);
+        assert_eq!(hints(&served), 0);
+        let full = pending(root.path());
+        assert_eq!(
+            full.len(),
+            daemon::transform::MAX_PENDING_USER_HINT_BLOCK_IDS
+        );
+        assert!(full.contains(&deferred.block_id));
+
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
+        let (client, route) = open_session(&fixture, &world.session).await;
+        let over = ["ok", PROMPT, PROMPT];
+        let (served, skipped) =
+            pass_with_tails(&fixture, &client, route, &world, &over, "surface-config").await;
+        assert_eq!(served["action"], "SOFT+", "{served}");
+        assert_eq!(
+            skipped,
+            Some(UserHintPass::Skipped {
+                reason: UserHintSkip::DeferralsFull
+            })
+        );
+        assert_eq!(hints(&served), 0);
+        client.close_route(route).await.expect("route closes");
+        let _ = fixture.shutdown();
+        assert_eq!(pending(root.path()), full, "the refused hint takes no slot");
+        let descriptor = daemon::managed_store_descriptor(root.path()).unwrap();
+        let hint_rows = memory_store::MemoryStore::open(&descriptor)
+            .unwrap()
+            .load_user_hints(&world.session)
+            .unwrap();
+        assert!(
+            hint_rows.iter().all(|row| row.block_id != "tail-9#0"),
+            "the refused hint records no decision"
+        );
+        let fixture = FixtureProcess::start_folding_at(root.path().to_path_buf());
+        let (client, route) = open_session(&fixture, &world.session).await;
+        let (bust, decided) =
+            pass_with_tails(&fixture, &client, route, &world, &over, "surface-config-2").await;
+        client.close_route(route).await.expect("route closes");
+        let _ = fixture.shutdown();
+        assert_eq!(bust["action"], "HARD", "{bust}");
+        let Some(UserHintPass::Decided(decided)) = decided else {
+            panic!("the bust decides the skipped tail afresh: {decided:?}");
+        };
+        assert!(!decided.deferred);
+        assert!(pending(root.path()).is_empty(), "the bust frees every slot");
+        assert_eq!(hints(&bust), 2, "the bust serves both decided hints");
+    });
+}
+
 #[test]
 fn a_repeated_pass_reports_the_frozen_decision_as_unjoinable() {
     block_on(async {

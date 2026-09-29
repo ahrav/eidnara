@@ -142,7 +142,11 @@ pub enum UserHintSkip {
     NoTextBlock,
     AlreadyDecided,
     BehindFrontier,
+    DeferralsFull,
 }
+
+pub const MAX_PENDING_USER_HINT_BLOCK_IDS: usize = 16;
+pub const MAX_REQUEST_IDENTITY_BYTES: usize = 256;
 
 /// What auto-search did for one pass: decided a hint for the live tail, or
 /// skipped for a named reason.
@@ -2214,6 +2218,28 @@ pub(crate) fn resolve_window(
     store: &MemoryStore,
     req: &mut TransformRequest,
 ) -> Result<(), TransformError> {
+    for (field, value) in [
+        ("session_id", req.session_id.as_str()),
+        ("render_config", req.render_config.as_str()),
+        ("system_prompt_hash", req.system_prompt_hash.as_str()),
+        ("upgrade_state", req.upgrade_state.as_str()),
+        (
+            "provider_id",
+            req.provider_id.as_deref().unwrap_or_default(),
+        ),
+        ("model_key", req.model_key.as_deref().unwrap_or_default()),
+        (
+            "prior_conversation_key",
+            req.prior_conversation_key.as_str(),
+        ),
+    ] {
+        if value.len() > MAX_REQUEST_IDENTITY_BYTES {
+            return Err(TransformError::InvalidWindow(format!(
+                "{field} is {} bytes, over the {MAX_REQUEST_IDENTITY_BYTES}-byte bound",
+                value.len()
+            )));
+        }
+    }
     let mut seen = HashSet::with_capacity(req.messages.len());
     if let Some(duplicate) = req.messages.iter().find(|m| !seen.insert(m.mid.as_str())) {
         return Err(TransformError::InvalidWindow(format!(
@@ -4187,24 +4213,31 @@ fn apply_once(
                 &hint.block_id,
                 is_bust_pass,
             );
-            if deferred {
-                meta.pending_user_hint_block_ids
-                    .insert(hint.block_id.clone());
+            if deferred && meta.pending_user_hint_block_ids.len() >= MAX_PENDING_USER_HINT_BLOCK_IDS
+            {
+                user_hint_pass = Some(UserHintPass::Skipped {
+                    reason: UserHintSkip::DeferralsFull,
+                });
+            } else {
+                if deferred {
+                    meta.pending_user_hint_block_ids
+                        .insert(hint.block_id.clone());
+                }
+                user_hints.push(UserHintRow {
+                    block_id: hint.block_id.clone(),
+                    hint_text: hint.hint_text.clone(),
+                    created_at: ctx.now_ms,
+                });
+                user_hint_pass = Some(UserHintPass::Decided(UserHintOutcome {
+                    block_id: hint.block_id.clone(),
+                    hint_text: hint.hint_text.clone(),
+                    trace,
+                    deferred,
+                    applied: false,
+                    attached: false,
+                }));
+                pending_overlays.user_hint = Some(hint);
             }
-            user_hints.push(UserHintRow {
-                block_id: hint.block_id.clone(),
-                hint_text: hint.hint_text.clone(),
-                created_at: ctx.now_ms,
-            });
-            user_hint_pass = Some(UserHintPass::Decided(UserHintOutcome {
-                block_id: hint.block_id.clone(),
-                hint_text: hint.hint_text.clone(),
-                trace,
-                deferred,
-                applied: false,
-                attached: false,
-            }));
-            pending_overlays.user_hint = Some(hint);
         }
         if is_bust_pass {
             meta.pending_user_hint_block_ids.clear();

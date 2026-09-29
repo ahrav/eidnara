@@ -437,8 +437,16 @@ fn retain_backoff(
 ) -> HistorySummarizerDurableState {
     let mut next = current.clone();
     next.failure_backoff_at_ms = Some(failure_backoff_at_ms);
-    next.last_failure = detail.or_else(|| current.last_failure.clone());
+    next.last_failure = detail
+        .map(|detail| bounded_detail(&detail))
+        .or_else(|| current.last_failure.clone());
     next
+}
+
+pub const MAX_SUMMARIZER_DETAIL_BYTES: usize = 512;
+
+pub(crate) fn bounded_detail(detail: &str) -> String {
+    detail[..detail.floor_char_boundary(MAX_SUMMARIZER_DETAIL_BYTES)].to_string()
 }
 
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
@@ -3083,6 +3091,17 @@ mod tests {
         store
             .replace_history_segments("ses", &[comp(1, 1, 1, "m1", "C1 summary")])
             .unwrap();
+    }
+
+    #[test]
+    fn a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_bound() {
+        let detail = format!("{}\u{e9}tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        let bounded = bounded_detail(&detail);
+        assert_eq!(bounded, "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        let short = "a short detail";
+        assert_eq!(bounded_detail(short), short);
+        let next = retain_backoff(&HistorySummarizerDurableState::default(), 5, Some(detail));
+        assert_eq!(next.last_failure.as_deref(), Some(bounded.as_str()));
     }
 
     fn test_selected_range_identities() -> Vec<HistorySummarizerSelectedMessageIdentity> {
