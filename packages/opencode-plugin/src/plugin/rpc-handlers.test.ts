@@ -12,6 +12,8 @@ import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
 import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
+import type { ConflictWarning } from "../shared/conflict-detector";
+import type { PluginFoldAuthority } from "../shared/fold-authority-status";
 import { unavailable } from "../shared/kernel-client";
 import { ANTI_MEMORY_CATEGORY, renderAntiMemoryContent } from "../shared/kernel-client/anti-memory";
 import { FakeKernel } from "../shared/kernel-client-testing/fake-kernel";
@@ -60,6 +62,7 @@ function register(
     configOverrides: Record<string, unknown> = {},
     status: RustSessionStatus | Error = {},
     liveSessionState = createLiveSessionState(),
+    foldAuthority?: PluginFoldAuthority,
 ): { handlers: Map<string, Handler>; calls: string[]; roots: string[] } {
     const handlers = new Map<string, Handler>();
     const calls: string[] = [];
@@ -86,6 +89,7 @@ function register(
         client: null,
         liveSessionState,
         rustModeModuleClient,
+        foldAuthority,
     });
     return { handlers, calls, roots };
 }
@@ -153,6 +157,114 @@ describe("registerRpcHandlers", () => {
         })) as unknown as StatusDetail;
         expect(calls).toEqual(["session.status"]);
         expect(detail.history_segmentCount).toBe(4);
+    });
+
+    const USER_CONFIG = "/home/u/.config/eidnara/eidnara.jsonc";
+    const statusWith = (summary: string): RustSessionStatus => ({ ...DAEMON_STATUS, summary });
+    const foldAuthority = (
+        raised: ConflictWarning[],
+        onReadDisk: () => void = () => {},
+    ): PluginFoldAuthority => ({
+        startup: { kind: "native", reason: "no summarizer model is configured" },
+        userConfigPath: USER_CONFIG,
+        readDisk: () => {
+            onReadDisk();
+            return { kind: "native", reason: "no summarizer model is configured" };
+        },
+        publish: (conflict) => {
+            if (conflict) raised.push(conflict);
+        },
+    });
+
+    test("a pending authority reaches both RPCs and raises a warn conflict while they keep answering", async () => {
+        const raised: ConflictWarning[] = [];
+        const { handlers } = register(
+            {},
+            statusWith(
+                `fold authority eidnara; fold authority pending native: another binding is open on this session; user config ${USER_CONFIG}; session ses (last active 0s ago): idle`,
+            ),
+            createLiveSessionState(),
+            foldAuthority(raised),
+        );
+        const sessionId = "ses-handler-fold-pending";
+
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+
+        expect(snapshot.inputTokens).toBe(42_000);
+        expect(snapshot.fold_authority?.applied).toBe("eidnara");
+        expect(snapshot.fold_authority?.pending?.target).toBe("native");
+        expect(snapshot.fold_authority?.label).toBe(
+            "fold authority pending native: restart other OpenCode instances",
+        );
+        expect(detail.fold_authority).toMatchObject(snapshot.fold_authority ?? {});
+        expect(detail.foldAuthorityLines).toContain(
+            "- Daemon applied (session.status): Eidnara folds",
+        );
+        expect(detail.foldAuthorityLines).toContain(
+            "- Plugin startup: OpenCode's native compaction folds (no summarizer model is configured)",
+        );
+        expect(raised.map((conflict) => conflict.disposition)).toEqual(["warn", "warn"]);
+        expect(raised[0]?.reasons[0]).toStartWith(
+            "authority pending: restart other OpenCode instances",
+        );
+    });
+
+    test("the sidebar poll leaves the configuration on disk unread while the status detail shows it", async () => {
+        let diskReads = 0;
+        const { handlers } = register(
+            {},
+            statusWith(
+                `fold authority native; user config ${USER_CONFIG}; session ses (last active 0s ago): idle`,
+            ),
+            createLiveSessionState(),
+            foldAuthority([], () => {
+                diskReads += 1;
+            }),
+        );
+        const sessionId = "ses-handler-fold-disk";
+
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
+            sessionId,
+        })) as unknown as SidebarSnapshot;
+        expect(diskReads).toBe(0);
+        expect(snapshot.fold_authority?.disk).toBeUndefined();
+
+        const detail = (await handlers.get("status-detail")?.({
+            sessionId,
+        })) as unknown as StatusDetail;
+        expect(diskReads).toBe(1);
+        expect(detail.foldAuthorityLines).toContain(
+            "- On disk: OpenCode's native compaction folds (no summarizer model is configured)",
+        );
+    });
+
+    test("a stalled summarizer and an unknown daemon path render without a conflict", async () => {
+        const raised: ConflictWarning[] = [];
+        const { handlers } = register(
+            {},
+            statusWith(
+                "fold authority eidnara, summarizer stalled (no models at the last pass); user config none; session ses (last active 0s ago): last history_summarizer: no fire: no_models, publish failures: 0",
+            ),
+            createLiveSessionState(),
+            foldAuthority(raised),
+        );
+
+        const snapshot = (await handlers.get("sidebar-snapshot")?.({
+            sessionId: "ses-handler-fold-stalled",
+        })) as unknown as SidebarSnapshot;
+
+        expect(snapshot.fold_authority?.stalled).toBe(true);
+        expect(snapshot.fold_authority?.pending).toBeUndefined();
+        expect(snapshot.fold_authority?.daemon_user_config).toBeUndefined();
+        expect(snapshot.fold_authority?.label).toBe(
+            "summarizer stalled at the last pass: no summarizer model",
+        );
+        expect(raised).toEqual([]);
     });
 
     test("an empty requested directory falls back to the server's directory instead of pinning an empty root", async () => {

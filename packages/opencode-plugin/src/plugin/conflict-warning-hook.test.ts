@@ -3,16 +3,24 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
-import { __ignoredNotificationTest } from "../hooks/context/send-session-notification";
-import type { ConflictResult } from "../shared/conflict-detector";
+import {
+    __ignoredNotificationTest,
+    flushIgnoredMessages,
+} from "../hooks/context/send-session-notification";
+import type { ConflictResult, ConflictWarning } from "../shared/conflict-detector";
 import { formatConflictShort } from "../shared/conflict-detector";
+import { AUTHORITY_PENDING_WARNING, ROOT_MISMATCH_WARNING } from "../shared/fold-authority-status";
 import {
     __resetNotificationStateForTests,
     registerNotificationSink,
 } from "../shared/rpc-notifications";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
-import { cleanupConflictWarnings, sendConflictWarning } from "./conflict-warning-hook";
+import {
+    cleanupConflictWarnings,
+    reconcileFoldAuthorityWarning,
+    sendConflictWarning,
+} from "./conflict-warning-hook";
 
 const SESSION_ID = "ses_conflict_hook_test";
 const REAL_TITLE = "Investigating the flaky cache";
@@ -596,6 +604,313 @@ describe.if(platform() === "linux")(
             } finally {
                 fetchSpy.mockRestore();
             }
+        });
+
+        describe("live fold-authority warnings", () => {
+            const SERVER = "http://127.0.0.1:1";
+            const POLLED = "ses_polled";
+            const warn = (reason: string): ConflictWarning => ({
+                disposition: "warn",
+                reasons: [reason],
+                unresolved: [],
+            });
+            const SIBLING = warn(`${AUTHORITY_PENDING_WARNING}. another binding is open`);
+            const LATER_BIND = warn(`${AUTHORITY_PENDING_WARNING}. it applies at the next bind`);
+            const MISMATCH = warn(
+                `${ROOT_MISMATCH_WARNING}: the daemon reads /a and this plugin reads /b`,
+            );
+            const STARTUP = warn("no fold authority");
+
+            function sessionWith(texts: Record<string, string>) {
+                const prompt = mock(async () => ({}));
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages: mock(async () =>
+                            Object.entries(texts).map(([id, text]) => ({
+                                info: { id, role: "user" },
+                                parts: [{ type: "text", text, ignored: true }],
+                            })),
+                        ),
+                    },
+                };
+                return { client, prompt };
+            }
+
+            function recordDeletes() {
+                const deletedUrls: string[] = [];
+                const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                    input: string | URL | Request,
+                ) => {
+                    deletedUrls.push(String(input));
+                    return new Response("{}", { status: 200 });
+                }) as unknown as typeof fetch);
+                return { deletedUrls, restore: () => fetchSpy.mockRestore() };
+            }
+
+            const sentTexts = (prompt: ReturnType<typeof mock>) =>
+                prompt.mock.calls.map(
+                    (call) =>
+                        (call[0] as { body: { parts: Array<{ text: string }> } }).body.parts[0]
+                            ?.text,
+                );
+
+            it("replaces a live warning whose text changed instead of keeping the stale one", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client, prompt } = sessionWith({ msg_old: formatConflictShort(SIBLING) });
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        LATER_BIND,
+                        SERVER,
+                    );
+
+                    expect(deletes.deletedUrls).toEqual([
+                        `${SERVER}/session/${POLLED}/message/msg_old`,
+                    ]);
+                    expect(sentTexts(prompt)).toEqual([formatConflictShort(LATER_BIND)]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("deletes the live warning once the conflict clears", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client, prompt } = sessionWith({ msg_old: formatConflictShort(MISMATCH) });
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+
+                    expect(deletes.deletedUrls).toEqual([
+                        `${SERVER}/session/${POLLED}/message/msg_old`,
+                    ]);
+                    expect(prompt).not.toHaveBeenCalled();
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("keeps an identical live warning without sending it again", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client, prompt } = sessionWith({ msg_same: formatConflictShort(SIBLING) });
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(client, directory, POLLED, SIBLING, SERVER);
+
+                    expect(deletes.deletedUrls).toEqual([]);
+                    expect(prompt).not.toHaveBeenCalled();
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("leaves a startup warning in place and still delivers the live warning", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client, prompt } = sessionWith({
+                    msg_startup: formatConflictShort(STARTUP),
+                });
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(client, directory, POLLED, SIBLING, SERVER);
+
+                    expect(deletes.deletedUrls).toEqual([]);
+                    expect(sentTexts(prompt)).toEqual([formatConflictShort(SIBLING)]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("drops a warning still queued behind an active turn once the conflict clears", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => true);
+                const { client } = sessionWith({});
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(client, directory, POLLED, SIBLING, SERVER);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([
+                        formatConflictShort(SIBLING),
+                    ]);
+
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        LATER_BIND,
+                        SERVER,
+                    );
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([
+                        formatConflictShort(LATER_BIND),
+                    ]);
+
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
+                    expect(deletes.deletedUrls).toEqual([]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("serializes reconciliations so a slower warning poll cannot outlive a later clean poll", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                let releaseFirstLookup = (): void => {};
+                const firstLookup = new Promise<void>((resolve) => {
+                    releaseFirstLookup = resolve;
+                });
+                let lookups = 0;
+                // A stateful session: a prompt persists a message, a DELETE removes it.
+                const stored = new Map<string, string>();
+                const prompt = mock(async (input: { body: { parts: Array<{ text: string }> } }) => {
+                    stored.set(`msg_${stored.size + 1}`, input.body.parts[0]?.text ?? "");
+                    return {};
+                });
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => ({ title: REAL_TITLE })),
+                        messages: mock(async () => {
+                            lookups += 1;
+                            if (lookups === 1) await firstLookup;
+                            return [...stored].map(([id, text]) => ({
+                                info: { id, role: "user" },
+                                parts: [{ type: "text", text, ignored: true }],
+                            }));
+                        }),
+                    },
+                };
+                const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (
+                    input: string | URL | Request,
+                ) => {
+                    stored.delete(String(input).split("/").at(-1) ?? "");
+                    return new Response("{}", { status: 200 });
+                }) as unknown as typeof fetch);
+                try {
+                    const warningPoll = reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        SIBLING,
+                        SERVER,
+                    );
+                    const cleanPoll = reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+                    await Promise.race([cleanPoll, new Promise((r) => setTimeout(r, 50))]);
+                    releaseFirstLookup();
+                    await Promise.all([warningPoll, cleanPoll]);
+
+                    expect([...stored.values()]).toEqual([]);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
+                } finally {
+                    fetchSpy.mockRestore();
+                }
+            });
+
+            it("drops a warning the idle flush already holds once a clean poll clears it", async () => {
+                const directory = seedDesktopSession();
+                let midTurn = true;
+                __ignoredNotificationTest.setMidTurnDetector(() => midTurn);
+                let releaseTitleRead = (): void => {};
+                const titleRead = new Promise<void>((resolve) => {
+                    releaseTitleRead = resolve;
+                });
+                const stored = new Map<string, string>();
+                const prompt = mock(async (input: { body: { parts: Array<{ text: string }> } }) => {
+                    stored.set(`msg_${stored.size + 1}`, input.body.parts[0]?.text ?? "");
+                    return {};
+                });
+                const client = {
+                    session: {
+                        prompt,
+                        get: mock(async () => {
+                            await titleRead;
+                            return { title: REAL_TITLE };
+                        }),
+                        messages: mock(async () =>
+                            [...stored].map(([id, text]) => ({
+                                info: { id, role: "user" },
+                                parts: [{ type: "text", text, ignored: true }],
+                            })),
+                        ),
+                    },
+                };
+                const deletes = recordDeletes();
+                try {
+                    await reconcileFoldAuthorityWarning(client, directory, POLLED, SIBLING, SERVER);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toHaveLength(1);
+
+                    midTurn = false;
+                    const flush = flushIgnoredMessages(POLLED);
+                    await new Promise((r) => setTimeout(r, 10));
+                    await reconcileFoldAuthorityWarning(
+                        client,
+                        directory,
+                        POLLED,
+                        undefined,
+                        SERVER,
+                    );
+                    releaseTitleRead();
+                    await flush;
+
+                    expect([...stored.values()]).toEqual([]);
+                    expect(__ignoredNotificationTest.pendingTexts(POLLED)).toEqual([]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("keeps a live warning through the startup cleanup", async () => {
+                const directory = seedDesktopSession({ sessionId: POLLED });
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client } = sessionWith({
+                    msg_live: formatConflictShort(SIBLING),
+                    msg_stale: formatConflictShort(STARTUP),
+                });
+                const deletes = recordDeletes();
+                try {
+                    await cleanupConflictWarnings(client, directory, SERVER);
+
+                    expect(deletes.deletedUrls).toEqual([
+                        `${SERVER}/session/${POLLED}/message/msg_stale`,
+                    ]);
+                } finally {
+                    deletes.restore();
+                }
+            });
+
+            it("does not let a live warning suppress the startup warning", async () => {
+                const directory = seedDesktopSession();
+                __ignoredNotificationTest.setMidTurnDetector(() => false);
+                const { client, prompt } = sessionWith({ msg_live: formatConflictShort(SIBLING) });
+
+                await sendConflictWarning(client, directory, STARTUP);
+
+                expect(sentTexts(prompt)).toEqual([formatConflictShort(STARTUP)]);
+            });
         });
     },
 );

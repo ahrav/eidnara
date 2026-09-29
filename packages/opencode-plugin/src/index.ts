@@ -10,7 +10,10 @@ import { loadPluginConfigDetailed } from "./config";
 import { isCompactionEnabled } from "./config/agent-disable";
 import { getEidnaraBuiltinCommands } from "./features/builtin-commands/commands";
 import { CONTEXT_RESEARCHER_SYSTEM_PROMPT } from "./features/context/context-researcher/agent";
-import { createLiveSessionState } from "./hooks/context/live-session-state";
+import {
+    createLiveSessionState,
+    MAX_LIVE_USAGE_SESSIONS,
+} from "./hooks/context/live-session-state";
 import {
     disposeNativeCaptureProjects,
     isNativeCaptureProject,
@@ -26,7 +29,11 @@ import {
     createConfigWarningDelivery,
     formatConfigWarning,
 } from "./plugin/config-warning";
-import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
+import {
+    cleanupConflictWarnings,
+    reconcileFoldAuthorityWarning,
+    sendConflictWarning,
+} from "./plugin/conflict-warning-hook";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
@@ -39,6 +46,7 @@ import {
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
 import { getEidnaraStorageDir } from "./shared/data-path";
+import { pluginFoldAuthority, publishOnChange } from "./shared/fold-authority-status";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
@@ -49,6 +57,11 @@ const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
     parentPackageName: "@eidnara/opencode",
 });
+
+function desktopServerUrl(ctx: Parameters<Plugin>[0]): string | undefined {
+    const serverUrl = (ctx as Record<string, unknown>).serverUrl;
+    return serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
+}
 
 const server: Plugin = async (ctx) => {
     if (isNativeCaptureProject(ctx.directory)) return {};
@@ -63,6 +76,28 @@ const server: Plugin = async (ctx) => {
     configureManagedDemandStart(managedDemandStart);
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
+    const foldAuthority = pluginFoldAuthority(
+        ctx.directory,
+        loadedPluginConfig,
+        publishOnChange((warning, sessionId) => {
+            if (warning) {
+                log(
+                    `[eidnara] fold authority warning for ${sessionId}, plugin enabled: ${warning.reasons.join("; ")}`,
+                );
+            }
+            // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.
+            return reconcileFoldAuthorityWarning(
+                ctx.client as unknown as Record<string, unknown>,
+                ctx.directory,
+                sessionId,
+                warning,
+                desktopServerUrl(ctx),
+            ).catch((error) => {
+                log(`[eidnara] fold authority warning for ${sessionId} failed:`, error);
+                return false;
+            });
+        }, MAX_LIVE_USAGE_SESSIONS),
+    );
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
         warn: (message) => log(`[eidnara] config warning: ${message}`),
     });
@@ -133,6 +168,7 @@ const server: Plugin = async (ctx) => {
         liveSessionState,
         rustModeModuleClient: moduleClient,
         promptSurfaceRuntime,
+        foldAuthority,
     });
     const eidnara = hooks.eidnara;
 
@@ -147,6 +183,9 @@ const server: Plugin = async (ctx) => {
     // The function-scope handle lets the `server.instance.disposed` cleanup handler stop the server.
     let rpcServer: EidnaraRpcServer | null = null;
 
+    // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
+    const serverUrlStr = desktopServerUrl(ctx);
+
     // A null hook means the directory has no project identity (a home directory without `allow_home_project`); the RPC handlers read kernel memory for their directory, so they honor the same refusal.
     if (pluginConfig.enabled && eidnara) {
         // RPC communication between the TUI and server bypasses the SQLite plugin_messages bus.
@@ -158,6 +197,7 @@ const server: Plugin = async (ctx) => {
             liveSessionState,
             rustModeModuleClient: moduleClient,
             nativeCompaction: resolvedCompaction ?? undefined,
+            foldAuthority,
         });
         rpcServer.start().catch((err) => {
             log(`[eidnara] RPC server failed to start: ${err}`);
@@ -174,10 +214,6 @@ const server: Plugin = async (ctx) => {
         void refreshModelLimitsFromApi(ctx.client, { retries: 3, retryDelayMs: 1000 });
     }
 
-    // Desktop has no dialog surface, so `sendConflictWarning` covers Desktop.
-    const serverUrl = (ctx as Record<string, unknown>).serverUrl;
-    const serverUrlStr =
-        serverUrl instanceof URL ? serverUrl.toString().replace(/\/$/, "") : undefined;
     if (conflictResult && conflictResult.disposition !== "none") {
         // The handler sends the warning to the project's last active session without awaiting it.
         // SAFETY: the conflict helpers read only `session.*` methods off the SDK client by name.

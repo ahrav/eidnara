@@ -10,6 +10,11 @@ import {
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
 import {
+    describeFoldAuthority,
+    type FoldAuthority,
+    foldAuthorityOf,
+} from "@eidnara/opencode/config/fold-authority";
+import {
     type ConflictDisposition,
     type ConflictResult,
     detectConflicts,
@@ -32,7 +37,6 @@ import {
 import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse as parseJsonc } from "comment-json";
 import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
-import { describeFoldAuthority, type FoldAuthority, foldAuthorityOf } from "./eidnara-modes";
 import { type HistorySummarizerDumpSummary, listDumpsInDir } from "./history_summarizer-dumps";
 import { codeFenceFor } from "./issue-body";
 import { detectOpenCodeInstallations } from "./opencode-detect";

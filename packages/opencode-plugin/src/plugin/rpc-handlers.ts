@@ -39,6 +39,13 @@ import {
     summarizeCompactionTiming,
 } from "../shared/compaction-timing";
 import {
+    type FoldAuthorityStatus,
+    formatFoldAuthorityLines,
+    type PluginFoldAuthority,
+    reportFoldAuthority,
+    withDiskAuthority,
+} from "../shared/fold-authority-status";
+import {
     disabled,
     isServedMemoryDecisionRow,
     type KernelMemorySnapshot,
@@ -190,6 +197,7 @@ export interface RustSessionStatus {
     wrapup_rounds?: number | null;
     pass_trace?: { last_reject_error?: string | null; scheduler_history?: unknown } | null;
     history_summarizer?: Record<string, unknown>;
+    summary?: string;
 }
 const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
     RUST_STATUS_CACHE_TTL_MS,
@@ -381,6 +389,7 @@ function resolveActiveModel(
 export interface CompactionOwnership {
     enabled: boolean;
     nativeActive?: boolean;
+    foldAuthority?: FoldAuthorityStatus;
 }
 
 const EIDNARA_COMPACTION: CompactionOwnership = { enabled: true };
@@ -534,6 +543,9 @@ export function buildSidebarSnapshot(
             ...(ownership.enabled || ownership.nativeActive === undefined
                 ? {}
                 : { native_compaction_active: ownership.nativeActive }),
+            ...(ownership.foldAuthority === undefined
+                ? {}
+                : { fold_authority: ownership.foldAuthority }),
             systemPromptTokens: calibrated.systemTokens,
             history_segmentCount,
             memoryCount,
@@ -658,6 +670,9 @@ export function buildStatusDetail(
         summarizeCompactionTiming(sessionId, directory, moduleStatus),
     );
     if (compactionTiming.length > 0) detail.compactionTiming = compactionTiming;
+    if (ownership.foldAuthority) {
+        detail.foldAuthorityLines = formatFoldAuthorityLines(ownership.foldAuthority);
+    }
 
     try {
         if (activeModel) {
@@ -767,6 +782,7 @@ export function registerRpcHandlers(
         rustModeModuleClient?: RustModeModuleClient;
         /** OpenCode's resolved compaction settings from boot conflict detection. */
         nativeCompaction?: { auto: boolean; prune: boolean };
+        foldAuthority?: PluginFoldAuthority;
     },
 ): void {
     const { directory, config, liveSessionState, rustModeModuleClient } = args;
@@ -820,13 +836,26 @@ export function registerRpcHandlers(
     const loadPollInputs = async (
         sessionId: string,
         dir: string,
-    ): Promise<{ moduleStatus?: RustSessionStatus; memory: KernelMemorySnapshot } | undefined> => {
+    ): Promise<
+        | {
+              moduleStatus?: RustSessionStatus;
+              memory: KernelMemorySnapshot;
+              ownership: CompactionOwnership;
+          }
+        | undefined
+    > => {
         try {
             const [moduleStatus, memory] = await Promise.all([
                 loadRustSessionStatus(rustModeModuleClient, sessionId, dir),
                 readMemory(sessionId, dir),
             ]);
-            return { moduleStatus, memory };
+            if (!args.foldAuthority) return { moduleStatus, memory, ownership };
+            const foldAuthority = reportFoldAuthority(
+                args.foldAuthority,
+                moduleStatus?.summary,
+                sessionId,
+            );
+            return { moduleStatus, memory, ownership: { ...ownership, foldAuthority } };
         } catch (error) {
             log(`[rpc] session.status unavailable for ${sessionId}:`, error);
             return undefined;
@@ -846,7 +875,7 @@ export function registerRpcHandlers(
             inputs.memory,
             rawConfig,
             inputs.moduleStatus,
-            ownership,
+            inputs.ownership,
         );
     });
 
@@ -858,6 +887,14 @@ export function registerRpcHandlers(
         const dir = await routeRootFor(sessionId, params.directory);
         const inputs = await loadPollInputs(sessionId, dir);
         if (!inputs) return { error: "status detail unavailable" };
+        const { foldAuthority } = inputs.ownership;
+        const ownership =
+            foldAuthority && args.foldAuthority
+                ? {
+                      ...inputs.ownership,
+                      foldAuthority: withDiskAuthority(foldAuthority, args.foldAuthority),
+                  }
+                : inputs.ownership;
         // SAFETY: same JSON-serializable status-detail record as the snapshot above.
         return buildStatusDetail(
             sessionId,

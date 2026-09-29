@@ -6553,6 +6553,7 @@ impl HandlerCore {
         session_id: &str,
         channel: RouteHandle,
         binding: &SessionBinding,
+        summarizer: &memory_store::HistorySummarizerDurableState,
     ) -> String {
         let intent = self
             .bindings
@@ -6567,6 +6568,9 @@ impl HandlerCore {
         };
         let plan = fold_authority::plan(record, intent);
         let applied = match record.applied {
+            Some(true) if summarizer.last_no_fire.as_deref() == Some("no_models") => {
+                "eidnara, summarizer stalled (no models at the last pass)".to_string()
+            }
             Some(applied) => fold_authority::authority_name(applied).to_string(),
             None => format!(
                 "unadopted (intent {})",
@@ -6748,12 +6752,18 @@ impl HandlerCore {
                 "computed_at_ms": baseline.computed_at_ms,
             })
         });
-        let fold_authority = self.status_fold_authority(&store, &session_id, channel, &binding);
+        let fold_authority = self.status_fold_authority(
+            &store,
+            &session_id,
+            channel,
+            &binding,
+            &loaded.meta.history_summarizer,
+        );
         let user_config = binding
             .config
             .user_config_path
             .as_deref()
-            .map_or_else(|| "none".to_string(), |path| path.display().to_string());
+            .map_or_else(|| "none".to_string(), status_path);
         let summary = sanitize_status_text(
             &format!(
                 "{fold_authority}; user config {user_config}; session {short_session} (last active {age}): {} {}, coverage ordinal {coverage}, boundary {boundary}, {} pending {}, {} {}, pending m1 delta {}, last history_summarizer: {history_summarizer}, {publish_health}, surface {surface}",
@@ -16960,6 +16970,21 @@ fn format_traffic_age(observed_at_ms: i64, now: i64) -> String {
     } else {
         format!("{}d ago", elapsed_seconds / (24 * 60 * 60))
     }
+}
+
+fn status_path(path: &Path) -> String {
+    let mut encoded = String::from("encoded:");
+    for ch in path.display().to_string().chars() {
+        if ch == '%' || ch == ';' || ch.is_whitespace() || ch.is_control() {
+            let mut bytes = [0; 4];
+            for byte in ch.encode_utf8(&mut bytes).bytes() {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            encoded.push(ch);
+        }
+    }
+    encoded
 }
 
 fn sanitize_status_text(text: &str, limit: usize) -> String {

@@ -714,6 +714,21 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 </box>
             )}
 
+            {(s().foldAuthorityLines?.length ?? 0) > 0 && (
+                <box marginTop={1} width="100%" flexDirection="column">
+                    <text fg={t().text}>
+                        <b>Fold Authority</b>
+                    </text>
+                    {s()
+                        .foldAuthorityLines?.slice(1)
+                        .map((line) => (
+                            <text fg={line.startsWith("- ⚠") ? t().warning : t().textMuted}>
+                                {line.replace(/^- /, "")}
+                            </text>
+                        ))}
+                </box>
+            )}
+
             {/* Error (full width, conditional) */}
             {s().lastTransformError && (
                 <box marginTop={1} width="100%">

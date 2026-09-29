@@ -8,13 +8,17 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { refreshOpenCodeDbPresence, withReadOnlySessionDb } from "../hooks/context/read-session-db";
-import { sendIgnoredMessage } from "../hooks/context/send-session-notification";
+import {
+    dropQueuedIgnoredMessages,
+    sendIgnoredMessage,
+} from "../hooks/context/send-session-notification";
 import {
     CONFLICT_DISABLED_HEADER,
     CONFLICT_WARNING_HEADER,
-    type ConflictResult,
+    type ConflictWarning,
     formatConflictShort,
 } from "../shared/conflict-detector";
+import { FOLD_AUTHORITY_WARNING_MARKERS } from "../shared/fold-authority-status";
 import { log } from "../shared/logger";
 import { normalizeSDKResponse } from "../shared/normalize-sdk-response";
 import type { SqliteReader } from "../shared/sqlite";
@@ -274,7 +278,7 @@ async function deleteMessages(
 export async function sendConflictWarning(
     client: unknown,
     directory: string,
-    conflictResult: ConflictResult,
+    conflictResult: ConflictWarning,
     serverUrl?: string,
 ): Promise<void> {
     const { sessionId, sidecarUrl } = readDesktopState(directory);
@@ -287,10 +291,14 @@ export async function sendConflictWarning(
     const [header, otherHeader] = disabled
         ? [CONFLICT_DISABLED_HEADER, CONFLICT_WARNING_HEADER]
         : [CONFLICT_WARNING_HEADER, CONFLICT_DISABLED_HEADER];
-    const [existing = [], superseded = []] = await findMarkerMessageIds(client, sessionId, [
+    const [found = [], superseded = [], ...live] = await findMarkerMessageIds(client, sessionId, [
         header,
         otherHeader,
+        ...FOLD_AUTHORITY_WARNING_MARKERS,
     ]);
+    // `reconcileFoldAuthorityWarning` owns the live fold-authority messages under the same header.
+    const liveIds = new Set(live.flat());
+    const existing = found.filter((id) => !liveIds.has(id));
     // A persisted message under the other header states the other disposition, which no longer holds.
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
     if (superseded.length > 0 && deleteUrl) {
@@ -325,6 +333,72 @@ export async function sendConflictWarning(
     await sendIgnoredMessage(client, sessionId, warningText, {}, true);
 }
 
+/** One in-flight reconciliation per session; a later poll waits for the earlier one. */
+const reconciling = new Map<string, Promise<boolean>>();
+
+/**
+ * Keeps at most one live fold-authority message in the session, equal to `warning`. A changed
+ * warning replaces the message an earlier poll persisted, a cleared warning deletes it, and startup
+ * warnings under the same header stay in place. A failed deletion blocks replacement. Polls of one
+ * session reconcile in call order. Resolves `true` when the session's messages match `warning`,
+ * or the message is queued for the idle flush.
+ */
+export function reconcileFoldAuthorityWarning(
+    client: unknown,
+    directory: string,
+    sessionId: string,
+    warning: ConflictWarning | undefined,
+    serverUrl?: string,
+): Promise<boolean> {
+    const previous = reconciling.get(sessionId) ?? Promise.resolve(false);
+    const run = previous
+        .catch(() => {})
+        .then(() => reconcileNow(client, directory, sessionId, warning, serverUrl));
+    reconciling.set(sessionId, run);
+    const settle = () => {
+        if (reconciling.get(sessionId) === run) reconciling.delete(sessionId);
+    };
+    run.then(settle, settle);
+    return run;
+}
+
+async function reconcileNow(
+    client: unknown,
+    directory: string,
+    sessionId: string,
+    warning: ConflictWarning | undefined,
+    serverUrl?: string,
+): Promise<boolean> {
+    const text = warning === undefined ? undefined : formatConflictShort(warning);
+    // Dropping queued fold-authority warnings keeps the idle flush consistent with the warning
+    // this poll reports.
+    dropQueuedIgnoredMessages(sessionId, FOLD_AUTHORITY_WARNING_MARKERS);
+    const markers =
+        text === undefined
+            ? FOLD_AUTHORITY_WARNING_MARKERS
+            : [...FOLD_AUTHORITY_WARNING_MARKERS, text];
+    const found = await findMarkerMessageIds(client, sessionId, markers);
+    const current =
+        text === undefined ? [] : (found[FOLD_AUTHORITY_WARNING_MARKERS.length] ?? []).slice(0, 1);
+    const stale = [...new Set(found.slice(0, FOLD_AUTHORITY_WARNING_MARKERS.length).flat())].filter(
+        (id) => !current.includes(id),
+    );
+    if (stale.length > 0) {
+        const deleteUrl = serverUrl ?? readDesktopState(directory).sidecarUrl ?? undefined;
+        const failed = deleteUrl ? await deleteMessages(deleteUrl, sessionId, stale) : stale;
+        if (failed.length > 0) {
+            log(
+                `[eidnara] fold-authority warning: ${failed.length} outdated message(s) remain in session ${sessionId}; not sending a replacement`,
+            );
+            return false;
+        }
+    }
+    if (text === undefined || current.length > 0) return true;
+    log(`[eidnara] sending fold-authority warning to session ${sessionId}`);
+    const disposition = await sendIgnoredMessage(client, sessionId, text, {}, true);
+    return disposition === "sent" || disposition === "queued";
+}
+
 /**
  * The plugin removes leftover conflict-warning messages from disabled and warning runs.
  * The "enabled" confirmation follows a removed disabled-run message; a warning run
@@ -341,12 +415,16 @@ export async function cleanupConflictWarnings(
         return;
     }
     const deleteUrl = serverUrl ?? sidecarUrl ?? undefined;
-    const [disabledMessageIds = [], configurationWarningIds = []] = await findMarkerMessageIds(
-        client,
-        sessionId,
-        CONFLICT_WARNING_MARKERS,
+    const [disabledMessageIds = [], configurationWarningIds = [], ...live] =
+        await findMarkerMessageIds(client, sessionId, [
+            ...CONFLICT_WARNING_MARKERS,
+            ...FOLD_AUTHORITY_WARNING_MARKERS,
+        ]);
+    // `reconcileFoldAuthorityWarning` owns the live fold-authority messages under the same header.
+    const liveIds = new Set(live.flat());
+    const warningMessageIds = [...disabledMessageIds, ...configurationWarningIds].filter(
+        (id) => !liveIds.has(id),
     );
-    const warningMessageIds = [...disabledMessageIds, ...configurationWarningIds];
 
     if (warningMessageIds.length === 0) {
         await cleanupEnabledMessages(client, deleteUrl, sessionId);

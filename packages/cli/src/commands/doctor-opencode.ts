@@ -7,14 +7,22 @@ import {
     eidnaraProjectConfigBasePath,
     eidnaraUserConfigBasePath,
 } from "@eidnara/opencode/config/config-paths";
+import {
+    describeFoldAuthority,
+    type FoldAuthority,
+    foldAuthorityOf,
+} from "@eidnara/opencode/config/fold-authority";
 import { substituteConfigVariables } from "@eidnara/opencode/config/variable";
 import { type ConflictResult, detectConflicts } from "@eidnara/opencode/shared/conflict-detector";
 import { fixConflicts } from "@eidnara/opencode/shared/conflict-fixer";
+import {
+    DAEMON_RESTART_STEP,
+    RESTART_OTHER_INSTANCES_STEP,
+} from "@eidnara/opencode/shared/fold-authority-status";
 import { detectConfigFile } from "@eidnara/opencode/shared/jsonc-parser";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
 import { readRegularFileSync } from "@eidnara/opencode/shared/regular-file";
 import { parse } from "comment-json";
-
 import {
     isDevPathPluginEntry,
     isLocalPathPluginEntry,
@@ -26,7 +34,6 @@ import {
     readProjectOpenCodeConfigs,
     resolveUserLevelPaths,
 } from "../lib/diagnostics-opencode";
-import { describeFoldAuthority, type FoldAuthority, foldAuthorityOf } from "../lib/eidnara-modes";
 import { parseJsoncObject } from "../lib/jsonc-config";
 import { EXCLUDE_SESSION_RECORDS } from "../lib/log-records";
 import { bundleIssueReport } from "../lib/logs-opencode";
@@ -506,7 +513,7 @@ export async function runDoctor(
     const compactionEnabled = authority.kind === "eidnara";
     log.info(`Fold authority: ${describeFoldAuthority(authority)}`);
     log.info(
-        "A running Eidnara daemon applies a changed fold authority at a session's next quiescent bind; if an OpenCode instance started the daemon from a different configuration root, run `eidnara daemon restart`.",
+        `A running Eidnara daemon applies a changed fold authority at a session's next quiescent bind; while another OpenCode instance holds the session, ${RESTART_OTHER_INSTANCES_STEP}. If an OpenCode instance started the daemon from a different configuration root, ${DAEMON_RESTART_STEP}.`,
     );
     // With `enabled: false` the plugin skips every hook, so nothing here would
     // replace native compaction, DCP, or the OMO hooks; they are left in place.

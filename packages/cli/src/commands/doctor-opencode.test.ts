@@ -11,6 +11,10 @@ import {
 } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+    DAEMON_RESTART_STEP,
+    RESTART_OTHER_INSTANCES_STEP,
+} from "@eidnara/opencode/shared/fold-authority-status";
 import { parse as parseJsonc } from "comment-json";
 import * as prompts from "../lib/prompts";
 import { log } from "../lib/prompts";
@@ -374,7 +378,8 @@ describe("doctor OpenCode conflict repair", () => {
             expect(infos).toContain(
                 "Fold authority: OpenCode's native compaction folds (no summarizer model is configured)",
             );
-            expect(infos.some((m) => m.includes("eidnara daemon restart"))).toBe(true);
+            expect(infos.some((m) => m.includes(DAEMON_RESTART_STEP))).toBe(true);
+            expect(infos.some((m) => m.includes(RESTART_OTHER_INSTANCES_STEP))).toBe(true);
             expect(warns.some((m) => m.includes("no fold authority"))).toBe(true);
             expect(successes).toContain("Fixed: Enabled auto-compaction");
             expect(errors.some((m) => m.startsWith("Leaving conflicts in place:"))).toBe(false);
