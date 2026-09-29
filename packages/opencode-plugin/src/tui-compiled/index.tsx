@@ -1290,7 +1290,6 @@ const tui = async (api, _options, meta) => {
   const directory = api.state.path.directory ?? "";
   // The TUI gates RPC discovery and socket startup so disabled installations perform no idle work.
   // `isCompactionEnabled` receives the loaded config to avoid deriving compaction mode from `directory` alone.
-  // `pluginConfig` remains undefined after config-load failure, so `isCompactionEnabled` defaults to `true`.
   let pluginConfig;
   try {
     pluginConfig = loadPluginConfig(directory);
