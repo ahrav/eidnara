@@ -1842,7 +1842,7 @@ pub(crate) fn transform_with_projection_cached(
     result
 }
 
-/// Diverging passes update current and historical trace fields in the fenced commit that accepts the new served fingerprint.
+/// A successful stable pass records its scheduler observation through `trace_pass_stable`.
 fn record_stable_pass_trace(
     store: &MemoryStore,
     req: &TransformRequest,
