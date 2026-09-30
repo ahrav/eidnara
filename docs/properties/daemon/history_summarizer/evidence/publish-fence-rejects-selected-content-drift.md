@@ -21,7 +21,11 @@ header advertises the fingerprint.
   fingerprint, while unrelated metadata drift and same-length content edits do
   not stale a snapshot."
 - `:151-160` `compute_chunk_fingerprint` joins `id:kind:byte-length` pieces with
-  `|`, no hashing, "so mismatches are readable in diagnostics".
+  `|`, no hashing, "so mismatches are readable in diagnostics". At
+  `0ff62b29a` this no longer holds: `bdf564e3a` (#859 PR C) returns the
+  SHA-256 hex digest of that join (`crates/daemon/src/history_summarizer.rs:166-173`),
+  so a mismatch names two digests, not item fields. The inputs, and so the
+  blindness to same-length edits, are unchanged (doc at `:155-158`).
 - `:363-372` `verify_chunk_fingerprint` is an equality check.
 - `:1260-1263` it runs before each fire attempt.
 - `:448-460` it runs again at the top of `publish_validated_chunk`, abandoning the
@@ -47,7 +51,10 @@ each carrying that message's `block_identities` from
   remains a readable structural diagnostic; exact content freshness is verified
   using the durable block identities. An empty vector means the firing predates
   selected-range identity persistence, so it cannot establish that the selected
-  content is still current."
+  content is still current." `bdf564e3a` removed this comment; at
+  `0ff62b29a` the predicate comparison is at
+  `crates/memory-store/src/lib.rs:14084-14096`, the empty rejection at
+  `:14098-14103`, and the per-mid comparison at `:14109-14131`.
 - `:12085-12089` rejects outright when `predicate.selected_range_identities` is
   empty. This is a separate, earlier rejection from the per-mid comparison.
 - `:12090-12113` for each selected entry, reads the session's `block_identities`
@@ -152,3 +159,16 @@ Dependencies:
   validation lens. This lens establishes that the fence is silent on extensions and
   that the silence is deliberate; whether the validator covers the gap is not this
   lens's call.
+
+### Q: Does #859 PR C's digest fingerprint change this record?
+
+- Sources examined: `git show bdf564e3a -- crates/daemon/src/history_summarizer.rs
+  crates/memory-store/src/lib.rs`; `crates/daemon/src/history_summarizer.rs:155-173`
+  and `crates/memory-store/src/lib.rs:14084-14131` at `0ff62b29a`.
+- Findings: The fingerprint is now a SHA-256 hex digest of the same
+  `id:kind:byte-length` join, compared by equality, so it is no longer a
+  readable diagnostic and still cannot see a same-length edit. The
+  block-identity fence and the empty-vector rejection are unchanged.
+- Missing evidence: None.
+- Conclusion: resolved with answer: the guarantee holds; only the
+  "readable diagnostic" evidence is superseded.

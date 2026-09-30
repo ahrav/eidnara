@@ -448,7 +448,14 @@ a commit hook to do exactly this, which is the seam to reuse.
 Confidence: high - [evidence](evidence/publish-fence-rejects-selected-content-drift.md). Read the
 fence at `memory-store:12085-12113` and confirmed the empty-vector rejection is
 separate from and prior to the per-mid comparison, with the reasoning at
-`:12081-12084`.
+`:12081-12084`. At `0ff62b29a` the fence keeps both checks: the
+empty-vector rejection is `crates/memory-store/src/lib.rs:14098-14103` and
+the per-mid comparison `:14109-14131`. The reasoning comment, which called
+the fingerprint "a readable structural diagnostic", was removed by
+`bdf564e3a` (#859 PR C), which also made the fingerprint a SHA-256 digest
+of the `id:kind:byte-length` join
+(`crates/daemon/src/history_summarizer.rs:166-173`); the digest stays blind
+to same-length edits, so the fence keeps its role.
 Existing check: `history_summarizer.rs:2323`, `:2369`, `:2942`, `:3776`
 `reattach_fingerprint_mismatch_recovers_to_idle_and_releases_routes`. Status
 `unaudited`.
@@ -470,20 +477,20 @@ Open questions:
   `a_prune_that_commits_first_fences_the_publication_out` and `:19741`
   `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`.
   The prune and the first witness are removed at HEAD; the second is at
-  `crates/daemon/src/transform.rs:20285`.
+  `crates/daemon/src/transform.rs:20489`.
 - Update, 2026-09-29: identity rows are no longer pruned to the window; they
   live until session reset or deletion, so a selected mid outside the window
   keeps a matching row. The transform records the first such mid on the
   in-flight firing (`withdraw_selection_outside_window`,
-  `crates/daemon/src/transform.rs:5342`), the firing's own transitions keep
+  `crates/daemon/src/transform.rs:5431`), the firing's own transitions keep
   the record (`keep_fields_other_writers_own`,
-  `crates/daemon/src/history_summarizer.rs:514`), and the fence rejects a
-  firing that carries it (`crates/memory-store/src/lib.rs:13314`). Witnesses:
-  `crates/daemon/src/transform.rs:20240`
+  `crates/daemon/src/history_summarizer.rs:533`), and the fence rejects a
+  firing that carries it (`crates/memory-store/src/lib.rs:14104`). Witnesses:
+  `crates/daemon/src/transform.rs:20444`
   `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
   (the publisher loses its CAS, then gets `FenceRejected` at the reloaded
   row version, no segment is written, and the identity rows are unchanged)
-  and `:20285`
+  and `:20489`
   `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`.
 
 ### publish-admits-awaiting-producer-phase-at-commit
@@ -801,8 +808,17 @@ and neither counts; counting them would publish placeholders over history a
 working model could summarize. The count is keyed by the model chain and the
 configured chunk token budget as well as the chunk start
 (`memory-store/src/lib.rs:541-552`), so a changed chain or a lowered budget sends
-the bytes to a model before any placeholder. A re-adopted tail message inside
-the counted chunk's range clears the count (`transform.rs:5596-5607`), since the
+the bytes to a model before any placeholder. Since `bdf564e3a` (#859 PR C)
+the record keeps `model_chain_digest`, the SHA-256 hex digest of the
+serialized chain, in place of the chain itself
+(`crates/memory-store/src/lib.rs:540-553`;
+`crates/daemon/src/history_summarizer.rs:175-179`), and `chunk_failures`
+compares digests (`crates/daemon/src/history_summarizer_chunk.rs:709-723`);
+a retry stored with the chain itself deserializes with an empty digest and
+restarts its count (`chunk_failures_count_per_chunk_and_ignore_provider_errors`,
+`history_summarizer.rs:2714`, checked at `0ff62b29a`). A re-adopted tail
+message inside the counted chunk's range clears the count
+(`transform.rs:5596-5607`), since the
 retried bytes changed, and a failure is recorded only while the firing's
 selected identities are still the stored ones (`lib.rs:18182-18228`). Assembly varies the
 calibration seeds from `VARY_SEEDS_AFTER_FAILURES` failures, halves the chunk token budget per

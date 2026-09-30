@@ -483,7 +483,7 @@ delta in any fault table.
 | [`evaluator_constants_are_pinned`][t-pinned] | Evaluator tables and constants digest are pinned. | unaudited |
 | [`windows_start_on_line_boundaries_and_overlap_when_lines_are_short`][t-windows] | Redaction window placement and overlap. | unaudited |
 | [`scanner_is_the_only_redaction_path`][t-only-path] | No redaction path bypasses the scanner. | unaudited |
-| [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-chunk-fp] | The length-only literal `id:kind:len`, empty input, explicit UTF-8 lengths distinct from UTF-16 units, and unescaped delimiters. | unaudited |
+| [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-chunk-fp] | The SHA-256 hex digest of the length-only `id:kind:len` join (a literal before `bdf564e3a`), empty input, explicit UTF-8 lengths distinct from UTF-16 units, unescaped delimiters, and a 64-character digest for 10,000 long-id items. | unaudited |
 | [`history_summarizer_boundary_construction_matches_owned_reference`][t-boundary-construction] | Owned boundary reference versus borrowed IDs/shared bytes; length-only snapshots versus copied strings; exact frozen transcript, prompt, and raw-message bytes; empty, non-ASCII, tool, system, synthetic, excluded-tail, and oversized inputs. Unflagged reserved synthetic messages with no projected identity preserve the no-fire result. A matching frozen-size entry and pending drop check exact percentages against the owned reference, an independent formula, and a no-entry control. | unaudited |
 | [`unflagged_synthetic_delta_prepares_history_summarizer_and_native_output`][t-firing-capture] | Scripted producer captures actual handler prompts on cached-prefix and reconstructed-prefix lanes. Full prompts compare across lanes and their SHA-256 values are pinned to the construction baseline. | unaudited |
 | [`optimized_matches_frozen_reference_at_production_windows`][diff-prod] | Truncation bytes equal the frozen reference at production windows (24 cases, budget 1..32_001). | unaudited |
@@ -752,7 +752,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-pinned]: ../../../../crates/secret-scanner/src/evaluator.rs#L1660
 [t-windows]: ../../../../crates/context-core/src/redaction.rs#L827
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
-[t-chunk-fp]: ../../../../crates/daemon/src/history_summarizer.rs#L3925
+[t-chunk-fp]: ../../../../crates/daemon/src/history_summarizer.rs#L6232
 [t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L18499
 [t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L25527
 [diff-prod]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L103
