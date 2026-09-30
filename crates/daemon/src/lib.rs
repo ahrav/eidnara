@@ -8224,7 +8224,14 @@ impl HandlerCore {
     }
 
     fn memory_holder_metrics(&self) -> Value {
-        let (snapshot_bytes, snapshot_count, in_flight_count, lease_bytes, lease_count) = {
+        let (
+            snapshot_bytes,
+            snapshot_count,
+            in_flight_count,
+            derived_count,
+            lease_bytes,
+            lease_count,
+        ) = {
             let snapshots = self
                 .transform_snapshots
                 .lock()
@@ -8243,6 +8250,7 @@ impl HandlerCore {
                 snapshots.ready_bytes,
                 ready_count,
                 in_flight_count,
+                snapshots.derived.len(),
                 leases.bytes,
                 leases.count,
             )
@@ -8298,6 +8306,7 @@ impl HandlerCore {
                 "charged_bytes": snapshot_bytes,
                 "entry_count": snapshot_count,
                 "in_flight_entry_count": in_flight_count,
+                "derived_entry_count": derived_count,
                 "active_lease_charged_bytes": lease_bytes,
                 "active_lease_entry_count": lease_count,
             },
@@ -24618,6 +24627,11 @@ mod tests {
             assert_eq!(metrics["snapshots"]["charged_bytes"], snapshots.ready_bytes);
             assert_eq!(metrics["snapshots"]["entry_count"], 1);
             assert_eq!(metrics["snapshots"]["in_flight_entry_count"], 0);
+            assert_eq!(
+                metrics["snapshots"]["derived_entry_count"],
+                snapshots.derived.len()
+            );
+            assert_eq!(snapshots.derived.len(), 1);
             let TransformSnapshot::Ready { retained_bytes, .. } =
                 snapshots.entries.get("ses").unwrap()
             else {

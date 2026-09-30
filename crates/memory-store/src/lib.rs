@@ -1216,6 +1216,8 @@ pub struct PassRecord {
 pub struct StablePassDivergence<'a> {
     pub first_divergence: &'a str,
     pub request_observed_at_ms: Option<u64>,
+    /// `trace_pass_stable` writes the trace only when this matches the current `cache_state` row version.
+    pub read_row_version: u64,
 }
 
 /// Incident-worthy scheduler evidence retained independently of the recency ring.
@@ -8240,6 +8242,7 @@ impl MemoryStore {
             CACHE_STATE_HISTORY_OWNER_KEY,
         );
         let flagged = write.recorded_detections(&["session_id"]);
+        let read_row_version = divergence.map(|divergence| divergence.read_row_version as i64);
         write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx();
             // A clean identity skips this query, so the ordinary pass pays one UPSERT.
@@ -8272,6 +8275,11 @@ impl MemoryStore {
                     )
                 })
                 .transpose()?;
+            // The pass measured divergence against the `cache_state` row version it read.
+            // A changed row version invalidates the pass's divergence trace.
+            if pass_id.is_some_and(|current| Some(current) != read_row_version) {
+                return Ok(WriteDisposition::Replay(()));
+            }
             tx.execute(
                 "INSERT INTO pass_trace (
                      session_id,
@@ -19378,6 +19386,7 @@ mod tests {
                 Some(StablePassDivergence {
                     first_divergence: r#"{"where":"m1"}"#,
                     request_observed_at_ms: Some(5),
+                    read_row_version: version,
                 }),
             )
             .unwrap();
@@ -19408,6 +19417,44 @@ mod tests {
         assert_eq!(trace.last_completed_at_ms, 8);
         assert_eq!(interesting(&store), 1);
         assert_eq!(trace.scheduler_history.len(), 2);
+    }
+
+    #[test]
+    fn a_stable_pass_whose_row_moved_records_no_divergence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let read = store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let moved = store
+            .commit(
+                "ses",
+                Some(read),
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+            )
+            .unwrap();
+        assert_ne!(read, moved);
+        store
+            .trace_pass_stable(
+                "ses",
+                &PassSchedulerObservation {
+                    timestamp_ms: 7,
+                    scheduler_decision: "Defer".into(),
+                    ..Default::default()
+                },
+                Some(StablePassDivergence {
+                    first_divergence: r#"{"where":"m1"}"#,
+                    request_observed_at_ms: Some(5),
+                    read_row_version: read,
+                }),
+            )
+            .unwrap();
+        let trace = store.load_pass_trace("ses").unwrap().unwrap();
+        assert_eq!(trace.first_divergence, None);
+        assert_eq!(trace.last_divergence, None);
+        assert_ne!(trace.last_completed_at_ms, 7);
+        assert!(field_scan_ids(&store, "ses", &["first_divergence"]).is_empty());
     }
 
     /// `trace_pass_stable` and `commit_transform` append to the same observation ring, so a

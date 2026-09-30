@@ -1867,6 +1867,7 @@ fn record_stable_pass_trace(
                 .map(|first_divergence| StablePassDivergence {
                     first_divergence,
                     request_observed_at_ms: req.request_observed_at_ms,
+                    read_row_version: pass.response.row_version,
                 }),
         );
     }
