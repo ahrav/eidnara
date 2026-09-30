@@ -442,9 +442,9 @@ edit, retract, or re-stamp a message while the producer runs. The fingerprint
 alone would not catch a same-length content edit; the module header says so
 explicitly (`history_summarizer.rs:141-143`).
 Required faults and enabling state: A configured model chain, a fired run, and a
-store mutation to `block_identity_by_mid` for one selected mid during the await,
-which `commit` writes to the `block_identities` table. The existing tests use a
-commit hook to do exactly this, which is the seam to reuse.
+store mutation to one selected mid's `block_identities` row during the await
+(`commit_with_block_identities_for_test` writes a delta). The existing tests use
+a commit hook to do exactly this, which is the seam to reuse.
 Confidence: high - [evidence](evidence/publish-fence-rejects-selected-content-drift.md). Read the
 fence at `memory-store:12085-12113` and confirmed the empty-vector rejection is
 separate from and prior to the per-mid comparison, with the reasoning at
@@ -462,15 +462,15 @@ Open questions:
   deliberately permitted. Whether that is safe depends on the validated end
   boundary, which is the sibling validation lens's question. Unresolved, needs
   cross-lens reconciliation.
-- Update, 2026-09-27: #833 (spec D12) prunes the session's
-  `block_identities` rows to the submitted window inside the transform's
-  meta CAS, so a selected mid outside the window has no row at publish.
-  The fence reads the missing row as drift and rejects. Witnesses:
-  `crates/daemon/src/transform.rs:19708`
-  `a_prune_that_commits_first_fences_the_publication_out` (the publisher
-  loses its CAS, then gets `FenceRejected` at the reloaded row version,
-  and no segment is written) and `:19741`
+- Update, 2026-09-27, superseded by the 2026-09-29 update: at `f2442b2f`,
+  #833 (spec D12) pruned the session's `block_identities` rows to the
+  submitted window inside the transform's meta CAS, so a selected mid
+  outside the window had no row at publish and the fence read the missing
+  row as drift. Witnesses at `f2442b2f`: `crates/daemon/src/transform.rs:19708`
+  `a_prune_that_commits_first_fences_the_publication_out` and `:19741`
   `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`.
+  The prune and the first witness are removed at HEAD; the second is at
+  `crates/daemon/src/transform.rs:20285`.
 - Update, 2026-09-29: identity rows are no longer pruned to the window; they
   live until session reset or deletion, so a selected mid outside the window
   keeps a matching row. The transform records the first such mid on the
