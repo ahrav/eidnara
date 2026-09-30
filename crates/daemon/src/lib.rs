@@ -5388,12 +5388,20 @@ impl HandlerCore {
                     .then(|| {
                         // A failed identity read leaves this pass without a cap cut; the
                         // next pass evaluates it again.
-                        let durable = history_summarizer_archive::persisted_mids(
+                        let durable = match history_summarizer_archive::persisted_mids(
                             &store,
                             &parsed.session_id,
                             projection,
-                        )
-                        .ok()?;
+                        ) {
+                            Ok(durable) => durable,
+                            Err(error) => {
+                                eprintln!(
+                                    "daemon: history_summarizer cap-cut identity read failed session={}: {error}",
+                                    parsed.session_id
+                                );
+                                return None;
+                            }
+                        };
                         history_summarizer_archive::archive_cut(
                             projection,
                             last_history_segment_end_ordinal,

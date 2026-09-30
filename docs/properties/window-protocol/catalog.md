@@ -1485,26 +1485,29 @@ Exercised: yes - #833's two WP-P06 tests are the two orders; each asserts
 the marker before its verdict, and both ran in #833's `cargo test -p daemon`
 gate.
 Guarantee: The verification campaign constructs both publication orders while
-the selected range and pruning decision conflict.
+a selected mid is absent from the resolved window and publication overlaps the
+transform's withdrawal path.
 Check: `sometimes` - Across the campaign, observe both writers read the same
 starting version, a selected mid absent from the resolved window, and each
 writer winning first in separate runs. The marker asserts enabling state and
 order, never stale publication, so it fires on a correct implementation.
 Fault/timing angle: Both writers pause between observation and CAS.
-Required faults and enabling state: A real pinned selected range, a nonempty
-prune set intersecting it, and explicit commit barriers in both orders.
+Required faults and enabling state: A real pinned selected range, a selected
+mid absent from the resolved window, and explicit commit barriers in both
+publication orders.
 Confidence: high -
 [evidence](evidence/wp-p16-prune-publish-race-is-actually-constructed.md).
-The marker assertions were read at `f2442b2f`. The shared fixture
-`pinned_firing` (`crates/daemon/src/transform.rs:19574`) asserts the resolved
-window is `[m4, m5]`, the firing selects `m6`, and the store holds `m6`'s
+The marker assertions were read at `f2442b2f`, where the shared fixture
+`pinned_firing` was at `crates/daemon/src/transform.rs:19574`; at HEAD it is at
+`:20117` and asserts the resolved window is `[m4, m5]`, the firing selects
+`m6`, and the store holds `m6`'s
 identity. In each run the attempt hook asserts the row is still at the
 publisher's expected version when the transform reaches its commit, and sets
 a flag the test asserts afterwards.
 Existing check: `crates/daemon/src/transform.rs:20240` (transform first) and
 `:20285` (publish first). The shared fixture `pinned_firing` is at `:20117`.
-Impact: High. WP-P06 passes vacuously if publication always finishes before
-pruning starts.
+Impact: High. WP-P06 passes vacuously if the campaign never races publication
+with the transform's withdrawal path.
 Open questions: None.
 
 ### wp-p17-interior-omission-is-constructed
