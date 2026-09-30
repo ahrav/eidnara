@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
 use std::ops::Add;
 
 use memory_store::{
     HistoryArchiveRequest, HistorySummarizerDurableState, HistorySummarizerPhase,
-    HistorySummarizerPublishError, LoadedState, MemoryStore,
+    HistorySummarizerPublishError, LoadedState, MemoryStore, MemoryStoreError,
 };
 
 use crate::boundary::completed_tool_arc_crosses_boundary;
@@ -95,6 +96,23 @@ pub struct ArchiveCut {
     pub end: u64,
     pub start_message_id: String,
     pub end_message_id: String,
+}
+
+/// The window's messages whose block identities the store holds: a cut ends on one of them.
+pub fn persisted_mids(
+    store: &MemoryStore,
+    session_id: &str,
+    projection: &FlatProjection,
+) -> Result<BTreeSet<String>, MemoryStoreError> {
+    let mids: Vec<&str> = projection
+        .identity_by_mid
+        .keys()
+        .map(String::as_str)
+        .collect();
+    Ok(store
+        .load_block_identities(session_id, &mids)?
+        .into_keys()
+        .collect())
 }
 
 /// The archive over the messages after `covered_end`. It ends on the message before the newest
@@ -203,8 +221,8 @@ pub fn archive_window(
     if !WindowSize::after(projection, covered_end).at_cap() {
         return Ok(None);
     }
-    let durable = &loaded.meta.block_identity_by_mid;
-    let Some(cut) = archive_cut(projection, covered_end, |mid| durable.contains_key(mid)) else {
+    let durable = persisted_mids(store, session_id, projection)?;
+    let Some(cut) = archive_cut(projection, covered_end, |mid| durable.contains(mid)) else {
         return Ok(None);
     };
     let published = store.publish_history_archive(HistoryArchiveRequest {
@@ -454,13 +472,13 @@ mod tests {
         ))
         .unwrap();
         let meta = ModuleMeta {
-            block_identity_by_mid: window.identity_by_mid.clone(),
             history_summarizer: summarizer,
             ..ModuleMeta::default()
         };
         store
             .commit("ses", None, &cache_stability::CoreState::empty(), &meta)
             .unwrap();
+        store.upsert_block_identities_for_test("ses", window.identity_by_mid.clone());
         (dir, store)
     }
 

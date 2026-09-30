@@ -112,14 +112,23 @@ async fn the_cap_firing_ends_its_head_on_a_message_with_durable_identities() {
             .lock()
             .expect("interleave hook mutex") = Some(Box::new(move || {
             let loaded = store.load("ses").unwrap();
-            let mut meta = loaded.meta;
+            let mid = format!("m{cut}");
             assert!(
-                meta.block_identity_by_mid
-                    .remove(&format!("m{cut}"))
-                    .is_some()
+                store
+                    .all_block_identities_for_test("ses")
+                    .contains_key(&mid)
             );
             store
-                .commit("ses", loaded.row_version, &loaded.core, &meta)
+                .commit_with_block_identities_for_test(
+                    "ses",
+                    loaded.row_version,
+                    &loaded.core,
+                    &loaded.meta,
+                    &memory_store::BlockIdentityDelta {
+                        deletes: [mid].into_iter().collect(),
+                        ..memory_store::BlockIdentityDelta::default()
+                    },
+                )
                 .unwrap();
         }));
     }

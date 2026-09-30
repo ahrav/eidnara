@@ -164,7 +164,7 @@ Distribution: 27 `default-production`, 3 `explicit-config-only`, 7 `test-only`.
 | WP-P22 | [`wp-p22-the-host-mutated-during-the-await`](#wp-p22-the-host-mutated-during-the-await) | reachability | `sometimes` | plugin | active | yes | #883 |
 | WP-P23 | [`wp-p23-the-scan-traversed-a-hostile-slot`](#wp-p23-the-scan-traversed-a-hostile-slot) | reachability | `sometimes` | plugin | active | yes | #883 |
 | WP-P24 | [`wp-p24-wire-admissibility-is-explicit`](#wp-p24-wire-admissibility-is-explicit) | safety | `always` | protocol | active | yes | #875, #881, #883 |
-| WP-P25 | [`wp-p25-legacy-meta-is-pruned-on-first-commit`](#wp-p25-legacy-meta-is-pruned-on-first-commit) | safety | `always` | store | active | yes | #833 |
+| WP-P25 | [`wp-p25-legacy-meta-is-pruned-on-first-commit`](#wp-p25-legacy-meta-is-pruned-on-first-commit) | safety | `always` | store | invalidated | yes | #833 |
 
 Owner lists the PR whose recorded run supplies the status, then, after a
 semicolon, the PR or ticket that still owes evidence. Semantics: 29 `always`,
@@ -172,7 +172,7 @@ semicolon, the PR or ticket that still owes evidence. Semantics: 29 `always`,
 
 Exercise distribution: 35 `yes`, 2 `partial` (WP-E10, WP-P14), 0
 `not yet`.
-Status: 35 `active`, 2 `invalidated` (WP-E06, WP-E11).
+Status: 34 `active`, 3 `invalidated` (WP-E06, WP-E11, WP-P25).
 
 ## Records
 
@@ -361,9 +361,15 @@ Existing check: `crates/daemon/src/history_summarizer.rs:3799`
 `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict`;
 `:22983`
 `publish_rejects_a_firing_whose_set_was_truncated_and_regrown_to_the_same_maximum`
-(#873). A selected mid removed by D12's prune reads as drift:
-`crates/daemon/src/transform.rs:19708`
-`a_prune_that_commits_first_fences_the_publication_out` (#833, WP-P06).
+(#873). Identity rows outlive the window, so a selected mid the window drops
+keeps a matching row. The transform records the first such mid on the in-flight
+firing (`withdraw_selection_outside_window`,
+`crates/daemon/src/transform.rs:5342`, called at `:5106`), and publication
+refuses a firing that carries it (`crates/memory-store/src/lib.rs:13314`).
+Witnesses: `crates/daemon/src/transform.rs:20240`
+`a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
+(WP-P06) and `crates/memory-store/src/lib.rs:24190`
+`publish_rejects_a_firing_whose_selected_message_left_the_window`.
 Impact: High. Stale summaries can replace changed or removed context.
 Open questions: None. The pruning race is WP-P06 and WP-P16, exercised by
 #833.
@@ -943,53 +949,69 @@ Open questions:
 ### wp-p06-pruning-and-publication-share-the-meta-fence
 
 Type: safety
-Reachability: explicit-config-only - pruning runs on ordinary passes, but the
-competing publication requires a configured summarizer (`model_chain` defaults
-empty, `crates/daemon/src/config.rs:123`).
+Reachability: explicit-config-only - the withdrawal record runs on ordinary
+passes, but the competing publication requires a configured summarizer
+(`model_chain` defaults empty, `crates/daemon/src/config.rs:123`).
 Status: active
-Exercised: yes - #833's `a_prune_that_commits_first_fences_the_publication_out`
+Exercised: yes -
+`a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
 and
 `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`
 run both commit orders through real store transactions, with the enabling state
-asserted apart from either verdict; both ran in #833's `cargo test -p daemon`
-gate (2,749 passed).
-Guarantee: Identity pruning commits with transform meta, while a summarizer
-retains its independent current-state publication fence.
-Check: `always` - After an accepted pruning commit, retained identity keys are
-confined to the submitted window (cut prefix plus resolved messages);
-publication succeeds only if every selected
-identity remains equal and the epoch matches; a stale writer reloads and
-re-resolves rather than restoring its old identity map. Falsifier: publish
-loses CAS, reloads only the row version, then commits using its pre-prune
-identity map.
-Fault/timing angle: Prune and publication both read the same row version.
+asserted apart from either verdict; both run in the `cargo test -p daemon`
+gate.
+Guarantee: A window that drops a selected mid commits a withdrawal record on
+the in-flight firing with transform meta, while identity rows stay and the
+summarizer retains its independent current-state publication fence.
+Check: `always` - After an accepted commit whose submitted window (cut prefix
+plus resolved messages) omits a selected mid, the firing records that mid and
+every identity row survives; publication succeeds only if no mid is recorded,
+every selected identity remains equal, and the epoch matches; a stale writer
+reloads and re-resolves. Falsifier: publish loses CAS, reloads only the row
+version, then commits a summary of the dropped mid.
+Fault/timing angle: The transform and publication both read the same row
+version.
 Required faults and enabling state: A selected mid leaves the resolved window;
-prune-first and publish-first schedules through real store transactions with
-one-shot barriers.
+transform-first and publish-first schedules through real store transactions
+with one-shot barriers.
 Confidence: high -
 [evidence](evidence/wp-p06-pruning-and-publication-share-the-meta-fence.md).
-The prune and both tests were read at `f2442b2f`. `prune_block_identities`
-(`crates/daemon/src/transform.rs:5260`) keeps the cut prefix plus the
-resolved messages and skips a revert's SOFT; it runs before the meta CAS on
-the additive path (`:2742`) and on the main path after the pressure refold
-(`:4981`). Pass-through paths return before it. The barrier is the existing
-transform attempt hook (`install_transform_attempt_hook`, `:2184`), which
-fires just before `commit_transform` (`:5002`).
-Existing check: `crates/daemon/src/transform.rs:19708`
-`a_prune_that_commits_first_fences_the_publication_out` (prune first: the
-publisher gets `CasConflict`, then `FenceRejected` after reloading only the row
-version, and the segment count stays 2; the falsifier's shape); `:19741`
+Identity pruning is superseded: rows live until reset or session deletion.
+`withdraw_selection_outside_window` (`crates/daemon/src/transform.rs:5342`)
+reads the cut prefix plus the resolved messages, skips an idle firing and a
+revert's SOFT, and runs on the main path after the pressure refold (`:5106`).
+Pass-through paths return before it. The firing's own transitions are persisted
+from an in-memory clone; `keep_fields_other_writers_own`
+(`crates/daemon/src/history_summarizer.rs:514`) carries the stored record into
+them while the firing sequence is unchanged, and a fire starts without one
+(`carried_forward`). Publication refuses a recorded mid before
+it reads identity rows (`crates/memory-store/src/lib.rs:13314`). The barrier is
+the transform attempt hook (`install_transform_attempt_hook`, `:2276`), which
+fires just before `commit_transform` (`:5129`).
+Existing check: `crates/daemon/src/transform.rs:20240`
+`a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
+(transform first: the publisher gets `CasConflict`, then `FenceRejected` naming
+`m6` after reloading only the row version, the segment count stays 2, and the
+identity rows are unchanged; the falsifier's shape); `:20285`
 `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`
 (publish first: the transform reloads, its response hash, segments, core, and
-identity map equal the serial run's, and the publication's third segment stays).
-Pass-through: `:19785`
+identity rows equal the serial run's, and the publication's third segment
+stays). Pass-through: `:20328`
 `reconcile_recut_nothing_survives_arms_pending_raw_without_truncate` asserts the
-arming commit leaves the map unchanged. WP-E04's witnesses cover drift and epoch
-mismatch.
-Impact: High. Stale meta can resurrect pruned identities or authorize stale
-summaries.
-Open questions: None. D12: pruning runs only on resolutions that commit
-ordinary meta.
+arming commit leaves the identity rows unchanged. WP-E04's witnesses cover
+drift and epoch mismatch. `crates/daemon/src/history_summarizer.rs:3660`
+`an_in_flight_persist_keeps_a_withdrawal_another_writer_recorded` (a pass
+records the mid while the firing awaits its producer; the awaiting transition
+keeps it, and the next fire starts without it).
+Impact: High. A summary of a dropped message can replace live context.
+Open questions:
+
+- The withdrawal record runs only on resolutions that commit ordinary meta.
+- A window that drops a selected mid after the firing is assembled and before
+  its first durable state (the row still reads `Idle`) records no withdrawal,
+  and a firing that reaches publication with no later pass keeps a matching
+  identity row. Reported on #905; the reproduction is in that thread (needs
+  human input).
 
 ### wp-p07-every-pass-store-read-has-a-work-bound
 
@@ -1463,26 +1485,29 @@ Exercised: yes - #833's two WP-P06 tests are the two orders; each asserts
 the marker before its verdict, and both ran in #833's `cargo test -p daemon`
 gate.
 Guarantee: The verification campaign constructs both publication orders while
-the selected range and pruning decision conflict.
+a selected mid is absent from the resolved window and publication overlaps the
+transform's withdrawal path.
 Check: `sometimes` - Across the campaign, observe both writers read the same
 starting version, a selected mid absent from the resolved window, and each
 writer winning first in separate runs. The marker asserts enabling state and
 order, never stale publication, so it fires on a correct implementation.
 Fault/timing angle: Both writers pause between observation and CAS.
-Required faults and enabling state: A real pinned selected range, a nonempty
-prune set intersecting it, and explicit commit barriers in both orders.
+Required faults and enabling state: A real pinned selected range, a selected
+mid absent from the resolved window, and explicit commit barriers in both
+publication orders.
 Confidence: high -
 [evidence](evidence/wp-p16-prune-publish-race-is-actually-constructed.md).
-The marker assertions were read at `f2442b2f`. The shared fixture
-`pinned_firing` (`crates/daemon/src/transform.rs:19574`) asserts the resolved
-window is `[m4, m5]`, the firing selects `m6`, and the store holds `m6`'s
+The marker assertions were read at `f2442b2f`, where the shared fixture
+`pinned_firing` was at `crates/daemon/src/transform.rs:19574`; at HEAD it is at
+`:20117` and asserts the resolved window is `[m4, m5]`, the firing selects
+`m6`, and the store holds `m6`'s
 identity. In each run the attempt hook asserts the row is still at the
 publisher's expected version when the transform reaches its commit, and sets
 a flag the test asserts afterwards.
-Existing check: `crates/daemon/src/transform.rs:19708` (prune first) and
-`:19741` (publish first), #833.
-Impact: High. WP-P06 passes vacuously if publication always finishes before
-pruning starts.
+Existing check: `crates/daemon/src/transform.rs:20240` (transform first) and
+`:20285` (publish first). The shared fixture `pinned_firing` is at `:20117`.
+Impact: High. WP-P06 passes vacuously if the campaign never races publication
+with the transform's withdrawal path.
 Open questions: None.
 
 ### wp-p17-interior-omission-is-constructed
@@ -1751,7 +1776,7 @@ Reachability: default-production - any session written before D12: its
 `e15a09a6` may still embed a `block_identity_by_mid` key in `meta`
 (`ModuleMeta::block_identity_by_mid` is `#[serde(skip)]`,
 `crates/memory-store/src/lib.rs:2110-2111`, `f2442b2f`).
-Status: active
+Status: invalidated
 Exercised: yes - #833's legacy fixture (1,998 + 300 identity rows, a `meta`
 row built to 480 to 512 KiB with an embedded identity map, and a summarizer
 firing `AwaitingProducer`) is read after a restart and pruned on its first
@@ -1760,13 +1785,13 @@ ran in #833's `cargo test -p daemon` gate (2,749 passed).
 Guarantee: A persisted `block_identity_by_mid` larger than the window is read
 as-is, pruned to window mids on the first ordinary commit, and never grows
 again.
-Check: `always` - After the first ordinary commit over a legacy row, the map
-contains exactly the submitted window's mids (cut prefix plus resolved
-messages); a revert's SOFT commit keeps the map, because
-`prune_block_identities` returns early on a Revert unless the plan is HARD or
-MigrateHard (`crates/daemon/src/transform.rs:5266-5268`). The row is below
-128 KiB; a restart before
-that commit reads the legacy row without error; a CAS conflict in either order
+Check: `always` - At `f2442b2f`: after the first ordinary commit over a legacy
+row, the map contains exactly the submitted window's mids (cut prefix plus
+resolved messages); a revert's SOFT commit keeps the map, because
+`prune_block_identities` returned early on a Revert unless the plan was HARD
+or MigrateHard (`crates/daemon/src/transform.rs:5266-5268` at `f2442b2f`; the
+function is removed at HEAD). The row is below 128 KiB; a restart before that
+commit reads the legacy row without error; a CAS conflict in either order
 retries and converges. Falsifier: pruning only on HARD passes, leaving
 Defer-only sessions unbounded.
 Fault/timing angle: Restart or CAS conflict around the first commit.
@@ -1780,17 +1805,29 @@ table, not the `meta` blob, so the obligation applies to both parts of a
 legacy session. "The map contains exactly the window's mids" is checked on
 the identity rows; "the row is below 128 KiB" on the `meta` row, which any
 struct-serialized commit shrinks because serde ignores the embedded key.
-Existing check: `crates/daemon/src/transform_meta_bound.rs:177`
+Identity rows now live until session reset or deletion rather than being
+pruned to the window, and `ModuleMeta::block_identity_by_mid` is removed, which
+invalidates the identity half. Serde still ignores an embedded legacy key, so
+the `meta` half holds on any struct-serialized commit. WP-P06 carries the
+publication fence that pruning provided.
+Existing check: At `f2442b2f`: `crates/daemon/src/transform_meta_bound.rs:177`
 `a_legacy_row_is_read_after_a_restart_and_pruned_on_its_first_commit`
 (marker: the fixture asserts 480 to 512 KiB of `meta` and the reopened load
 holds 2,298 identities; then `SOFT+`, not HARD, committed; `assert_pruned`
 at `:166`: identities equal the window, `meta` under 128 KiB, firing still
 `AwaitingProducer`); `:195`
-`a_legacy_prune_that_loses_its_cas_reloads_and_prunes` (a writer commits
-inside the attempt hook; the retry prunes); `:230`
-`a_writer_that_loses_to_the_legacy_prune_reloads_the_pruned_row` (a stale
-writer at the legacy version gets `CasConflict`, reloads, and commits the
-pruned map).
+`a_legacy_prune_that_loses_its_cas_reloads_and_prunes`; `:230`
+`a_writer_that_loses_to_the_legacy_prune_reloads_the_pruned_row`. At HEAD the
+same fixture (`legacy_session`, `:112`) asserts the identity history is kept:
+`:183`
+`a_legacy_row_is_read_after_a_restart_and_keeps_its_identity_rows_on_its_first_commit`
+(`SOFT+` committed; `assert_history_kept` at `:172`: 1,998 + window + 1
+identity rows, `meta` under 128 KiB, firing still `AwaitingProducer`); `:196`
+`a_pass_that_loses_its_cas_reloads_and_keeps_the_identity_history` (a writer
+commits inside the attempt hook; the retry keeps the rows); `:212`
+`a_writer_that_loses_to_a_pass_reloads_the_row` (a stale writer at the legacy
+version gets `CasConflict`, reloads, and commits). Successor for the
+publication fence: WP-P06.
 Impact: High. Without the prune every legacy session stays near the cliff.
 Open questions:
 
@@ -1812,8 +1849,9 @@ Open questions:
   and WP-P01 (the window is the complete declared suffix) gate the D10
   no-survivor reset, which deletes segments and bumps the epoch; a dedicated
   reset record is queued in `portfolio-evaluation.md`.
-- Shared mechanism, meta identities: WP-E04, WP-E10, WP-P06, and WP-P25 read
-  or write `ModuleMeta::block_identity_by_mid`.
+- Shared mechanism, block identities: WP-E04, WP-E10, WP-P06, and WP-P25 read
+  or write the `block_identities` rows; `ModuleMeta::block_identity_by_mid`,
+  which they read until `f2442b2f`, is removed.
 - Shared mechanism, revert epoch: WP-E02 and WP-E12 share
   `truncate_history_segments_for_revert`.
 - Shared mechanism, window capture: WP-P01, WP-P12, WP-P13, and WP-E07 share

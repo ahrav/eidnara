@@ -846,13 +846,25 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
         }]
     };
 
-    let mut clean = ModuleMeta::default();
-    clean
-        .block_identity_by_mid
-        .insert("mid-1".to_string(), identity("text"));
-    clean.last_render_config = "render-v1".to_string();
+    let identities = |entries: &[(&str, &str)]| memory_store::BlockIdentityDelta {
+        upserts: entries
+            .iter()
+            .map(|(mid, kind_tag)| (mid.to_string(), identity(kind_tag)))
+            .collect(),
+        ..memory_store::BlockIdentityDelta::default()
+    };
+    let clean = ModuleMeta {
+        last_render_config: "render-v1".to_string(),
+        ..ModuleMeta::default()
+    };
     store
-        .commit("clean", None, &CoreState::empty(), &clean)
+        .commit_with_block_identities_for_test(
+            "clean",
+            None,
+            &CoreState::empty(),
+            &clean,
+            &identities(&[("mid-1", "text")]),
+        )
         .unwrap();
     assert_eq!(
         stored_meta("clean"),
@@ -878,15 +890,18 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
     drop(connection);
 
     // A secret under a nested map value is substituted and recorded.
-    let mut planted = ModuleMeta {
+    let planted = ModuleMeta {
         shadow_acked_watermarks: json!({ "note": "password=planted-secret" }),
         ..ModuleMeta::default()
     };
-    planted
-        .block_identity_by_mid
-        .insert("mid-1".to_string(), identity("password=planted-secret"));
     store
-        .commit("planted", None, &CoreState::empty(), &planted)
+        .commit_with_block_identities_for_test(
+            "planted",
+            None,
+            &CoreState::empty(),
+            &planted,
+            &identities(&[("mid-1", "password=planted-secret")]),
+        )
         .unwrap();
     for stored in [stored_meta("planted"), stored_identities("planted")] {
         assert!(!stored.contains("planted-secret"), "{stored}");
@@ -906,17 +921,23 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
         shadow_acked_watermarks: json!({ "a-note": "password=earlier-value", "password=key-secret": 1 }),
         ..ModuleMeta::default()
     };
-    let mut keyed_identities = ModuleMeta::default();
-    keyed_identities
-        .block_identity_by_mid
-        .insert("a-mid".to_string(), identity("password=earlier-value"));
-    keyed_identities
-        .block_identity_by_mid
-        .insert("password=key-secret".to_string(), identity("text"));
-    for keyed in [keyed_meta, keyed_identities] {
+    let keyed_identities = identities(&[
+        ("a-mid", "password=earlier-value"),
+        ("password=key-secret", "text"),
+    ]);
+    for (keyed, delta) in [
+        (keyed_meta, memory_store::BlockIdentityDelta::default()),
+        (ModuleMeta::default(), keyed_identities),
+    ] {
         let audit_before_refusal = scan_audit_counts(temp.path());
         let refused = store
-            .commit("keyed", None, &CoreState::empty(), &keyed)
+            .commit_with_block_identities_for_test(
+                "keyed",
+                None,
+                &CoreState::empty(),
+                &keyed,
+                &delta,
+            )
             .unwrap_err();
         assert!(
             matches!(refused, memory_store::MemoryStoreError::Redaction(_)),

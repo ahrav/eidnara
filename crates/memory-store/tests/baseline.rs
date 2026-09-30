@@ -11,6 +11,7 @@ use storage::{INFRASTRUCTURE_TABLES, STORE_BASELINE, StoreError, schema_inventor
 /// `sqlite_sequence` and `sqlite_autoindex_*`. A dropped, added, or misrenamed
 /// table, index, or trigger fails here by name, independently of the digest.
 const EXPECTED_OBJECTS: &[(&str, &str)] = &[
+    ("index", "block_identities_by_scan_version"),
     ("index", "idx_authority_project"),
     ("index", "idx_authority_route_bindings_authority"),
     ("index", "idx_changefeed_domain_seq"),
@@ -453,11 +454,11 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
     );
 }
 
-/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds the
-/// tag counter table and its three triggers in place of the chunk transcript totals.
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds
+/// `block_identities` without its scan-version index.
 const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
-    "70babc6b334441e5f52234100ff155c9d1a76d31c4f72c678b984d40a21b5d07";
+    "79d5bb7f35f5056c40838b15427b9f7a0052e52d730f8c9586c27dbfc6357b79";
 
 /// A store laid down under the prior baseline refuses to open and is left byte-identical.
 #[test]

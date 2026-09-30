@@ -510,13 +510,14 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, stamps activations, and clears a chunk's retry count when it re-adopts one of its messages; publish and revert transactions count and settle earlier entries; the failed-firing path counts the chunk. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, the retry count, and every entry but the in-flight firing's own.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, withdraws a selected message its window omits, stamps activations, and clears a chunk's retry count when it re-adopts one of its messages; publish and revert transactions count and settle earlier entries; the failed-firing path counts the chunk. Their fields are taken from the stored row: the eligibility and the withdrawal unless a fire, which advances the sequence, consumed them, the retry count, and every entry but the in-flight firing's own.
 fn keep_fields_other_writers_own(
     durable: &HistorySummarizerDurableState,
     next: &mut HistorySummarizerDurableState,
 ) {
     if next.firing_seq == durable.firing_seq {
         next.pending_eligibility = durable.pending_eligibility.clone();
+        next.withdrawn_selected_mid = durable.withdrawn_selected_mid.clone();
     }
     next.chunk_retry = durable.chunk_retry.clone();
     next.last_abandon = durable.last_abandon.clone();
@@ -2849,11 +2850,12 @@ mod tests {
         )
         .unwrap();
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(awaiting),
+                &test_selected_identity_delta(),
             )
             .unwrap();
     }
@@ -3099,29 +3101,29 @@ mod tests {
     fn test_meta_with_history_summarizer(
         history_summarizer: HistorySummarizerDurableState,
     ) -> ModuleMeta {
-        let mut meta = ModuleMeta {
+        ModuleMeta {
             history_summarizer,
             ..Default::default()
-        };
-        for selected in test_selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
         }
-        meta
+    }
+
+    fn test_selected_identity_delta() -> memory_store::BlockIdentityDelta {
+        memory_store::BlockIdentityDelta {
+            upserts: test_selected_range_identities()
+                .into_iter()
+                .map(|selected| (selected.mid, selected.block_identities))
+                .collect(),
+            ..Default::default()
+        }
     }
 
     fn seed_test_selected_range_identities(store: &MemoryStore) {
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta.clone();
-        for selected in test_selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
-        }
-        if meta != loaded.meta {
-            store
-                .commit("ses", loaded.row_version, &loaded.core, &meta)
-                .unwrap();
-        }
+        store.upsert_block_identities_for_test(
+            "ses",
+            test_selected_range_identities()
+                .into_iter()
+                .map(|selected| (selected.mid, selected.block_identities)),
+        );
     }
 
     #[derive(Default)]
@@ -3378,6 +3380,7 @@ mod tests {
             }),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: test_selected_range_identities(),
+            withdrawn_selected_mid: None,
             presented_token_budget: None,
             producer_session_id: Some("producer-session".into()),
             producer_run_id: Some("run-3".into()),
@@ -3462,11 +3465,12 @@ mod tests {
         let db = store(dir.path());
         let seeded = |state: &HistorySummarizerDurableState| {
             let current = db.load("ses").unwrap().row_version;
-            db.commit(
+            db.commit_with_block_identities_for_test(
                 "ses",
                 current,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(state.clone()),
+                &test_selected_identity_delta(),
             )
             .unwrap()
         };
@@ -3623,11 +3627,12 @@ mod tests {
         };
         in_flight.record_fire(FiringTrigger::default(), 5, None);
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(in_flight.clone()),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         // A transform pass stamps the earlier firing's activation while the firing runs.
@@ -3646,6 +3651,72 @@ mod tests {
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.recent_firings[0].activated_at_ms, Some(7));
         assert_eq!(state.recent_firings[1].producer_started_at_ms, Some(8));
+    }
+
+    /// A transform pass withdraws a selected message while the firing awaits the model; the
+    /// firing's later transitions, built from its earlier snapshot, must not erase the
+    /// withdrawal before the publication fence reads it. A new firing starts without one.
+    #[test]
+    fn an_in_flight_persist_keeps_a_withdrawal_another_writer_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let FireOutcome::Fired(fired) = fire(
+            &HistorySummarizerDurableState::default(),
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            5,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &test_meta_with_history_summarizer(fired.clone()),
+                &test_selected_identity_delta(),
+            )
+            .unwrap();
+        // The pass's window omits a selected message while the firing runs.
+        let loaded = store.load("ses").unwrap();
+        let mut withdrawn = loaded.meta.clone();
+        withdrawn.history_summarizer.withdrawn_selected_mid = Some("m3".to_string());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &withdrawn)
+            .unwrap();
+
+        let awaiting =
+            producer_started(&fired, "session".into(), "run".into(), "pi".into()).unwrap();
+        assert_eq!(awaiting.withdrawn_selected_mid, None);
+        persist_history_summarizer_state(&store, "ses", awaiting).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::AwaitingProducer);
+        assert_eq!(state.withdrawn_selected_mid.as_deref(), Some("m3"));
+
+        let idle = abandon_with_detail(&state, 0, None, AbandonClass::ProducerFailed);
+        persist_history_summarizer_state(&store, "ses", idle).unwrap();
+        let FireOutcome::Fired(refired) = fire(
+            &store.load("ses").unwrap().meta.history_summarizer,
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            9,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        persist_history_summarizer_state(&store, "ses", refired).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.firing_seq, 2);
+        assert_eq!(state.withdrawn_selected_mid, None);
     }
 
     /// A transform pass that re-adopts a chunk's message clears its retry count while the firing awaits the model; the firing's abandonment, built from its earlier snapshot, must not restore the count.
@@ -3680,11 +3751,12 @@ mod tests {
             producer_started(&fired, "session".into(), "run".into(), "pi".into()).unwrap();
         assert_eq!(awaiting.chunk_retry, idle.chunk_retry);
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(awaiting.clone()),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         // The pass re-adopts a message in the chunk while the model runs.
@@ -3887,13 +3959,16 @@ mod tests {
             .with_start(Ok(run_handle("run-1")))
             .with_output(Ok(producer_output(history_summarizer_xml("stale summary"))))
             .with_await_output_hook(move || {
-                let loaded = hook_store.load("ses").unwrap();
-                let mut meta = loaded.meta;
-                meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-                    "m2-content-b".to_string();
-                hook_store
-                    .commit("ses", loaded.row_version, &loaded.core, &meta)
-                    .unwrap();
+                hook_store.upsert_block_identities_for_test(
+                    "ses",
+                    [(
+                        "m2".to_string(),
+                        vec![memory_store::BlockIdentity {
+                            kind_tag: "text".to_string(),
+                            byte_fingerprint: "m2-content-b".to_string(),
+                        }],
+                    )],
+                );
             });
 
         let error = run_history_summarizer_firing(
@@ -3940,18 +4015,16 @@ mod tests {
                 "current summary",
             ))))
             .with_await_output_hook(move || {
-                let loaded = hook_store.load("ses").unwrap();
-                let mut meta = loaded.meta;
-                meta.block_identity_by_mid.insert(
-                    "m5".to_string(),
-                    vec![memory_store::BlockIdentity {
-                        kind_tag: "text".to_string(),
-                        byte_fingerprint: "later-content".to_string(),
-                    }],
+                hook_store.upsert_block_identities_for_test(
+                    "ses",
+                    [(
+                        "m5".to_string(),
+                        vec![memory_store::BlockIdentity {
+                            kind_tag: "text".to_string(),
+                            byte_fingerprint: "later-content".to_string(),
+                        }],
+                    )],
                 );
-                hook_store
-                    .commit("ses", loaded.row_version, &loaded.core, &meta)
-                    .unwrap();
             });
 
         let outcome = run_history_summarizer_firing(
@@ -3967,7 +4040,11 @@ mod tests {
         ));
         let loaded = store.load("ses").unwrap();
         assert_eq!(loaded.meta.publication_floor_ordinal, Some(4));
-        assert!(loaded.meta.block_identity_by_mid.contains_key("m5"));
+        assert!(
+            store
+                .all_block_identities_for_test("ses")
+                .contains_key("m5")
+        );
         assert_eq!(store.load_history_segments("ses").unwrap().len(), 2);
     }
 
@@ -4479,13 +4556,16 @@ mod tests {
         let chunk = history_summarizer_chunk();
         let prior = prior_ranges();
         seed_awaiting_history_summarizer(&store);
-        let loaded = store.load("ses").unwrap();
-        let mut meta = loaded.meta;
-        meta.block_identity_by_mid.get_mut("m2").unwrap()[0].byte_fingerprint =
-            "m2-content-b".to_string();
-        store
-            .commit("ses", loaded.row_version, &loaded.core, &meta)
-            .unwrap();
+        store.upsert_block_identities_for_test(
+            "ses",
+            [(
+                "m2".to_string(),
+                vec![memory_store::BlockIdentity {
+                    kind_tag: "text".to_string(),
+                    byte_fingerprint: "m2-content-b".to_string(),
+                }],
+            )],
+        );
         let mut producer = ScriptedProducer::default()
             .with_status(Ok(RunState::Terminal))
             .with_output(Ok(producer_output(history_summarizer_xml(
@@ -4558,11 +4638,12 @@ mod tests {
             )
             .unwrap();
             store
-                .commit(
+                .commit_with_block_identities_for_test(
                     lineage,
                     None,
                     &CoreState::empty(),
                     &test_meta_with_history_summarizer(awaiting),
+                    &test_selected_identity_delta(),
                 )
                 .unwrap();
         }
@@ -4669,11 +4750,12 @@ mod tests {
         )
         .unwrap();
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(awaiting),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         let chunk = history_summarizer_chunk();
@@ -5553,11 +5635,8 @@ mod tests {
         );
         assert!(rejected.facts.is_empty());
 
+        seed_test_selected_range_identities(&store);
         let mut meta = store.load("ses").unwrap().meta;
-        for selected in test_selected_range_identities() {
-            meta.block_identity_by_mid
-                .insert(selected.mid, selected.block_identities);
-        }
         meta.history_summarizer = HistorySummarizerDurableState {
             state: HistorySummarizerPhase::Publishing,
             firing_seq: 1,
@@ -5567,6 +5646,7 @@ mod tests {
             }),
             chunk_fingerprint: "fp".into(),
             selected_range_identities: test_selected_range_identities(),
+            withdrawn_selected_mid: None,
             presented_token_budget: None,
             producer_session_id: Some("ps".into()),
             producer_run_id: Some("run-1".into()),
@@ -6026,7 +6106,13 @@ mod tests {
         publishing.record_fire(FiringTrigger::default(), 1, None);
         let meta = test_meta_with_history_summarizer(publishing);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
         let loaded = store.load("ses").unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
@@ -6130,7 +6216,13 @@ mod tests {
             ..test_meta_with_history_summarizer(publishing)
         };
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
         let loaded = store.load("ses").unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
@@ -6189,11 +6281,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
                 &test_meta_with_history_summarizer(publishing_state()),
+                &test_selected_identity_delta(),
             )
             .unwrap();
         let predicate =
@@ -6308,7 +6401,7 @@ mod tests {
         )
         .unwrap();
         store
-            .commit(
+            .commit_with_block_identities_for_test(
                 "ses",
                 None,
                 &CoreState::empty(),
@@ -6316,6 +6409,7 @@ mod tests {
                     revert_epoch: 8,
                     ..test_meta_with_history_summarizer(awaiting)
                 },
+                &test_selected_identity_delta(),
             )
             .unwrap();
         let mut producer = ScriptedProducer::default()
@@ -6372,7 +6466,13 @@ mod tests {
         .unwrap();
         let meta = test_meta_with_history_summarizer(awaiting);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
 
         let action = handle_restart_load(&store, "ses", 500).unwrap();
@@ -6428,7 +6528,13 @@ mod tests {
         });
         let meta = test_meta_with_history_summarizer(awaiting);
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -6456,7 +6562,13 @@ mod tests {
         let store = store(dir.path());
         let meta = test_meta_with_history_summarizer(publishing_state());
         store
-            .commit("ses", None, &CoreState::empty(), &meta)
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &test_selected_identity_delta(),
+            )
             .unwrap();
         let loaded = store.load("ses").unwrap();
         let predicate = publish_predicate(&loaded.meta.history_summarizer).unwrap();
