@@ -980,7 +980,11 @@ Identity pruning is superseded: rows live until reset or session deletion.
 `withdraw_selection_outside_window` (`crates/daemon/src/transform.rs:5342`)
 reads the cut prefix plus the resolved messages, skips an idle firing and a
 revert's SOFT, and runs on the main path after the pressure refold (`:5106`).
-Pass-through paths return before it. Publication refuses a recorded mid before
+Pass-through paths return before it. The firing's own transitions are persisted
+from an in-memory clone; `keep_fields_other_writers_own`
+(`crates/daemon/src/history_summarizer.rs:514`) carries the stored record into
+them while the firing sequence is unchanged, and a fire starts without one
+(`carried_forward`). Publication refuses a recorded mid before
 it reads identity rows (`crates/memory-store/src/lib.rs:13314`). The barrier is
 the transform attempt hook (`install_transform_attempt_hook`, `:2276`), which
 fires just before `commit_transform` (`:5129`).
@@ -995,10 +999,19 @@ identity rows equal the serial run's, and the publication's third segment
 stays). Pass-through: `:20328`
 `reconcile_recut_nothing_survives_arms_pending_raw_without_truncate` asserts the
 arming commit leaves the identity rows unchanged. WP-E04's witnesses cover
-drift and epoch mismatch.
+drift and epoch mismatch. `crates/daemon/src/history_summarizer.rs:3660`
+`an_in_flight_persist_keeps_a_withdrawal_another_writer_recorded` (a pass
+records the mid while the firing awaits its producer; the awaiting transition
+keeps it, and the next fire starts without it).
 Impact: High. A summary of a dropped message can replace live context.
-Open questions: None. The withdrawal record runs only on resolutions that
-commit ordinary meta.
+Open questions:
+
+- The withdrawal record runs only on resolutions that commit ordinary meta.
+- A window that drops a selected mid after the firing is assembled and before
+  its first durable state (the row still reads `Idle`) records no withdrawal,
+  and a firing that reaches publication with no later pass keeps a matching
+  identity row. Reported on #905; the reproduction is in that thread (needs
+  human input).
 
 ### wp-p07-every-pass-store-read-has-a-work-bound
 

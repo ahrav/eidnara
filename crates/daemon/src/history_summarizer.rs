@@ -510,13 +510,14 @@ pub fn persist_history_summarizer_state(
     Ok(store.commit(session_id, loaded.row_version, &loaded.core, &meta)?)
 }
 
-/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, stamps activations, and clears a chunk's retry count when it re-adopts one of its messages; publish and revert transactions count and settle earlier entries; the failed-firing path counts the chunk. Their fields are taken from the stored row: the eligibility unless a fire, which advances the sequence, consumed it, the retry count, and every entry but the in-flight firing's own.
+/// A firing advances from an in-memory state while other writers commit: a transform pass records eligibility, withdraws a selected message its window omits, stamps activations, and clears a chunk's retry count when it re-adopts one of its messages; publish and revert transactions count and settle earlier entries; the failed-firing path counts the chunk. Their fields are taken from the stored row: the eligibility and the withdrawal unless a fire, which advances the sequence, consumed them, the retry count, and every entry but the in-flight firing's own.
 fn keep_fields_other_writers_own(
     durable: &HistorySummarizerDurableState,
     next: &mut HistorySummarizerDurableState,
 ) {
     if next.firing_seq == durable.firing_seq {
         next.pending_eligibility = durable.pending_eligibility.clone();
+        next.withdrawn_selected_mid = durable.withdrawn_selected_mid.clone();
     }
     next.chunk_retry = durable.chunk_retry.clone();
     next.last_abandon = durable.last_abandon.clone();
@@ -3650,6 +3651,72 @@ mod tests {
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.recent_firings[0].activated_at_ms, Some(7));
         assert_eq!(state.recent_firings[1].producer_started_at_ms, Some(8));
+    }
+
+    /// A transform pass withdraws a selected message while the firing awaits the model; the
+    /// firing's later transitions, built from its earlier snapshot, must not erase the
+    /// withdrawal before the publication fence reads it. A new firing starts without one.
+    #[test]
+    fn an_in_flight_persist_keeps_a_withdrawal_another_writer_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let FireOutcome::Fired(fired) = fire(
+            &HistorySummarizerDurableState::default(),
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            5,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &test_meta_with_history_summarizer(fired.clone()),
+                &test_selected_identity_delta(),
+            )
+            .unwrap();
+        // The pass's window omits a selected message while the firing runs.
+        let loaded = store.load("ses").unwrap();
+        let mut withdrawn = loaded.meta.clone();
+        withdrawn.history_summarizer.withdrawn_selected_mid = Some("m3".to_string());
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &withdrawn)
+            .unwrap();
+
+        let awaiting =
+            producer_started(&fired, "session".into(), "run".into(), "pi".into()).unwrap();
+        assert_eq!(awaiting.withdrawn_selected_mid, None);
+        persist_history_summarizer_state(&store, "ses", awaiting).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::AwaitingProducer);
+        assert_eq!(state.withdrawn_selected_mid.as_deref(), Some("m3"));
+
+        let idle = abandon_with_detail(&state, 0, None, AbandonClass::ProducerFailed);
+        persist_history_summarizer_state(&store, "ses", idle).unwrap();
+        let FireOutcome::Fired(refired) = fire(
+            &store.load("ses").unwrap().meta.history_summarizer,
+            2,
+            4,
+            "fp".into(),
+            test_selected_range_identities(),
+            0,
+            HistorySegmentSetGeneration::default(),
+            9,
+        )
+        .unwrap() else {
+            unreachable!("an idle state fires")
+        };
+        persist_history_summarizer_state(&store, "ses", refired).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.firing_seq, 2);
+        assert_eq!(state.withdrawn_selected_mid, None);
     }
 
     /// A transform pass that re-adopts a chunk's message clears its retry count while the firing awaits the model; the firing's abandonment, built from its earlier snapshot, must not restore the count.
