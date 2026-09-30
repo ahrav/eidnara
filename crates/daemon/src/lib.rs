@@ -2126,7 +2126,7 @@ impl TransformSnapshotCache {
         })
     }
 
-    fn promote_derived(&mut self, session_id: &str, generation: u64, state: DerivedState) {
+    fn promote_derived(&mut self, session_id: &str, generation: u64, mut state: DerivedState) {
         if !self.generation_present_in_flight_or_ready(session_id, generation)
             || self
                 .derived
@@ -2135,7 +2135,16 @@ impl TransformSnapshotCache {
         {
             return;
         }
-        self.remove_derived(session_id);
+        let replaced = self.take_derived(session_id);
+        if state.baseline_parts.is_none()
+            && let Some(replaced) = replaced
+            && replaced.revert_epoch == state.revert_epoch
+        {
+            state.baseline_parts = Arc::try_unwrap(replaced).map_or_else(
+                |shared| shared.baseline_parts.clone(),
+                |owned| owned.baseline_parts,
+            );
+        }
         let retained_bytes = state.retained_bytes().saturating_add(
             retained_size::cloned_string_retained_bytes(session_id).saturating_mul(2),
         );
@@ -2155,10 +2164,16 @@ impl TransformSnapshotCache {
     }
 
     fn remove_derived(&mut self, session_id: &str) {
-        if let Some(retained) = self.derived.remove(session_id) {
+        self.take_derived(session_id);
+    }
+
+    fn take_derived(&mut self, session_id: &str) -> Option<Arc<DerivedState>> {
+        let retained = self.derived.remove(session_id);
+        if let Some(retained) = &retained {
             self.ready_bytes = self.ready_bytes.saturating_sub(retained.retained_bytes);
         }
         self.forget_use(RetainedKind::Derived, session_id);
+        retained.map(|retained| retained.state)
     }
 
     fn derived_state(&self, session_id: &str) -> Option<&DerivedState> {
@@ -3345,17 +3360,15 @@ struct PassEnv {
     note_project_path: String,
     project_memory: Option<canonical_memory::CanonicalMemoryRead>,
     snapshot_generation: u64,
-    derived: Option<DerivedLease>,
     pass_now: i64,
     timings: PassTimings,
     // Fields drop in declaration order, so request-owned bytes go before their charges.
     _held: PassHold,
 }
 
-/// What the first transform consumes: the pass load it transforms against and the lineage
-/// root it records once the transform succeeds.
 struct PassStart {
     pass_load: Result<ModuleMeta, MemoryStoreError>,
+    derived: Option<DerivedLease>,
     lineage_root: PathBuf,
 }
 
@@ -9013,7 +9026,6 @@ impl HandlerCore {
             note_project_path,
             project_memory,
             snapshot_generation,
-            derived,
             pass_now,
             timings: PassTimings {
                 entry,
@@ -9026,6 +9038,7 @@ impl HandlerCore {
             env,
             PassStart {
                 pass_load,
+                derived,
                 lineage_root,
             },
         ))
@@ -9037,6 +9050,7 @@ impl HandlerCore {
         &self,
         env: &PassEnv,
         pass_state: PassState<'_>,
+        derived: Option<&DerivedLease>,
     ) -> Result<TransformWithProjection, crate::transform::TransformError> {
         let PassEnv {
             store,
@@ -9048,20 +9062,8 @@ impl HandlerCore {
             note_project_path,
             project_memory,
             pass_now,
-            derived,
             ..
         } = env;
-        let reloaded;
-        let derived = if matches!(pass_state, PassState::Reload) {
-            reloaded = self
-                .transform_snapshots
-                .lock()
-                .expect("transform snapshots mutex")
-                .lease_derived(&parsed.session_id);
-            reloaded.as_ref()
-        } else {
-            derived.as_ref()
-        };
         let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
             || {
                 binding
@@ -9181,9 +9183,15 @@ impl HandlerCore {
         pass: &mut TransformedPass,
     ) -> Result<(), PreparedOutcome> {
         let decided_before = pass.result.response.user_hint.take();
+        let derived = self
+            .transform_snapshots
+            .lock()
+            .expect("transform snapshots mutex")
+            .lease_derived(&env.parsed.session_id);
         pass.result = self
-            .run_transform(env, PassState::Reload)
+            .run_transform(env, PassState::Reload, derived.as_ref())
             .map_err(|error| Self::reject_transform(env, error))?;
+        drop(derived);
         // The first run decided this pass's hint for its tail and persisted
         // it; the rerun finds that decision already made. The pass's decision
         // is the first run's, and the rerun's served output is judged against
@@ -9245,11 +9253,13 @@ impl HandlerCore {
     ) -> Result<TransformedPass, PreparedOutcome> {
         let PassStart {
             pass_load,
+            derived,
             lineage_root,
         } = start;
         let result = self
-            .run_transform(env, PassState::from(&pass_load))
+            .run_transform(env, PassState::from(&pass_load), derived.as_ref())
             .map_err(|error| Self::reject_transform(env, error))?;
+        drop(derived);
         // Dropping the load makes `Reload` the only state a rerun can name.
         drop(pass_load);
         // The hook sits between the commit and the first thing the commit implies, so a test
@@ -35098,6 +35108,135 @@ mod tests {
         assert_eq!(response["action"], json!("HARD"), "{response}");
         let tail_hygiene = session_tail_hygiene(&restarted, session);
         assert_eq!(tail_hygiene["evaluable"], json!(true), "{tail_hygiene}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_pass_refused_a_lease_keeps_the_retained_baseline_parts() {
+        let session = "derived-lease-refused";
+        let (handler, _store, _dir, _project) = derived_handler(session);
+        let request = derived_request(session, vec![ck("m1", 1, "hello"), ck("m2", 2, "world")]);
+        call_transform_request_on_channel(&handler, DERIVED_CHANNEL, request.clone()).await;
+        let parts = retained_derived(&handler, session)
+            .and_then(|state| state.baseline_parts)
+            .expect("the first pass measures parts");
+        let leases = Arc::clone(&handler.transform_snapshots.lock().unwrap().active_leases);
+        let held: Vec<LeaseCharge> = (0..MAX_ACTIVE_SNAPSHOT_LEASES)
+            .map(|_| LeaseCharge::acquire(&leases, 0).expect("an idle budget charges"))
+            .collect();
+        assert!(
+            handler
+                .transform_snapshots
+                .lock()
+                .unwrap()
+                .lease_derived(session)
+                .is_none(),
+            "the budget refuses a further lease"
+        );
+
+        call_transform_request_on_channel(&handler, DERIVED_CHANNEL, request).await;
+        drop(held);
+        let retained = retained_derived(&handler, session).expect("the refused pass promotes");
+        assert_eq!(retained.baseline_parts, Some(parts));
+        assert_eq!(
+            session_tail_hygiene(&handler, session)["evaluable"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only() {
+        let mut cache = TransformSnapshotCache::new(TRANSFORM_SNAPSHOT_BUDGET_BYTES);
+        let generation = cache.begin("a");
+        let with_parts = derived_state_for_test(2, 2);
+        let parts = with_parts.baseline_parts.clone();
+        cache.promote_derived("a", generation, with_parts);
+        let without_parts = |revert_epoch, accepted_row_version| DerivedState {
+            revert_epoch,
+            accepted_row_version,
+            baseline_parts: None,
+            ..derived_state_for_test(3, 0)
+        };
+        cache.promote_derived("a", generation, without_parts(0, 1));
+        let kept = cache.derived_state("a").unwrap();
+        assert_eq!((kept.accepted_row_version, kept.served.len()), (1, 3));
+        assert_eq!(kept.baseline_parts, parts);
+        let charged = kept.retained_bytes()
+            + retained_size::cloned_string_retained_bytes("a").saturating_mul(2);
+        assert_eq!(cache.ready_bytes, charged);
+
+        cache.promote_derived("a", generation, without_parts(1, 2));
+        assert_eq!(cache.derived_state("a").unwrap().baseline_parts, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_emergency_pass_holds_a_derived_lease_only_inside_each_transform() {
+        let session = "derived-emergency-lease";
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        handler.bind_route(
+            test_route(DERIVED_CHANNEL),
+            binding(project.to_str().unwrap(), session),
+        );
+        let request = |current_total_input_tokens| {
+            let mut request =
+                request_with_usage(big_messages(), current_total_input_tokens, 50_000);
+            request["session_id"] = json!(session);
+            request
+        };
+        let first =
+            call_transform_request_on_channel(&handler, DERIVED_CHANNEL, request(45_000)).await;
+        assert_eq!(first["history_summarizer"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+        assert!(retained_derived(&handler, session).is_some());
+
+        let leases = Arc::clone(&handler.transform_snapshots.lock().unwrap().active_leases);
+        let at_promotion = Arc::new(Mutex::new(Vec::new()));
+        let record = |leases: Arc<Mutex<SnapshotLeaseBudget>>, seen: Arc<Mutex<Vec<usize>>>| {
+            move || {
+                let count = leases.lock().unwrap().count;
+                seen.lock().unwrap().push(count);
+            }
+        };
+        let hook = format!("promote_derived:{session}");
+        transform::install_transform_attempt_hook(
+            &hook,
+            record(Arc::clone(&leases), Arc::clone(&at_promotion)),
+        );
+        let release = {
+            let producer = Arc::clone(&producer);
+            let leases = Arc::clone(&leases);
+            let at_promotion = Arc::clone(&at_promotion);
+            tokio::spawn(async move {
+                while at_promotion.lock().unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while leases.lock().unwrap().count != 0 && Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let waiting = leases.lock().unwrap().count;
+                transform::install_transform_attempt_hook(&hook, record(leases, at_promotion));
+                producer.block_output.store(false, Ordering::SeqCst);
+                producer.notify.notify_waiters();
+                waiting
+            })
+        };
+        let emergency =
+            call_transform_request_on_channel(&handler, DERIVED_CHANNEL, request(48_000)).await;
+        let waiting = release.await.unwrap();
+        assert!(
+            emergency["timings"]["emergency_wait"].as_f64().unwrap() > 0.0,
+            "{emergency}"
+        );
+        assert_eq!(waiting, 0, "the continuation waits without a lease");
+        assert_eq!(
+            *at_promotion.lock().unwrap(),
+            vec![1, 1],
+            "each transform holds exactly one lease"
+        );
+        assert_eq!(leases.lock().unwrap().count, 0);
     }
 
     fn rival_wins_every_attempt(

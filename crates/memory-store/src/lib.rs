@@ -1892,6 +1892,7 @@ pub struct TailHygienePartMeasurement {
 /// Durable hygiene metrics used by both reminder channels, measured relative to the currently
 /// live tail rather than the full history.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct TailHygieneBaseline {
     pub baseline_u: i64,
     pub baseline_t: i64,
@@ -1902,6 +1903,34 @@ pub struct TailHygieneBaseline {
     pub evaluable: bool,
     pub generation_invalidated: bool,
     pub content_signature: String,
+}
+
+impl Serialize for TailHygieneBaseline {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        fn fields<S: serde::Serializer>(
+            baseline: &&TailHygieneBaseline,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            TailHygieneBaseline::serialize(baseline, serializer)
+        }
+        #[derive(Serialize)]
+        struct Row<'a> {
+            #[serde(flatten, serialize_with = "fields")]
+            baseline: &'a TailHygieneBaseline,
+            baseline_parts: [(); 0],
+        }
+        Row {
+            baseline: self,
+            baseline_parts: [],
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TailHygieneBaseline {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        TailHygieneBaseline::deserialize(deserializer)
+    }
 }
 
 /// The source of a project-memory block.
@@ -27311,6 +27340,51 @@ mod tests {
         assert_eq!(kept.meta, meta);
     }
 
+    /// An empty `baseline_parts` array keeps rows loadable by readers that require the key.
+    #[test]
+    fn a_row_this_build_writes_loads_under_the_definition_that_requires_baseline_parts() {
+        #[derive(Debug, Deserialize)]
+        struct RequiredPartsBaseline {
+            baseline_u: i64,
+            baseline_generation: u64,
+            baseline_parts: Vec<TailHygienePartMeasurement>,
+            #[serde(default)]
+            excluded_prefix_len: usize,
+            #[serde(default)]
+            excluded_prefix_digest: String,
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            tail_hygiene_baseline: Some(TailHygieneBaseline {
+                baseline_u: 120,
+                baseline_generation: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        let text: String = raw
+            .query_row(
+                "SELECT meta FROM cache_state WHERE session_id = 'ses'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rolled_back: RequiredPartsBaseline =
+            serde_json::from_value(row["tail_hygiene_baseline"].clone()).unwrap();
+        assert_eq!(rolled_back.baseline_u, 120);
+        assert_eq!(rolled_back.baseline_generation, 3);
+        assert!(rolled_back.baseline_parts.is_empty());
+        assert_eq!(rolled_back.excluded_prefix_len, 0);
+        assert!(rolled_back.excluded_prefix_digest.is_empty());
+        assert_eq!(store.load("ses").unwrap().meta, meta);
+    }
+
     #[test]
     fn derived_output_state_is_absent_from_serialized_meta_and_legacy_rows_still_load() {
         let meta = ModuleMeta {
@@ -27340,11 +27414,8 @@ mod tests {
         let mut row: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(row.get("served_output_fingerprint").is_none());
         let baseline = &row["tail_hygiene_baseline"];
-        for removed in [
-            "baseline_parts",
-            "excluded_prefix_len",
-            "excluded_prefix_digest",
-        ] {
+        assert_eq!(baseline["baseline_parts"], serde_json::json!([]));
+        for removed in ["excluded_prefix_len", "excluded_prefix_digest"] {
             assert!(baseline.get(removed).is_none(), "{removed} is serialized");
         }
         assert_eq!(baseline["baseline_u"], 120);
@@ -27354,7 +27425,10 @@ mod tests {
         row["served_output_fingerprint"] = serde_json::json!([
             {"block_id": "m0000001#0", "content_hash": "81aa6b79", "serialized_len": 182}
         ]);
-        row["tail_hygiene_baseline"]["baseline_parts"] = serde_json::json!([]);
+        row["tail_hygiene_baseline"]["baseline_parts"] = serde_json::json!([
+            {"key": "m0000001#0\u{0}text", "content_hash": "81aa6b79", "kind": "text",
+             "tokens": 40, "u_tokens": 0, "protected": false}
+        ]);
         row["tail_hygiene_baseline"]["excluded_prefix_len"] = serde_json::json!(2);
         row["tail_hygiene_baseline"]["excluded_prefix_digest"] = serde_json::json!("digest");
         raw.execute(
