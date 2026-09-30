@@ -475,7 +475,7 @@ Open questions:
   live until session reset or deletion, so a selected mid outside the window
   keeps a matching row. The transform records the first such mid on the
   in-flight firing (`withdraw_selection_outside_window`,
-  `crates/daemon/src/transform.rs:5330`), and the fence rejects a firing
+  `crates/daemon/src/transform.rs:5342`), and the fence rejects a firing
   that carries it (`crates/memory-store/src/lib.rs:13109`). Witnesses:
   `crates/daemon/src/transform.rs:20183`
   `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
