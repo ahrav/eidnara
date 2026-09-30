@@ -483,7 +483,7 @@ Open questions:
   `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
   (the publisher loses its CAS, then gets `FenceRejected` at the reloaded
   row version, no segment is written, and the identity rows are unchanged)
-  and `:20228`
+  and `:20285`
   `a_publication_that_commits_first_makes_the_transform_reload_and_match_the_serial_run`.
 
 ### publish-admits-awaiting-producer-phase-at-commit
