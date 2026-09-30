@@ -37,6 +37,26 @@ CREATE INDEX block_identities_by_scan_version
     ON block_identities (session_id, scan_version)
     WHERE scan_version IS NOT NULL;
 
+-- The covered system messages of a session's fold, one row per distinct text
+-- keyed by the ordinal of its first occurrence; the transform renders them into
+-- m0 in ordinal order. They live beside `cache_state` instead of inside `meta`
+-- so the metadata blob stays bounded while every covered instruction is kept;
+-- the transform commit writes and deletes rows by ordinal. `content` holds the
+-- redacted text. `scan_version` names the receipt owner of the scanned
+-- document that wrote the row, as in `block_identities`.
+CREATE TABLE covered_system_messages (
+    session_id   TEXT NOT NULL,
+    ordinal      INTEGER NOT NULL,
+    content      TEXT NOT NULL,
+    scan_version INTEGER,
+    PRIMARY KEY (session_id, ordinal)
+) WITHOUT ROWID;
+-- Retiring a receipt owner counts that owner's remaining rows through this index, a count
+-- bounded by the rows of the one commit that wrote them.
+CREATE INDEX covered_system_messages_by_scan_version
+    ON covered_system_messages (session_id, scan_version)
+    WHERE scan_version IS NOT NULL;
+
 -- Automatic capture keeps input until a kernel receipt is confirmed. Completed
 -- identities remain replayable; only their source and prepared-output bytes go.
 -- `abandoned_at_ms` is terminal: the row keeps its identity and last error but

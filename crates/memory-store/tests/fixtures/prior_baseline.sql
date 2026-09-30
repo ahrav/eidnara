@@ -31,6 +31,11 @@ CREATE TABLE block_identities (
     scan_version INTEGER,
     PRIMARY KEY (session_id, mid)
 ) WITHOUT ROWID;
+-- Retiring a receipt owner counts that owner's remaining rows through this index, a count
+-- bounded by the rows of the one commit that wrote them.
+CREATE INDEX block_identities_by_scan_version
+    ON block_identities (session_id, scan_version)
+    WHERE scan_version IS NOT NULL;
 
 -- Automatic capture keeps input until a kernel receipt is confirmed. Completed
 -- identities remain replayable; only their source and prepared-output bytes go.

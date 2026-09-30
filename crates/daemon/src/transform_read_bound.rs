@@ -106,6 +106,7 @@ const CLASSES: &[(&str, &str)] = &[
     // Session state: the pass's cache_state row, and the lineage and assembly meta reads.
     ("cache_state", "coverage snapshot"),
     ("block_identities", "coverage snapshot"),
+    ("covered_system_messages", "coverage snapshot"),
     (" tags ", "tags"),
     ("temporal_marks", "temporal marks, hints, appends"),
     ("user_hints", "temporal marks, hints, appends"),

@@ -231,16 +231,17 @@ fn a_writer_that_loses_to_a_pass_reloads_the_row() {
     assert_history_kept(&store);
 }
 
+/// A field's worst-case serialized bytes. Every metadata field records one, so the sum is a
+/// bound on the whole `meta` text.
 #[derive(Clone, Copy)]
 enum RecordedBound {
     Bytes(usize),
     Configured(usize),
-    Unbounded,
 }
 
 #[test]
 fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
-    use RecordedBound::{Bytes, Configured, Unbounded};
+    use RecordedBound::{Bytes, Configured};
     const ESCAPED: usize = 6;
     let text = |bytes: usize| bytes * ESCAPED + 2;
     let boolean = Bytes(5);
@@ -255,6 +256,7 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
     let pending_hint_ids = crate::transform::MAX_PENDING_USER_HINT_BLOCK_IDS * (block_id + 1) + 2;
     let note_nudge_anchors =
         memory_store::MAX_NOTE_NUDGE_ANCHORS * (memory_store::MAX_NOTE_NUDGE_ANCHOR_BYTES + 1) + 2;
+    let legacy_seqs = memory_store::MAX_LEGACY_HISTORY_SEGMENTS * 21 + 2;
     let directive = Bytes(text(memory_store::MAX_STATE_SYNC_DIRECTIVE_BYTES) + 16);
     let synthetic_todo = {
         let content = "\"".repeat(memory_store::MAX_TODO_STATE_BYTES / 2 - 64);
@@ -314,7 +316,7 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         m1_pending_since_ms => int;
         folded_history_segment_seq => int;
         archive_fold_seq => int;
-        legacy_history_segment_seqs => Unbounded;
+        legacy_history_segment_seqs => Bytes(legacy_seqs);
         history_segments_ordered => boolean;
         coverage_start_ordinal => int;
         coverage_history_segment_seq => int;
@@ -361,7 +363,6 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         emergency_drain_active => boolean;
         emergency_drain_entered_at_ms => int;
         last_committed_pass_at_ms => int;
-        covered_system_messages => Unbounded;
         shadow_generation => int;
         shadow_seq => int;
         shadow_quarantined => boolean;
@@ -371,7 +372,6 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
     };
     let mut total = 2;
     let mut configured = Vec::new();
-    let mut unbounded = Vec::new();
     for (field, bound) in &table {
         match bound {
             Bytes(bytes) => total += field.len() + 4 + bytes,
@@ -379,14 +379,9 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
                 total += field.len() + 4 + bytes;
                 configured.push(*field);
             }
-            Unbounded => unbounded.push(*field),
         }
     }
     assert_eq!(configured, ["history_summarizer"]);
-    assert_eq!(
-        unbounded,
-        ["legacy_history_segment_seqs", "covered_system_messages"]
-    );
     assert!(
         total < 128 * 1024,
         "the recorded bounds sum to {total} bytes"
