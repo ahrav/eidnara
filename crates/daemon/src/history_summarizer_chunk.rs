@@ -712,10 +712,11 @@ pub fn chunk_failures(
     model_chain: &[String],
     token_budget: usize,
 ) -> u32 {
+    let chain_digest = crate::history_summarizer::model_chain_digest(model_chain);
     chunk_retry
         .filter(|retry| {
             retry.chunk_start == chunk_start
-                && retry.model_chain == model_chain
+                && retry.model_chain_digest == chain_digest
                 && retry.token_budget == token_budget
         })
         .map_or(0, |retry| retry.failures)
@@ -1365,6 +1366,16 @@ fn merge_tool_only_ranges(ranges: &[MessageRange]) -> Vec<MessageRange> {
 }
 
 #[cfg(test)]
+pub(crate) fn identity_prefix_oracle(
+    blocks: &[Vec<HistorySummarizerSelectedMessageIdentity>],
+) -> Option<usize> {
+    (1..=blocks.len()).rev().find(|&count| {
+        let selection: Vec<_> = blocks[..count].iter().flatten().collect();
+        serde_json::to_vec(&selection).unwrap().len() <= SELECTED_IDENTITY_BUDGET_BYTES
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::FixtureBuilder;
@@ -1781,18 +1792,26 @@ mod tests {
             }
         }
 
-        fn selection(&self, blocks: usize) -> Vec<HistorySummarizerSelectedMessageIdentity> {
-            self.blocks[..blocks]
+        fn block_selections(&self) -> Vec<Vec<HistorySummarizerSelectedMessageIdentity>> {
+            self.blocks
                 .iter()
-                .flatten()
-                .map(|&index| {
-                    let mid = &self.messages[index].mid;
-                    HistorySummarizerSelectedMessageIdentity {
-                        mid: mid.clone(),
-                        block_identities: self.identities[mid].clone(),
-                    }
+                .map(|block| {
+                    block
+                        .iter()
+                        .map(|&index| {
+                            let mid = &self.messages[index].mid;
+                            HistorySummarizerSelectedMessageIdentity {
+                                mid: mid.clone(),
+                                block_identities: self.identities[mid].clone(),
+                            }
+                        })
+                        .collect()
                 })
                 .collect()
+        }
+
+        fn selection(&self, blocks: usize) -> Vec<HistorySummarizerSelectedMessageIdentity> {
+            self.block_selections()[..blocks].concat()
         }
 
         fn serialized_len(&self, blocks: usize) -> usize {
@@ -1810,9 +1829,7 @@ mod tests {
         }
 
         fn oracle(&self) -> Option<usize> {
-            (1..=self.blocks.len())
-                .rev()
-                .find(|&blocks| self.serialized_len(blocks) <= SELECTED_IDENTITY_BUDGET_BYTES)
+            identity_prefix_oracle(&self.block_selections())
         }
 
         fn assemble(&self) -> AssembleHistorySummarizerFiringOutcome {
@@ -1906,7 +1923,7 @@ mod tests {
             let unbudgeted = build_history_summarizer_chunk(
                 &self.messages,
                 &projection.blocks,
-                1,
+                firing.from_ordinal,
                 1_000_000,
                 end_ordinal + 1,
             );
@@ -1997,6 +2014,170 @@ mod tests {
             );
             assert_eq!(budget_case.oracle(), Some(if offset <= 0 { 4 } else { 3 }));
             budget_case.assert_matches_oracle(&format!("escaped mids, offset {offset}"));
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum GeneratedTurn {
+        User,
+        Assistant,
+        ToolExchange,
+        System,
+        Noise,
+    }
+
+    fn generated_turn() -> impl proptest::strategy::Strategy<Value = GeneratedTurn> {
+        use proptest::prelude::*;
+        prop_oneof![
+            Just(GeneratedTurn::User),
+            Just(GeneratedTurn::Assistant),
+            Just(GeneratedTurn::ToolExchange),
+            Just(GeneratedTurn::System),
+            Just(GeneratedTurn::Noise),
+        ]
+    }
+
+    const MID_PREFIXES: [&str; 6] = ["", "q\"q\"", "b\\s\\", "\u{1f4a1}\u{e9}", "\n\t", "\u{7}"];
+
+    fn generated_case(turns: &[(GeneratedTurn, usize, Vec<usize>)]) -> BudgetCase {
+        struct Generated {
+            messages: Vec<Arc<IngressMessage>>,
+            classes: Vec<Option<&'static str>>,
+            sizes: Vec<Vec<usize>>,
+        }
+        impl Generated {
+            fn push(
+                &mut self,
+                role: &str,
+                blocks: Vec<BlockKind>,
+                class: Option<&'static str>,
+                prefix: usize,
+                sizes: &[usize],
+            ) {
+                let ordinal = self.messages.len() as u64 + 1;
+                let mid = format!("{}{ordinal}", MID_PREFIXES[prefix % MID_PREFIXES.len()]);
+                self.messages.push(msg(&mid, ordinal, role, blocks));
+                self.classes.push(class);
+                self.sizes.push(sizes.to_vec());
+            }
+        }
+        let mut generated = Generated {
+            messages: Vec::new(),
+            classes: Vec::new(),
+            sizes: Vec::new(),
+        };
+        for (index, (turn, prefix, sizes)) in turns.iter().enumerate() {
+            let words = text(&format!("turn {index}"));
+            match turn {
+                GeneratedTurn::User => {
+                    generated.push("user", vec![words], Some("U"), *prefix, sizes)
+                }
+                GeneratedTurn::Assistant => {
+                    generated.push("assistant", vec![words], Some("A"), *prefix, sizes)
+                }
+                GeneratedTurn::ToolExchange => {
+                    let call = format!("call{index}");
+                    generated.push(
+                        "assistant",
+                        vec![BlockKind::ToolCall {
+                            id: call.clone(),
+                            name: "read".to_string(),
+                            input: json!({ "path": format!("src/{index}.rs") }),
+                            provider_executed: false,
+                        }],
+                        Some("A"),
+                        *prefix,
+                        sizes,
+                    );
+                    generated.push(
+                        "tool",
+                        vec![BlockKind::ToolResult {
+                            id: call,
+                            tool_name: "read".to_string(),
+                            output: memory_store::ToolOutput::bare(
+                                memory_store::OutputKind::Text {
+                                    text: "file".to_string(),
+                                },
+                            ),
+                            provider_executed: false,
+                        }],
+                        Some("A"),
+                        *prefix,
+                        sizes,
+                    );
+                }
+                GeneratedTurn::System => {
+                    generated.push("system", vec![words], None, *prefix, sizes)
+                }
+                GeneratedTurn::Noise => {
+                    generated.push("user", vec![text("   ")], None, *prefix, sizes)
+                }
+            }
+        }
+        if generated.classes.iter().all(Option::is_none) {
+            generated.push("user", vec![text("closing turn")], Some("U"), 0, &[64]);
+        }
+        let Generated {
+            messages,
+            classes,
+            sizes,
+        } = generated;
+        let identities = messages
+            .iter()
+            .zip(sizes)
+            .map(|(message, sizes)| {
+                let block_identities = sizes
+                    .into_iter()
+                    .map(|len| BlockIdentity {
+                        kind_tag: "text".to_string(),
+                        byte_fingerprint: "f".repeat(len),
+                    })
+                    .collect();
+                (message.mid.clone(), block_identities)
+            })
+            .collect();
+        let first_live = messages
+            .iter()
+            .position(|message| message.ck.role != "system")
+            .expect("a live turn");
+        let mut blocks: Vec<Vec<usize>> = Vec::new();
+        let mut current = None;
+        let mut pending = Vec::new();
+        for (index, class) in classes.iter().enumerate().skip(first_live) {
+            pending.push(index);
+            let Some(class) = class else {
+                continue;
+            };
+            if current == Some(*class) {
+                blocks.last_mut().unwrap().append(&mut pending);
+            } else {
+                blocks.push(std::mem::take(&mut pending));
+                current = Some(*class);
+            }
+        }
+        BudgetCase {
+            messages,
+            identities,
+            blocks,
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget(
+            turns in proptest::collection::vec(
+                (
+                    generated_turn(),
+                    0usize..MID_PREFIXES.len(),
+                    proptest::collection::vec(0usize..48_000, 0..4),
+                ),
+                1..14,
+            ),
+        ) {
+            let case = generated_case(&turns);
+            case.assert_matches_oracle(&format!("{turns:?}"));
         }
     }
 
@@ -2328,7 +2509,9 @@ mod tests {
             chunk_start: 0,
             chunk_end: 3,
             failures,
-            model_chain: vec!["prov/model".to_string()],
+            model_chain_digest: crate::history_summarizer::model_chain_digest(&[
+                "prov/model".to_string()
+            ]),
             token_budget: 8_000,
         });
         store

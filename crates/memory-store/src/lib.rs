@@ -537,7 +537,6 @@ pub struct HistorySummarizerChunkRange {
     pub to_ordinal: u64,
 }
 
-/// Consecutive failed firings on the chunk that starts at `chunk_start` under `model_chain` and `token_budget`. Assembly reads it to vary the prompt, then shrink the chunk, so a chunk that fails deterministically cannot stall folding; a count kept under another chain does not apply, so a configuration fix sends the bytes to the new models first.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySummarizerChunkRetry {
     pub chunk_start: u64,
@@ -546,7 +545,7 @@ pub struct HistorySummarizerChunkRetry {
     pub chunk_end: u64,
     pub failures: u32,
     #[serde(default)]
-    pub model_chain: Vec<String>,
+    pub model_chain_digest: String,
     /// The configured chunk token budget the failures were counted under; a lowered budget presents a smaller chunk, so the count starts over.
     #[serde(default)]
     pub token_budget: usize,
@@ -663,6 +662,31 @@ pub struct MemoryReviewerReservation {
     pub payload_digest: String,
     pub kernel_incarnation: String,
     pub queue_deadline_ms: i64,
+}
+
+/// The largest serialized length, without quotes, of each identity string a recorded [`MemoryReviewerReservation`] carries; [`MemoryStore::record_memory_reviewer_reservation`] refuses a longer one.
+pub const MAX_MEMORY_REVIEWER_RESERVATION_ID_BYTES: usize = 128;
+
+impl MemoryReviewerReservation {
+    fn over_bound_identity(&self) -> Option<&'static str> {
+        let MemoryReviewerReservation {
+            firing_seq: _,
+            causal_identity,
+            candidate_id,
+            payload_digest,
+            kernel_incarnation,
+            queue_deadline_ms: _,
+        } = self;
+        [
+            ("causal_identity", causal_identity),
+            ("candidate_id", candidate_id),
+            ("payload_digest", payload_digest),
+            ("kernel_incarnation", kernel_incarnation),
+        ]
+        .into_iter()
+        .find(|(_, value)| serialized_str_len(value) > MAX_MEMORY_REVIEWER_RESERVATION_ID_BYTES)
+        .map(|(field, _)| field)
+    }
 }
 
 /// Content-free, low-cardinality facts about MemoryReviewer work in this store incarnation, sampled for the operator surface. Every field is a count or a byte total from the ledger tables and the producers' durable state; nothing here carries an identity, a payload, or a reason string outside the closed code sets.
@@ -5955,7 +5979,32 @@ pub const MAX_TODO_STATE_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_SERIALIZED_BYTES: usize = 2 * MAX_TODO_STATE_BYTES + 2;
 
 fn serialized_text_len(text: &str) -> usize {
-    serde_json::to_string(text).map_or(usize::MAX, |serialized| serialized.len())
+    serialized_str_len(text) + 2
+}
+
+/// The bytes `character` takes inside a JSON string as `serde_json` escapes it.
+fn serialized_char_len(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+        '\0'..='\u{1f}' => 6,
+        _ => character.len_utf8(),
+    }
+}
+
+/// Returns the byte length of JSON-escaped string content.
+pub fn serialized_str_len(text: &str) -> usize {
+    text.chars().map(serialized_char_len).sum()
+}
+
+pub fn prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> &str {
+    let mut used = 0;
+    for (index, character) in text.char_indices() {
+        used += serialized_char_len(character);
+        if used > max_bytes {
+            return &text[..index];
+        }
+    }
+    text
 }
 pub const MAX_STATE_SYNC_DIRECTIVE_BYTES: usize = 256;
 pub const MAX_STATE_SYNC_ID_BYTES: usize = 128;
@@ -13583,6 +13632,13 @@ impl MemoryStore {
         reservation: &MemoryReviewerReservation,
         pending: &PendingPublication,
     ) -> Result<u64, HistorySummarizerPublishError> {
+        if let Some(field) = reservation.over_bound_identity() {
+            return Err(HistorySummarizerPublishError::InvalidState {
+                state: format!(
+                    "memory_reviewer reservation {field} exceeds {MAX_MEMORY_REVIEWER_RESERVATION_ID_BYTES} bytes"
+                ),
+            });
+        }
         let (write, payload_deflate) = prepare_pending_publication(session_id, pending)?;
         let now_ms = current_time_ms();
         let outcome = write.execute(&self.inner, |coordinated| {
@@ -13866,10 +13922,6 @@ impl MemoryStore {
                     )));
                 }
 
-                // `chunk_fingerprint` remains a readable structural diagnostic; exact
-                // content freshness is verified using the durable block identities. An empty
-                // vector means the firing predates selected-range identity persistence, so it
-                // cannot establish that the selected content is still current.
                 if predicate.selected_range_identities.is_empty() {
                     return Ok(PublishTxnOutcome::FenceRejected(
                         "history_summarizer firing has no selected-range content identities"
@@ -24164,6 +24216,28 @@ mod tests {
             stored.last_todo_state.map(|state| state.len()),
             Some(MAX_TODO_STATE_BYTES)
         );
+        let serialized_at_bound = "\"".repeat(MAX_TODO_STATE_BYTES);
+        let serialized_over_bound = format!("{}\u{1}a", "\"".repeat(MAX_TODO_STATE_BYTES - 3));
+        assert_eq!(
+            serde_json::to_string(&serialized_at_bound).unwrap().len(),
+            MAX_TODO_STATE_SERIALIZED_BYTES
+        );
+        assert!(serialized_over_bound.len() <= MAX_TODO_STATE_BYTES);
+        assert_eq!(
+            serde_json::to_string(&serialized_over_bound).unwrap().len(),
+            MAX_TODO_STATE_SERIALIZED_BYTES + 1
+        );
+        let seq = store.load("ses").unwrap().meta.shadow_seq;
+        store
+            .apply_authority_state_sync(ModuleStateSyncRequest {
+                last_todo_state: Some(serialized_at_bound.clone()),
+                ..history_segment_sync(seq, &[])
+            })
+            .unwrap();
+        assert_eq!(
+            store.load("ses").unwrap().meta.last_todo_state.as_deref(),
+            Some(serialized_at_bound.as_str())
+        );
 
         let too_many = vec![anchor(40); MAX_NOTE_NUDGE_ANCHORS + 1];
         let too_long = [anchor(MAX_NOTE_NUDGE_ANCHOR_BYTES + 1)];
@@ -24248,6 +24322,14 @@ mod tests {
                 "last_todo_state bytes",
             ),
             (
+                "todo state serialized",
+                with(ModuleStateSyncRequest {
+                    last_todo_state: Some(serialized_over_bound.clone()),
+                    ..history_segment_sync(0, &[])
+                }),
+                "last_todo_state serialized bytes",
+            ),
+            (
                 "marker id",
                 with(ModuleStateSyncRequest {
                     pending_compaction_marker: Some(Some(&over_marker)),
@@ -24295,6 +24377,23 @@ mod tests {
             store.set_todo_state("ses", &"t".repeat(MAX_TODO_STATE_BYTES + 1), "m1", "h"),
             Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
         ));
+        assert!(matches!(
+            store.set_todo_state("ses", &serialized_over_bound, "m1", "h"),
+            Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
+        ));
+        let after = store.load("ses").unwrap();
+        assert_eq!(
+            (after.row_version, after.meta),
+            before,
+            "a refused todo write writes nothing"
+        );
+        store
+            .set_todo_state("ses", &serialized_at_bound, "m1", "h")
+            .unwrap();
+        assert_eq!(
+            store.load("ses").unwrap().meta.last_todo_state.as_deref(),
+            Some(serialized_at_bound.as_str())
+        );
         store
             .set_todo_state("ses", &"t".repeat(MAX_TODO_STATE_BYTES), "m1", "h")
             .unwrap();
@@ -25047,7 +25146,7 @@ mod tests {
                     chunk_start: 10,
                     chunk_end: 12,
                     failures: 3,
-                    model_chain: vec!["prov/model".to_string()],
+                    model_chain_digest: "chain".to_string(),
                     token_budget: 8_000,
                 }),
                 memory_reviewer_nonadmission: MemoryReviewerNonadmission::default(),
@@ -25116,7 +25215,7 @@ mod tests {
                 chunk_start: 10,
                 chunk_end: 12,
                 failures: 3,
-                model_chain: vec!["prov/model".to_string()],
+                model_chain_digest: "chain".to_string(),
                 token_budget: 8_000,
             }),
             "abandonment keeps the chunk failure count",
@@ -25919,6 +26018,72 @@ mod tests {
         }
         let reencoded = serde_json::to_value(MemoryReviewerNonadmissionCode::Unrecognized).unwrap();
         assert_eq!(reencoded, serde_json::json!({"code": "unrecognized"}));
+    }
+
+    #[test]
+    fn a_reservation_identity_over_its_serialized_bound_is_refused_before_any_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                state: HistorySummarizerPhase::Publishing,
+                firing_seq: 1,
+                ..HistorySummarizerDurableState::default()
+            },
+            ..ModuleMeta::default()
+        };
+        let row_version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let pending = PendingPublication {
+            validated_json: "{}".to_string(),
+            aliases_json: "{}".to_string(),
+            chunk_transcript: "U: retained".to_string(),
+            boundary_dates: BTreeMap::new(),
+            publication_floor_ordinal: 3,
+            collect_user_memory_candidates: false,
+            created_at_ms: 1,
+        };
+        let reservation = |candidate_id: String| MemoryReviewerReservation {
+            firing_seq: 1,
+            causal_identity: "c".repeat(64),
+            candidate_id,
+            payload_digest: "d".repeat(64),
+            kernel_incarnation: "k".repeat(32),
+            queue_deadline_ms: 10,
+        };
+        let over = reservation(format!(
+            "{}\u{1}",
+            "x".repeat(MAX_MEMORY_REVIEWER_RESERVATION_ID_BYTES - 5)
+        ));
+        let refused = store.record_memory_reviewer_reservation("ses", row_version, &over, &pending);
+        assert!(
+            matches!(&refused, Err(HistorySummarizerPublishError::InvalidState { state }) if state.contains("candidate_id")),
+            "{refused:?}"
+        );
+        let unchanged = store.load("ses").unwrap();
+        assert_eq!(unchanged.row_version, Some(row_version));
+        assert_eq!(
+            unchanged
+                .meta
+                .history_summarizer
+                .memory_reviewer_reservation,
+            None
+        );
+        assert!(store.load_pending_publication("ses").unwrap().is_none());
+        let at_bound = reservation("x".repeat(MAX_MEMORY_REVIEWER_RESERVATION_ID_BYTES));
+        store
+            .record_memory_reviewer_reservation("ses", row_version, &at_bound, &pending)
+            .unwrap();
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .history_summarizer
+                .memory_reviewer_reservation,
+            Some(at_bound)
+        );
     }
 
     /// A full-session reset drops the retained publication with the reservation pointer it belonged to; nothing can consume the row once the metadata is reset.

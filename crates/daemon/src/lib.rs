@@ -17545,7 +17545,7 @@ fn record_blocked_eligibility(
             eligible_at_ms: now,
             no_fire: Some(history_summarizer::classify_no_fire(reason)),
         });
-    meta.history_summarizer.last_no_fire = Some(reason.to_string());
+    meta.history_summarizer.last_no_fire = Some(history_summarizer::bounded_detail(reason));
     store
         .commit(&parsed.session_id, loaded.row_version, &loaded.core, &meta)
         .is_ok()
@@ -17604,7 +17604,7 @@ fn record_history_summarizer_connect_failure(
         let loaded = store.load(session_id)?;
         let mut meta = loaded.meta.clone();
         if meta.history_summarizer.state == HistorySummarizerPhase::Idle {
-            meta.history_summarizer.last_failure = Some(detail.to_string());
+            meta.history_summarizer.last_failure = Some(history_summarizer::bounded_detail(detail));
             meta.history_summarizer.failure_backoff_at_ms = Some(failure_backoff_at_ms);
             let counters = &mut meta.history_summarizer.counters;
             counters.connect_failed = counters.connect_failed.saturating_add(1);
@@ -18857,8 +18857,8 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("|");
                 assert_eq!(
-                    firing.chunk_fingerprint.as_bytes(),
-                    reference_fingerprint.as_bytes()
+                    firing.chunk_fingerprint,
+                    sha256_hex(reference_fingerprint.as_bytes())
                 );
                 assert_eq!(firing.chunk.snapshot.len(), owned_snapshot.len());
                 for (item, (id, kind, bytes)) in firing.chunk.snapshot.iter().zip(&owned_snapshot) {
@@ -18867,9 +18867,16 @@ mod tests {
                         (id, kind, bytes.len())
                     );
                 }
-                assert!(!firing.chunk_fingerprint.contains("synthetic"));
-                assert!(!firing.chunk_fingerprint.contains("system"));
-                assert!(!firing.chunk_fingerprint.contains("excluded-tail"));
+                for excluded in ["synthetic", "system", "excluded-tail"] {
+                    assert!(
+                        firing
+                            .chunk
+                            .snapshot
+                            .iter()
+                            .all(|item| !item.id.contains(excluded)),
+                        "{excluded}"
+                    );
+                }
                 assert_eq!(
                     firing.chunk.chunk.present_ordinals.contains(&7),
                     replayed_unflagged
@@ -36299,6 +36306,104 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix() {
+        let producer = Arc::new(ProducerState::default());
+        producer.block_output.store(true, Ordering::SeqCst);
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages: Vec<_> = (1..=800)
+            .map(|ordinal| {
+                let escaped_mid = format!("{}{ordinal}", "\u{1}".repeat(100));
+                let role = if ordinal % 2 == 1 {
+                    "user"
+                } else {
+                    "assistant"
+                };
+                wire_with_role(
+                    &escaped_mid,
+                    ordinal,
+                    role,
+                    &format!("turn {ordinal} of the work"),
+                )
+            })
+            .collect();
+        let before = store.load("ses").unwrap().row_version;
+        let response = call_transform(&handler, messages.clone()).await;
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        wait_for_count(&producer.starts, 1).await;
+
+        let reserved = store.load("ses").unwrap();
+        assert!(reserved.row_version > before, "the reservation commits");
+        let state = reserved.meta.history_summarizer;
+        assert_eq!(
+            state.state,
+            memory_store::HistorySummarizerPhase::AwaitingProducer
+        );
+        assert_eq!(state.firing_seq, 1);
+        let mids: Vec<&str> = messages
+            .iter()
+            .map(|message| message.mid.as_str())
+            .collect();
+        let stored = store.load_block_identities("ses", &mids).unwrap();
+        let blocks: Vec<Vec<memory_store::HistorySummarizerSelectedMessageIdentity>> = messages
+            .iter()
+            .map(|message| {
+                vec![memory_store::HistorySummarizerSelectedMessageIdentity {
+                    mid: message.mid.clone(),
+                    block_identities: stored[&message.mid].clone(),
+                }]
+            })
+            .collect();
+        let prefix = history_summarizer_chunk::identity_prefix_oracle(&blocks)
+            .expect("the first block fits the budget");
+        assert!(
+            (2..messages.len()).contains(&prefix),
+            "the later blocks push the selection over the budget: {prefix}"
+        );
+        let end = messages[prefix - 1].ordinal;
+        assert_eq!(state.selected_range_identities, blocks[..prefix].concat());
+        assert_eq!(
+            state.chunk_range,
+            Some(memory_store::HistorySummarizerChunkRange {
+                from_ordinal: 1,
+                to_ordinal: end,
+            })
+        );
+        let arcs: Vec<_> = messages.iter().cloned().map(Arc::new).collect();
+        let projection = crate::wire::project_messages(&arcs).unwrap();
+        let items: Vec<_> = projection
+            .blocks
+            .iter()
+            .filter(|block| (1..=end).contains(&block.ordinal))
+            .map(|block| history_summarizer::ChunkSnapshotItem {
+                id: &block.id,
+                kind: &block.kind_tag,
+                byte_len: block.bytes.len(),
+            })
+            .collect();
+        assert_eq!(
+            state.chunk_fingerprint,
+            history_summarizer::compute_chunk_fingerprint(&items)
+        );
+        let prompt = producer.prompts.lock().unwrap()[0].clone();
+        assert_eq!(prompt_ordinal_range(&prompt), Some((1, end)));
+        assert!(prompt.contains(&format!("turn {end} of the work")));
+        assert!(!prompt.contains(&format!("turn {} of the work", end + 1)));
+
+        producer.block_output.store(false, Ordering::SeqCst);
+        producer.notify.notify_waiters();
+        wait_for_idle(&store).await;
+        let history_segments = store.load_history_segments("ses").unwrap();
+        assert_eq!(history_segments.len(), 1);
+        assert_eq!(history_segments[0].start_message, 1);
+        assert_eq!(history_segments[0].end_message, i64::try_from(end).unwrap());
+        let published = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(published.state, memory_store::HistorySummarizerPhase::Idle);
+        assert_eq!(published.firing_seq, 1);
+        assert_eq!(published.counters.published, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_autonomous_cycle_fires_publishes_and_next_pass_folds_across_start_ordinals() {
         // The daemon numbers the window from 1; a system lead is skipped, so the chunk starts at
         // the first user message.
@@ -40376,7 +40481,9 @@ mod tests {
                 chunk_start: 1,
                 chunk_end: 1,
                 failures,
-                model_chain: default_test_config().model_chain,
+                model_chain_digest: crate::history_summarizer::model_chain_digest(
+                    &default_test_config().model_chain,
+                ),
                 token_budget: configured_budget,
             }),
             ..HistorySummarizerDurableState::default()
@@ -40492,7 +40599,9 @@ mod tests {
                 chunk_start: 1,
                 chunk_end: 1,
                 failures,
-                model_chain: vec!["retired/model".to_string()],
+                model_chain_digest: crate::history_summarizer::model_chain_digest(&[
+                    "retired/model".to_string(),
+                ]),
                 token_budget: configured_budget,
             }),
             ..HistorySummarizerDurableState::default()
@@ -40645,7 +40754,9 @@ mod tests {
                 chunk_start: 1,
                 chunk_end: 1,
                 failures: 2,
-                model_chain: default_test_config().model_chain,
+                model_chain_digest: crate::history_summarizer::model_chain_digest(
+                    &default_test_config().model_chain,
+                ),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     default_test_config().history_summarizer_context_limit_tokens,
                 ),
@@ -40674,7 +40785,9 @@ mod tests {
                 chunk_start: 1,
                 chunk_end: 1,
                 failures: 3,
-                model_chain: default_test_config().model_chain,
+                model_chain_digest: crate::history_summarizer::model_chain_digest(
+                    &default_test_config().model_chain
+                ),
                 token_budget: derive_history_summarizer_chunk_tokens(
                     default_test_config().history_summarizer_context_limit_tokens
                 ),

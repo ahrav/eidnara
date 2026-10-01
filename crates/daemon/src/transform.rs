@@ -14841,7 +14841,9 @@ pub(crate) mod tests {
                 chunk_start,
                 chunk_end,
                 failures: 8,
-                model_chain: vec!["prov/model".to_string()],
+                model_chain_digest: crate::history_summarizer::model_chain_digest(&[
+                    "prov/model".to_string()
+                ]),
                 token_budget: 8_000,
             })
         };

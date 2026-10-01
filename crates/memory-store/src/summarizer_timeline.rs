@@ -9,7 +9,7 @@ use crate::HistorySummarizerDurableState;
 /// How many firings the timeline keeps; the ninth evicts the oldest.
 pub const RECENT_FIRINGS_CAPACITY: usize = 8;
 
-/// The largest no-fire detail an entry keeps, in UTF-8 bytes, cut at a character boundary.
+/// The largest no-fire detail an entry keeps, in serialized JSON string bytes without the quotes, cut at a character boundary.
 pub const NO_FIRE_DETAIL_MAX_BYTES: usize = 128;
 
 /// Which daemon entry path started a firing.
@@ -89,10 +89,10 @@ pub struct NoFire {
 impl NoFire {
     /// Keeps at most [`NO_FIRE_DETAIL_MAX_BYTES`] of `detail`.
     pub fn new(reason: NoFireReason, detail: &str) -> Self {
-        let cut = detail.floor_char_boundary(NO_FIRE_DETAIL_MAX_BYTES);
         NoFire {
             reason,
-            detail: detail[..cut].to_string(),
+            detail: crate::prefix_within_serialized_bytes(detail, NO_FIRE_DETAIL_MAX_BYTES)
+                .to_string(),
         }
     }
 }
@@ -484,6 +484,40 @@ mod tests {
             NoFire::new(NoFireReason::Other, &exact).detail.len(),
             NO_FIRE_DETAIL_MAX_BYTES
         );
+    }
+
+    #[test]
+    fn a_detail_is_cut_by_its_serialized_length() {
+        for character in [
+            '"',
+            '\\',
+            '\n',
+            '\t',
+            '\u{8}',
+            '\u{c}',
+            '\r',
+            '\0',
+            '\u{1}',
+            '\u{1f}',
+            ' ',
+            '\u{7f}',
+            '\u{e9}',
+            '\u{1f4a1}',
+        ] {
+            let text = character.to_string();
+            assert_eq!(
+                crate::serialized_str_len(&text),
+                serde_json::to_string(&text).unwrap().len() - 2,
+                "{character:?}"
+            );
+        }
+        let text = format!("{}\u{1}tail", "a".repeat(NO_FIRE_DETAIL_MAX_BYTES - 5));
+        let detail = NoFire::new(NoFireReason::Other, &text).detail;
+        assert_eq!(detail, "a".repeat(NO_FIRE_DETAIL_MAX_BYTES - 5));
+        let controls = "\u{1}".repeat(NO_FIRE_DETAIL_MAX_BYTES);
+        let detail = NoFire::new(NoFireReason::Other, &controls).detail;
+        assert_eq!(detail.len(), NO_FIRE_DETAIL_MAX_BYTES / 6);
+        assert!(serde_json::to_string(&detail).unwrap().len() - 2 <= NO_FIRE_DETAIL_MAX_BYTES);
     }
 
     #[test]
