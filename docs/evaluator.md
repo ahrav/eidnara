@@ -2116,14 +2116,14 @@ is eligible; the trigger fires `force_band` from 85 percent of the limit
 with the firing spawned behind the pass, and in the emergency band from 95
 percent inline, before the pass settles. The session's meta row is written
 whole on every commit and is bounded at 512 KiB of durable text. Per-message
-block identities live in their own `block_identities` table, and the tail
-hygiene baseline keeps only the parts after the covered prefix, so the meta
-grows with the uncovered tail and the served output, not with covered
-history: `crates/daemon/src/transform_meta_bound.rs` commits a first HARD
-pass over 10,000 messages whose segments cover all but the last 200 with
-about 70 KiB of meta, the same as at 1,000. A session with no coverage still
-carries roughly 340 bytes of meta per uncovered message, so about 1,500
-uncovered 2 KiB messages reach the bound. S0 and S1 sit well under that. The
+block identities live in their own `block_identities` table, and the served
+output's fingerprints and the tail hygiene baseline's parts live in the
+daemon's per-session cache, so the meta row stays the same size as the
+history grows: one unfolded pass writes about 3.2 KiB of meta over 500
+uncovered 2 KiB messages and over 1,000, and
+`crates/daemon/src/transform_meta_bound.rs` commits a first HARD pass over a
+100,000-message session with under 128 KiB of meta. S0 and S1 sit well
+under the bound. The
 campaign envelope's cassette bound does not: at S1 the recording life
 completes and the campaign is refused `EnvelopeExceeded { CassetteBytes }`,
 the recorded cassette about 6.9 MB at 900 aged messages and 7.7 MB at 1,000

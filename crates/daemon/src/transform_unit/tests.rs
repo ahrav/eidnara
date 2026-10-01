@@ -66,8 +66,9 @@ pub(super) struct JoinedUnitRunner {
     worker: DetachedRunner,
     joins: TaskTracker,
     before_unit: Mutex<VecDeque<Box<dyn FnOnce() + Send>>>,
-    submitted: AtomicUsize,
+    pub(super) submitted: AtomicUsize,
     pub(super) completed: Arc<AtomicUsize>,
+    pub(super) failed: Arc<AtomicUsize>,
 }
 
 impl UnitRunner for JoinedUnitRunner {
@@ -86,8 +87,12 @@ impl UnitRunner for JoinedUnitRunner {
         }));
         let (send, receive) = oneshot::channel();
         let completed = Arc::clone(&self.completed);
+        let failed = Arc::clone(&self.failed);
         self.joins.spawn(async move {
             let result = joined.await;
+            if result.is_err() {
+                failed.fetch_add(1, Ordering::SeqCst);
+            }
             completed.fetch_add(1, Ordering::SeqCst);
             let _ = send.send(result);
         });
@@ -107,7 +112,11 @@ impl UnitRunner for JoinedUnitRunner {
 }
 
 impl JoinedUnitRunner {
-    async fn join_all(&self) {
+    pub(super) fn cancel(&self) {
+        self.worker.cancel.cancel();
+    }
+
+    pub(super) async fn join_all(&self) {
         self.joins.close();
         watchdog(self.joins.wait()).await;
     }
@@ -992,7 +1001,7 @@ fn same_session_pass(handler: &Handler, project: &Path, route: u16, text: &str) 
 }
 
 /// Polls `future` once, where it must park.
-async fn park<F: Future + Unpin>(future: &mut F) {
+pub(super) async fn park<F: Future + Unpin>(future: &mut F) {
     poll_fn(|cx| {
         assert!(Pin::new(&mut *future).poll(cx).is_pending());
         Poll::Ready(())
