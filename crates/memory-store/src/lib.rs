@@ -5996,6 +5996,10 @@ pub fn serialized_str_len(text: &str) -> usize {
     text.chars().map(serialized_char_len).sum()
 }
 
+/// The largest `last_failure` or `last_no_fire` text the durable summarizer state keeps, in
+/// JSON-escaped bytes.
+pub const MAX_SUMMARIZER_DETAIL_BYTES: usize = 512;
+
 pub fn prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> &str {
     let mut used = 0;
     for (index, character) in text.char_indices() {
@@ -13505,7 +13509,12 @@ impl MemoryStore {
         write.domain_owner("session", session_id, "history_summarizer");
         write.existing_identity("session_id", session_id)?;
         let detail = detail
-            .map(|value| write.content("last_failure", value))
+            .map(|value| {
+                write.content("last_failure", value).map(|redacted| {
+                    prefix_within_serialized_bytes(&redacted, MAX_SUMMARIZER_DETAIL_BYTES)
+                        .to_string()
+                })
+            })
             .transpose()?;
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
@@ -25158,6 +25167,43 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_abandon_keeps_a_failure_detail_within_its_serialized_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(directory.path())).unwrap();
+        store
+            .commit_with_block_identities_for_test(
+                "detail",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let detail = format!("publish rejected: {}", "\u{1}".repeat(400));
+        store
+            .abandon_history_summarizer_run_if_matching_with_publish_failure(
+                "detail",
+                &publish_predicate(),
+                None,
+                Some(&detail),
+                true,
+                summarizer_timeline::AbandonClass::Invalidated,
+            )
+            .unwrap()
+            .expect("abandon applies");
+        let stored = store
+            .load("detail")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .last_failure
+            .expect("the detail is recorded");
+        assert!(serialized_str_len(&stored) <= MAX_SUMMARIZER_DETAIL_BYTES);
+        assert!(serialized_str_len(&stored) > MAX_SUMMARIZER_DETAIL_BYTES - 6);
+        assert!(detail.starts_with(&stored));
     }
 
     #[test]

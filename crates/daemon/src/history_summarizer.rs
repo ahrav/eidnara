@@ -454,8 +454,7 @@ fn retain_backoff(
     next
 }
 
-/// The largest `last_failure` or `last_no_fire` text the durable state keeps, in JSON-escaped bytes.
-pub const MAX_SUMMARIZER_DETAIL_BYTES: usize = 512;
+pub use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
 
 pub(crate) fn bounded_detail(detail: &str) -> String {
     memory_store::prefix_within_serialized_bytes(detail, MAX_SUMMARIZER_DETAIL_BYTES).to_string()
