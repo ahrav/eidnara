@@ -8956,6 +8956,11 @@ impl HandlerCore {
                 completion,
             } => {
                 let waited_at = Instant::now();
+                #[cfg(test)]
+                transform::run_transform_attempt_hook(&format!(
+                    "emergency_wait:{}",
+                    env.parsed.session_id
+                ));
                 let completed = self
                     .await_live_history_summarizer_completion(completion)
                     .await;
@@ -39339,7 +39344,17 @@ mod tests {
 
         let release = {
             let producer = Arc::clone(&producer);
+            let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+            let armed_tx = Mutex::new(Some(armed_tx));
+            transform::install_transform_attempt_hook("emergency_wait:ses", move || {
+                if let Some(tx) = armed_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
             tokio::spawn(async move {
+                armed_rx
+                    .await
+                    .expect("the emergency pass reaches its live wait");
                 tokio::time::sleep(Duration::from_millis(1_200)).await;
                 producer.block_output.store(false, Ordering::SeqCst);
                 producer.notify.notify_waiters();
