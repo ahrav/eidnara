@@ -1709,7 +1709,8 @@ writes and deletes one mid; descent and recomp reset.
 Confidence: high -
 [evidence](evidence/fa-n12-identity-observations-survive-window-loss.md).
 Read `lookup_block_identity_rows` and `apply_block_identity_delta`
-(`crates/memory-store/src/lib.rs:4863-4979`), `commit_transform` (`:10883`, delta at `:11117-11119`), `load_transform_snapshot_with_hook`
+(`crates/memory-store/src/lib.rs:4863-4979`), `commit_transform`
+(`:10883`, delta at `:11117-11119`), `load_transform_snapshot_with_hook`
 (`:8727-8772`), descent's copy (`:12961-12970`), reset
 (`delete_block_identities` `:4981-4983`, called at `:13328`), and
 `WindowIdentities` (`crates/daemon/src/transform.rs:5394-5429`) at
@@ -1982,7 +1983,8 @@ identity refusal (`crates/memory-store/src/lib.rs:668-690`,
 (`crates/daemon/src/transform.rs:149`, `:2236-2241`), the hint deferral cap
 (`:148`, `:4218-4222`), and the mid bound (`crates/daemon/src/wire.rs:215`,
 `:285-290`). The store's
-`abandon_history_summarizer_run_if_matching_with_publish_failure` (`crates/memory-store/src/lib.rs:13701`) redacts its caller's detail and
+`abandon_history_summarizer_run_if_matching_with_publish_failure`
+(`crates/memory-store/src/lib.rs:13701`) redacts its caller's detail and
 keeps the stable prefix within `MAX_SUMMARIZER_DETAIL_BYTES`
 (`:13715-13722`, stored at `:13768-13770`). Its daemon callers pass uncut
 `publish rejected: {reason}` and `memory_reviewer handoff failed: {error}`
@@ -2060,7 +2062,8 @@ Open questions:
 - Resolved: the store's abandon path wrote `last_failure` without the
   512-byte cut before `6267f66d4`. `6267f66d4` (#859 PR C) cuts it in the store,
   so every caller meets the bound, and
-  `an_abandon_keeps_a_failure_detail_within_its_serialized_bound` (`crates/memory-store/src/lib.rs:25787`) witnesses it.
+  `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
+  (`crates/memory-store/src/lib.rs:25787`) witnesses it.
 - Resolved: a design review found that a value meeting its bound on input
   could pass it once redaction replaced a secret with a longer placeholder,
   for summarizer failure and no-fire details, the task-list setter, and the

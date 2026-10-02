@@ -38,7 +38,8 @@ References are verified at `0ff62b29a` unless another tree is named.
   is one byte over the bound on top of an existing row with an identity
   delta, and asserts `InputLimit`, unchanged identity rows, and an unchanged
   row version. It ran in #905's workspace gate and in #859 PR A's run.
-- Related: `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused` (`:32079`) pins the exact boundary for prepared content (input at exactly
+- Related: `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused`
+  (`:32079`) pins the exact boundary for prepared content (input at exactly
   the bound, output over it after redaction);
   `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (`:31906`)
   shows a stored oversized `meta` refused inside a state sync with earlier
@@ -58,9 +59,11 @@ References are verified at `0ff62b29a` unless another tree is named.
   document passes through `json_content` (`prepare_document`, `:4832-4856`)
   and so meets the 512 KiB durable-text guard. A refusal there rolls the
   transaction back, and the durable rows stay as they were.
-  `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts` (`:34174`) shows a lost CAS and a write-and-delete refusal leave the rows
+  `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts`
+  (`:34174`) shows a lost CAS and a write-and-delete refusal leave the rows
   unchanged.
-  `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt` (`:34279`, #859 PR C, `e02b22383`) writes four individually sub-threshold
+  `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt`
+  (`:34279`, #859 PR C, `e02b22383`) writes four individually sub-threshold
   rows whose combined serialized length exceeds 256 KiB and stays below
   512 KiB; the one
   write holds more than one document receipt, and the receipts stay until

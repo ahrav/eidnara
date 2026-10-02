@@ -68,7 +68,8 @@ Witnesses in `crates/daemon/src/fold_authority_handler_tests.rs` (#903):
   adoption leaves no identity rows (`:399-422`).
 - Pure table: `the_transition_table_follows_the_session_authority_rules`
   (`crates/daemon/src/fold_authority.rs:200`), 128 combinations.
-- Store: `a_non_boolean_fold_authority_is_a_serde_error_on_every_read` (`crates/memory-store/src/lib.rs:29612`).
+- Store: `a_non_boolean_fold_authority_is_a_serde_error_on_every_read`
+  (`crates/memory-store/src/lib.rs:29612`).
 
 ## Failure scenario
 

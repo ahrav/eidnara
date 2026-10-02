@@ -98,8 +98,10 @@ These are proposed queue entries, not tracker items.
   FA-E04. Closed by #859 PR C (see I3).
 - G4 - FA-N12 sub-obligations: read-work bounds, deletion isolation, and
   counter semantics. Reuse
-  `requested_identity_reads_do_not_grow_with_the_identity_table` (`crates/memory-store/src/lib.rs:23909`) and
-  `delete_session_sweeps_every_session_table_once_and_scopes_notes` (`crates/memory-store/src/lib.rs:21188`).
+  `requested_identity_reads_do_not_grow_with_the_identity_table`
+  (`crates/memory-store/src/lib.rs:23909`) and
+  `delete_session_sweeps_every_session_table_once_and_scopes_notes`
+  (`crates/memory-store/src/lib.rs:21188`).
 - G5 - M2 measurement evidence: per-operation transaction duration,
   connection wait, aborts, and retries.
 - G6 - Remaining boundary witnesses: the authority reset and pass crash

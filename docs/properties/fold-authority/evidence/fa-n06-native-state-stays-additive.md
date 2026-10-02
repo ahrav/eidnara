@@ -57,7 +57,8 @@ Witnesses (#903 unless noted):
   (`:555`), `native_metadata_does_not_grow_with_the_message_count` (`:645`),
   and after every native transform in
   `bounded_operation_histories_follow_the_authority_model` (`:1030`).
-- Store: `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates` (`crates/memory-store/src/lib.rs:25162`), with an unadopted positive
+- Store: `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`
+  (`crates/memory-store/src/lib.rs:25162`), with an unadopted positive
   control that does write three segments and coverage.
 - Read inventory: `native_pass_reads_are_bounded_independent_of_stored_rows`
   (`crates/daemon/src/transform_read_bound.rs:756`).
