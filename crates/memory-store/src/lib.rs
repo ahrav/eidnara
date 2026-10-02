@@ -5821,16 +5821,9 @@ fn prepare_state_sync(
             MAX_NOTE_NUDGE_ANCHORS,
             anchors.len(),
         )?;
-        for anchor in anchors {
-            let serialized = serde_json::to_vec(anchor)
-                .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
-            within_bound(
-                "note_nudge_anchor bytes",
-                MAX_NOTE_NUDGE_ANCHOR_BYTES,
-                serialized.len(),
-            )?;
-        }
     }
+    // Redaction can lengthen a value, so each byte bound below measures the
+    // prepared text the row stores.
     let note_nudge_anchors = request
         .note_nudge_anchors
         .map(|anchors| {
@@ -5838,12 +5831,20 @@ fn prepare_state_sync(
                 .iter()
                 .map(|anchor| {
                     write.identity("note_nudge_message_id", &anchor.message_id)?;
-                    Ok(NoteNudgeAnchorSeed {
+                    let prepared = NoteNudgeAnchorSeed {
                         message_id: anchor.message_id.clone(),
                         text: write.content("note_nudge_text", &anchor.text)?,
-                    })
+                    };
+                    let serialized = serde_json::to_vec(&prepared)
+                        .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
+                    within_bound(
+                        "note_nudge_anchor bytes",
+                        MAX_NOTE_NUDGE_ANCHOR_BYTES,
+                        serialized.len(),
+                    )?;
+                    Ok(prepared)
                 })
-                .collect::<Result<Vec<_>, MemoryStoreError>>()
+                .collect::<Result<Vec<_>, ModuleStateSyncError>>()
         })
         .transpose()?;
     if let Some(pair) = request.todo_synthetic_anchor {
@@ -5874,36 +5875,18 @@ fn prepare_state_sync(
             marker.end_message_id.len(),
         )?;
     }
-    if let Some(Some(state)) = request.deferred_execute_state {
-        within_bound(
-            "deferred_execute_state reason bytes",
-            MAX_STATE_SYNC_DIRECTIVE_BYTES,
-            state.reason.len(),
-        )?;
-    }
-    if let Some(state) = request.channel2_nudge_state {
-        within_bound(
-            "channel2_nudge_state bytes",
-            MAX_STATE_SYNC_DIRECTIVE_BYTES,
-            state.len(),
-        )?;
-    }
-    if let Some(state) = request.last_todo_state.as_deref() {
-        within_bound("last_todo_state bytes", MAX_TODO_STATE_BYTES, state.len())?;
-        within_bound(
-            "last_todo_state serialized bytes",
-            MAX_TODO_STATE_SERIALIZED_BYTES,
-            serialized_text_len(state),
-        )?;
-    }
     let deferred_execute_state = request
         .deferred_execute_state
         .map(|state| {
             state
                 .map(|state| {
-                    Ok::<_, MemoryStoreError>(DeferredExecuteState {
-                        reason: write.content("deferred_execute_reason", &state.reason)?,
-                    })
+                    let reason = write.content("deferred_execute_reason", &state.reason)?;
+                    within_bound(
+                        "deferred_execute_state reason bytes",
+                        MAX_STATE_SYNC_DIRECTIVE_BYTES,
+                        reason.len(),
+                    )?;
+                    Ok::<_, ModuleStateSyncError>(DeferredExecuteState { reason })
                 })
                 .transpose()
         })
@@ -5912,6 +5895,13 @@ fn prepare_state_sync(
         .channel2_nudge_state
         .map(|value| write.content("channel2_nudge_state", value))
         .transpose()?;
+    if let Some(state) = channel2_nudge_state.as_deref() {
+        within_bound(
+            "channel2_nudge_state bytes",
+            MAX_STATE_SYNC_DIRECTIVE_BYTES,
+            state.len(),
+        )?;
+    }
     let strip_seeds = request
         .strip_seeds
         .iter()
@@ -5926,6 +5916,14 @@ fn prepare_state_sync(
         .as_deref()
         .map(|value| write.content("last_todo_state", value))
         .transpose()?;
+    if let Some(state) = last_todo_state.as_deref() {
+        within_bound("last_todo_state bytes", MAX_TODO_STATE_BYTES, state.len())?;
+        within_bound(
+            "last_todo_state serialized bytes",
+            MAX_TODO_STATE_SERIALIZED_BYTES,
+            serialized_text_len(state),
+        )?;
+    }
     let acked_watermarks_json = serde_json::to_string(&request.acked_watermarks)
         .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
     within_bound(
@@ -23861,6 +23859,17 @@ mod tests {
                 "todo state",
                 with(ModuleStateSyncRequest {
                     last_todo_state: Some("t".repeat(MAX_TODO_STATE_BYTES + 1)),
+                    ..history_segment_sync(0, &[])
+                }),
+                "last_todo_state bytes",
+            ),
+            (
+                "todo state that redaction grows past the bound",
+                with(ModuleStateSyncRequest {
+                    last_todo_state: Some(format!(
+                        "{}\npassword=hunter-two",
+                        "t".repeat(MAX_TODO_STATE_BYTES - "\npassword=hunter-two".len())
+                    )),
                     ..history_segment_sync(0, &[])
                 }),
                 "last_todo_state bytes",

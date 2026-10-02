@@ -321,7 +321,9 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         additive_served_history_segment_seq => int;
         project_memory => Bytes(256);
         expiry_cutoff_ms => int;
-        history_summarizer => Configured(12 * 1024);
+        history_summarizer => Configured(
+            crate::history_summarizer_chunk::SELECTED_IDENTITY_BUDGET_BYTES + 12 * 1024
+        );
         publication_floor_ordinal => int;
         block_identity_basis => label;
         tail_identity_re_adopt_count => int;
@@ -388,8 +390,8 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         ["legacy_history_segment_seqs", "covered_system_messages"]
     );
     assert!(
-        total < 128 * 1024,
-        "the recorded bounds sum to {total} bytes"
+        total <= 3 * (512 * 1024) / 4,
+        "the recorded bounds sum to {total} bytes, over three quarters of the 512 KiB durable-text guard"
     );
     eprintln!(
         "recorded metadata bounds: {total} bytes over {} fields",

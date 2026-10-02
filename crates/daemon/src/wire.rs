@@ -194,8 +194,6 @@ pub enum WireError {
     EmptyMid { ordinal: u64 },
     #[error("message id contains reserved '#': {0}")]
     MidContainsReservedHash(String),
-    #[error("message id at ordinal {ordinal} is {len} bytes, over the {MAX_MID_BYTES}-byte bound")]
-    MidTooLong { ordinal: u64, len: usize },
     #[error("message id {0} appears more than once")]
     DuplicateMid(String),
     #[error("unsupported wire block {kind} at {mid}#{block_index}")]
@@ -281,12 +279,6 @@ fn project_messages_from_state(
         }
         if msg.mid.contains('#') {
             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
-        }
-        if msg.mid.len() > MAX_MID_BYTES {
-            return Err(WireError::MidTooLong {
-                ordinal: msg.ordinal,
-                len: msg.mid.len(),
-            });
         }
         if !seen_mids.insert(msg.mid.clone()) {
             return Err(WireError::DuplicateMid(msg.mid.clone()));
@@ -982,17 +974,6 @@ mod tests {
         assert_eq!(
             project_messages(&reserved).unwrap_err(),
             WireError::MidContainsReservedHash("bad#id".into())
-        );
-        let at_bound = "\u{e9}".repeat(MAX_MID_BYTES / 2);
-        assert_eq!(at_bound.len(), MAX_MID_BYTES);
-        assert!(project_messages(&[text_msg(&at_bound, 3, "user", "d")]).is_ok());
-        let over = format!("{at_bound}m");
-        assert_eq!(
-            project_messages(&[text_msg(&over, 3, "user", "d")]).unwrap_err(),
-            WireError::MidTooLong {
-                ordinal: 3,
-                len: MAX_MID_BYTES + 1
-            }
         );
         assert_eq!(split_block_id("#3"), None);
     }
