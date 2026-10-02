@@ -9799,8 +9799,9 @@ impl MemoryStore {
         owner_message_id: &str,
         state_hash: &str,
     ) -> Result<TodoStateSetOutcome, MemoryStoreError> {
+        let state_json = redact_durable_text(state_json).text;
         if state_json.len() > MAX_TODO_STATE_BYTES
-            || serialized_text_len(state_json) > MAX_TODO_STATE_SERIALIZED_BYTES
+            || serialized_text_len(&state_json) > MAX_TODO_STATE_SERIALIZED_BYTES
         {
             return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
         }
@@ -23927,6 +23928,23 @@ mod tests {
         store
             .set_todo_state("ses", &"t".repeat(MAX_TODO_STATE_BYTES), "m1", "h")
             .unwrap();
+        let grows_past_the_bound = format!(
+            "{}\npassword=hunter-two",
+            "t".repeat(MAX_TODO_STATE_BYTES - "\npassword=hunter-two".len())
+        );
+        assert!(matches!(
+            store.set_todo_state("ses", &grows_past_the_bound, "m2", "h2"),
+            Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
+        ));
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .last_todo_state
+                .map(|state| state.len()),
+            Some(MAX_TODO_STATE_BYTES)
+        );
     }
 
     #[test]
