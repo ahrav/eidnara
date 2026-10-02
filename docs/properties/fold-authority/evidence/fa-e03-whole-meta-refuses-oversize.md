@@ -33,15 +33,14 @@ References are verified at `0ff62b29a` unless another tree is named.
   (`:4303`). This runs while the commit is prepared, before `write.execute`
   opens the transaction (`:11102`); the row write runs inside it
   (`:11104-11113`).
-- Refusal witness: `a_refused_commit_writes_no_identity_row` (`:33555`),
+- Refusal witness: `a_refused_commit_writes_no_identity_row` (`:33757`),
   added by #905 (`871ebfb08`), commits a `meta` whose `last_render_config`
   is one byte over the bound on top of an existing row with an identity
   delta, and asserts `InputLimit`, unchanged identity rows, and an unchanged
   row version. It ran in #905's workspace gate and in #859 PR A's run.
-- Related: `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused`
-  (`:31877`) pins the exact boundary for prepared content (input at exactly
+- Related: `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused` (`:32079`) pins the exact boundary for prepared content (input at exactly
   the bound, output over it after redaction);
-  `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (`:31704`)
+  `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (`:31906`)
   shows a stored oversized `meta` refused inside a state sync with earlier
   writes rolled back.
 - Not reached: `matrix_meta` asserts every matrix cell's stored `meta` is
@@ -59,11 +58,9 @@ References are verified at `0ff62b29a` unless another tree is named.
   document passes through `json_content` (`prepare_document`, `:4832-4856`)
   and so meets the 512 KiB durable-text guard. A refusal there rolls the
   transaction back, and the durable rows stay as they were.
-  `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts`
-  (`:33972`) shows a lost CAS and a write-and-delete refusal leave the rows
+  `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts` (`:34174`) shows a lost CAS and a write-and-delete refusal leave the rows
   unchanged.
-  `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt`
-  (`:34077`, #859 PR C, `e02b22383`) writes four individually sub-threshold
+  `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt` (`:34279`, #859 PR C, `e02b22383`) writes four individually sub-threshold
   rows whose combined serialized length exceeds 256 KiB and stays below
   512 KiB; the one
   write holds more than one document receipt, and the receipts stay until
@@ -126,7 +123,7 @@ covered-system document, leaves the covered rows as they were.
 ### Q: Does a refused commit leave the covered-system rows unchanged?
 
 - Sources examined: `git show b45416ac0 -- crates/memory-store`; the
-  covered-system store tests (`crates/memory-store/src/lib.rs:33972`,
+  covered-system store tests (`crates/memory-store/src/lib.rs:34174`,
   `:34147`, `:34183`, `:34213`).
 - Findings: The rows are written inside the commit transaction after the
   `meta` guard, and each row document passes the same guard, so a refusal

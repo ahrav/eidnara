@@ -32,8 +32,8 @@ All references are verified at HEAD `0ff62b29a`.
   pass's bind sequence is present with no participating sibling
   (`RouteBindings::has_sibling`, `:351-357`). A sibling bind therefore lands
   before the reset (the change stays pending) or after it.
-- `reset_session_for_authority` (`crates/memory-store/src/lib.rs:13189`) calls
-  `reset_session` (`:13246`). Inside the fenced transaction it checks the
+- `reset_session_for_authority` (`crates/memory-store/src/lib.rs:13226`) calls
+  `reset_session` (`:13283`). Inside the fenced transaction it checks the
   row-version CAS, then re-checks summarizer Idle and the pending-publication
   row (`:13272-13283`) and returns `Ok(None)` without writing when either
   blocks. The same transaction writes the replacement
@@ -41,7 +41,7 @@ All references are verified at HEAD `0ff62b29a`.
   `revert_epoch`, empties core and metadata, deletes identity rows (`:13328`),
   retires scan owners, and deletes segments, transcripts, candidates, and the
   pending publication.
-- `reset_session_for_recomp` (`:13176`) passes no replacement, so the adopted
+- `reset_session_for_recomp` (`:13213`) passes no replacement, so the adopted
   authority survives an ordinary reset. `reset_no_survivor` uses it
   (`crates/daemon/src/transform.rs:2192`).
 - A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9294`, which
@@ -62,7 +62,7 @@ Witnesses:
 - Store: `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority`,
   `a_busy_summarizer_refuses_the_authority_reset`, and
   `a_pending_publication_refuses_the_authority_reset_of_an_idle_session`
-  (`crates/memory-store/src/lib.rs:29456`, `:29489`, `:29516`).
+  (`crates/memory-store/src/lib.rs:29658`, `:29489`, `:29516`).
 
 ## Failure scenario
 

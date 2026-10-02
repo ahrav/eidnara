@@ -155,25 +155,18 @@ All references are verified at `0ff62b29a`.
   (`crates/memory-store/tests/production_redaction.rs:968`; stored detail
   redacted, within 512 bytes, stable under both redactors, and its
   receipt's finding count at least one),
-  `a_committed_last_recut_is_stored_within_its_bound`
-  (`crates/memory-store/src/lib.rs:24699`; a 200 KiB recut stored as its
+  `a_committed_last_recut_is_stored_within_its_bound` (`crates/memory-store/src/lib.rs:24789`; a 200 KiB recut stored as its
   1,024-byte prefix),
-  `a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long`
-  (`:24719`; a 4 KiB surviving id),
+  `a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long` (`:24809`; a 4 KiB surviving id),
   `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair`
   and `a_replacement_pair_near_its_bound_persists_and_reloads_within_it`
   (`crates/daemon/src/transform.rs:21623`, `:21655`; the caller-side pair
   through `advance_synthetic_todo` and a reload),
-  `a_redacted_detail_cut_keeps_its_length_through_another_redaction`
-  (`crates/memory-store/src/lib.rs:24666`),
-  `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction`
-  (`:24854`),
-  `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound`
-  (`:24894`), `a_secret_bearing_start_failure_stays_within_its_bound_once_stored`
-  (`crates/daemon/src/history_summarizer.rs:4267`),
-  `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list`
-  (`crates/daemon/src/injection.rs:773`), and
-  `a_synthetic_pair_over_its_bound_after_redaction_is_refused` (`:793`). The
+  `a_redacted_detail_cut_keeps_its_length_through_another_redaction` (`crates/memory-store/src/lib.rs:24756`),
+  `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction` (`:24944`),
+  `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound` (`:24984`), `a_secret_bearing_start_failure_stays_within_its_bound_once_stored` (`crates/daemon/src/history_summarizer.rs:4275`),
+  `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list` (`crates/daemon/src/injection.rs:785`), and
+  `a_synthetic_pair_over_its_bound_after_redaction_is_refused` (`:820`). The
   #859 PR C description records the negative control for each; this
   evidence does not rerun those controls.
 - The store's abandon path: before `6267f66d4`,
@@ -181,18 +174,17 @@ All references are verified at `0ff62b29a`.
   the caller's redacted detail whole. Since `6267f66d4` (#859 PR C) it
   redacts the detail and keeps the prefix within
   `MAX_SUMMARIZER_DETAIL_BYTES` that both redactors leave unchanged
-  (`crates/memory-store/src/lib.rs:13664`, `:13676-13682`), and stores that
-  prefix (`:13728-13730`). Its daemon
+  (`crates/memory-store/src/lib.rs:13701`, `:13715-13722`), and stores that
+  prefix (`:13768-13770`). Its daemon
   callers still pass uncut `publish rejected: {reason}` details for fence,
   caller-fence, overlap, and conflict refusals
   (`crates/daemon/src/history_summarizer.rs:737-743`, `:756-762`,
   `:773-779`, `:794-806`) and `memory_reviewer handoff failed: {error}`
-  (`:2582`, `:2591-2598`); the store-side cut bounds them all. A fence
-  reason names the selected mid (`crates/memory-store/src/lib.rs:14125-14129`),
+  (`:2589`, `:2598-2605`); the store-side cut bounds them all. A fence
+  reason names the selected mid (`crates/memory-store/src/lib.rs:14165-14169`),
   and a mid may be 128 bytes of control characters
   (`crates/daemon/src/wire.rs:215`, `:285-290`), which serialize to 768
-  bytes. `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
-  (`crates/memory-store/src/lib.rs:25617`) abandons with
+  bytes. `an_abandon_keeps_a_failure_detail_within_its_serialized_bound` (`crates/memory-store/src/lib.rs:25787`) abandons with
   `publish rejected: ` and 400 control characters (2,418 serialized bytes,
   `:25629`) and asserts the stored detail is a prefix of it, at most 512
   serialized bytes and more than 506 (`:25648-25650`).
@@ -206,8 +198,7 @@ All references are verified at `0ff62b29a`.
   (`:6398`, `:6402-6448`). Since `186f3c076` the seeded pair and the
   acknowledged watermarks are checked with `stored_json_len`
   (`:6295-6299`, `:6379-6383`);
-  `state_sync_refuses_values_whose_stored_form_passes_their_bound`
-  (`:24759`) refuses each at exactly its raw bound with a stored form past
+  `state_sync_refuses_values_whose_stored_form_passes_their_bound` (`:24849`) refuses each at exactly its raw bound with a stored form past
   it and asserts the refused sync writes nothing. A sync whose result would
   hold more than 512 legacy segments is refused before any write
   (`:11505-11534`).
@@ -263,11 +254,9 @@ selection, committed; a store-side abandon with a detail over the bound
 - Findings: At `d7b330113` both were `Unbounded`. The owner decided: #859
   PR B moves covered system messages into rows outside `meta` and caps
   legacy segments at 512 per session;
-  `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed`
-  (`crates/daemon/src/transform.rs:26366`) shows 40 distinct covered systems
+  `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed` (`crates/daemon/src/transform.rs:26370`) shows 40 distinct covered systems
   rendered while the stored meta changes by digit widths alone, and
-  `state_sync_refuses_a_result_over_the_legacy_segment_cap`
-  (`crates/memory-store/src/lib.rs:24947`) refuses the 513th legacy row.
+  `state_sync_refuses_a_result_over_the_legacy_segment_cap` (`crates/memory-store/src/lib.rs:25037`) refuses the 513th legacy row.
 - Missing evidence: None.
 - Conclusion: resolved with answer: the owner decision is implemented.
 

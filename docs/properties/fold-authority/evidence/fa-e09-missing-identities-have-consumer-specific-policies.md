@@ -87,7 +87,7 @@ transform pass over a mid whose row was deleted.
   (`crates/memory-store/src/lib.rs:14124-14183`);
   `crates/daemon/src/transform.rs:5485-5487`; tests at
   `crates/memory-store/src/lib.rs:25938`,
-  `crates/daemon/src/history_summarizer.rs:4047`,
+  `crates/daemon/src/history_summarizer.rs:4055`,
   `crates/memory-store/src/lib.rs:30032`, and
   `crates/daemon/src/transform.rs:14628` (lines at `0ff62b29a`).
 - Findings: Yes. The fence refuses a missing row

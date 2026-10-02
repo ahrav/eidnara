@@ -18,7 +18,7 @@ All references are verified at HEAD `0ff62b29a`.
   `#[serde(default, skip_serializing_if = "Option::is_none")]`
   (`crates/memory-store/src/lib.rs:2460-2465`). An absent key reads as `None`,
   so a default never supplies `false`.
-- `load_fold_authority` (`crates/memory-store/src/lib.rs:13200`) reads the key
+- `load_fold_authority` (`crates/memory-store/src/lib.rs:13237`) reads the key
   with `json_type` through `FOLD_AUTHORITY_SELECT` (`:6735-6739`) and does not
   decode the row. A non-boolean JSON type is `MemoryStoreError::Serde`
   (`:13226-13235`). `applied` is the stored value, or `Some(true)` for a row
@@ -68,8 +68,7 @@ Witnesses in `crates/daemon/src/fold_authority_handler_tests.rs` (#903):
   adoption leaves no identity rows (`:399-422`).
 - Pure table: `the_transition_table_follows_the_session_authority_rules`
   (`crates/daemon/src/fold_authority.rs:200`), 128 combinations.
-- Store: `a_non_boolean_fold_authority_is_a_serde_error_on_every_read`
-  (`crates/memory-store/src/lib.rs:29410`).
+- Store: `a_non_boolean_fold_authority_is_a_serde_error_on_every_read` (`crates/memory-store/src/lib.rs:29612`).
 
 ## Failure scenario
 

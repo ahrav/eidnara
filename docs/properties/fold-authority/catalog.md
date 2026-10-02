@@ -297,12 +297,12 @@ S`:427` to `:429` and the guard from `:3998-4004` to `:4577-4583`; the
 existing check D`transform_meta_bound.rs:20-99` was deleted by #833
 (`7a8fb84b`); the growing fields S`:1668`, `:1876`, `:2014` left the record
 (identity map by #905, fingerprints and baseline parts by #906).
-Existing check: `crates/memory-store/src/lib.rs:33555`
-`a_refused_commit_writes_no_identity_row`; `:31877`
+Existing check: `crates/memory-store/src/lib.rs:33757`
+`a_refused_commit_writes_no_identity_row`; `:32079`
 `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused`
-(exact boundary on prepared content); `:31704`
+(exact boundary on prepared content); `:31906`
 `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (oversized
-stored meta refused inside a state sync); `:34077`
+stored meta refused inside a state sync); `:34279`
 `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt`
 (covered rows split across scan documents, #859 PR C);
 `crates/daemon/src/transform_meta_bound.rs:1273` (guard not reached, `:1265-1268`).
@@ -633,9 +633,9 @@ is now `:5485-5487`; the `IdentityDrift` error and
 re-adopts or refuses with `FrozenTargetDrift`.
 Existing check: `crates/memory-store/src/lib.rs:25938`
 `publish_rejects_a_selected_message_whose_identity_row_is_gone` (#905);
-`crates/daemon/src/history_summarizer.rs:4047`
+`crates/daemon/src/history_summarizer.rs:4055`
 `selected_range_identity_drift_during_await_rejects_without_cooldown` (spec
-`:3037`); `:4101` `tail_identity_extension_during_await_still_publishes`;
+`:3037`); `:4109` `tail_identity_extension_during_await_still_publishes`;
 `crates/memory-store/src/lib.rs:30032`
 `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict`;
 `crates/daemon/src/transform.rs:14628`
@@ -983,7 +983,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every transform pass plans its authority
-from the store (`load_fold_authority`, `crates/memory-store/src/lib.rs:13200`;
+from the store (`load_fold_authority`, `crates/memory-store/src/lib.rs:13237`;
 `fold_authority::plan`, `crates/daemon/src/fold_authority.rs:95`) and stamps
 the adoption into its commit (`stamp_fold_authority`,
 `crates/daemon/src/transform.rs:2154`, called at `:2746` and `:3390`); a fresh
@@ -1032,7 +1032,7 @@ Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:135`
 `legacy_rows_adopt_by_their_fold_artifacts`;
 `crates/daemon/src/fold_authority.rs:200`
 `the_transition_table_follows_the_session_authority_rules`;
-`crates/memory-store/src/lib.rs:29410`
+`crates/memory-store/src/lib.rs:29612`
 `a_non_boolean_fold_authority_is_a_serde_error_on_every_read`.
 Impact: High. Routes that read different authorities for one session mix
 fold coordinates.
@@ -1082,7 +1082,7 @@ Confidence: high -
 [evidence](evidence/fa-n03-authority-change-requires-quiescent-bind.md). The
 planner's change and pending arms, the fence, the in-transaction re-check,
 the replacement write beside the epoch advance, and recomp's preservation
-(`reset_session_for_recomp`, `crates/memory-store/src/lib.rs:13176`) were read
+(`reset_session_for_recomp`, `crates/memory-store/src/lib.rs:13213`) were read
 at HEAD. The "restart" in the busy-summarizer witness clears the binding
 table in place rather than reopening the handler.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:219`
@@ -1092,9 +1092,9 @@ Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:219`
 `a_busy_summarizer_keeps_the_change_pending_across_a_restart`; `:656`
 `an_emergency_rerun_after_publication_keeps_the_change_pending`; `:314`
 `an_ordinary_recomp_reset_preserves_the_adopted_authority`;
-`crates/memory-store/src/lib.rs:29456`
+`crates/memory-store/src/lib.rs:29658`
 `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority`;
-`:29489` `a_busy_summarizer_refuses_the_authority_reset`; `:29516`
+`:29691` `a_busy_summarizer_refuses_the_authority_reset`; `:29718`
 `a_pending_publication_refuses_the_authority_reset_of_an_idle_session`.
 Impact: High. A change under a live firing publishes old coordinates into a
 session that claims the new authority.
@@ -1265,7 +1265,7 @@ path (`:4159`); native state sync empties the segment batch
 baseline parts are not `ModuleMeta` fields after #905 and #906.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:46`,
 `:219`, `:840`, `:555`, `:645`, `:1030` (through `assert_native_state`,
-`:19`); `crates/memory-store/src/lib.rs:24992`
+`:19`); `crates/memory-store/src/lib.rs:25162`
 `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`;
 `crates/daemon/src/transform_read_bound.rs:756`
 `native_pass_reads_are_bounded_independent_of_stored_rows`; folding-path
@@ -1709,23 +1709,22 @@ writes and deletes one mid; descent and recomp reset.
 Confidence: high -
 [evidence](evidence/fa-n12-identity-observations-survive-window-loss.md).
 Read `lookup_block_identity_rows` and `apply_block_identity_delta`
-(`crates/memory-store/src/lib.rs:4863-4979`), `commit_transform`
-(`:10831`, delta at `:11117-11119`), `load_transform_snapshot_with_hook`
+(`crates/memory-store/src/lib.rs:4863-4979`), `commit_transform` (`:10883`, delta at `:11117-11119`), `load_transform_snapshot_with_hook`
 (`:8727-8772`), descent's copy (`:12961-12970`), reset
 (`delete_block_identities` `:4981-4983`, called at `:13328`), and
 `WindowIdentities` (`crates/daemon/src/transform.rs:5394-5429`) at
 `0ff62b29a`.
-Existing check: `crates/memory-store/src/lib.rs:23853`
-`requested_identity_reads_do_not_grow_with_the_identity_table`; `:33283`
+Existing check: `crates/memory-store/src/lib.rs:23909`
+`requested_identity_reads_do_not_grow_with_the_identity_table`; `:33485`
 `block_identity_deltas_keep_omitted_rows_and_scan_only_the_rows_they_write`;
-`:33369` `a_rejected_commit_writes_no_identity_row`; `:33555`
-`a_refused_commit_writes_no_identity_row`; `:33401`
+`:33571` `a_rejected_commit_writes_no_identity_row`; `:33757`
+`a_refused_commit_writes_no_identity_row`; `:33603`
 `a_failure_after_each_identity_mutation_rolls_the_whole_commit_back`;
-`:33595` `a_delta_that_writes_and_deletes_one_mid_is_refused`; `:33775`
-`identity_histories_match_a_per_session_reference_map`; `:21840`
+`:33797` `a_delta_that_writes_and_deletes_one_mid_is_refused`; `:33977`
+`identity_histories_match_a_per_session_reference_map`; `:21896`
 `transform_snapshot_resists_commit_between_state_and_overlay_reads`;
-`:33872` `descent_copies_block_identities_and_recomp_reset_clears_them`;
-`:33723` `descent_copies_identity_rows_without_their_scan_owner`; `:33624`
+`:34074` `descent_copies_block_identities_and_recomp_reset_clears_them`;
+`:33925` `descent_copies_identity_rows_without_their_scan_owner`; `:33826`
 `receipt_retirement_reads_at_most_one_row_beyond_the_released_ones`;
 `:25938` `publish_rejects_a_selected_message_whose_identity_row_is_gone`;
 `crates/daemon/src/transform.rs:14628`
@@ -1983,14 +1982,13 @@ identity refusal (`crates/memory-store/src/lib.rs:668-690`,
 (`crates/daemon/src/transform.rs:149`, `:2236-2241`), the hint deferral cap
 (`:148`, `:4218-4222`), and the mid bound (`crates/daemon/src/wire.rs:215`,
 `:285-290`). The store's
-`abandon_history_summarizer_run_if_matching_with_publish_failure`
-(`crates/memory-store/src/lib.rs:13664`) redacts its caller's detail and
+`abandon_history_summarizer_run_if_matching_with_publish_failure` (`crates/memory-store/src/lib.rs:13701`) redacts its caller's detail and
 keeps the stable prefix within `MAX_SUMMARIZER_DETAIL_BYTES`
-(`:13676-13682`, stored at `:13728-13730`). Its daemon callers pass uncut
+(`:13715-13722`, stored at `:13768-13770`). Its daemon callers pass uncut
 `publish rejected: {reason}` and `memory_reviewer handoff failed: {error}`
 details (`crates/daemon/src/history_summarizer.rs:737-743`, `:756-762`,
-`:773-779`, `:794-806`, `:2591-2598`), and a fence reason can quote a
-128-byte control-character mid (`crates/memory-store/src/lib.rs:14125-14129`),
+`:773-779`, `:794-806`, `:2598-2605`), and a fence reason can quote a
+128-byte control-character mid (`crates/memory-store/src/lib.rs:14165-14169`),
 so the store-side cut keeps that path within the 514 bytes the inventory
 charges.
 Existing check: `crates/daemon/src/transform_meta_bound.rs:1273`
@@ -2003,41 +2001,41 @@ Existing check: `crates/daemon/src/transform_meta_bound.rs:1273`
 `every_history_summarizer_field_has_an_enforced_bound`; `:1371`
 `request_identity_strings_over_their_bound_are_refused_before_any_read`;
 `:91` `a_hundred_thousand_message_session_commits_a_three_hundred_message_window`;
-`crates/daemon/src/transform.rs:26366`
+`crates/daemon/src/transform.rs:26370`
 `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed` (#859 PR B);
 `:21623` `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair`
-and `:21655` `a_replacement_pair_near_its_bound_persists_and_reloads_within_it`
+and `:21659` `a_replacement_pair_near_its_bound_persists_and_reloads_within_it`
 (#859 PR C);
 `crates/memory-store/tests/production_redaction.rs:968`
 `a_secret_bearing_summarizer_detail_is_stored_within_its_bound_with_its_detection_recorded`
 (#859 PR C);
-`crates/memory-store/src/lib.rs:24334`
+`crates/memory-store/src/lib.rs:24390`
 `state_sync_refuses_anchors_and_watermarks_over_their_bounds` (with the todo
-serialized-length cap, #859 PR C); `:24576`
+serialized-length cap, #859 PR C); `:24632`
 `state_sync_refuses_values_whose_redacted_form_passes_their_bound` and
-`:24947` `state_sync_refuses_a_result_over_the_legacy_segment_cap` (#859 PR
-B); `:24666` `a_redacted_detail_cut_keeps_its_length_through_another_redaction`,
-`:24699` `a_committed_last_recut_is_stored_within_its_bound`, `:24719`
+`:25037` `state_sync_refuses_a_result_over_the_legacy_segment_cap` (#859 PR
+B); `:24756` `a_redacted_detail_cut_keeps_its_length_through_another_redaction`,
+`:24789` `a_committed_last_recut_is_stored_within_its_bound`, `:24809`
 `a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long`,
-`:24759` `state_sync_refuses_values_whose_stored_form_passes_their_bound`,
-`:24854`
+`:24849` `state_sync_refuses_values_whose_stored_form_passes_their_bound`,
+`:24944`
 `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction`,
-`:24894` `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound`,
-and `:25617` `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
-(#859 PR C); `:26514`
+`:24984` `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound`,
+and `:25787` `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
+(#859 PR C); `:26716`
 `a_reservation_identity_over_its_serialized_bound_is_refused_before_any_write`
-(#859 PR C); `:33972`
+(#859 PR C); `:34174`
 `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts`,
-`:34147` `covered_system_content_is_stored_as_the_meta_scan_redacts_it`,
-`:34183` `reset_and_delete_remove_covered_system_rows_and_their_receipts`,
-and `:34213` `descent_leaves_the_target_without_covered_system_rows` (#859
-PR B); `crates/daemon/src/history_summarizer.rs:4235`
-`a_producer_start_failure_records_a_bounded_detail`, `:4267`
-`a_secret_bearing_start_failure_stays_within_its_bound_once_stored`, `:4300`
-`a_run_id_over_the_producer_identity_bound_is_a_start_failure`, `:4331`
-`a_harness_over_the_producer_identity_bound_writes_nothing`, `:6271`
-`a_producer_session_id_keeps_a_bounded_slug`, `:6232`
-`chunk_fingerprint_uses_id_kind_and_byte_length`, and `:2714`
+`:34349` `covered_system_content_is_stored_as_the_meta_scan_redacts_it`,
+`:34385` `reset_and_delete_remove_covered_system_rows_and_their_receipts`,
+and `:34415` `descent_leaves_the_target_without_covered_system_rows` (#859
+PR B); `crates/daemon/src/history_summarizer.rs:4243`
+`a_producer_start_failure_records_a_bounded_detail`, `:4275`
+`a_secret_bearing_start_failure_stays_within_its_bound_once_stored`, `:4397`
+`a_run_id_over_the_producer_identity_bound_is_a_start_failure`, `:4432`
+`a_harness_over_the_producer_identity_bound_writes_nothing`, `:6372`
+`a_producer_session_id_keeps_a_bounded_slug`, `:6333`
+`chunk_fingerprint_uses_id_kind_and_byte_length`, and `:2721`
 `chunk_failures_count_per_chunk_and_ignore_provider_errors` (#859 PR C);
 `crates/memory-store/src/summarizer_timeline.rs:490`
 `a_detail_is_cut_by_its_serialized_length` (#859 PR C);
@@ -2062,8 +2060,7 @@ Open questions:
 - Resolved: the store's abandon path wrote `last_failure` without the
   512-byte cut before `6267f66d4`. `6267f66d4` (#859 PR C) cuts it in the store,
   so every caller meets the bound, and
-  `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
-  (`crates/memory-store/src/lib.rs:25617`) witnesses it.
+  `an_abandon_keeps_a_failure_detail_within_its_serialized_bound` (`crates/memory-store/src/lib.rs:25787`) witnesses it.
 - Resolved: a design review found that a value meeting its bound on input
   could pass it once redaction replaced a secret with a longer placeholder,
   for summarizer failure and no-fire details, the task-list setter, and the

@@ -26,7 +26,7 @@ Code references are verified at `0ff62b29a`.
   `apply_block_identity_delta` (`:4904-4979`) refuses a delta that writes and
   deletes one mid (`:4913-4923`), skips an unchanged vector (`:4942-4945`),
   deletes only the listed mids (`:4951-4956`), and upserts the rest.
-- CAS coupling: `commit_transform` (`:10831`) runs the row-version CAS
+- CAS coupling: `commit_transform` (`:10883`) runs the row-version CAS
   (`:11059-11068`), the new-row identity check (`:11069-11077`), and the
   history-segment sequence check (`:11078-11089`); the CAS and the sequence
   check return `Replay`. It then writes `cache_state` (`:11104-11113`) and
@@ -55,8 +55,7 @@ Gate results as recorded in the PR descriptions:
   -- --check`, clippy `-D warnings`, rustdoc `-D warnings`, `cargo +1.98
   test --workspace --all-features --locked --no-fail-fast`, and the marker
   script pass. The run log records 6,064 passed, 0 failed, 66 ignored, with
-  each named test `ok`. The ignored driver `record_identity_transaction_timings`
-  (`crates/memory-store/src/lib.rs:33463`) records a 300-mid delta commit at
+  each named test `ok`. The ignored driver `record_identity_transaction_timings` (`crates/memory-store/src/lib.rs:33665`) records a 300-mid delta commit at
   4.00 ms and 4.27 ms and a 300-mid snapshot read at 0.43 ms and 0.49 ms at
   100k and 1M rows (SQLite 3.51.3, WAL, `synchronous=2`); evidence, not a
   gate.
