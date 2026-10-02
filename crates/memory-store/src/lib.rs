@@ -1576,7 +1576,7 @@ pub enum HistorySummarizerPublishError {
         found: u64,
         reason: Option<String>,
     },
-    /// The store's own fence refused the publish before any write: the selected input or the segment set no longer matches the firing's snapshot. Distinct from CasConflict so callers can abandon the run WITHOUT arming a model-failure cooldown.
+    /// The store's own fence refused the publish before any write: the selected input or the segment set no longer matches the firing's snapshot, or the appended rows would carry the session's `legacy = 1` rows past [`MAX_LEGACY_HISTORY_SEGMENTS`]. Distinct from CasConflict so callers can abandon the run WITHOUT arming a model-failure cooldown.
     #[error("publication fence rejected: {reason}")]
     FenceRejected { reason: String },
     /// A caller-supplied publication fence refused before the store was reached: a fast local race, not a property of the stored history, so a retry with a fresh snapshot is valid.
@@ -5960,10 +5960,33 @@ fn serialized_text_len(text: &str) -> usize {
 pub const MAX_STATE_SYNC_DIRECTIVE_BYTES: usize = 256;
 pub const MAX_STATE_SYNC_ID_BYTES: usize = 128;
 pub const MAX_SYNTHETIC_TODO_PAIR_BYTES: usize = 24 * 1024;
-/// Most `legacy = 1` history_segments a session holds. Only the state-sync seed writes them,
-/// and a sync whose result would hold more is refused, so
-/// [`ModuleMeta::legacy_history_segment_seqs`] has a fixed bound.
+/// Maximum number of `legacy = 1` rows in `history_segments` per session, which bounds
+/// [`ModuleMeta::legacy_history_segment_seqs`].
 pub const MAX_LEGACY_HISTORY_SEGMENTS: usize = 512;
+
+fn legacy_history_segments_over_cap(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    replaced_sequences: impl IntoIterator<Item = i64>,
+    added: usize,
+) -> rusqlite::Result<Option<usize>> {
+    if added == 0 {
+        return Ok(None);
+    }
+    let replaced = serde_json::to_string(&replaced_sequences.into_iter().collect::<Vec<_>>())
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let kept: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM history_segments
+          WHERE session_id = ?1 AND legacy = 1
+            AND sequence NOT IN (SELECT value FROM json_each(?2))",
+        params![session_id, replaced],
+        |row| row.get(0),
+    )?;
+    let found = usize::try_from(kept)
+        .unwrap_or(usize::MAX)
+        .saturating_add(added);
+    Ok((found > MAX_LEGACY_HISTORY_SEGMENTS).then_some(found))
+}
 
 fn within_bound(
     field: &'static str,
@@ -11295,35 +11318,20 @@ impl MemoryStore {
                     ));
                 }
             };
-            let written_legacy = written_history_segments
-                .iter()
-                .filter(|row| row.legacy == 1)
-                .count();
-            if written_legacy > 0 {
-                // A written row replaces the stored row at its sequence, so the session keeps
-                // only the stored legacy rows the batch does not overwrite.
-                let written_sequences = serde_json::to_string(
-                    &written_history_segments
-                        .iter()
-                        .map(|row| row.sequence)
-                        .collect::<Vec<_>>(),
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                let kept: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM history_segments
-                      WHERE session_id = ?1 AND legacy = 1
-                        AND sequence NOT IN (SELECT value FROM json_each(?2))",
-                    params![request.session_id, written_sequences],
-                    |row| row.get(0),
-                )?;
-                let found = usize::try_from(kept)
-                    .unwrap_or(usize::MAX)
-                    .saturating_add(written_legacy);
-                if found > MAX_LEGACY_HISTORY_SEGMENTS {
-                    return Ok(WriteDisposition::Replay(
-                        ModuleStateSyncTxnOutcome::LegacyOverBound { found },
-                    ));
-                }
+            // A written row replaces the stored row at its sequence, so the count keeps the
+            // stored legacy rows at other sequences and adds the written legacy rows.
+            if let Some(found) = legacy_history_segments_over_cap(
+                tx,
+                request.session_id,
+                written_history_segments.iter().map(|row| row.sequence),
+                written_history_segments
+                    .iter()
+                    .filter(|row| row.legacy == 1)
+                    .count(),
+            )? {
+                return Ok(WriteDisposition::Replay(
+                    ModuleStateSyncTxnOutcome::LegacyOverBound { found },
+                ));
             }
 
             let drop_seeds_skipped = if native_authority {
@@ -13939,7 +13947,23 @@ impl MemoryStore {
                         ));
                     }
                 }
-                if history_segments.iter().any(|row| row.legacy == 1) {
+                // Publication appends, so every stored legacy row stays beside the new ones.
+                let published_legacy = history_segments
+                    .iter()
+                    .filter(|row| row.legacy == 1)
+                    .count();
+                if let Some(found) = legacy_history_segments_over_cap(
+                    tx,
+                    session_id,
+                    std::iter::empty(),
+                    published_legacy,
+                )? {
+                    return Ok(PublishTxnOutcome::FenceRejected(format!(
+                        "publication would hold {found} legacy history_segments, over the cap of \
+                         {MAX_LEGACY_HISTORY_SEGMENTS}"
+                    )));
+                }
+                if published_legacy > 0 {
                     meta.legacy_history_segment_seqs = None;
                 }
                 meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
@@ -24434,6 +24458,86 @@ mod tests {
         assert_eq!(snapshot(), before, "a refused sync writes nothing");
         sync_history_segments(&store, 2, &[bounded_read_segment(cap + 1, 0)])
             .expect("a non-legacy row leaves the legacy count at its cap");
+    }
+
+    #[test]
+    fn summarizer_publication_refuses_a_result_over_the_legacy_segment_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = MAX_LEGACY_HISTORY_SEGMENTS as i64;
+        let store = bounded_read_store(dir.path(), cap, &(1..=cap).collect::<Vec<_>>());
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: cap,
+            count: 0,
+        };
+        let base = publishing_meta();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                history_segment_set_generation: generation,
+                ..base.history_summarizer.clone()
+            },
+            ..base
+        };
+        let expected = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let predicate = HistorySummarizerPublishPredicate {
+            history_segment_set_generation: generation,
+            ..publish_predicate()
+        };
+        let published = |legacy: i32| StoredHistorySegment {
+            start_message: 2 * cap + 1,
+            end_message: 2 * cap + 2,
+            ..bounded_read_segment(cap + 1, legacy)
+        };
+        let publish = |row: StoredHistorySegment| {
+            store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                session_id: "ses",
+                expected_row_version: Some(expected),
+                expected_revert_epoch: 0,
+                predicate: &predicate,
+                project_path: "git:proj",
+                history_segments: &[row],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
+                published_at_ms: 0,
+            })
+        };
+        let snapshot = || {
+            let loaded = store.load("ses").unwrap();
+            (
+                loaded.row_version,
+                loaded.meta,
+                store.load_history_segments("ses").unwrap(),
+            )
+        };
+        let before = snapshot();
+        assert_eq!(
+            before.2.iter().filter(|row| row.legacy == 1).count(),
+            MAX_LEGACY_HISTORY_SEGMENTS
+        );
+
+        let refused = publish(published(1));
+        assert!(
+            matches!(
+                &refused,
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
+                    if reason.contains("legacy")
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(snapshot(), before, "a refused publication writes nothing");
+        publish(published(0)).expect("a non-legacy row leaves the legacy count at its cap");
     }
 
     #[test]
