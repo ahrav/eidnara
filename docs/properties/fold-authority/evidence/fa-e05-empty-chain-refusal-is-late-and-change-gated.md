@@ -40,12 +40,12 @@ At HEAD `0ff62b29a`:
 - Defense guards: the assembler returns `NoModels` for an empty chain
   (`crates/daemon/src/history_summarizer_chunk.rs:908-912`) and the driver
   returns `HistorySummarizerDriveError::NoModels`
-  (`crates/daemon/src/history_summarizer.rs:1831-1833`).
+  (`crates/daemon/src/history_summarizer.rs:1840-1842`).
 - Wrapup keeps its own late check under Eidnara authority
   (`lib.rs:5797-5802`).
 - `session.status` reports this state as
   `eidnara, summarizer stalled (no models at the last pass)`
-  (`lib.rs:6708-6711`), a #904 change.
+  (`lib.rs:6760-6763`), a #904 change.
 
 Checks at HEAD:
 
@@ -60,9 +60,9 @@ Checks at HEAD:
   (`crates/daemon/src/fold_authority_handler_tests.rs:1037`).
 
 Citation corrections from `265df096` to HEAD: callers `lib.rs:9014`, `:9150`
-are now `:8924`, `:9077`; `:9451-9468` (the preparation entry) is
-`:9423-9434` and now holds the gate; `history_summarizer_chunk.rs:619-623` is
-`:908-912`; `history_summarizer.rs:1655-1657` is `:1831-1833`; the checks at
+are now `:8976`, `:9077`; `:9503-9520` (the preparation entry) is
+`:9475-9486` and now holds the gate; `history_summarizer_chunk.rs:619-623` is
+`:908-912`; `history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
 
 ## Failure scenario

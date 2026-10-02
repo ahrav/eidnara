@@ -29,7 +29,7 @@ All references are verified at HEAD `0ff62b29a`.
   are promoted into the daemon cache. Since `ccab18208` (#903 on `main`) the
   commit that adopts native authority sets `clear_identities` (`:3129`),
   which deletes the session's identity rows inside that transaction
-  (`crates/memory-store/src/lib.rs:11114-11116`), so a legacy
+  (`crates/memory-store/src/lib.rs:11166-11168`), so a legacy
   compaction-off row that recorded identities leaves none behind.
 - After #905 and #906, `ModuleMeta` holds no identity map, served
   fingerprints, or baseline parts; identities are `block_identities` rows and
@@ -37,10 +37,10 @@ All references are verified at HEAD `0ff62b29a`.
   and `coverage_ordinal` remain in metadata
   (`crates/memory-store/src/lib.rs:2121`, fields in that struct).
 - State sync on a `Some(false)` session treats the history-segment batch as
-  empty (`crates/memory-store/src/lib.rs:11434-11439`), so it writes no seed
+  empty (`crates/memory-store/src/lib.rs:11486-11491`), so it writes no seed
   boundary, segments, or drop and strip seeds.
 - The authority reset that makes a session native deletes identity rows and
-  segments and empties core and metadata (`lib.rs:13285-13355`).
+  segments and empties core and metadata (`lib.rs:13322-13392`).
 
 Witnesses (#903 unless noted):
 
@@ -113,7 +113,7 @@ empty and the ingress scalars updated.
 
 - Sources examined: `git show ccab18208`;
   `crates/daemon/src/transform.rs:3114-3133`;
-  `crates/memory-store/src/lib.rs:2588-2592`, `:11114-11116`;
+  `crates/memory-store/src/lib.rs:2588-2592`, `:11166-11168`;
   `crates/daemon/src/fold_authority_handler_tests.rs:399-422`.
 - Findings: It strengthens it. A legacy compaction-off row could hold
   identity rows and no fold coordinates; adopting native authority through

@@ -111,7 +111,7 @@ All references are verified at `0ff62b29a`.
   (`history_summarizer.rs:1843-1852`, `:1905-1915`); the session slug keeps
   48 bytes (`:1617-1625`, `:1630-1633`). Reservation identifiers over 128
   serialized bytes are refused before any write
-  (`crates/memory-store/src/lib.rs:668-690`, `:13808-13814`); no-fire
+  (`crates/memory-store/src/lib.rs:668-690`, `:13848-13854`); no-fire
   details in the timeline keep a raw prefix within 128 serialized bytes
   (`crates/memory-store/src/summarizer_timeline.rs:13`, `:94-95`).
 - Store-owned shaping (`186f3c076`): `shape_stored_meta`
@@ -122,7 +122,7 @@ All references are verified at `0ff62b29a`.
   when it is within its bound and stable under both redactors; otherwise it
   scans the value with `write.content`, so the field's receipt records any
   detection, and keeps `redacted_prefix_within_serialized_bytes` of the
-  result. That function (`:6024-6032`) redacts with the durable and then the
+  result. That function (`:6029-6037`) redacts with the durable and then the
   transaction redactor and, while a redactor would change the cut, moves it
   back to the start of that redactor's earliest finding (`earliest_finding`),
   so a state sync that re-prepares the record with the transaction redactor
@@ -134,17 +134,17 @@ All references are verified at `0ff62b29a`.
   `NoFire::new` and `pending_rewrite_detail`
   (`crates/daemon/src/transform.rs:6831-6848`) keep raw prefixes. `MAX_PENDING_REWRITE_DETAIL_BYTES`
   and `MAX_LAST_RECUT_BYTES`, 1,024 each, live in the store
-  (`crates/memory-store/src/lib.rs:6039`, `:6041`); the descent, reset, and
+  (`crates/memory-store/src/lib.rs:6067`, `:6069`); the descent, reset, and
   revert-truncation writers cut `last_recut` to the stable prefix
-  (`:12706-12712`, `:13288-13299`, `:13505-13510`).
+  (`:12743-12749`, `:13325-13336`, `:13542-13547`).
   `todo_state_within_bounds` checks both task-list bounds on the raw and
   the redacted form (`todo_state_bounds_hold_for_the_raw_and_the_redacted_form`); `set_todo_state` refuses a state that fails it
-  (`:10309-10311`), and the bust capture records `[]` for one
+  (`:10361-10363`), and the bust capture records `[]` for one
   (`newest_bounded_todowrite_state_json`,
-  `crates/daemon/src/injection.rs:214-222`).
-  `synthetic_todo_pair_within_bounds` (`crates/memory-store/src/lib.rs:6147-6152`)
+  `crates/daemon/src/injection.rs:223-231`).
+  `synthetic_todo_pair_within_bounds` (`crates/memory-store/src/lib.rs:6175-6180`)
   measures the pair with `stored_json_len`, the longer of the durable and
-  transaction scans (`:6155-6160`). `SyntheticTodo::admitted`
+  transaction scans (`:6183-6188`). `SyntheticTodo::admitted`
   (`crates/daemon/src/injection.rs`) measures it under the longest
   serialized anchor; `advance_synthetic_todo` freezes a pair only when it is
   admitted, and `injection_pending_after_capture` applies the same decision,
@@ -162,7 +162,7 @@ All references are verified at `0ff62b29a`.
   (`:24809`; a 4 KiB surviving id),
   `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair`
   and `a_replacement_pair_near_its_bound_persists_and_reloads_within_it`
-  (`crates/daemon/src/transform.rs:21623`, `:21655`; the caller-side pair
+  (`crates/daemon/src/transform.rs:21623`, `:21659`; the caller-side pair
   through `advance_synthetic_todo` and a reload),
   `a_redacted_detail_cut_keeps_its_length_through_another_redaction`
   (`crates/memory-store/src/lib.rs:24756`),
@@ -194,32 +194,32 @@ All references are verified at `0ff62b29a`.
   bytes. `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
   (`crates/memory-store/src/lib.rs:25787`) abandons with
   `publish rejected: ` and 400 control characters (2,418 serialized bytes,
-  `:25629`) and asserts the stored detail is a prefix of it, at most 512
-  serialized bytes and more than 506 (`:25648-25650`).
+  `:25799`) and asserts the stored detail is a prefix of it, at most 512
+  serialized bytes and more than 506 (`:25818-25820`).
 - State sync: caps on anchors, watermarks, todo state, directives, marker
   ids, and the synthetic todo pair (`crates/memory-store/src/lib.rs:5976-5980`,
-  `:6141-6143`, `:6164`; `within_bound` at `:6166`), now with a todo
-  serialized-length cap (`:5980`, `:6333-6340`; `set_todo_state` at
-  `:10309-10311`). After content
+  `:6169-6171`, `:6192`; `within_bound` at `:6218`), now with a todo
+  serialized-length cap (`:5980`, `:6385-6392`; `set_todo_state` at
+  `:10361-10363`). After content
   preparation, `check_prepared_state_sync_bounds` re-checks each capped value
   as stored, since a redaction placeholder can be longer than its secret
-  (`:6398`, `:6402-6448`). Since `186f3c076` the seeded pair and the
+  (`:6450`, `:6454-6500`). Since `186f3c076` the seeded pair and the
   acknowledged watermarks are checked with `stored_json_len`
-  (`:6295-6299`, `:6379-6383`);
+  (`:6347-6351`, `:6431-6435`);
   `state_sync_refuses_values_whose_stored_form_passes_their_bound`
   (`:24849`) refuses each at exactly its raw bound with a stored form past
   it and asserts the refused sync writes nothing. A sync whose result would
   hold more than 512 legacy segments is refused before any write
-  (`:11505-11534`).
+  (`:11559-11571`).
 - Covered systems: `ModuleMeta` has no covered list. The rows live in
   `covered_system_messages` (`crates/memory-store/baseline.sql:40-58`). The
   transform reads them with its snapshot
   (`crates/daemon/src/transform.rs:3371-3372`; store
-  `crates/memory-store/src/lib.rs:8773`), records them
+  `crates/memory-store/src/lib.rs:8825`), records them
   through `record_covered_systems` (`transform.rs:6351-6366`), and commits a
   `CoveredSystemMessageDelta` inside the CAS (`:5189-5194`, `:5244`; store
-  `crates/memory-store/src/lib.rs:11120-11127`). Reset removes the rows
-  (`:13329`); a descent target starts with none (`:12962-12964`).
+  `crates/memory-store/src/lib.rs:11172-11179`). Reset removes the rows
+  (`:13366`); a descent target starts with none (`:12999-13001`).
 - Other caps: request identity strings over 256 bytes
   (`crates/daemon/src/transform.rs:149`, `:2236-2241`); 16 pending hint ids
   (`:148`, `:4218-4222`); mids over 128 bytes (`crates/daemon/src/wire.rs:215`,

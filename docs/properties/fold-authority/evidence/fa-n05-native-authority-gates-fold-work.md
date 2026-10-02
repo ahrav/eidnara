@@ -30,14 +30,14 @@ All references are verified at HEAD `0ff62b29a`.
   (`lib.rs:5299`): its own `store.load` (`:5318`), the trigger evaluation, the
   `no_models` check against the live `effective_config` (`:5406`, `:5578`),
   `record_no_fire` (`:5895`), and firing assembly.
-- The two callers are the first unit (`lib.rs:8924`, after the subagent arm)
+- The two callers are the first unit (`lib.rs:8976`, after the subagent arm)
   and the emergency rerun (`lib.rs:9077`). Both call the gated function.
 - `session.wrapup` (`handle_session_wrapup_value`, `lib.rs:7183`) refuses at
-  `:7273-7292` with `ok: false`, `disposition: "failed"`,
+  `:7325-7344` with `ok: false`, `disposition: "failed"`,
   `reason: "native_authority"`, and zero rounds. The refusal follows the
   wrapup latch claim and an entry `store.load` (`:7264`), and precedes the
-  snapshot read (`:7306`) and boundary work. An unadopted session uses
-  the binding's intent (`:7282`).
+  snapshot read (`:7358`) and boundary work. An unadopted session uses
+  the binding's intent (`:7334`).
 - No error variant is added; the refusal and the diagnostics reuse existing
   shapes.
 
@@ -109,7 +109,7 @@ and boundary reads.
 - Findings: No. Native preparation returns `Complete`, which settles in the
   first unit at any pressure; the rerun follows only a completed `Busy`
   wait. The one native handler witness (`fold_authority_handler_tests.rs:46`)
-  runs at 90 percent (`lib.rs:24440-24442`); no native test runs at or
+  runs at 90 percent (`lib.rs:24496-24498`); no native test runs at or
   above 95 percent. The second caller is covered structurally by the shared
   gate.
 - Missing evidence: A native first-unit pass at or above 95 percent.

@@ -39,7 +39,7 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   `publish_rejects_a_firing_whose_selected_message_left_the_window`
   (`crates/memory-store/src/lib.rs:25993`) witnesses the refusal.
 - At `265df096` the fence compared against the hydrated
-  `meta.block_identity_by_mid` (`lib.rs:11845-11851` there) and the
+  `meta.block_identity_by_mid` (`lib.rs:11882-11888` there) and the
   transform read the same map (`transform.rs:5367-5369` there). #905 removed
   the field and routed both through the row lookup.
 - `IdentityDrift` and `identity_drift_requires_reject`
@@ -104,7 +104,7 @@ transform pass over a mid whose row was deleted.
 
 - Sources examined: `git grep` for the refusal text and for empty
   `selected_range_identities` in tests.
-- Findings: The text appears only at `crates/memory-store/src/lib.rs:14100`;
+- Findings: The text appears only at `crates/memory-store/src/lib.rs:14140`;
   no test builds an empty predicate.
 - Missing evidence: A publication with an empty selected set.
 - Conclusion: unresolved, needs that test.
@@ -114,7 +114,7 @@ transform pass over a mid whose row was deleted.
 - Sources examined: `git show f0e39d04d 64a8bf371`;
   `crates/daemon/src/transform.rs:5431-5469`;
   `crates/daemon/src/history_summarizer.rs:533-555`;
-  `crates/memory-store/src/lib.rs:14124-14183`, `:25791`.
+  `crates/memory-store/src/lib.rs:14124-14183`, `:25993`.
 - Findings: It adds a refusal. Identity rows are no longer pruned to the
   window, so a selected mid outside the window keeps a matching row. The
   transform records the first such mid on the in-flight firing

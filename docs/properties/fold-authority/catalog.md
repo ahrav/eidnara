@@ -287,7 +287,7 @@ preparation (`crates/memory-store/src/lib.rs:11034-11041`) before
 `write.execute` opens the transaction (`:11102`); the covered-system row scan
 (`prepare_document`, `:4832-4856`; `apply_covered_system_message_delta`,
 `:5025-5127`) runs inside that transaction after the `cache_state` write
-(`:11120-11127`), so its refusal rolls the transaction back and the durable
+(`:11172-11179`), so its refusal rolls the transaction back and the durable
 rows stay as they were. Cross-reference:
 [WP-E10](../window-protocol/catalog.md#wp-e10-durable-meta-bound-refuses-the-cliff)
 catalogs the same guard for the window protocol and records that the refusal
@@ -417,10 +417,10 @@ Required faults and enabling state: A stored Eidnara authority; an empty live
 chain; both trigger outcomes; a repeated reason; a forced commit failure.
 Confidence: high -
 [evidence](evidence/fa-e05-empty-chain-refusal-is-late-and-change-gated.md).
-Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:8924`,
-`:9077`; the entry `:9451-9468` is `:9423-9434`;
+Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:8976`,
+`:9077`; the entry `:9451-9468` is `:9475-9486`;
 `history_summarizer_chunk.rs:619-623` is `:908-912`;
-`history_summarizer.rs:1655-1657` is `:1831-1833`; the checks at
+`history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
 Existing check: `crates/daemon/src/lib.rs:41167`
 `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37569`
@@ -1018,7 +1018,7 @@ an unresolved admission; keyless rows with and without fold artifacts; a
 non-boolean stored value.
 Confidence: high - [evidence](evidence/fa-n02-first-commit-adopts-authority.md).
 The field's serde default and skip (`crates/memory-store/src/lib.rs:2460-2465`),
-the SQL read and Serde error (`:13200-13243`), the planner's adopt arms
+the SQL read and Serde error (`:13237-13280`), the planner's adopt arms
 (`fold_authority.rs:105-112`), the admission-aware intent
 (`crates/daemon/src/config.rs:181-185`), and the row-version fence
 (`transform.rs:2158-2163`) were read at HEAD; the witnesses were run in the
@@ -1067,8 +1067,8 @@ transaction.
 Check: `always-or-unreached` - whenever `eidnara_folds` changes from
 `Some(a)` to `Some(b)`, the same transaction advanced `revert_epoch`, emptied
 core and metadata, deleted identity rows, and observed summarizer Idle and no
-pending publication row (`crates/memory-store/src/lib.rs:13272-13283`, `:13301`,
-`:13328`), and the change ran under the bindings mutex with no participating
+pending publication row (`crates/memory-store/src/lib.rs:13309-13320`, `:13338`,
+`:13365`), and the change ran under the bindings mutex with no participating
 sibling (`crates/daemon/src/lib.rs:301-313`). `always-or-unreached` because
 most sessions never change authority. Falsifier: authority changes without
 the epoch-fenced reset; a blocked change alters the serving mode; an ordinary
@@ -1146,7 +1146,7 @@ before the invocation; for (b), a test-only kill point after
 `reset_session_for_authority` commits, then a reopen.
 Confidence: medium - [evidence](evidence/fa-n04-quiescent-change-completes.md).
 The attempt loop, the reset's full clearing
-(`crates/memory-store/src/lib.rs:13285-13355`),
+(`crates/memory-store/src/lib.rs:13322-13392`),
 and the empty binding table after reopen were read at HEAD. The restart
 witnesses fall between transform calls, so the kill window inside one call
 is argued from the reset leaving no coverage, not tested.
@@ -1180,9 +1180,9 @@ first-unit witness runs at 45,000 of 50,000 tokens, 90 percent
 test under native authority runs at or above 95 percent. The second caller
 (`lib.rs:9077`) is not a reachable native state: native preparation returns
 `Complete` (`:9428-9432`), which settles in the first unit whatever the
-pressure (`:8918-8942`), and the rerun follows only a completed `Busy` wait
-(`:8957-8974`), which native authority never produces. Both callers call
-the one gated function (`:8924`, `:9077`), so the second caller is covered
+pressure (`:8970-8994`), and the rerun follows only a completed `Busy` wait
+(`:9009-9026`), which native authority never produces. Both callers call
+the one gated function (`:8976`, `:9077`), so the second caller is covered
 structurally by the shared gate, not by a witness. Wrapup's snapshot and
 boundary work are not counted.
 Guarantee: Under native authority the shared preparation entry returns
@@ -1261,7 +1261,7 @@ Confidence: high - [evidence](evidence/fa-n06-native-state-stays-additive.md).
 The additive path calls only `apply_ingress_scalars` (`transform.rs:2904`,
 `:5583`); `apply_ingress_identities` (`:5602`) is called only on the folding
 path (`:4159`); native state sync empties the segment batch
-(`crates/memory-store/src/lib.rs:11434-11439`). Served fingerprints and
+(`crates/memory-store/src/lib.rs:11486-11491`). Served fingerprints and
 baseline parts are not `ModuleMeta` fields after #905 and #906.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:46`,
 `:219`, `:840`, `:555`, `:645`, `:1030` (through `assert_native_state`,
@@ -1690,12 +1690,12 @@ identity mutation, and a later scan, serialization, or write failure rolls
 back the transaction, preserving the previous durable state.
 Check: `always-or-unreached` - at `commit_transform` the delta is applied
 after both checks that return `Replay` (row-version CAS and history-segment
-sequence, `crates/memory-store/src/lib.rs:11059-11089`) and after the
-`cache_state` write, inside the same transaction (`:11117-11119`); the only
+sequence, `crates/memory-store/src/lib.rs:11111-11141`) and after the
+`cache_state` write, inside the same transaction (`:11169-11171`); the only
 per-mid delete is the delta's `deletes` set (`:4951-4956`), which the
 transform fills only for the provisional tail
 (`crates/daemon/src/transform.rs:5610-5612`); requested-mid reads run inside
-the snapshot read (`crates/memory-store/src/lib.rs:8772`); publication
+the snapshot read (`crates/memory-store/src/lib.rs:8824`); publication
 refuses a selected mid whose row is absent or differs
 (`:14149-14171`). `always-or-unreached` because identity writes happen only
 on folding sessions.
@@ -1710,9 +1710,9 @@ Confidence: high -
 [evidence](evidence/fa-n12-identity-observations-survive-window-loss.md).
 Read `lookup_block_identity_rows` and `apply_block_identity_delta`
 (`crates/memory-store/src/lib.rs:4863-4979`), `commit_transform`
-(`:10883`, delta at `:11117-11119`), `load_transform_snapshot_with_hook`
-(`:8727-8772`), descent's copy (`:12961-12970`), reset
-(`delete_block_identities` `:4981-4983`, called at `:13328`), and
+(`:10883`, delta at `:11169-11171`), `load_transform_snapshot_with_hook`
+(`:8779-8824`), descent's copy (`:12998-13007`), reset
+(`delete_block_identities` `:4981-4983`, called at `:13365`), and
 `WindowIdentities` (`crates/daemon/src/transform.rs:5394-5429`) at
 `0ff62b29a`.
 Existing check: `crates/memory-store/src/lib.rs:23909`
@@ -1807,7 +1807,7 @@ per-entry charge from `"[]"` with separators (`:119-150`), the charge inside
 `flush_current_block` after the token check (`:386-395`), the first-block
 refusal (`:139-142`), the `IdentityBudget` return before any prompt work
 (`:999-1006`), and the reservation handing the assembled selection to `fire`
-(`crates/daemon/src/history_summarizer.rs:1857-1865`) were read at
+(`crates/daemon/src/history_summarizer.rs:1866-1874`) were read at
 `0ff62b29a`. Reattachment reuses the stored selection and rebuilds only text
 (`crates/daemon/src/lib.rs:5072-5084`), so it never re-selects.
 Existing check: `crates/daemon/src/history_summarizer_chunk.rs:1960`
@@ -1932,7 +1932,7 @@ inventory of `HistorySummarizerAbandon` (`:477-481`); both sums
 summarizer (`:485-595`); the composite witness (`worst_case_module_meta`
 `:822-975`, test `:978-1072`). Store-owned shaping: `commit_transform`
 passes the record through `shape_stored_meta` before serializing it
-(`crates/memory-store/src/lib.rs:10982`; `:6094-6167`), which scans
+(`crates/memory-store/src/lib.rs:11034`; `:6094-6167`), which scans
 `last_failure`, `last_no_fire`, every `NoFire` detail,
 `pending_rewrite_last_failure`, and `last_recut` with `write.content` when a value is over its bound or a
 redactor would change it, so the field's receipt records any detection, and
@@ -1952,34 +1952,34 @@ cut (`a_credential_that_crosses_the_detail_bound_is_redacted_whole`).
 raw prefix; `record_no_fire` compares the stored form
 (`crates/daemon/src/lib.rs:5903-5907`).
 `MAX_PENDING_REWRITE_DETAIL_BYTES` and `MAX_LAST_RECUT_BYTES` (1,024 each)
-live in the store (`crates/memory-store/src/lib.rs:6039`, `:6041`), and the
+live in the store (`crates/memory-store/src/lib.rs:6067`, `:6069`), and the
 descent, reset, and revert-truncation writers cut `last_recut` to the stable
-prefix (`:12706-12712`, `:13288-13299`, `:13505-13510`).
-`MAX_SUMMARIZER_DETAIL_BYTES` is at `:6007-6009`, re-exported by the daemon.
+prefix (`:12743-12749`, `:13325-13336`, `:13542-13547`).
+`MAX_SUMMARIZER_DETAIL_BYTES` is at `:6009-6011`, re-exported by the daemon.
 The task-list setter and bust capture accept a state only when its raw and
 its redacted form both meet both task-list bounds (`todo_state_within_bounds`;
-`set_todo_state` `:10309-10311`; `crates/daemon/src/injection.rs:214-222`);
+`set_todo_state` `:10361-10363`; `crates/daemon/src/injection.rs:223-231`);
 the synthetic pair is frozen only when `SyntheticTodo::admitted` holds: its
 stored form fits 24 KiB under the longest serialized anchor, and
 `injection_pending_after_capture` applies the same decision, so a refused
 pair leaves no injection pending (`synthetic_todo_pair_within_bounds`,
-`crates/memory-store/src/lib.rs:6147-6152`, measured by `stored_json_len`,
-the longer of the durable and transaction scans, `:6155-6160`;
-`crates/daemon/src/transform.rs:6977-6979`). State sync checks the seeded
+`crates/memory-store/src/lib.rs:6175-6180`, measured by `stored_json_len`,
+the longer of the durable and transaction scans, `:6183-6188`;
+`crates/daemon/src/transform.rs:6976-6979`). State sync checks the seeded
 pair and acknowledged watermarks with `stored_json_len`
-(`crates/memory-store/src/lib.rs:6295-6299`, `:6379-6383`), beside the
-caps (`:5976-5980`, `:6141-6143`, `:6164`) and their check after redaction
-(`:6398`, `:6402-6448`); the legacy count refusal (`:11505-11534`). The
+(`crates/memory-store/src/lib.rs:6347-6351`, `:6431-6435`), beside the
+caps (`:5976-5980`, `:6169-6171`, `:6192`) and their check after redaction
+(`:6450`, `:6454-6500`); the legacy count refusal (`:11559-11571`). The
 summarizer state stores a SHA-256 chunk fingerprint and model-chain digest
 (`crates/daemon/src/history_summarizer.rs:166-179`) and refuses a harness or
 run id over 128 serialized bytes and keeps a 48-byte session slug
 (`:1617-1625`, `:1630-1633`, `:1843-1852`, `:1905-1915`); the reservation
 identity refusal (`crates/memory-store/src/lib.rs:668-690`,
-`:13808-13814`); the covered-system rows
+`:13848-13854`); the covered-system rows
 (`crates/memory-store/baseline.sql:40-58`, delta applied in the commit at
-`crates/memory-store/src/lib.rs:11120-11127`, read with the snapshot at
-`:8773`, removed by reset at `:13329`, and absent from a descent target at
-`:12962-12964`); the request-identity bound
+`crates/memory-store/src/lib.rs:11172-11179`, read with the snapshot at
+`:8825`, removed by reset at `:13366`, and absent from a descent target at
+`:12999-13001`); the request-identity bound
 (`crates/daemon/src/transform.rs:149`, `:2236-2241`), the hint deferral cap
 (`:148`, `:4218-4222`), and the mid bound (`crates/daemon/src/wire.rs:215`,
 `:285-290`). The store's
@@ -2041,9 +2041,9 @@ PR B); `crates/daemon/src/history_summarizer.rs:4261`
 `chunk_failures_count_per_chunk_and_ignore_provider_errors` (#859 PR C);
 `crates/memory-store/src/summarizer_timeline.rs:490`
 `a_detail_is_cut_by_its_serialized_length` (#859 PR C);
-`crates/daemon/src/injection.rs:773`
+`crates/daemon/src/injection.rs:785`
 `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list`
-and `:793` `a_synthetic_pair_over_its_bound_after_redaction_is_refused`
+and `:820` `a_synthetic_pair_over_its_bound_after_redaction_is_refused`
 (#859 PR C);
 `crates/daemon/src/wire.rs:975` `empty_and_reserved_message_ids_are_rejected`
 (mid length at `:986-996`);

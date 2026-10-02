@@ -19,18 +19,18 @@ Code references are verified at `0ff62b29a`.
 - One lookup: `lookup_block_identity_rows`
   (`crates/memory-store/src/lib.rs:4863-4880`) selects the requested mids with
   `mid IN (SELECT value FROM json_each(?2))`. It backs the snapshot read
-  (`:8772`, inside `load_transform_snapshot_with_hook` `:8727`), the public
-  `load_block_identities` (`:8551-8559`), and the publication fence
-  (`:14115`).
+  (`:8824`, inside `load_transform_snapshot_with_hook` `:8779`), the public
+  `load_block_identities` (`:8603-8611`), and the publication fence
+  (`:14155`).
 - Delta: `BlockIdentityDelta { upserts, deletes }` (`:1890-1893`).
   `apply_block_identity_delta` (`:4904-4979`) refuses a delta that writes and
   deletes one mid (`:4913-4923`), skips an unchanged vector (`:4942-4945`),
   deletes only the listed mids (`:4951-4956`), and upserts the rest.
 - CAS coupling: `commit_transform` (`:10883`) runs the row-version CAS
-  (`:11059-11068`), the new-row identity check (`:11069-11077`), and the
-  history-segment sequence check (`:11078-11089`); the CAS and the sequence
-  check return `Replay`. It then writes `cache_state` (`:11104-11113`) and
-  applies the delta (`:11117-11119`) in the same transaction. No `Replay`
+  (`:11111-11120`), the new-row identity check (`:11121-11129`), and the
+  history-segment sequence check (`:11130-11141`); the CAS and the sequence
+  check return `Replay`. It then writes `cache_state` (`:11156-11165`) and
+  applies the delta (`:11169-11171`) in the same transaction. No `Replay`
   return follows the delta in this closure (it ends `Applied` at `:11405`).
   Meta and core pass the durable-text scans before `write.execute`
   (`:11032-11041`, `:11102`).
@@ -43,9 +43,9 @@ Code references are verified at `0ff62b29a`.
 - Lifetime: reset deletes every row (`delete_block_identities`
   `crates/memory-store/src/lib.rs:4981-4983`, which delegates to
   `ScanOwnedRows::delete_session_rows` `:4821-4829`, called in `reset_session`
-  at `:13328`); `delete_session` deletes from every table with a `session_id`
-  column (`:8437-8511`); descent copies the source's rows with NULL
-  `scan_version` (`:12961-12970`).
+  at `:13365`); `delete_session` deletes from every table with a `session_id`
+  column (`:8489-8563`); descent copies the source's rows with NULL
+  `scan_version` (`:12998-13007`).
 - Schema: `block_identities` and the partial index
   `block_identities_by_scan_version` (`crates/memory-store/baseline.sql:27-38`).
 
@@ -73,7 +73,7 @@ message is never compared because the transform has no stored identity.
 ## Timing windows and dependencies
 
 - A commit between the snapshot's state read and its identity read; the test
-  hook runs between the two (`:8488`).
+  hook runs between the two (`:8540`).
 - CAS loss or a durable-text refusal after the transform built its delta.
 - An aborting trigger after the delete, between two upserts, or after the
   upserts; the whole commit rolls back.
@@ -97,7 +97,7 @@ reopen.
   the store deletes a single mid only from `delta.deletes`. Native adoption
   clears legacy identity rows in the adopting transaction (`clear_identities`,
   `crates/daemon/src/transform.rs:3126-3130`;
-  `crates/memory-store/src/lib.rs:11114-11116`); reset, session deletion,
+  `crates/memory-store/src/lib.rs:11166-11168`); reset, session deletion,
   and descent-target replacement clear whole sessions.
 - Missing evidence: None.
 - Conclusion: resolved with answer.

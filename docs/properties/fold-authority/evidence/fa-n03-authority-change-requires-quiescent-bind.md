@@ -23,7 +23,7 @@ All references are verified at HEAD `0ff62b29a`.
   (`:116-138`). A blocked change never alters the serving mode.
 - The durable half comes from `load_fold_authority`: `quiescent` is
   summarizer Idle and no pending publication row
-  (`crates/memory-store/src/lib.rs:13236-13242`).
+  (`crates/memory-store/src/lib.rs:13273-13279`).
 - The change runs inside the attempt loop
   (`crates/daemon/src/transform.rs:2026-2067`). The reset call is wrapped by
   `ctx.sibling_fence.without_sibling` (`:2035-2037`).
@@ -35,10 +35,10 @@ All references are verified at HEAD `0ff62b29a`.
 - `reset_session_for_authority` (`crates/memory-store/src/lib.rs:13226`) calls
   `reset_session` (`:13283`). Inside the fenced transaction it checks the
   row-version CAS, then re-checks summarizer Idle and the pending-publication
-  row (`:13272-13283`) and returns `Ok(None)` without writing when either
+  row (`:13309-13320`) and returns `Ok(None)` without writing when either
   blocks. The same transaction writes the replacement
-  (`eidnara_folds: replacement_authority.or(prior)`, `:13301`), advances
-  `revert_epoch`, empties core and metadata, deletes identity rows (`:13328`),
+  (`eidnara_folds: replacement_authority.or(prior)`, `:13338`), advances
+  `revert_epoch`, empties core and metadata, deletes identity rows (`:13365`),
   retires scan owners, and deletes segments, transcripts, candidates, and the
   pending publication.
 - `reset_session_for_recomp` (`:13213`) passes no replacement, so the adopted
@@ -62,7 +62,7 @@ Witnesses:
 - Store: `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority`,
   `a_busy_summarizer_refuses_the_authority_reset`, and
   `a_pending_publication_refuses_the_authority_reset_of_an_idle_session`
-  (`crates/memory-store/src/lib.rs:29658`, `:29489`, `:29516`).
+  (`crates/memory-store/src/lib.rs:29658`, `:29691`, `:29718`).
 
 ## Failure scenario
 

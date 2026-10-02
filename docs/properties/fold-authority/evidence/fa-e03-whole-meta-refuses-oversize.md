@@ -32,7 +32,7 @@ References are verified at `0ff62b29a` unless another tree is named.
   `prepare_json_content_single_pass`, whose first statement is the guard
   (`:4303`). This runs while the commit is prepared, before `write.execute`
   opens the transaction (`:11102`); the row write runs inside it
-  (`:11104-11113`).
+  (`:11156-11165`).
 - Refusal witness: `a_refused_commit_writes_no_identity_row` (`:33757`),
   added by #905 (`871ebfb08`), commits a `meta` whose `last_render_config`
   is one byte over the bound on top of an existing row with an identity
@@ -50,7 +50,7 @@ References are verified at `0ff62b29a` unless another tree is named.
   (`:1273`), green in #859 PR A's run.
 - Covered-system rows (#859 PR B, `b45416ac0`): the commit applies a
   `CoveredSystemMessageDelta` inside the transaction, after the
-  `cache_state` write (`crates/memory-store/src/lib.rs:11120-11127`).
+  `cache_state` write (`crates/memory-store/src/lib.rs:11172-11179`).
   `apply_covered_system_message_delta` (`:5025-5127`) groups the written
   rows toward the 256 KiB `SCAN_DOCUMENT_CHUNK_BYTES` batching threshold
   (`:4713`; `scan_documents`, `:4717-4737`): a row that would carry a
@@ -127,7 +127,7 @@ covered-system document, leaves the covered rows as they were.
 
 - Sources examined: `git show b45416ac0 -- crates/memory-store`; the
   covered-system store tests (`crates/memory-store/src/lib.rs:34174`,
-  `:34147`, `:34183`, `:34213`).
+  `:34349`, `:34385`, `:34415`).
 - Findings: The rows are written inside the commit transaction after the
   `meta` guard, and each row document passes the same guard, so a refusal
   writes no row. The tests cover a lost CAS and a write-and-delete refusal,

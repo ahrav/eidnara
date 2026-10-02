@@ -19,11 +19,11 @@ All references are verified at HEAD `0ff62b29a`.
   (`crates/memory-store/src/lib.rs:2460-2465`). An absent key reads as `None`,
   so a default never supplies `false`.
 - `load_fold_authority` (`crates/memory-store/src/lib.rs:13237`) reads the key
-  with `json_type` through `FOLD_AUTHORITY_SELECT` (`:6735-6739`) and does not
+  with `json_type` through `FOLD_AUTHORITY_SELECT` (`:6787-6791`) and does not
   decode the row. A non-boolean JSON type is `MemoryStoreError::Serde`
-  (`:13226-13235`). `applied` is the stored value, or `Some(true)` for a row
+  (`:13263-13272`). `applied` is the stored value, or `Some(true)` for a row
   without the key that carries a fold artifact (`fold_artifacts_present`,
-  `:6727-6733`): coverage, a folded history-segment sequence, or a
+  `:6779-6785`): coverage, a folded history-segment sequence, or a
   non-Idle summarizer. Since `a694bdffa` (#903 on `main`) a stored block
   identity is not an artifact, because compaction-off passes also record
   identities, so a legacy row that holds only identities adopts its
@@ -47,7 +47,7 @@ All references are verified at HEAD `0ff62b29a`.
   retries under a fresh plan (`:2110-2116`), bounded by `MAX_CAS_RETRIES = 8`
   (`:81`).
 - A state-sync row carries no key: native state sync reads the field only to
-  skip seeds (`crates/memory-store/src/lib.rs:11434-11439`).
+  skip seeds (`crates/memory-store/src/lib.rs:11486-11491`).
 
 Witnesses in `crates/daemon/src/fold_authority_handler_tests.rs` (#903):
 
@@ -119,7 +119,7 @@ row without the key, with and without artifacts; a non-boolean key.
 ### Q: Do #903's later commits on `main` change the adoption rule?
 
 - Sources examined: `git show a694bdffa ccab18208`;
-  `crates/memory-store/src/lib.rs:6727-6739`;
+  `crates/memory-store/src/lib.rs:6779-6791`;
   `crates/daemon/src/transform.rs:3114-3133`;
   `crates/daemon/src/fold_authority_handler_tests.rs:329`.
 - Findings: The guarantee holds. `a694bdffa` drops the `block_identities`

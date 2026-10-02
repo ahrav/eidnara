@@ -125,7 +125,7 @@ followed by a non-bust pass and then a bust.
 ### Q: Does `main`'s `96aad0baf` change the join?
 
 - Sources examined: `git show 96aad0baf`; `crates/daemon/src/lib.rs:2152-2188`,
-  `:35255`, `:35288`; `crates/memory-store/src/lib.rs:2075-2079`, `:29551`.
+  `:35255`, `:35288`; `crates/memory-store/src/lib.rs:2075-2079`, `:29753`.
 - Findings: The join rule is unchanged; `parts_for` still checks the
   baseline generation on read. A promotion without parts now keeps the
   replaced state's parts of the same revert epoch, so a lease-refused pass

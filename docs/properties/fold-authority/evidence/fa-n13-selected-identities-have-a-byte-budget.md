@@ -48,7 +48,7 @@ All references are verified at `0ff62b29a`.
   (`crates/daemon/src/lib.rs:5078-5084`), which reuses the stored
   `selected_range_identities` (`:5072-5076`) rather than re-selecting.
 - The reservation passes the assembled selection to `fire`
-  (`crates/daemon/src/history_summarizer.rs:1857-1865`), inside the same
+  (`crates/daemon/src/history_summarizer.rs:1866-1874`), inside the same
   store load and commit as the firing state.
 - Tests: `BudgetCase` (`history_summarizer_chunk.rs:1743-1949`) gives every
   message two block identities (a 64-hex text identity and a large tool-call
