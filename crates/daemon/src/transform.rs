@@ -21580,6 +21580,113 @@ pub(crate) mod tests {
         );
     }
 
+    fn single_active_todo_state(content: &str) -> String {
+        crate::injection::normalize_todo_state_json(&format!(
+            r#"[{{"content":"{content}","status":"in_progress","priority":"high"}}]"#
+        ))
+        .expect("active state normalizes")
+    }
+
+    fn advance_and_reload_synthetic_todo(
+        s: &MemoryStore,
+        session: &str,
+        existing: memory_store::FrozenSyntheticTodoPair,
+        next_state: String,
+    ) -> ModuleMeta {
+        let request = req(session, "cfg0", vec![item("a", 1, "raw")]);
+        let seeded = s.load(session).unwrap();
+        let seed_meta = ModuleMeta {
+            synthetic_todo: Some(existing.clone()),
+            ..Default::default()
+        };
+        s.commit(session, seeded.row_version, &seeded.core, &seed_meta)
+            .unwrap();
+        let loaded = s.load(session).unwrap();
+        assert_eq!(loaded.meta.synthetic_todo.as_ref(), Some(&existing));
+
+        let mut meta = loaded.meta.clone();
+        meta.last_todo_state = Some(next_state);
+        advance_synthetic_todo(
+            &mut meta,
+            true,
+            None,
+            false,
+            &normalize_synthetic_todo_ingress(&request),
+        )
+        .unwrap();
+        s.commit(session, loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        s.load(session).unwrap().meta
+    }
+
+    #[test]
+    fn a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let existing =
+            crate::injection::build_synthetic_todo_pair(&single_active_todo_state("frozen before"))
+                .unwrap()
+                .freeze_at(Some("a".to_string()));
+        let secret = "password=abc next ";
+        let state = single_active_todo_state(&secret.repeat(
+            (memory_store::MAX_TODO_STATE_BYTES - single_active_todo_state("").len())
+                / secret.len(),
+        ));
+        assert!(state.len() <= memory_store::MAX_TODO_STATE_BYTES);
+        let next = crate::injection::build_synthetic_todo_pair(&state)
+            .unwrap()
+            .freeze_at(None);
+        assert_ne!(next.call_id, existing.call_id);
+        assert!(
+            serde_json::to_vec(&next).unwrap().len() <= memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES
+        );
+        assert!(!memory_store::synthetic_todo_pair_within_bounds(&next));
+
+        let reloaded = advance_and_reload_synthetic_todo(&s, "redacted-pair", existing, state);
+
+        assert!(
+            reloaded.synthetic_todo.is_none(),
+            "an over-bound replacement persisted as {:?}",
+            reloaded.synthetic_todo.as_ref().map(|pair| &pair.call_id)
+        );
+    }
+
+    #[test]
+    fn a_replacement_pair_near_its_bound_persists_and_reloads_within_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let existing =
+            crate::injection::build_synthetic_todo_pair(&single_active_todo_state("frozen before"))
+                .unwrap()
+                .freeze_at(Some("a".to_string()));
+        let filler = "plain next ";
+        let state = single_active_todo_state(&filler.repeat(
+            (memory_store::MAX_TODO_STATE_BYTES - single_active_todo_state("").len())
+                / filler.len(),
+        ));
+        assert!(state.len() <= memory_store::MAX_TODO_STATE_BYTES);
+        let next = crate::injection::build_synthetic_todo_pair(&state).unwrap();
+        let next_call_id = next.call_id.clone();
+        assert_ne!(next_call_id, existing.call_id);
+
+        let reloaded = advance_and_reload_synthetic_todo(&s, "plain-pair", existing, state);
+
+        let pair = reloaded.synthetic_todo.expect("the bounded pair persists");
+        assert_eq!(pair.call_id, next_call_id);
+        assert_eq!(pair.assistant_msg, next.assistant_msg);
+        assert_eq!(pair.tool_msg, next.tool_msg);
+        let stored = serde_json::to_vec(&pair).unwrap().len();
+        assert!(
+            stored > memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES / 2,
+            "{stored}"
+        );
+        assert!(
+            stored <= memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES,
+            "{stored}"
+        );
+        assert!(memory_store::synthetic_todo_pair_within_bounds(&pair));
+    }
+
     #[test]
     fn synthetic_todo_keep_reanchors_when_coverage_advance_folds_anchor() {
         let dir = tempfile::tempdir().unwrap();

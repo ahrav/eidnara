@@ -34074,6 +34074,76 @@ mod lineage_descent_tests {
     }
 
     #[test]
+    fn covered_system_rows_past_one_scan_document_split_and_retire_every_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let meta = ModuleMeta::default();
+        let commit = |expected, delta: &CoveredSystemMessageDelta| {
+            store.commit_with_covered_system_messages_for_test(
+                "ses",
+                expected,
+                &CoreState::empty(),
+                &meta,
+                delta,
+            )
+        };
+        let row_bytes = SCAN_DOCUMENT_CHUNK_BYTES / 3 + 1;
+        let contents = [9u64, 2, 5, 7]
+            .map(|ordinal| (ordinal, format!("rule {ordinal} ").repeat(row_bytes / 7)));
+        let rows = contents
+            .iter()
+            .map(|(ordinal, content)| {
+                serde_json::to_string(&CoveredSystemMessage {
+                    ordinal: *ordinal,
+                    content: content.clone(),
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(rows.iter().all(|row| row.len() < SCAN_DOCUMENT_CHUNK_BYTES));
+        let combined = rows.iter().map(String::len).sum::<usize>();
+        assert!(combined > SCAN_DOCUMENT_CHUNK_BYTES, "{combined}");
+        assert!(combined < MAX_DURABLE_TEXT_BYTES, "{combined}");
+        let upserts = contents
+            .iter()
+            .map(|(ordinal, content)| (*ordinal, content.as_str()))
+            .collect::<Vec<_>>();
+        let mut ordered = upserts.clone();
+        ordered.sort_by_key(|(ordinal, _)| *ordinal);
+
+        let version = commit(None, &covered_delta(&upserts, &[])).unwrap();
+        assert_eq!(
+            store.covered_system_messages_for_test("ses"),
+            covered(&ordered)
+        );
+        assert_eq!(
+            store
+                .load_transform_snapshot("ses", &[], &[])
+                .unwrap()
+                .covered_system_messages,
+            covered(&ordered),
+            "the snapshot reads the rows in ordinal order"
+        );
+        let receipts = covered_receipts(&store, "ses");
+        assert!(receipts > 1, "one write holds {receipts} document receipts");
+
+        let version = commit(Some(version), &covered_delta(&[], &[7, 9])).unwrap();
+        assert_eq!(
+            store.covered_system_messages_for_test("ses"),
+            covered(&ordered[..2])
+        );
+        assert_eq!(
+            covered_receipts(&store, "ses"),
+            receipts,
+            "rows of the write remain, so its document receipts stay"
+        );
+
+        commit(Some(version), &covered_delta(&[], &[2, 5])).unwrap();
+        assert!(store.covered_system_messages_for_test("ses").is_empty());
+        assert_eq!(covered_receipts(&store, "ses"), 0);
+    }
+
+    #[test]
     fn covered_system_content_is_stored_as_the_meta_scan_redacts_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());

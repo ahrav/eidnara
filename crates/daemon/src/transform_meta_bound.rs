@@ -581,8 +581,20 @@ fn every_history_summarizer_field_has_an_enforced_bound() {
     eprintln!("history_summarizer bound: {bound} bytes, worst case built: {worst} bytes");
 }
 
-#[test]
-fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
+fn worst_case_synthetic_todo() -> memory_store::FrozenSyntheticTodoPair {
+    let content = "\"".repeat(memory_store::MAX_TODO_STATE_BYTES / 2 - 64);
+    let state = crate::injection::normalize_todo_state_json(&format!(
+        r#"[{{"content":{},"status":"in_progress","priority":"high"}}]"#,
+        serde_json::to_string(&content).unwrap()
+    ))
+    .unwrap();
+    assert!(state.len() <= memory_store::MAX_TODO_STATE_BYTES);
+    crate::injection::build_synthetic_todo_pair(&state)
+        .unwrap()
+        .freeze_at(Some("m".repeat(crate::wire::MAX_MID_BYTES)))
+}
+
+fn recorded_metadata_bounds() -> Vec<(&'static str, usize)> {
     const ESCAPED: usize = 6;
     let text = |bytes: usize| bytes * ESCAPED + 2;
     let boolean = BOOLEAN;
@@ -599,17 +611,9 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
     let legacy_seqs = memory_store::MAX_LEGACY_HISTORY_SEGMENTS * 21 + 2;
     let directive = text(memory_store::MAX_STATE_SYNC_DIRECTIVE_BYTES) + 16;
     let synthetic_todo = {
-        let content = "\"".repeat(memory_store::MAX_TODO_STATE_BYTES / 2 - 64);
-        let state = crate::injection::normalize_todo_state_json(&format!(
-            r#"[{{"content":{},"status":"in_progress","priority":"high"}}]"#,
-            serde_json::to_string(&content).unwrap()
-        ))
-        .unwrap();
-        assert!(state.len() <= memory_store::MAX_TODO_STATE_BYTES);
-        let pair = crate::injection::build_synthetic_todo_pair(&state)
+        let built = serde_json::to_vec(&worst_case_synthetic_todo())
             .unwrap()
-            .freeze_at(Some("m".repeat(mid_bytes)));
-        let built = serde_json::to_vec(&pair).unwrap().len();
+            .len();
         assert!(
             built <= memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES,
             "{built}"
@@ -617,7 +621,7 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES
     };
 
-    let table = inventory! { memory_store::ModuleMeta {
+    inventory!(memory_store::ModuleMeta {
         initialized => boolean;
         bootstrap_seed_fold_pending => boolean;
         last_render_config => text(4 * crate::transform::MAX_REQUEST_IDENTITY_BYTES + 256);
@@ -633,7 +637,12 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         guidance_date => label;
         revert_epoch => int;
         last_recut => ascii(memory_store::MAX_LAST_RECUT_BYTES);
-        pending_rewrite => text(64) + 128;
+        pending_rewrite => object(&inventory!(memory_store::PendingRewriteState {
+            armed_at_ms => INT;
+            absent_shape_fingerprint => ascii(64);
+            absent_request_count => INT;
+            last_present_at_ms => INT;
+        }));
         pending_rewrite_trip_count => int;
         pending_rewrite_ambiguous => boolean;
         pending_rewrite_last_failure => ascii(memory_store::MAX_PENDING_REWRITE_DETAIL_BYTES);
@@ -703,7 +712,12 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         shadow_quarantined_pass_count => int;
         shadow_acked_watermarks => memory_store::MAX_ACKED_WATERMARKS_BYTES;
         eidnara_folds => boolean;
-    }};
+    })
+}
+
+#[test]
+fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
+    let table = recorded_metadata_bounds();
     let total = object(&table);
     assert!(
         total < 128 * 1024,
@@ -717,6 +731,320 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
     eprintln!(
         "recorded metadata bounds: {total} bytes over {} fields, {with_selection} bytes with the selected identities",
         table.len()
+    );
+}
+
+/// Each U+0001 character serializes as the six-byte JSON escape `\u0001`.
+fn escaped(bytes: usize) -> String {
+    "\u{1}".repeat(bytes)
+}
+
+fn redacting(max_bytes: usize) -> String {
+    let secret = "password=abc next ";
+    let text = secret.repeat(max_bytes / secret.len());
+    assert!(text.len() <= max_bytes);
+    text
+}
+
+fn near_budget_selection() -> Vec<memory_store::HistorySummarizerSelectedMessageIdentity> {
+    let mut selected = Vec::new();
+    let mut serialized = "[]".len();
+    for n in 1.. {
+        let entry = memory_store::HistorySummarizerSelectedMessageIdentity {
+            mid: format!("m{n}"),
+            block_identities: vec![memory_store::BlockIdentity {
+                kind_tag: "text".to_string(),
+                byte_fingerprint: crate::wire::fingerprint(&format!("message {n} with some text")),
+            }],
+        };
+        let next = serialized
+            + usize::from(!selected.is_empty())
+            + serde_json::to_vec(&entry).unwrap().len();
+        if next > SELECTED_IDENTITY_BUDGET_BYTES {
+            break;
+        }
+        serialized = next;
+        selected.push(entry);
+    }
+    assert_eq!(serde_json::to_vec(&selected).unwrap().len(), serialized);
+    assert!(
+        SELECTED_IDENTITY_BUDGET_BYTES - serialized < 256,
+        "{serialized}"
+    );
+    selected
+}
+
+fn note_nudge_anchor_at_bound(n: usize) -> memory_store::NoteNudgeAnchorSeed {
+    let mut anchor = memory_store::NoteNudgeAnchorSeed {
+        message_id: format!("m{n}"),
+        text: String::new(),
+    };
+    let empty = serde_json::to_vec(&anchor).unwrap().len();
+    anchor.text = "n".repeat(memory_store::MAX_NOTE_NUDGE_ANCHOR_BYTES - empty);
+    assert_eq!(
+        serde_json::to_vec(&anchor).unwrap().len(),
+        memory_store::MAX_NOTE_NUDGE_ANCHOR_BYTES
+    );
+    anchor
+}
+
+fn acked_watermarks_near_bound() -> serde_json::Value {
+    let mut watermarks = serde_json::Map::new();
+    for n in 0.. {
+        let mut next = watermarks.clone();
+        next.insert(format!("channel-{n}"), serde_json::Value::from(u64::MAX));
+        if serde_json::to_vec(&next).unwrap().len() > memory_store::MAX_ACKED_WATERMARKS_BYTES {
+            break;
+        }
+        watermarks = next;
+    }
+    serde_json::Value::Object(watermarks)
+}
+
+fn worst_case_module_meta() -> memory_store::ModuleMeta {
+    let mid = crate::wire::MAX_MID_BYTES;
+    let block_id = mid + 21;
+    let identity = crate::transform::MAX_REQUEST_IDENTITY_BYTES;
+    let mut history_summarizer = worst_case_history_summarizer();
+    history_summarizer.selected_range_identities = near_budget_selection();
+    memory_store::ModuleMeta {
+        initialized: true,
+        bootstrap_seed_fold_pending: true,
+        last_render_config: escaped(4 * identity + 256),
+        last_provider_id: escaped(identity),
+        last_model_key: escaped(identity),
+        last_system_prompt_hash: escaped(identity),
+        last_upgrade_state: escaped(identity),
+        coverage_ordinal: Some(u64::MAX),
+        last_todo_state: Some("\"".repeat(memory_store::MAX_TODO_STATE_BYTES)),
+        last_todo_state_owner_message_id: Some(escaped(mid)),
+        last_todo_state_hash: Some(crate::wire::fingerprint("todo state")),
+        soft_refresh_pending: true,
+        guidance_date: escaped(32),
+        revert_epoch: u64::MAX,
+        last_recut: Some(redacting(memory_store::MAX_LAST_RECUT_BYTES)),
+        pending_rewrite: Some(memory_store::PendingRewriteState {
+            armed_at_ms: i64::MIN,
+            absent_shape_fingerprint: crate::wire::fingerprint("absent shape"),
+            absent_request_count: u64::MAX,
+            last_present_at_ms: Some(i64::MIN),
+        }),
+        pending_rewrite_trip_count: u32::MAX,
+        pending_rewrite_ambiguous: true,
+        pending_rewrite_last_failure: Some(redacting(
+            memory_store::MAX_PENDING_REWRITE_DETAIL_BYTES,
+        )),
+        synthetic_todo: Some(worst_case_synthetic_todo()),
+        note_nudge_anchors: (0..memory_store::MAX_NOTE_NUDGE_ANCHORS)
+            .map(note_nudge_anchor_at_bound)
+            .collect(),
+        m1_revision: u64::MAX,
+        m1_history_segment_seq: Some(i64::MIN),
+        memory_disabled: true,
+        m1_external_revision: u64::MAX,
+        project_memory_epoch: u64::MAX,
+        project_memory_epoch_pending: true,
+        user_profile_version: u64::MAX,
+        m1_user_profile_version: u64::MAX,
+        m1_pending_since_ms: Some(i64::MIN),
+        folded_history_segment_seq: i64::MIN,
+        legacy_history_segment_seqs: Some(vec![
+            i64::MIN;
+            memory_store::MAX_LEGACY_HISTORY_SEGMENTS
+        ]),
+        history_segments_ordered: true,
+        coverage_start_ordinal: Some(u64::MAX),
+        coverage_history_segment_seq: Some(i64::MIN),
+        additive_served_history_segment_seq: Some(i64::MIN),
+        project_memory: Some(memory_store::ProjectMemoryComposition::Canonical {
+            known_as_of: i64::MIN,
+            truncated: true,
+            revision: u64::MAX,
+        }),
+        expiry_cutoff_ms: i64::MIN,
+        history_summarizer,
+        publication_floor_ordinal: Some(u64::MAX),
+        block_identity_basis: memory_store::BlockIdentityBasis::Replay,
+        tail_identity_re_adopt_count: u64::MAX,
+        newest_live_block_id: Some(escaped(block_id)),
+        last_usage: Some(memory_store::ModuleUsage {
+            current_total_input_tokens: u64::MAX,
+            context_limit_tokens: u64::MAX,
+            final_wire_input_tokens: u64::MAX,
+            final_wire_trusted: true,
+        }),
+        last_serializer_profile: escaped(32),
+        reasoning_cleared_through_ordinal: u64::MAX,
+        reasoning_cleared_through_tag: u64::MAX,
+        terse_text_compression_age_basis_tag: u64::MAX,
+        cc_u1_active: true,
+        tagging_surface_active: true,
+        channel1_last_nudge_undropped: i64::MIN,
+        channel1_last_nudge_level: escaped(32),
+        tail_hygiene_baseline: Some(memory_store::TailHygieneBaseline {
+            baseline_u: i64::MIN,
+            baseline_t: i64::MIN,
+            turn_delta_u: i64::MIN,
+            turn_delta_t: i64::MIN,
+            baseline_generation: u64::MAX,
+            computed_at_ms: i64::MIN,
+            evaluable: true,
+            generation_invalidated: true,
+            content_signature: crate::wire::fingerprint("tail")[..32].to_string(),
+        }),
+        pending_user_hint_block_ids: (0..crate::transform::MAX_PENDING_USER_HINT_BLOCK_IDS)
+            .map(|n| format!("{n:02}{}", escaped(block_id - 2)))
+            .collect(),
+        channel1_reduce_suppressed: true,
+        last_execute_ordinal: u64::MAX,
+        last_emergency_input_sample: f64::MIN,
+        has_prior_emergency_drop: true,
+        deferred_execute_state: Some(memory_store::DeferredExecuteState {
+            reason: escaped(memory_store::MAX_STATE_SYNC_DIRECTIVE_BYTES),
+        }),
+        pending_compaction_marker: Some(memory_store::PendingCompactionMarkerState {
+            ordinal: u64::MAX,
+            end_message_id: escaped(memory_store::MAX_STATE_SYNC_ID_BYTES),
+            published_at: i64::MIN,
+        }),
+        newest_live_ordinal: u64::MAX,
+        descent_completed: true,
+        lineage_descent_target_key: escaped(identity),
+        lineage_descent_edge_id: u64::MAX,
+        lineage_descent_disposition: escaped(32),
+        lineage_descent_source_key: Some(escaped(identity)),
+        ordinal_continuation_base: Some(u64::MAX),
+        anchor_block_id: Some(escaped(block_id)),
+        anchor_content_hash: Some(crate::wire::fingerprint("anchor")),
+        lineage_descent_materialized: true,
+        lineage_descent_counters: memory_store::LineageDescentCounters {
+            compaction_seen: u64::MAX,
+            compaction_answered: u64::MAX,
+            fork_arm: u64::MAX,
+            descended: u64::MAX,
+            unknown_ancestor: u64::MAX,
+            already_bootstrapped: u64::MAX,
+            not_compaction_shape: u64::MAX,
+            observed_flag_missing_shape_present: u64::MAX,
+            cycle_detected: u64::MAX,
+            pending_build_skew: u64::MAX,
+            pending_no_responses: u64::MAX,
+        },
+        channel2_nudge_state: escaped(memory_store::MAX_STATE_SYNC_DIRECTIVE_BYTES),
+        pending_channel2_directive: Some(memory_store::PendingChannel2Directive {
+            text: escaped(280),
+            directive_id: escaped(32),
+            armed_at_ms: i64::MIN,
+            arming_watermark: u64::MAX,
+        }),
+        channel2_pressure_latched: true,
+        channel2_arming_watermark: u64::MAX,
+        emergency_drain_active: true,
+        emergency_drain_entered_at_ms: i64::MIN,
+        last_committed_pass_at_ms: i64::MIN,
+        shadow_generation: u64::MAX,
+        shadow_seq: u64::MAX,
+        shadow_quarantined: true,
+        shadow_quarantined_pass_count: u64::MAX,
+        shadow_acked_watermarks: acked_watermarks_near_bound(),
+        eidnara_folds: Some(true),
+    }
+}
+
+#[test]
+fn composition_witness_a_meta_with_every_field_near_its_bound_commits_and_reloads_within_the_total()
+{
+    let _serial = serial();
+    let dir = tempfile::tempdir().expect("store dir");
+    let store = store(dir.path());
+    let meta = worst_case_module_meta();
+    let selection = &meta.history_summarizer.selected_range_identities;
+    let identities = memory_store::BlockIdentityDelta {
+        upserts: selection
+            .iter()
+            .map(|selected| (selected.mid.clone(), selected.block_identities.clone()))
+            .collect(),
+        ..Default::default()
+    };
+    let empty = store.load(SESSION).expect("load empty");
+    store
+        .commit_with_block_identities_for_test(SESSION, None, &empty.core, &meta, &identities)
+        .expect("the composite meta commits");
+
+    let table = recorded_metadata_bounds();
+    let total = object(&table);
+    let stored_text = stored_meta_text(&store);
+    let serde_json::Value::Object(mut stored) = serde_json::from_str(&stored_text).unwrap() else {
+        panic!("the stored meta is an object");
+    };
+    let selected = stored
+        .get_mut("history_summarizer")
+        .and_then(|summarizer| summarizer.get_mut("selected_range_identities"))
+        .map(serde_json::Value::take)
+        .expect("the stored selection");
+    let selected_bytes = serde_json::to_vec(&selected).unwrap().len();
+    assert!(
+        selected_bytes <= SELECTED_IDENTITY_BUDGET_BYTES,
+        "the stored selection holds {selected_bytes} bytes"
+    );
+    stored["history_summarizer"]["selected_range_identities"] = serde_json::json!([]);
+    for (field, value) in &stored {
+        let bound = table
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, bound)| *bound)
+            .unwrap_or_else(|| panic!("{field} is stored without a recorded bound"));
+        let bytes = serde_json::to_vec(value).unwrap().len();
+        assert!(
+            bytes <= bound,
+            "{field} stores {bytes} bytes over its {bound}"
+        );
+    }
+    let stored_bytes = stored_text.len();
+    assert!(
+        stored_bytes <= total + SELECTED_IDENTITY_BUDGET_BYTES,
+        "the composite meta stores {stored_bytes} bytes over {total} + {SELECTED_IDENTITY_BUDGET_BYTES}"
+    );
+    assert!(stored_bytes < 512 * 1024, "{stored_bytes}");
+    assert_eq!(meta_row_bytes(&store), stored_bytes);
+    eprintln!(
+        "composite meta: {stored_bytes} bytes stored, {selected_bytes} selected, {total} recorded"
+    );
+
+    let reloaded = store
+        .load(SESSION)
+        .expect("the composite meta reloads")
+        .meta;
+    for (field, shaped, max_bytes) in [
+        (
+            "last_recut",
+            reloaded.last_recut.as_deref(),
+            memory_store::MAX_LAST_RECUT_BYTES,
+        ),
+        (
+            "pending_rewrite_last_failure",
+            reloaded.pending_rewrite_last_failure.as_deref(),
+            memory_store::MAX_PENDING_REWRITE_DETAIL_BYTES,
+        ),
+    ] {
+        let shaped = shaped.unwrap_or_else(|| panic!("{field} reloads"));
+        assert!(shaped.contains("<REDACTED"), "{field}: {shaped}");
+        assert!(!shaped.contains("password=abc"), "{field}: {shaped}");
+        assert!(
+            serde_json::to_string(shaped).unwrap().len() <= max_bytes + 2,
+            "{field}"
+        );
+    }
+    let mut expected = meta.clone();
+    expected.last_recut = reloaded.last_recut.clone();
+    expected.pending_rewrite_last_failure = reloaded.pending_rewrite_last_failure.clone();
+    assert!(
+        reloaded == expected,
+        "the reload differs from the committed meta"
+    );
+    assert_eq!(
+        store.all_block_identities_for_test(SESSION).len(),
+        selection.len()
     );
 }
 
