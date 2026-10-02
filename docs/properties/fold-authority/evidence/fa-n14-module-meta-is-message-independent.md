@@ -93,11 +93,12 @@ All references are verified at `0ff62b29a`.
   free-text field with characters that escape to two bytes and every
   collection to capacity, with an empty selection (`:526`), and asserts it
   fits.
-- Summarizer writers: `bounded_detail` keeps a raw prefix within
-  `MAX_SUMMARIZER_DETAIL_BYTES`, 512 serialized bytes
-  (`crates/daemon/src/history_summarizer.rs:457-461`;
-  the constant lives at `crates/memory-store/src/lib.rs:6007-6009` since
-  `6267f66d4` and the daemon re-exports it), applied by
+- Summarizer writers: `bounded_detail` caps a detail at
+  `MAX_RAW_SUMMARIZER_DETAIL_BYTES`, 64 KiB of raw text
+  (`crates/daemon/src/history_summarizer.rs`), and the store's shaping cuts
+  the redacted form to `MAX_SUMMARIZER_DETAIL_BYTES`, 512 serialized bytes
+  (both constants live in `crates/memory-store/src/lib.rs`; the daemon
+  re-exports the second), applied by
   `abandon_with_detail` (`history_summarizer.rs:363-365`), `retain_backoff`
   (`:451-453`), `record_no_fire` (`crates/daemon/src/lib.rs:5902`, which
   compares the stored form at `:5903-5907`),
@@ -122,25 +123,33 @@ All references are verified at `0ff62b29a`.
   scans the value with `write.content`, so the field's receipt records any
   detection, and keeps `redacted_prefix_within_serialized_bytes` of the
   result. That function (`:6024-6032`) redacts with the durable and then the
-  transaction redactor and shortens the cut until `redaction_stable`
-  (`:6034-6036`) holds for both, so a state sync that re-prepares the
-  record with the transaction redactor stores the same bytes. The daemon
-  keeps raw prefixes in `bounded_detail`, `NoFire::new`, and
-  `pending_rewrite_detail` (`crates/daemon/src/transform.rs:6831-6848`), so
-  the original text reaches the store's scan. `MAX_PENDING_REWRITE_DETAIL_BYTES`
+  transaction redactor and, while a redactor would change the cut, moves it
+  back to the start of that redactor's earliest finding (`earliest_finding`),
+  so a state sync that re-prepares the record with the transaction redactor
+  stores the same bytes and each scan removes a whole finding
+  (`a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans`).
+  `bounded_detail` hands the store up to 64 KiB, so a credential that
+  crosses the 512-byte bound is scanned whole
+  (`a_credential_that_crosses_the_detail_bound_is_redacted_whole`);
+  `NoFire::new` and `pending_rewrite_detail`
+  (`crates/daemon/src/transform.rs:6831-6848`) keep raw prefixes. `MAX_PENDING_REWRITE_DETAIL_BYTES`
   and `MAX_LAST_RECUT_BYTES`, 1,024 each, live in the store
   (`crates/memory-store/src/lib.rs:6039`, `:6041`); the descent, reset, and
   revert-truncation writers cut `last_recut` to the stable prefix
   (`:12706-12712`, `:13288-13299`, `:13505-13510`).
-  `todo_state_within_bounds` (`:5983-5987`) checks both task-list bounds on
-  the redacted form; `set_todo_state` refuses a state that fails it
+  `todo_state_within_bounds` checks both task-list bounds on the raw and
+  the redacted form (`todo_state_bounds_hold_for_the_raw_and_the_redacted_form`); `set_todo_state` refuses a state that fails it
   (`:10309-10311`), and the bust capture records `[]` for one
   (`newest_bounded_todowrite_state_json`,
   `crates/daemon/src/injection.rs:214-222`).
   `synthetic_todo_pair_within_bounds` (`crates/memory-store/src/lib.rs:6147-6152`)
   measures the pair with `stored_json_len`, the longer of the durable and
-  transaction scans (`:6155-6160`), and `advance_synthetic_todo` freezes a
-  pair only when it fits (`crates/daemon/src/transform.rs:6977-6979`).
+  transaction scans (`:6155-6160`). `SyntheticTodo::admitted`
+  (`crates/daemon/src/injection.rs`) measures it under the longest
+  serialized anchor; `advance_synthetic_todo` freezes a pair only when it is
+  admitted, and `injection_pending_after_capture` applies the same decision,
+  so a refused pair leaves no injection pending
+  (`a_state_whose_pair_is_refused_leaves_no_injection_pending`).
   Tests:
   `a_secret_bearing_summarizer_detail_is_stored_within_its_bound_with_its_detection_recorded`
   (`crates/memory-store/tests/production_redaction.rs:968`; stored detail

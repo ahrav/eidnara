@@ -147,7 +147,12 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_producer_session_id_keeps_a_bounded_slug` | `crates/daemon/src/history_summarizer.rs:6271` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `chunk_fingerprint_uses_id_kind_and_byte_length` (now a SHA-256 digest of the join) | `crates/daemon/src/history_summarizer.rs:6232` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `chunk_failures_count_per_chunk_and_ignore_provider_errors` (model-chain digest, older chain form, 1,000-model chain) | `crates/daemon/src/history_summarizer.rs:2714` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_bound` | `crates/daemon/src/history_summarizer.rs:3175` | FA-N14 | #859 PR A; #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound` | `crates/daemon/src/history_summarizer.rs:3175` | FA-N14 | #859 PR A; #859 PR C | unaudited |
+| `a_credential_that_crosses_the_detail_bound_is_redacted_whole` | `crates/daemon/src/history_summarizer.rs:4351` | FA-N14 | #859 PR C | unaudited |
+| `a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans` | `crates/memory-store/src/lib.rs:24694` | FA-N14 | #859 PR C | unaudited |
+| `todo_state_bounds_hold_for_the_raw_and_the_redacted_form` | `crates/memory-store/src/lib.rs:24715` | FA-N14 | #859 PR C | unaudited |
+| `a_captured_state_over_its_raw_bound_reads_as_an_empty_list_whatever_its_redacted_form` | `crates/daemon/src/injection.rs:805` | FA-N14 | #859 PR C | unaudited |
+| `a_state_whose_pair_is_refused_leaves_no_injection_pending` | `crates/daemon/src/injection.rs:840` | FA-N14 | #859 PR C | unaudited |
 | `a_detail_is_cut_by_its_serialized_length` | `crates/memory-store/src/summarizer_timeline.rs:490` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 
 ## Plugin, Pi, and CLI

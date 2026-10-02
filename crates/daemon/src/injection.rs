@@ -80,6 +80,15 @@ impl SyntheticTodo {
             tool_msg: self.tool_msg,
         }
     }
+
+    /// Admission uses the longest serialized anchor to make the size check independent of the
+    /// stored anchor.
+    pub fn admitted(&self) -> bool {
+        let longest_anchor = "\u{1}".repeat(crate::wire::MAX_MID_BYTES);
+        memory_store::synthetic_todo_pair_within_bounds(
+            &self.clone().freeze_at(Some(longest_anchor)),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,7 +277,10 @@ pub fn injection_pending_after_capture(
 
     match (next_call_id.as_deref(), frozen) {
         (Some(call_id), Some(current)) => current.call_id != call_id,
-        (Some(_), None) | (None, Some(_)) => true,
+        (Some(_), None) => {
+            build_synthetic_todo_pair(&normalized).is_some_and(|next| next.admitted())
+        }
+        (None, Some(_)) => true,
         (None, None) => false,
     }
 }
@@ -790,6 +802,21 @@ mod tests {
     }
 
     #[test]
+    fn a_captured_state_over_its_raw_bound_reads_as_an_empty_list_whatever_its_redacted_form() {
+        let scanner_limit = active_state(&"n".repeat(600 * 1024));
+        assert!(scanner_limit.len() > memory_store::MAX_TODO_STATE_BYTES);
+        assert!(!memory_store::todo_state_within_bounds(&scanner_limit));
+        let mut meta = ModuleMeta::default();
+        assert!(capture_todo_state_on_bust(
+            &mut meta,
+            &[todowrite_tail_item("m1#0", 1, &scanner_limit)],
+            true,
+            None,
+        ));
+        assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
+    }
+
+    #[test]
     fn a_synthetic_pair_over_its_bound_after_redaction_is_refused() {
         let secret = "password=abc next ";
         let state =
@@ -807,6 +834,35 @@ mod tests {
         assert!(memory_store::synthetic_todo_pair_within_bounds(
             &frozen_for(&active_state("plain"))
         ));
+    }
+
+    #[test]
+    fn a_state_whose_pair_is_refused_leaves_no_injection_pending() {
+        let secret = "password=abc next ";
+        let state =
+            active_state(&secret.repeat(
+                (memory_store::MAX_TODO_STATE_BYTES - active_state("").len()) / secret.len(),
+            ));
+        assert!(!memory_store::synthetic_todo_pair_within_bounds(
+            &frozen_for(&state)
+        ));
+        let meta = ModuleMeta {
+            last_todo_state: Some(state.clone()),
+            ..ModuleMeta::default()
+        };
+        assert!(
+            !injection_pending_after_capture(&meta, &[], None, None),
+            "a pair the store refuses is settled once cleared"
+        );
+        let tail = [todowrite_tail_item("m1#0", 1, &state)];
+        assert!(!injection_pending_after_capture(&meta, &tail, None, None));
+
+        let plain = active_state("plain");
+        let meta = ModuleMeta {
+            last_todo_state: Some(plain),
+            ..ModuleMeta::default()
+        };
+        assert!(injection_pending_after_capture(&meta, &[], None, None));
     }
 
     #[test]

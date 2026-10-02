@@ -457,7 +457,7 @@ fn retain_backoff(
 pub use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
 
 pub(crate) fn bounded_detail(detail: &str) -> String {
-    memory_store::prefix_within_serialized_bytes(detail, MAX_SUMMARIZER_DETAIL_BYTES).to_string()
+    detail[..detail.floor_char_boundary(memory_store::MAX_RAW_SUMMARIZER_DETAIL_BYTES)].to_string()
 }
 
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
@@ -3172,10 +3172,11 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_bound() {
-        let detail = format!("{}\u{e9}tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+    fn a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound() {
+        let raw_bound = memory_store::MAX_RAW_SUMMARIZER_DETAIL_BYTES;
+        let detail = format!("{}\u{e9}tail", "a".repeat(raw_bound - 1));
         let bounded = bounded_detail(&detail);
-        assert_eq!(bounded, "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        assert_eq!(bounded, "a".repeat(raw_bound - 1));
         let short = "a short detail";
         assert_eq!(bounded_detail(short), short);
         let next = retain_backoff(&HistorySummarizerDurableState::default(), 5, Some(detail));
@@ -4289,6 +4290,95 @@ mod tests {
             .last_failure
             .expect("the failure is recorded");
         assert!(detail.contains("<REDACTED:password>"), "{detail}");
+        assert!(
+            memory_store::serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES,
+            "{}",
+            detail.len()
+        );
+    }
+
+    async fn stored_start_failure_detail(message: String) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model".to_string()];
+        let mut producer = ScriptedProducer::default().with_start(Err(
+            HistorySummarizerProducerError::context_overflow(message),
+        ));
+        run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        store
+            .load("ses")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .last_failure
+            .expect("the failure is recorded")
+    }
+
+    fn checksummed_github_token() -> String {
+        const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let body: String = (0..30)
+            .map(|index| char::from(DIGITS[(index * 37 + 11) % DIGITS.len()]))
+            .collect();
+        let mut crc = u32::MAX;
+        for byte in body.bytes() {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let mut checksum = !crc;
+        let mut encoded = [b'0'; 6];
+        for slot in encoded.iter_mut().rev() {
+            *slot = DIGITS[(checksum % 62) as usize];
+            checksum /= 62;
+        }
+        format!("ghp_{body}{}", std::str::from_utf8(&encoded).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_crosses_the_detail_bound_is_redacted_whole() {
+        let token = checksummed_github_token();
+        let prefix_of = |text: &str| text.contains(&token[..12]);
+
+        let probe = stored_start_failure_detail("MARKER".to_string()).await;
+        let offset = probe.find("MARKER").expect("the message is recorded");
+        let offset = memory_store::serialized_str_len(&probe[..offset]);
+        let filler = MAX_SUMMARIZER_DETAIL_BYTES - 30 - offset - 1;
+        let message = format!("{} {token} tail", "a".repeat(filler));
+        let whole = context_core::redaction::redact_durable_text(&message).text;
+        assert!(!prefix_of(&whole), "the whole message redacts the token");
+        let full = probe.replace("MARKER", &message);
+        let raw_cut =
+            memory_store::prefix_within_serialized_bytes(&full, MAX_SUMMARIZER_DETAIL_BYTES);
+        assert!(
+            raw_cut.ends_with(&token[..30]),
+            "the bound falls inside the token"
+        );
+        let cut_redacted = context_core::redaction::redact_durable_text(raw_cut).text;
+        assert!(
+            prefix_of(&cut_redacted),
+            "a cut token is no longer recognized"
+        );
+
+        let detail = stored_start_failure_detail(message).await;
+
+        assert!(!prefix_of(&detail), "{detail}");
+        assert!(
+            context_core::redaction::contains_redaction_token(&detail),
+            "{detail}"
+        );
         assert!(
             memory_store::serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES,
             "{}",

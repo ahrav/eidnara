@@ -6973,10 +6973,10 @@ fn advance_synthetic_todo(
     );
     match outcome {
         InjectionOutcome::Replace(next) => {
-            let anchor_mid = tail_end_mid(req, meta.coverage_ordinal);
-            let frozen = (*next).freeze_at(anchor_mid);
-            meta.synthetic_todo =
-                memory_store::synthetic_todo_pair_within_bounds(&frozen).then_some(frozen);
+            meta.synthetic_todo = next.admitted().then(|| {
+                let anchor_mid = tail_end_mid(req, meta.coverage_ordinal);
+                (*next).freeze_at(anchor_mid)
+            });
         }
         InjectionOutcome::Clear => meta.synthetic_todo = None,
         InjectionOutcome::Keep => {
@@ -21648,6 +21648,10 @@ pub(crate) mod tests {
             reloaded.synthetic_todo.is_none(),
             "an over-bound replacement persisted as {:?}",
             reloaded.synthetic_todo.as_ref().map(|pair| &pair.call_id)
+        );
+        assert!(
+            !injection_pending_after_capture(&reloaded, &[], None, None),
+            "the refused pair leaves no injection pending"
         );
     }
 

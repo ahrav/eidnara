@@ -5979,11 +5979,13 @@ pub const MAX_ACKED_WATERMARKS_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_SERIALIZED_BYTES: usize = 2 * MAX_TODO_STATE_BYTES + 2;
 
-/// Whether `state` meets both task-list bounds in the redacted form the metadata scan stores.
+/// The raw-text check bounds caller-retained input independently of the redacted text's size.
 pub fn todo_state_within_bounds(state: &str) -> bool {
-    let stored = redact_durable_text(state).text;
-    stored.len() <= MAX_TODO_STATE_BYTES
-        && serialized_text_len(&stored) <= MAX_TODO_STATE_SERIALIZED_BYTES
+    let within = |text: &str| {
+        text.len() <= MAX_TODO_STATE_BYTES
+            && serialized_text_len(text) <= MAX_TODO_STATE_SERIALIZED_BYTES
+    };
+    within(state) && within(&redact_durable_text(state).text)
 }
 
 fn serialized_text_len(text: &str) -> usize {
@@ -6008,6 +6010,8 @@ pub fn serialized_str_len(text: &str) -> usize {
 /// JSON-escaped bytes.
 pub const MAX_SUMMARIZER_DETAIL_BYTES: usize = 512;
 
+pub const MAX_RAW_SUMMARIZER_DETAIL_BYTES: usize = 64 * 1024;
+
 pub fn prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> &str {
     let mut used = 0;
     for (index, character) in text.char_indices() {
@@ -6019,20 +6023,44 @@ pub fn prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> &str {
     text
 }
 
-/// The longest prefix of `text`, redacted, within `max_bytes` serialized bytes that the durable
-/// and transaction redactors both leave unchanged.
+/// A prefix of `text`, redacted, within `max_bytes` serialized bytes that the durable and
+/// transaction redactors both leave unchanged. A prefix a redactor would change is cut back to the
+/// start of that redactor's earliest finding in it, so each scan removes a whole finding.
 pub fn redacted_prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> String {
     let durable = redact_durable_text(text).text;
     let redacted = redact_transaction_durable_text(&durable).text;
     let mut end = prefix_within_serialized_bytes(&redacted, max_bytes).len();
-    while end > 0 && !redaction_stable(&redacted[..end]) {
-        end = redacted.floor_char_boundary(end - 1);
+    while let Some(finding) = earliest_finding(&redacted[..end]) {
+        end = redacted.floor_char_boundary(finding.min(end - 1));
     }
     redacted[..end].to_string()
 }
 
 fn redaction_stable(text: &str) -> bool {
-    redact_durable_text(text).text == text && redact_transaction_durable_text(text).text == text
+    earliest_finding(text).is_none()
+}
+
+/// The byte offset where the first redactor that changes `text` places its earliest finding, or
+/// `None` when the durable and transaction redactors both leave `text` unchanged.
+fn earliest_finding(text: &str) -> Option<usize> {
+    #[cfg(test)]
+    REDACTION_STABILITY_CHECKS.with(|checks| checks.set(checks.get() + 1));
+    let earliest = |redaction: context_core::redaction::Redaction| {
+        (redaction.text != text).then(|| {
+            redaction
+                .detections
+                .iter()
+                .map(|detection| detection.offset)
+                .min()
+                .unwrap_or(0)
+        })
+    };
+    earliest(redact_durable_text(text)).or_else(|| earliest(redact_transaction_durable_text(text)))
+}
+
+#[cfg(test)]
+thread_local! {
+    static REDACTION_STABILITY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The largest `pending_rewrite_last_failure` text the metadata keeps, in JSON-escaped bytes.
@@ -24662,6 +24690,40 @@ mod tests {
         }
         assert_eq!(snapshot(), before, "a refused sync writes nothing");
     }
+
+    #[test]
+    fn a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans() {
+        let detail = format!("password=abc password={}example", "a".repeat(470));
+        assert!(
+            serialized_str_len(&redact_durable_text(&detail).text) > MAX_SUMMARIZER_DETAIL_BYTES
+        );
+        REDACTION_STABILITY_CHECKS.with(|checks| checks.set(0));
+        let cut = redacted_prefix_within_serialized_bytes(&detail, MAX_SUMMARIZER_DETAIL_BYTES);
+        let checks = REDACTION_STABILITY_CHECKS.with(std::cell::Cell::get);
+        assert!(checks <= 8, "{checks} stability checks for one cut");
+        assert!(
+            serialized_str_len(&cut) <= MAX_SUMMARIZER_DETAIL_BYTES,
+            "{cut:?}"
+        );
+        assert!(redaction_stable(&cut), "{cut:?}");
+        assert!(
+            redact_durable_text(&detail).text.starts_with(&cut),
+            "{cut:?}"
+        );
+    }
+
+    #[test]
+    fn todo_state_bounds_hold_for_the_raw_and_the_redacted_form() {
+        let scanner_limit = "n".repeat(600 * 1024);
+        assert!(!todo_state_within_bounds(&scanner_limit));
+        assert!(!todo_state_within_bounds(
+            &"t".repeat(MAX_TODO_STATE_BYTES + 1)
+        ));
+        let serialized_over = format!("{}\u{1}a", "\"".repeat(MAX_TODO_STATE_BYTES - 3));
+        assert!(!todo_state_within_bounds(&serialized_over));
+        assert!(todo_state_within_bounds(&"t".repeat(MAX_TODO_STATE_BYTES)));
+    }
+
     #[test]
     fn a_redacted_detail_cut_keeps_its_length_through_another_redaction() {
         let secret = "password=abc next ";

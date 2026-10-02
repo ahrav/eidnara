@@ -1935,25 +1935,32 @@ passes the record through `shape_stored_meta` before serializing it
 `pending_rewrite_last_failure`, and `last_recut` with `write.content` when a value is over its bound or a
 redactor would change it, so the field's receipt records any detection, and
 keeps `redacted_prefix_within_serialized_bytes` of the result
-(`shaped_meta_text`, `:6046-6062`). That prefix is the longest one within the
-bound that both the durable and the transaction redactors leave unchanged
-(`:6024-6032`, `redaction_stable` `:6034-6036`), so the record keeps its
-bound when state sync re-prepares it with the transaction redactor. The
-daemon's `bounded_detail` (`crates/daemon/src/history_summarizer.rs:459-461`),
-`NoFire::new` (`crates/memory-store/src/summarizer_timeline.rs:94-95`), and
+(`shaped_meta_text`). That prefix is within the bound and both the durable
+and the transaction redactors leave it unchanged; a prefix a redactor would
+change is cut back to the start of that redactor's earliest finding in it
+(`earliest_finding`), so each scan removes a whole finding and the record
+keeps its bound when state sync re-prepares it with the transaction
+redactor. The daemon's `bounded_detail`
+(`crates/daemon/src/history_summarizer.rs`) caps a summarizer detail at
+`MAX_RAW_SUMMARIZER_DETAIL_BYTES`, 64 KiB of raw text, so a credential near
+the 512-byte bound reaches the store's scan whole and is redacted before the
+cut (`a_credential_that_crosses_the_detail_bound_is_redacted_whole`).
+`NoFire::new` (`crates/memory-store/src/summarizer_timeline.rs:94-95`) and
 `pending_rewrite_detail` (`crates/daemon/src/transform.rs:6831-6848`) keep a
-raw prefix, so the original text reaches the store's scan; `record_no_fire`
-compares the stored form (`crates/daemon/src/lib.rs:5903-5907`).
+raw prefix; `record_no_fire` compares the stored form
+(`crates/daemon/src/lib.rs:5903-5907`).
 `MAX_PENDING_REWRITE_DETAIL_BYTES` and `MAX_LAST_RECUT_BYTES` (1,024 each)
 live in the store (`crates/memory-store/src/lib.rs:6039`, `:6041`), and the
 descent, reset, and revert-truncation writers cut `last_recut` to the stable
 prefix (`:12706-12712`, `:13288-13299`, `:13505-13510`).
 `MAX_SUMMARIZER_DETAIL_BYTES` is at `:6007-6009`, re-exported by the daemon.
-The task-list setter and bust capture accept a state only when its redacted
-form meets both task-list bounds (`todo_state_within_bounds`, `:5983-5987`;
+The task-list setter and bust capture accept a state only when its raw and
+its redacted form both meet both task-list bounds (`todo_state_within_bounds`;
 `set_todo_state` `:10309-10311`; `crates/daemon/src/injection.rs:214-222`);
-the synthetic pair is frozen only when its stored form fits 24 KiB
-(`synthetic_todo_pair_within_bounds`,
+the synthetic pair is frozen only when `SyntheticTodo::admitted` holds: its
+stored form fits 24 KiB under the longest serialized anchor, and
+`injection_pending_after_capture` applies the same decision, so a refused
+pair leaves no injection pending (`synthetic_todo_pair_within_bounds`,
 `crates/memory-store/src/lib.rs:6147-6152`, measured by `stored_json_len`,
 the longer of the durable and transaction scans, `:6155-6160`;
 `crates/daemon/src/transform.rs:6977-6979`). State sync checks the seeded
