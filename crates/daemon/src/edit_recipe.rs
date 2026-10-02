@@ -103,7 +103,7 @@ impl RevisionAllocator {
         use std::sync::atomic::Ordering;
         let counter = self
             .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .ok()?;
