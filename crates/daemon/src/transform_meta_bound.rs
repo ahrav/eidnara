@@ -313,6 +313,7 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         m1_user_profile_version => int;
         m1_pending_since_ms => int;
         folded_history_segment_seq => int;
+        archive_fold_seq => int;
         legacy_history_segment_seqs => Unbounded;
         history_segments_ordered => boolean;
         coverage_start_ordinal => int;
