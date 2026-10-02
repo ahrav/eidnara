@@ -513,7 +513,7 @@ impl KernelStore {
         );
         let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         self.classification_generation
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |generation| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |generation| {
                 generation.is_multiple_of(2).then_some(generation + 1)
             })
             .expect("a classification window is already open");
