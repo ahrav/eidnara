@@ -145,8 +145,8 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_run_id_over_the_producer_identity_bound_is_a_start_failure` | `crates/daemon/src/history_summarizer.rs:4415` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_harness_over_the_producer_identity_bound_writes_nothing` | `crates/daemon/src/history_summarizer.rs:4451` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_producer_session_id_keeps_a_bounded_slug` | `crates/daemon/src/history_summarizer.rs:6391` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `chunk_fingerprint_uses_id_kind_and_byte_length` (now a SHA-256 digest of the join) | `crates/daemon/src/history_summarizer.rs:6333` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `chunk_failures_count_per_chunk_and_ignore_provider_errors` (model-chain digest, older chain form, 1,000-model chain) | `crates/daemon/src/history_summarizer.rs:2721` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `chunk_fingerprint_uses_id_kind_and_byte_length` (now a SHA-256 digest of the join) | `crates/daemon/src/history_summarizer.rs:6352` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `chunk_failures_count_per_chunk_and_ignore_provider_errors` (model-chain digest, older chain form, 1,000-model chain) | `crates/daemon/src/history_summarizer.rs:2730` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound` | `crates/daemon/src/history_summarizer.rs:3191` | FA-N14 | #859 PR A; #859 PR C | unaudited |
 | `a_credential_that_crosses_the_detail_bound_is_redacted_whole` | `crates/daemon/src/history_summarizer.rs:4376` | FA-N14 | #859 PR C | unaudited |
 | `a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans` | `crates/memory-store/src/lib.rs:24723` | FA-N14 | #859 PR C | unaudited |

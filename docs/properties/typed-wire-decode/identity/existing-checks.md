@@ -214,7 +214,7 @@ Source: `crates/daemon/src/history_summarizer.rs`.
 | 2275 | `selected_range_identity_drift_during_await_rejects_without_cooldown` | Checks selected-range identity drift while awaiting output. | unaudited |
 | 2843 | `reattach_equal_length_identity_drift_rejects_before_publish` | Distinguishes equal-length content drift from length fingerprint equality. | unaudited |
 | 3539 | `reattach_fingerprint_mismatch_recovers_to_idle_and_releases_routes` | Checks mismatched fingerprint recovery. | unaudited |
-| 3925 | `chunk_fingerprint_uses_id_kind_and_byte_length` | Pins exact joined string and UTF-8 lengths; since `bdf564e3a` it pins the SHA-256 digest of that string (`:6232` at `0ff62b29a`). | unaudited |
+| 6352 | `chunk_fingerprint_uses_id_kind_and_byte_length` | Pins exact joined string and UTF-8 lengths; since `bdf564e3a` it pins the SHA-256 digest of that string (`:6232` at `0ff62b29a`). | unaudited |
 | 4025 | `fingerprint_mismatch_at_publish_abandons_and_releases_single_flight` | Checks publication mismatch branch. | unaudited |
 
 Source: `crates/daemon/src/history_summarizer_chunk.rs`.

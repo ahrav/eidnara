@@ -266,7 +266,7 @@ Two cheaper unit-level assertions worth having regardless, both pure:
   count. A record written with the chain itself loads with an empty digest
   and restarts its count, which
   `chunk_failures_count_per_chunk_and_ignore_provider_errors`
-  (`history_summarizer.rs:2714`) asserts.
+  (`history_summarizer.rs:2730`) asserts.
 - Missing evidence: None.
 - Conclusion: resolved with answer: the key's meaning is unchanged; the
   stored form is a digest.

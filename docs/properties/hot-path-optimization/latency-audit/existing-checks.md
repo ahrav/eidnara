@@ -752,7 +752,7 @@ not a claim that no related check exists anywhere in the repository.
 [t-pinned]: ../../../../crates/secret-scanner/src/evaluator.rs#L1660
 [t-windows]: ../../../../crates/context-core/src/redaction.rs#L827
 [t-only-path]: ../../../../crates/context-core/src/redaction.rs#L857
-[t-chunk-fp]: ../../../../crates/daemon/src/history_summarizer.rs#L6232
+[t-chunk-fp]: ../../../../crates/daemon/src/history_summarizer.rs#L6352
 [t-boundary-construction]: ../../../../crates/daemon/src/lib.rs#L18499
 [t-firing-capture]: ../../../../crates/daemon/src/lib.rs#L25527
 [diff-prod]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L103

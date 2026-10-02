@@ -170,7 +170,7 @@ All references are verified at `0ff62b29a`.
   (`:24944`),
   `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound`
   (`:24984`), `a_secret_bearing_start_failure_stays_within_its_bound_once_stored`
-  (`crates/daemon/src/history_summarizer.rs:4275`),
+  (`crates/daemon/src/history_summarizer.rs:4293`),
   `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list`
   (`crates/daemon/src/injection.rs:785`), and
   `a_synthetic_pair_over_its_bound_after_redaction_is_refused` (`:820`). The
