@@ -13710,8 +13710,11 @@ impl MemoryStore {
         let mut write = PreparedWrite::new(DurableWriteFamily::HistorySummarizerSideChannels);
         write.domain_owner("session", session_id, "history_summarizer");
         write.existing_identity("session_id", session_id)?;
+        // The raw cut keeps the scan within the durable text limit, so an oversize detail
+        // is shortened and the firing is still released.
         let detail = detail
             .map(|value| {
+                let value = prefix_within_serialized_bytes(value, MAX_RAW_SUMMARIZER_DETAIL_BYTES);
                 write.content("last_failure", value).map(|redacted| {
                     redacted_prefix_within_serialized_bytes(&redacted, MAX_SUMMARIZER_DETAIL_BYTES)
                 })
@@ -25814,6 +25817,38 @@ mod tests {
             .expect("the detail is recorded");
         assert!(serialized_str_len(&stored) <= MAX_SUMMARIZER_DETAIL_BYTES);
         assert!(serialized_str_len(&stored) > MAX_SUMMARIZER_DETAIL_BYTES - 6);
+        assert!(detail.starts_with(&stored));
+    }
+
+    #[test]
+    fn an_abandon_with_a_detail_over_the_durable_text_bound_still_releases_the_firing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(directory.path())).unwrap();
+        store
+            .commit_with_block_identities_for_test(
+                "detail",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let detail = format!("publish rejected: {}", "x".repeat(MAX_DURABLE_TEXT_BYTES));
+        store
+            .abandon_history_summarizer_run_if_matching_with_publish_failure(
+                "detail",
+                &publish_predicate(),
+                None,
+                Some(&detail),
+                true,
+                summarizer_timeline::AbandonClass::Invalidated,
+            )
+            .unwrap()
+            .expect("abandon applies");
+        let state = store.load("detail").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        let stored = state.last_failure.expect("the detail is recorded");
+        assert!(serialized_str_len(&stored) <= MAX_SUMMARIZER_DETAIL_BYTES);
         assert!(detail.starts_with(&stored));
     }
 

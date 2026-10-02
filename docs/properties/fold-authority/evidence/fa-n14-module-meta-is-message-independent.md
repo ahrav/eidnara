@@ -25,7 +25,7 @@ All references are verified at `0ff62b29a`.
 
 - Write path: `commit_transform` shapes `meta` with `shape_stored_meta`,
   serializes it, and scans it with `json_content`
-  (`crates/memory-store/src/lib.rs:10982-10989`, `:3028-3038`); the
+  (`crates/memory-store/src/lib.rs:11034-11041`, `:3028-3038`); the
   single-pass JSON preparation applies `ensure_durable_text_bound` first
   (`:4303`, `:4577-4583`); the bound is
   512 KiB (`:429`).
@@ -115,10 +115,10 @@ All references are verified at `0ff62b29a`.
   details in the timeline keep a raw prefix within 128 serialized bytes
   (`crates/memory-store/src/summarizer_timeline.rs:13`, `:94-95`).
 - Store-owned shaping (`186f3c076`): `shape_stored_meta`
-  (`crates/memory-store/src/lib.rs:6066-6139`) runs in `commit_transform`
-  (`:10982`) over `last_failure`, `last_no_fire`, every `NoFire` detail in
+  (`crates/memory-store/src/lib.rs:6094-6167`) runs in `commit_transform`
+  (`:11034`) over `last_failure`, `last_no_fire`, every `NoFire` detail in
   the firing timeline and pending eligibility, `pending_rewrite_last_failure`,
-  and `last_recut`. `shaped_meta_text` (`:6046-6062`) leaves a value alone
+  and `last_recut`. `shaped_meta_text` (`:6074-6090`) leaves a value alone
   when it is within its bound and stable under both redactors; otherwise it
   scans the value with `write.content`, so the field's receipt records any
   detection, and keeps `redacted_prefix_within_serialized_bytes` of the

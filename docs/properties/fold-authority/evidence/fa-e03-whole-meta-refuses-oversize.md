@@ -27,11 +27,11 @@ References are verified at `0ff62b29a` unless another tree is named.
   returns `Redaction(InputLimit)` above it (`:4577-4583`).
 - Chain on the transform commit: `shape_stored_meta`, then
   `serde_json::to_string(meta)`, then `write.json_content("meta", ..)`
-  (`:10982-10989`) ->
+  (`:11034-11041`) ->
   `prepare_json_content_collecting` (`:3028-3038`, `:4282-4292`) ->
   `prepare_json_content_single_pass`, whose first statement is the guard
   (`:4303`). This runs while the commit is prepared, before `write.execute`
-  opens the transaction (`:11050`); the row write runs inside it
+  opens the transaction (`:11102`); the row write runs inside it
   (`:11104-11113`).
 - Refusal witness: `a_refused_commit_writes_no_identity_row` (`:33555`),
   added by #905 (`871ebfb08`), commits a `meta` whose `last_render_config`

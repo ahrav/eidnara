@@ -1889,16 +1889,23 @@ where
             request.session_id,
             fired.firing_seq,
         );
-        let started = producer
+        let started = match producer
             .start(&producer_session_id, request.system, request.prompt, model)
             .await
-            .and_then(|handle| {
-                if memory_store::serialized_str_len(&handle.run_id) <= MAX_PRODUCER_IDENTITY_BYTES {
-                    Ok(handle)
-                } else {
-                    Err(HistorySummarizerProducerError::MissingRunId)
-                }
-            });
+        {
+            Ok(handle)
+                if memory_store::serialized_str_len(&handle.run_id)
+                    > MAX_PRODUCER_IDENTITY_BYTES =>
+            {
+                let cancel_result = producer.cancel(&handle.run_id).await;
+                Err(attach_cleanup(
+                    HistorySummarizerProducerError::MissingRunId,
+                    cancel_result,
+                    "cancel",
+                ))
+            }
+            started => started,
+        };
         let handle = match started {
             Ok(handle) => {
                 if let Some(started) = request.producer_started {
@@ -4394,9 +4401,8 @@ mod tests {
         let chunk = history_summarizer_chunk();
         let prior = prior_ranges();
         let models = vec!["prov/model".to_string()];
-        let mut producer = ScriptedProducer::default().with_start(Ok(run_handle(
-            &"\"".repeat(MAX_PRODUCER_IDENTITY_BYTES / 2 + 1),
-        )));
+        let run_id = "\"".repeat(MAX_PRODUCER_IDENTITY_BYTES / 2 + 1);
+        let mut producer = ScriptedProducer::default().with_start(Ok(run_handle(&run_id)));
         let error = run_history_summarizer_firing(
             &mut producer,
             fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
@@ -4411,6 +4417,11 @@ mod tests {
             "{error}"
         );
         assert!(producer.await_run_ids.is_empty());
+        assert_eq!(
+            producer.cancels,
+            vec![run_id],
+            "the run the provider started is cancelled before the firing is released"
+        );
         assert_eq!(producer.closes, 1);
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.state, HistorySummarizerPhase::Idle);

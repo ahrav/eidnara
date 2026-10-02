@@ -31,9 +31,9 @@ Code references are verified at `0ff62b29a`.
   history-segment sequence check (`:11078-11089`); the CAS and the sequence
   check return `Replay`. It then writes `cache_state` (`:11104-11113`) and
   applies the delta (`:11117-11119`) in the same transaction. No `Replay`
-  return follows the delta in this closure (it ends `Applied` at `:11353`).
+  return follows the delta in this closure (it ends `Applied` at `:11405`).
   Meta and core pass the durable-text scans before `write.execute`
-  (`:10980-10989`, `:11050`).
+  (`:11032-11041`, `:11102`).
 - Transform: the pass requests the projection's mids
   (`crates/daemon/src/transform.rs:3363-3369`), holds `WindowIdentities`
   (`:5394-5429`), and sends its delta with the commit (`:5242`). A pass whose
@@ -117,7 +117,7 @@ reopen.
 
 - Sources examined: `git show f0e39d04d 64a8bf371 5d9ff4581`;
   `crates/daemon/src/transform.rs:5431-5469`, `:20444`;
-  `crates/memory-store/src/lib.rs:14141-14145`.
+  `crates/memory-store/src/lib.rs:14144-14148`.
 - Findings: Yes. The window still deletes no omitted row. When a window
   drops a selected mid of an in-flight firing, the transform records the
   withdrawal on the firing and the publication is fenced out, while the
