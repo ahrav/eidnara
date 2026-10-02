@@ -624,7 +624,7 @@ fn recorded_metadata_bounds() -> Vec<(&'static str, usize)> {
     inventory!(memory_store::ModuleMeta {
         initialized => boolean;
         bootstrap_seed_fold_pending => boolean;
-        last_render_config => text(4 * crate::transform::MAX_REQUEST_IDENTITY_BYTES + 256);
+        last_render_config => text(5 * crate::transform::MAX_REQUEST_IDENTITY_BYTES) + RENDER_IDENTITY_FRAMING_BYTES;
         last_provider_id => request_identity;
         last_model_key => request_identity;
         last_system_prompt_hash => request_identity;
@@ -735,6 +735,11 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
 }
 
 /// Each U+0001 character serializes as the six-byte JSON escape `\u0001`.
+/// The labels, separators, length prefixes, and epoch parts a stored render identity adds to its
+/// five request-supplied strings: `additive-only-v2|`, `provider:`, `model:`, `system:`, the
+/// `|m0epoch[...]` fold, and every optional epoch part at its generated length.
+const RENDER_IDENTITY_FRAMING_BYTES: usize = 512;
+
 fn escaped(bytes: usize) -> String {
     "\u{1}".repeat(bytes)
 }
@@ -810,7 +815,11 @@ fn worst_case_module_meta() -> memory_store::ModuleMeta {
     memory_store::ModuleMeta {
         initialized: true,
         bootstrap_seed_fold_pending: true,
-        last_render_config: escaped(4 * identity + 256),
+        last_render_config: format!(
+            "{}{}",
+            escaped(5 * identity),
+            "f".repeat(RENDER_IDENTITY_FRAMING_BYTES)
+        ),
         last_provider_id: escaped(identity),
         last_model_key: escaped(identity),
         last_system_prompt_hash: escaped(identity),
@@ -1313,6 +1322,35 @@ fn module_meta_size_is_independent_of_message_count_and_window_size() {
     );
     let widths = |value: u64| (String::new(), format!(r#"{{"w":{value},"m":"m{value}"}}"#));
     assert!(equal_apart_from_digit_width(&[widths(7), widths(70_000)]).is_ok());
+}
+
+#[test]
+fn a_render_identity_from_five_escaped_inputs_at_their_bound_fits_its_allowance() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().expect("store dir");
+    let store = store(dir.path());
+    let at_bound = || escaped(crate::transform::MAX_REQUEST_IDENTITY_BYTES);
+    let mut request = req(SESSION, &at_bound(), vec![item("m1", 1, "hello")]);
+    request.provider_id = Some(at_bound());
+    request.model_key = Some(at_bound());
+    request.system_prompt_hash = at_bound();
+    request.upgrade_state = at_bound();
+    pass(&store, &request).expect("the pass commits");
+    let stored = store.load(SESSION).unwrap().meta.last_render_config;
+    let payload = 5 * crate::transform::MAX_REQUEST_IDENTITY_BYTES;
+    assert_eq!(stored.matches('\u{1}').count(), payload, "{stored:?}");
+    let framing = stored.len() - payload;
+    assert!(
+        framing <= RENDER_IDENTITY_FRAMING_BYTES,
+        "the render identity adds {framing} framing bytes"
+    );
+    let recorded = recorded_metadata_bounds()
+        .into_iter()
+        .find(|(field, _)| *field == "last_render_config")
+        .map(|(_, bound)| bound)
+        .unwrap();
+    let serialized = serde_json::to_string(&stored).unwrap().len();
+    assert!(serialized <= recorded, "{serialized} over {recorded}");
 }
 
 #[test]
