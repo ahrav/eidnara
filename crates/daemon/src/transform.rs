@@ -2241,11 +2241,11 @@ pub(crate) fn resolve_window(
         }
     }
     let mut seen = HashSet::with_capacity(req.messages.len());
-    for message in &req.messages {
+    for (index, message) in req.messages.iter().enumerate() {
         if message.mid.len() > crate::wire::MAX_MID_BYTES {
             return Err(TransformError::InvalidWindow(format!(
-                "message id {:?} is {} bytes, over the {}-byte bound",
-                message.mid,
+                "message id at index {} is {} bytes, over the {}-byte bound",
+                index,
                 message.mid.len(),
                 crate::wire::MAX_MID_BYTES
             )));
