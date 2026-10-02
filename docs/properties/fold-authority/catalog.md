@@ -633,9 +633,9 @@ is now `:5485-5487`; the `IdentityDrift` error and
 re-adopts or refuses with `FrozenTargetDrift`.
 Existing check: `crates/memory-store/src/lib.rs:25938`
 `publish_rejects_a_selected_message_whose_identity_row_is_gone` (#905);
-`crates/daemon/src/history_summarizer.rs:4055`
+`crates/daemon/src/history_summarizer.rs:4073`
 `selected_range_identity_drift_during_await_rejects_without_cooldown` (spec
-`:3037`); `:4109` `tail_identity_extension_during_await_still_publishes`;
+`:3037`); `:4127` `tail_identity_extension_during_await_still_publishes`;
 `crates/memory-store/src/lib.rs:30032`
 `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict`;
 `crates/daemon/src/transform.rs:14628`
@@ -1973,7 +1973,7 @@ caps (`:5976-5980`, `:6141-6143`, `:6164`) and their check after redaction
 summarizer state stores a SHA-256 chunk fingerprint and model-chain digest
 (`crates/daemon/src/history_summarizer.rs:166-179`) and refuses a harness or
 run id over 128 serialized bytes and keeps a 48-byte session slug
-(`:1616`, `:1621-1624`, `:1834-1843`, `:1895-1901`); the reservation
+(`:1617-1625`, `:1630-1633`, `:1843-1852`, `:1905-1915`); the reservation
 identity refusal (`crates/memory-store/src/lib.rs:668-690`,
 `:13808-13814`); the covered-system rows
 (`crates/memory-store/baseline.sql:40-58`, delta applied in the commit at
@@ -1989,7 +1989,7 @@ keeps the stable prefix within `MAX_SUMMARIZER_DETAIL_BYTES`
 (`:13715-13722`, stored at `:13768-13770`). Its daemon callers pass uncut
 `publish rejected: {reason}` and `memory_reviewer handoff failed: {error}`
 details (`crates/daemon/src/history_summarizer.rs:737-743`, `:756-762`,
-`:773-779`, `:794-806`, `:2598-2605`), and a fence reason can quote a
+`:773-779`, `:794-806`, `:2607-2614`), and a fence reason can quote a
 128-byte control-character mid (`crates/memory-store/src/lib.rs:14165-14169`),
 so the store-side cut keeps that path within the 514 bytes the inventory
 charges.
@@ -2031,13 +2031,13 @@ and `:25787` `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
 `:34349` `covered_system_content_is_stored_as_the_meta_scan_redacts_it`,
 `:34385` `reset_and_delete_remove_covered_system_rows_and_their_receipts`,
 and `:34415` `descent_leaves_the_target_without_covered_system_rows` (#859
-PR B); `crates/daemon/src/history_summarizer.rs:4243`
-`a_producer_start_failure_records_a_bounded_detail`, `:4275`
-`a_secret_bearing_start_failure_stays_within_its_bound_once_stored`, `:4397`
-`a_run_id_over_the_producer_identity_bound_is_a_start_failure`, `:4432`
-`a_harness_over_the_producer_identity_bound_writes_nothing`, `:6372`
-`a_producer_session_id_keeps_a_bounded_slug`, `:6333`
-`chunk_fingerprint_uses_id_kind_and_byte_length`, and `:2721`
+PR B); `crates/daemon/src/history_summarizer.rs:4261`
+`a_producer_start_failure_records_a_bounded_detail`, `:4293`
+`a_secret_bearing_start_failure_stays_within_its_bound_once_stored`, `:4415`
+`a_run_id_over_the_producer_identity_bound_is_a_start_failure`, `:4451`
+`a_harness_over_the_producer_identity_bound_writes_nothing`, `:6391`
+`a_producer_session_id_keeps_a_bounded_slug`, `:6352`
+`chunk_fingerprint_uses_id_kind_and_byte_length`, and `:2730`
 `chunk_failures_count_per_chunk_and_ignore_provider_errors` (#859 PR C);
 `crates/memory-store/src/summarizer_timeline.rs:490`
 `a_detail_is_cut_by_its_serialized_length` (#859 PR C);

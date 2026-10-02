@@ -26,8 +26,8 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `non_append_mutation_invalidates_until_a_bust` | `crates/daemon/src/tail_hygiene.rs:2210` | FA-E07, FA-N11 | #906 | unaudited |
 | `first_divergence_classifies_each_boundary_kind_and_ignores_appends` | `crates/daemon/src/divergence.rs:124` | FA-E08 | #906 | unaudited |
 | `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:30032` | FA-E09 | #905 | unaudited |
-| `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:4055` | FA-E09 | #905 | unaudited |
-| `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:4109` | FA-E09 | #905 | unaudited |
+| `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:4073` | FA-E09 | #905 | unaudited |
+| `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:4127` | FA-E09 | #905 | unaudited |
 | `tier_policy_ignores_project_models_and_rejects_project_lowering` | `crates/daemon/src/config.rs:1509` | FA-E10 | #859 PR A | unaudited |
 | `compaction_enabled_defaults_true_and_is_user_tier_only` | `crates/daemon/src/config.rs:1616` | FA-E10 | #859 PR A | unaudited |
 | `module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set` | `crates/daemon/src/config.rs:2237` | FA-E10 | #859 PR A | unaudited |
@@ -129,7 +129,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_redacted_detail_cut_keeps_its_length_through_another_redaction` | `crates/memory-store/src/lib.rs:24756` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction` | `crates/memory-store/src/lib.rs:24944` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound` | `crates/memory-store/src/lib.rs:24984` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_secret_bearing_start_failure_stays_within_its_bound_once_stored` | `crates/daemon/src/history_summarizer.rs:4275` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_secret_bearing_start_failure_stays_within_its_bound_once_stored` | `crates/daemon/src/history_summarizer.rs:4293` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list` | `crates/daemon/src/injection.rs:785` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_synthetic_pair_over_its_bound_after_redaction_is_refused` | `crates/daemon/src/injection.rs:820` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `composition_witness_a_meta_with_every_field_near_its_bound_commits_and_reloads_within_the_total` | `crates/daemon/src/transform_meta_bound.rs:978` | FA-N14 (composite commit; synthetic stress state) | #859 PR C (run at `0ff62b29a`) | unaudited |
@@ -141,14 +141,14 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair` | `crates/daemon/src/transform.rs:21623` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_replacement_pair_near_its_bound_persists_and_reloads_within_it` | `crates/daemon/src/transform.rs:21659` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_reservation_identity_over_its_serialized_bound_is_refused_before_any_write` | `crates/memory-store/src/lib.rs:26716` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_producer_start_failure_records_a_bounded_detail` | `crates/daemon/src/history_summarizer.rs:4243` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_run_id_over_the_producer_identity_bound_is_a_start_failure` | `crates/daemon/src/history_summarizer.rs:4397` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_harness_over_the_producer_identity_bound_writes_nothing` | `crates/daemon/src/history_summarizer.rs:4432` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_producer_session_id_keeps_a_bounded_slug` | `crates/daemon/src/history_summarizer.rs:6372` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_producer_start_failure_records_a_bounded_detail` | `crates/daemon/src/history_summarizer.rs:4261` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_run_id_over_the_producer_identity_bound_is_a_start_failure` | `crates/daemon/src/history_summarizer.rs:4415` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_harness_over_the_producer_identity_bound_writes_nothing` | `crates/daemon/src/history_summarizer.rs:4451` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_producer_session_id_keeps_a_bounded_slug` | `crates/daemon/src/history_summarizer.rs:6391` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `chunk_fingerprint_uses_id_kind_and_byte_length` (now a SHA-256 digest of the join) | `crates/daemon/src/history_summarizer.rs:6333` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `chunk_failures_count_per_chunk_and_ignore_provider_errors` (model-chain digest, older chain form, 1,000-model chain) | `crates/daemon/src/history_summarizer.rs:2721` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound` | `crates/daemon/src/history_summarizer.rs:3182` | FA-N14 | #859 PR A; #859 PR C | unaudited |
-| `a_credential_that_crosses_the_detail_bound_is_redacted_whole` | `crates/daemon/src/history_summarizer.rs:4358` | FA-N14 | #859 PR C | unaudited |
+| `a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound` | `crates/daemon/src/history_summarizer.rs:3191` | FA-N14 | #859 PR A; #859 PR C | unaudited |
+| `a_credential_that_crosses_the_detail_bound_is_redacted_whole` | `crates/daemon/src/history_summarizer.rs:4376` | FA-N14 | #859 PR C | unaudited |
 | `a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans` | `crates/memory-store/src/lib.rs:24723` | FA-N14 | #859 PR C | unaudited |
 | `todo_state_bounds_hold_for_the_raw_and_the_redacted_form` | `crates/memory-store/src/lib.rs:24744` | FA-N14 | #859 PR C | unaudited |
 | `a_captured_state_over_its_raw_bound_reads_as_an_empty_list_whatever_its_redacted_form` | `crates/daemon/src/injection.rs:805` | FA-N14 | #859 PR C | unaudited |

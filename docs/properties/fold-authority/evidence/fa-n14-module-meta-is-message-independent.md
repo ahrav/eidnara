@@ -108,8 +108,8 @@ All references are verified at `0ff62b29a`.
   (`history_summarizer.rs:166-179`;
   `crates/memory-store/src/lib.rs:548`). A harness over 128 serialized bytes
   is refused before any write and a longer run id is a start failure
-  (`history_summarizer.rs:1834-1843`, `:1895-1901`); the session slug keeps
-  48 bytes (`:1616`, `:1621-1624`). Reservation identifiers over 128
+  (`history_summarizer.rs:1843-1852`, `:1905-1915`); the session slug keeps
+  48 bytes (`:1617-1625`, `:1630-1633`). Reservation identifiers over 128
   serialized bytes are refused before any write
   (`crates/memory-store/src/lib.rs:668-690`, `:13808-13814`); no-fire
   details in the timeline keep a raw prefix within 128 serialized bytes
@@ -187,7 +187,7 @@ All references are verified at `0ff62b29a`.
   caller-fence, overlap, and conflict refusals
   (`crates/daemon/src/history_summarizer.rs:737-743`, `:756-762`,
   `:773-779`, `:794-806`) and `memory_reviewer handoff failed: {error}`
-  (`:2589`, `:2598-2605`); the store-side cut bounds them all. A fence
+  (`:2598`, `:2607-2614`); the store-side cut bounds them all. A fence
   reason names the selected mid (`crates/memory-store/src/lib.rs:14165-14169`),
   and a mid may be 128 bytes of control characters
   (`crates/daemon/src/wire.rs:215`, `:285-290`), which serialize to 768

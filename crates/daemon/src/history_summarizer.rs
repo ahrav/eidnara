@@ -1613,7 +1613,16 @@ pub fn history_summarizer_producer_session_id(
         .collect();
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "project" } else { slug };
-    let slug = &slug[..slug.len().min(MAX_PRODUCER_SESSION_SLUG_BYTES)];
+    // Two long project names that share a prefix still name distinct producer sessions.
+    let slug = if slug.len() > MAX_PRODUCER_SESSION_SLUG_BYTES {
+        let digest = fnv1a_hex16(slug);
+        format!(
+            "{}-{digest}",
+            &slug[..MAX_PRODUCER_SESSION_SLUG_BYTES - digest.len() - 1]
+        )
+    } else {
+        slug.to_string()
+    };
     let lineage = fnv1a_hex16(session_id);
     format!("eidnara-history_summarizer:{slug}:{lineage}:{firing_seq}")
 }
@@ -1897,11 +1906,11 @@ where
                 if memory_store::serialized_str_len(&handle.run_id)
                     > MAX_PRODUCER_IDENTITY_BYTES =>
             {
-                let cancel_result = producer.cancel(&handle.run_id).await;
+                let purge_result = producer.purge_session(&producer_session_id).await;
                 Err(attach_cleanup(
                     HistorySummarizerProducerError::MissingRunId,
-                    cancel_result,
-                    "cancel",
+                    purge_result,
+                    "purge",
                 ))
             }
             started => started,
@@ -3243,6 +3252,7 @@ mod tests {
         observed_systems: Vec<String>,
         await_run_ids: Vec<String>,
         cancels: Vec<String>,
+        purges: Vec<String>,
         attempt_closes: usize,
         closes: usize,
         connection_closed: bool,
@@ -3346,6 +3356,14 @@ mod tests {
         async fn cancel(&mut self, run_id: &str) -> Result<(), HistorySummarizerProducerError> {
             self.cancels.push(run_id.to_string());
             self.cancel_results.pop_front().unwrap_or(Ok(()))
+        }
+
+        async fn purge_session(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), HistorySummarizerProducerError> {
+            self.purges.push(session_id.to_string());
+            Ok(())
         }
 
         async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {
@@ -4418,10 +4436,11 @@ mod tests {
         );
         assert!(producer.await_run_ids.is_empty());
         assert_eq!(
-            producer.cancels,
-            vec![run_id],
-            "the run the provider started is cancelled before the firing is released"
+            producer.purges,
+            vec![history_summarizer_producer_session_id("proj", "ses", 1)],
+            "the producer session is deleted so its run ends without sending the rejected id"
         );
+        assert!(producer.cancels.is_empty(), "{:?}", producer.cancels);
         assert_eq!(producer.closes, 1);
         let state = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.state, HistorySummarizerPhase::Idle);
@@ -6372,8 +6391,26 @@ mod tests {
     fn a_producer_session_id_keeps_a_bounded_slug() {
         let session = history_summarizer_producer_session_id(&"s".repeat(4_096), "ses", u64::MAX);
         assert!(session.len() <= MAX_PRODUCER_IDENTITY_BYTES, "{session}");
-        assert!(session.contains(&"s".repeat(MAX_PRODUCER_SESSION_SLUG_BYTES)));
+        let slug = session
+            .strip_prefix("eidnara-history_summarizer:")
+            .and_then(|rest| rest.split(':').next())
+            .expect("the id carries a slug");
+        assert_eq!(slug.len(), MAX_PRODUCER_SESSION_SLUG_BYTES, "{session}");
         assert!(!session.contains(&"s".repeat(MAX_PRODUCER_SESSION_SLUG_BYTES + 1)));
+    }
+
+    #[test]
+    fn long_project_slugs_that_share_a_prefix_keep_distinct_producer_session_ids() {
+        let shared = "p".repeat(MAX_PRODUCER_SESSION_SLUG_BYTES);
+        let left = history_summarizer_producer_session_id(&format!("{shared}-left"), "ses", 1);
+        let right = history_summarizer_producer_session_id(&format!("{shared}-right"), "ses", 1);
+        assert_ne!(left, right);
+        assert!(left.len() <= MAX_PRODUCER_IDENTITY_BYTES, "{left}");
+        let short = history_summarizer_producer_session_id("proj", "ses", 1);
+        assert_eq!(
+            short,
+            "eidnara-history_summarizer:proj:".to_string() + &fnv1a_hex16("ses") + ":1"
+        );
     }
 
     #[test]

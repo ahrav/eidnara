@@ -108,7 +108,7 @@ path and must fail.
 
 ### Q: Does the CLI run the fixture?
 
-- Sources examined: `packages/cli/src/lib/eidnara-modes.ts:17-65`.
+- Sources examined: `packages/cli/src/lib/eidnara-modes.ts:17-64`.
 - Findings: No. The CLI reads the user tier alone through
   `loadUserTierConfigDetailed` by design (setup edits global host settings),
   so project-tier rows do not apply to it. `eidnara-modes.test.ts:24`, `:53`,
