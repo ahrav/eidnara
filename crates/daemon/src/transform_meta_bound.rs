@@ -292,6 +292,7 @@ fn history_summarizer_bound() -> usize {
             TailSize,
         }),
         longest_variant!(timeline::TimelineClock { DaemonWallMs }),
+        longest_variant!(memory_store::HistorySummarizerAbandonReason { WindowArchived }),
         longest_variant!(timeline::NoFireReason {
             Busy,
             PendingRewrite,
@@ -472,6 +473,12 @@ fn history_summarizer_bound() -> usize {
         recent_firings => recent_firings;
         counters => counters;
         pending_eligibility => pending_eligibility;
+        withdrawn_selected_mid => crate::wire::MAX_MID_BYTES * 6 + 2;
+        last_abandon => object(&inventory!(memory_store::HistorySummarizerAbandon {
+            firing_seq => INT;
+            reason => IDENT;
+            abandoned_at_ms => INT;
+        }));
     }))
 }
 
@@ -567,6 +574,12 @@ fn worst_case_history_summarizer() -> memory_store::HistorySummarizerDurableStat
         pending_eligibility: Some(timeline::PendingEligibility {
             eligible_at_ms: i64::MIN,
             no_fire: Some(no_fire),
+        }),
+        withdrawn_selected_mid: Some("\u{1}".repeat(crate::wire::MAX_MID_BYTES)),
+        last_abandon: Some(memory_store::HistorySummarizerAbandon {
+            firing_seq: u64::MAX,
+            reason: memory_store::HistorySummarizerAbandonReason::WindowArchived,
+            abandoned_at_ms: i64::MIN,
         }),
     }
 }
@@ -857,6 +870,7 @@ fn worst_case_module_meta() -> memory_store::ModuleMeta {
         m1_user_profile_version: u64::MAX,
         m1_pending_since_ms: Some(i64::MIN),
         folded_history_segment_seq: i64::MIN,
+        archive_fold_seq: Some(i64::MIN),
         legacy_history_segment_seqs: Some(vec![
             i64::MIN;
             memory_store::MAX_LEGACY_HISTORY_SEGMENTS
