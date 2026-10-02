@@ -20,7 +20,7 @@ use memory_store::{
     HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
     HistorySummarizerUserMemoryCandidate, LoadedState, MemoryReviewerActivation,
     MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError, PendingPublication,
-    StoredHistorySegment,
+    StoredHistorySegment, bounded_summarizer_detail,
     summarizer_timeline::{AbandonClass, FiringOutcome, FiringTrigger, NoFire, NoFireReason},
 };
 
@@ -348,7 +348,9 @@ pub fn abandon_with_detail(
         state: HistorySummarizerPhase::Idle,
         firing_seq: current.firing_seq,
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
-        last_failure: detail.or_else(|| current.last_failure.clone()),
+        last_failure: detail
+            .map(bounded_summarizer_detail)
+            .or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
         chunk_retry: current.chunk_retry.clone(),
         memory_reviewer_reservation: current.memory_reviewer_reservation.clone(),
@@ -438,15 +440,9 @@ fn retain_backoff(
     let mut next = current.clone();
     next.failure_backoff_at_ms = Some(failure_backoff_at_ms);
     next.last_failure = detail
-        .map(|detail| bounded_detail(&detail))
+        .map(bounded_summarizer_detail)
         .or_else(|| current.last_failure.clone());
     next
-}
-
-pub const MAX_SUMMARIZER_DETAIL_BYTES: usize = 512;
-
-pub(crate) fn bounded_detail(detail: &str) -> String {
-    detail[..detail.floor_char_boundary(MAX_SUMMARIZER_DETAIL_BYTES)].to_string()
 }
 
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
@@ -3095,13 +3091,18 @@ mod tests {
 
     #[test]
     fn a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_bound() {
+        use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
         let detail = format!("{}\u{e9}tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
-        let bounded = bounded_detail(&detail);
+        let bounded = bounded_summarizer_detail(detail.clone());
         assert_eq!(bounded, "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
         let short = "a short detail";
-        assert_eq!(bounded_detail(short), short);
-        let next = retain_backoff(&HistorySummarizerDurableState::default(), 5, Some(detail));
+        assert_eq!(bounded_summarizer_detail(short.to_string()), short);
+        let current = HistorySummarizerDurableState::default();
+        let next = retain_backoff(&current, 5, Some(detail.clone()));
         assert_eq!(next.last_failure.as_deref(), Some(bounded.as_str()));
+        let abandoned =
+            abandon_with_detail(&current, 5, Some(detail), AbandonClass::ProducerFailed);
+        assert_eq!(abandoned.last_failure.as_deref(), Some(bounded.as_str()));
     }
 
     fn test_selected_range_identities() -> Vec<HistorySummarizerSelectedMessageIdentity> {

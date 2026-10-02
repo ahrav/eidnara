@@ -930,6 +930,13 @@ pub struct MemoryReviewerNonadmission {
     pub latest: Option<RecordedNonadmission>,
 }
 
+pub const MAX_SUMMARIZER_DETAIL_BYTES: usize = 512;
+
+pub fn bounded_summarizer_detail(mut detail: String) -> String {
+    detail.truncate(detail.floor_char_boundary(MAX_SUMMARIZER_DETAIL_BYTES));
+    detail
+}
+
 /// The durable history_summarizer state stored inside [`ModuleMeta`]. Idle keeps
 /// `firing_seq` as the monotonic last-issued sequence and clears the in-flight
 /// identifiers; abandon paths additionally set `failure_backoff_at_ms`.
@@ -13064,7 +13071,8 @@ impl MemoryStore {
         write.existing_identity("session_id", session_id)?;
         let detail = detail
             .map(|value| write.content("last_failure", value))
-            .transpose()?;
+            .transpose()?
+            .map(bounded_summarizer_detail);
         let outcome = write.execute(&self.inner, |coordinated| {
             let tx = coordinated.tx;
             let row = tx
@@ -24717,6 +24725,38 @@ mod tests {
             content: "published summary".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_abandoned_firing_records_its_failure_detail_cut_to_the_detail_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let detail = format!("{}\u{e9}tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        store
+            .abandon_history_summarizer_run_if_matching(
+                "ses",
+                &publish_predicate(),
+                None,
+                Some(&detail),
+                summarizer_timeline::AbandonClass::ProducerFailed,
+            )
+            .unwrap()
+            .expect("the matching run is abandoned");
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        assert_eq!(
+            state.last_failure,
+            Some("a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1))
+        );
     }
 
     #[test]

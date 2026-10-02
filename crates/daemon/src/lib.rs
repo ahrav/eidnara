@@ -5899,7 +5899,7 @@ impl HandlerCore {
         loaded: &memory_store::LoadedState,
         reason: &str,
     ) {
-        let reason = history_summarizer::bounded_detail(reason);
+        let reason = memory_store::bounded_summarizer_detail(reason.to_string());
         if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason.as_str()) {
             return;
         }
@@ -17604,7 +17604,8 @@ fn record_history_summarizer_connect_failure(
         let loaded = store.load(session_id)?;
         let mut meta = loaded.meta.clone();
         if meta.history_summarizer.state == HistorySummarizerPhase::Idle {
-            meta.history_summarizer.last_failure = Some(detail.to_string());
+            meta.history_summarizer.last_failure =
+                Some(memory_store::bounded_summarizer_detail(detail.to_string()));
             meta.history_summarizer.failure_backoff_at_ms = Some(failure_backoff_at_ms);
             let counters = &mut meta.history_summarizer.counters;
             counters.connect_failed = counters.connect_failed.saturating_add(1);
@@ -37012,6 +37013,29 @@ mod tests {
         assert!(!summary.chars().any(char::is_control));
         assert!(!summary.contains('\n'));
         assert!(summary.chars().count() <= 500);
+    }
+
+    #[test]
+    fn an_idle_connect_failure_records_its_detail_cut_to_the_detail_bound() {
+        let producer = Arc::new(ProducerState::default());
+        let (_handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        assert_eq!(
+            store.load("ses").unwrap().meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        let detail = format!(
+            "producer connect: {}",
+            "x".repeat(memory_store::MAX_SUMMARIZER_DETAIL_BYTES)
+        );
+        let hook: ConnectFailureCommitHook = Arc::new(Mutex::new(None));
+        record_history_summarizer_connect_failure(&store, "ses", 5, &detail, &hook).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(
+            state.last_failure.as_deref(),
+            Some(&detail[..memory_store::MAX_SUMMARIZER_DETAIL_BYTES])
+        );
+        assert_eq!(state.failure_backoff_at_ms, Some(5));
+        assert_eq!(state.counters.connect_failed, 1);
     }
 
     #[test]
