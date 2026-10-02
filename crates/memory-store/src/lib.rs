@@ -937,6 +937,14 @@ pub fn bounded_summarizer_detail(mut detail: String) -> String {
     detail
 }
 
+/// Deserialization bounds stored `last_failure` values to [`MAX_SUMMARIZER_DETAIL_BYTES`],
+/// preserving the byte limit in loaded states and carry-forward copies.
+fn deserialize_bounded_summarizer_detail<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|detail| detail.map(bounded_summarizer_detail))
+}
+
 /// The durable history_summarizer state stored inside [`ModuleMeta`]. Idle keeps
 /// `firing_seq` as the monotonic last-issued sequence and clears the in-flight
 /// identifiers; abandon paths additionally set `failure_backoff_at_ms`.
@@ -991,7 +999,8 @@ pub struct HistorySummarizerDurableState {
     /// spawned task whose stderr a supervised deployment never captures, so the error
     /// must live in durable state to be diagnosable from a state dump. Cleared when a
     /// later firing establishes its producer run.
-    #[serde(default)]
+    /// `last_failure` holds at most [`MAX_SUMMARIZER_DETAIL_BYTES`] bytes; deserialization bounds longer stored values.
+    #[serde(default, deserialize_with = "deserialize_bounded_summarizer_detail")]
     pub last_failure: Option<String>,
     /// Why the most recent pass declined to fire (reason discriminant only, no numbers,
     /// so steady-state passes rewrite nothing). The twin of `last_failure` for the
@@ -24725,6 +24734,21 @@ mod tests {
             content: "published summary".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_stored_failure_detail_over_the_bound_loads_cut_to_the_bound() {
+        let legacy = format!(
+            r#"{{"last_failure":"{}\u00e9tail"}}"#,
+            "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1)
+        );
+        let state: HistorySummarizerDurableState = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(
+            state.last_failure,
+            Some("a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1))
+        );
+        let absent: HistorySummarizerDurableState = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.last_failure, None);
     }
 
     #[test]
