@@ -91,10 +91,8 @@ impl NoFire {
     pub fn new(reason: NoFireReason, detail: &str) -> Self {
         NoFire {
             reason,
-            detail: crate::redacted_prefix_within_serialized_bytes(
-                detail,
-                NO_FIRE_DETAIL_MAX_BYTES,
-            ),
+            detail: crate::prefix_within_serialized_bytes(detail, NO_FIRE_DETAIL_MAX_BYTES)
+                .to_string(),
         }
     }
 }

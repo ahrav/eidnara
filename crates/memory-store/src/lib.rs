@@ -6019,32 +6019,125 @@ pub fn prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> &str {
     text
 }
 
-/// The returned prefix remains unchanged when redacted again, preserving its serialized-byte
-/// budget.
+/// The longest prefix of `text`, redacted, within `max_bytes` serialized bytes that the durable
+/// and transaction redactors both leave unchanged.
 pub fn redacted_prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> String {
-    let redacted = redact_durable_text(text).text;
+    let durable = redact_durable_text(text).text;
+    let redacted = redact_transaction_durable_text(&durable).text;
     let mut end = prefix_within_serialized_bytes(&redacted, max_bytes).len();
-    loop {
-        let candidate = &redacted[..end];
-        let again = redact_durable_text(candidate);
-        if again.text == candidate {
-            return candidate.to_string();
-        }
-        let common = candidate
-            .bytes()
-            .zip(again.text.bytes())
-            .take_while(|(left, right)| left == right)
-            .count();
-        let changed_from = again
-            .detections
-            .iter()
-            .filter(|detection| detection.offset + detection.length > common)
-            .map(|detection| detection.offset)
-            .min()
-            .unwrap_or(common);
-        end = redacted.floor_char_boundary(changed_from.min(end - 1));
+    while end > 0 && !redaction_stable(&redacted[..end]) {
+        end = redacted.floor_char_boundary(end - 1);
     }
+    redacted[..end].to_string()
 }
+
+fn redaction_stable(text: &str) -> bool {
+    redact_durable_text(text).text == text && redact_transaction_durable_text(text).text == text
+}
+
+/// The largest `pending_rewrite_last_failure` text the metadata keeps, in JSON-escaped bytes.
+pub const MAX_PENDING_REWRITE_DETAIL_BYTES: usize = 1024;
+/// The largest `last_recut` text the metadata keeps, in JSON-escaped bytes.
+pub const MAX_LAST_RECUT_BYTES: usize = 1024;
+
+/// `text` as a metadata field keeps it: unchanged when it is within `max_bytes` serialized bytes
+/// and stable under both redactors, otherwise scanned as `field_id`, so its receipt records any
+/// detection, and cut to [`redacted_prefix_within_serialized_bytes`].
+fn shaped_meta_text(
+    write: &mut PreparedWrite,
+    field_id: &'static str,
+    text: Option<&str>,
+    max_bytes: usize,
+) -> Result<Option<String>, MemoryStoreError> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    if serialized_str_len(text) <= max_bytes && redaction_stable(text) {
+        return Ok(None);
+    }
+    let redacted = write.content(field_id, text)?;
+    Ok(Some(redacted_prefix_within_serialized_bytes(
+        &redacted, max_bytes,
+    )))
+}
+
+/// `meta` with each diagnostic text field shaped by [`shaped_meta_text`], cloned only when a
+/// field changes.
+fn shape_stored_meta<'a>(
+    write: &mut PreparedWrite,
+    meta: &'a ModuleMeta,
+) -> Result<Cow<'a, ModuleMeta>, MemoryStoreError> {
+    let mut shaped = Cow::Borrowed(meta);
+    let summarizer = &meta.history_summarizer;
+    if let Some(value) = shaped_meta_text(
+        write,
+        "last_failure",
+        summarizer.last_failure.as_deref(),
+        MAX_SUMMARIZER_DETAIL_BYTES,
+    )? {
+        shaped.to_mut().history_summarizer.last_failure = Some(value);
+    }
+    if let Some(value) = shaped_meta_text(
+        write,
+        "last_no_fire",
+        summarizer.last_no_fire.as_deref(),
+        MAX_SUMMARIZER_DETAIL_BYTES,
+    )? {
+        shaped.to_mut().history_summarizer.last_no_fire = Some(value);
+    }
+    for (index, firing) in summarizer.recent_firings.iter().enumerate() {
+        if let Some(value) = shaped_meta_text(
+            write,
+            "no_fire_detail",
+            firing
+                .last_no_fire
+                .as_ref()
+                .map(|no_fire| no_fire.detail.as_str()),
+            summarizer_timeline::NO_FIRE_DETAIL_MAX_BYTES,
+        )? && let Some(no_fire) = shaped.to_mut().history_summarizer.recent_firings[index]
+            .last_no_fire
+            .as_mut()
+        {
+            no_fire.detail = value;
+        }
+    }
+    if let Some(value) = shaped_meta_text(
+        write,
+        "no_fire_detail",
+        summarizer
+            .pending_eligibility
+            .as_ref()
+            .and_then(|pending| pending.no_fire.as_ref())
+            .map(|no_fire| no_fire.detail.as_str()),
+        summarizer_timeline::NO_FIRE_DETAIL_MAX_BYTES,
+    )? && let Some(no_fire) = shaped
+        .to_mut()
+        .history_summarizer
+        .pending_eligibility
+        .as_mut()
+        .and_then(|pending| pending.no_fire.as_mut())
+    {
+        no_fire.detail = value;
+    }
+    if let Some(value) = shaped_meta_text(
+        write,
+        "pending_rewrite_last_failure",
+        meta.pending_rewrite_last_failure.as_deref(),
+        MAX_PENDING_REWRITE_DETAIL_BYTES,
+    )? {
+        shaped.to_mut().pending_rewrite_last_failure = Some(value);
+    }
+    if let Some(value) = shaped_meta_text(
+        write,
+        "last_recut",
+        meta.last_recut.as_deref(),
+        MAX_LAST_RECUT_BYTES,
+    )? {
+        shaped.to_mut().last_recut = Some(value);
+    }
+    Ok(shaped)
+}
+
 pub const MAX_STATE_SYNC_DIRECTIVE_BYTES: usize = 256;
 pub const MAX_STATE_SYNC_ID_BYTES: usize = 128;
 pub const MAX_SYNTHETIC_TODO_PAIR_BYTES: usize = 24 * 1024;
@@ -6054,10 +6147,16 @@ pub const MAX_SYNTHETIC_TODO_PAIR_BYTES: usize = 24 * 1024;
 pub fn synthetic_todo_pair_within_bounds(pair: &FrozenSyntheticTodoPair) -> bool {
     serde_json::to_string(pair)
         .ok()
-        .and_then(|json| {
-            prepare_json_content_with(&json, JsonScanPolicy::DurablePreserveIdentities).ok()
-        })
-        .is_some_and(|stored| stored.len() <= MAX_SYNTHETIC_TODO_PAIR_BYTES)
+        .and_then(|json| stored_json_len(&json).ok())
+        .is_some_and(|stored| stored <= MAX_SYNTHETIC_TODO_PAIR_BYTES)
+}
+
+/// The longer of the forms the durable and transaction metadata scans store `json` as.
+fn stored_json_len(json: &str) -> Result<usize, MemoryStoreError> {
+    let durable = prepare_json_content_with(json, JsonScanPolicy::DurablePreserveIdentities)?;
+    let transaction =
+        prepare_json_content_with(json, JsonScanPolicy::TransactionPreserveIdentities)?;
+    Ok(durable.len().max(transaction.len()))
 }
 /// Most `legacy = 1` history_segments a session holds. Only the state-sync seed writes them,
 /// and a sync whose result would hold more is refused, so
@@ -6193,6 +6292,11 @@ fn prepare_state_sync(
             pair_json.len(),
         )?;
         write.identity("todo_synthetic_anchor", &pair_json)?;
+        within_bound(
+            "todo_synthetic_anchor bytes",
+            MAX_SYNTHETIC_TODO_PAIR_BYTES,
+            stored_json_len(&pair_json)?,
+        )?;
     }
     let pending_compaction_marker = request
         .pending_compaction_marker
@@ -6272,6 +6376,11 @@ fn prepare_state_sync(
         acked_watermarks_json.len(),
     )?;
     write.identity("acked_watermarks", &acked_watermarks_json)?;
+    within_bound(
+        "acked_watermarks bytes",
+        MAX_ACKED_WATERMARKS_BYTES,
+        stored_json_len(&acked_watermarks_json)?,
+    )?;
     let prepared = PreparedStateSync {
         drop_seeds,
         pending_agent_drops,
@@ -10870,8 +10979,9 @@ impl MemoryStore {
         let core = prepare_core_state_for_write(&mut write, core)?;
         let core_json =
             serde_json::to_string(&core).map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
-        let meta_json =
-            serde_json::to_string(meta).map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
+        let meta = shape_stored_meta(&mut write, meta)?;
+        let meta_json = serde_json::to_string(meta.as_ref())
+            .map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
         let meta_json = write.json_content(
             "meta",
             &meta_json,
@@ -12593,9 +12703,12 @@ impl MemoryStore {
                 Err(error) => return Ok(LineageDescentTxnOutcome::Serde(error.to_string())),
             };
             prior_meta.revert_epoch = prior_meta.revert_epoch.saturating_add(1);
-            prior_meta.last_recut = Some(format!(
-                "lineage descent edge {} fenced prior key at epoch {}",
-                request.edge_id, prior_meta.revert_epoch
+            prior_meta.last_recut = Some(redacted_prefix_within_serialized_bytes(
+                &format!(
+                    "lineage descent edge {} fenced prior key at epoch {}",
+                    request.edge_id, prior_meta.revert_epoch
+                ),
+                MAX_LAST_RECUT_BYTES,
             ));
             let prior_meta_json = match serde_json::to_string(&prior_meta) {
                 Ok(json) => json,
@@ -13172,13 +13285,18 @@ impl MemoryStore {
             let next_epoch = prior_meta.revert_epoch.saturating_add(1);
             let mut reset_meta = ModuleMeta {
                 revert_epoch: next_epoch,
-                last_recut: Some(match replacement_authority {
-                    Some(folds) => format!(
-                        "fold authority reset to {}; epoch {next_epoch}",
-                        if folds { "Eidnara" } else { "native" }
-                    ),
-                    None => format!("native recomp reset all history_segments; epoch {next_epoch}"),
-                }),
+                last_recut: Some(redacted_prefix_within_serialized_bytes(
+                    &match replacement_authority {
+                        Some(folds) => format!(
+                            "fold authority reset to {}; epoch {next_epoch}",
+                            if folds { "Eidnara" } else { "native" }
+                        ),
+                        None => {
+                            format!("native recomp reset all history_segments; epoch {next_epoch}")
+                        }
+                    },
+                    MAX_LAST_RECUT_BYTES,
+                )),
                 history_summarizer: prior_meta.history_summarizer.cleared_of_in_flight_firing(),
                 eidnara_folds: replacement_authority.or(prior_meta.eidnara_folds),
                 ..ModuleMeta::default()
@@ -13384,8 +13502,11 @@ impl MemoryStore {
                 .as_ref()
                 .map(|(_, id)| id.clone())
                 .unwrap_or_else(|| "none".to_string());
-            let last_recut = Some(format!(
-                "dropped seq {dropped_range}; surviving seq {surviving_seq}; live head {live_head}; live tail {live_tail}; epoch {next_epoch}"
+            let last_recut = Some(redacted_prefix_within_serialized_bytes(
+                &format!(
+                    "dropped seq {dropped_range}; surviving seq {surviving_seq}; live head {live_head}; live tail {live_tail}; epoch {next_epoch}"
+                ),
+                MAX_LAST_RECUT_BYTES,
             ));
             meta.revert_epoch = next_epoch;
             meta.last_recut = last_recut.clone();
@@ -24572,6 +24693,161 @@ mod tests {
             redacted_prefix_within_serialized_bytes(&plain, MAX_SUMMARIZER_DETAIL_BYTES),
             "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES)
         );
+    }
+
+    #[test]
+    fn a_committed_last_recut_is_stored_within_its_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            last_recut: Some("r".repeat(200 * 1024)),
+            ..ModuleMeta::default()
+        };
+        store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        let stored = store.load("ses").unwrap().meta.last_recut.unwrap();
+        assert!(
+            serialized_str_len(&stored) <= MAX_LAST_RECUT_BYTES,
+            "{}",
+            stored.len()
+        );
+        assert_eq!(stored, "r".repeat(MAX_LAST_RECUT_BYTES));
+    }
+
+    #[test]
+    fn a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let rv = store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let long_id = format!("{}#0", "h".repeat(4 * 1024));
+        store
+            .replace_history_segments(
+                "ses",
+                &[
+                    StoredHistorySegment {
+                        start_message_id: long_id.clone(),
+                        ..recut_comp(1, 1, 1, &long_id)
+                    },
+                    recut_comp(2, 2, 2, "b#0"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_history_segments("ses").unwrap()[0].start_message_id,
+            long_id
+        );
+        let outcome = store
+            .truncate_history_segments_for_revert("ses", 1, Some(rv))
+            .unwrap();
+        let stored = store.load("ses").unwrap().meta.last_recut.unwrap();
+        assert_eq!(outcome.last_recut.as_deref(), Some(stored.as_str()));
+        assert!(
+            stored.starts_with("dropped seq 2; surviving seq 1; live head h"),
+            "{stored}"
+        );
+        assert!(
+            serialized_str_len(&stored) <= MAX_LAST_RECUT_BYTES,
+            "{}",
+            stored.len()
+        );
+    }
+
+    #[test]
+    fn state_sync_refuses_values_whose_stored_form_passes_their_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let watermarks = {
+            let base = r#"{"auth":"0","padding":""}"#.len();
+            let value = serde_json::json!({
+                "auth": "0",
+                "padding": "p".repeat(MAX_ACKED_WATERMARKS_BYTES - base),
+            });
+            let json = serde_json::to_string(&value).unwrap();
+            assert_eq!(json.len(), MAX_ACKED_WATERMARKS_BYTES);
+            assert!(stored_json_len(&json).unwrap() > MAX_ACKED_WATERMARKS_BYTES);
+            value
+        };
+        let pair = {
+            let secret = "password\n=abc ";
+            let message = |role: &str, text: String| {
+                WireMessage::from_parts(
+                    role,
+                    vec![WireBlock::bare(BlockKind::Text { text })],
+                    None,
+                    ProviderExtras::default(),
+                    HarnessMeta::default(),
+                )
+            };
+            let mut pair = FrozenSyntheticTodoPair {
+                call_id: String::new(),
+                anchor_mid: None,
+                assistant_msg: message("assistant", String::new()),
+                tool_msg: message("tool", secret.repeat(1200)),
+            };
+            let base = serde_json::to_string(&pair).unwrap().len();
+            pair.call_id = "c".repeat(MAX_SYNTHETIC_TODO_PAIR_BYTES - base);
+            let json = serde_json::to_string(&pair).unwrap();
+            assert_eq!(json.len(), MAX_SYNTHETIC_TODO_PAIR_BYTES);
+            assert!(stored_json_len(&json).unwrap() > MAX_SYNTHETIC_TODO_PAIR_BYTES);
+            assert!(!synthetic_todo_pair_within_bounds(&pair));
+            pair
+        };
+        let segments = [bounded_read_segment(1, 0)];
+        let snapshot = || {
+            let loaded = store.load("ses").unwrap();
+            (
+                loaded.row_version,
+                loaded.meta,
+                store.load_history_segments("ses").unwrap(),
+            )
+        };
+        let before = snapshot();
+        let with = |request: ModuleStateSyncRequest<'_>| {
+            let seq = store.load("ses").unwrap().meta.shadow_seq;
+            store.apply_authority_state_sync(ModuleStateSyncRequest {
+                expected_shadow_seq: seq,
+                ..request
+            })
+        };
+        for (field, bound, result) in [
+            (
+                "acked_watermarks bytes",
+                MAX_ACKED_WATERMARKS_BYTES,
+                with(ModuleStateSyncRequest {
+                    acked_watermarks: watermarks,
+                    ..history_segment_sync(0, &segments)
+                }),
+            ),
+            (
+                "todo_synthetic_anchor bytes",
+                MAX_SYNTHETIC_TODO_PAIR_BYTES,
+                with(ModuleStateSyncRequest {
+                    todo_synthetic_anchor: Some(&pair),
+                    todo_synthetic_anchor_present: true,
+                    ..history_segment_sync(0, &segments)
+                }),
+            ),
+        ] {
+            match result {
+                Err(ModuleStateSyncError::OverBound {
+                    field: refused,
+                    bound: refused_bound,
+                    found,
+                }) => {
+                    assert_eq!(refused, field);
+                    assert_eq!(refused_bound, bound, "{field}");
+                    assert!(found > bound, "{field}: {found}");
+                }
+                other => panic!("{field}: {other:?}"),
+            }
+        }
+        assert_eq!(snapshot(), before, "a refused sync writes nothing");
     }
 
     #[test]

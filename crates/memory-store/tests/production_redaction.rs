@@ -962,6 +962,58 @@ fn cache_state_meta_is_stored_byte_identical_when_clean_and_scanned_to_every_nes
     }
 }
 
+/// A secret-bearing summarizer detail committed through `commit` is stored within its bound,
+/// stable under both redactors, and its detection is recorded on the field's own receipt.
+#[test]
+fn a_secret_bearing_summarizer_detail_is_stored_within_its_bound_with_its_detection_recorded() {
+    use context_core::redaction::{redact_durable_text, redact_transaction_durable_text};
+    let temp = tempfile::tempdir().unwrap();
+    let descriptor = MemoryStore::test_descriptor(temp.path(), "production-redaction-detail");
+    let store = MemoryStore::open(&descriptor).unwrap();
+    let detail = "password=abc next ".repeat(28);
+    assert!(memory_store::serialized_str_len(&detail) <= memory_store::MAX_SUMMARIZER_DETAIL_BYTES);
+    assert!(
+        memory_store::serialized_str_len(&redact_durable_text(&detail).text)
+            > memory_store::MAX_SUMMARIZER_DETAIL_BYTES
+    );
+    let mut meta = ModuleMeta::default();
+    meta.history_summarizer.last_failure = Some(detail);
+    store
+        .commit("detail", None, &CoreState::empty(), &meta)
+        .unwrap();
+    let stored = store
+        .load("detail")
+        .unwrap()
+        .meta
+        .history_summarizer
+        .last_failure
+        .expect("the detail is stored");
+    assert!(stored.contains("<REDACTED:password>"), "{stored}");
+    assert!(!stored.contains("abc"), "{stored}");
+    assert!(
+        memory_store::serialized_str_len(&stored) <= memory_store::MAX_SUMMARIZER_DETAIL_BYTES,
+        "{}",
+        stored.len()
+    );
+    assert_eq!(redact_durable_text(&stored).text, stored);
+    assert_eq!(redact_transaction_durable_text(&stored).text, stored);
+    let connection = Connection::open(temp.path().join("memory.sqlite")).unwrap();
+    let findings: Vec<i64> = connection
+        .prepare(
+            "SELECT finding_count FROM field_scans WHERE scan_id IN \
+             (SELECT scan_id FROM scan_owner_copies WHERE field_id = 'last_failure')",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        findings.iter().any(|count| *count >= 1),
+        "the detail's receipt records its detection: {findings:?}"
+    );
+}
+
 #[test]
 fn cache_state_redacts_payloads_preserves_existing_ids_and_rejects_integrity() {
     let temp = tempfile::tempdir().unwrap();

@@ -6828,8 +6828,6 @@ fn absent_shape_fingerprint(live: &[&FlatBlock]) -> String {
     out
 }
 
-pub(crate) const MAX_PENDING_REWRITE_DETAIL_BYTES: usize = 1024;
-
 fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) -> String {
     let state = if ambiguous {
         "ambiguous_pending_rewrite"
@@ -6842,7 +6840,11 @@ fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) 
          lineage-switch detection miss or foreign traffic on this session key; serving raw \
          pass-through and preserving the held lineage"
     );
-    memory_store::redacted_prefix_within_serialized_bytes(&detail, MAX_PENDING_REWRITE_DETAIL_BYTES)
+    memory_store::prefix_within_serialized_bytes(
+        &detail,
+        memory_store::MAX_PENDING_REWRITE_DETAIL_BYTES,
+    )
+    .to_string()
 }
 
 struct PendingPassthroughArgs {

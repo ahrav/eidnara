@@ -632,11 +632,11 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         soft_refresh_pending => boolean;
         guidance_date => label;
         revert_epoch => int;
-        last_recut => text(2 * block_id + 128);
+        last_recut => ascii(memory_store::MAX_LAST_RECUT_BYTES);
         pending_rewrite => text(64) + 128;
         pending_rewrite_trip_count => int;
         pending_rewrite_ambiguous => boolean;
-        pending_rewrite_last_failure => ascii(crate::transform::MAX_PENDING_REWRITE_DETAIL_BYTES);
+        pending_rewrite_last_failure => ascii(memory_store::MAX_PENDING_REWRITE_DETAIL_BYTES);
         synthetic_todo => synthetic_todo;
         note_nudge_anchors => note_nudge_anchors;
         m1_revision => int;

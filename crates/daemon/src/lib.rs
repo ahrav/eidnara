@@ -5900,7 +5900,11 @@ impl HandlerCore {
         reason: &str,
     ) {
         let reason = history_summarizer::bounded_detail(reason);
-        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason.as_str()) {
+        let stored = memory_store::redacted_prefix_within_serialized_bytes(
+            &reason,
+            history_summarizer::MAX_SUMMARIZER_DETAIL_BYTES,
+        );
+        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(stored.as_str()) {
             return;
         }
         let mut meta = loaded.meta.clone();

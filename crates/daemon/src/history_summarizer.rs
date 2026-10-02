@@ -457,7 +457,7 @@ fn retain_backoff(
 pub use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
 
 pub(crate) fn bounded_detail(detail: &str) -> String {
-    memory_store::redacted_prefix_within_serialized_bytes(detail, MAX_SUMMARIZER_DETAIL_BYTES)
+    memory_store::prefix_within_serialized_bytes(detail, MAX_SUMMARIZER_DETAIL_BYTES).to_string()
 }
 
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
