@@ -636,7 +636,7 @@ without escalating a backoff or moving a health counter.
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - `history_summarizer.rs:4261`
+Exercised: partial - `history_summarizer.rs:6417`
 `pure_state_machine_happy_path_and_single_flight` covers the pure `fire`/`Busy`
 transition and `:3011`
 `concurrent_lineages_reattach_and_publish_in_isolated_sessions` covers two
@@ -666,8 +666,8 @@ Verified three independent layers: `fire` refuses non-idle
 (`memory-store:9398-9407`), and the row-version CAS uses the version written by the
 `Publishing` transition rather than a fresh read (`history_summarizer.rs:1707-1719` with
 the reasoning at `:1709-1713`).
-Existing check: `history_summarizer.rs:4261`, `:4314`
-`fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:4451`
+Existing check: `history_summarizer.rs:6417`, `:6488`
+`fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:6666`
 `history_segment_generation_fence_releases_overlapped_publish_to_idle`. Status
 `unaudited`.
 Impact: Two commits at one `firing_seq` would append the same summarized range
@@ -1045,7 +1045,7 @@ Reachability: explicit-config-only
 Status: active
 Exercised: partial - `history_summarizer.rs:2881`
 `reattach_terminal_redrains_from_start_without_second_send`, `:3138`
-`reattach_redrains_full_run_from_start`, and `:4563`
+`reattach_redrains_full_run_from_start`, and `:4533`
 `reattach_carries_durable_revert_epoch_to_publish` cover the reattach publish.
 None compares the published `raw_chunk_messages` against what the producer
 actually summarized. Not run in CI.
@@ -1098,7 +1098,7 @@ question the old line said "needs a test, not more reading" was answerable by
 reading: `build_history_summarizer_chunk` cannot return a `chunk.chunk.end_index` beyond the
 exclusive bound it is given, per the two filters at `history_summarizer_chunk.rs:373-375`
 and `:383-386`.
-Existing check: `history_summarizer.rs:2881`, `:2942`, `:3138`, `:4563`. Status
+Existing check: `history_summarizer.rs:2881`, `:2942`, `:3138`, `:4533`. Status
 `unaudited`.
 Impact: A stored original that is narrower than the summary, or whose content was
 re-read after the model spoke, makes the durable full-message recovery misleading

@@ -257,7 +257,7 @@ set. Clusters:
 - **`history_summarizer.rs`, 51 tests.** Six clusters. Pure state machine and projection
   (`:1863`, `:4213`, `:4243`, `:4286`, `:4379`); lineage and session-id isolation
   (`:2146`, `:2163`, `:3011`); the wired happy path and content-drift fences
-  (`:2272`, `:2323`, `:2369`, `:4061`, `:4314`, `:4401`, `:4451`); the fallback
+  (`:2272`, `:2323`, `:2369`, `:4061`, `:6488`, `:4401`, `:6666`); the fallback
   chain and error classification, the largest cluster at fourteen tests
   (`:2410`-`:2850`, plus `:3895`, `:3938`); reattach and timeout recovery
   (`:2881`-`:3610`, plus `:4533`); cancellation-proof and cleanup discipline

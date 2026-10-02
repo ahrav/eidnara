@@ -346,13 +346,13 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `history_summarizer.rs:4261` `pure_state_machine_happy_path_and_single_flight` covers the pure `fire`/`Busy` transition and `:3011` `concurrent_lineages_reattach_and_publish_in_isolated_sessions` covers two lineages; no test drives two concurrent publishes against one session id. Not run in CI.
+Exercised: partial — `history_summarizer.rs:6417` `pure_state_machine_happy_path_and_single_flight` covers the pure `fire`/`Busy` transition and `:3011` `concurrent_lineages_reattach_and_publish_in_isolated_sessions` covers two lineages; no test drives two concurrent publishes against one session id. Not run in CI.
 Guarantee: For one session, at most one publish transaction commits per `firing_seq`, and a second concurrent publisher is rejected before any row is appended.
 Check: `always` — for every session, the multiset of committed publishes has distinct `firing_seq` values, and every rejected publish leaves `count(history_segments)` unchanged. `always` because it constrains every reachable state of the store, and the forbidden state (two commits at one `firing_seq`) has no dedicated detection point, so `unreachable` would be wrong.
 Fault/timing angle: Two publishers interleaving between the `Publishing` persist (`history_summarizer.rs:1707`) and the transaction at `memory-store:9360`. The first to commit bumps `row_version` and resets the phase to idle, so the second fails gate 1 (`:9373-9382`) and gate 2 (`:9389-9396`).
 Required faults and enabling state: A configured model chain, plus either two in-process firings racing (which the live-session guard at `lib.rs:4556-4581` is meant to prevent) or one firing racing its own reattach (which the reattach latch at `lib.rs:4640-4650` and the live-session check at `:4632-4639` are meant to prevent). The interesting construction bypasses the in-process guards and drives `publish_validated_chunk` twice, which the pure-function seam permits.
 Confidence: high — [evidence](../evidence/history_summarizer-single-flight-admits-one-publish-per-firing.md). Verified three independent layers: `fire` refuses non-idle (`history_summarizer.rs:251-253`), the store predicate binds five fields (`memory-store:9398-9407`), and the row-version CAS uses the version written by the `Publishing` transition rather than a fresh read (`history_summarizer.rs:1707-1719` with the reasoning at `:1709-1713`).
-Existing check: `history_summarizer.rs:4261`, `:4314` `fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:4451` `history_segment_generation_fence_releases_overlapped_publish_to_idle`. Status `unaudited`.
+Existing check: `history_summarizer.rs:6417`, `:6488` `fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:6666` `history_segment_generation_fence_releases_overlapped_publish_to_idle`. Status `unaudited`.
 Impact: Two commits at one `firing_seq` would append the same summarized range twice. The overlap backstop at `memory-store:12637-12646` would catch identical ranges, but a fallback attempt that produced different boundaries could append an overlapping-but-not-identical second fold.
 Open questions: None.
 
@@ -477,13 +477,13 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial — `history_summarizer.rs:2881` `reattach_terminal_redrains_from_start_without_second_send`, `:3138` `reattach_redrains_full_run_from_start`, and `:4563` `reattach_carries_durable_revert_epoch_to_publish` cover the reattach publish. None compares the published `raw_chunk_messages` against what the producer actually summarized. Not run in CI.
+Exercised: partial — `history_summarizer.rs:2881` `reattach_terminal_redrains_from_start_without_second_send`, `:3138` `reattach_redrains_full_run_from_start`, and `:4533` `reattach_carries_durable_revert_epoch_to_publish` cover the reattach publish. None compares the published `raw_chunk_messages` against what the producer actually summarized. Not run in CI.
 Guarantee: On the reattach path, the transcript and original messages stored beside a history_segment describe the same message range the model summarized.
 Check: `always` — for a reattach publish, the inflated `raw_messages_deflate` contains exactly the non-synthetic messages in `[chunk.start_index, chunk.end_index]` as they existed when the producer's prompt was built. `always` because a stored original that does not correspond to the stored summary defeats the recoverability property.
 Fault/timing angle: The reattach rebuilds the chunk, the transcript, the raw messages, and the fingerprint from the **current** request's projection (`lib.rs:4696-4725`), minutes after the producer received the old chunk text. The identity fence (`memory-store:9418-9425`) pins content for mids inside the pinned range, and `tail_identity_extension_during_email` (see `history_summarizer.rs:2369`) shows a tail extension is deliberately permitted, so the recomputed range can be a superset.
 Required faults and enabling state: A configured model chain, a restart or process handoff leaving an `AwaitingProducer` row, and a transform request whose projection has grown past the pinned `chunk_range.to_ordinal` before the reattach publishes.
 Confidence: medium — [evidence](../evidence/reattach-publishes-a-chunk-recomputed-after-the-model-ran.md). The rebuild is verified at `lib.rs:4692-4725`, and the pinned range at `history_summarizer.rs:645` and `:1529-1530`. What I could not settle is whether `build_history_summarizer_chunk` called with `range.to_ordinal + 1` as its exclusive end (`lib.rs:4701`) can ever return a `chunk.chunk.end_index` beyond the pinned end, which is what would make the raw payload a superset. That needs a test, not more reading.
-Existing check: `history_summarizer.rs:2881`, `:2942`, `:3138`, `:4563`. Status `unaudited`.
+Existing check: `history_summarizer.rs:2881`, `:2942`, `:3138`, `:4533`. Status `unaudited`.
 Impact: A stored original that is wider or narrower than the summary makes the durable full-message recovery misleading rather than absent, which is worse: an expand would return messages the summary does not describe.
 Open questions:
 
