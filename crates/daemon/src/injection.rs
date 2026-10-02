@@ -212,13 +212,16 @@ pub fn capture_todo_state_on_bust(
 }
 
 fn newest_bounded_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
-    newest_todowrite_state_json(tail).map(|(owner_message_id, state_json)| {
-        if state_json.len() > memory_store::MAX_TODO_STATE_BYTES {
-            (owner_message_id, "[]".to_string())
-        } else {
-            (owner_message_id, state_json)
-        }
-    })
+    newest_todowrite_state_json(tail)
+        .map(|(owner_message_id, state_json)| (owner_message_id, bounded_todo_state(state_json)))
+}
+
+fn bounded_todo_state(normalized: String) -> String {
+    if normalized.len() > memory_store::MAX_TODO_STATE_BYTES {
+        "[]".to_string()
+    } else {
+        normalized
+    }
 }
 
 /// Advances injection from persisted metadata without capturing visible calls.
@@ -256,7 +259,10 @@ pub fn injection_pending_after_capture(
 
     let visible_state = newest_bounded_todowrite_state_json(tail).map(|(_, state_json)| state_json);
     let persisted_state = visible_state.as_deref().or(meta.last_todo_state.as_deref());
-    let Some(normalized) = persisted_state.and_then(normalize_todo_state_json) else {
+    let Some(normalized) = persisted_state
+        .and_then(normalize_todo_state_json)
+        .map(bounded_todo_state)
+    else {
         return false;
     };
     let Some(todos) = parse_todo_state(&normalized) else {
@@ -313,13 +319,8 @@ pub fn advance_injection(
     let Some(state_json) = effective_state_json else {
         return InjectionOutcome::None;
     };
-    let Some(normalized) = normalize_todo_state_json(state_json) else {
+    let Some(normalized) = normalize_todo_state_json(state_json).map(bounded_todo_state) else {
         return InjectionOutcome::None;
-    };
-    let normalized = if normalized.len() > memory_store::MAX_TODO_STATE_BYTES {
-        "[]".to_string()
-    } else {
-        normalized
     };
     let Some(next) = build_synthetic_todo_pair(&normalized) else {
         return if frozen.is_some() {
@@ -783,6 +784,38 @@ mod tests {
         );
         assert_eq!(
             advance_injection(Some(&raw), None, true, None),
+            InjectionOutcome::None
+        );
+    }
+
+    #[test]
+    fn the_pending_gate_reads_a_persisted_state_over_its_bound_as_the_advance_does() {
+        let entry = r#"{"content":"","status":""}"#;
+        let raw = format!("[{}]", vec![entry; 150].join(","));
+        assert!(raw.len() <= memory_store::MAX_TODO_STATE_BYTES);
+        assert!(
+            normalize_todo_state_json(&raw).unwrap().len() > memory_store::MAX_TODO_STATE_BYTES
+        );
+        let mut meta = ModuleMeta {
+            last_todo_state: Some(raw.clone()),
+            ..Default::default()
+        };
+        let frozen = frozen_for(&active_state("active"));
+
+        assert!(
+            injection_pending_after_capture(&meta, &[], Some(&frozen), None),
+            "the frozen pair is still to clear"
+        );
+        assert_eq!(
+            advance_injection_after_capture(&mut meta, &[], Some(&frozen), true, None),
+            InjectionOutcome::Clear
+        );
+        assert!(
+            !injection_pending_after_capture(&meta, &[], None, None),
+            "a cleared over-bound state leaves no transition pending"
+        );
+        assert_eq!(
+            advance_injection_after_capture(&mut meta, &[], None, true, None),
             InjectionOutcome::None
         );
     }
