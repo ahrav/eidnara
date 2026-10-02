@@ -937,8 +937,9 @@ pub fn bounded_summarizer_detail(mut detail: String) -> String {
     detail
 }
 
-/// Deserialization bounds stored `last_failure` values to [`MAX_SUMMARIZER_DETAIL_BYTES`],
-/// preserving the byte limit in loaded states and carry-forward copies.
+/// Deserialization bounds stored `last_failure` and `last_no_fire` values to
+/// [`MAX_SUMMARIZER_DETAIL_BYTES`], preserving the byte limit in loaded states and
+/// carry-forward copies.
 fn deserialize_bounded_summarizer_detail<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -1006,7 +1007,8 @@ pub struct HistorySummarizerDurableState {
     /// so steady-state passes rewrite nothing). The twin of `last_failure` for the
     /// pre-fire half: a supervised rig cannot read the transform response's diagnostics
     /// block, so the skip branch must be readable from the state dump. Cleared on fire.
-    #[serde(default)]
+    /// `last_no_fire` holds at most [`MAX_SUMMARIZER_DETAIL_BYTES`] bytes; deserialization bounds longer stored values.
+    #[serde(default, deserialize_with = "deserialize_bounded_summarizer_detail")]
     pub last_no_fire: Option<String>,
     /// Consecutive failures on the history_summarizer publication path. This is diagnostic-only
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
@@ -24747,17 +24749,15 @@ mod tests {
 
     #[test]
     fn a_stored_failure_detail_over_the_bound_loads_cut_to_the_bound() {
-        let legacy = format!(
-            r#"{{"last_failure":"{}\u00e9tail"}}"#,
-            "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1)
-        );
+        let over = format!("{}\\u00e9tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        let legacy = format!(r#"{{"last_failure":"{over}","last_no_fire":"{over}"}}"#);
         let state: HistorySummarizerDurableState = serde_json::from_str(&legacy).unwrap();
-        assert_eq!(
-            state.last_failure,
-            Some("a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1))
-        );
+        let bounded = Some("a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        assert_eq!(state.last_failure, bounded);
+        assert_eq!(state.last_no_fire, bounded);
         let absent: HistorySummarizerDurableState = serde_json::from_str("{}").unwrap();
         assert_eq!(absent.last_failure, None);
+        assert_eq!(absent.last_no_fire, None);
     }
 
     #[test]
