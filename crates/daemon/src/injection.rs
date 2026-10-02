@@ -213,7 +213,7 @@ pub fn capture_todo_state_on_bust(
 
 fn newest_bounded_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
     newest_todowrite_state_json(tail).map(|(owner_message_id, state_json)| {
-        if state_json.len() > memory_store::MAX_TODO_STATE_BYTES {
+        if !memory_store::todo_state_within_bounds(&state_json) {
             (owner_message_id, "[]".to_string())
         } else {
             (owner_message_id, state_json)
@@ -767,6 +767,46 @@ mod tests {
         assert_eq!(outcome, InjectionOutcome::Clear);
         assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
         assert_eq!(meta.last_todo_state_owner_message_id.as_deref(), Some("m2"));
+    }
+
+    #[test]
+    fn a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list() {
+        let secret = "password=abc next ";
+        let base = active_state(secret);
+        let state = active_state(&format!(
+            "{secret}{}",
+            "n".repeat(memory_store::MAX_TODO_STATE_BYTES - base.len())
+        ));
+        assert_eq!(state.len(), memory_store::MAX_TODO_STATE_BYTES);
+        assert!(!memory_store::todo_state_within_bounds(&state));
+        let mut meta = ModuleMeta::default();
+        assert!(capture_todo_state_on_bust(
+            &mut meta,
+            &[todowrite_tail_item("m1#0", 1, &state)],
+            true,
+            None,
+        ));
+        assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
+    }
+
+    #[test]
+    fn a_synthetic_pair_over_its_bound_after_redaction_is_refused() {
+        let secret = "password=abc next ";
+        let state =
+            active_state(&secret.repeat(
+                (memory_store::MAX_TODO_STATE_BYTES - active_state("").len()) / secret.len(),
+            ));
+        assert!(state.len() <= memory_store::MAX_TODO_STATE_BYTES);
+        let pair = frozen_for(&state);
+        let raw = serde_json::to_vec(&pair).unwrap().len();
+        assert!(raw <= memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES, "{raw}");
+        assert!(
+            !memory_store::synthetic_todo_pair_within_bounds(&pair),
+            "{raw}"
+        );
+        assert!(memory_store::synthetic_todo_pair_within_bounds(
+            &frozen_for(&active_state("plain"))
+        ));
     }
 
     #[test]

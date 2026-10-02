@@ -617,13 +617,7 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         memory_store::MAX_SYNTHETIC_TODO_PAIR_BYTES
     };
 
-    macro_rules! recorded_bounds {
-        ($($field:ident => $bound:expr;)*) => {{
-            let memory_store::ModuleMeta { $($field: _,)* } = memory_store::ModuleMeta::default();
-            vec![$((stringify!($field), $bound)),*]
-        }};
-    }
-    let table = recorded_bounds! {
+    let table = inventory! { memory_store::ModuleMeta {
         initialized => boolean;
         bootstrap_seed_fold_pending => boolean;
         last_render_config => text(4 * crate::transform::MAX_REQUEST_IDENTITY_BYTES + 256);
@@ -642,7 +636,7 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         pending_rewrite => text(64) + 128;
         pending_rewrite_trip_count => int;
         pending_rewrite_ambiguous => boolean;
-        pending_rewrite_last_failure => text(crate::transform::MAX_REQUEST_IDENTITY_BYTES + 64 + 320);
+        pending_rewrite_last_failure => ascii(crate::transform::MAX_PENDING_REWRITE_DETAIL_BYTES);
         synthetic_todo => synthetic_todo;
         note_nudge_anchors => note_nudge_anchors;
         m1_revision => int;
@@ -709,11 +703,8 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
         shadow_quarantined_pass_count => int;
         shadow_acked_watermarks => memory_store::MAX_ACKED_WATERMARKS_BYTES;
         eidnara_folds => boolean;
-    };
-    let total = 2 + table
-        .iter()
-        .map(|(field, bytes)| field.len() + 4 + bytes)
-        .sum::<usize>();
+    }};
+    let total = object(&table);
     assert!(
         total < 128 * 1024,
         "the recorded bounds sum to {total} bytes"

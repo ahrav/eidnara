@@ -4828,19 +4828,22 @@ impl ScanOwnedRows {
         self.retire_owners(tx, session_id, scan_versions)
     }
 
-    /// Scans `document` under `policy` with its receipts owned by `scan_version`.
+    /// Scans `document` with its receipts owned by `scan_version`.
     fn prepare_document(
         &self,
         coordinated: &ActiveWriteTransaction<'_>,
         session_id: &str,
         scan_version: i64,
         document: &str,
-        policy: JsonScanPolicy,
     ) -> rusqlite::Result<String> {
         let mut write = coordinated.prepared.borrow_mut();
         let first_scan = write.scans.len();
         let prepared = write
-            .json_content(self.table, document, policy)
+            .json_content(
+                self.table,
+                document,
+                JsonScanPolicy::DurablePreserveIdentities,
+            )
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let end_scan = write.scans.len();
         write.reassign_scans_in(
@@ -4964,7 +4967,6 @@ fn apply_block_identity_delta(
             session_id,
             scan_version,
             &document,
-            JsonScanPolicy::DurablePreserveIdentities,
         )?;
         let prepared: BTreeMap<String, Vec<BlockIdentity>> =
             serde_json::from_str(&prepared).map_err(stored_row_serde_error)?;
@@ -5109,7 +5111,6 @@ fn apply_covered_system_message_delta(
             session_id,
             scan_version,
             &document,
-            JsonScanPolicy::DurablePreserveIdentities,
         )?;
         let prepared: CoveredSystemMessageDocument =
             serde_json::from_str(&prepared).map_err(stored_row_serde_error)?;
@@ -5978,6 +5979,13 @@ pub const MAX_ACKED_WATERMARKS_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_SERIALIZED_BYTES: usize = 2 * MAX_TODO_STATE_BYTES + 2;
 
+/// Whether `state` meets both task-list bounds in the redacted form the metadata scan stores.
+pub fn todo_state_within_bounds(state: &str) -> bool {
+    let stored = redact_durable_text(state).text;
+    stored.len() <= MAX_TODO_STATE_BYTES
+        && serialized_text_len(&stored) <= MAX_TODO_STATE_SERIALIZED_BYTES
+}
+
 fn serialized_text_len(text: &str) -> usize {
     serialized_str_len(text) + 2
 }
@@ -6010,9 +6018,47 @@ pub fn prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> &str {
     }
     text
 }
+
+/// The returned prefix remains unchanged when redacted again, preserving its serialized-byte
+/// budget.
+pub fn redacted_prefix_within_serialized_bytes(text: &str, max_bytes: usize) -> String {
+    let redacted = redact_durable_text(text).text;
+    let mut end = prefix_within_serialized_bytes(&redacted, max_bytes).len();
+    loop {
+        let candidate = &redacted[..end];
+        let again = redact_durable_text(candidate);
+        if again.text == candidate {
+            return candidate.to_string();
+        }
+        let common = candidate
+            .bytes()
+            .zip(again.text.bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let changed_from = again
+            .detections
+            .iter()
+            .filter(|detection| detection.offset + detection.length > common)
+            .map(|detection| detection.offset)
+            .min()
+            .unwrap_or(common);
+        end = redacted.floor_char_boundary(changed_from.min(end - 1));
+    }
+}
 pub const MAX_STATE_SYNC_DIRECTIVE_BYTES: usize = 256;
 pub const MAX_STATE_SYNC_ID_BYTES: usize = 128;
 pub const MAX_SYNTHETIC_TODO_PAIR_BYTES: usize = 24 * 1024;
+
+/// Whether `pair` fits [`MAX_SYNTHETIC_TODO_PAIR_BYTES`] in the redacted form the metadata scan
+/// stores.
+pub fn synthetic_todo_pair_within_bounds(pair: &FrozenSyntheticTodoPair) -> bool {
+    serde_json::to_string(pair)
+        .ok()
+        .and_then(|json| {
+            prepare_json_content_with(&json, JsonScanPolicy::DurablePreserveIdentities).ok()
+        })
+        .is_some_and(|stored| stored.len() <= MAX_SYNTHETIC_TODO_PAIR_BYTES)
+}
 /// Most `legacy = 1` history_segments a session holds. Only the state-sync seed writes them,
 /// and a sync whose result would hold more is refused, so
 /// [`ModuleMeta::legacy_history_segment_seqs`] has a fixed bound.
@@ -10151,9 +10197,7 @@ impl MemoryStore {
         owner_message_id: &str,
         state_hash: &str,
     ) -> Result<TodoStateSetOutcome, MemoryStoreError> {
-        if state_json.len() > MAX_TODO_STATE_BYTES
-            || serialized_text_len(state_json) > MAX_TODO_STATE_SERIALIZED_BYTES
-        {
+        if !todo_state_within_bounds(state_json) {
             return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
         }
         reject_secret_text(owner_message_id)?;
@@ -13511,8 +13555,7 @@ impl MemoryStore {
         let detail = detail
             .map(|value| {
                 write.content("last_failure", value).map(|redacted| {
-                    prefix_within_serialized_bytes(&redacted, MAX_SUMMARIZER_DETAIL_BYTES)
-                        .to_string()
+                    redacted_prefix_within_serialized_bytes(&redacted, MAX_SUMMARIZER_DETAIL_BYTES)
                 })
             })
             .transpose()?;
@@ -24497,6 +24540,131 @@ mod tests {
             }
         }
         assert_eq!(snapshot(), before, "a refused sync writes nothing");
+    }
+    #[test]
+    fn a_redacted_detail_cut_keeps_its_length_through_another_redaction() {
+        let secret = "password=abc next ";
+        for (detail, max) in [
+            (secret.repeat(60), MAX_SUMMARIZER_DETAIL_BYTES),
+            (
+                format!("{}{secret}", "a".repeat(500)),
+                MAX_SUMMARIZER_DETAIL_BYTES,
+            ),
+            (secret.repeat(10), 40),
+            (String::new(), 8),
+            ("plain detail".to_string(), MAX_SUMMARIZER_DETAIL_BYTES),
+        ] {
+            let cut = redacted_prefix_within_serialized_bytes(&detail, max);
+            assert!(serialized_str_len(&cut) <= max, "{cut:?}");
+            assert_eq!(redact_durable_text(&cut).text, cut, "{cut:?}");
+            assert!(
+                redact_durable_text(&detail).text.starts_with(&cut),
+                "{cut:?}"
+            );
+        }
+        let placeholder = redact_durable_text(secret).text;
+        let split = placeholder.find("<REDACTED").unwrap() + 4;
+        let cut = redacted_prefix_within_serialized_bytes(secret, split);
+        assert_eq!(redact_durable_text(&cut).text, cut);
+        assert!(cut.len() <= split, "{cut:?}");
+        let plain = "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES + 10);
+        assert_eq!(
+            redacted_prefix_within_serialized_bytes(&plain, MAX_SUMMARIZER_DETAIL_BYTES),
+            "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES)
+        );
+    }
+
+    #[test]
+    fn an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(directory.path())).unwrap();
+        store
+            .commit_with_block_identities_for_test(
+                "detail",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let detail = "password=abc next ".repeat(MAX_SUMMARIZER_DETAIL_BYTES / 18);
+        assert!(serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES);
+        assert!(
+            serialized_str_len(&redact_durable_text(&detail).text) > MAX_SUMMARIZER_DETAIL_BYTES
+        );
+        store
+            .abandon_history_summarizer_run_if_matching_with_publish_failure(
+                "detail",
+                &publish_predicate(),
+                None,
+                Some(&detail),
+                true,
+                summarizer_timeline::AbandonClass::Invalidated,
+            )
+            .unwrap()
+            .expect("abandon applies");
+        let stored = store
+            .load("detail")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .last_failure
+            .expect("the detail is recorded");
+        assert!(serialized_str_len(&stored) <= MAX_SUMMARIZER_DETAIL_BYTES);
+        assert!(stored.contains("<REDACTED:password>"), "{stored}");
+    }
+
+    #[test]
+    fn set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let entry = |content: &str| {
+            format!(
+                r#"{{"content":{},"status":"pending"}}"#,
+                serde_json::json!(content)
+            )
+        };
+        let at = |bytes: usize| {
+            let base = format!("[{}]", entry("password=abc next "));
+            let state = format!(
+                "[{}]",
+                entry(&format!(
+                    "password=abc next {}",
+                    "n".repeat(bytes - base.len())
+                ))
+            );
+            assert_eq!(state.len(), bytes);
+            state
+        };
+        let raw_fits = at(MAX_TODO_STATE_BYTES);
+        assert!(redact_durable_text(&raw_fits).text.len() > MAX_TODO_STATE_BYTES);
+        assert!(!todo_state_within_bounds(&raw_fits));
+        let before = store.load("ses").unwrap();
+        assert!(matches!(
+            store.set_todo_state("ses", &raw_fits, "m1", "h"),
+            Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
+        ));
+        let after = store.load("ses").unwrap();
+        assert_eq!(
+            (after.row_version, after.meta),
+            (before.row_version, before.meta)
+        );
+
+        let expansion = redact_durable_text(&raw_fits).text.len() - raw_fits.len();
+        let redacted_fits = at(MAX_TODO_STATE_BYTES - expansion);
+        assert_eq!(
+            redact_durable_text(&redacted_fits).text.len(),
+            MAX_TODO_STATE_BYTES
+        );
+        assert!(todo_state_within_bounds(&redacted_fits));
+        store
+            .set_todo_state("ses", &redacted_fits, "m1", "h")
+            .unwrap();
+        let stored = store.load("ses").unwrap().meta.last_todo_state.unwrap();
+        assert_eq!(stored.len(), MAX_TODO_STATE_BYTES);
     }
 
     #[test]

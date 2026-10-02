@@ -457,7 +457,7 @@ fn retain_backoff(
 pub use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
 
 pub(crate) fn bounded_detail(detail: &str) -> String {
-    memory_store::prefix_within_serialized_bytes(detail, MAX_SUMMARIZER_DETAIL_BYTES).to_string()
+    memory_store::redacted_prefix_within_serialized_bytes(detail, MAX_SUMMARIZER_DETAIL_BYTES)
 }
 
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
@@ -4260,6 +4260,39 @@ mod tests {
         assert!(
             memory_store::serialized_str_len(&detail) > MAX_SUMMARIZER_DETAIL_BYTES - 6,
             "the cut keeps as much as fits"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_bearing_start_failure_stays_within_its_bound_once_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model".to_string()];
+        let message = "password=abc next ".repeat(MAX_SUMMARIZER_DETAIL_BYTES / 18);
+        let mut producer = ScriptedProducer::default().with_start(Err(
+            HistorySummarizerProducerError::context_overflow(message),
+        ));
+        run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        let detail = store
+            .load("ses")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .last_failure
+            .expect("the failure is recorded");
+        assert!(detail.contains("<REDACTED:password>"), "{detail}");
+        assert!(
+            memory_store::serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES,
+            "{}",
+            detail.len()
         );
     }
 

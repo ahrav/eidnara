@@ -6828,18 +6828,21 @@ fn absent_shape_fingerprint(live: &[&FlatBlock]) -> String {
     out
 }
 
+pub(crate) const MAX_PENDING_REWRITE_DETAIL_BYTES: usize = 1024;
+
 fn pending_rewrite_detail(session_id: &str, fingerprint: &str, ambiguous: bool) -> String {
     let state = if ambiguous {
         "ambiguous_pending_rewrite"
     } else {
         "pending_rewrite"
     };
-    format!(
+    let detail = format!(
         "{state}: boundary-absent share-nothing array on session {session_id}; \
          absent_shape_fingerprint={fingerprint}; expected causes are an upstream \
          lineage-switch detection miss or foreign traffic on this session key; serving raw \
          pass-through and preserving the held lineage"
-    )
+    );
+    memory_store::redacted_prefix_within_serialized_bytes(&detail, MAX_PENDING_REWRITE_DETAIL_BYTES)
 }
 
 struct PendingPassthroughArgs {
@@ -6969,7 +6972,9 @@ fn advance_synthetic_todo(
     match outcome {
         InjectionOutcome::Replace(next) => {
             let anchor_mid = tail_end_mid(req, meta.coverage_ordinal);
-            meta.synthetic_todo = Some((*next).freeze_at(anchor_mid));
+            let frozen = (*next).freeze_at(anchor_mid);
+            meta.synthetic_todo =
+                memory_store::synthetic_todo_pair_within_bounds(&frozen).then_some(frozen);
         }
         InjectionOutcome::Clear => meta.synthetic_todo = None,
         InjectionOutcome::Keep => {
