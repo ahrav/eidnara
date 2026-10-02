@@ -608,11 +608,11 @@ rejects a missing or changed selected identity and a mismatched epoch.
 Check: `always` - in `enforce_block_identity` a mid with no stored row
 continues (`crates/daemon/src/transform.rs:5485-5487`) and produces no
 re-adoption and no `FrozenTargetDrift`; publication refuses an empty selected
-set (`crates/memory-store/src/lib.rs:14098-14103`), then a firing whose
-`withdrawn_selected_mid` is set (`:14104-14108`), then any selected mid whose
-stored vector is absent or differs (`:14109-14132`), then a revert-epoch
-mismatch as `CasConflict` (`history_publication_fence_tx`, `:6593-6598`,
-called at `:14134-14143`). `always` because each consumer
+set (`crates/memory-store/src/lib.rs:14135-14140`), then a firing whose
+`withdrawn_selected_mid` is set (`:14141-14145`), then any selected mid whose
+stored vector is absent or differs (`:14146-14169`), then a revert-epoch
+mismatch as `CasConflict` (`history_publication_fence_tx`, `:6645-6650`,
+called at `:14171-14180`). `always` because each consumer
 applies its policy on every evaluation.
 Fault/timing angle: Identity removal or edit during a firing's producer
 await, or a reset during a firing.
@@ -621,26 +621,28 @@ absent or changed; an empty selected set; a mismatched epoch; a legal
 unrelated-tail control.
 Confidence: high -
 [evidence](evidence/fa-e09-missing-identities-have-consumer-specific-policies.md).
-Read both consumers at `0ff62b29a`. Corrections to the spec (at `265df096`):
-S`:11825-11859` is now `crates/memory-store/src/lib.rs:14084-14143`, and the
+Read both consumers at `0ff62b29a`; the `lib.rs` line references were
+refreshed at `175fa1349` after `44f3159` and the base merge moved the
+publish transaction down by 37 lines. Corrections to the spec (at `265df096`):
+S`:11825-11859` is now `crates/memory-store/src/lib.rs:14121-14180`, and the
 fence reads `lookup_block_identity_rows` in the publish transaction instead
 of the hydrated `meta.block_identity_by_mid` (#905); D`transform.rs:5364-5370`
 is now `:5485-5487`; the `IdentityDrift` error and
 `identity_drift_requires_reject` (spec `:5437-5444`) were deleted by
 `6477c9f27` (window-protocol #833, D25), so a stored-versus-new mismatch now
 re-adopts or refuses with `FrozenTargetDrift`.
-Existing check: `crates/memory-store/src/lib.rs:25736`
+Existing check: `crates/memory-store/src/lib.rs:25903`
 `publish_rejects_a_selected_message_whose_identity_row_is_gone` (#905);
 `crates/daemon/src/history_summarizer.rs:4047`
 `selected_range_identity_drift_during_await_rejects_without_cooldown` (spec
 `:3037`); `:4101` `tail_identity_extension_during_await_still_publishes`;
-`crates/memory-store/src/lib.rs:29830`
+`crates/memory-store/src/lib.rs:29997`
 `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict`;
 `crates/daemon/src/transform.rs:14628`
 `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`
 (#905); `:20444`
 `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
-(#905); `crates/memory-store/src/lib.rs:25791`
+(#905); `crates/memory-store/src/lib.rs:25958`
 `publish_rejects_a_firing_whose_selected_message_left_the_window` (#905).
 Impact: High. Removing identity rows weakens transform validation while
 blocking publication; a fence that accepts a missing row publishes stale
@@ -1695,7 +1697,7 @@ transform fills only for the provisional tail
 (`crates/daemon/src/transform.rs:5610-5612`); requested-mid reads run inside
 the snapshot read (`crates/memory-store/src/lib.rs:8772`); publication
 refuses a selected mid whose row is absent or differs
-(`:14109-14131`). `always-or-unreached` because identity writes happen only
+(`:14146-14168`). `always-or-unreached` because identity writes happen only
 on folding sessions.
 Fault/timing angle: CAS loss; restart; covered edits; missing selected rows;
 a commit between the state read and the identity read; failure injected
@@ -1725,7 +1727,7 @@ Existing check: `crates/memory-store/src/lib.rs:23853`
 `:33872` `descent_copies_block_identities_and_recomp_reset_clears_them`;
 `:33723` `descent_copies_identity_rows_without_their_scan_owner`; `:33624`
 `receipt_retirement_reads_at_most_one_row_beyond_the_released_ones`;
-`:25736` `publish_rejects_a_selected_message_whose_identity_row_is_gone`;
+`:25903` `publish_rejects_a_selected_message_whose_identity_row_is_gone`;
 `crates/daemon/src/transform.rs:14628`
 `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`;
 `:14673` `mid_turn_tail_stays_provisional_and_re_adopts_completed_tail`;

@@ -117,7 +117,7 @@ reopen.
 
 - Sources examined: `git show f0e39d04d 64a8bf371 5d9ff4581`;
   `crates/daemon/src/transform.rs:5431-5469`, `:20444`;
-  `crates/memory-store/src/lib.rs:14104-14108`.
+  `crates/memory-store/src/lib.rs:14141-14145`.
 - Findings: Yes. The window still deletes no omitted row. When a window
   drops a selected mid of an in-flight firing, the transform records the
   withdrawal on the firing and the publication is fenced out, while the

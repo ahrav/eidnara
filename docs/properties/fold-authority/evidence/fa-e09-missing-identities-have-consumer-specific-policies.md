@@ -23,13 +23,13 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   `FrozenTargetDrift`; `apply_ingress_identities` then adopts the projected
   vector (`:5644-5651`).
 - Publication: `publish_history_summarizer_chunk`'s transaction checks the
-  predicate (`crates/memory-store/src/lib.rs:14084-14096`), refuses an empty
-  selected set (`:14098-14103`), refuses a firing whose
-  `withdrawn_selected_mid` is set (`:14104-14108`), reads the selected mids
-  through `lookup_block_identity_rows` (`:14109-14115`), refuses any mid
-  whose stored vector is absent or differs (`:14116-14131`), and then
+  predicate (`crates/memory-store/src/lib.rs:14121-14133`), refuses an empty
+  selected set (`:14135-14140`), refuses a firing whose
+  `withdrawn_selected_mid` is set (`:14141-14145`), reads the selected mids
+  through `lookup_block_identity_rows` (`:14146-14152`), refuses any mid
+  whose stored vector is absent or differs (`:14153-14168`), and then
   refuses a revert epoch mismatch as `CasConflict` in
-  `history_publication_fence_tx` (`:6593-6598`, called at `:14134-14143`).
+  `history_publication_fence_tx` (`:6645-6650`, called at `:14171-14180`).
 - Withdrawal (#905, merged as `21681e0ea`): identity rows are no longer
   pruned to the window, so a selected mid outside the window keeps a
   matching row. `withdraw_selection_outside_window`
@@ -37,7 +37,7 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   mid the submitted window no longer holds on the in-flight firing, and the
   fence refuses that firing;
   `publish_rejects_a_firing_whose_selected_message_left_the_window`
-  (`crates/memory-store/src/lib.rs:25791`) witnesses the refusal.
+  (`crates/memory-store/src/lib.rs:25958`) witnesses the refusal.
 - At `265df096` the fence compared against the hydrated
   `meta.block_identity_by_mid` (`lib.rs:11845-11851` there) and the
   transform read the same map (`transform.rs:5367-5369` there). #905 removed
@@ -84,11 +84,11 @@ transform pass over a mid whose row was deleted.
 ### Q: Is FA-E09 preserved by #905?
 
 - Sources examined: #905 description; the fence
-  (`crates/memory-store/src/lib.rs:14084-14143`);
+  (`crates/memory-store/src/lib.rs:14121-14180`);
   `crates/daemon/src/transform.rs:5485-5487`; tests at
-  `crates/memory-store/src/lib.rs:25736`,
+  `crates/memory-store/src/lib.rs:25903`,
   `crates/daemon/src/history_summarizer.rs:4047`,
-  `crates/memory-store/src/lib.rs:29830`, and
+  `crates/memory-store/src/lib.rs:29997`, and
   `crates/daemon/src/transform.rs:14628` (lines at `0ff62b29a`).
 - Findings: Yes. The fence refuses a missing row
   (`publish_rejects_a_selected_message_whose_identity_row_is_gone`) and a
@@ -114,7 +114,7 @@ transform pass over a mid whose row was deleted.
 - Sources examined: `git show f0e39d04d 64a8bf371`;
   `crates/daemon/src/transform.rs:5431-5469`;
   `crates/daemon/src/history_summarizer.rs:533-555`;
-  `crates/memory-store/src/lib.rs:14084-14143`, `:25791`.
+  `crates/memory-store/src/lib.rs:14121-14180`, `:25791`.
 - Findings: It adds a refusal. Identity rows are no longer pruned to the
   window, so a selected mid outside the window keeps a matching row. The
   transform records the first such mid on the in-flight firing

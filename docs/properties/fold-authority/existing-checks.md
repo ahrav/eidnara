@@ -25,7 +25,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `defer_delta_and_boundary_advance_are_additive` | `crates/daemon/src/tail_hygiene.rs:2148` | FA-E07 | #906 | unaudited |
 | `non_append_mutation_invalidates_until_a_bust` | `crates/daemon/src/tail_hygiene.rs:2210` | FA-E07, FA-N11 | #906 | unaudited |
 | `first_divergence_classifies_each_boundary_kind_and_ignores_appends` | `crates/daemon/src/divergence.rs:124` | FA-E08 | #906 | unaudited |
-| `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:29830` | FA-E09 | #905 | unaudited |
+| `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:29997` | FA-E09 | #905 | unaudited |
 | `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:4047` | FA-E09 | #905 | unaudited |
 | `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:4101` | FA-E09 | #905 | unaudited |
 | `tier_policy_ignores_project_models_and_rejects_project_lowering` | `crates/daemon/src/config.rs:1509` | FA-E10 | #859 PR A | unaudited |
@@ -100,10 +100,10 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `identity_histories_match_a_per_session_reference_map` | `crates/memory-store/src/lib.rs:33775` | FA-N12 | #905 | unaudited |
 | `descent_copies_block_identities_and_recomp_reset_clears_them` | `crates/memory-store/src/lib.rs:33872` | FA-N12 | #905 | unaudited |
 | `transform_snapshot_resists_commit_between_state_and_overlay_reads` | `crates/memory-store/src/lib.rs:21840` | FA-N12 | #905 | unaudited |
-| `publish_rejects_a_selected_message_whose_identity_row_is_gone` | `crates/memory-store/src/lib.rs:25736` | FA-N12, FA-E09 | #905 | unaudited |
+| `publish_rejects_a_selected_message_whose_identity_row_is_gone` | `crates/memory-store/src/lib.rs:25903` | FA-N12, FA-E09 | #905 | unaudited |
 | `mid_turn_tail_stays_provisional_and_re_adopts_completed_tail` | `crates/daemon/src/transform.rs:14673` | FA-N12 | #905 | unaudited |
 | `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows` | `crates/daemon/src/transform.rs:20444` | FA-N12, FA-E09 | #905 (renamed from `a_window_that_omits_the_selected_message_keeps_its_identity_for_the_publication` by #905's review commits) | unaudited |
-| `publish_rejects_a_firing_whose_selected_message_left_the_window` | `crates/memory-store/src/lib.rs:25791` | FA-E09 | #905 | unaudited |
+| `publish_rejects_a_firing_whose_selected_message_left_the_window` | `crates/memory-store/src/lib.rs:25958` | FA-E09 | #905 | unaudited |
 | `an_over_budget_selection_stops_at_the_longest_prefix_of_whole_blocks` | `crates/daemon/src/history_summarizer_chunk.rs:1960` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `an_indivisible_first_block_over_the_identity_budget_no_fires` | `crates/daemon/src/history_summarizer_chunk.rs:1981` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `escaped_and_unicode_mids_are_charged_as_they_serialize` | `crates/daemon/src/history_summarizer_chunk.rs:1995` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
