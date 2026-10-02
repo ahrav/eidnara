@@ -217,11 +217,7 @@ fn newest_bounded_todowrite_state_json(tail: &[SelItem]) -> Option<(String, Stri
 }
 
 fn bounded_todo_state(normalized: String) -> String {
-    if normalized.len() > memory_store::MAX_TODO_STATE_BYTES {
-        "[]".to_string()
-    } else {
-        normalized
-    }
+    memory_store::bounded_todo_state(&normalized).unwrap_or_else(|| "[]".to_string())
 }
 
 /// Advances injection from persisted metadata without capturing visible calls.
@@ -768,6 +764,26 @@ mod tests {
         assert_eq!(outcome, InjectionOutcome::Clear);
         assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
         assert_eq!(meta.last_todo_state_owner_message_id.as_deref(), Some("m2"));
+
+        // A state at MAX_TODO_STATE_BYTES reads as an empty list when redaction expands it
+        // beyond that limit.
+        let secret = " password=hunter-two";
+        let base = active_state(secret);
+        let grows = active_state(&format!(
+            "{}{secret}",
+            "t".repeat(memory_store::MAX_TODO_STATE_BYTES - base.len())
+        ));
+        assert_eq!(grows.len(), memory_store::MAX_TODO_STATE_BYTES);
+        let mut meta = ModuleMeta::default();
+        let outcome = advance_injection_after_capture(
+            &mut meta,
+            &[todowrite_tail_item("m3#0", 3, &grows)],
+            None,
+            true,
+            None,
+        );
+        assert_eq!(outcome, InjectionOutcome::None, "{outcome:?}");
+        assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
     }
 
     #[test]

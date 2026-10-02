@@ -5721,6 +5721,15 @@ pub const MAX_ACKED_WATERMARKS_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_BYTES: usize = 4 * 1024;
 pub const MAX_TODO_STATE_SERIALIZED_BYTES: usize = 2 * MAX_TODO_STATE_BYTES + 2;
 
+/// Redaction can expand task-list text, so both byte limits apply to the redacted value
+/// before persistence.
+pub fn bounded_todo_state(state_json: &str) -> Option<String> {
+    let redacted = redact_durable_text(state_json).text;
+    let within = redacted.len() <= MAX_TODO_STATE_BYTES
+        && serialized_text_len(&redacted) <= MAX_TODO_STATE_SERIALIZED_BYTES;
+    within.then_some(redacted)
+}
+
 fn serialized_text_len(text: &str) -> usize {
     serde_json::to_string(text).map_or(usize::MAX, |serialized| serialized.len())
 }
@@ -9799,12 +9808,8 @@ impl MemoryStore {
         owner_message_id: &str,
         state_hash: &str,
     ) -> Result<TodoStateSetOutcome, MemoryStoreError> {
-        let state_json = redact_durable_text(state_json).text;
-        if state_json.len() > MAX_TODO_STATE_BYTES
-            || serialized_text_len(&state_json) > MAX_TODO_STATE_SERIALIZED_BYTES
-        {
-            return Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit));
-        }
+        let state_json = bounded_todo_state(state_json)
+            .ok_or(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))?;
         reject_secret_text(owner_message_id)?;
         reject_secret_text(state_hash)?;
         let mut last_conflict = None;
