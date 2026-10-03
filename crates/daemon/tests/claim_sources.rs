@@ -30,7 +30,8 @@ use retrieval::batch::{
 };
 use retrieval::claims::{
     CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateBounds, SurfaceValidation,
-    UseDenial, UseVerdict, classify_live_claims, validate_for_surface,
+    UseDenial, UseVerdict, classify_live_claims, judge_selected_for_surface, read_selected_claims,
+    validate_for_surface,
 };
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
@@ -1851,7 +1852,77 @@ fn validate_scoped(
         &EvalBudget::unbounded(),
     )
     .unwrap();
+    assert_selected_judgement_agrees(
+        projection,
+        corpus,
+        project,
+        destination,
+        surface,
+        &validation,
+    );
     (batch, validation)
+}
+
+/// The route's selected-claims judgement permits exactly the rows `validate_for_surface` permits, with the same visibility, when no commit lands between the two reads.
+fn assert_selected_judgement_agrees(
+    projection: &SearchProjection,
+    corpus: &Corpus,
+    project: &str,
+    destination: ArtifactDestination,
+    surface: Surface,
+    validation: &SurfaceValidation,
+) {
+    let occurrence_ids: Vec<String> = validation
+        .candidates
+        .iter()
+        .map(|validated| validated.candidate.row.occurrence_id.clone())
+        .collect();
+    if occurrence_ids.is_empty() {
+        return;
+    }
+    let selected = projection
+        .read(|conn| {
+            Ok(read_selected_claims(
+                conn,
+                &corpus.kernel,
+                &EvalBudget::unbounded(),
+                candidate_bounds(),
+                &occurrence_ids,
+            )
+            .unwrap())
+        })
+        .unwrap();
+    let verdicts = judge_selected_for_surface(
+        &corpus.kernel,
+        &selected,
+        &ProjectScope::new(project).unwrap(),
+        destination,
+        surface,
+        candidate_bounds().facts,
+        &EvalBudget::unbounded(),
+    )
+    .unwrap();
+    let permitted = |verdict: UseVerdict| match verdict {
+        UseVerdict::Permitted(visibility) => Some(visibility),
+        UseVerdict::Denied(_) => None,
+    };
+    let expected: BTreeMap<&str, Option<kernel::SurfaceVisibility>> = validation
+        .candidates
+        .iter()
+        .map(|validated| {
+            (
+                validated.candidate.row.occurrence_id.as_str(),
+                permitted(validated.verdict),
+            )
+        })
+        .collect();
+    let judged: BTreeMap<&str, Option<kernel::SurfaceVisibility>> = selected
+        .rows
+        .iter()
+        .zip(verdicts)
+        .map(|(row, verdict)| (row.occurrence_id.as_str(), permitted(verdict)))
+        .collect();
+    assert_eq!(judged, expected, "{surface:?} {project} {destination:?}");
 }
 
 fn validate(
@@ -3057,4 +3128,67 @@ fn a_removed_consumer_is_registered_again_and_the_scan_resumes() {
         corpus.inventory(),
         ledger(&[seeds[0], seeds[1], memory("q3", "Three.")])
     );
+}
+
+/// The selected-claims judgement reads facts for a permitted object or a required occurrence, and lists only the selected occurrences of each object it reads.
+#[test]
+fn a_selected_judgement_reads_permitted_objects_and_only_their_selected_occurrences() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, _projection, batch, _) = one_decision_validated(dir.path());
+    let row = &batch.candidates[0].row;
+    let candidate = EligibilityCandidate {
+        object_id: row.object_id.clone(),
+        source_revision: row.revision,
+        artifact_digest: Some(row.artifact_digest.clone()),
+    };
+    let judge = |project: &str, required: bool| {
+        corpus
+            .kernel
+            .judge_surface_eligibility_with_selected_claims(
+                &ProjectScope::new(project).unwrap(),
+                ArtifactDestination::Local,
+                Surface::ExplicitSearch,
+                std::slice::from_ref(&candidate),
+                &[kernel::SelectedOccurrence {
+                    object_id: &row.object_id,
+                    class: row.class,
+                    representation: &row.representation,
+                    required,
+                }],
+                candidate_bounds().facts,
+                batch.incarnation,
+                &EvalBudget::unbounded(),
+            )
+            .unwrap()
+    };
+    let permitted = judge(PROJECT, false);
+    assert!(permitted.batch.verdicts[0].permits());
+    let [claim] = permitted.claims.as_slice() else {
+        panic!("{:?}", permitted.claims);
+    };
+    let listed: Vec<&str> = claim
+        .occurrences
+        .iter()
+        .map(|occurrence| occurrence.occurrence_id.as_str())
+        .collect();
+    assert_eq!(listed, [row.occurrence_id.as_str()]);
+    let full = batch.claim(&batch.candidates[0]).unwrap();
+    assert_eq!(full.occurrences.len(), batch.candidates.len());
+    assert_eq!(
+        (
+            &claim.object,
+            &claim.decision,
+            &claim.served,
+            &claim.causality
+        ),
+        (&full.object, &full.decision, &full.served, &full.causality)
+    );
+
+    let foreign = "b".repeat(64);
+    let denied = judge(&foreign, false);
+    assert!(!denied.batch.verdicts[0].permits());
+    assert!(denied.claims.is_empty() && denied.missing.is_empty());
+    let required = judge(&foreign, true);
+    assert_eq!(required.claims.len(), 1);
+    assert_eq!(required.claims[0].occurrences.len(), 1);
 }

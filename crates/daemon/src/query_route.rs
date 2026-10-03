@@ -20,8 +20,8 @@ use kernel::{
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::claims::{
-    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, classify_selected_claims,
-    validate_for_surface,
+    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, judge_selected_for_surface,
+    read_selected_claims,
 };
 use retrieval::dense::{
     Completion as DenseCompletion, ExhaustiveQuery, IncompleteReason as DenseIncompleteReason,
@@ -1413,7 +1413,7 @@ fn validate_claims(
         },
     };
     let read = projection.read_under(budget, |conn| {
-        Ok(classify_selected_claims(
+        Ok(read_selected_claims(
             conn,
             kernel,
             budget.eval(),
@@ -1421,38 +1421,42 @@ fn validate_claims(
             batch,
         ))
     });
-    let classified = match read {
-        Ok(classified) => classified.map_err(refused)?,
+    let selected = match read {
+        Ok(selected) => selected.map_err(refused)?,
         Err(SearchProjectionError::Store(StoreError::Deadline)) => {
             return Err(exhaustion(budget).into());
         }
         Err(_) => return Err(QueryFailure::Unavailable("claim_validation")),
     };
-    let validation = validate_for_surface(
+    let verdicts = judge_selected_for_surface(
         kernel,
-        &classified.candidates,
+        &selected,
         authority.project,
         authority.destination,
         Surface::ExplicitSearch,
         bounds.facts,
-        classified.incarnation,
         budget.eval(),
     )
     .map_err(refused)?;
-    references.extend(validation.candidates.into_iter().filter_map(|validated| {
-        let UseVerdict::Permitted(visibility) = validated.verdict else {
-            return None;
-        };
-        let row = validated.candidate.row;
-        Some((
-            row.occurrence_id,
-            CanonicalReference {
-                object_id: row.object_id,
-                revision: row.revision,
-                visibility,
-            },
-        ))
-    }));
+    references.extend(
+        selected
+            .rows
+            .into_iter()
+            .zip(verdicts)
+            .filter_map(|(row, verdict)| {
+                let UseVerdict::Permitted(visibility) = verdict else {
+                    return None;
+                };
+                Some((
+                    row.occurrence_id,
+                    CanonicalReference {
+                        object_id: row.object_id,
+                        revision: row.revision,
+                        visibility,
+                    },
+                ))
+            }),
+    );
     Ok(())
 }
 
