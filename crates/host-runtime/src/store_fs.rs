@@ -320,6 +320,8 @@ pub(crate) fn write_new_file(
     Ok(fd)
 }
 
+pub(crate) const HASH_BUFFER_BYTES: usize = 128 * 1024;
+
 /// Reads `source` to EOF, hashing every byte and copying it to `destination` when given.
 /// Returns the byte count and lowercase SHA-256 hex. Once the count exceeds `cap` the copy
 /// fails with `InvalidData`, so a source that grows mid-copy cannot overrun its manifest size.
@@ -330,7 +332,7 @@ pub(crate) fn hash_copy(
 ) -> io::Result<(u64, String)> {
     let mut hasher = sha2::Sha256::new();
     let mut total = 0u64;
-    let mut buffer = vec![0u8; 128 * 1024];
+    let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
     loop {
         let count = rustix::io::read(source, &mut buffer)?;
         if count == 0 {

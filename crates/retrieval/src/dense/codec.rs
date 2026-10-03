@@ -333,24 +333,72 @@ pub fn decode_header(header: &[u8], layout: &RowLayout) -> Result<u64, ArtifactR
     ))
 }
 
+pub const fn row_bytes(dimension: u32) -> u64 {
+    dimension as u64 * 4
+}
+
+/// Rows follow the header with no padding, so row `index` starts `index` whole rows past it.
+pub const fn row_offset(index: u64, dimension: u32) -> u64 {
+    ARTIFACT_HEADER_BYTES as u64 + index * row_bytes(dimension)
+}
+
+/// Checks that the `body_bytes` after the header hold exactly the `declared` rows of `layout`.
+///
+/// # Errors
+///
+/// [`ArtifactRejection::RowBytes`] when they hold more or fewer bytes.
+pub fn check_body(
+    declared: u64,
+    body_bytes: u64,
+    layout: &RowLayout,
+) -> Result<(), ArtifactRejection> {
+    if declared.checked_mul(row_bytes(layout.dimension)) == Some(body_bytes) {
+        Ok(())
+    } else {
+        Err(ArtifactRejection::RowBytes {
+            declared,
+            bytes: usize::try_from(body_bytes).unwrap_or(usize::MAX),
+        })
+    }
+}
+
+/// Decodes and validates artifact rows one at a time into one reused buffer, so a walk over every row allocates once.
+pub struct RowDecoder {
+    layout: RowLayout,
+    row: Vec<f32>,
+}
+
+impl RowDecoder {
+    pub fn new(layout: &RowLayout) -> Self {
+        Self {
+            layout: *layout,
+            row: Vec::with_capacity(layout.dimension as usize),
+        }
+    }
+
+    /// The coordinates of artifact row `index`, decoded from its `bytes` and validated under the layout.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactRejection::Row`] at `index` for a row outside the layout.
+    pub fn decode(&mut self, index: usize, bytes: &[u8]) -> Result<&[f32], ArtifactRejection> {
+        decode_length_into(bytes, self.layout.dimension, &mut self.row)
+            .and_then(|()| validate(&self.row, &self.layout))
+            .map_err(|rejection| ArtifactRejection::Row { index, rejection })?;
+        Ok(&self.row)
+    }
+}
+
 /// The header, metric, dimension, and byte count are checked before any row is read.
 pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, ArtifactRejection> {
     let row_count = decode_header(bytes, layout)?;
     let body = &bytes[ARTIFACT_HEADER_BYTES..];
-    let row_bytes = u64::from(layout.dimension) * 4;
-    let mismatch = ArtifactRejection::RowBytes {
-        declared: row_count,
-        bytes: body.len(),
-    };
-    if row_count.checked_mul(row_bytes) != u64::try_from(body.len()).ok() {
-        return Err(mismatch);
-    }
+    check_body(row_count, body.len() as u64, layout)?;
+    let mut decoder = RowDecoder::new(layout);
     let rows = body
-        .chunks_exact(usize::try_from(row_bytes).map_err(|_| mismatch)?)
+        .chunks_exact(row_bytes(layout.dimension) as usize)
         .enumerate()
-        .map(|(index, chunk)| {
-            decode(chunk, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })
-        })
+        .map(|(index, chunk)| decoder.decode(index, chunk).map(<[f32]>::to_vec))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(OriginalRows {
         layout: *layout,

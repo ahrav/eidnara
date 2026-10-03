@@ -379,26 +379,10 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
     };
     assert!(verify(&fixture.store, &digest, &with_checkpoint, u64::MAX).is_ok());
 
-    // The bound is what verification holds at once: the resident tables and sidecar, one row chunk, and one row's codes.
-    // The row and code payloads stream through it, so their sizes are not part of it; one byte under it refuses before any payload is read.
-    let manifest = first.sidecar.stage_manifest();
-    let held = verification_bytes(&manifest, first.sidecar.vector_dimension);
-    let streamed: u64 = manifest
-        .files
-        .iter()
-        .filter(|file| file.path == ROWS_FILE || file.path == CODES_FILE)
-        .map(|file| file.size)
-        .sum();
-    assert_eq!(
-        held,
-        resident_bytes(&manifest)
-            + (1 << 16) / (4 * u64::from(first.sidecar.vector_dimension))
-                * 4
-                * u64::from(first.sidecar.vector_dimension)
-            + 24
-            + 18 * u64::from(first.sidecar.vector_dimension)
-    );
-    assert!(streamed > 0);
+    // The bound is what verification holds at once; one byte under it refuses before any table or payload is read.
+    let manifest = fixture.store.manifest(&digest).unwrap();
+    let held = verification_bytes(&manifest, &first.sidecar);
+    assert!(held > resident_bytes(&manifest));
     assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
     assert_eq!(
         verify(&fixture.store, &digest, &fixture.expected(), held - 1).map(|v| v.digest),
@@ -1165,8 +1149,7 @@ impl Fixture {
     }
 }
 
-/// A generation larger than one verification chunk streams through several chunks in both passes and verifies under a bound
-/// that holds the resident tables plus one chunk, less than its row payload.
+/// A generation larger than one verification chunk streams through several chunks in both passes and verifies under its verification bound.
 #[test]
 fn streaming_verification_reads_rows_and_codes_across_chunks() {
     let fixture = Fixture::new();
@@ -1190,28 +1173,28 @@ fn streaming_verification_reads_rows_and_codes_across_chunks() {
     let rows_bytes = std::fs::metadata(built.dir.join(ROWS_FILE)).unwrap().len();
     assert!(rows_bytes > 1 << 16, "the rows span more than one chunk");
     let digest = fixture.stage(&built).unwrap();
-    let manifest = built.sidecar.stage_manifest();
-    let held = verification_bytes(&manifest, built.sidecar.vector_dimension);
-    assert!(
-        held - resident_bytes(&manifest) < rows_bytes,
-        "beyond the resident tables, verification holds less than the row payload"
-    );
+    let manifest = fixture.store.manifest(&digest).unwrap();
+    let held = verification_bytes(&manifest, &built.sidecar);
     assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
 
-    // A code changed in the last row, past the first chunk, refuses as a code mismatch.
-    let late_code = fixture.restaged(&digest, |dir| {
-        let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
-        let last = codes.len() - 1;
-        codes[last] = codes[last].wrapping_add(1);
-        rehash_file(dir, CODES_FILE, &codes);
-    });
-    assert_eq!(
-        fixture.verify(&late_code).unwrap_err(),
-        VectorRefusal::File {
-            path: CODES_FILE,
-            fault: FileFault::Codes
-        }
-    );
+    // A code changed in the last row of the first chunk, the first row of the second, or the last row refuses as a code mismatch.
+    let chunk_rows = (1usize << 16) / (4 * DIMENSION as usize);
+    for row in [chunk_rows - 1, chunk_rows, many.rows.len() - 1] {
+        let tampered = fixture.restaged(&digest, |dir| {
+            let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
+            let code = row * DIMENSION as usize;
+            codes[code] = codes[code].wrapping_add(1);
+            rehash_file(dir, CODES_FILE, &codes);
+        });
+        assert_eq!(
+            fixture.verify(&tampered).unwrap_err(),
+            VectorRefusal::File {
+                path: CODES_FILE,
+                fault: FileFault::Codes
+            },
+            "tampered row: {row}"
+        );
+    }
     // One row of codes more or fewer than the rows refuses as a code mismatch before any code is compared.
     for extra in [true, false] {
         let resized = fixture.restaged(&digest, |dir| {

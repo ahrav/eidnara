@@ -86,6 +86,9 @@ fn is_profile_temp_name(name: &str) -> bool {
 /// Manifest and lifecycle-evidence readers each cap input at 1 MiB.
 pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
+/// Heap bytes [`GenerationStore::validate`] and [`ValidatedGeneration::open_verified_file`] hold while they hash one file; the buffer is released before they return.
+pub const FILE_HASH_BUFFER_BYTES: usize = crate::store_fs::HASH_BUFFER_BYTES;
+
 /// Capacity preflight reserves 1 MiB for metadata that coexists until rename.
 const CAPACITY_FIXED_OVERHEAD_BYTES: u64 = 1024 * 1024;
 

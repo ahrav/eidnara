@@ -35,7 +35,7 @@ use crate::vector_generation::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderBounds {
     pub max_deltas: NonZeroUsize,
-    /// Bytes verification of one member may hold at once: its resident tables plus one streamed row chunk, as [`vector_generation::verification_bytes`] declares.
+    /// Heap bytes verification of one member may hold at once, as [`vector_generation::verification_bytes`] counts them.
     pub max_member_bytes: u64,
     /// Compositions recovery may fully verify when the selected one does not.
     pub recovery_bound: NonZeroUsize,
