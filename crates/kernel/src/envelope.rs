@@ -303,13 +303,14 @@ impl Envelope<'_> {
             .tx
             .prepare_cached(
                 "SELECT object_id,source_id FROM object_registry
-                 WHERE created_commit_seq=?1 AND object_id GLOB ?2",
+                 WHERE created_commit_seq=?1 AND object_id>=?2 AND object_id<?3",
             )
             .map_err(map_sqlite)?;
         let rows = statement
-            .query_map(params![self.commit_seq, format!("{prefix}*")], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
+            .query_map(
+                params![self.commit_seq, prefix, prefix_upper_bound(prefix)],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
             .map_err(map_sqlite)?;
         for row in rows {
             let (object_id, owner_id) = row.map_err(map_sqlite)?;
@@ -1628,6 +1629,18 @@ pub(super) const OBJECT_ROW_COLUMNS: &str = "o.object_id,o.object_kind,o.domain_
      o.source_id,o.source_revision,o.created_commit_seq,o.invalidated_commit_seq,\
      o.superseded_by,o.sensitivity_class";
 
+/// `prefix_upper_bound` returns an exclusive upper bound under SQLite's BINARY collation, so `object_id>=prefix AND object_id<bound` selects exactly the IDs starting with `prefix`.
+///
+/// # Panics
+///
+/// `prefix_upper_bound` panics when `prefix` is empty or ends in U+D7FF or U+10FFFF.
+pub(super) fn prefix_upper_bound(prefix: &str) -> String {
+    let mut bound = prefix.to_owned();
+    let last = bound.pop().expect("a nonempty prefix");
+    bound.push(char::from_u32(u32::from(last) + 1).expect("a prefix ending below U+D7FF"));
+    bound
+}
+
 pub(super) fn object_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ObjectRow> {
     let sensitivity: String = row.get(9)?;
     Ok(ObjectRow {
@@ -2129,4 +2142,25 @@ fn operation_identity(intent: &RedactedIntent) -> String {
         hash.update(component.as_bytes());
     }
     format!("{:x}", hash.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn prefix_upper_bound_brackets_exactly_the_prefixed_ids() {
+        let bound = super::prefix_upper_bound("srcdesc:ab:");
+        assert_eq!(bound, "srcdesc:ab;");
+        for inside in ["srcdesc:ab:", "srcdesc:ab:1", "srcdesc:ab:\u{10ffff}"] {
+            assert!(
+                inside >= "srcdesc:ab:" && inside < bound.as_str(),
+                "{inside}"
+            );
+        }
+        for outside in ["srcdesc:ab", "srcdesc:ab;", "srcdesc:ac:", "srcdesc:aa:9"] {
+            assert!(
+                !(outside >= "srcdesc:ab:" && outside < bound.as_str()),
+                "{outside}"
+            );
+        }
+    }
 }
