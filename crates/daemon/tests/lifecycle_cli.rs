@@ -274,6 +274,17 @@ fn version_and_release_info_are_side_effect_free() {
     assert_eq!(inputs.code, 0);
     assert_eq!(inputs.stdout.trim(), PRODUCTION_INPUTS_LOCK_SHA256);
 
+    let profile = run(&data, &["build-profile"]);
+    assert_eq!(profile.code, 0);
+    assert_eq!(
+        profile.stdout,
+        if cfg!(debug_assertions) {
+            "debug\n"
+        } else {
+            "release\n"
+        }
+    );
+
     assert!(!data.exists(), "metadata commands must not create the root");
 }
 

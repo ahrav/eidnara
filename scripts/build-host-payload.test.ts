@@ -67,13 +67,18 @@ function cloneManifest(manifest: PayloadManifest): PayloadManifest {
     return JSON.parse(JSON.stringify(manifest)) as PayloadManifest;
 }
 
-/** Shell stand-in for `eidnara-host`; `release-info` emits the contract file plus a newline, and `input-lock-digest` emits the lock digest. */
-function fakeLauncherScript(contractPath: string, lockSha256: string): string {
+/** Shell stand-in for `eidnara-host`; `release-info` emits the contract file plus a newline, `input-lock-digest` emits the lock digest, and `build-profile` emits `profile`. */
+function fakeLauncherScript(
+    contractPath: string,
+    lockSha256: string,
+    profile: "debug" | "release" = "debug",
+): string {
     return [
         "#!/bin/sh",
         'case "$1" in',
         `  release-info) cat ${JSON.stringify(contractPath)}; echo ;;`,
         `  input-lock-digest) echo ${lockSha256} ;;`,
+        `  build-profile) echo ${profile} ;;`,
         "  *) exit 0 ;;",
         "esac",
         "",
@@ -128,6 +133,7 @@ describe("build-host-payload", () => {
     let fixture: string;
     let lockSha256: string;
     let launcherPath: string;
+    let releaseLauncherPath: string;
     let releaseAddon: string;
     let debugAddon: string;
     let built: PayloadResult;
@@ -143,6 +149,11 @@ describe("build-host-payload", () => {
         writeExecutable(
             launcherPath,
             fakeLauncherScript(contractPath, lockSha256),
+        );
+        releaseLauncherPath = join(tmp, "release-eidnara-host");
+        writeExecutable(
+            releaseLauncherPath,
+            fakeLauncherScript(contractPath, lockSha256, "release"),
         );
         releaseAddon = join(tmp, "release-addon.cjs");
         writeFileSync(releaseAddon, fakeAddonModule("release", "linux-x86_64"));
@@ -288,7 +299,7 @@ describe("build-host-payload", () => {
         const context = loadReleaseContext(fixture);
         const production = await buildPayload(fixture, "production", {
             outDir: join(tmp, "out-production"),
-            launcherPath,
+            launcherPath: releaseLauncherPath,
             addonPath: releaseAddon,
         });
         expect(production.manifest.mode).toBe("production");
@@ -308,6 +319,25 @@ describe("build-host-payload", () => {
         const stripped = (result: PayloadResult) =>
             result.manifest.files.filter((file) => file.path !== LAUNCHER_PATH);
         expect(stripped(production)).toEqual(stripped(built));
+    });
+
+    test("a launcher whose build profile does not match the payload mode is refused", async () => {
+        await expect(
+            buildPayload(fixture, "production", {
+                outDir: join(tmp, "out-production-debug"),
+                launcherPath,
+                addonPath: releaseAddon,
+            }),
+        ).rejects.toThrow(/production payload requires a release eidnara-host; .* reports debug/);
+        await expect(
+            buildPayload(fixture, "development", {
+                outDir: join(tmp, "out-development-release"),
+                launcherPath: releaseLauncherPath,
+                addonPath: releaseAddon,
+            }),
+        ).rejects.toThrow(/development payload requires a debug eidnara-host; .* reports release/);
+        expect(existsSync(join(tmp, "out-production-debug", "payload"))).toBe(false);
+        expect(existsSync(join(tmp, "out-development-release", "payload"))).toBe(false);
     });
 
     test("a manifest that omits or alters a locked input is refused", async () => {
