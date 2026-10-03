@@ -31,8 +31,8 @@ use retrieval::eligibility::{
     Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
 };
 use retrieval::exact::{
-    ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
-    SelectorValue, classify, page,
+    Coverage, ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
+    SelectorValue, classify, coverage, page,
 };
 use retrieval::fusion::IdentityRefusal;
 use retrieval::fusion::{
@@ -1333,11 +1333,9 @@ fn fused_envelope(
     })
 }
 
+/// `retrieval::claims` filters its selected read by the classes `coverage(Family::Id)` lists, so the route's claim set is read from the same table.
 fn is_claim(class: OccurrenceClass) -> bool {
-    matches!(
-        class,
-        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
-    )
+    matches!(coverage(Family::Id), Coverage::Extracted(classes) if classes.contains(&class))
 }
 
 /// The canonical decision and source revision each claim occurrence validates to on the explicit-search surface at a fresh kernel snapshot, keyed by occurrence id. The projection read and the kernel facts cover the selected occurrences alone; an occurrence that is not a current, permitted claim of the bound project is absent.
@@ -1370,18 +1368,22 @@ fn canonical_references(
                 max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
             },
         };
-        let classified = projection
-            .read(|conn| {
-                Ok(classify_selected_claims(
-                    conn,
-                    kernel,
-                    budget.eval(),
-                    bounds,
-                    batch,
-                ))
-            })
-            .map_err(|_| QueryFailure::Unavailable("claim_validation"))?
-            .map_err(refused)?;
+        let read = projection.read_under(budget, |conn| {
+            Ok(classify_selected_claims(
+                conn,
+                kernel,
+                budget.eval(),
+                bounds,
+                batch,
+            ))
+        });
+        let classified = match read {
+            Ok(classified) => classified.map_err(refused)?,
+            Err(SearchProjectionError::Store(StoreError::Deadline)) => {
+                return Err(exhaustion(budget).into());
+            }
+            Err(_) => return Err(QueryFailure::Unavailable("claim_validation")),
+        };
         let validation = validate_for_surface(
             kernel,
             &classified.candidates,

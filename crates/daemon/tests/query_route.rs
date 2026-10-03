@@ -107,6 +107,54 @@ async fn cancellation_and_deadline_are_observed_in_every_phase() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_validation_stops_waiting_for_a_held_connection_when_the_budget_ends() {
+    const HOLD: Duration = Duration::from_secs(3);
+    let fixture = Fixture::build().await;
+    let held_during_claim_validation = |budget_ms: u64, cancel_after: Option<Duration>| {
+        let (token, budget) = request_budget(budget_ms);
+        std::thread::scope(|scope| {
+            let mut holding = false;
+            let started = std::time::Instant::now();
+            let outcome = fixture.run(&limits(), budget.shared(), QUERY, |phase| {
+                if phase != Phase::ClaimValidation || holding {
+                    return;
+                }
+                holding = true;
+                let (acquired, wait) = std::sync::mpsc::channel();
+                let projection = &fixture.projection;
+                scope.spawn(move || {
+                    projection
+                        .read(|_| {
+                            acquired.send(()).unwrap();
+                            std::thread::sleep(HOLD);
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+                wait.recv().unwrap();
+                if let Some(delay) = cancel_after {
+                    let token = token.clone();
+                    scope.spawn(move || {
+                        std::thread::sleep(delay);
+                        token.cancel();
+                    });
+                }
+            });
+            assert!(holding, "the query reached claim validation");
+            (outcome.err(), started.elapsed())
+        })
+    };
+    let (deadline, waited) = held_during_claim_validation(400, None);
+    assert_eq!(deadline, Some(QueryFailure::Terminal(Terminal::Deadline)));
+    assert!(waited < HOLD - Duration::from_secs(1), "{waited:?}");
+    let (cancelled, waited) =
+        held_during_claim_validation(10_000, Some(Duration::from_millis(200)));
+    assert_eq!(cancelled, Some(QueryFailure::Terminal(Terminal::Cancelled)));
+    assert!(waited < HOLD - Duration::from_secs(1), "{waited:?}");
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revalidation_excludes_retired_and_foreign_occurrences() {
     let fixture = Fixture::build().await;
     let (_token, budget) = request_budget(10_000);
