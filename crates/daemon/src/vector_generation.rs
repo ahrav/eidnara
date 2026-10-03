@@ -872,13 +872,12 @@ pub fn verify(
             }
         }
         encoder.encode_validated_into(&layout, row, &mut codes);
-        if codes
+        // The fold reads every byte of the row, so the comparison vectorizes.
+        let differ = codes
             .iter()
-            .map(|code| *code as u8)
-            .ne(stored[slot * dimension..(slot + 1) * dimension]
-                .iter()
-                .copied())
-        {
+            .zip(&stored[slot * dimension..(slot + 1) * dimension])
+            .fold(0u8, |differ, (code, byte)| differ | (*code as u8 ^ byte));
+        if differ != 0 {
             (codes_verdict, compare) = (Err(fault(CODES_FILE, FileFault::Codes)), None);
         }
         Ok(())
