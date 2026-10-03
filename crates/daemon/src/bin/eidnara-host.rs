@@ -298,9 +298,14 @@ enum Command {
         payload_manifest_digest: Option<String>,
     },
     Serve,
+    /// Installs an owner's search admission records after the daemon's own validation.
+    InstallSearchAdmission {
+        manifest: PathBuf,
+        campaign: PathBuf,
+    },
 }
 
-const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version (probe is an alias of status)";
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | install-search-admission <runtime-manifest.json> <campaign-evidence.json> | --version (probe is an alias of status)";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -310,6 +315,13 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let Some(first) = first.to_str() else {
         return Err("command is not valid UTF-8".to_owned());
     };
+    if first == "install-search-admission" {
+        let paths: Vec<PathBuf> = iter.map(PathBuf::from).collect();
+        let [manifest, campaign] = <[PathBuf; 2]>::try_from(paths).map_err(|_| {
+            "install-search-admission takes a manifest and a campaign path".to_owned()
+        })?;
+        return Ok(Command::InstallSearchAdmission { manifest, campaign });
+    }
     let mut payload_dir: Option<PathBuf> = None;
     let mut payload_manifest_digest: Option<String> = None;
     let takes_payload = matches!(first, "start" | "restart");
@@ -937,6 +949,38 @@ fn supported_target() -> Result<&'static str, (&'static str, &'static str)> {
         return Err(unsupported);
     }
     Ok(target)
+}
+
+/// Installs both records under the data home after bounded reads; prints `installed` or the refusal.
+fn install_search_admission(manifest: &Path, campaign: &Path) -> i32 {
+    let limit = daemon::projection_lifecycle::MAX_RECORD_BYTES;
+    let read = |path: &Path| -> Result<Vec<u8>, String> {
+        let file =
+            std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        Ok(bytes)
+    };
+    let outcome = host_runtime::data_dir_path(None)
+        .map_err(|_| "no data directory".to_owned())
+        .and_then(|home| {
+            let manifest = read(manifest)?;
+            let campaign = read(campaign)?;
+            daemon::projection_admission::install(&home, &manifest, &campaign)
+                .map_err(|refusal| refusal.to_string())
+        });
+    match outcome {
+        Ok(()) => {
+            println!("installed");
+            0
+        }
+        Err(reason) => {
+            eprintln!("eidnara-host: search admission not installed: {reason}");
+            1
+        }
+    }
 }
 
 /// The validation confirms that the generation was staged by this release for this target.
@@ -1913,6 +1957,9 @@ fn real_main() -> i32 {
                 daemon::production_inputs::production_inputs_lock_sha256()
             );
             0
+        }
+        Command::InstallSearchAdmission { manifest, campaign } => {
+            install_search_admission(&manifest, &campaign)
         }
         Command::Status => emit(cmd_probe()),
         Command::Start {

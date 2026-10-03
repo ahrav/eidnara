@@ -1,4 +1,4 @@
-//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. Nothing here records intent on its own: a rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. Holds die with the kernel's lease, so after a restart the family serves what it has until it trails the kernel past the freshness limit, at which point every hook is denied until a rebuild is requested. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
+//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. An absent record with installed admission records is registered by the slice loop as a first build; every other rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. Holds die with the kernel's lease, so after a restart the family serves what it has until it trails the kernel past the freshness limit, at which point every hook is denied until a rebuild is requested. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -32,8 +32,8 @@ use crate::projection_gates::{
     Denial, EntryPoint, Gate, InvalidationIdentity, ProjectionHook, RuntimeManifest,
 };
 use crate::projection_lifecycle::{
-    ControlState, IntentRefusal, LifecycleIntent, LifecycleRequest, MAX_RECORD_BYTES,
-    ProjectionLifecycle, Recorded, Transition,
+    Cause, ConsumerBinding, ControlState, IntentRefusal, LifecycleIntent, LifecycleRequest,
+    MAX_RECORD_BYTES, ProjectionLifecycle, Recorded, Transition,
 };
 #[cfg(feature = "test-support")]
 use crate::search_catchup::EpisodeEvent;
@@ -63,6 +63,11 @@ const REPORT_REPEAT_INTERVAL: Duration = Duration::from_secs(60);
 const LOCK_POLL: Duration = Duration::from_millis(1);
 /// Owner slices one project's supervisor runs before the next bound project takes over.
 pub const MAINTENANCE_TENURE_SLICES: u32 = 4;
+/// The consumer a registered projection reads the kernel through.
+pub const REGISTERED_CONSUMER: &str = "search-projection";
+/// Episodes a registration rebuild may consume before its record must be renewed.
+pub const REGISTRATION_ALLOWANCE: u32 = 3;
+
 /// One claim-source slice examines at most 64 decisions or one commit page of at most 64 commits, 65,536 rows, and 64 MiB of payload, and ends within `SLICE_IDLE`. The row and byte bounds admit any commit the daemon's own routes and producers write, so no ordinary commit blocks the runner as oversized.
 pub const CLAIM_SLICE_BOUNDS: ClaimSliceBounds = ClaimSliceBounds {
     decisions: NonZeroUsize::new(64).expect("nonzero"),
@@ -529,6 +534,43 @@ impl SearchLifecycleOwner {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// Records the first build of an absent projection under the installed records, so a qualified installation registers and maintains its projection without an operator request. The request names the kernel incarnation in its attempt identity, so a repeat replays the record already there.
+    ///
+    /// Missing, refused, or identity-mismatched records, a lane that is not ready, and limits that cannot bound the build refuse here and record nothing; admission stays closed with the refusal visible in the request's error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`BuildError`] [`Self::request`] returns.
+    pub fn register_projection(
+        &self,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<Recorded>, BuildError> {
+        let inputs = AdmissionInputs::read(&self.home)
+            .map_err(|_| IntentRefusal::Denied(Denial::NoManifest))?;
+        let identity = self
+            .identity(inputs.manifest(), budget)
+            .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
+        let bound = limit(inputs.manifest(), Transition::Rebuilding.duration_limit())
+            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        let request = LifecycleRequest {
+            transition: Transition::Rebuilding,
+            selected_generation: "unregistered".to_owned(),
+            kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
+            consumer: ConsumerBinding {
+                consumer_id: REGISTERED_CONSUMER.to_owned(),
+                generation_id: format!("gen-{}", identity.generation_epoch),
+            },
+            cause: Cause::Registration,
+            attempt_id: format!("registration-{}", identity.kernel_incarnation_id),
+            recovery_target: None,
+            allowance: REGISTRATION_ALLOWANCE,
+            deadline: now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
+            authorization_ref: None,
+        };
+        self.request(&request, now, budget)
     }
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
@@ -1642,7 +1684,38 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if cancel.is_cancelled() {
             return;
         }
+        // An unregistered home with installed records records its first build; the next slice starts it.
+        let registered = if matches!(outcome, SliceOutcome::Unregistered) {
+            let register_owner = Arc::clone(&owner);
+            let registration = tokio::task::spawn_blocking(move || {
+                register_owner.register_projection(
+                    crate::now_ms(),
+                    &EvalBudget::unbounded().bounded_by(Instant::now() + SLICE_IDLE),
+                )
+            })
+            .await;
+            match registration {
+                Ok(Ok(Some(_))) => true,
+                Ok(Ok(None)) => false,
+                Ok(Err(error)) => {
+                    if let Some(report) = reporter.report(
+                        &SliceOutcome::Blocked(format!("registration refused: {error}")),
+                        Instant::now(),
+                    ) {
+                        eprintln!("daemon: search lifecycle {report}");
+                    }
+                    false
+                }
+                Err(join) => {
+                    eprintln!("daemon: search registration ended abnormally: {join}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
         let advanced = claims_continue
+            || registered
             || match &outcome {
                 SliceOutcome::Advanced(_) => true,
                 SliceOutcome::CaughtUp(report) => report.batches_applied > 0,

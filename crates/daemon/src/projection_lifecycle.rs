@@ -73,6 +73,8 @@ pub enum Cause {
     DeletedAfterPruning,
     /// A Disabled projection resumes under operator authorization.
     DisabledRecovery,
+    /// No projection exists yet; the installed records admit its first build from the kernel.
+    Registration,
 }
 
 /// The kernel consumer the projection reads through and the vector generation it produces.

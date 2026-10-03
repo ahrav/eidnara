@@ -1046,3 +1046,52 @@ fn parsed_vector_limits_bound_the_ledger() {
         }
     );
 }
+
+/// Installation applies the daemon's own parse, refuses a mismatched pair or a malformed record without touching the installed records, and publishes owner-only files that the daemon then reads back.
+#[test]
+fn installation_validates_and_publishes_owner_only_records() {
+    use daemon::projection_admission::{InstallRefusal, install};
+
+    let home = tempfile::tempdir().unwrap();
+    let identity = support::embedding_fixtures::identity("installed-kernel");
+    let manifest = serde_json::to_vec(&manifest_json(&identity, &ProjectionHook::ALL)).unwrap();
+    let campaign = serde_json::to_vec(&campaign_json(&identity)).unwrap();
+    install(home.path(), &manifest, &campaign).unwrap();
+    let dir = home.path().join(ADMISSION_DIR);
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for record in [MANIFEST_RECORD, EVIDENCE_RECORD] {
+        assert_eq!(
+            fs::metadata(dir.join(record)).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let inputs = AdmissionInputs::read(home.path()).unwrap();
+    assert!(inputs.applies_to(&identity));
+
+    let mut other = identity.clone();
+    other.embedding_model = "another-model".to_owned();
+    let mismatched = serde_json::to_vec(&campaign_json(&other)).unwrap();
+    assert_eq!(
+        install(home.path(), &manifest, &mismatched),
+        Err(InstallRefusal::IdentityMismatch)
+    );
+    assert!(matches!(
+        install(home.path(), b"{", &campaign),
+        Err(InstallRefusal::Inputs(InputRefusal::Malformed(
+            MANIFEST_RECORD
+        )))
+    ));
+    let oversized = vec![b' '; MAX_RECORD_BYTES as usize + 1];
+    assert!(matches!(
+        install(home.path(), &oversized, &campaign),
+        Err(InstallRefusal::TooLarge { .. })
+    ));
+    assert!(
+        AdmissionInputs::read(home.path())
+            .unwrap()
+            .applies_to(&identity)
+    );
+}

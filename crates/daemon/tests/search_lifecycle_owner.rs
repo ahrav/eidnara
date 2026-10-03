@@ -3463,7 +3463,6 @@ async fn a_request_wakes_an_idle_slice_loop() {
     let home = root.path();
     let corpus = Corpus::open(home);
     corpus.seed();
-    records(home);
     let owner = Arc::new(owner(home, &corpus.kernel));
     let (events_tx, events) = std::sync::mpsc::channel();
     owner.tap_slice_events_for_test(move |event| match event {
@@ -3493,6 +3492,8 @@ async fn a_request_wakes_an_idle_slice_loop() {
     })
     .await
     .unwrap();
+    // The records arrive during the idle wait, so the loop's own registration cannot record first.
+    records(home);
     let requested = Instant::now();
     owner
         .request(&rebuild(home), now(), &slice_budget())
@@ -4573,6 +4574,130 @@ async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slice
             daemon::claim_sources::ClaimProgress::Bootstrap { after: Some(_), .. }
         )),
         "a lifecycle slice ran while the scan was mid-backlog: {observed:?}"
+    );
+    daemon.shutdown().await;
+}
+
+/// Installed records alone register the projection: the running daemon records the first build, reaches Current over the memories the claim-source runner published, and a restart resumes Current without a request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let kernel_root = home.join("eidnara").join("context");
+    {
+        let seed = KernelStore::open(kernel_root.join("kernel")).unwrap();
+        drop(seed);
+    }
+    let incarnation = kernel_incarnation_id(&kernel_root);
+    let identity = identity(&incarnation);
+    write_records(
+        &home,
+        &manifest_json(&identity, &ProjectionHook::ALL),
+        &campaign_json(&identity),
+    );
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let current = loop {
+        if let Ok(lifecycle) = ProjectionLifecycle::open(&home)
+            && let ControlState::Current(intent) = lifecycle.read()
+        {
+            break intent;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "installed records did not register a current projection"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(current.cause, Cause::Registration);
+    assert_eq!(
+        current.consumer.consumer_id,
+        daemon::search_lifecycle_owner::REGISTERED_CONSUMER
+    );
+    let data = daemon.shutdown_keeping_data().await;
+
+    let restarted = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let owner = loop {
+        if let Some(owner) = restarted.handler().search_lifecycle() {
+            break owner;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let reader = loop {
+        let pinned = tokio::task::spawn_blocking({
+            let owner = Arc::clone(&owner);
+            move || owner.pin(&slice_budget())
+        })
+        .await
+        .unwrap();
+        if let Ok(reader) = pinned {
+            break reader;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the restarted daemon did not resume its current projection"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        reader.consumer().consumer_id,
+        daemon::search_lifecycle_owner::REGISTERED_CONSUMER
+    );
+    drop(reader);
+    assert!(matches!(
+        ProjectionLifecycle::open(&home).unwrap().read(),
+        ControlState::Current(intent) if intent.attempt_id == current.attempt_id
+    ));
+    restarted.shutdown().await;
+}
+
+/// Without installed records the daemon records nothing and hooks stay closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn absent_or_refused_records_register_nothing() {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let owner = loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            break owner;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let refused = tokio::task::spawn_blocking({
+        let owner = Arc::clone(&owner);
+        move || owner.register_projection(now(), &slice_budget())
+    })
+    .await
+    .unwrap();
+    assert!(refused.is_err(), "{refused:?}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(control(&home), ControlState::Absent);
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err(),
+        Denial::NoManifest
     );
     daemon.shutdown().await;
 }

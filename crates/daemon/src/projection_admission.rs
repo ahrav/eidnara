@@ -1,6 +1,7 @@
 //! The daemon reads `runtime-manifest.json` and `campaign-evidence.json` from `<home>/search-admission/` to renew one [`HookGate`] for the selected projection. Coverage is not a record: the daemon observes it on that projection and supplies it at every refresh. No selected projection, a missing or refused record, or a closed owner leaves the gate closed. A refresh keeps the grants the new evidence still admits and cancels the hooks it withdraws; neither record enables a hook by itself. Both records are read anew at every refresh, so a writer publishes each by rename, and a pair whose identities disagree is denied by the evaluator rather than installed as approval.
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -94,9 +95,19 @@ impl AdmissionInputs {
     /// Returns the first [`InputRefusal`]: a missing, unreadable, refused, or malformed record; a [`ManifestRefusal`]; or an unknown harness or capability name.
     pub fn read(home: &Path) -> Result<Self, InputRefusal> {
         let dir = home.join(ADMISSION_DIR);
-        let manifest = RuntimeManifest::parse(&read_record(&dir, MANIFEST_RECORD)?)
+        Self::parse(
+            &read_record(&dir, MANIFEST_RECORD)?,
+            read_record(&dir, EVIDENCE_RECORD)?,
+        )
+    }
+
+    fn parse(
+        manifest: &serde_json::Value,
+        campaign: serde_json::Value,
+    ) -> Result<Self, InputRefusal> {
+        let manifest = RuntimeManifest::parse(manifest)
             .map_err(|refusal| InputRefusal::Manifest(bounded_manifest_refusal(refusal)))?;
-        let campaign: CampaignRecord = serde_json::from_value(read_record(&dir, EVIDENCE_RECORD)?)
+        let campaign: CampaignRecord = serde_json::from_value(campaign)
             .map_err(|_| InputRefusal::Malformed(EVIDENCE_RECORD))?;
         for harness in campaign
             .capabilities
@@ -163,6 +174,64 @@ impl AdmissionInputs {
             binding: None,
         }
     }
+}
+
+/// Why an owner's records were not installed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InstallRefusal {
+    #[error(transparent)]
+    Inputs(#[from] InputRefusal),
+    #[error("the manifest and the campaign name different invalidation identities")]
+    IdentityMismatch,
+    #[error("{record} exceeds {limit} bytes")]
+    TooLarge { record: &'static str, limit: u64 },
+    #[error("the admission directory could not be written: {0}")]
+    Write(String),
+}
+
+/// Installs an owner's runtime manifest and campaign evidence under `<home>/search-admission/` after the same parse the daemon applies at every refresh, refusing a pair whose invalidation identities disagree. Each record is written owner-only to a temporary file, synced, renamed into place, and the directory is synced, so a reader sees the prior record or the new one. Installation grants nothing: the daemon still binds both records to the running projection identity, coverage, and lane before any hook opens.
+///
+/// # Errors
+///
+/// Returns [`InstallRefusal`] for a record the daemon would refuse, a mismatched pair, an oversized record, or a failed write.
+pub fn install(home: &Path, manifest: &[u8], campaign: &[u8]) -> Result<(), InstallRefusal> {
+    let limit = crate::projection_lifecycle::MAX_RECORD_BYTES;
+    for (record, bytes) in [(MANIFEST_RECORD, manifest), (EVIDENCE_RECORD, campaign)] {
+        if bytes.len() as u64 > limit {
+            return Err(InstallRefusal::TooLarge { record, limit });
+        }
+    }
+    let parsed = AdmissionInputs::parse(
+        &serde_json::from_slice(manifest).map_err(|_| InputRefusal::Malformed(MANIFEST_RECORD))?,
+        serde_json::from_slice(campaign).map_err(|_| InputRefusal::Malformed(EVIDENCE_RECORD))?,
+    )?;
+    if parsed.manifest.identity != parsed.campaign.invalidation_identity {
+        return Err(InstallRefusal::IdentityMismatch);
+    }
+    let dir = home.join(ADMISSION_DIR);
+    let write = |error: std::io::Error| InstallRefusal::Write(error.kind().to_string());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(write)?;
+    for (record, bytes) in [(MANIFEST_RECORD, manifest), (EVIDENCE_RECORD, campaign)] {
+        let temp = dir.join(format!(".{record}.{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(write)?;
+        let written = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
+        if let Err(error) = written.and_then(|()| std::fs::rename(&temp, dir.join(record))) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(write(error));
+        }
+    }
+    std::fs::File::open(&dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(write)
 }
 
 fn bounded_name(name: &str) -> String {
