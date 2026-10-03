@@ -2739,6 +2739,8 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    /// The verified composition the dense lane ranks through; absent, the lane runs the exhaustive producer.
+    dense_vectors: Mutex<Option<query_route::DenseVectors>>,
     edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
     capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -3685,6 +3687,7 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            dense_vectors: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
@@ -4188,6 +4191,7 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            dense_vectors: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]

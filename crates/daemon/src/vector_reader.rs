@@ -22,8 +22,8 @@ use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
     CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, Layer,
     LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, OracleRefusal,
-    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, WinnerRow,
-    rank_layers, rescore_pool, select_candidates,
+    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, Window,
+    WinnerRow, rank_layers, rescore_pool, select_candidates_observed,
 };
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
@@ -672,6 +672,8 @@ enum ReadStop {
 /// Where a compressed ranking stands; a test may hold or mutate the store here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RescoreEvent<'a> {
+    /// A point inside the candidate scan.
+    Scan(Window<'a>),
     /// The pool is selected; no original row has been read.
     AfterSelection,
     /// The original row `row` of member `member` is about to be read.
@@ -756,7 +758,10 @@ pub fn rank_compressed(
         codes: &codes,
         max_entries: request.max_entries,
     };
-    let pool = select_candidates(conn, kernel, &query, budget).map_err(|refusal| {
+    let pool = select_candidates_observed(conn, kernel, &query, budget, |window| {
+        observe(RescoreEvent::Scan(window));
+    })
+    .map_err(|refusal| {
         if code_corruption(&refusal) {
             view.quarantine();
         }
