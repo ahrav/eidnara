@@ -3011,3 +3011,42 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
     }
     assert!(!corpus.live_objects().contains("late"));
 }
+
+/// A consumer removed after its first registration is registered again by the next slice, and the scan republishes from receipts.
+#[test]
+fn a_removed_consumer_is_registered_again_and_the_scan_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    let seeds = [memory("q1", "One."), memory("q2", "Two.")];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let mut progress = ClaimProgress::default();
+    corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    assert_eq!(corpus.inventory(), ledger(&seeds));
+    corpus
+        .kernel
+        .commit(intent("deregister"), |envelope| {
+            envelope.deregister_outbox_consumer(CLAIM_CONSUMER, NOW)?;
+            Ok(String::new())
+        })
+        .unwrap();
+    assert_eq!(corpus.checkpoint(), None);
+    let refused = corpus.slice(&mut progress, slice_bounds(8));
+    assert!(
+        matches!(
+            refused.end,
+            MaterializationEnd::Blocked(ClaimBlocked::UnknownConsumer)
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(progress, ClaimProgress::Unregistered);
+    corpus.decide(memory("q3", "Three."));
+    corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    assert!(corpus.checkpoint().is_some());
+    assert_eq!(
+        corpus.inventory(),
+        ledger(&[seeds[0], seeds[1], memory("q3", "Three.")])
+    );
+}

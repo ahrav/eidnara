@@ -252,6 +252,8 @@ pub struct MaterializationReport {
     pub target: i64,
     /// Current decisions a bootstrap page published or replayed.
     pub bootstrapped: usize,
+    /// Decisions a bootstrap page moved its cursor past, published or deferred to replay.
+    pub scanned: usize,
     pub acknowledged_through: i64,
     pub commits_consumed: usize,
     /// Descriptors this episode published for the first time.
@@ -311,6 +313,7 @@ impl MaterializationReport {
         Self {
             target,
             bootstrapped: 0,
+            scanned: 0,
             acknowledged_through: 0,
             commits_consumed: 0,
             published: 0,
@@ -325,7 +328,7 @@ impl MaterializationReport {
     pub fn advanced(&self) -> bool {
         match self.end {
             MaterializationEnd::Continues => true,
-            MaterializationEnd::Exhausted => self.bootstrapped > 0 || self.commits_consumed > 0,
+            MaterializationEnd::Exhausted => self.scanned > 0 || self.commits_consumed > 0,
             MaterializationEnd::ReachedTarget | MaterializationEnd::Blocked(_) => false,
         }
     }
@@ -376,29 +379,36 @@ impl<'a> ClaimMaterializer<'a> {
         budget: Option<&EvalBudget>,
         now: i64,
     ) -> Result<(), KernelError> {
-        let intent = CommitIntent {
-            producer: PRODUCER.to_owned(),
-            operation_key: format!("register:{CLAIM_CONSUMER}"),
-            request_digest: identity_digest(CLAIM_CONSUMER.as_bytes()),
-            actor: CANONICAL_ROLE.to_owned(),
-            cause: "claim consumer registration".to_owned(),
-        };
-        let operation = |envelope: &mut kernel::Envelope<'_>| {
-            envelope.register_outbox_consumer(CLAIM_CONSUMER, now)?;
-            Ok(String::new())
-        };
-        let receipt = match budget {
-            Some(budget) => kernel.commit_within_budget(budget, intent, operation)?,
-            None => kernel.commit(intent, operation)?,
-        };
-        // The kernel registers a consumer at the oldest retained outbox commit. A replayed receipt carries the first registration's commit, so the guard keeps a later call from moving an advanced checkpoint.
-        let checkpoint = match budget {
-            Some(budget) => {
-                kernel.outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER)?
+        let register = |operation_key: String| {
+            let intent = CommitIntent {
+                producer: PRODUCER.to_owned(),
+                operation_key,
+                request_digest: identity_digest(CLAIM_CONSUMER.as_bytes()),
+                actor: CANONICAL_ROLE.to_owned(),
+                cause: "claim consumer registration".to_owned(),
+            };
+            let operation = |envelope: &mut kernel::Envelope<'_>| {
+                envelope.register_outbox_consumer(CLAIM_CONSUMER, now)?;
+                Ok(String::new())
+            };
+            match budget {
+                Some(budget) => kernel.commit_within_budget(budget, intent, operation),
+                None => kernel.commit(intent, operation),
             }
-            None => kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER)?,
+        };
+        let read_checkpoint = || match budget {
+            Some(budget) => kernel.outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER),
+            None => kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER),
+        };
+        let mut receipt = register(format!("register:{CLAIM_CONSUMER}"))?;
+        let mut checkpoint = read_checkpoint()?;
+        // A consumer removed after its first registration leaves that receipt to replay without registering anything, so the runner registers again under a key that names the replayed commit.
+        if checkpoint.is_none() && receipt.replayed {
+            receipt = register(format!("register:{CLAIM_CONSUMER}:{}", receipt.commit_seq))?;
+            checkpoint = read_checkpoint()?;
         }
-        .ok_or(KernelError::NotFound)?;
+        // The kernel registers a consumer at the oldest retained outbox commit. A replayed receipt carries the first registration's commit, so the guard keeps a later call from moving an advanced checkpoint.
+        let checkpoint = checkpoint.ok_or(KernelError::NotFound)?;
         if checkpoint < receipt.commit_seq {
             match budget {
                 Some(budget) => {
@@ -452,7 +462,7 @@ impl<'a> ClaimMaterializer<'a> {
     ///
     /// The consumer is registered before the scan reads any decision, so every change the scan races is retained for replay. The scan publishes only decisions created at or before the durable checkpoint read in the same slice; a later decision is published by the replay of its own commit, which retires the predecessor it replaced first. The proof assumes one writer of the consumer: the daemon's lifecycle owner serializes its slices, and no other production path acknowledges it.
     ///
-    /// Kernel reads, the retirement and descriptor commits, and the acknowledgement wait within `budget`; artifact retention has no budgeted entry. A slice always completes its first decision or commit, stops between later ones once `budget` is exhausted, and acknowledges every fully applied commit within a short grace.
+    /// Kernel reads, the retirement and descriptor commits, and the acknowledgement wait within `budget`; artifact retention has no budgeted entry. A slice starts its first decision or commit whatever the budget, stops between later ones once `budget` is exhausted, and acknowledges every fully applied commit within a short grace.
     ///
     /// # Errors
     ///
@@ -594,11 +604,20 @@ impl<'a> ClaimMaterializer<'a> {
                             changes_next: true,
                         });
                     }
+                    // The decisions before this one are complete, so the cursor keeps them and the next slice runs a change page.
+                    Err(Stop::Failed(KernelError::Deadline)) if completed > 0 => {
+                        report.end = MaterializationEnd::Exhausted;
+                        return Ok(ClaimProgress::Bootstrap {
+                            after: done,
+                            changes_next: true,
+                        });
+                    }
                     Err(stop) => return Err(stop),
                 }
             }
             done = Some(object.object_id.clone());
             completed += 1;
+            report.scanned = completed;
             self.exhaust_on_fault(completed);
         }
         Ok(match page.next {
@@ -725,7 +744,7 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// Retires and publishes every decision change of `page` in commit order and records in `applied` the last commit whose effects are complete. A `budget` that runs out stops the page between commits after the first; replaying the rest is idempotent.
+    /// Retires and publishes every decision change of `page` in commit order and records in `applied` the last commit whose effects are complete. A `budget` that runs out stops the page between commits; the first commit starts whatever the budget, and its own budgeted writes may still refuse. Replaying the rest is idempotent.
     fn apply_page(
         &self,
         page: &kernel::CommitPage,
