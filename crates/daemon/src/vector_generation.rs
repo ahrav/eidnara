@@ -943,7 +943,7 @@ fn check_meaning(
     .ok_or_else(|| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
     if tombstones.len() as u64 != sidecar.tombstones
         || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
-        || ids.iter().any(|id| tombstones.binary_search(id).is_ok())
+        || share_an_entry(&ids, &tombstones)
     {
         return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
@@ -1035,6 +1035,19 @@ pub fn verification_bytes(manifest: &GenerationManifest, sidecar: &VectorSidecar
 
 /// Verification reads the row artifact in chunks of about this many bytes.
 const VERIFY_CHUNK_BYTES: u64 = 1 << 16;
+
+/// Whether two strictly increasing lists share an entry, decided in one merge walk.
+fn share_an_entry(left: &[String], right: &[String]) -> bool {
+    let (mut l, mut r) = (0, 0);
+    while let (Some(a), Some(b)) = (left.get(l), right.get(r)) {
+        match a.cmp(b) {
+            std::cmp::Ordering::Less => l += 1,
+            std::cmp::Ordering::Greater => r += 1,
+            std::cmp::Ordering::Equal => return true,
+        }
+    }
+    false
+}
 
 /// Decodes a JSON string list into a vector sized to the sidecar's declared count and refuses a longer list at the first extra entry.
 struct DeclaredList(usize);
@@ -1330,6 +1343,27 @@ mod tests {
         assert!(!is_exact_json(&value, &bytes[..bytes.len() - 1]));
         assert!(!is_exact_json(&value, &[bytes.as_slice(), b" "].concat()));
         assert!(!is_exact_json(&value, br#"["alpha","beta "]"#));
+    }
+
+    #[test]
+    fn sorted_lists_share_an_entry_wherever_it_falls() {
+        let list = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let ids = list(&["b", "d", "f", "h"]);
+        for shared in ["b", "f", "h"] {
+            let mut other = list(&["a", "c", "g"]);
+            other.push(shared.to_owned());
+            other.sort();
+            assert!(share_an_entry(&ids, &other), "{shared}");
+            assert!(share_an_entry(&other, &ids), "{shared}");
+        }
+        assert!(!share_an_entry(&ids, &list(&["a", "c", "e", "g", "i"])));
+        assert!(!share_an_entry(&ids, &[]));
+        assert!(!share_an_entry(&[], &ids));
     }
 
     #[test]
