@@ -1,7 +1,7 @@
 //! The daemon reads `runtime-manifest.json` and `campaign-evidence.json` from `<home>/search-admission/` to renew one [`HookGate`] for the selected projection. Coverage is not a record: the daemon observes it on that projection and supplies it at every refresh. No selected projection, a missing or refused record, or a closed owner leaves the gate closed. A refresh keeps the grants the new evidence still admits and cancels the hooks it withdraws; neither record enables a hook by itself. Both records are read anew at every refresh, so a writer publishes each by rename, and a pair whose identities disagree is denied by the evaluator rather than installed as approval.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -197,7 +197,7 @@ pub enum InstallRefusal {
     },
 }
 
-/// Installs an owner's runtime manifest and campaign evidence under `<home>/search-admission/` after the same parse the daemon applies at every refresh, refusing a pair whose invalidation identities disagree. Each record is written owner-only to a temporary file, synced, renamed into place, and the directory is synced, so a reader sees the prior record or the new one. Installation grants nothing: the daemon still binds both records to the running projection identity, coverage, and lane before any hook opens.
+/// Installs an owner's runtime manifest and campaign evidence under `<home>/search-admission/` using the daemon's refresh parser and requiring matching invalidation identities. The directory's exclusive `flock` serializes pair publication across installers. Each record is written owner-only to a temporary file, synced, and renamed into place before the directory is synced; readers see either the prior record or its replacement. The daemon still binds both records to the running projection identity, coverage, and lane before any hook opens.
 ///
 /// # Errors
 ///
@@ -233,6 +233,12 @@ pub fn install(home: &Path, manifest: &[u8], campaign: &[u8]) -> Result<(), Inst
     let metadata = directory.metadata().map_err(|error| write(&[], error))?;
     crate::projection_lifecycle::owner_only_directory(&metadata)
         .map_err(InstallRefusal::Directory)?;
+    // Explicit descriptor permissions restore owner access when the umask narrows creation modes: 0o700 for the directory and 0o600 for each record.
+    directory
+        .set_permissions(std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| write(&[], error))?;
+    rustix::fs::flock(&directory, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|error| write(&[], error.into()))?;
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
@@ -244,7 +250,10 @@ pub fn install(home: &Path, manifest: &[u8], campaign: &[u8]) -> Result<(), Inst
             .mode(0o600)
             .open(&temp)
             .map_err(|error| write(&replaced, error))?;
-        let written = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
+        let written = file
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .and_then(|()| std::io::Write::write_all(&mut file, bytes))
+            .and_then(|()| file.sync_all());
         if let Err(error) = written.and_then(|()| std::fs::rename(&temp, dir.join(record))) {
             let _ = std::fs::remove_file(&temp);
             return Err(write(&replaced, error));
