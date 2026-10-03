@@ -1574,6 +1574,13 @@ fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
         skipped.completion,
         Completion::Incomplete(IncompleteReason::RankBudget)
     );
+    // Admission follows increasing count, not request order: the smaller probe is ranked even when it comes second.
+    let reordered = run("d15001 c15000");
+    assert_eq!(reordered.consumed.ranked_matches, 15_000);
+    assert_eq!(
+        reordered.completion,
+        Completion::Incomplete(IncompleteReason::RankBudget)
+    );
 
     // A repeated probe is counted and ranked once.
     let repeated = run("t19999 t19999");
@@ -1611,6 +1618,14 @@ fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifyi
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(scanned.hits(), 5);
+    let mut hit: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
+    let mut newest_sorted = newest.clone();
+    hit.sort();
+    newest_sorted.sort();
+    assert_eq!(
+        hit, newest_sorted,
+        "the common scan keeps the newest rowids"
+    );
     let only_common = fixture
         .retrieve(&probes("t20001"), tight, &EvalBudget::unbounded())
         .unwrap();
@@ -1703,54 +1718,91 @@ fn lexical_scan_p99_at_one_million_occurrences() {
             (at, mix[index % mix.len()])
         })
         .collect();
+    // Each request runs the lexical lane's scan and admission with a deadline taken at its scheduled arrival, as the route does.
+    struct Sample {
+        scheduled_us: u64,
+        sent_us: u64,
+        done_us: u64,
+        request: &'static str,
+        outcome: String,
+        counted: usize,
+        ranked: usize,
+    }
     let start = Instant::now();
-    let mut samples = Vec::with_capacity(queries);
-    let mut ranked = 0usize;
+    let micros =
+        |at: Instant| u64::try_from(at.duration_since(start).as_micros()).unwrap_or(u64::MAX);
+    let mut samples: Vec<Sample> = Vec::with_capacity(queries);
     for (scheduled, request) in &schedule {
         let due = start + Duration::from_secs_f64(*scheduled);
         if let Some(wait) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(wait);
         }
-        let sent = start.elapsed().as_secs_f64();
-        let scanned = fixture
-            .store
-            .with_conn(|conn| {
-                Ok(scan(
-                    conn,
-                    &probes(request),
-                    bounds(),
-                    &EvalBudget::unbounded(),
-                ))
-            })
-            .unwrap()
-            .unwrap();
-        let done = start.elapsed().as_secs_f64();
-        assert!(scanned.hits() <= bounds().scan_rows.get() * 2);
-        ranked += 1;
-        samples.push((*scheduled, sent, done, *request));
+        let sent = Instant::now();
+        let budget = EvalBudget::new(
+            Some(due + Duration::from_secs(5)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let outcome = fixture.retrieve(&probes(request), bounds(), &budget);
+        let done = Instant::now();
+        let (outcome, counted, ranked) = match outcome {
+            Ok(retrieval) => (
+                format!("{:?}", retrieval.completion),
+                retrieval.consumed.counted_rows,
+                retrieval.consumed.ranked_matches,
+            ),
+            Err(refusal) => (format!("censored: {refusal}"), 0, 0),
+        };
+        samples.push(Sample {
+            scheduled_us: micros(due),
+            sent_us: micros(sent),
+            done_us: micros(done),
+            request,
+            outcome,
+            counted,
+            ranked,
+        });
     }
+    let completed = samples
+        .iter()
+        .filter(|sample| !sample.outcome.starts_with("censored"))
+        .count();
     let latency = |range: std::ops::Range<usize>| {
-        let mut micros: Vec<u64> = samples[range]
+        let mut waits: Vec<u64> = samples[range]
             .iter()
-            .map(|(scheduled, _, done, _)| ((done - scheduled) * 1e6) as u64)
+            .map(|sample| sample.done_us.saturating_sub(sample.scheduled_us))
             .collect();
-        micros.sort_unstable();
-        let p = |q: f64| micros[((micros.len() as f64 * q).ceil() as usize).saturating_sub(1)];
-        (p(0.5), p(0.99), *micros.last().unwrap())
+        waits.sort_unstable();
+        let p = |q: f64| waits[((waits.len() as f64 * q).ceil() as usize).saturating_sub(1)];
+        (p(0.5), p(0.99), *waits.last().unwrap())
     };
-    let cold = latency(0..50);
+    // The page cache holds the projection the build just wrote, so the first queries are first-after-build, not cold-cache.
+    let first = latency(0..50);
     let warm = latency(50..queries);
+    let most_ranked = samples
+        .iter()
+        .map(|sample| sample.ranked)
+        .max()
+        .unwrap_or(0);
     eprintln!(
-        "offered {queries} sent {} completed {ranked}; cold p50/p99/max us {cold:?}; warm p50/p99/max us {warm:?}",
+        "rate {rate_per_second}/s; offered {queries} sent {} completed {completed}; most ranked matches {most_ranked}; first-after-build p50/p99/max us {first:?}; warm p50/p99/max us {warm:?}",
         samples.len()
     );
     if let Some(path) = std::env::var_os("EIDNARA_LEXICAL_SCALE_SAMPLES") {
-        let rows: Vec<String> = samples
-            .iter()
-            .map(|(scheduled, sent, done, request)| {
-                format!("{{\"scheduled_s\":{scheduled},\"sent_s\":{sent},\"done_s\":{done},\"query\":\"{request}\"}}")
-            })
-            .collect();
+        let mut rows = vec![format!(
+            "{{\"rate_per_second\":{rate_per_second},\"seed\":\"0x9e3779b97f4a7c15\",\"occurrences\":{OCCURRENCES},\"offered\":{queries},\"completed\":{completed}}}"
+        )];
+        rows.extend(samples.iter().map(|sample| {
+            format!(
+                "{{\"scheduled_us\":{},\"sent_us\":{},\"done_us\":{},\"query\":\"{}\",\"outcome\":\"{}\",\"counted_rows\":{},\"ranked_matches\":{}}}",
+                sample.scheduled_us,
+                sample.sent_us,
+                sample.done_us,
+                sample.request,
+                sample.outcome,
+                sample.counted,
+                sample.ranked
+            )
+        }));
         std::fs::write(path, rows.join("\n")).unwrap();
     }
     if std::env::var_os("EIDNARA_LEXICAL_SCALE_KEEP").is_some() {
@@ -1762,4 +1814,145 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         "warm lexical p99 {}us exceeds 50ms",
         warm.1
     );
+}
+
+#[test]
+fn a_probe_with_no_match_leaves_the_common_probe_to_its_bounded_scan() {
+    let fixture = Fixture::all_admitted();
+    project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let retrieval = fixture
+        .retrieve(
+            &probes("absentterm t20001"),
+            tight,
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(retrieval.consumed.ranked_matches, 0);
+    assert_eq!(
+        retrieval.consumed.scanned_rows, 5,
+        "the common probe was scanned"
+    );
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+}
+
+/// 3,000 rows of identical rank cross a 64-row bound; the kept rows are exactly the lowest occurrence identifiers, whatever order the rows were stored in.
+#[test]
+fn a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers() {
+    let fixture = Fixture::all_admitted();
+    let mut tied: Vec<Row> = (0..3000)
+        .map(|n| Row::claim(&format!("tie-{n}"), &format!("tiegroup filler {n}")))
+        .collect();
+    tied.reverse();
+    for chunk in tied.chunks(1000) {
+        fixture.project(chunk);
+    }
+    let request = probes("tiegroup");
+    let mut expected: Vec<String> = tied.iter().map(Row::occurrence_id).collect();
+    expected.sort();
+    expected.truncate(64);
+    let scanned = fixture
+        .store
+        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+        .unwrap()
+        .unwrap();
+    assert_eq!(scanned.hits(), 64);
+    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let reference = fixture.reference(&request);
+    assert_eq!(
+        &reference[..64],
+        expected.as_slice(),
+        "the oracle agrees the ranks tie"
+    );
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+    assert_eq!(retrieval.consumed.ranked_matches, 3000);
+}
+
+/// An interrupt from the connection's progress handler at any point of counting, ranking, or a common scan ends the request as
+/// budget exhaustion with no contributions, and the connection serves the next request normally.
+#[test]
+fn an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion() {
+    let fixture = Fixture::all_admitted();
+    project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let run_until = |request: &str, stop_after: usize| {
+        let flag = Arc::new(AtomicBool::new(false));
+        let budget = EvalBudget::new(None, Arc::clone(&flag));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = {
+            let flag = Arc::clone(&flag);
+            let polls = Arc::clone(&polls);
+            move || {
+                if polls.fetch_add(1, Ordering::Relaxed) >= stop_after {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                flag.load(Ordering::Relaxed)
+            }
+        };
+        let outcome = fixture
+            .store
+            .with_conn_interruptible(Instant::now() + Duration::from_secs(60), stop, |conn| {
+                Ok(retrieve(
+                    conn,
+                    &fixture.kernel,
+                    &probes(request),
+                    fixture.authority(),
+                    tight,
+                    &budget,
+                ))
+            })
+            // An interrupt outside the request's statements ends the connection's interval itself as its deadline.
+            .unwrap_or_else(|error| {
+                assert!(format!("{error:?}").contains("Deadline"), "{error:?}");
+                Err(RetrievalRefusal::BudgetExhausted)
+            });
+        (outcome, polls.load(Ordering::Relaxed))
+    };
+    for request in ["t20001", "t20000", "c15000 d15000"] {
+        let (complete, total) = run_until(request, usize::MAX);
+        assert!(!matches!(
+            complete.unwrap().completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted)
+        ));
+        assert!(total > 8, "{request} polled {total} times");
+        for step in 0..8 {
+            let (outcome, _) = run_until(request, total * step / 8);
+            match outcome {
+                Err(RetrievalRefusal::BudgetExhausted) => {}
+                Ok(retrieval) => {
+                    assert_eq!(
+                        retrieval.completion,
+                        Completion::Incomplete(IncompleteReason::BudgetExhausted),
+                        "{request} at poll {}",
+                        total * step / 8
+                    );
+                    assert!(retrieval.contributions.is_empty());
+                }
+                Err(other) => panic!("{request}: {other:?}"),
+            }
+        }
+        // The progress handler was removed, so the connection serves an unbudgeted request.
+        let after = fixture
+            .retrieve(&probes(request), tight, &EvalBudget::unbounded())
+            .unwrap();
+        assert!(!matches!(
+            after.completion,
+            Completion::Incomplete(IncompleteReason::BudgetExhausted)
+        ));
+    }
 }

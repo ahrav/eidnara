@@ -1024,16 +1024,12 @@ fn admit_lexical(
         Completion::Incomplete(IncompleteReason::BudgetExhausted) => {
             return Err(exhaustion(budget).into());
         }
-        Completion::Incomplete(IncompleteReason::ScanBound) => LaneStatus::Incomplete("scan_bound"),
-        Completion::Incomplete(IncompleteReason::CommonTerms) => {
-            LaneStatus::Incomplete("common_terms")
-        }
-        Completion::Incomplete(IncompleteReason::RankBudget) => {
-            LaneStatus::Incomplete("rank_budget")
-        }
-        Completion::Incomplete(IncompleteReason::AcceptedBound) => {
-            LaneStatus::Incomplete("accepted_bound")
-        }
+        Completion::Incomplete(
+            reason @ (IncompleteReason::ScanBound
+            | IncompleteReason::CommonTerms
+            | IncompleteReason::RankBudget
+            | IncompleteReason::AcceptedBound),
+        ) => LaneStatus::Incomplete(lexical_bound_reason(reason)),
         Completion::Incomplete(IncompleteReason::KernelIncarnationChanged) => {
             return Ok(LaneOutput::unavailable("kernel_incarnation_changed"));
         }
@@ -1335,6 +1331,19 @@ fn lane_slot(lane: Lane) -> usize {
         .iter()
         .position(|candidate| *candidate == lane)
         .expect("every lane has a slot in Lane::ORDER")
+}
+
+/// The lexical lane's `incomplete` reason for a bound the scan or admission stopped at.
+fn lexical_bound_reason(reason: IncompleteReason) -> &'static str {
+    match reason {
+        IncompleteReason::ScanBound => "scan_bound",
+        IncompleteReason::CommonTerms => "common_terms",
+        IncompleteReason::RankBudget => "rank_budget",
+        IncompleteReason::AcceptedBound => "accepted_bound",
+        IncompleteReason::BudgetExhausted
+        | IncompleteReason::KernelIncarnationChanged
+        | IncompleteReason::SnapshotChanged => "not_a_bound",
+    }
 }
 
 fn lanes_json(statuses: &[LaneStatus; Lane::ORDER.len()]) -> Value {
@@ -1736,6 +1745,21 @@ mod tests {
             starting.embed("query", deadline).await,
             Err(EmbedFailure::Unavailable("starting" | "disabled"))
         ));
+    }
+
+    #[test]
+    fn lexical_bounds_report_their_own_incomplete_reasons() {
+        for (reason, code) in [
+            (IncompleteReason::ScanBound, "scan_bound"),
+            (IncompleteReason::CommonTerms, "common_terms"),
+            (IncompleteReason::RankBudget, "rank_budget"),
+            (IncompleteReason::AcceptedBound, "accepted_bound"),
+        ] {
+            assert_eq!(
+                LaneStatus::Incomplete(lexical_bound_reason(reason)).json(),
+                json!({"status": "incomplete", "reason": code})
+            );
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //! instead. A skipped probe of either kind leaves the result incomplete.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
 
 use kernel::applicability::EvalBudget;
@@ -53,7 +53,7 @@ pub struct RetrievalBounds {
 pub struct Contribution {
     pub occurrence_id: String,
     pub class: OccurrenceClass,
-    /// The engine's score for one probe, comparable only with other ranks of this request.
+    /// The engine's score for one probe, comparable only with other ranks of this request; a row read for an only-common query is not scored and carries `0.0`.
     pub rank: f64,
     /// Breaks equal-rank ties by selecting the lowest probe ordinal.
     pub ordinal: usize,
@@ -100,7 +100,7 @@ pub enum Completion {
 pub struct Consumed {
     /// Probes the request compiled to, repeats included; a repeated probe is counted here without running the engine again.
     pub probes: usize,
-    /// Live rows taken from the engine, summed over the distinct probes that ran; a repeated probe adds nothing.
+    /// Live rows kept within the scan bound, summed over the distinct probes that ran; a repeated probe adds nothing.
     pub scanned_rows: usize,
     /// Rows read to count the distinct probes, lookahead rows included.
     pub counted_rows: usize,
@@ -180,7 +180,7 @@ pub const RANKED_MATCH_BUDGET: usize = 30_000;
 /// Counts a probe's matches in the engine's rowid order inside SQLite, computing no rank; `?2` is the count limit.
 const COUNT_SQL: &str = "SELECT count(*) FROM (SELECT rowid FROM lexical WHERE lexical MATCH ?1 ORDER BY rowid LIMIT ?2)";
 
-/// A qualifying probe's best `?2` rowids and ranks in the engine's rank order; `?2` never exceeds the probe's count.
+/// A qualifying probe's rowids and ranks in the engine's rank order; `?2` is the probe's count, so the engine ranks no more rows than it counted.
 const RANKED_SQL: &str =
     "SELECT rowid, rank FROM lexical WHERE lexical MATCH ?1 ORDER BY rank LIMIT ?2";
 
@@ -196,9 +196,6 @@ const ROW_SQL: &str = "SELECT l.occurrence_id, o.class, o.source_object_id, o.re
             AND NOT EXISTS(SELECT 1 FROM occurrence_tombstones t WHERE t.occurrence_id=l.occurrence_id)
      FROM lexical l LEFT JOIN occurrences o ON o.occurrence_id=l.occurrence_id
      WHERE l.rowid=?1";
-
-/// Rows the first ranked pass returns, so an equal-rank group of this size at the bound settles without a second pass.
-const RANKED_FIRST_PASS_ROWS: usize = 1024;
 
 /// One lexical row's occurrence identifier, read only for the rows of an equal-rank group that crosses the scan bound.
 const ID_SQL: &str = "SELECT occurrence_id FROM lexical WHERE rowid=?1";
@@ -220,6 +217,11 @@ impl Scan {
     /// Distinct occurrences the probes hit, before any kernel verdict.
     pub fn hits(&self) -> usize {
         self.ordered.len()
+    }
+
+    /// The hit occurrences in comparator order, before any kernel verdict.
+    pub fn hit_ids(&self) -> impl Iterator<Item = &str> {
+        self.ordered.iter().map(|(id, _)| id.as_str())
     }
 }
 
@@ -295,17 +297,17 @@ pub fn scan(
     };
     let mut best: BTreeMap<String, Hit> = BTreeMap::new();
     // Each distinct probe is counted once, under its first ordinal.
-    let mut counts: HashMap<&Probe, usize> = HashMap::new();
+    let mut counted: HashSet<&Probe> = HashSet::new();
     let mut distinct: Vec<(usize, &Probe, usize)> = Vec::new();
     for (ordinal, probe) in probes.iter().enumerate() {
         if budget.is_exhausted() {
             return exhausted_scan(retrieval, bounds);
         }
-        if !counts.contains_key(probe) {
+        if !counted.contains(probe) {
             match count_probe(conn, probe, budget) {
                 Ok(count) => {
                     retrieval.consumed.counted_rows += count;
-                    counts.insert(probe, count);
+                    counted.insert(probe);
                     distinct.push((ordinal, probe, count));
                 }
                 Err(ScanStop::Budget) => return exhausted_scan(retrieval, bounds),
@@ -314,22 +316,21 @@ pub fn scan(
         }
         retrieval.consumed.probes += 1;
     }
+    // A probe with no match contributes nothing, so it neither qualifies nor counts as common.
     let (mut qualifying, common): (Vec<_>, Vec<_>) = distinct
         .into_iter()
+        .filter(|&(_, _, count)| count > 0)
         .partition(|&(_, _, count)| count <= QUALIFYING_MATCHES);
     qualifying.sort_by_key(|&(ordinal, _, count)| (count, ordinal));
+    if !common.is_empty() {
+        incomplete(&mut retrieval, IncompleteReason::CommonTerms);
+    }
     let runs = if qualifying.is_empty() {
-        if !common.is_empty() {
-            incomplete(&mut retrieval, IncompleteReason::CommonTerms);
-        }
         common
             .into_iter()
             .map(|(ordinal, probe, _)| (ordinal, probe, Run::Common))
             .collect::<Vec<_>>()
     } else {
-        if !common.is_empty() {
-            incomplete(&mut retrieval, IncompleteReason::CommonTerms);
-        }
         let mut ranked = Vec::new();
         for (ordinal, probe, count) in qualifying {
             if retrieval.consumed.ranked_matches + count > RANKED_MATCH_BUDGET {
@@ -337,9 +338,7 @@ pub fn scan(
                 break;
             }
             retrieval.consumed.ranked_matches += count;
-            if count > 0 {
-                ranked.push((ordinal, probe, Run::Ranked(count)));
-            }
+            ranked.push((ordinal, probe, Run::Ranked(count)));
         }
         ranked
     };
@@ -502,48 +501,21 @@ fn scan_probe(
         Run::Ranked(count) => {
             let mut statement = conn.prepare_cached(RANKED_SQL)?;
             let mut ids = conn.prepare_cached(ID_SQL)?;
-            // The engine ranks every counted match but returns only the best `limit`; the limit becomes the full count only when an
-            // equal-rank group or dead rows reach past it before the bound is settled.
-            let mut limit = count.min(bound.saturating_add(1).max(RANKED_FIRST_PASS_ROWS));
-            loop {
-                let ranked: Vec<(i64, f64)> = statement
-                    .query_map(
-                        rusqlite::params![probe, i64::try_from(limit).unwrap_or(i64::MAX)],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )?
-                    .collect::<rusqlite::Result<_>>()?;
-                budget.check().map_err(|_| ScanStop::Budget)?;
-                taken.clear();
-                truncated = settle_ranked(
-                    &ranked,
-                    &mut detail,
-                    &mut ids,
-                    budget,
-                    ordinal,
-                    bound,
-                    &mut taken,
-                )?;
-                let cut = ranked.len() == limit && limit < count;
-                // The rows past the limit may continue the group that holds the bound position.
-                let open_tie = cut
-                    && ranked
-                        .last()
-                        .zip(ranked.get(ranked.len().min(bound) - 1))
-                        .is_some_and(|(last, at_bound)| {
-                            last.1.total_cmp(&at_bound.1) == Ordering::Equal
-                        });
-                if !cut || (truncated && !open_tie) {
-                    break;
-                }
-                // A second pass at the full count settles any tie or dead-row shortfall, so ranking runs at most twice.
-                limit = count;
-            }
+            // The engine's rank sorter scores and orders every counted match once; rows are stepped out only until the bound settles.
+            let ranked = statement.query_map(
+                rusqlite::params![probe, i64::try_from(count).unwrap_or(i64::MAX)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            truncated = settle_ranked(
+                ranked,
+                &mut detail,
+                &mut ids,
+                budget,
+                ordinal,
+                bound,
+                &mut taken,
+            )?;
         }
-    }
-    taken.sort_by(comparator);
-    if taken.len() > bound {
-        truncated = true;
-        taken.truncate(bound);
     }
     let seen = taken.len();
     for (occurrence_id, hit) in taken {
@@ -559,7 +531,7 @@ fn scan_probe(
 
 /// Keeps the best `bound` live rows of `ranked`, which is in the engine's rank order; `true` when a live row lies past the bound.
 fn settle_ranked(
-    ranked: &[(i64, f64)],
+    ranked: impl Iterator<Item = rusqlite::Result<(i64, f64)>>,
     detail: &mut storage::CachedStatement<'_>,
     ids: &mut storage::CachedStatement<'_>,
     budget: &EvalBudget,
@@ -573,7 +545,8 @@ fn settle_ranked(
         ordinal,
         bound,
     };
-    for &(rowid, rank) in ranked {
+    for row in ranked {
+        let (rowid, rank) = row?;
         budget.check().map_err(|_| ScanStop::Budget)?;
         if !group.rowids.is_empty()
             && rank.total_cmp(&group.rank) != Ordering::Equal
