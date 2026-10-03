@@ -158,14 +158,13 @@ describe("managed lifecycle owner", () => {
 
     test("a development-mode payload stages through the trusted manifest digest", () => {
         const f = fixture();
-        writeManifest(f, { ...f.manifest, mode: "development" });
+        const text = writeManifest(f, { ...f.manifest, mode: "development" });
 
         const target = prepare(f, true);
 
         expect(target?.kind).toBe("retained-fd");
         expect(target?.retained.path).toContain(f.launcherDigest);
         // `crates/daemon/src/bin/eidnara-host.rs` stages a development manifest through its trusted path in debug builds.
-        const text = writeManifest(f, { ...f.manifest, mode: "development" });
         expect(target?.payloadManifestDigest).toBe(
             createHash("sha256").update(text.slice(0, -1)).digest("hex"),
         );

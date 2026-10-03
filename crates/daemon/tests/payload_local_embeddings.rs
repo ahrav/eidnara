@@ -81,7 +81,11 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = lifecycle(self.data.path(), &["stop"]);
+        let _ = Command::new(BIN)
+            .arg("stop")
+            .env_clear()
+            .env("XDG_DATA_HOME", self.data.path())
+            .output();
     }
 }
 
@@ -164,9 +168,12 @@ async fn a_built_payload_reaches_ready_and_serves_a_certified_embedding() {
     let response: Value = serde_json::from_slice(&response.body).expect("response json");
     let result = &response["result"];
     assert_eq!(result["fingerprint"], manifest["fingerprint"], "{response}");
+    assert_eq!(result["model"], manifest["model"], "{response}");
+    assert_eq!(result["vectors"].as_array().map(Vec::len), Some(1));
     let got = result["vectors"][0]["vector"].as_array().expect("vector");
     let expected = probe["expected"].as_array().expect("expected");
     assert_eq!(got.len(), 768);
+    assert_eq!(expected.len(), got.len());
     let tolerance = corpus["tolerance"].as_f64().expect("tolerance");
     for (got, expected) in got.iter().zip(expected) {
         let drift =
@@ -178,7 +185,7 @@ async fn a_built_payload_reaches_ready_and_serves_a_certified_embedding() {
     }
 }
 
-fn payload_with_broken_runtime(source: &Path, into: &Path) {
+fn copy_payload(source: &Path, into: &Path) {
     let status = Command::new("cp")
         .args(["-a", "--reflink=auto"])
         .arg(source.join("payload"))
@@ -187,6 +194,10 @@ fn payload_with_broken_runtime(source: &Path, into: &Path) {
         .status()
         .expect("cp runs");
     assert!(status.success(), "payload copy failed");
+}
+
+fn payload_with_broken_runtime(source: &Path, into: &Path) {
+    copy_payload(source, into);
     let broken = std::fs::read(into.join("payload/native/shm_native.node")).expect("addon bytes");
     std::fs::write(into.join(ORT_LIBRARY), &broken).expect("replace runtime");
     let manifest_path = into.join("payload-manifest.json");
@@ -207,10 +218,56 @@ fn payload_with_broken_runtime(source: &Path, into: &Path) {
 #[tokio::test]
 #[ignore = "requires EIDNARA_HOST_TEST_PAYLOAD_DIR; run with --ignored"]
 async fn a_valid_payload_whose_runtime_fails_to_initialize_reports_degraded() {
+    // Health exposes no failure detail, so the ready witness over the unmodified payload is this test's control.
     let copy = tempfile::tempdir().expect("payload copy");
     payload_with_broken_runtime(&payload_dir(), copy.path());
     let daemon = Daemon::start(copy.path());
     let client = daemon.client().await;
     let (state, _) = settled_lane_state(&client).await;
     assert_eq!(state, "degraded");
+}
+
+#[tokio::test]
+#[ignore = "requires EIDNARA_HOST_TEST_PAYLOAD_DIR; run with --ignored"]
+async fn a_corrupt_or_missing_manifest_listed_file_refuses_startup() {
+    let source = payload_dir();
+    let digest = manifest_digest(&source);
+    for (case, damage) in [
+        ("corrupt ORT library", ORT_LIBRARY),
+        (
+            "missing corpus",
+            "payload/model/gte-modernbert-base-f32/corpus.json",
+        ),
+    ] {
+        let copy = tempfile::tempdir().expect("payload copy");
+        copy_payload(&source, copy.path());
+        let target = copy.path().join(damage);
+        if case.starts_with("corrupt") {
+            let mut bytes = std::fs::read(&target).expect("target bytes");
+            bytes[0] ^= 0x01;
+            std::fs::write(&target, bytes).expect("corrupt");
+        } else {
+            std::fs::remove_file(&target).expect("remove");
+        }
+        let data = tempfile::tempdir().expect("data root");
+        let result = lifecycle(
+            data.path(),
+            &[
+                "start",
+                "--payload-dir",
+                copy.path().to_str().expect("payload path"),
+                "--payload-manifest-digest",
+                &digest,
+            ],
+        );
+        assert_eq!(result["ok"], false, "{case}: {result}");
+        assert_eq!(
+            result["reason"], "native_payload_invalid",
+            "{case}: {result}"
+        );
+        let publication = host_runtime::runtime_dir_path(Some(data.path()))
+            .expect("runtime dir")
+            .join(host_runtime::CONNECTION_FILE_NAME);
+        assert!(!publication.exists(), "{case}: no host published health");
+    }
 }

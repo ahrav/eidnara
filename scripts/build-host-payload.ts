@@ -15,7 +15,13 @@ import { createRequire } from "node:module";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { defaultInputsDir, type LockedInput, lockedInputs, verifiedCacheEntry } from "./host-inputs";
+import {
+    defaultInputsDir,
+    isRecord,
+    type LockedInput,
+    lockedInputs,
+    verifiedCacheEntry,
+} from "./host-inputs";
 
 function fail(message: string): never {
     throw new Error(`eidnara-host payload: ${message}`);
@@ -52,7 +58,7 @@ export const PAYLOAD_TARGET = {
 
 const PATH_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-/** Extensions the CLI accepts for `--addon`; `buildDevPayload` also accepts a CommonJS module so tests can run without a compiled addon. */
+/** Extensions the CLI accepts for `--addon`; `buildPayload` also accepts a CommonJS module so tests can run without a compiled addon. */
 const NATIVE_ADDON_EXTENSIONS = new Set([".so", ".node"]);
 
 export interface PayloadFileEntry {
@@ -107,7 +113,7 @@ export interface ReleaseContext {
     inputs: LockedInput[];
 }
 
-export interface DevPayloadResult {
+export interface PayloadResult {
     outDir: string;
     manifestPath: string;
     manifest: PayloadManifest;
@@ -163,10 +169,6 @@ function readJson(rootDir: string, relative: string): unknown {
     }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function asContract(value: unknown): ReleaseContract {
     const where = RELEASE_CONTRACT_PATH;
     if (!isRecord(value)) fail(`${where} must be an object`);
@@ -203,6 +205,7 @@ function asContract(value: unknown): ReleaseContract {
     ) {
         fail(`${where}: packages.payloads must be an array of strings`);
     }
+    // SAFETY: every field `ReleaseContract` declares was type-checked above.
     return value as unknown as ReleaseContract;
 }
 
@@ -415,6 +418,7 @@ export function validatePayloadManifest(
             fail(`payload manifest must list locked input ${input.key} at ${input.payload_path} with its locked size and sha256`);
         }
     }
+    // SAFETY: `assertExactKeys` and the checks above proved every `PayloadManifest` field.
     return manifest as unknown as PayloadManifest;
 }
 
@@ -632,9 +636,9 @@ export async function buildPayload(
     rootDir: string,
     mode: PayloadMode,
     options: BuildPayloadOptions,
-    context: ReleaseContext = loadReleaseContext(rootDir),
-): Promise<DevPayloadResult> {
+): Promise<PayloadResult> {
     assertGlibcLinuxX64Host();
+    const context = loadReleaseContext(rootDir);
     // Absolute paths keep `readSourceFile` (working-directory relative) and `probeAddon` (`require`, module-directory relative) reading the same file.
     const launcherPath = resolve(
         options.launcherPath ?? defaultLauncherPath(rootDir, mode),
@@ -650,6 +654,7 @@ export async function buildPayload(
     const inputsDir = options.inputsDir ?? defaultInputsDir(rootDir);
     const inputSources: { input: LockedInput; source: string }[] = [];
     for (const input of context.inputs) {
+        assertSafePayloadPath(input.payload_path);
         inputSources.push({ input, source: await verifiedCacheEntry(inputsDir, input, input.key) });
     }
 
@@ -684,7 +689,6 @@ export async function buildPayload(
             );
         }
         for (const { input, source } of inputSources) {
-            assertSafePayloadPath(input.payload_path);
             stageFile(source, join(outDir, input.payload_path), 0o644);
             entries.push({
                 path: input.payload_path,
@@ -756,14 +760,6 @@ export async function buildPayload(
         launcherSha256,
         addonSha256,
     };
-}
-
-export function buildDevPayload(
-    rootDir: string,
-    options: BuildPayloadOptions,
-    context?: ReleaseContext,
-): Promise<DevPayloadResult> {
-    return buildPayload(rootDir, "development", options, context);
 }
 
 function sameStringSet(actual: unknown, expected: readonly string[]): boolean {

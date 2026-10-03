@@ -18,9 +18,8 @@ import { join } from "node:path";
 
 import {
     ADDON_PATH,
-    buildDevPayload,
     canonicalJson,
-    type DevPayloadResult,
+    type PayloadResult,
     LAUNCHER_PATH,
     loadReleaseContext,
     MANIFEST_SCHEMA,
@@ -131,7 +130,7 @@ describe("build-host-payload", () => {
     let launcherPath: string;
     let releaseAddon: string;
     let debugAddon: string;
-    let built: DevPayloadResult;
+    let built: PayloadResult;
     const contractPath = join(rootDir, "release/host-release.json");
 
     beforeAll(async () => {
@@ -149,7 +148,7 @@ describe("build-host-payload", () => {
         writeFileSync(releaseAddon, fakeAddonModule("release", "linux-x86_64"));
         debugAddon = join(tmp, "debug-addon.cjs");
         writeFileSync(debugAddon, fakeAddonModule("debug", "linux-x86_64"));
-        built = await buildDevPayload(fixture, {
+        built = await buildPayload(fixture, "development", {
             outDir: join(tmp, "out"),
             launcherPath,
             addonPath: releaseAddon,
@@ -306,7 +305,7 @@ describe("build-host-payload", () => {
                 expect(sha256(readFileSync(join(result.outDir, input.payload_path)))).toBe(input.sha256);
             }
         }
-        const stripped = (result: DevPayloadResult) =>
+        const stripped = (result: PayloadResult) =>
             result.manifest.files.filter((file) => file.path !== LAUNCHER_PATH);
         expect(stripped(production)).toEqual(stripped(built));
     });
@@ -331,18 +330,39 @@ describe("build-host-payload", () => {
         cpSync(join(fixture, "target", "host-inputs"), cache, { recursive: true });
         writeFileSync(join(cache, input.sha256), "wrong same-name bytes");
         await expect(
-            buildDevPayload(fixture, { outDir: built.outDir, launcherPath, addonPath: releaseAddon, inputsDir: cache }),
+            buildPayload(fixture, "development", { outDir: built.outDir, launcherPath, addonPath: releaseAddon, inputsDir: cache }),
         ).rejects.toThrow(/cache entry/);
         rmSync(join(cache, input.sha256));
         await expect(
-            buildDevPayload(fixture, { outDir: built.outDir, launcherPath, addonPath: releaseAddon, inputsDir: cache }),
+            buildPayload(fixture, "development", { outDir: built.outDir, launcherPath, addonPath: releaseAddon, inputsDir: cache }),
         ).rejects.toThrow(/is missing/);
+        expect(() => verifyPayloadDir(built.outDir, built.manifest)).not.toThrow();
+    });
+
+    test("an unsafe locked payload path refuses the build before the output tree changes", async () => {
+        const { shadow } = shadowRoot("shadow-unsafe-path");
+        const lockPath = join(shadow, "release/production-inputs.lock.json");
+        const lock = JSON.parse(readFileSync(lockPath, "utf8")) as {
+            inputs: Record<string, { payload_path: string }>;
+        };
+        const first = Object.values(lock.inputs)[0]!;
+        first.payload_path = "payload/../escape";
+        writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+        const unsafeLauncher = join(tmp, "unsafe-eidnara-host");
+        writeExecutable(unsafeLauncher, fakeLauncherScript(contractPath, sha256(readFileSync(lockPath))));
+        await expect(
+            buildPayload(shadow, "development", {
+                outDir: built.outDir,
+                launcherPath: unsafeLauncher,
+                addonPath: releaseAddon,
+            }),
+        ).rejects.toThrow(/unsafe payload path/);
         expect(() => verifyPayloadDir(built.outDir, built.manifest)).not.toThrow();
     });
 
     test("debug-profile addon is refused", async () => {
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-debug"),
                 launcherPath,
                 addonPath: debugAddon,
@@ -354,7 +374,7 @@ describe("build-host-payload", () => {
         const foreignAddon = join(tmp, "foreign-addon.cjs");
         writeFileSync(foreignAddon, fakeAddonModule("release", "darwin-arm64"));
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-foreign"),
                 launcherPath,
                 addonPath: foreignAddon,
@@ -366,7 +386,7 @@ describe("build-host-payload", () => {
         const stale = join(tmp, "stale-addon.cjs");
         writeFileSync(stale, fakeAddonModule("release", "linux-x86_64", null));
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-stale"),
                 launcherPath,
                 addonPath: stale,
@@ -385,7 +405,7 @@ describe("build-host-payload", () => {
             const broken = join(tmp, `broken-${name}-addon.cjs`);
             writeFileSync(broken, fakeAddonModule("release", "linux-x86_64", body));
             await expect(
-                buildDevPayload(fixture, {
+                buildPayload(fixture, "development", {
                     outDir: join(tmp, `out-broken-${name}`),
                     launcherPath,
                     addonPath: broken,
@@ -399,7 +419,7 @@ describe("build-host-payload", () => {
         const previousCwd = process.cwd();
         process.chdir(tmp);
         try {
-            const result = await buildDevPayload(fixture, {
+            const result = await buildPayload(fixture, "development", {
                 outDir: "out-relative",
                 launcherPath: "./eidnara-host",
                 addonPath: "./release-addon.cjs",
@@ -427,7 +447,7 @@ describe("build-host-payload", () => {
         packageDir: string;
     }> {
         const root = shadowRoot(name);
-        await buildDevPayload(root.shadow, {
+        await buildPayload(root.shadow, "development", {
             outDir: root.packageDir,
             launcherPath,
             addonPath: releaseAddon,
@@ -464,7 +484,7 @@ describe("build-host-payload", () => {
             fakeLauncherScript(contractPath, lockSha256),
         );
         await expect(
-            buildDevPayload(shadow, {
+            buildPayload(shadow, "development", {
                 outDir: join(tmp, "out-launcher"),
                 addonPath: releaseAddon,
             }),
@@ -476,7 +496,7 @@ describe("build-host-payload", () => {
             debug,
             `${fakeLauncherScript(contractPath, lockSha256)}# debug\n`,
         );
-        const result = await buildDevPayload(shadow, {
+        const result = await buildPayload(shadow, "development", {
             outDir: join(tmp, "out-launcher"),
             addonPath: releaseAddon,
         });
@@ -492,7 +512,7 @@ describe("build-host-payload", () => {
             fakeLauncherScript(staleContract, lockSha256),
         );
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-stale"),
                 launcherPath: staleLauncher,
                 addonPath: releaseAddon,
@@ -505,7 +525,7 @@ describe("build-host-payload", () => {
             fakeLauncherScript(contractPath, "0".repeat(64)),
         );
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-stale-lock"),
                 launcherPath: staleLock,
                 addonPath: releaseAddon,
@@ -520,7 +540,7 @@ describe("build-host-payload", () => {
             "#!/bin/sh\necho not eidnara-host >&2\nexit 1\n",
         );
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-foreign-launcher"),
                 launcherPath: foreign,
                 addonPath: releaseAddon,
@@ -570,7 +590,7 @@ describe("build-host-payload", () => {
         const fifo = join(tmp, "addon.fifo");
         expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
         await expect(
-            buildDevPayload(fixture, {
+            buildPayload(fixture, "development", {
                 outDir: join(tmp, "out-fifo"),
                 launcherPath,
                 addonPath: fifo,

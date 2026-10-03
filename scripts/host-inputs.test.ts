@@ -193,6 +193,7 @@ describe("host inputs", () => {
             ["absolute", [tarEntry("/etc/passwd", member)], /outside ort-1.0/],
             ["foreign root", [tarEntry("other/lib/libort.so.1", member)], /outside ort-1.0/],
             ["hard link", [tarEntry("ort-1.0/link", Buffer.alloc(0), "1"), tarEntry(MEMBER, member)], /unexpected type/],
+            ["pax header", [tarEntry("ort-1.0/pax", Buffer.from("path=x"), "x"), tarEntry(MEMBER, member)], /unexpected type/],
             ["long name", [tarEntry("././@LongLink", member, "L")], /outside ort-1.0|unexpected type/],
             ["symlink member", [tarEntry(MEMBER, Buffer.alloc(0), "2")], /not a regular file/],
             ["duplicate member", [tarEntry(MEMBER, member), tarEntry(MEMBER, member)], /appears twice/],
@@ -202,5 +203,52 @@ describe("host inputs", () => {
             expect(() => extractArchiveMember(archive(entries), MEMBER), name).toThrow(error);
         }
         expect(() => extractArchiveMember(Buffer.from("not gzip"), MEMBER)).toThrow(/decompress/);
+        const badSize = tarEntry(MEMBER, member);
+        badSize.write("17x\0", 124);
+        expect(() => extractArchiveMember(archive([badSize]), MEMBER)).toThrow(/invalid size/);
+    });
+
+    test("a ustar name prefix joins its entry name", () => {
+        const member = Buffer.from("runtime library");
+        const entry = tarEntry("libort.so.1", member);
+        entry.write("ort-1.0/lib", 345);
+        expect(extractArchiveMember(archive([entry]), MEMBER)).toEqual(member);
+    });
+
+    test("a repo source that is mutated, outside the repository, or not a regular file publishes nothing", async () => {
+        const repo = join(tmp, "repo");
+        mkdirSync(join(repo, "release"), { recursive: true });
+        const bytes = Buffer.from("corpus bytes");
+        const input: LockedInput = {
+            key: "corpus",
+            sha256: sha256(bytes),
+            size_bytes: bytes.length,
+            source: "repo:release/corpus.json",
+            payload_path: "payload/model/x/corpus.json",
+        };
+        writeFileSync(join(repo, "release/corpus.json"), "CORPUS bytes");
+        await expect(acquireInputs(repo, { inputsDir, inputs: [input] })).rejects.toThrow(/locked sha256/);
+        writeFileSync(join(repo, "release/corpus.json"), "corpus");
+        await expect(acquireInputs(repo, { inputsDir, inputs: [input] })).rejects.toThrow(/has 6 bytes/);
+        await expect(
+            acquireInputs(repo, { inputsDir, inputs: [{ ...input, source: "repo:../outside.json" }] }),
+        ).rejects.toThrow(/outside the repository/);
+        mkdirSync(join(repo, "release/dir.json"));
+        await expect(
+            acquireInputs(repo, { inputsDir, inputs: [{ ...input, source: "repo:release/dir.json" }] }),
+        ).rejects.toThrow(/not a regular file/);
+        expect(existsSync(inputsDir) ? readdirSync(inputsDir) : []).toEqual([]);
+        writeFileSync(join(repo, "release/corpus.json"), bytes);
+        await acquireInputs(repo, { inputsDir, inputs: [input] });
+        expect(readFileSync(cachePath(inputsDir, input.sha256))).toEqual(bytes);
+    });
+
+    test("a directory at a cache name is replaced by verified bytes", async () => {
+        const bytes = Buffer.from("model bytes");
+        const input = downloaded(bytes);
+        mkdirSync(join(cachePath(inputsDir, input.sha256), "nested"), { recursive: true });
+        await expect(verifiedCacheEntry(inputsDir, input, "model")).rejects.toThrow(/not a regular file/);
+        await acquireInputs(rootDir, { inputsDir, inputs: [input], fetchImpl: respond(bytes) });
+        expect(readFileSync(cachePath(inputsDir, input.sha256))).toEqual(bytes);
     });
 });

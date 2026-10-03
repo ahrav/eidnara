@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
     closeSync,
     createReadStream,
-    existsSync,
     fsyncSync,
     lstatSync,
     mkdirSync,
@@ -12,7 +11,7 @@ import {
     rmSync,
     writeSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
@@ -24,6 +23,8 @@ const REPO_SOURCE_PREFIX = "repo:";
 const MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024;
 /** One download, including redirects, must finish within this many milliseconds. */
 const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+/** A download that delivers no bytes for this many milliseconds is abandoned. */
+const DOWNLOAD_IDLE_MS = 60 * 1000;
 
 function fail(message: string): never {
     throw new Error(`host inputs: ${message}`);
@@ -50,17 +51,19 @@ interface Expected {
     size_bytes: number;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function checkDigestAndSize(value: Record<string, unknown>, where: string): void {
-    if (typeof value.sha256 !== "string" || !SHA256_RE.test(value.sha256)) {
+function digestAndSize(value: Record<string, unknown>, where: string): Expected {
+    const { sha256, size_bytes } = value;
+    if (typeof sha256 !== "string" || !SHA256_RE.test(sha256)) {
         fail(`${where}: sha256 must be a lowercase 64-hex digest`);
     }
-    if (!Number.isSafeInteger(value.size_bytes) || (value.size_bytes as number) <= 0) {
+    if (typeof size_bytes !== "number" || !Number.isSafeInteger(size_bytes) || size_bytes <= 0) {
         fail(`${where}: size_bytes must be a positive integer`);
     }
+    return { sha256, size_bytes };
 }
 
 /** Every lock input with its staging path; the lock is the only source of digests, sizes, and locations. */
@@ -77,36 +80,34 @@ export function lockedInputs(rootDir: string): LockedInput[] {
     for (const [key, value] of Object.entries(lock.inputs)) {
         const where = `${LOCK_PATH}: inputs.${key}`;
         if (!isRecord(value)) fail(`${where} must be an object`);
-        checkDigestAndSize(value, where);
+        const expected = digestAndSize(value, where);
+        const { source, payload_path } = value;
         if (
-            typeof value.source !== "string" ||
-            !(value.source.startsWith("https://") || value.source.startsWith(REPO_SOURCE_PREFIX))
+            typeof source !== "string" ||
+            !(source.startsWith("https://") || source.startsWith(REPO_SOURCE_PREFIX))
         ) {
             fail(`${where}: source must be an https URL or a repo: path`);
         }
-        if (typeof value.payload_path !== "string" || !value.payload_path.startsWith("payload/")) {
+        if (typeof payload_path !== "string" || !payload_path.startsWith("payload/")) {
             fail(`${where}: payload_path must be payload-rooted`);
         }
-        if (paths.has(value.payload_path)) fail(`${where}: duplicate payload_path`);
-        paths.add(value.payload_path);
+        if (paths.has(payload_path)) fail(`${where}: duplicate payload_path`);
+        paths.add(payload_path);
         let archive: LockedArchive | undefined;
         if (value.archive !== undefined) {
             if (!isRecord(value.archive) || typeof value.archive.member !== "string") {
                 fail(`${where}: archive must name a member`);
             }
-            checkDigestAndSize(value.archive, `${where}.archive`);
             archive = {
                 member: value.archive.member,
-                sha256: value.archive.sha256 as string,
-                size_bytes: value.archive.size_bytes as number,
+                ...digestAndSize(value.archive, `${where}.archive`),
             };
         }
         inputs.push({
             key,
-            sha256: value.sha256 as string,
-            size_bytes: value.size_bytes as number,
-            source: value.source,
-            payload_path: value.payload_path,
+            ...expected,
+            source,
+            payload_path,
             ...(archive === undefined ? {} : { archive }),
         });
     }
@@ -122,17 +123,13 @@ export function cachePath(inputsDir: string, sha256: string): string {
     return join(resolve(inputsDir), sha256);
 }
 
-function hashFile(path: string, maxBytes: number): Promise<{ size: number; sha256: string }> {
+function hashFile(path: string): Promise<{ size: number; sha256: string }> {
     return new Promise((resolvePromise, reject) => {
         const hash = createHash("sha256");
         let size = 0;
         const stream = createReadStream(path, { highWaterMark: 1024 * 1024 });
         stream.on("data", (chunk) => {
             size += chunk.length;
-            if (size > maxBytes) {
-                stream.destroy(new Error(`${path} exceeds ${maxBytes} bytes`));
-                return;
-            }
             hash.update(chunk);
         });
         stream.on("error", reject);
@@ -160,7 +157,7 @@ export async function verifiedCacheEntry(
     if (stat.size !== expected.size_bytes) {
         fail(`${what} cache entry has ${stat.size} bytes; the lock requires ${expected.size_bytes}`);
     }
-    const actual = await hashFile(path, expected.size_bytes);
+    const actual = await hashFile(path);
     if (actual.size !== expected.size_bytes || actual.sha256 !== expected.sha256) {
         fail(`${what} cache entry does not match its locked sha256`);
     }
@@ -172,6 +169,11 @@ async function isVerified(inputsDir: string, expected: Expected, what: string): 
         () => true,
         () => false,
     );
+}
+
+function writeAll(fd: number, bytes: Uint8Array): void {
+    let offset = 0;
+    while (offset < bytes.length) offset += writeSync(fd, bytes, offset);
 }
 
 /**
@@ -198,6 +200,8 @@ async function publish(
             fail(`received ${actual.size} bytes; the lock requires ${expected.size_bytes}`);
         }
         if (actual.sha256 !== expected.sha256) fail("received bytes do not match the locked sha256");
+        // A directory at the digest name would make the rename fail.
+        rmSync(final, { recursive: true, force: true });
         renameSync(partial, final);
     } catch (error) {
         if (open) closeSync(fd);
@@ -208,33 +212,44 @@ async function publish(
 
 function publishBytes(inputsDir: string, expected: Expected, bytes: Buffer): Promise<void> {
     return publish(inputsDir, expected, async (fd) => {
-        writeSync(fd, bytes);
+        writeAll(fd, bytes);
         return { size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
     });
 }
 
 export type FetchLike = (url: string, init: { signal: AbortSignal }) => Promise<Response>;
 
-/** Streams `url` into the cache and stops at the first byte beyond the locked size. */
 function download(inputsDir: string, url: string, expected: Expected, fetchImpl: FetchLike): Promise<void> {
     return publish(inputsDir, expected, async (fd) => {
-        const response = await fetchImpl(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
-        if (!response.ok || response.body === null) fail(`${url} answered HTTP ${response.status}`);
-        const hash = createHash("sha256");
-        let size = 0;
-        const reader = response.body.getReader();
-        for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            size += value.length;
-            if (size > expected.size_bytes) {
-                await reader.cancel();
-                fail(`${url} sent more than the locked ${expected.size_bytes} bytes`);
+        const idle = new AbortController();
+        let timer = setTimeout(() => idle.abort(), DOWNLOAD_IDLE_MS);
+        const signal = AbortSignal.any([idle.signal, AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)]);
+        try {
+            const response = await fetchImpl(url, { signal });
+            if (!response.ok || response.body === null) {
+                await response.body?.cancel();
+                fail(`${url} answered HTTP ${response.status}`);
             }
-            hash.update(value);
-            writeSync(fd, value);
+            const hash = createHash("sha256");
+            let size = 0;
+            const reader = response.body.getReader();
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                clearTimeout(timer);
+                timer = setTimeout(() => idle.abort(), DOWNLOAD_IDLE_MS);
+                size += value.length;
+                if (size > expected.size_bytes) {
+                    await reader.cancel();
+                    fail(`${url} sent more than the locked ${expected.size_bytes} bytes`);
+                }
+                hash.update(value);
+                writeAll(fd, value);
+            }
+            return { size, sha256: hash.digest("hex") };
+        } finally {
+            clearTimeout(timer);
         }
-        return { size, sha256: hash.digest("hex") };
     });
 }
 
@@ -266,12 +281,14 @@ export function extractArchiveMember(archive: Buffer, member: string): Buffer {
     while (offset + 512 <= tar.length) {
         const header = tar.subarray(offset, offset + 512);
         if (header.every((byte) => byte === 0)) break;
-        const prefix = tarString(header, 345, 155);
+        // POSIX ustar headers carry a name prefix at 345; GNU headers keep timestamps there.
+        const prefix = header.toString("latin1", 257, 263) === "ustar\0" ? tarString(header, 345, 155) : "";
         const base = tarString(header, 0, 100);
         const name = (prefix === "" ? base : `${prefix}/${base}`).replace(/\/$/, "");
         const type = String.fromCharCode(header[156] ?? 0);
-        const size = Number.parseInt(tarString(header, 124, 12).trim() || "0", 8);
-        if (!Number.isSafeInteger(size) || size < 0) fail(`archive entry ${name} has an invalid size`);
+        const sizeField = tarString(header, 124, 12).trim();
+        if (!/^[0-7]+$/.test(sizeField)) fail(`archive entry ${name} has an invalid size`);
+        const size = Number.parseInt(sizeField, 8);
         const segments = name.split("/");
         if (
             segments[0] !== root ||
@@ -295,7 +312,27 @@ export function extractArchiveMember(archive: Buffer, member: string): Buffer {
     return found;
 }
 
-/** Fills the cache with every locked input whose entry is absent or wrong, then proves every entry. */
+function readRepoSource(rootDir: string, input: LockedInput): Buffer {
+    const root = resolve(rootDir);
+    const path = resolve(root, input.source.slice(REPO_SOURCE_PREFIX.length));
+    const inside = relative(root, path);
+    if (inside === "" || inside.startsWith("..")) {
+        fail(`${input.key}: ${input.source} is outside the repository`);
+    }
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+        stat = lstatSync(path);
+    } catch {
+        fail(`${input.key}: ${input.source} is missing`);
+    }
+    if (!stat.isFile()) fail(`${input.key}: ${input.source} is not a regular file`);
+    if (stat.size !== input.size_bytes) {
+        fail(`${input.key}: ${input.source} has ${stat.size} bytes; the lock requires ${input.size_bytes}`);
+    }
+    return readFileSync(path);
+}
+
+/** Fills the cache with every locked input whose entry is absent or wrong; each entry is published only after its size and digest match. */
 export async function acquireInputs(
     rootDir: string,
     options: { inputsDir: string; fetchImpl?: FetchLike; inputs?: LockedInput[] },
@@ -304,25 +341,18 @@ export async function acquireInputs(
     const inputsDir = resolve(options.inputsDir);
     for (const input of options.inputs ?? lockedInputs(rootDir)) {
         if (await isVerified(inputsDir, input, input.key)) continue;
-        // An entry whose bytes contradict its name is deleted, never staged.
-        rmSync(cachePath(inputsDir, input.sha256), { force: true });
         if (input.source.startsWith(REPO_SOURCE_PREFIX)) {
-            const source = join(rootDir, input.source.slice(REPO_SOURCE_PREFIX.length));
-            if (!existsSync(source)) fail(`${input.key}: ${source} is missing`);
-            await publishBytes(inputsDir, input, readFileSync(source));
+            await publishBytes(inputsDir, input, readRepoSource(rootDir, input));
         } else if (input.archive !== undefined) {
             const archive = input.archive;
-            const what = `${input.key} archive`;
-            if (!(await isVerified(inputsDir, archive, what))) {
-                rmSync(cachePath(inputsDir, archive.sha256), { force: true });
+            if (!(await isVerified(inputsDir, archive, `${input.key} archive`))) {
                 await download(inputsDir, input.source, archive, fetchImpl);
             }
-            const archivePath = await verifiedCacheEntry(inputsDir, archive, what);
-            await publishBytes(inputsDir, input, extractArchiveMember(readFileSync(archivePath), archive.member));
+            const bytes = readFileSync(cachePath(inputsDir, archive.sha256));
+            await publishBytes(inputsDir, input, extractArchiveMember(bytes, archive.member));
         } else {
             await download(inputsDir, input.source, input, fetchImpl);
         }
-        await verifiedCacheEntry(inputsDir, input, input.key);
     }
 }
 

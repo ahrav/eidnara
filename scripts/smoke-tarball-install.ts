@@ -14,7 +14,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { canonicalJson } from "./build-host-payload";
-import { lockedInputs } from "./host-inputs";
+import { isRecord, lockedInputs } from "./host-inputs";
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.1.0";
@@ -466,9 +466,7 @@ interface LaneObservation {
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
-    return value !== null && typeof value === "object" && !Array.isArray(value)
-        ? (value as Record<string, unknown>)
-        : undefined;
+    return isRecord(value) ? value : undefined;
 }
 
 /** Polls `daemon status` until the embedding lane leaves `starting`, then reads `daemon doctor` once. */
