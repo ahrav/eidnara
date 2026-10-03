@@ -31,7 +31,7 @@ use crate::object_write::map_write_error;
 use crate::redaction::{
     RedactedField, identity, payload_has_secret, record, redact_lossy, redact_payload,
 };
-use crate::{KernelError, KernelStore, Sensitivity};
+use crate::{CachedSql, KernelError, KernelStore, Sensitivity};
 
 const RESERVATION_MS: i64 = 60 * 60 * 1_000;
 
@@ -449,7 +449,7 @@ impl KernelStore {
             ));
         }
         reservation
-            .execute(
+            .execute_cached(
                 "INSERT INTO artifact_ingestion_reservations(
                      reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
                      created_at,heartbeat_at,lease_expires_at
@@ -923,7 +923,7 @@ fn insert_reference(
     }
     let reservation_state: Option<String> = envelope
         .tx
-        .query_row(
+        .query_row_cached(
             "SELECT state FROM artifact_ingestion_reservations WHERE reservation_id=?1 AND artifact_digest=?2",
             params![reservation_id, prepared.digest],
             |row| row.get(0),
@@ -936,7 +936,7 @@ fn insert_reference(
     }
     let reclaiming: i64 = envelope
         .tx
-        .query_row(
+        .query_row_cached(
             "SELECT COUNT(*) FROM artifact_ingestion_reservations WHERE artifact_digest=?1 AND state='Reclaiming'",
             [&prepared.digest],
             |row| row.get(0),
@@ -969,7 +969,7 @@ fn insert_reference(
     let retention_class = redact_lossy(&prepared.request.retention_class);
     envelope
         .tx
-        .execute(
+        .execute_cached(
             "INSERT INTO object_registry(
                  object_id,object_kind,domain_id,source_kind,source_id,source_revision,
                  created_commit_seq,sensitivity_class
@@ -989,7 +989,7 @@ fn insert_reference(
     let first_detection = prepared.payload_redaction.detections.first();
     envelope
         .tx
-        .execute(
+        .execute_cached(
             "INSERT INTO evidence_meta(
                  evidence_id,object_id,artifact_reference,artifact_digest,byte_length,media_type,
                  retention_class,retain_until,detector_kind,detector_version,detector_metadata,
@@ -1048,7 +1048,7 @@ fn insert_reference(
     }
     if envelope
         .tx
-        .execute(
+        .execute_cached(
             "DELETE FROM artifact_ingestion_reservations WHERE reservation_id=?1 AND state='Live'",
             [reservation_id],
         )
@@ -1109,7 +1109,7 @@ impl MergedClassification {
     fn apply(self, envelope: &mut crate::Envelope<'_>, digest: &str) -> Result<(), KernelError> {
         envelope
             .tx
-            .execute(
+            .execute_cached(
                 "UPDATE evidence_meta SET sensitivity_class=?1,provider_egress_class=?2
                  WHERE artifact_digest=?3",
                 params![self.sensitivity.as_str(), self.egress.as_str(), digest],
@@ -1144,7 +1144,7 @@ fn load_merged_classification(
     mut egress: ProviderEgress,
 ) -> Result<MergedClassification, KernelError> {
     let mut statement = tx
-        .prepare(
+        .prepare_cached(
             "SELECT e.sensitivity_class,e.provider_egress_class,e.invalidated_commit_seq,
                     o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
                     o.source_revision,o.created_commit_seq,o.superseded_by
@@ -1218,7 +1218,7 @@ fn artifact_is_blocked(
     digest: &str,
 ) -> Result<bool, KernelError> {
     connection
-        .query_row(
+        .query_row_cached(
             "SELECT EXISTS(SELECT 1 FROM artifact_purge_tombstones WHERE artifact_digest=?1)
                     OR EXISTS(SELECT 1 FROM artifact_pending_unlinks WHERE artifact_digest=?1)",
             [digest],
@@ -1232,7 +1232,7 @@ fn artifact_is_reclaiming(
     digest: &str,
 ) -> Result<bool, KernelError> {
     connection
-        .query_row(
+        .query_row_cached(
             "SELECT EXISTS(SELECT 1 FROM artifact_ingestion_reservations
                            WHERE artifact_digest=?1 AND state='Reclaiming')",
             [digest],
