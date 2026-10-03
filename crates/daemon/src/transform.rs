@@ -51,13 +51,13 @@ use cache_stability::{CoreState, FrozenUnit, PassInput};
 use context_core::{ClassifierInput, PassPlan, PersistedShape, classify};
 use memory_store::{
     BlockIdentity, BlockIdentityBasis, BlockIdentityDelta, Channel1AppendRow, CoveredSystemMessage,
-    DeferredExecuteState, LineageAnchor, LineageConstituent, LineageDescentDisposition,
-    LineageDescentRequest, MaterializeReason, MemoryStore, MemoryStoreError, ModuleMeta,
-    ModuleUsage, NoteDelivery, PassAction, PassRecord, PassSchedulerObservation, PendingAgentDrop,
-    PendingChannel2Directive, PendingRewriteState, ProjectMemoryComposition,
-    ServedBlockFingerprint, StablePassDivergence, TagMintInput, TagRow, TailHygieneBaseline,
-    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
-    UserHintDecisionInput, UserHintRow,
+    CoveredSystemMessageDelta, DeferredExecuteState, LineageAnchor, LineageConstituent,
+    LineageDescentDisposition, LineageDescentRequest, MaterializeReason, MemoryStore,
+    MemoryStoreError, ModuleMeta, ModuleUsage, NoteDelivery, PassAction, PassRecord,
+    PassSchedulerObservation, PendingAgentDrop, PendingChannel2Directive, PendingRewriteState,
+    ProjectMemoryComposition, ServedBlockFingerprint, StablePassDivergence, TagMintInput, TagRow,
+    TailHygieneBaseline, TemporalMarkInput, TemporalMarkRow, TransformCommit,
+    TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -3378,6 +3378,8 @@ fn apply_once(
     let transform_snapshot =
         store.load_transform_snapshot(&req.session_id, &projection_block_ids, &identity_mids)?;
     let mut window_identities = WindowIdentities::new(transform_snapshot.block_identities);
+    let stored_covered_systems = transform_snapshot.covered_system_messages;
+    let mut covered_systems = stored_covered_systems.clone();
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
@@ -4343,7 +4345,7 @@ fn apply_once(
                     &mut meta.history_segments_ordered,
                 )?;
                 let covered_system_messages = record_covered_systems(
-                    &mut meta,
+                    &mut covered_systems,
                     req,
                     coverage_bounds.map(|(_, end)| end),
                     coverage_bounds.map(|(start, _)| start),
@@ -4424,7 +4426,7 @@ fn apply_once(
                                 &mut meta.history_segments_ordered,
                             )?;
                             let recut_covered_system_messages = record_covered_systems(
-                                &mut meta,
+                                &mut covered_systems,
                                 req,
                                 recut_coverage_bounds.map(|(_, end)| end),
                                 recut_coverage_bounds.map(|(start, _)| start),
@@ -4617,7 +4619,7 @@ fn apply_once(
                         &mut meta.history_segments_ordered,
                     )?;
                     let covered_system_messages = record_covered_systems(
-                        &mut meta,
+                        &mut covered_systems,
                         req,
                         coverage_bounds.map(|(_, end)| end),
                         coverage_bounds.map(|(start, _)| start),
@@ -4782,9 +4784,9 @@ fn apply_once(
                     if let Some((_, ord)) = m1.new_coverage {
                         meta.coverage_ordinal = Some(ord);
                         meta.coverage_history_segment_seq = Some(m1_signal.max_history_segment_seq);
-                        meta.covered_system_messages = covered_system_messages_for_coverage(
+                        covered_systems = covered_system_messages_for_coverage(
                             req,
-                            &meta.covered_system_messages,
+                            &covered_systems,
                             meta.coverage_ordinal,
                             meta.coverage_start_ordinal,
                             serializer_profile,
@@ -5194,8 +5196,12 @@ fn apply_once(
         first_fold_due,
     );
     withdraw_selection_outside_window(&mut meta, req, plan);
-    let state_changed =
-        core != loaded.core || meta != loaded.meta || !window_identities.delta.is_empty();
+    let covered_system_delta =
+        CoveredSystemMessageDelta::between(&stored_covered_systems, &covered_systems);
+    let state_changed = core != loaded.core
+        || meta != loaded.meta
+        || !window_identities.delta.is_empty()
+        || !covered_system_delta.is_empty();
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
     }
@@ -5245,6 +5251,7 @@ fn apply_once(
                     channel1_append: pending_overlays.channel1_append.as_ref(),
                     identities: Some(&window_identities.delta),
                     clear_identities: false,
+                    covered_systems: Some(&covered_system_delta),
                     created_at_ms: ctx.now_ms,
                 },
             },
@@ -6352,23 +6359,20 @@ fn covered_system_messages_for_coverage(
 }
 
 fn record_covered_systems(
-    meta: &mut ModuleMeta,
+    covered: &mut Vec<CoveredSystemMessage>,
     req: &TransformIngress<'_>,
     coverage_ordinal: Option<u64>,
     coverage_start_ordinal: Option<u64>,
     profile: Option<SerializerProfile>,
 ) -> Vec<String> {
-    meta.covered_system_messages = covered_system_messages_for_coverage(
+    *covered = covered_system_messages_for_coverage(
         req,
-        &meta.covered_system_messages,
+        covered,
         coverage_ordinal,
         coverage_start_ordinal,
         profile,
     );
-    meta.covered_system_messages
-        .iter()
-        .map(|entry| entry.content.clone())
-        .collect()
+    covered.iter().map(|entry| entry.content.clone()).collect()
 }
 
 fn coverage_advance_covers_new_system(
@@ -26267,6 +26271,69 @@ pub(crate) mod tests {
             covered_system_entries(m0_bytes(&refolded)),
             covered_system_entries(m0_bytes(&advanced)),
             "a HARD over a window with no covered system keeps every absorbed system"
+        );
+    }
+
+    #[test]
+    fn covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed() {
+        const FOLDS: u64 = 40;
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let system =
+            |k: u64| system_item(&format!("sys{k}"), 2 * k - 1, &format!("system rule {k}"));
+        let message = |k: u64| item(&format!("m{k}"), 2 * k, &format!("message {k}"));
+        let meta_bytes = || {
+            s.with_fenced_conn_for_test(|tx| {
+                tx.query_row(
+                    "SELECT CAST(meta AS TEXT) FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap()
+        };
+        let mut sizes = Vec::new();
+        for k in 1..=FOLDS {
+            let segment = comp(
+                k as i64,
+                2 * k as i64 - 1,
+                2 * k as i64,
+                &format!("m{k}"),
+                "S",
+            );
+            s.append_history_segments("ses", &[segment]).unwrap();
+            let mut window = if k == 1 {
+                Vec::new()
+            } else {
+                vec![message(k - 1)]
+            };
+            window.extend([system(k), message(k), system(k + 1), message(k + 1)]);
+            let mut request = cc_req("ses", "cfg0", window);
+            if k > 1 {
+                request.boundary = Some(Some(BoundaryAnchor {
+                    mid: format!("m{}", k - 1),
+                    sequence: k as i64 - 1,
+                }));
+            }
+            let response = run(&s, &request, &spine());
+            assert_eq!(response.action, "HARD", "fold {k}");
+            assert_eq!(
+                covered_system_entries(m0_bytes(&response)),
+                (1..=k)
+                    .map(|n| format!("system rule {n}"))
+                    .collect::<Vec<_>>(),
+                "fold {k} renders every covered system"
+            );
+            assert_eq!(s.covered_system_messages_for_test("ses").len(), k as usize);
+            let meta = meta_bytes();
+            assert!(!meta.contains("system rule"), "fold {k}: {meta}");
+            sizes.push(meta.len());
+        }
+        let settled = sizes[9];
+        let last = *sizes.last().unwrap();
+        assert!(
+            last.abs_diff(settled) < 32,
+            "the stored meta changes by digit widths alone: {sizes:?}"
         );
     }
 

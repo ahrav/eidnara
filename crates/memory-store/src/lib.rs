@@ -1594,7 +1594,7 @@ pub enum HistorySummarizerPublishError {
         found: u64,
         reason: Option<String>,
     },
-    /// The store's own fence refused the publish before any write: the selected input or the segment set no longer matches the firing's snapshot. Distinct from CasConflict so callers can abandon the run WITHOUT arming a model-failure cooldown.
+    /// The store's own fence refused the publish before any write: the selected input or the segment set no longer matches the firing's snapshot, or the appended rows would carry the session's `legacy = 1` rows past [`MAX_LEGACY_HISTORY_SEGMENTS`]. Distinct from CasConflict so callers can abandon the run WITHOUT arming a model-failure cooldown.
     #[error("publication fence rejected: {reason}")]
     FenceRejected { reason: String },
     /// A caller-supplied publication fence refused before the store was reached: a fast local race, not a property of the stored history, so a retry with a fresh snapshot is valid.
@@ -1946,11 +1946,52 @@ pub struct ServedBlockFingerprint {
     pub serialized_len: usize,
 }
 
+/// One covered system message, one per distinct content. A fold window starts at its anchor;
+/// preceding system messages reach later folds only through the session's
+/// `covered_system_messages` rows, which [`TransformSnapshot`] reads in ordinal order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoveredSystemMessage {
     /// The ordinal of the content's first occurrence.
     pub ordinal: u64,
     pub content: String,
+}
+
+/// The `covered_system_messages` rows one accepted pass writes, keyed by ordinal, and the
+/// ordinals whose rows it removes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoveredSystemMessageDelta {
+    pub upserts: BTreeMap<u64, String>,
+    pub deletes: BTreeSet<u64>,
+}
+
+impl CoveredSystemMessageDelta {
+    /// The delta that turns the `stored` rows into `current`.
+    pub fn between(stored: &[CoveredSystemMessage], current: &[CoveredSystemMessage]) -> Self {
+        let stored: BTreeMap<u64, &str> = stored
+            .iter()
+            .map(|entry| (entry.ordinal, entry.content.as_str()))
+            .collect();
+        let current: BTreeMap<u64, &str> = current
+            .iter()
+            .map(|entry| (entry.ordinal, entry.content.as_str()))
+            .collect();
+        Self {
+            upserts: current
+                .iter()
+                .filter(|(ordinal, content)| stored.get(*ordinal) != Some(*content))
+                .map(|(ordinal, content)| (*ordinal, (*content).to_string()))
+                .collect(),
+            deletes: stored
+                .keys()
+                .filter(|ordinal| !current.contains_key(*ordinal))
+                .copied()
+                .collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty()
+    }
 }
 
 fn bool_is_false(value: &bool) -> bool {
@@ -2389,11 +2430,6 @@ pub struct ModuleMeta {
     /// Sparse response-recency anchor, piggybacked only on passes already committing.
     #[serde(default)]
     pub last_committed_pass_at_ms: i64,
-    /// Covered system messages, one per distinct content in first-ordinal order. A fold
-    /// window starts at its anchor; preceding system messages reach later folds only through
-    /// this list.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub covered_system_messages: Vec<CoveredSystemMessage>,
 
     /// Tracks which shadow reset generation this record belongs to. Operations created
     /// before the most recent reset are rejected so they cannot write rows from an older
@@ -2549,6 +2585,7 @@ pub struct TransformOverlayBatch<'a> {
     /// documents they came from. Native adoption sets it: a legacy compaction-off row
     /// recorded identities no native pass reads.
     pub clear_identities: bool,
+    pub covered_systems: Option<&'a CoveredSystemMessageDelta>,
     pub created_at_ms: i64,
 }
 
@@ -2561,6 +2598,9 @@ impl TransformOverlayBatch<'_> {
             && self.channel1_append.is_none()
             && self.identities.is_none_or(BlockIdentityDelta::is_empty)
             && !self.clear_identities
+            && self
+                .covered_systems
+                .is_none_or(CoveredSystemMessageDelta::is_empty)
     }
 }
 
@@ -4663,11 +4703,152 @@ fn sqlite_redaction_kind(error: &rusqlite::Error) -> Option<RedactionErrorKind> 
         })
 }
 
-/// Size at which one `block_identities` scan document is closed, half the durable-text bound
-/// so a document that ends with one more row still meets it.
-const BLOCK_IDENTITY_SCAN_CHUNK_BYTES: usize = MAX_DURABLE_TEXT_BYTES / 2;
+/// Size at which one row scan document is closed, half the durable-text bound so a document
+/// that ends with one more row still meets it.
+const SCAN_DOCUMENT_CHUNK_BYTES: usize = MAX_DURABLE_TEXT_BYTES / 2;
 
-fn block_identity_serde_error(error: serde_json::Error) -> rusqlite::Error {
+/// Joins serialized rows into `open`…`close` documents, closing one before the next row would
+/// carry it past [`SCAN_DOCUMENT_CHUNK_BYTES`].
+fn scan_documents(rows: impl IntoIterator<Item = String>, open: &str, close: &str) -> Vec<String> {
+    let mut documents = Vec::new();
+    let mut document = String::new();
+    for row in rows {
+        if !document.is_empty() && document.len() + row.len() + 1 > SCAN_DOCUMENT_CHUNK_BYTES {
+            document.push_str(close);
+            documents.push(std::mem::take(&mut document));
+        }
+        if document.is_empty() {
+            document.push_str(open);
+        } else {
+            document.push(',');
+        }
+        document.push_str(&row);
+    }
+    if !document.is_empty() {
+        document.push_str(close);
+        documents.push(document);
+    }
+    documents
+}
+
+/// A per-session table whose rows each record, in `scan_version`, the row version of the
+/// commit whose scanned document wrote them. That version names the document's receipt
+/// owner, which is retired once no row of the session names it, so the receipts never
+/// outnumber the stored rows.
+struct ScanOwnedRows {
+    table: &'static str,
+    /// Counts at most `?3` rows of one owner through the table's partial `scan_version` index.
+    count_owned: &'static str,
+    owner_versions: &'static str,
+    delete_session: &'static str,
+}
+
+const BLOCK_IDENTITY_ROWS: ScanOwnedRows = ScanOwnedRows {
+    table: "block_identities",
+    count_owned: "SELECT COUNT(*) FROM (
+             SELECT 1 FROM block_identities INDEXED BY block_identities_by_scan_version
+              WHERE session_id = ?1 AND scan_version = ?2 LIMIT ?3)",
+    owner_versions: "SELECT DISTINCT scan_version FROM block_identities
+              WHERE session_id = ?1 AND scan_version IS NOT NULL",
+    delete_session: "DELETE FROM block_identities WHERE session_id = ?1",
+};
+
+const COVERED_SYSTEM_ROWS: ScanOwnedRows = ScanOwnedRows {
+    table: "covered_system_messages",
+    count_owned: "SELECT COUNT(*) FROM (
+             SELECT 1 FROM covered_system_messages
+                INDEXED BY covered_system_messages_by_scan_version
+              WHERE session_id = ?1 AND scan_version = ?2 LIMIT ?3)",
+    owner_versions: "SELECT DISTINCT scan_version FROM covered_system_messages
+              WHERE session_id = ?1 AND scan_version IS NOT NULL",
+    delete_session: "DELETE FROM covered_system_messages WHERE session_id = ?1",
+};
+
+impl ScanOwnedRows {
+    fn owner_key(&self, scan_version: i64) -> String {
+        format!("{}:{scan_version}", self.table)
+    }
+
+    /// The owners every one of whose stored rows is among `released`, one owner per entry. The
+    /// caller reads them before it deletes or rewrites those rows. Each count reads at most one
+    /// row beyond the ones released.
+    fn unreferenced_owners(
+        &self,
+        tx: &GuardedConn<'_>,
+        session_id: &str,
+        released: &[Option<i64>],
+    ) -> rusqlite::Result<Vec<i64>> {
+        let mut releasing = BTreeMap::<i64, i64>::new();
+        for version in released.iter().flatten() {
+            *releasing.entry(*version).or_default() += 1;
+        }
+        let mut count = tx.prepare_cached(self.count_owned)?;
+        let mut unreferenced = Vec::new();
+        for (version, rows) in releasing {
+            let stored: i64 =
+                count.query_row(params![session_id, version, rows + 1], |row| row.get(0))?;
+            if stored == rows {
+                unreferenced.push(version);
+            }
+        }
+        Ok(unreferenced)
+    }
+
+    fn retire_owners(
+        &self,
+        tx: &GuardedConn<'_>,
+        session_id: &str,
+        scan_versions: impl IntoIterator<Item = i64>,
+    ) -> rusqlite::Result<()> {
+        for scan_version in scan_versions {
+            retire_active_scan_domain_owner(
+                tx,
+                "session",
+                session_id,
+                DurableWriteFamily::CacheState.owner_kind(),
+                &self.owner_key(scan_version),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Deletes one session's rows and retires the receipts of the documents they came from.
+    fn delete_session_rows(&self, tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+        let scan_versions = tx
+            .prepare_cached(self.owner_versions)?
+            .query_map(params![session_id], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        tx.prepare_cached(self.delete_session)?
+            .execute(params![session_id])?;
+        self.retire_owners(tx, session_id, scan_versions)
+    }
+
+    /// Scans `document` under `policy` with its receipts owned by `scan_version`.
+    fn prepare_document(
+        &self,
+        coordinated: &ActiveWriteTransaction<'_>,
+        session_id: &str,
+        scan_version: i64,
+        document: &str,
+        policy: JsonScanPolicy,
+    ) -> rusqlite::Result<String> {
+        let mut write = coordinated.prepared.borrow_mut();
+        let first_scan = write.scans.len();
+        let prepared = write
+            .json_content(self.table, document, policy)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let end_scan = write.scans.len();
+        write.reassign_scans_in(
+            first_scan..end_scan,
+            "session",
+            session_id,
+            self.owner_key(scan_version),
+        );
+        Ok(prepared)
+    }
+}
+
+fn stored_row_serde_error(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(error.to_string())))
 }
 
@@ -4679,7 +4860,7 @@ fn lookup_block_identity_rows(
     if mids.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mids = serde_json::to_string(mids).map_err(block_identity_serde_error)?;
+    let mids = serde_json::to_string(mids).map_err(stored_row_serde_error)?;
     conn.prepare_cached(
         "SELECT mid, identities, scan_version FROM block_identities
           WHERE session_id = ?1 AND mid IN (SELECT value FROM json_each(?2))",
@@ -4710,6 +4891,8 @@ fn lookup_block_identities(
         .collect()
 }
 
+/// Written rows are scanned as JSON objects keyed by message id, so a secret in an id is
+/// refused and one in a value is substituted.
 fn apply_block_identity_delta(
     coordinated: &ActiveWriteTransaction<'_>,
     session_id: &str,
@@ -4744,32 +4927,19 @@ fn apply_block_identity_delta(
         .filter_map(|mid| stored.get(mid).map(|(_, owner)| (mid, *owner)))
         .collect::<Vec<_>>();
     let mut released_owners = deleted.iter().map(|(_, owner)| *owner).collect::<Vec<_>>();
-    let mut documents = Vec::new();
-    let mut document = String::new();
+    let mut rows = Vec::new();
     for (mid, vector) in &delta.upserts {
-        let value = serde_json::to_string(vector).map_err(block_identity_serde_error)?;
+        let value = serde_json::to_string(vector).map_err(stored_row_serde_error)?;
         match stored.get(mid) {
             Some((stored_value, _)) if *stored_value == value => continue,
             Some((_, owner)) => released_owners.push(*owner),
             None => {}
         }
-        let key = serde_json::to_string(mid).map_err(block_identity_serde_error)?;
-        if !document.is_empty()
-            && document.len() + key.len() + value.len() + 2 > BLOCK_IDENTITY_SCAN_CHUNK_BYTES
-        {
-            document.push('}');
-            documents.push(std::mem::take(&mut document));
-        }
-        document.push(if document.is_empty() { '{' } else { ',' });
-        document.push_str(&key);
-        document.push(':');
-        document.push_str(&value);
+        let key = serde_json::to_string(mid).map_err(stored_row_serde_error)?;
+        rows.push(format!("{key}:{value}"));
     }
-    if !document.is_empty() {
-        document.push('}');
-        documents.push(document);
-    }
-    let unreferenced = unreferenced_block_identity_owners(tx, session_id, &released_owners)?;
+    let documents = scan_documents(rows, "{", "}");
+    let unreferenced = BLOCK_IDENTITY_ROWS.unreferenced_owners(tx, session_id, &released_owners)?;
     {
         let mut delete =
             tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1 AND mid = ?2")?;
@@ -4784,95 +4954,174 @@ fn apply_block_identity_delta(
               identities = excluded.identities, scan_version = excluded.scan_version",
     )?;
     for document in documents {
-        let prepared = {
-            let mut write = coordinated.prepared.borrow_mut();
-            let first_scan = write.scans.len();
-            let prepared = write
-                .json_content(
-                    "block_identities",
-                    &document,
-                    JsonScanPolicy::DurablePreserveIdentities,
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let end_scan = write.scans.len();
-            write.reassign_scans_in(
-                first_scan..end_scan,
-                "session",
-                session_id,
-                block_identity_owner_key(scan_version),
-            );
-            prepared
-        };
+        let prepared = BLOCK_IDENTITY_ROWS.prepare_document(
+            coordinated,
+            session_id,
+            scan_version,
+            &document,
+            JsonScanPolicy::DurablePreserveIdentities,
+        )?;
         let prepared: BTreeMap<String, Vec<BlockIdentity>> =
-            serde_json::from_str(&prepared).map_err(block_identity_serde_error)?;
+            serde_json::from_str(&prepared).map_err(stored_row_serde_error)?;
         for (mid, vector) in prepared {
-            let value = serde_json::to_string(&vector).map_err(block_identity_serde_error)?;
+            let value = serde_json::to_string(&vector).map_err(stored_row_serde_error)?;
             upsert.execute(params![session_id, mid, value, scan_version])?;
         }
     }
-    retire_block_identity_owners(tx, session_id, unreferenced)
+    BLOCK_IDENTITY_ROWS.retire_owners(tx, session_id, unreferenced)
 }
 
-fn unreferenced_block_identity_owners(
-    tx: &GuardedConn<'_>,
+fn delete_block_identities(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+    BLOCK_IDENTITY_ROWS.delete_session_rows(tx, session_id)
+}
+
+fn covered_system_ordinal(ordinal: u64) -> rusqlite::Result<i64> {
+    i64::try_from(ordinal).map_err(|_| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(MemoryStoreError::Serde(
+            "covered system message ordinal exceeds SQLite range".to_string(),
+        )))
+    })
+}
+
+/// One session's covered system messages in ordinal order.
+fn load_covered_system_messages(
+    conn: &GuardedConn<'_>,
     session_id: &str,
-    released: &[Option<i64>],
-) -> rusqlite::Result<Vec<i64>> {
-    let mut releasing = BTreeMap::<i64, i64>::new();
-    for version in released.iter().flatten() {
-        *releasing.entry(*version).or_default() += 1;
+) -> rusqlite::Result<Vec<CoveredSystemMessage>> {
+    conn.prepare_cached(
+        "SELECT ordinal, content FROM covered_system_messages
+          WHERE session_id = ?1 ORDER BY ordinal",
+    )?
+    .query_map(params![session_id], |row| {
+        let ordinal = row.get::<_, i64>(0)?;
+        Ok(CoveredSystemMessage {
+            ordinal: u64::try_from(ordinal)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, ordinal))?,
+            content: row.get(1)?,
+        })
+    })?
+    .collect()
+}
+
+/// The stored document shape of a covered system message scan: the entries under the key that
+/// named them inside `meta`, so the scan walks them under the same keys.
+#[derive(Deserialize)]
+struct CoveredSystemMessageDocument {
+    covered_system_messages: Vec<CoveredSystemMessage>,
+}
+
+const COVERED_SYSTEM_DOCUMENT_OPEN: &str = "{\"covered_system_messages\":[";
+const COVERED_SYSTEM_DOCUMENT_CLOSE: &str = "]}";
+
+/// Written rows are scanned as the `covered_system_messages` array of a metadata document, so
+/// the stored content is the text a `meta` scan substitutes.
+fn apply_covered_system_message_delta(
+    coordinated: &ActiveWriteTransaction<'_>,
+    session_id: &str,
+    scan_version: i64,
+    delta: &CoveredSystemMessageDelta,
+) -> rusqlite::Result<()> {
+    if delta.is_empty() {
+        return Ok(());
     }
-    let mut count = tx.prepare_cached(
-        "SELECT COUNT(*) FROM (
-             SELECT 1 FROM block_identities INDEXED BY block_identities_by_scan_version
-              WHERE session_id = ?1 AND scan_version = ?2 LIMIT ?3)",
-    )?;
-    let mut unreferenced = Vec::new();
-    for (version, rows) in releasing {
-        let stored: i64 =
-            count.query_row(params![session_id, version, rows + 1], |row| row.get(0))?;
-        if stored == rows {
-            unreferenced.push(version);
+    if let Some(ordinal) = delta
+        .deletes
+        .iter()
+        .find(|ordinal| delta.upserts.contains_key(*ordinal))
+    {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            MemoryStoreError::Serde(format!(
+                "covered system message delta both writes and deletes ordinal {ordinal}"
+            )),
+        )));
+    }
+    let tx = coordinated.tx();
+    let touched = delta
+        .upserts
+        .keys()
+        .chain(&delta.deletes)
+        .map(|ordinal| covered_system_ordinal(*ordinal))
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let stored: BTreeMap<i64, (String, Option<i64>)> = tx
+        .prepare_cached(
+            "SELECT ordinal, content, scan_version FROM covered_system_messages
+              WHERE session_id = ?1 AND ordinal IN (SELECT value FROM json_each(?2))",
+        )?
+        .query_map(
+            params![
+                session_id,
+                serde_json::to_string(&touched).map_err(stored_row_serde_error)?
+            ],
+            |row| Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?))),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut deleted = Vec::new();
+    for ordinal in &delta.deletes {
+        let ordinal = covered_system_ordinal(*ordinal)?;
+        if let Some((_, owner)) = stored.get(&ordinal) {
+            deleted.push((ordinal, *owner));
         }
     }
-    Ok(unreferenced)
-}
-
-fn block_identity_owner_key(scan_version: i64) -> String {
-    format!("block_identities:{scan_version}")
-}
-
-/// Retires the receipt owners of `block_identities` documents no stored row names.
-fn retire_block_identity_owners(
-    tx: &GuardedConn<'_>,
-    session_id: &str,
-    scan_versions: impl IntoIterator<Item = i64>,
-) -> rusqlite::Result<()> {
-    for scan_version in scan_versions {
-        retire_active_scan_domain_owner(
-            tx,
-            "session",
-            session_id,
-            DurableWriteFamily::CacheState.owner_kind(),
-            &block_identity_owner_key(scan_version),
-        )?;
+    let mut released_owners = deleted.iter().map(|(_, owner)| *owner).collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    for (ordinal, content) in &delta.upserts {
+        match stored.get(&covered_system_ordinal(*ordinal)?) {
+            Some((stored_content, _)) if stored_content == content => continue,
+            Some((_, owner)) => released_owners.push(*owner),
+            None => {}
+        }
+        rows.push(
+            serde_json::to_string(&CoveredSystemMessage {
+                ordinal: *ordinal,
+                content: content.clone(),
+            })
+            .map_err(stored_row_serde_error)?,
+        );
     }
-    Ok(())
+    let documents = scan_documents(
+        rows,
+        COVERED_SYSTEM_DOCUMENT_OPEN,
+        COVERED_SYSTEM_DOCUMENT_CLOSE,
+    );
+    let unreferenced = COVERED_SYSTEM_ROWS.unreferenced_owners(tx, session_id, &released_owners)?;
+    {
+        let mut delete = tx.prepare_cached(
+            "DELETE FROM covered_system_messages WHERE session_id = ?1 AND ordinal = ?2",
+        )?;
+        for (ordinal, _) in &deleted {
+            delete.execute(params![session_id, ordinal])?;
+        }
+    }
+    let mut upsert = tx.prepare_cached(
+        "INSERT INTO covered_system_messages (session_id, ordinal, content, scan_version)
+              VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id, ordinal) DO UPDATE SET
+              content = excluded.content, scan_version = excluded.scan_version",
+    )?;
+    for document in documents {
+        let prepared = COVERED_SYSTEM_ROWS.prepare_document(
+            coordinated,
+            session_id,
+            scan_version,
+            &document,
+            JsonScanPolicy::DurablePreserveIdentities,
+        )?;
+        let prepared: CoveredSystemMessageDocument =
+            serde_json::from_str(&prepared).map_err(stored_row_serde_error)?;
+        for entry in prepared.covered_system_messages {
+            upsert.execute(params![
+                session_id,
+                covered_system_ordinal(entry.ordinal)?,
+                entry.content,
+                scan_version
+            ])?;
+        }
+    }
+    COVERED_SYSTEM_ROWS.retire_owners(tx, session_id, unreferenced)
 }
 
-/// Deletes one session's `block_identities` rows and retires the receipts of the
-/// documents they came from.
-fn delete_block_identities(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
-    let scan_versions = tx
-        .prepare_cached(
-            "SELECT DISTINCT scan_version FROM block_identities
-              WHERE session_id = ?1 AND scan_version IS NOT NULL",
-        )?
-        .query_map(params![session_id], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    tx.prepare_cached("DELETE FROM block_identities WHERE session_id = ?1")?
-        .execute(params![session_id])?;
-    retire_block_identity_owners(tx, session_id, scan_versions)
+fn delete_covered_system_messages(tx: &GuardedConn<'_>, session_id: &str) -> rusqlite::Result<()> {
+    COVERED_SYSTEM_ROWS.delete_session_rows(tx, session_id)
 }
 
 fn prepare_history_segment(
@@ -5561,6 +5810,8 @@ pub struct TransformSnapshotTimings {
 pub struct TransformSnapshot {
     pub loaded: LoadedState,
     pub block_identities: BTreeMap<String, Vec<BlockIdentity>>,
+    /// The session's covered system messages in ordinal order.
+    pub covered_system_messages: Vec<CoveredSystemMessage>,
     pub temporal_marks: Vec<TemporalMarkRow>,
     pub user_hints: Vec<UserHintRow>,
     pub channel1_appends: Vec<Channel1AppendRow>,
@@ -5754,6 +6005,33 @@ fn serialized_text_len(text: &str) -> usize {
 pub const MAX_STATE_SYNC_DIRECTIVE_BYTES: usize = 256;
 pub const MAX_STATE_SYNC_ID_BYTES: usize = 128;
 pub const MAX_SYNTHETIC_TODO_PAIR_BYTES: usize = 24 * 1024;
+/// Maximum number of `legacy = 1` rows in `history_segments` per session, which bounds
+/// [`ModuleMeta::legacy_history_segment_seqs`].
+pub const MAX_LEGACY_HISTORY_SEGMENTS: usize = 512;
+
+fn legacy_history_segments_over_cap(
+    tx: &GuardedConn<'_>,
+    session_id: &str,
+    replaced_sequences: impl IntoIterator<Item = i64>,
+    added: usize,
+) -> rusqlite::Result<Option<usize>> {
+    if added == 0 {
+        return Ok(None);
+    }
+    let replaced = serde_json::to_string(&replaced_sequences.into_iter().collect::<Vec<_>>())
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let kept: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM history_segments
+          WHERE session_id = ?1 AND legacy = 1
+            AND sequence NOT IN (SELECT value FROM json_each(?2))",
+        params![session_id, replaced],
+        |row| row.get(0),
+    )?;
+    let found = usize::try_from(kept)
+        .unwrap_or(usize::MAX)
+        .saturating_add(added);
+    Ok((found > MAX_LEGACY_HISTORY_SEGMENTS).then_some(found))
+}
 
 fn within_bound(
     field: &'static str,
@@ -5961,7 +6239,7 @@ fn prepare_state_sync(
         acked_watermarks_json.len(),
     )?;
     write.identity("acked_watermarks", &acked_watermarks_json)?;
-    Ok(PreparedStateSync {
+    let prepared = PreparedStateSync {
         drop_seeds,
         pending_agent_drops,
         history_segments,
@@ -5974,7 +6252,57 @@ fn prepare_state_sync(
         channel2_nudge_state,
         strip_seeds,
         last_todo_state,
-    })
+    };
+    check_prepared_state_sync_bounds(&prepared)?;
+    Ok(prepared)
+}
+
+/// The capped values as the metadata stores them. Redaction can lengthen a value that met
+/// its bound on input, since a placeholder can be longer than the secret it replaces.
+fn check_prepared_state_sync_bounds(
+    prepared: &PreparedStateSync,
+) -> Result<(), ModuleStateSyncError> {
+    if let Some(anchors) = &prepared.note_nudge_anchors {
+        for anchor in anchors {
+            let serialized = serde_json::to_vec(anchor)
+                .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
+            within_bound(
+                "note_nudge_anchor bytes",
+                MAX_NOTE_NUDGE_ANCHOR_BYTES,
+                serialized.len(),
+            )?;
+        }
+    }
+    if let Some(Some(marker)) = &prepared.pending_compaction_marker {
+        within_bound(
+            "pending_compaction_marker end_message_id bytes",
+            MAX_STATE_SYNC_ID_BYTES,
+            marker.end_message_id.len(),
+        )?;
+    }
+    if let Some(Some(state)) = &prepared.deferred_execute_state {
+        within_bound(
+            "deferred_execute_state reason bytes",
+            MAX_STATE_SYNC_DIRECTIVE_BYTES,
+            state.reason.len(),
+        )?;
+    }
+    if let Some(state) = &prepared.channel2_nudge_state {
+        within_bound(
+            "channel2_nudge_state bytes",
+            MAX_STATE_SYNC_DIRECTIVE_BYTES,
+            state.len(),
+        )?;
+    }
+    if let Some(state) = &prepared.last_todo_state {
+        within_bound("last_todo_state bytes", MAX_TODO_STATE_BYTES, state.len())?;
+        within_bound(
+            "last_todo_state serialized bytes",
+            MAX_TODO_STATE_SERIALIZED_BYTES,
+            serialized_text_len(state),
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -6517,6 +6845,7 @@ enum ModuleStateSyncTxnOutcome {
     HistorySummarizerBusy { phase: HistorySummarizerPhase },
     InvalidSeedBoundary { declared: String, detail: String },
     InvalidHistorySegments { detail: String },
+    LegacyOverBound { found: usize },
     Serde(String),
 }
 
@@ -8109,6 +8438,13 @@ impl MemoryStore {
             .expect("block identities read")
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn covered_system_messages_for_test(&self, session_id: &str) -> Vec<CoveredSystemMessage> {
+        self.inner
+            .with_conn(|conn| load_covered_system_messages(conn, session_id))
+            .expect("covered system messages read")
+    }
+
     /// Returns default metadata for an absent row; invalid `meta` JSON returns
     /// [`MemoryStoreError::Serde`]. `core_state` is neither read nor validated, so a row
     /// whose core is corrupt still answers here where [`Self::load`] fails.
@@ -8292,6 +8628,7 @@ impl MemoryStore {
             let cache_state_ms = cache_state_started_at.elapsed().as_secs_f64() * 1_000.0;
             after_state_read();
             let block_identities = lookup_block_identities(transaction, session_id, identity_mids)?;
+            let covered_system_messages = load_covered_system_messages(transaction, session_id)?;
 
             let temporal_started_at = Instant::now();
             let temporal_marks = {
@@ -8363,6 +8700,7 @@ impl MemoryStore {
             Ok(TransformSnapshot {
                 loaded,
                 block_identities,
+                covered_system_messages,
                 temporal_marks,
                 user_hints,
                 channel1_appends,
@@ -10270,6 +10608,35 @@ impl MemoryStore {
     }
 
     #[cfg(any(test, feature = "test-support"))]
+    pub fn commit_with_covered_system_messages_for_test(
+        &self,
+        session_id: &str,
+        expected: Option<u64>,
+        core: &CoreState,
+        meta: &ModuleMeta,
+        covered_systems: &CoveredSystemMessageDelta,
+    ) -> Result<u64, MemoryStoreError> {
+        self.commit_transform(
+            session_id,
+            TransformCommit {
+                expected,
+                core,
+                meta,
+                consumed_drop_ids: &[],
+                first_applied_command_ids: &[],
+                history_segment_max_seq: None,
+                project_root: None,
+                first_divergence: None,
+                pass: None,
+                overlays: TransformOverlayBatch {
+                    covered_systems: Some(covered_systems),
+                    ..TransformOverlayBatch::default()
+                },
+            },
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn upsert_block_identities_for_test(
         &self,
         session_id: &str,
@@ -10361,6 +10728,7 @@ impl MemoryStore {
             channel1_append,
             identities,
             clear_identities,
+            covered_systems,
             created_at_ms,
         } = overlays;
         // Canonicalize before scanning, because the canonical form is what the row stores.
@@ -10604,6 +10972,14 @@ impl MemoryStore {
             }
             if let Some(identities) = identities {
                 apply_block_identity_delta(coordinated, session_id, next as i64, identities)?;
+            }
+            if let Some(covered_systems) = covered_systems {
+                apply_covered_system_message_delta(
+                    coordinated,
+                    session_id,
+                    next as i64,
+                    covered_systems,
+                )?;
             }
             // Every accepted transform owns the current-pass value: stable passes write NULL
             // rather than leaving an older divergence looking like a present observation.
@@ -10982,6 +11358,21 @@ impl MemoryStore {
                     ));
                 }
             };
+            // A written row replaces the stored row at its sequence, so the count keeps the
+            // stored legacy rows at other sequences and adds the written legacy rows.
+            if let Some(found) = legacy_history_segments_over_cap(
+                tx,
+                request.session_id,
+                written_history_segments.iter().map(|row| row.sequence),
+                written_history_segments
+                    .iter()
+                    .filter(|row| row.legacy == 1)
+                    .count(),
+            )? {
+                return Ok(WriteDisposition::Replay(
+                    ModuleStateSyncTxnOutcome::LegacyOverBound { found },
+                ));
+            }
 
             let drop_seeds_skipped = if native_authority {
                 request.drop_seed_skipped + drop_seeds.len()
@@ -11228,6 +11619,13 @@ impl MemoryStore {
             }
             ModuleStateSyncTxnOutcome::InvalidHistorySegments { detail } => {
                 Err(ModuleStateSyncError::InvalidHistorySegments { detail })
+            }
+            ModuleStateSyncTxnOutcome::LegacyOverBound { found } => {
+                Err(ModuleStateSyncError::OverBound {
+                    field: "legacy history_segments count",
+                    bound: MAX_LEGACY_HISTORY_SEGMENTS,
+                    found,
+                })
             }
             ModuleStateSyncTxnOutcome::Serde(e) => Err(ModuleStateSyncError::Serde(e)),
         }
@@ -12182,7 +12580,6 @@ impl MemoryStore {
             target_meta.pending_rewrite_trip_count = 0;
             target_meta.pending_rewrite_ambiguous = false;
             target_meta.pending_rewrite_last_failure = None;
-            target_meta.covered_system_messages.clear();
             target_meta.anchor_block_id = Some(anchor.block_id.clone());
             target_meta.anchor_content_hash = Some(anchor.content_hash.clone());
             target_meta.ordinal_continuation_base = Some(prior_last);
@@ -12400,6 +12797,9 @@ impl MemoryStore {
             // The target adopts the source metadata whole, and the identities belong to it.
             // The copies name no document owner: the lineage links cover their bytes.
             delete_block_identities(tx, request.target_key)?;
+            // The target's fold starts at the descent anchor, so it holds no covered system
+            // messages; the source keeps its rows.
+            delete_covered_system_messages(tx, request.target_key)?;
             tx.execute(
                 "INSERT INTO block_identities (session_id, mid, identities)
                   SELECT ?1, reject_transaction_text(mid), redact_transaction_text(identities)
@@ -12759,6 +13159,7 @@ impl MemoryStore {
                 retire_active_scan_owner_kind(tx, "session", session_id, owner_kind)?;
             }
             delete_block_identities(tx, session_id)?;
+            delete_covered_system_messages(tx, session_id)?;
             tx.execute(
                 "DELETE FROM chunk_transcripts WHERE session_id = ?1",
                 params![session_id],
@@ -13587,7 +13988,23 @@ impl MemoryStore {
                         ));
                     }
                 }
-                if history_segments.iter().any(|row| row.legacy == 1) {
+                // Publication appends, so every stored legacy row stays beside the new ones.
+                let published_legacy = history_segments
+                    .iter()
+                    .filter(|row| row.legacy == 1)
+                    .count();
+                if let Some(found) = legacy_history_segments_over_cap(
+                    tx,
+                    session_id,
+                    std::iter::empty(),
+                    published_legacy,
+                )? {
+                    return Ok(PublishTxnOutcome::FenceRejected(format!(
+                        "publication would hold {found} legacy history_segments, over the cap of \
+                         {MAX_LEGACY_HISTORY_SEGMENTS}"
+                    )));
+                }
+                if published_legacy > 0 {
                     meta.legacy_history_segment_seqs = None;
                 }
                 meta.history_summarizer = meta.history_summarizer.cleared_of_in_flight_firing();
@@ -20463,6 +20880,10 @@ mod tests {
              VALUES (?1, 1, 1, 2, x'00', 1)",
         ),
         (
+            "covered_system_messages",
+            "INSERT INTO covered_system_messages(session_id, ordinal, content) VALUES (?1, 0, 's')",
+        ),
+        (
             "history_segment_events",
             "INSERT INTO history_segment_events(session_id, kind) VALUES (?1, 'k')",
         ),
@@ -21370,6 +21791,7 @@ mod tests {
                         channel1_append: Some(&channel1),
                         identities: None,
                         clear_identities: false,
+                        covered_systems: None,
                         created_at_ms: 10,
                     },
                     ..base_commit(
@@ -21446,6 +21868,7 @@ mod tests {
                         channel1_append: Some(&channel1),
                         identities: None,
                         clear_identities: false,
+                        covered_systems: None,
                         created_at_ms: 1,
                     },
                     ..base_commit(stale.row_version, &stale.core, &stale.meta)
@@ -23968,6 +24391,222 @@ mod tests {
                 .map(|state| state.len()),
             Some(MAX_TODO_STATE_BYTES)
         );
+    }
+
+    #[test]
+    fn state_sync_refuses_values_whose_redacted_form_passes_their_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let secret = "password=abc next ";
+        let at = |bytes: usize| format!("{secret}{}", "n".repeat(bytes - secret.len()));
+        let expansion = prepare_content(secret).unwrap().len() - secret.len();
+        assert!(expansion > 0);
+        let anchor = NoteNudgeAnchorSeed {
+            message_id: "m1".to_string(),
+            text: at(MAX_NOTE_NUDGE_ANCHOR_BYTES - r#"{"message_id":"m1","text":""}"#.len()),
+        };
+        assert_eq!(
+            serde_json::to_vec(&anchor).unwrap().len(),
+            MAX_NOTE_NUDGE_ANCHOR_BYTES
+        );
+        let anchors = [anchor];
+        let directive = DeferredExecuteState {
+            reason: at(MAX_STATE_SYNC_DIRECTIVE_BYTES),
+        };
+        let nudge = at(MAX_STATE_SYNC_DIRECTIVE_BYTES);
+        let segments = [bounded_read_segment(1, 0)];
+        let snapshot = || {
+            let loaded = store.load("ses").unwrap();
+            (
+                loaded.row_version,
+                loaded.meta,
+                store.load_history_segments("ses").unwrap(),
+            )
+        };
+        let before = snapshot();
+        let with = |request: ModuleStateSyncRequest<'_>| {
+            let seq = store.load("ses").unwrap().meta.shadow_seq;
+            store.apply_authority_state_sync(ModuleStateSyncRequest {
+                expected_shadow_seq: seq,
+                ..request
+            })
+        };
+        for (field, bound, result) in [
+            (
+                "note_nudge_anchor bytes",
+                MAX_NOTE_NUDGE_ANCHOR_BYTES,
+                with(ModuleStateSyncRequest {
+                    note_nudge_anchors: Some(&anchors),
+                    ..history_segment_sync(0, &segments)
+                }),
+            ),
+            (
+                "deferred_execute_state reason bytes",
+                MAX_STATE_SYNC_DIRECTIVE_BYTES,
+                with(ModuleStateSyncRequest {
+                    deferred_execute_state: Some(Some(&directive)),
+                    ..history_segment_sync(0, &segments)
+                }),
+            ),
+            (
+                "channel2_nudge_state bytes",
+                MAX_STATE_SYNC_DIRECTIVE_BYTES,
+                with(ModuleStateSyncRequest {
+                    channel2_nudge_state: Some(&nudge),
+                    ..history_segment_sync(0, &segments)
+                }),
+            ),
+            (
+                "last_todo_state bytes",
+                MAX_TODO_STATE_BYTES,
+                with(ModuleStateSyncRequest {
+                    last_todo_state: Some(at(MAX_TODO_STATE_BYTES)),
+                    ..history_segment_sync(0, &segments)
+                }),
+            ),
+        ] {
+            match result {
+                Err(ModuleStateSyncError::OverBound {
+                    field: refused,
+                    bound: refused_bound,
+                    found,
+                }) => {
+                    assert_eq!(refused, field);
+                    assert_eq!(refused_bound, bound, "{field}");
+                    assert_eq!(found, bound + expansion, "{field}");
+                }
+                other => panic!("{field}: {other:?}"),
+            }
+        }
+        assert_eq!(snapshot(), before, "a refused sync writes nothing");
+    }
+
+    #[test]
+    fn state_sync_refuses_a_result_over_the_legacy_segment_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let cap = MAX_LEGACY_HISTORY_SEGMENTS as i64;
+        let legacy: Vec<_> = (1..=cap)
+            .map(|sequence| bounded_read_segment(sequence, 1))
+            .collect();
+        sync_history_segments(&store, 0, &legacy).unwrap();
+        sync_history_segments(&store, 1, &legacy[..1])
+            .expect("an overwrite keeps the session at its cap");
+        let snapshot = || {
+            let loaded = store.load("ses").unwrap();
+            (
+                loaded.row_version,
+                loaded.meta,
+                store.load_history_segments("ses").unwrap(),
+            )
+        };
+        let before = snapshot();
+        assert_eq!(
+            before.2.iter().filter(|row| row.legacy == 1).count(),
+            MAX_LEGACY_HISTORY_SEGMENTS
+        );
+
+        let refused = sync_history_segments(&store, 2, &[bounded_read_segment(cap + 1, 1)]);
+        assert!(
+            matches!(
+                refused,
+                Err(ModuleStateSyncError::OverBound {
+                    field: "legacy history_segments count",
+                    bound: MAX_LEGACY_HISTORY_SEGMENTS,
+                    found,
+                }) if found == MAX_LEGACY_HISTORY_SEGMENTS + 1
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(snapshot(), before, "a refused sync writes nothing");
+        sync_history_segments(&store, 2, &[bounded_read_segment(cap + 1, 0)])
+            .expect("a non-legacy row leaves the legacy count at its cap");
+    }
+
+    #[test]
+    fn summarizer_publication_refuses_a_result_over_the_legacy_segment_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap = MAX_LEGACY_HISTORY_SEGMENTS as i64;
+        let store = bounded_read_store(dir.path(), cap, &(1..=cap).collect::<Vec<_>>());
+        let generation = HistorySegmentSetGeneration {
+            max_sequence: cap,
+            count: 0,
+        };
+        let base = publishing_meta();
+        let meta = ModuleMeta {
+            history_summarizer: HistorySummarizerDurableState {
+                history_segment_set_generation: generation,
+                ..base.history_summarizer.clone()
+            },
+            ..base
+        };
+        let expected = store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &meta,
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let predicate = HistorySummarizerPublishPredicate {
+            history_segment_set_generation: generation,
+            ..publish_predicate()
+        };
+        let published = |legacy: i32| StoredHistorySegment {
+            start_message: 2 * cap + 1,
+            end_message: 2 * cap + 2,
+            ..bounded_read_segment(cap + 1, legacy)
+        };
+        let publish = |row: StoredHistorySegment| {
+            store.publish_history_summarizer_chunk(HistorySummarizerPublishRequest {
+                session_id: "ses",
+                expected_row_version: Some(expected),
+                expected_revert_epoch: 0,
+                predicate: &predicate,
+                project_path: "git:proj",
+                history_segments: &[row],
+                events: &[],
+                primer_candidates: &[],
+                user_memory_candidates: &[],
+                publication_floor_ordinal: 21,
+                chunk_transcript: None,
+                memory_reviewer_nonadmission: None,
+                memory_reviewer_activation: None,
+                published_at_ms: 0,
+            })
+        };
+        let snapshot = || {
+            let loaded = store.load("ses").unwrap();
+            (
+                loaded.row_version,
+                loaded.meta,
+                store.load_history_segments("ses").unwrap(),
+            )
+        };
+        let before = snapshot();
+        assert_eq!(
+            before.2.iter().filter(|row| row.legacy == 1).count(),
+            MAX_LEGACY_HISTORY_SEGMENTS
+        );
+
+        let refused = publish(published(1));
+        assert!(
+            matches!(
+                &refused,
+                Err(HistorySummarizerPublishError::FenceRejected { reason })
+                    if reason.contains("legacy")
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(snapshot(), before, "a refused publication writes nothing");
+        publish(published(0)).expect("a non-legacy row leaves the legacy count at its cap");
     }
 
     #[test]
@@ -32188,6 +32827,10 @@ mod lineage_descent_tests {
     }
 
     fn identity_document_receipts(store: &MemoryStore, session: &str) -> i64 {
+        row_document_receipts(store, "block_identities", session)
+    }
+
+    fn row_document_receipts(store: &MemoryStore, field_id: &str, session: &str) -> i64 {
         store
             .inner
             .with_conn(|conn| {
@@ -32195,10 +32838,10 @@ mod lineage_descent_tests {
                     "SELECT COUNT(*) FROM scan_owner_copies copies
                        JOIN scan_domain_owners owners USING(domain_owner_id)
                        JOIN scan_owner_scopes scopes USING(owner_scope_id)
-                      WHERE copies.field_id = 'block_identities'
+                      WHERE copies.field_id = ?2
                         AND owners.owner_kind = 'cache_state'
                         AND scopes.scope_kind = 'session' AND scopes.scope_key = ?1",
-                    params![active_scan_private_key("session", session)],
+                    params![active_scan_private_key("session", session), field_id],
                     |row| row.get(0),
                 )
             })
@@ -32878,6 +33521,251 @@ mod lineage_descent_tests {
             "recomp deletes every row, so it retires every document receipt"
         );
         assert!(store.all_block_identities_for_test("A").is_empty());
+    }
+
+    fn covered_delta(upserts: &[(u64, &str)], deletes: &[u64]) -> CoveredSystemMessageDelta {
+        CoveredSystemMessageDelta {
+            upserts: upserts
+                .iter()
+                .map(|(ordinal, content)| (*ordinal, content.to_string()))
+                .collect(),
+            deletes: deletes.iter().copied().collect(),
+        }
+    }
+
+    fn covered(entries: &[(u64, &str)]) -> Vec<CoveredSystemMessage> {
+        entries
+            .iter()
+            .map(|(ordinal, content)| CoveredSystemMessage {
+                ordinal: *ordinal,
+                content: content.to_string(),
+            })
+            .collect()
+    }
+
+    fn covered_receipts(store: &MemoryStore, session: &str) -> i64 {
+        row_document_receipts(store, "covered_system_messages", session)
+    }
+
+    #[test]
+    fn covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let meta = ModuleMeta::default();
+        let commit = |expected, delta: &CoveredSystemMessageDelta| {
+            store.commit_with_covered_system_messages_for_test(
+                "ses",
+                expected,
+                &CoreState::empty(),
+                &meta,
+                delta,
+            )
+        };
+        let version = commit(
+            None,
+            &covered_delta(&[(9, "rule c"), (2, "rule a"), (5, "rule b")], &[]),
+        )
+        .unwrap();
+        let first = covered(&[(2, "rule a"), (5, "rule b"), (9, "rule c")]);
+        assert_eq!(store.covered_system_messages_for_test("ses"), first);
+        assert_eq!(
+            store
+                .load_transform_snapshot("ses", &[], &[])
+                .unwrap()
+                .covered_system_messages,
+            first,
+            "the snapshot reads the rows in ordinal order"
+        );
+        let stored_meta: String = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT meta FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert!(!stored_meta.contains("rule"), "{stored_meta}");
+        assert_eq!(covered_receipts(&store, "ses"), 1);
+
+        // A metadata writer outside the transform leaves every row in place.
+        let loaded = store.load("ses").unwrap();
+        let version_after_meta = store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        assert!(version_after_meta > version);
+        assert_eq!(store.covered_system_messages_for_test("ses"), first);
+        assert_eq!(covered_receipts(&store, "ses"), 1);
+
+        let version = commit(
+            Some(version_after_meta),
+            &covered_delta(&[(2, "rule a")], &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            covered_receipts(&store, "ses"),
+            1,
+            "an unchanged row is neither written nor scanned"
+        );
+        let version = commit(Some(version), &covered_delta(&[(5, "rule b2")], &[])).unwrap();
+        assert_eq!(
+            covered_receipts(&store, "ses"),
+            2,
+            "a partly replaced document keeps its receipt"
+        );
+
+        let before = (
+            store.load("ses").unwrap().row_version,
+            store.covered_system_messages_for_test("ses"),
+        );
+        let lost = commit(Some(version + 1), &covered_delta(&[(11, "rule d")], &[2]));
+        assert!(matches!(lost, Err(MemoryStoreError::CasConflict { .. })));
+        let both = commit(Some(version), &covered_delta(&[(5, "rule e")], &[5]));
+        assert!(
+            both.as_ref()
+                .is_err_and(|error| error.to_string().contains("both writes and deletes")),
+            "{both:?}"
+        );
+        assert_eq!(
+            (
+                store.load("ses").unwrap().row_version,
+                store.covered_system_messages_for_test("ses"),
+            ),
+            before,
+            "a lost or refused commit writes no row"
+        );
+        assert_eq!(covered_receipts(&store, "ses"), 2);
+
+        let version = commit(Some(version), &covered_delta(&[], &[2, 9])).unwrap();
+        assert_eq!(
+            store.covered_system_messages_for_test("ses"),
+            covered(&[(5, "rule b2")])
+        );
+        assert_eq!(
+            covered_receipts(&store, "ses"),
+            1,
+            "the emptied first document's receipt is retired"
+        );
+        commit(Some(version), &covered_delta(&[], &[5])).unwrap();
+        assert!(store.covered_system_messages_for_test("ses").is_empty());
+        assert_eq!(covered_receipts(&store, "ses"), 0);
+    }
+
+    #[test]
+    fn covered_system_content_is_stored_as_the_meta_scan_redacts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let content = "rule one password=planted-secret next";
+        store
+            .commit_with_covered_system_messages_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+                &covered_delta(&[(3, content)], &[]),
+            )
+            .unwrap();
+        let entry = serde_json::to_string(&CoveredSystemMessage {
+            ordinal: 3,
+            content: content.to_string(),
+        })
+        .unwrap();
+        let meta_shaped = prepare_json_content_preserving_identities(&format!(
+            r#"{{"last_committed_pass_at_ms":0,"covered_system_messages":[{entry}],"shadow_generation":0}}"#
+        ))
+        .unwrap();
+        let meta_shaped: Value = serde_json::from_str(&meta_shaped).unwrap();
+        let expected = meta_shaped["covered_system_messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(expected, content);
+        assert!(!expected.contains("planted-secret"), "{expected}");
+        assert_eq!(
+            store.covered_system_messages_for_test("ses"),
+            covered(&[(3, &expected)])
+        );
+    }
+
+    #[test]
+    fn reset_and_delete_remove_covered_system_rows_and_their_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        for session in ["reset", "deleted", "kept"] {
+            store
+                .commit_with_covered_system_messages_for_test(
+                    session,
+                    None,
+                    &CoreState::empty(),
+                    &ModuleMeta::default(),
+                    &covered_delta(&[(1, "rule a"), (4, "rule b")], &[]),
+                )
+                .unwrap();
+            assert_eq!(covered_receipts(&store, session), 1);
+        }
+        let version = store.load("reset").unwrap().row_version;
+        store.reset_session_for_recomp("reset", version).unwrap();
+        store.delete_session("deleted", "/project").unwrap();
+        for session in ["reset", "deleted"] {
+            assert!(
+                store.covered_system_messages_for_test(session).is_empty(),
+                "{session}"
+            );
+            assert_eq!(covered_receipts(&store, session), 0, "{session}");
+        }
+        assert_eq!(store.covered_system_messages_for_test("kept").len(), 2);
+        assert_eq!(covered_receipts(&store, "kept"), 1);
+    }
+
+    #[test]
+    fn descent_leaves_the_target_without_covered_system_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 10);
+        let loaded = store.load("A").unwrap();
+        store
+            .commit_with_covered_system_messages_for_test(
+                "A",
+                loaded.row_version,
+                &loaded.core,
+                &loaded.meta,
+                &covered_delta(&[(1, "rule a"), (2, "rule b")], &[]),
+            )
+            .unwrap();
+        let target_version = store
+            .commit_with_covered_system_messages_for_test(
+                "B",
+                None,
+                &CoreState::empty(),
+                &ModuleMeta::default(),
+                &covered_delta(&[(7, "rule b7")], &[]),
+            )
+            .unwrap();
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        let outcome = store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: Some(target_version),
+                edge_id: 42,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 10,
+            })
+            .unwrap();
+        assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
+        assert!(store.covered_system_messages_for_test("B").is_empty());
+        assert_eq!(covered_receipts(&store, "B"), 0);
+        assert_eq!(
+            store.covered_system_messages_for_test("A"),
+            covered(&[(1, "rule a"), (2, "rule b")])
+        );
+        assert_eq!(covered_receipts(&store, "A"), 1);
     }
 
     /// A full-session recomp retires the history_segment set and bumps the revert epoch, but the row stays alive, so the producer's sequence and Q31 nonadmission facts survive while in-flight firing state is cleared.

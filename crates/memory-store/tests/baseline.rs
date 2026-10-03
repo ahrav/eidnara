@@ -12,6 +12,7 @@ use storage::{INFRASTRUCTURE_TABLES, STORE_BASELINE, StoreError, schema_inventor
 /// table, index, or trigger fails here by name, independently of the digest.
 const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "block_identities_by_scan_version"),
+    ("index", "covered_system_messages_by_scan_version"),
     ("index", "idx_authority_project"),
     ("index", "idx_authority_route_bindings_authority"),
     ("index", "idx_changefeed_domain_seq"),
@@ -63,6 +64,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "channel1_appends"),
     ("table", "chunk_transcript_totals"),
     ("table", "chunk_transcripts"),
+    ("table", "covered_system_messages"),
     ("table", "facade_mutation_ledger"),
     ("table", "fence"),
     ("table", "field_scans"),
@@ -454,11 +456,11 @@ fn a_file_with_a_different_baseline_is_refused_as_a_baseline_mismatch() {
     );
 }
 
-/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds
-/// `block_identities` without its scan-version index.
+/// The preceding Memory Store baseline, frozen byte for byte, and its digest. It holds no
+/// `covered_system_messages` table.
 const PRIOR_BASELINE: &str = include_str!("fixtures/prior_baseline.sql");
 const PRIOR_BASELINE_DIGEST: &str =
-    "79d5bb7f35f5056c40838b15427b9f7a0052e52d730f8c9586c27dbfc6357b79";
+    "14f25ad8b7044a4c89219e1a4a34cd54d12abc596fca6a3438fdcb831e3bf855";
 
 /// A store laid down under the prior baseline refuses to open and is left byte-identical.
 #[test]
