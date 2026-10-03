@@ -74,7 +74,7 @@ References are verified at `0ff62b29a` unless another tree is named.
   messages; it now uses a secret-bearing session id.
 - Corrections to the spec's citations at `265df096`: S`:427` (constant) is
   `:429`; S`:3998-4004` (guard) is `:4599-4605`; the growing fields
-  S`:1668` (`baseline_parts`), `:1876` (`block_identity_by_mid`), and `:2035`
+  S`:1668` (`baseline_parts`), `:1876` (`block_identity_by_mid`), and `:2014`
   (`served_output_fingerprint`), read at `265df096`, are removed by #905 and
   #906; S`:1929` (`tail_hygiene_baseline`) remains as scalars only. The
   existing check D`transform_meta_bound.rs:20-99`

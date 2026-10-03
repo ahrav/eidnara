@@ -40,7 +40,7 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   `transform.rs:4881-4893` at `265df096`). A non-bust pass with no durable
   baseline still leaves it absent; the no-previous refresh runs on a bust.
 - Reachability: at `265df096` `apply_once` entered the folding path whenever
-  `ctx.compaction_enabled` held (`transform.rs:3060-3062` there; default
+  `ctx.compaction_enabled` held (`transform.rs:3050-3052` there; default
   true, `config.rs:125` there). Since `8b1e04944` (#903) it enters only when
   the stored authority folds (`crates/daemon/src/transform.rs:3217-3218`),
   which needs a non-empty chain (`crates/daemon/src/config.rs:181-185`).

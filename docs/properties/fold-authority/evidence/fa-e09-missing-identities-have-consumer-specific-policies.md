@@ -43,7 +43,7 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   transform read the same map (`transform.rs:5377-5379` there). #905 removed
   the field and routed both through the row lookup.
 - `IdentityDrift` and `identity_drift_requires_reject`
-  (`transform.rs:5441-5454` at `265df096`) were deleted by `6477c9f27`
+  (`transform.rs:5431-5444` at `265df096`) were deleted by `6477c9f27`
   ("Delete covered-drift rejection and the serialized-output memo",
   window-protocol #833, D25). A stored-versus-new mismatch now re-adopts or,
   for a frozen tail target, refuses with `FrozenTargetDrift` (`:5522-5526`).

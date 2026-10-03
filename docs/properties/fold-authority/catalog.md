@@ -293,7 +293,7 @@ rows stay as they were. Cross-reference:
 catalogs the same guard for the window protocol and records that the refusal
 half had no witness; #905's store test now supplies one for a later commit.
 Corrections to the spec's citations (at `265df096`): the constant moved from
-S`:427` to `:429` and the guard from `:4020-4026` to `:4599-4605`; the
+S`:427` to `:429` and the guard from `:3998-4004` to `:4599-4605`; the
 existing check D`transform_meta_bound.rs:20-99` was deleted by #833
 (`7a8fb84b`); the growing fields S`:1668`, `:1876`, `:2014` left the record
 (identity map by #905, fingerprints and baseline parts by #906).

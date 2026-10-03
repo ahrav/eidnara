@@ -25,11 +25,11 @@ References are verified at `0ff62b29a` unless another tree is named.
   (`crates/daemon/src/config.rs:181-185`, default chain `:142`), so the path
   is default-production at HEAD. At `265df096` it ran only with
   `compaction.enabled: false`, hence the record's explicit-config label.
-- Output: `apply_additive_only` (`transform.rs:2700`) builds the served list
+- Output: `apply_additive_only` (`transform.rs:2710`) builds the served list
   as the m0 unit, the m1 unit, then every ingress message cloned in order
   (`:3064-3074`). This is the surviving clause.
 - Ingress update: the additive path calls only `apply_ingress_scalars`
-  (`:2904`; body `:5593-5608`: newest-live block and ordinal, last usage).
+  (`:2914`; body `:5593-5608`: newest-live block and ordinal, last usage).
   Identity insertion, provisional-tail removal, tail and basis re-adoption,
   and the re-adoption counter live in `apply_ingress_identities` (`:5612`),
   called only on the folding path.
@@ -51,8 +51,8 @@ References are verified at `0ff62b29a` unless another tree is named.
   (D`lib.rs:42489` at `265df096`) was deleted on `main` by `252d9e179`
   ("Project every request from its full input and delete the projection
   cache"), which is after `265df096` and an ancestor of HEAD. The spec's
-  other citations (D`transform.rs:2562-3036`, `:2767-2774`, `:2905-2927`,
-  `:5488-5519`, `:3060-3062`) describe `265df096`; their HEAD counterparts
+  other citations (D`transform.rs:2562-3036`, `:2757-2764`, `:2895-2917`,
+  `:5478-5509`, `:3050-3052`) describe `265df096`; their HEAD counterparts
   are the lines above.
 
 ## Failure scenario
