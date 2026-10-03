@@ -341,6 +341,23 @@ describe("eidnara_search through the fused route", () => {
         expect(transport.calls).toHaveLength(0);
     });
 
+    it("gives hydration only what remains of the search deadline", async () => {
+        const { kernel, transport, run } = harness();
+        kernel.seedDecision({ object_id: id(1), decision_kind: "NAMING", summary: "Timed text." });
+        kernel.routeReply = () => {
+            const until = performance.now() + 40;
+            while (performance.now() < until) {
+                // The ranking spends 40 ms of the search's budget.
+            }
+            return fused([{ object: id(1) }]);
+        };
+        await run({ query: "anything" });
+        expect(methods(transport)).toEqual(["retrieval.query", "kernel.read"]);
+        expect(transport.calls[1]?.timeoutMs ?? Infinity).toBeLessThanOrEqual(
+            ROUTE_SEARCH_DEADLINE_MS - 35,
+        );
+    });
+
     it("reports a degraded or truncated ranking and renders a ranked anti-memory warning", async () => {
         const { kernel, run } = harness();
         kernel.seedDecision({
