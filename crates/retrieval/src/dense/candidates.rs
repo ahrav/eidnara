@@ -15,8 +15,8 @@ use super::layered::{
     self, Cursor, LayerAccount, LayeredQuery, LayeredRefusal, Resolving, fault_refusal,
 };
 use super::oracle::{
-    Completion, ExhaustiveRanking, IncompleteReason, Lane, OracleBounds, OracleRefusal, PageRow,
-    RowSource, StorageBounds, Walk, Window,
+    self, Completion, ExhaustiveRanking, IncompleteReason, Lane, OracleBounds, OracleRefusal,
+    PageRow, RowSource, StorageBounds, Walk, Window,
 };
 use super::resolve::{Layer, RowFault};
 use super::scalar::{self, QuantizedQuery, QueryRefusal, Scales};
@@ -25,12 +25,18 @@ use crate::eligibility::Authority;
 
 /// A layer's int8 codes by row index, in the order of the layer's identifiers.
 pub trait CodeAccess {
+    fn row_count(&self) -> usize;
+
     /// Writes the codes of row `index` into `into`; the caller checks them against the recipe.
     fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault>;
 }
 
 /// Resident codes; a slice cannot stand behind `dyn`, so the owning vector is the implementor.
 impl CodeAccess for Vec<Vec<i8>> {
+    fn row_count(&self) -> usize {
+        self.len()
+    }
+
     fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault> {
         let codes = self.get(index).ok_or_else(|| {
             RowFault::Unavailable(format!(
@@ -94,10 +100,17 @@ pub struct CandidatePool {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CandidateRefusal {
+    /// The query encodes under every layer's scales before any row is read, whichever layers end up holding winners.
     #[error("the query cannot score layer {layer}'s codes: {refusal}")]
     Query { layer: usize, refusal: QueryRefusal },
     #[error("{codes} code sets were supplied for {layers} layers")]
     Codes { layers: usize, codes: usize },
+    #[error("layer {layer} holds {rows} rows but {codes} rows of codes")]
+    CodeRows {
+        layer: usize,
+        rows: usize,
+        codes: usize,
+    },
     #[error(transparent)]
     Layered(#[from] LayeredRefusal),
 }
@@ -126,7 +139,7 @@ impl RowSource for ResolvedCodes<'_> {
     type Payload = WinnerCodes;
 
     fn page_sql(&self) -> &str {
-        layered::live_sql()
+        &layered::LIVE_SQL
     }
 
     fn after_page(&mut self, more: bool) {
@@ -209,6 +222,12 @@ fn select_inner<'a>(
             codes: request.codes.len(),
         });
     }
+    for (layer, (rows, codes)) in request.layers.iter().zip(request.codes).enumerate() {
+        let (rows, codes) = (rows.rows.row_count(), codes.codes.row_count());
+        if rows != codes {
+            return Err(CandidateRefusal::CodeRows { layer, rows, codes });
+        }
+    }
     let layout = RowLayout {
         dimension: request.generation.vector_dimension,
         metric: request.metric,
@@ -251,11 +270,13 @@ fn select_inner<'a>(
         },
     )?;
     let ranking = &mut ranked.ranking;
+    // A discarded pool keeps its counts and carries no authority stamp a caller could mistake for a usable one.
     if let Completion::Incomplete(reason) = ranking.completion
         && reason != IncompleteReason::DenseCoverageShortfall
     {
-        ranking.ranked.clear();
-        ranking.candidates.clear();
+        oracle::drop_rows(ranking);
+        ranking.snapshot = None;
+        ranking.incarnation = None;
     }
     // The cursor's winners are in identifier order, and every pool entry is one of them.
     let winners = &source.cursor().winners;

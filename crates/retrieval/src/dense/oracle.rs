@@ -80,16 +80,21 @@ pub(super) struct Walk<'a> {
 /// Byte limits on the two stores a walk fills, counted separately: the temporary rows one page selects for judgment, and the accepted set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageBounds {
-    /// Bytes of the candidates one page selects for judgment, each counted as [`selected_bytes`] counts it.
+    /// Bytes of the candidates one page selects for judgment, each counted as [`selected_bytes`] counts it. Until the set fills, every row of a page is selected, so the bound covers `page_rows` rows at their largest.
     pub batch_bytes: NonZeroUsize,
-    /// Bytes of the accepted set: its preallocated entries plus the strings each admitted entry owns, as [`held_bytes`] counts them.
+    /// Bytes of the accepted set while the walk runs: its preallocated entries plus the strings each admitted entry owns, as [`held_bytes`] counts them. The final re-judgment moves the same entries through two more vectors of at most `k` slots.
     pub heap_bytes: NonZeroUsize,
 }
 
-/// One selected row: its candidate, its score, and the strings the candidate owns.
+/// One selected row: the candidate, the slot and two indices judgment orders it with, its score and the batch copy of it, and the strings the candidate owns.
 pub fn selected_bytes(candidate: &OccurrenceCandidate) -> usize {
-    size_of::<OccurrenceCandidate>() + size_of::<f64>() + candidate_strings(candidate)
+    SELECTED_ROW_BYTES + candidate_strings(candidate)
 }
+
+const SELECTED_ROW_BYTES: usize = size_of::<OccurrenceCandidate>()
+    + size_of::<Option<OccurrenceCandidate>>()
+    + 2 * size_of::<usize>()
+    + 2 * size_of::<f64>();
 
 /// The strings one held entry owns beyond its preallocated slot: the candidate's, plus the ranked copy of its identifier.
 pub fn held_bytes(candidate: &OccurrenceCandidate) -> usize {
@@ -100,13 +105,15 @@ pub fn held_bytes(candidate: &OccurrenceCandidate) -> usize {
 pub const HELD_SLOT_BYTES: usize = size_of::<(Ranked, OccurrenceCandidate)>();
 
 fn candidate_strings(candidate: &OccurrenceCandidate) -> usize {
-    candidate.occurrence_id.len()
-        + candidate.candidate.object_id.len()
-        + candidate
-            .candidate
-            .artifact_digest
-            .as_ref()
-            .map_or(0, String::len)
+    strings_of(
+        &candidate.occurrence_id,
+        &candidate.candidate.object_id,
+        candidate.candidate.artifact_digest.as_deref().unwrap_or(""),
+    )
+}
+
+fn strings_of(occurrence_id: &str, object_id: &str, digest: &str) -> usize {
+    occurrence_id.len() + object_id.len() + digest.len()
 }
 
 /// Supplies the live required rows in identifier order, what each carries into scoring, and its score.
@@ -450,7 +457,7 @@ pub(super) fn walk(
             .get()
             .min(bounds.max_rows.get() - progress.ranking.coverage.required);
         let Some(page) = progress.visit_page(conn, request, source, take, budget)? else {
-            return progress.ended();
+            return progress.ended(budget);
         };
         let more = page.more;
         if let Some(selected) = page.selected {
@@ -458,11 +465,11 @@ pub(super) fn walk(
             let flow = progress.judge_selected(kernel, request.authority, selected, budget)?;
             (progress.hook)(Window::AfterPage(progress.ranking.consumed.pages));
             match flow {
-                ControlFlow::Break(Stop::Moved(moved)) => {
+                ControlFlow::Break(Some(moved)) => {
                     incomplete(&mut progress.ranking, moved_reason(moved));
                     break;
                 }
-                ControlFlow::Break(Stop::Ended) => return progress.ended(),
+                ControlFlow::Break(None) => return progress.ended(budget),
                 ControlFlow::Continue(()) => {}
             }
         } else {
@@ -501,17 +508,14 @@ fn exhausted(ranking: ExhaustiveRanking) -> Result<ExhaustiveRanking, OracleRefu
 
 /// A walk that stopped mid-page holds a set nobody re-judged, so the result keeps the counts and returns no row.
 fn discarded(mut ranking: ExhaustiveRanking, reason: IncompleteReason) -> ExhaustiveRanking {
-    ranking.ranked.clear();
-    ranking.candidates.clear();
+    drop_rows(&mut ranking);
     incomplete(&mut ranking, reason);
     ranking
 }
 
-/// Why judgment stopped a walk before its pages ran out.
-enum Stop {
-    /// The budget ended or a storage bound was reached; `Progress::ended` says which.
-    Ended,
-    Moved(AuthorityMoved),
+pub(super) fn drop_rows(ranking: &mut ExhaustiveRanking) {
+    ranking.ranked.clear();
+    ranking.candidates.clear();
 }
 
 /// The bytes a walk's stores hold, and the storage bound that stopped it.
@@ -645,16 +649,21 @@ impl<P: Default> Block<P> {
             if stored.stopped.is_some() || !top.admits(*score, &lane.occurrence_id) {
                 continue;
             }
-            let candidate = lane.candidate();
-            if let Some(storage) = request.storage {
-                let bytes = stored.selected + selected_bytes(&candidate);
+            if let Some(storage) = stored.limits {
+                let bytes = stored.selected
+                    + SELECTED_ROW_BYTES
+                    + strings_of(
+                        &lane.occurrence_id,
+                        &lane.source_object_id,
+                        &lane.source_artifact_digest,
+                    );
                 if bytes > storage.batch_bytes.get() {
                     stored.stopped = Some(IncompleteReason::BatchBytes);
                     continue;
                 }
                 stored.selected = bytes;
             }
-            selected.candidates.push(candidate);
+            selected.candidates.push(lane.candidate());
             selected.scores.push(*score);
         }
         Ok(())
@@ -673,11 +682,11 @@ struct Progress<P, H> {
 }
 
 impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
-    /// The budget ended or a storage bound stopped the walk; a bound names its own reason.
-    fn ended(self) -> Result<ExhaustiveRanking, OracleRefusal> {
+    /// The budget ended or a storage bound stopped the walk; an ended budget wins, as in [`incomplete`].
+    fn ended(self, budget: &EvalBudget) -> Result<ExhaustiveRanking, OracleRefusal> {
         match self.stored.stopped {
-            Some(reason) => Ok(discarded(self.ranking, reason)),
-            None => exhausted(self.ranking),
+            Some(reason) if !budget.is_exhausted() => Ok(discarded(self.ranking, reason)),
+            _ => exhausted(self.ranking),
         }
     }
 
@@ -801,7 +810,7 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
         authority: Authority<'_>,
         Selected { candidates, scores }: Selected,
         budget: &EvalBudget,
-    ) -> Result<ControlFlow<Stop>, OracleRefusal> {
+    ) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
         let k = self.top.k();
         let total = candidates.len();
         if total == 0 {
@@ -903,11 +912,11 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
         candidates: Vec<OccurrenceCandidate>,
         scores: Vec<f64>,
         budget: &EvalBudget,
-    ) -> Result<ControlFlow<Stop>, OracleRefusal> {
+    ) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
         let Some((report, moved)) =
             judge_page(kernel, authority, &candidates, budget, &mut self.ranking)?
         else {
-            return Ok(ControlFlow::Break(Stop::Ended));
+            return Ok(ControlFlow::Break(None));
         };
         (self.hook)(Window::AfterJudgment);
         // Exclusions are judged work whether the page is then scored, cancelled, or discarded for a moved authority.
@@ -918,19 +927,19 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
         }
         if let Some(moved) = moved {
             // The moved batch's verdicts describe other facts, so none is admitted.
-            return Ok(ControlFlow::Break(Stop::Moved(moved)));
+            return Ok(ControlFlow::Break(Some(moved)));
         }
         self.admissions.judged += candidates.len();
         for ((candidate, score), judged) in
             candidates.into_iter().zip(scores).zip(report.occurrences)
         {
             if budget.is_exhausted() {
-                return Ok(ControlFlow::Break(Stop::Ended));
+                return Ok(ControlFlow::Break(None));
             }
             if judged.disposition == Disposition::Eligible {
                 self.admissions.eligible += 1;
                 if !self.hold(&candidate, score) {
-                    return Ok(ControlFlow::Break(Stop::Ended));
+                    return Ok(ControlFlow::Break(None));
                 }
                 let ranked = Ranked {
                     occurrence_id: candidate.occurrence_id.clone(),

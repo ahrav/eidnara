@@ -62,8 +62,8 @@ pub enum LayeredRefusal {
     Oracle(#[from] OracleRefusal),
 }
 
-/// The oracle's page over live required rows without the stored vector; the walk takes vectors from the resolved layers instead.
-static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
+/// The oracle's page over live required rows without the stored vector; the walk takes vectors or codes from the resolved layers instead.
+pub(super) static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,NULL,
                 {CURRENT_PENDING}
@@ -75,11 +75,6 @@ static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
         *oracle::DENSE_CLASSES
     )
 });
-
-/// The live required rows in identifier order, for a walk that draws vectors or codes from resolved layers.
-pub(super) fn live_sql() -> &'static str {
-    &LIVE_SQL
-}
 
 /// Merges the winners, in identifier order, with the walk's rows in the same order.
 pub(super) struct Cursor<'a> {
@@ -145,7 +140,7 @@ impl RowSource for ResolvedRows<'_> {
     type Payload = Vec<f32>;
 
     fn page_sql(&self) -> &str {
-        live_sql()
+        &LIVE_SQL
     }
 
     fn after_page(&mut self, more: bool) {

@@ -11,9 +11,11 @@ non-result.
 - `oracle::walk` refuses `HeapOverBound` when the preallocated slots exceed
   the heap bound and `BatchOverBound` for a pool past the kernel batch, before
   any page is read.
-- `Block::flush` checks batch bytes before a selected candidate is pushed
-  (`oracle.rs:652`); `Progress::hold` checks heap bytes, net of the entry a
-  full set displaces, before an eligible row moves in (`oracle.rs:876`).
+- `Block::flush` checks batch bytes from the lane's strings before the
+  selected candidate is allocated; `Progress::hold` checks heap bytes, net of
+  the entry a full set displaces, before an eligible row moves in.
+- `selected_bytes` counts each selected row's candidate, its judgment slot,
+  two ordering indices, its score twice, and its strings.
 - `select_candidates` clears the pool for every incomplete reason except a
   coverage shortfall.
 

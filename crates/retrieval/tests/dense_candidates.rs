@@ -317,20 +317,38 @@ fn a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_elig
         })
         .collect();
     let expected = reference_pool(&fixture, &coded, &query, &positions, 4);
-    let pool = select(&fixture, &layers, &codes, &query, 4, roomy(4), |_| {}).unwrap();
-    assert_eq!(pool.ranking.completion, Completion::Complete);
-    assert_eq!(pool_of(&pool), expected);
-    assert_eq!(pool.ranking.ranked.len(), 4);
-    assert_aligned(&coded, &pool);
-    let excluded: usize = pool
-        .ranking
-        .consumed
-        .excluded
-        .iter()
-        .filter(|(verdict, _)| *verdict == EligibilityVerdict::Hidden)
-        .map(|(_, count)| count)
-        .sum();
-    assert!(excluded >= 4, "rejected leaders were judged: {excluded}");
+    for page_rows in [4, 40] {
+        let pool = select(
+            &fixture,
+            &layers,
+            &codes,
+            &query,
+            4,
+            roomy(page_rows),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(pool.ranking.completion, Completion::Complete);
+        assert_eq!(pool_of(&pool), expected, "page {page_rows}");
+        assert_aligned(&coded, &pool);
+        let excluded: usize = pool
+            .ranking
+            .consumed
+            .excluded
+            .iter()
+            .filter(|(verdict, _)| *verdict == EligibilityVerdict::Hidden)
+            .map(|(_, count)| count)
+            .sum();
+        assert!(excluded >= 4, "rejected leaders were judged: {excluded}");
+        if page_rows == 40 {
+            // One page: the first batch is the four best rows, all hidden; it admits nothing, so the rest of the page is one batch; then the re-judgment.
+            assert_eq!(
+                pool.ranking.consumed.excluded,
+                vec![(EligibilityVerdict::Hidden, 20)]
+            );
+            assert_eq!(pool.ranking.consumed.batches, 3);
+        }
+    }
 
     // Negative control: the unchecked top-R over every row, filtered afterwards, finds nothing.
     let mut everyone: BTreeMap<&str, (usize, usize)> = positions.clone();
@@ -469,7 +487,7 @@ fn a_change_to_an_excluded_row_discards_the_pool_too() {
 }
 
 #[test]
-fn unavailable_canonical_validation_admits_no_candidate() {
+fn a_corrupt_identity_field_refuses_the_scan_with_no_candidate() {
     let fixture = Fixture::all_admitted();
     let coded = [full_base(&fixture)];
     let layers = [coded[0].layer.layer()];
@@ -487,27 +505,6 @@ fn unavailable_canonical_validation_admits_no_candidate() {
             OracleRefusal::Kernel(kernel::KernelError::InvalidInput)
         )))
     );
-}
-
-fn pool_candidates(
-    fixture: &Fixture,
-    coded: &[Coded],
-    candidates: usize,
-) -> Vec<OccurrenceCandidate> {
-    let layers = [coded[0].layer.layer()];
-    let codes = [coded[0].codes()];
-    select(
-        fixture,
-        &layers,
-        &codes,
-        &axis(0),
-        candidates,
-        roomy(8),
-        |_| {},
-    )
-    .unwrap()
-    .ranking
-    .candidates
 }
 
 #[test]
@@ -530,7 +527,7 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
     };
     let complete = run(3, roomy(8)).unwrap();
     assert_eq!(complete.ranking.completion, Completion::Complete);
-    let held: Vec<OccurrenceCandidate> = pool_candidates(&fixture, &coded, 3);
+    let held: Vec<OccurrenceCandidate> = complete.ranking.candidates.clone();
 
     // Scan work: one row short of the population.
     let population = complete.ranking.coverage.required;
@@ -557,35 +554,47 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
     .unwrap();
     assert_eq!(exact.ranking.completion, Completion::Complete);
 
-    // Batch bytes: one page of eight selects the first row it visits; a bound one byte short of that row stops the scan.
-    let smallest = held.iter().map(selected_bytes).min().unwrap();
-    let batch = run(
-        3,
-        ScanBounds {
-            storage: StorageBounds {
-                batch_bytes: NonZeroUsize::new(smallest - 1).unwrap(),
-                ..roomy(8).storage
+    // Batch bytes. With a pool of eight every row is selected, so a one-row page holds the largest row and no more.
+    let every = run(8, roomy(8)).unwrap().ranking.candidates;
+    assert_eq!(every.len(), 8);
+    let largest = every.iter().map(selected_bytes).max().unwrap();
+    let batch = |page_rows: usize, batch_bytes: usize| {
+        run(
+            8,
+            ScanBounds {
+                storage: StorageBounds {
+                    batch_bytes: NonZeroUsize::new(batch_bytes).unwrap(),
+                    ..roomy(page_rows).storage
+                },
+                ..roomy(page_rows)
             },
-            ..roomy(8)
-        },
-    )
-    .unwrap();
+        )
+        .unwrap()
+    };
+    assert_eq!(batch(1, largest).ranking.completion, Completion::Complete);
+    let short = batch(1, largest - 1);
     assert_eq!(
-        batch.ranking.completion,
+        short.ranking.completion,
         Completion::Incomplete(IncompleteReason::BatchBytes)
     );
-    assert!(batch.ranking.ranked.is_empty());
+    assert!(short.ranking.ranked.is_empty());
+    // Each page starts its count afresh: two rows per page fit twice the largest row, below the scan's total.
+    assert!(every.iter().map(selected_bytes).sum::<usize>() > 2 * largest);
+    assert_eq!(
+        batch(2, 2 * largest).ranking.completion,
+        Completion::Complete
+    );
 
-    // Heap bytes: the preallocated slots and one byte fit; the first admission's strings do not.
+    // Heap bytes, with one-row pages so later rows displace held ones: the preallocated slots and one byte fit; the first admission's strings do not.
     let slots = 3 * HELD_SLOT_BYTES;
     let heap = run(
         3,
         ScanBounds {
             storage: StorageBounds {
                 heap_bytes: NonZeroUsize::new(slots + 1).unwrap(),
-                ..roomy(8).storage
+                ..roomy(1).storage
             },
-            ..roomy(8)
+            ..roomy(1)
         },
     )
     .unwrap();
@@ -594,24 +603,75 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
         Completion::Incomplete(IncompleteReason::HeapBytes)
     );
     assert!(heap.ranking.ranked.is_empty());
-    let fits = run(
-        3,
-        ScanBounds {
-            storage: StorageBounds {
-                heap_bytes: NonZeroUsize::new(slots + held.iter().map(held_bytes).sum::<usize>())
-                    .unwrap(),
-                ..roomy(8).storage
+    // The peak the walk holds: rows visited in identifier order, one per page, each offered while it outranks the worst of three.
+    let eligible = base_positions(&fixture, &coded[0]);
+    let scored = reference_pool(&fixture, &coded, &query, &eligible, usize::MAX);
+    let mut visit: Vec<(String, u64)> = scored.clone();
+    visit.sort();
+    let candidate_of = |id: &str| {
+        let row = fixture
+            .rows
+            .iter()
+            .find(|row| row.occurrence_id() == id)
+            .unwrap();
+        OccurrenceCandidate::new(
+            id.to_owned(),
+            row.class,
+            row.object.clone(),
+            1,
+            DIGEST.to_owned(),
+        )
+    };
+    let rank = |id: &str| scored.iter().position(|(other, _)| other == id).unwrap();
+    let mut held_ids: Vec<String> = Vec::new();
+    let mut peak = 0;
+    for (id, _) in &visit {
+        held_ids.push(id.clone());
+        held_ids.sort_by_key(|id| rank(id));
+        held_ids.truncate(3);
+        peak = peak.max(
+            held_ids
+                .iter()
+                .map(|id| held_bytes(&candidate_of(id)))
+                .sum::<usize>(),
+        );
+    }
+    let final_held: usize = held.iter().map(held_bytes).sum();
+    assert!(
+        peak > final_held,
+        "a displaced entry owned longer strings than its replacement"
+    );
+    let heap_at = |bytes: usize| {
+        run(
+            3,
+            ScanBounds {
+                storage: StorageBounds {
+                    heap_bytes: NonZeroUsize::new(bytes).unwrap(),
+                    ..roomy(1).storage
+                },
+                ..roomy(1)
             },
-            ..roomy(8)
-        },
-    )
-    .unwrap();
+        )
+        .unwrap()
+    };
+    let fits = heap_at(slots + peak);
     assert_eq!(
         fits.ranking.completion,
         Completion::Complete,
-        "the exact bound holds the pool"
+        "the peak bound holds the walk"
     );
     assert_eq!(pool_of(&fits), pool_of(&complete));
+    let paged = run(3, roomy(1)).unwrap();
+    assert!(
+        paged.ranking.consumed.judged - 3 > 3,
+        "{:?}",
+        paged.ranking.consumed
+    );
+    let tight = heap_at(slots + peak - 1);
+    assert_eq!(
+        tight.ranking.completion,
+        Completion::Incomplete(IncompleteReason::HeapBytes)
+    );
 
     // Slots that do not fit are refused before any page is read.
     let mut visited = 0;
@@ -719,8 +779,113 @@ fn a_coverage_shortfall_keeps_the_pool_and_says_so() {
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::DenseCoverageShortfall)
     );
-    assert_eq!(pool.ranking.ranked.len(), 3);
-    assert!(!pool_of(&pool).iter().any(|(id, _)| *id == beta));
+    let mut eligible = base_positions(&fixture, &coded[0]);
+    eligible.remove("beta");
+    assert_eq!(
+        pool_of(&pool),
+        reference_pool(&fixture, &coded, &axis(0), &eligible, 3)
+    );
+    assert_aligned(&coded, &pool);
+    // A bound reached in the same walk names itself, and the pool goes.
+    let bounded = select(
+        &fixture,
+        &layers,
+        &codes,
+        &axis(0),
+        3,
+        ScanBounds {
+            max_rows: NonZeroUsize::new(pool.ranking.coverage.required - 1).unwrap(),
+            ..roomy(2)
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        bounded.ranking.completion,
+        Completion::Incomplete(IncompleteReason::RowBound)
+    );
+    assert!(bounded.ranking.ranked.is_empty() && bounded.ranking.snapshot.is_none());
+}
+
+#[test]
+fn an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush() {
+    let fixture = Fixture::all_admitted();
+    let coded = [full_base(&fixture)];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let generation = generation();
+    let query = axis(0);
+    let budget = EvalBudget::unbounded();
+    let request = CandidateQuery {
+        generation: &generation,
+        metric: Metric::InnerProduct,
+        unit_norm_tolerance: TOLERANCE,
+        query: &query,
+        authority: fixture.authority(),
+        capacity: capacity(8),
+        bounds: ScanBounds {
+            storage: StorageBounds {
+                batch_bytes: NonZeroUsize::new(1).unwrap(),
+                ..roomy(8).storage
+            },
+            ..roomy(8)
+        },
+        layers: &layers,
+        codes: &codes,
+        max_entries: NonZeroUsize::new(64).unwrap(),
+    };
+    let mut visited = 0;
+    // The second visit cancels; the walk then flushes the first row, which the one-byte batch bound refuses.
+    let pool = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(select_candidates_with_hook_for_test(
+                conn,
+                &fixture.kernel,
+                &request,
+                &budget,
+                |window| {
+                    if matches!(window, Window::Visited(_)) {
+                        visited += 1;
+                        if visited == 2 {
+                            budget.cancel();
+                        }
+                    }
+                },
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pool.ranking.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(pool.ranking.ranked.is_empty());
+}
+
+#[test]
+fn codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read() {
+    let fixture = Fixture::all_admitted();
+    let mut base = full_base(&fixture);
+    base.codes.pop();
+    let coded = [base];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let rows = coded[0].layer.rows.len();
+    let mut visited = 0;
+    assert_eq!(
+        select(&fixture, &layers, &codes, &axis(0), 3, roomy(2), |window| {
+            if matches!(window, Window::Visited(_)) {
+                visited += 1;
+            }
+        }),
+        Err(CandidateRefusal::CodeRows {
+            layer: 0,
+            rows,
+            codes: rows - 1
+        })
+    );
+    assert_eq!(visited, 0);
 }
 
 #[test]
