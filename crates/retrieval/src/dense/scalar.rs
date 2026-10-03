@@ -263,17 +263,23 @@ pub fn encode_codes(codes: &[i8]) -> Vec<u8> {
 
 /// Rejects the reserved code `-128` so a corrupt byte cannot widen into a product outside the recipe's range.
 pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytesRejection> {
-    if bytes.len() != dimension as usize {
+    let codes: Vec<i8> = bytes.iter().map(|byte| *byte as i8).collect();
+    check_codes(&codes, dimension)?;
+    Ok(codes)
+}
+
+/// The row of codes [`decode_codes`] admits: `dimension` codes, none of them the reserved `-128`.
+pub fn check_codes(codes: &[i8], dimension: u32) -> Result<(), ScalarBytesRejection> {
+    if codes.len() != dimension as usize {
         return Err(ScalarBytesRejection::Dimension {
             expected: dimension,
-            actual: bytes.len(),
+            actual: codes.len(),
         });
     }
-    let codes: Vec<i8> = bytes.iter().map(|byte| *byte as i8).collect();
-    if let Some(coordinate) = codes.iter().position(|code| *code == i8::MIN) {
-        return Err(ScalarBytesRejection::ReservedCode { coordinate });
+    match codes.iter().position(|code| *code == i8::MIN) {
+        Some(coordinate) => Err(ScalarBytesRejection::ReservedCode { coordinate }),
+        None => Ok(()),
     }
-    Ok(codes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
