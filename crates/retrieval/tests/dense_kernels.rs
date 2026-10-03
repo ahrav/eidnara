@@ -3,7 +3,7 @@
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use retrieval::dense::codec::{Metric, RowLayout};
+use retrieval::dense::codec::{Metric, RowLayout, validate, validate_from_sum};
 use retrieval::dense::scalar::{Encoder, Scales, encode_validated_into};
 
 const SEED: [u8; 32] = *b"dense-kernel-agreement-seed-0001";
@@ -110,4 +110,58 @@ fn ties_and_their_neighbours_code_as_the_quotient_does_in_wide_rows() {
             assert_eq!((codes, clipped), (expected, expected_clipped), "scale {scale}, offset {offset}");
         }
     }
+}
+
+/// The in-order sum of squares the norm contract names: from `+0.0`, in increasing coordinate order.
+fn in_order_sum(row: &[f32]) -> f64 {
+    let mut sum = 0.0f64;
+    for value in row {
+        sum += f64::from(*value) * f64::from(*value);
+    }
+    sum
+}
+
+fn row_of(dimension: usize, seed: u64) -> Vec<f32> {
+    let mut state = seed | 1;
+    let mut raw: Vec<f64> = (0..dimension)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        })
+        .collect();
+    if raw.iter().all(|value| *value == 0.0) {
+        raw[0] = 1.0;
+    }
+    let norm = raw.iter().map(|value| value * value).sum::<f64>().sqrt();
+    raw.iter().map(|value| (value / norm) as f32).collect()
+}
+
+/// Each tolerance is the norm distance of a sum a few f64 steps from the in-order sum, so the bound falls between the in-order sum and any other summation order of the same squares.
+#[test]
+fn validation_decides_every_row_as_the_in_order_sum_does() {
+    runner()
+        .run(&(1usize..1000, any::<u64>()), |(dimension, seed)| {
+            let row = row_of(dimension, seed);
+            let sum = in_order_sum(&row);
+            for steps in -48i64..=48 {
+                let near = f64::from_bits((sum.to_bits() as i64 + steps) as u64);
+                let tolerance = (near.sqrt() - 1.0).abs();
+                let layout = RowLayout {
+                    dimension: dimension as u32,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: tolerance,
+                };
+                prop_assert_eq!(
+                    validate(&row, &layout),
+                    validate_from_sum(&row, &layout, sum),
+                    "tolerance {} from {} steps",
+                    tolerance,
+                    steps
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
 }
