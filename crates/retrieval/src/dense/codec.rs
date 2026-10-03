@@ -159,30 +159,29 @@ pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
 }
 
 /// Lanes [`surely_unit`] accumulates squares in.
-const SUM_LANES: usize = 8;
+const SUM_LANES: usize = 16;
 
-/// Whether the in-order sum of squares of `row` passes the norm check, decided from a sum over [`SUM_LANES`] lanes; `false` leaves the decision to the in-order sum.
+/// Whether the in-order sum of squares of `row` passes the norm check, decided from an f32 sum over [`SUM_LANES`] lanes; `false` leaves the decision to the in-order sum.
 ///
-/// Each square of an f32 is exact in f64, so every summation order of the `n` squares lies within relative `γ = (n - 1)u / (1 - (n - 1)u)` of their exact sum, `u = 2^-53`, and the in-order sum lies within relative `4nu` of the lane sum, a margin that also covers rounding the interval's ends.
-/// The rounded square root and the subtraction are monotone, so the sums the norm check admits form an interval; when both ends of the lane sum's interval pass, the in-order sum passes too.
+/// With `u = 2^-24`, each f32 square is within `u` of the exact square plus `2^-150` where it underflows, and every summation order of the `n` squares adds relative `γ = (n - 1)u / (1 - (n - 1)u)`. Once the lane sum is at least `2^-60`, underflow is below `2^-57` of it, so the lane sum lies within relative `γ + 2u` of the exact sum, and the in-order f64 sum within `(n - 1)2^-53` of it.
+/// The margin `3(n + 2)u` covers both and the rounding of the interval's ends while it stays below `1/4`. The rounded square root and the subtraction are monotone, so the sums the norm check admits form an interval; when both ends of the lane sum's interval pass, the in-order sum passes too.
 fn surely_unit(row: &[f32], tolerance: f64) -> bool {
-    let mut lanes = [0.0f64; SUM_LANES];
+    let mut lanes = [0.0f32; SUM_LANES];
     let (blocks, tail) = row.as_chunks::<SUM_LANES>();
     for block in blocks {
         for (lane, value) in lanes.iter_mut().zip(block) {
-            let widened = f64::from(*value);
-            *lane += widened * widened;
+            *lane += value * value;
         }
     }
-    let mut sum = lanes.iter().sum::<f64>();
+    let mut sum = lanes.iter().sum::<f32>();
     for value in tail {
-        let widened = f64::from(*value);
-        sum += widened * widened;
+        sum += value * value;
     }
-    let margin = 2.0 * row.len() as f64 * f64::EPSILON;
+    let sum = f64::from(sum);
+    let margin = 1.5 * (row.len() + 2) as f64 * f64::from(f32::EPSILON);
     sum.is_finite()
-        && sum > 0.0
-        && margin < 0.5
+        && sum >= 2.0f64.powi(-60)
+        && margin < 0.25
         && [sum * (1.0 - margin), sum * (1.0 + margin)]
             .into_iter()
             .all(|end| check_norm_sum(end, tolerance).is_ok())

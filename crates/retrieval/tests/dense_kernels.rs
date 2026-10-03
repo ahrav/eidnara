@@ -142,7 +142,7 @@ fn in_order_sum(row: &[f32]) -> f64 {
     sum
 }
 
-fn row_of(dimension: usize, seed: u64) -> Vec<f32> {
+fn row_of(dimension: usize, seed: u64, scale: f64) -> Vec<f32> {
     let mut state = seed | 1;
     let mut raw: Vec<f64> = (0..dimension)
         .map(|_| {
@@ -156,33 +156,39 @@ fn row_of(dimension: usize, seed: u64) -> Vec<f32> {
         raw[0] = 1.0;
     }
     let norm = raw.iter().map(|value| value * value).sum::<f64>().sqrt();
-    raw.iter().map(|value| (value / norm) as f32).collect()
+    raw.iter()
+        .map(|value| (value / norm * scale) as f32)
+        .collect()
 }
 
-/// Each tolerance is the norm distance of a sum a few f64 steps from the in-order sum, so the bound falls between the in-order sum and any other summation order of the same squares.
+/// Each tolerance is the norm distance of a sum a few f64 steps from the in-order sum, so the bound falls between the in-order sum and any other summation order of the same squares; the scale sets how far the norm is from 1, and with it the tolerance's magnitude.
 #[test]
 fn validation_decides_every_row_as_the_in_order_sum_does() {
+    let scale = prop::sample::select(vec![1.0f64, 1.0 + 1e-3, 1.0 - 1e-3, 1.0 + 1e-5, 1.25, 0.5]);
     runner()
-        .run(&(1usize..1000, any::<u64>()), |(dimension, seed)| {
-            let row = row_of(dimension, seed);
-            let sum = in_order_sum(&row);
-            for steps in -48i64..=48 {
-                let near = f64::from_bits((sum.to_bits() as i64 + steps) as u64);
-                let tolerance = (near.sqrt() - 1.0).abs();
-                let layout = RowLayout {
-                    dimension: dimension as u32,
-                    metric: Metric::InnerProduct,
-                    unit_norm_tolerance: tolerance,
-                };
-                prop_assert_eq!(
-                    validate(&row, &layout),
-                    validate_from_sum(&row, &layout, sum),
-                    "tolerance {} from {} steps",
-                    tolerance,
-                    steps
-                );
-            }
-            Ok(())
-        })
+        .run(
+            &(1usize..1000, any::<u64>(), scale),
+            |(dimension, seed, scale)| {
+                let row = row_of(dimension, seed, scale);
+                let sum = in_order_sum(&row);
+                for steps in (-48i64..=48).chain([-(1 << 40), 1 << 40, -(1 << 44), 1 << 44]) {
+                    let near = f64::from_bits((sum.to_bits() as i64 + steps) as u64);
+                    let tolerance = (near.sqrt() - 1.0).abs();
+                    let layout = RowLayout {
+                        dimension: dimension as u32,
+                        metric: Metric::InnerProduct,
+                        unit_norm_tolerance: tolerance,
+                    };
+                    prop_assert_eq!(
+                        validate(&row, &layout),
+                        validate_from_sum(&row, &layout, sum),
+                        "tolerance {} from {} steps",
+                        tolerance,
+                        steps
+                    );
+                }
+                Ok(())
+            },
+        )
         .unwrap();
 }
