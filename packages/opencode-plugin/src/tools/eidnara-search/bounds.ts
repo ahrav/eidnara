@@ -121,10 +121,11 @@ let utf8Scratch = new Uint8Array(MAX_RENDER_FIELD_BYTES);
 export function truncateUtf8Bytes(text: string, maxBytes: number): string {
     // A UTF-16 code unit encodes to at most 3 bytes.
     if (text.length * 3 <= maxBytes) return text;
-    if (text.length <= maxBytes && Buffer.byteLength(text, "utf8") <= maxBytes) return text;
     // Every code unit encodes to at least one byte, so the cut falls within the first `maxBytes + 1` units.
     const window = text.length > maxBytes ? text.slice(0, maxBytes + 1) : text;
     if (Number.isSafeInteger(maxBytes) && maxBytes >= 0 && isWellFormed(window)) {
+        // `Buffer.byteLength` is exact for well-formed text.
+        if (text.length <= maxBytes && Buffer.byteLength(text, "utf8") <= maxBytes) return text;
         if (utf8Scratch.length < maxBytes) utf8Scratch = new Uint8Array(maxBytes);
         let { read } = utf8Encoder.encodeInto(window, utf8Scratch.subarray(0, maxBytes));
         // In a well-formed window a cut after a high surrogate splits a pair.
