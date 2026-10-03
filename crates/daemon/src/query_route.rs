@@ -14,8 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, ClaimFactBounds, ClaimFactsError, KernelError, KernelStore,
-    MAX_ELIGIBILITY_CANDIDATES, Surface,
+    ArtifactDestination, ClaimFactBounds, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
+    Surface, SurfaceVisibility,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
@@ -288,6 +288,8 @@ pub enum Phase {
     Admission,
     Fusion,
     Revalidation,
+    /// Each batch of ranked claim occurrences is validated against its canonical decision.
+    ClaimValidation,
     Materialization,
     Response,
 }
@@ -1241,7 +1243,15 @@ pub fn select(
             is_claim(candidate.class).then(|| candidate.occurrence_id.clone())
         })
         .collect();
-    let references = canonical_references(projection, kernel, authority, limits, budget, &claims)?;
+    let references = canonical_references(
+        projection,
+        kernel,
+        authority,
+        limits,
+        budget,
+        &claims,
+        &mut before_phase,
+    )?;
     let fused = fused.filter(|entry| {
         let candidate = &terms[entry.occurrence()];
         !is_claim(candidate.class) || references.contains_key(&candidate.occurrence_id)
@@ -1338,16 +1348,19 @@ fn canonical_references(
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
     occurrence_ids: &[String],
+    before_phase: &mut impl FnMut(Phase),
 ) -> Result<BTreeMap<String, CanonicalReference>, QueryFailure> {
-    let refused = |error: ClaimCandidateError| match error {
-        ClaimCandidateError::Facts(ClaimFactsError::Kernel(KernelError::Deadline)) => {
+    let refused = |_: ClaimCandidateError| {
+        if budget.is_exhausted() {
             QueryFailure::from(exhaustion(budget))
+        } else {
+            QueryFailure::Unavailable("claim_validation")
         }
-        _ => QueryFailure::Unavailable("claim_validation"),
     };
     let mut references = BTreeMap::new();
     // Each batch of at most `validation_batch` selected occurrences is classified and validated at its own fresh snapshot.
     for batch in occurrence_ids.chunks(limits.validation_batch.get()) {
+        before_phase(Phase::ClaimValidation);
         check(budget)?;
         let max = NonZeroUsize::new(batch.len()).expect("chunks are not empty");
         let bounds = ClaimCandidateBounds {
@@ -1380,31 +1393,30 @@ fn canonical_references(
             budget.eval(),
         )
         .map_err(refused)?;
-        references.extend(
-            validation
-                .candidates
-                .into_iter()
-                .filter(|validated| matches!(validated.verdict, UseVerdict::Permitted(_)))
-                .map(|validated| {
-                    let row = validated.candidate.row;
-                    (
-                        row.occurrence_id,
-                        CanonicalReference {
-                            object_id: row.object_id,
-                            revision: row.revision,
-                        },
-                    )
-                }),
-        );
+        references.extend(validation.candidates.into_iter().filter_map(|validated| {
+            let UseVerdict::Permitted(visibility) = validated.verdict else {
+                return None;
+            };
+            let row = validated.candidate.row;
+            Some((
+                row.occurrence_id,
+                CanonicalReference {
+                    object_id: row.object_id,
+                    revision: row.revision,
+                    visibility,
+                },
+            ))
+        }));
     }
     Ok(references)
 }
 
 /// The canonical decision a served claim occurrence names, as validated at the response's snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct CanonicalReference {
     object_id: String,
     revision: i64,
+    /// `labeled` obliges the presentation to carry the claim's label.
+    visibility: SurfaceVisibility,
 }
 
 fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Value {
@@ -1431,6 +1443,7 @@ fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Val
         value["canonical"] = json!({
             "decision_object_id": reference.object_id,
             "source_revision": reference.revision,
+            "visibility": reference.visibility.as_str(),
         });
     }
     value

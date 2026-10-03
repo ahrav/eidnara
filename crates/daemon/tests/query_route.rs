@@ -525,9 +525,16 @@ async fn served_claims_carry_validated_canonical_decision_references() {
         .map(|entry| {
             let canonical = &entry["canonical"];
             assert_eq!(canonical["source_revision"], 1, "{entry}");
+            assert!(
+                ["visible", "labeled"].contains(&canonical["visibility"].as_str().unwrap()),
+                "{entry}"
+            );
             let decision = canonical["decision_object_id"].as_str().unwrap();
             assert_ne!(decision, entry["occurrence_id"].as_str().unwrap());
-            assert!(!decision.starts_with("srcdesc:"), "{entry}");
+            assert!(
+                ["rule", "other", "third"].contains(&decision),
+                "a served reference names a seeded decision: {entry}"
+            );
             decision
         })
         .collect();
@@ -555,12 +562,21 @@ async fn a_claim_changed_after_admission_is_dropped_without_renumbering_the_surv
     let after = fixture
         .run(&limits(), budget.shared(), QUERY, |_| {})
         .unwrap();
+    let retired: Vec<&str> = before.body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["canonical"]["decision_object_id"] == "rule")
+        .map(|entry| entry["occurrence_id"].as_str().unwrap())
+        .collect();
+    assert!(!retired.is_empty(), "{}", before.body);
     let survivors: Vec<&serde_json::Value> =
         after.body["entries"].as_array().unwrap().iter().collect();
     assert!(
-        survivors
-            .iter()
-            .all(|entry| entry["canonical"]["decision_object_id"] != "rule"),
+        survivors.iter().all(|entry| {
+            !retired.contains(&entry["occurrence_id"].as_str().unwrap())
+                && entry["canonical"]["decision_object_id"].is_string()
+        }),
         "{}",
         after.body
     );

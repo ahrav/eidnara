@@ -55,7 +55,7 @@ pub const WEIGHTS: LaneWeights = LaneWeights {
     dense: 1.0,
 };
 pub const K: f64 = 7.0;
-pub const ALL_PHASES: [Phase; 9] = [
+pub const ALL_PHASES: [Phase; 10] = [
     Phase::Probes,
     Phase::Exact,
     Phase::Lexical,
@@ -63,6 +63,7 @@ pub const ALL_PHASES: [Phase; 9] = [
     Phase::Admission,
     Phase::Fusion,
     Phase::Revalidation,
+    Phase::ClaimValidation,
     Phase::Materialization,
     Phase::Response,
 ];

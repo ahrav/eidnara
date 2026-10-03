@@ -721,23 +721,6 @@ mod live_rows {
             rows.iter()
                 .any(|row| row.occurrence_id == occ(3) && row.object_id == "obj-00000003")
         );
-        // The plan reaches each selected row through the occurrence key, so the work follows the selection, not the projection size.
-        let plan: Vec<String> = store
-            .with_conn(|conn| {
-                let mut statement = conn.prepare(
-                    "EXPLAIN QUERY PLAN SELECT o.occurrence_id FROM occurrences o
-                     WHERE o.occurrence_id IN (SELECT value FROM json_each(?1))",
-                )?;
-                let rows = statement
-                    .query_map(["[]"], |row| row.get::<_, String>(3))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(rows)
-            })
-            .unwrap();
-        assert!(
-            plan.iter().any(|step| step.contains("SEARCH o USING")),
-            "{plan:?}"
-        );
     }
 
     #[test]

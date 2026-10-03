@@ -148,32 +148,38 @@ fn claim_classes() -> &'static [OccurrenceClass] {
     }
 }
 
+macro_rules! claim_row_columns {
+    () => {
+        "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
+            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
+            o.created_commit_seq,o.source_artifact_digest\n"
+    };
+}
+
 /// `?1` and `?2` are the two claim class codes, `?3` the row probe, `?4` the
 /// association family keyword, `?5` the association namespace.
-const LIVE_CLAIM_ROWS_SQL: &str =
-    "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
-            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
-            o.created_commit_seq,o.source_artifact_digest
-     FROM occurrences o
+const LIVE_CLAIM_ROWS_SQL: &str = concat!(
+    claim_row_columns!(),
+    "FROM occurrences o
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
      LEFT JOIN exact_associations a
        ON a.occurrence_id=o.occurrence_id AND a.family=?4 AND a.namespace=?5
      WHERE t.occurrence_id IS NULL AND o.class IN (?1,?2)
      ORDER BY o.class,o.occurrence_id
-     LIMIT ?3";
+     LIMIT ?3"
+);
 
-/// [`LIVE_CLAIM_ROWS_SQL`] restricted to the occurrence ids bound as one JSON array, so the read touches only the selected rows.
-const SELECTED_CLAIM_ROWS_SQL: &str =
-    "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
-            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
-            o.created_commit_seq,o.source_artifact_digest
-     FROM occurrences o
+/// [`LIVE_CLAIM_ROWS_SQL`] over the occurrence ids bound as one JSON array in `?3`. The selection drives the join, and each table is reached through its occurrence key, so the work grows with the selection alone.
+const SELECTED_CLAIM_ROWS_SQL: &str = concat!(
+    claim_row_columns!(),
+    "FROM json_each(?3) j
+     CROSS JOIN occurrences o ON o.occurrence_id=j.value
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-     LEFT JOIN exact_associations a
+     LEFT JOIN exact_associations a INDEXED BY idx_exact_associations_occurrence
        ON a.occurrence_id=o.occurrence_id AND a.family=?4 AND a.namespace=?5
      WHERE t.occurrence_id IS NULL AND o.class IN (?1,?2)
-       AND o.occurrence_id IN (SELECT value FROM json_each(?3))
-     ORDER BY o.class,o.occurrence_id";
+     ORDER BY o.class,o.occurrence_id"
+);
 
 struct LiveRow {
     occurrence_id: String,
@@ -741,6 +747,48 @@ pub fn validate_for_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selected_read_plan_follows_the_selection() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../baseline.sql")).unwrap();
+        let classes = claim_classes();
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTED_CLAIM_ROWS_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = statement
+            .query_map(
+                params![
+                    classes[0].code(),
+                    classes[1].code(),
+                    "[\"a\",\"b\"]",
+                    Family::Id.keyword(),
+                    CANONICAL_OBJECT_NAMESPACE
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.starts_with("SCAN j")),
+            "{plan:?}"
+        );
+        for table in ["o", "t", "a"] {
+            assert!(
+                plan.iter()
+                    .any(|step| step.starts_with(&format!("SEARCH {table} "))
+                        && step.contains("occurrence_id=?")),
+                "{table} is reached by its occurrence key: {plan:?}"
+            );
+        }
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.starts_with("SCAN o") || step.starts_with("SCAN a")),
+            "{plan:?}"
+        );
+    }
     use std::cell::Cell;
     use std::sync::{Arc, atomic::AtomicBool};
     use std::time::Instant;
