@@ -162,6 +162,19 @@ const LIVE_CLAIM_ROWS_SQL: &str =
      ORDER BY o.class,o.occurrence_id
      LIMIT ?3";
 
+/// [`LIVE_CLAIM_ROWS_SQL`] restricted to the occurrence ids bound as one JSON array, so the read touches only the selected rows.
+const SELECTED_CLAIM_ROWS_SQL: &str =
+    "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
+            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
+            o.created_commit_seq,o.source_artifact_digest
+     FROM occurrences o
+     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+     LEFT JOIN exact_associations a
+       ON a.occurrence_id=o.occurrence_id AND a.family=?4 AND a.namespace=?5
+     WHERE t.occurrence_id IS NULL AND o.class IN (?1,?2)
+       AND o.occurrence_id IN (SELECT value FROM json_each(?3))
+     ORDER BY o.class,o.occurrence_id";
+
 struct LiveRow {
     occurrence_id: String,
     class: String,
@@ -214,29 +227,63 @@ pub fn live_claim_candidates(
                 Family::Id.keyword(),
                 CANONICAL_OBJECT_NAMESPACE
             ],
-            |row| {
-                Ok(LiveRow {
-                    occurrence_id: row.get(0)?,
-                    class: row.get(1)?,
-                    representation: row.get(2)?,
-                    target_id: row.get(3)?,
-                    version: row.get(4)?,
-                    revision: row.get(5)?,
-                    key: row.get(6)?,
-                    tuple: row.get(7)?,
-                    lineage_id: row.get(8)?,
-                    span_start: row.get(9)?,
-                    span_end: row.get(10)?,
-                    association_commit_seq: row.get(11)?,
-                    created_commit_seq: row.get(12)?,
-                    source_artifact_digest: row.get(13)?,
-                })
-            },
+            live_row,
         )?
         .collect::<rusqlite::Result<_>>()?;
     if rows.len() > max.get() {
         return Err(ProjectionError::TooManyRecords { count: rows.len() });
     }
+    rows.into_iter().map(candidate_row).collect()
+}
+
+fn live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveRow> {
+    Ok(LiveRow {
+        occurrence_id: row.get(0)?,
+        class: row.get(1)?,
+        representation: row.get(2)?,
+        target_id: row.get(3)?,
+        version: row.get(4)?,
+        revision: row.get(5)?,
+        key: row.get(6)?,
+        tuple: row.get(7)?,
+        lineage_id: row.get(8)?,
+        span_start: row.get(9)?,
+        span_end: row.get(10)?,
+        association_commit_seq: row.get(11)?,
+        created_commit_seq: row.get(12)?,
+        source_artifact_digest: row.get(13)?,
+    })
+}
+
+/// The live claim rows among `occurrence_ids`, with the same association and tuple checks as [`live_claim_candidates`]. The read work is bounded by the selected set, whatever the projection holds; ids of other classes, tombstoned rows, and unknown ids are absent from the result.
+///
+/// # Errors
+///
+/// Returns [`ProjectionError::CorruptRow`] for a row whose association does not decode to its own identity.
+pub fn selected_claim_candidates(
+    conn: &GuardedConn<'_>,
+    occurrence_ids: &[String],
+) -> Result<Vec<ClaimCandidateRow>, ProjectionError> {
+    let classes = claim_classes();
+    assert_eq!(
+        classes.len(),
+        2,
+        "SELECTED_CLAIM_ROWS_SQL binds two claim class codes"
+    );
+    let ids = serde_json::to_string(occurrence_ids).map_err(|_| ProjectionError::CorruptRow)?;
+    let rows: Vec<LiveRow> = conn
+        .prepare_cached(SELECTED_CLAIM_ROWS_SQL)?
+        .query_map(
+            params![
+                classes[0].code(),
+                classes[1].code(),
+                ids,
+                Family::Id.keyword(),
+                CANONICAL_OBJECT_NAMESPACE
+            ],
+            live_row,
+        )?
+        .collect::<rusqlite::Result<_>>()?;
     rows.into_iter().map(candidate_row).collect()
 }
 
@@ -367,6 +414,35 @@ pub fn classify_live_claims(
     budget: &EvalBudget,
     bounds: ClaimCandidateBounds,
 ) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
+    classify_rows(conn, kernel, budget, bounds, |conn| {
+        live_claim_candidates(conn, bounds.max_rows)
+    })
+}
+
+/// [`classify_live_claims`] over only the live claim rows among `occurrence_ids`, so a caller resolving a ranked result reads and classifies the selected set alone.
+///
+/// # Errors
+///
+/// Returns what [`classify_live_claims`] returns; a selection naming more distinct claims than `bounds.facts.max_claims` is refused whole.
+pub fn classify_selected_claims(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    budget: &EvalBudget,
+    bounds: ClaimCandidateBounds,
+    occurrence_ids: &[String],
+) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
+    classify_rows(conn, kernel, budget, bounds, |conn| {
+        selected_claim_candidates(conn, occurrence_ids)
+    })
+}
+
+fn classify_rows(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    budget: &EvalBudget,
+    bounds: ClaimCandidateBounds,
+    read_rows: impl FnOnce(&GuardedConn<'_>) -> Result<Vec<ClaimCandidateRow>, ProjectionError>,
+) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
     let identity = read_identity(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
     let entry = kernel
         .capture_commit_read_target_within_budget(budget)
@@ -380,7 +456,7 @@ pub fn classify_live_claims(
         });
     }
     let checkpoint = read_checkpoint(conn, &database)?.ok_or(ClaimCandidateError::NoCheckpoint)?;
-    let rows = live_claim_candidates(conn, bounds.max_rows)?;
+    let rows = read_rows(conn)?;
     let mut seen = BTreeSet::new();
     let object_ids: Vec<String> = rows
         .iter()

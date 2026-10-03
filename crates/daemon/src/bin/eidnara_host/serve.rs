@@ -1164,16 +1164,17 @@ pub fn run() -> Result<(), &'static str> {
         selection_root,
         Arc::clone(&memory_reviewer_host),
     );
-    let composite = StaticComposite::new(
-        daemon::Handler::new_with_connection_file(Some(publication))
-            .with_connection_key_hook(commit_selection)
-            .with_capability_source(capability_source)
-            .with_local_embeddings(local_embeddings.clone())
-            .with_memory_reviewer_host(memory_reviewer_host),
-        local_embeddings,
-        model_execution,
-    )
-    .map_err(|_| "composite construction failed")?;
+    let handler = daemon::Handler::new_with_connection_file(Some(publication))
+        .with_connection_key_hook(commit_selection)
+        .with_capability_source(capability_source)
+        .with_local_embeddings(local_embeddings.clone())
+        .with_memory_reviewer_host(memory_reviewer_host);
+    // The query route serves under #825 D23's limits; admission still decides whether a request reaches the projection.
+    handler
+        .set_query_route_limits(Some(daemon::query_route::QueryRouteLimits::production()))
+        .map_err(|_| "query route limits refused")?;
+    let composite = StaticComposite::new(handler, local_embeddings, model_execution)
+        .map_err(|_| "composite construction failed")?;
 
     let config = HostConfig {
         data_dir: Some(root),

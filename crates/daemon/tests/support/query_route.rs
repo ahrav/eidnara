@@ -48,7 +48,6 @@ pub const MEMORY: &str = "memory";
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 pub const MODEL: &str = "tiny-test-model";
 pub const NOW: i64 = 1_700_000_000_000;
-pub const KERNEL: &str = "route-kernel";
 pub const QUERY: &str = "id:rule explicit contract";
 pub const WEIGHTS: LaneWeights = LaneWeights {
     exact: 2.0,
@@ -108,10 +107,10 @@ pub fn page_bounds() -> SourcePageBounds {
     }
 }
 
-pub fn projection_identity() -> ProjectionIdentity {
+pub fn projection_identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
     ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: KERNEL.to_string(),
+        kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
         identity_contract_version: "search-projection-identity-v3".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -157,6 +156,8 @@ pub fn request_budget(remaining_ms: u64) -> (CancellationToken, RequestBudget) {
 pub struct Fixture {
     pub daemon: KernelDaemon,
     pub store: Arc<KernelStore>,
+    /// The kernel incarnation the fixture projection is built for.
+    pub kernel_incarnation: String,
     pub project: ProjectScope,
     pub projection: SearchProjection,
     _dir: tempfile::TempDir,
@@ -166,6 +167,9 @@ impl Fixture {
     pub async fn build() -> Self {
         let daemon = KernelDaemon::start().await;
         let store = daemon.store();
+        let kernel_incarnation = store
+            .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+            .unwrap();
         ClaimMaterializer::register(&store, NOW).unwrap();
         let spec = |object: &str, revision: i64, summary: &str| {
             json!({
@@ -210,13 +214,14 @@ impl Fixture {
         let projection = SearchProjection::open(dir.path()).unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &projection_identity(), 1)?;
+                install_identity(conn, &projection_identity(&kernel_incarnation), 1)?;
                 register_generation(conn, &generation(), 1).map(|_| ())
             })
             .unwrap();
         let fixture = Self {
             daemon,
             store,
+            kernel_incarnation,
             project,
             projection,
             _dir: dir,
@@ -281,7 +286,7 @@ impl Fixture {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL.to_string(),
+                kernel_incarnation_id: self.kernel_incarnation.clone(),
                 hold_id: hold.hold_id.clone(),
                 snapshot_commit_seq: hold.snapshot,
                 through_commit_seq: hold.snapshot,
@@ -409,7 +414,7 @@ impl Fixture {
         self.projection
             .read(|conn| {
                 let context = LookupContext {
-                    kernel_incarnation_id: KERNEL,
+                    kernel_incarnation_id: &self.kernel_incarnation,
                     page_rows: limits.exact_page_rows,
                     budget: shared.eval(),
                 };

@@ -387,7 +387,9 @@ async fn a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves() {
     let dir = tempfile::tempdir().unwrap();
     let projection = SearchProjection::open(dir.path()).unwrap();
     projection
-        .write(|conn| install_identity(conn, &projection_identity(), 1).map(|_| ()))
+        .write(|conn| {
+            install_identity(conn, &projection_identity(&fixture.kernel_incarnation), 1).map(|_| ())
+        })
         .unwrap();
     let (_token, budget) = request_budget(10_000);
     let outcome = execute(
@@ -468,5 +470,116 @@ async fn a_single_declared_lane_serves_and_no_lane_is_refused() {
         "{:?}",
         none.err()
     );
+    fixture.daemon.shutdown().await;
+}
+
+/// The daemon installs #825 D23's exact limit set, and the set passes the route's own validator.
+#[test]
+fn production_limits_are_the_d23_set() {
+    let limits = QueryRouteLimits::production();
+    limits.validate().unwrap();
+    let sizes = [
+        limits.query_bytes.get(),
+        limits.probes.get(),
+        limits.lexical_scan_rows.get(),
+        limits.lexical_accepted.get(),
+        limits.validation_batch.get(),
+        limits.exact_page_rows.get(),
+        limits.exact_pages.get(),
+        limits.fused_union.get(),
+        limits.result_rows.get(),
+        limits.response_bytes.get(),
+    ];
+    assert_eq!(sizes, [4096, 16, 4096, 128, 128, 32, 4, 320, 32, 65_536]);
+    assert_eq!(limits.deadline_ceiling, Duration::from_secs(5));
+    let dense = limits.dense.unwrap();
+    assert_eq!(
+        (dense.k.get(), dense.page_rows.get(), dense.max_rows.get()),
+        (64, 256, 1_500_000)
+    );
+    assert_eq!(dense.unit_norm_tolerance, 1e-3);
+    let expected = retrieval::fusion::FusionParameters::new(
+        retrieval::fusion::LaneWeights {
+            exact: 1.0,
+            lexical: 1.0,
+            dense: 1.0,
+        },
+        60.0,
+    )
+    .unwrap();
+    assert_eq!(format!("{:?}", limits.fusion), format!("{expected:?}"));
+}
+
+/// Every served claim occurrence carries the canonical decision and source revision it validates to now; occurrence and descriptor ids are never offered as memory ids.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn served_claims_carry_validated_canonical_decision_references() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let outcome = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let entries = outcome.body["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    let decisions: std::collections::BTreeSet<&str> = entries
+        .iter()
+        .map(|entry| {
+            let canonical = &entry["canonical"];
+            assert_eq!(canonical["source_revision"], 1, "{entry}");
+            let decision = canonical["decision_object_id"].as_str().unwrap();
+            assert_ne!(decision, entry["occurrence_id"].as_str().unwrap());
+            assert!(!decision.starts_with("srcdesc:"), "{entry}");
+            decision
+        })
+        .collect();
+    assert!(decisions.contains("rule"), "{decisions:?}");
+    fixture.daemon.shutdown().await;
+}
+
+/// A decision retired after its descriptors were admitted is denied at final use: its occurrences leave the answer, and the survivors keep the fused positions and scores they had before the retirement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_changed_after_admission_is_dropped_without_renumbering_the_survivors() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let before = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    // The kernel retires the decision while its descriptors stay live in the projection and kernel.
+    let retired = fixture
+        .daemon
+        .commit(
+            "retire-without-sources",
+            vec![serde_json::json!({"op": "retire_decision", "object_id": "rule"})],
+        )
+        .await;
+    assert_eq!(retired["state"]["kind"], "available", "{retired}");
+    let after = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let survivors: Vec<&serde_json::Value> =
+        after.body["entries"].as_array().unwrap().iter().collect();
+    assert!(
+        survivors
+            .iter()
+            .all(|entry| entry["canonical"]["decision_object_id"] != "rule"),
+        "{}",
+        after.body
+    );
+    let earlier: std::collections::BTreeMap<&str, (&serde_json::Value, &serde_json::Value)> =
+        before.body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["occurrence_id"].as_str().unwrap(),
+                    (&entry["position"], &entry["score"]),
+                )
+            })
+            .collect();
+    assert!(!survivors.is_empty());
+    for entry in survivors {
+        let (position, score) = earlier[entry["occurrence_id"].as_str().unwrap()];
+        assert_eq!((&entry["position"], &entry["score"]), (position, score));
+    }
     fixture.daemon.shutdown().await;
 }

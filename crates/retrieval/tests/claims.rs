@@ -515,6 +515,7 @@ mod live_rows {
     use kernel::source_identity::{Occurrence, OccurrenceClass, encode};
     use retrieval::claims::{
         ClaimCandidateBounds, ClaimCandidateError, classify_live_claims, live_claim_candidates,
+        selected_claim_candidates,
     };
     use retrieval::{ProjectionError, ProjectionIdentity, install_identity};
     use rusqlite::params;
@@ -699,6 +700,44 @@ mod live_rows {
                 .unwrap(),
             Err(ProjectionError::TooManyRecords { count: 4 })
         ));
+    }
+
+    #[test]
+    fn a_selected_read_returns_only_the_named_live_claim_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path());
+        seed(&store, 64);
+        let selected = [occ(3), occ(40), "unknown-occurrence".to_string()];
+        let rows = store
+            .with_conn(|conn| Ok(selected_claim_candidates(conn, &selected)))
+            .unwrap()
+            .unwrap();
+        let mut ids: Vec<&str> = rows.iter().map(|row| row.occurrence_id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected = [occ(3), occ(40)];
+        expected.sort();
+        assert_eq!(ids, [expected[0].as_str(), expected[1].as_str()]);
+        assert!(
+            rows.iter()
+                .any(|row| row.occurrence_id == occ(3) && row.object_id == "obj-00000003")
+        );
+        // The plan reaches each selected row through the occurrence key, so the work follows the selection, not the projection size.
+        let plan: Vec<String> = store
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "EXPLAIN QUERY PLAN SELECT o.occurrence_id FROM occurrences o
+                     WHERE o.occurrence_id IN (SELECT value FROM json_each(?1))",
+                )?;
+                let rows = statement
+                    .query_map(["[]"], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.contains("SEARCH o USING")),
+            "{plan:?}"
+        );
     }
 
     #[test]

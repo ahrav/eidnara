@@ -12,9 +12,17 @@ use host_runtime::local_embeddings::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
-use kernel::{ArtifactDestination, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES};
+use kernel::source_identity::OccurrenceClass;
+use kernel::{
+    ArtifactDestination, ClaimFactBounds, ClaimFactsError, KernelError, KernelStore,
+    MAX_ELIGIBILITY_CANDIDATES, Surface,
+};
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
+use retrieval::claims::{
+    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, classify_selected_claims,
+    validate_for_surface,
+};
 use retrieval::dense::{
     Completion as DenseCompletion, ExhaustiveQuery, IncompleteReason as DenseIncompleteReason,
     Metric, OracleBounds, OracleRefusal, exhaustive,
@@ -28,8 +36,8 @@ use retrieval::exact::{
 };
 use retrieval::fusion::IdentityRefusal;
 use retrieval::fusion::{
-    DeclaredLanes, Fused, FusedEntry, FusionParameters, Lane, LaneHit, LaneRanking, OccurrenceId,
-    RawScore, fuse,
+    DeclaredLanes, Fused, FusedEntry, FusionParameters, Lane, LaneHit, LaneRanking, LaneWeights,
+    OccurrenceId, RawScore, fuse,
 };
 use retrieval::lexical::{
     Completion, IncompleteReason, LexicalBounds, LexicalRefusal, RetrievalBounds, RetrievalRefusal,
@@ -50,6 +58,9 @@ use crate::transform_unit::{UnitOutcome, UnitRunner};
 use crate::{HandlerCore, invalid_params_error};
 
 pub(crate) const OPERATION: &str = "retrieval.query";
+/// Causal payload bytes the claim facts read may hold for one ranked result's claims.
+const CLAIM_CAUSAL_PAYLOAD_BYTES: std::num::NonZeroU64 =
+    std::num::NonZeroU64::new(1024 * 1024).expect("nonzero");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LimitsRefusal {
@@ -100,6 +111,39 @@ pub struct QueryRouteLimits {
 }
 
 impl QueryRouteLimits {
+    /// #825 D23's production limit set, which the daemon installs at startup and CI uses unchanged.
+    pub fn production() -> Self {
+        let n = |value: usize| NonZeroUsize::new(value).expect("D23 limits are positive");
+        Self {
+            query_bytes: n(4096),
+            probes: n(16),
+            lexical_scan_rows: n(4096),
+            lexical_accepted: n(128),
+            validation_batch: n(128),
+            exact_page_rows: n(32),
+            exact_pages: n(4),
+            fused_union: n(320),
+            result_rows: n(32),
+            response_bytes: n(65_536),
+            deadline_ceiling: Duration::from_secs(5),
+            fusion: FusionParameters::new(
+                LaneWeights {
+                    exact: 1.0,
+                    lexical: 1.0,
+                    dense: 1.0,
+                },
+                60.0,
+            )
+            .expect("D23 fusion parameters are valid"),
+            dense: Some(DenseLimits {
+                k: n(64),
+                page_rows: n(256),
+                max_rows: n(1_500_000),
+                unit_norm_tolerance: 1e-3,
+            }),
+        }
+    }
+
     /// An all-`Undeclared` lane array is larger than an array with one `Complete` lane.
     pub fn response_floor() -> NonZeroUsize {
         let mut statuses = [const { LaneStatus::Undeclared }; Lane::ORDER.len()];
@@ -996,6 +1040,7 @@ pub struct Admitted<'a> {
     lanes: DeclaredLanes,
     pub exact: ExactReport,
     terms: BTreeMap<OccurrenceId, OccurrenceCandidate>,
+    projection: &'a SearchProjection,
     kernel: &'a KernelStore,
     authority: Authority<'a>,
     limits: &'a QueryRouteLimits,
@@ -1036,7 +1081,7 @@ pub fn execute(
 /// Reads and judges every declared lane; ends at the admission phase.
 #[allow(clippy::too_many_arguments)]
 pub fn admit_lanes<'a>(
-    projection: &SearchProjection,
+    projection: &'a SearchProjection,
     kernel: &'a KernelStore,
     authority: Authority<'a>,
     limits: &'a QueryRouteLimits,
@@ -1135,6 +1180,7 @@ pub fn admit_lanes<'a>(
         lanes,
         exact: exact_report,
         terms,
+        projection,
         kernel,
         authority,
         limits,
@@ -1152,6 +1198,7 @@ pub fn select(
         lanes,
         exact: exact_report,
         terms,
+        projection,
         kernel,
         authority,
         limits,
@@ -1185,6 +1232,20 @@ pub fn select(
             Judged::Kernel => return Err(QueryFailure::Unavailable("eligibility")),
         };
     let fused = fused.filter(|entry| eligible.contains(entry.occurrence()));
+    // A claim occurrence is served only with the canonical decision it validates to now; one the surface denies is dropped, and the survivors keep their fused positions and scores.
+    let claims: Vec<String> = fused
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let candidate = &terms[entry.occurrence()];
+            is_claim(candidate.class).then(|| candidate.occurrence_id.clone())
+        })
+        .collect();
+    let references = canonical_references(projection, kernel, authority, limits, budget, &claims)?;
+    let fused = fused.filter(|entry| {
+        let candidate = &terms[entry.occurrence()];
+        !is_claim(candidate.class) || references.contains_key(&candidate.occurrence_id)
+    });
 
     before_phase(Phase::Materialization);
     check(budget)?;
@@ -1205,7 +1266,10 @@ pub fn select(
             truncated = true;
             break;
         }
-        let value = entry_json(entry);
+        let value = entry_json(
+            entry,
+            references.get(&terms[entry.occurrence()].occurrence_id),
+        );
         let size =
             measure_json(&value).map_err(|_| QueryFailure::Unavailable("response_measure"))? + 1;
         if used + size > limits.response_bytes.get() {
@@ -1259,7 +1323,91 @@ fn fused_envelope(
     })
 }
 
-fn entry_json(entry: &FusedEntry) -> Value {
+fn is_claim(class: OccurrenceClass) -> bool {
+    matches!(
+        class,
+        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
+    )
+}
+
+/// The canonical decision and source revision each claim occurrence validates to on the explicit-search surface at a fresh kernel snapshot, keyed by occurrence id. The projection read and the kernel facts cover the selected occurrences alone; an occurrence that is not a current, permitted claim of the bound project is absent.
+fn canonical_references(
+    projection: &SearchProjection,
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    limits: &QueryRouteLimits,
+    budget: &SharedBudget,
+    occurrence_ids: &[String],
+) -> Result<BTreeMap<String, CanonicalReference>, QueryFailure> {
+    let refused = |error: ClaimCandidateError| match error {
+        ClaimCandidateError::Facts(ClaimFactsError::Kernel(KernelError::Deadline)) => {
+            QueryFailure::from(exhaustion(budget))
+        }
+        _ => QueryFailure::Unavailable("claim_validation"),
+    };
+    let mut references = BTreeMap::new();
+    // Each batch of at most `validation_batch` selected occurrences is classified and validated at its own fresh snapshot.
+    for batch in occurrence_ids.chunks(limits.validation_batch.get()) {
+        check(budget)?;
+        let max = NonZeroUsize::new(batch.len()).expect("chunks are not empty");
+        let bounds = ClaimCandidateBounds {
+            max_rows: max,
+            facts: ClaimFactBounds {
+                max_claims: max,
+                max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
+            },
+        };
+        let classified = projection
+            .read(|conn| {
+                Ok(classify_selected_claims(
+                    conn,
+                    kernel,
+                    budget.eval(),
+                    bounds,
+                    batch,
+                ))
+            })
+            .map_err(|_| QueryFailure::Unavailable("claim_validation"))?
+            .map_err(refused)?;
+        let validation = validate_for_surface(
+            kernel,
+            &classified.candidates,
+            authority.project,
+            authority.destination,
+            Surface::ExplicitSearch,
+            bounds.facts,
+            classified.incarnation,
+            budget.eval(),
+        )
+        .map_err(refused)?;
+        references.extend(
+            validation
+                .candidates
+                .into_iter()
+                .filter(|validated| matches!(validated.verdict, UseVerdict::Permitted(_)))
+                .map(|validated| {
+                    let row = validated.candidate.row;
+                    (
+                        row.occurrence_id,
+                        CanonicalReference {
+                            object_id: row.object_id,
+                            revision: row.revision,
+                        },
+                    )
+                }),
+        );
+    }
+    Ok(references)
+}
+
+/// The canonical decision a served claim occurrence names, as validated at the response's snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalReference {
+    object_id: String,
+    revision: i64,
+}
+
+fn entry_json(entry: &FusedEntry, reference: Option<&CanonicalReference>) -> Value {
     let mut lanes = serde_json::Map::new();
     for lane in Lane::ORDER {
         if let Some(contribution) = entry.lane(lane) {
@@ -1273,12 +1421,19 @@ fn entry_json(entry: &FusedEntry) -> Value {
             );
         }
     }
-    json!({
+    let mut value = json!({
         "occurrence_id": entry.occurrence().to_string(),
         "position": entry.position().get(),
         "score": entry.score(),
         "lanes": lanes,
-    })
+    });
+    if let Some(reference) = reference {
+        value["canonical"] = json!({
+            "decision_object_id": reference.object_id,
+            "source_revision": reference.revision,
+        });
+    }
+    value
 }
 
 pub(crate) fn terminal_response(terminal: Terminal) -> PreparedOutcome {
