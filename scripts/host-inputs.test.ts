@@ -208,6 +208,14 @@ describe("host inputs", () => {
         expect(() => extractArchiveMember(archive([badSize]), MEMBER)).toThrow(/invalid size/);
     });
 
+    test("a GNU header's timestamp bytes at the prefix offset are not part of its name", () => {
+        const member = Buffer.from("runtime library");
+        const entry = tarEntry(MEMBER, member);
+        entry.write("ustar  \0", 257, "latin1");
+        entry.write("junk-timestamps", 345);
+        expect(extractArchiveMember(archive([entry]), MEMBER)).toEqual(member);
+    });
+
     test("a ustar name prefix joins its entry name", () => {
         const member = Buffer.from("runtime library");
         const entry = tarEntry("libort.so.1", member);
@@ -230,6 +238,7 @@ describe("host inputs", () => {
         await expect(acquireInputs(repo, { inputsDir, inputs: [input] })).rejects.toThrow(/locked sha256/);
         writeFileSync(join(repo, "release/corpus.json"), "corpus");
         await expect(acquireInputs(repo, { inputsDir, inputs: [input] })).rejects.toThrow(/has 6 bytes/);
+        writeFileSync(join(tmp, "outside.json"), bytes);
         await expect(
             acquireInputs(repo, { inputsDir, inputs: [{ ...input, source: "repo:../outside.json" }] }),
         ).rejects.toThrow(/outside the repository/);

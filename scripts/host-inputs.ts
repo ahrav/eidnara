@@ -7,11 +7,12 @@ import {
     mkdirSync,
     openSync,
     readFileSync,
+    realpathSync,
     renameSync,
     rmSync,
     writeSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
@@ -200,8 +201,10 @@ async function publish(
             fail(`received ${actual.size} bytes; the lock requires ${expected.size_bytes}`);
         }
         if (actual.sha256 !== expected.sha256) fail("received bytes do not match the locked sha256");
-        // A directory at the digest name would make the rename fail.
-        rmSync(final, { recursive: true, force: true });
+        // A rename replaces a file at the digest name but fails on a directory.
+        if (lstatSync(final, { throwIfNoEntry: false })?.isDirectory()) {
+            rmSync(final, { recursive: true, force: true });
+        }
         renameSync(partial, final);
     } catch (error) {
         if (open) closeSync(fd);
@@ -247,6 +250,11 @@ function download(inputsDir: string, url: string, expected: Expected, fetchImpl:
                 writeAll(fd, value);
             }
             return { size, sha256: hash.digest("hex") };
+        } catch (error) {
+            if (signal.aborted) {
+                fail(`${url} ${idle.signal.aborted ? `sent no bytes for ${DOWNLOAD_IDLE_MS} ms` : "exceeded the download deadline"}`);
+            }
+            throw error;
         } finally {
             clearTimeout(timer);
         }
@@ -313,17 +321,18 @@ export function extractArchiveMember(archive: Buffer, member: string): Buffer {
 }
 
 function readRepoSource(rootDir: string, input: LockedInput): Buffer {
-    const root = resolve(rootDir);
-    const path = resolve(root, input.source.slice(REPO_SOURCE_PREFIX.length));
-    const inside = relative(root, path);
-    if (inside === "" || inside.startsWith("..")) {
-        fail(`${input.key}: ${input.source} is outside the repository`);
-    }
+    const root = realpathSync(rootDir);
+    let path: string;
     let stat: ReturnType<typeof lstatSync>;
     try {
+        path = realpathSync(resolve(root, input.source.slice(REPO_SOURCE_PREFIX.length)));
         stat = lstatSync(path);
     } catch {
         fail(`${input.key}: ${input.source} is missing`);
+    }
+    const inside = relative(root, path);
+    if (inside === "" || inside === ".." || inside.startsWith(`..${sep}`)) {
+        fail(`${input.key}: ${input.source} is outside the repository`);
     }
     if (!stat.isFile()) fail(`${input.key}: ${input.source} is not a regular file`);
     if (stat.size !== input.size_bytes) {

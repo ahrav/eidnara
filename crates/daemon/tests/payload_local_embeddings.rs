@@ -260,6 +260,9 @@ async fn a_corrupt_or_missing_manifest_listed_file_refuses_startup() {
                 &digest,
             ],
         );
+        if result["ok"] == true {
+            lifecycle(data.path(), &["stop"]);
+        }
         assert_eq!(result["ok"], false, "{case}: {result}");
         assert_eq!(
             result["reason"], "native_payload_invalid",
