@@ -725,7 +725,14 @@ pub fn verify(
     if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
-    // The sidecar is a resident file, so its declared size is inside the bound checked once the dimension is known.
+    // The resident tables, the sidecar among them, are judged before any is read; the chunk is added once the sidecar names the dimension.
+    let resident = resident_bytes(manifest);
+    if resident > max_bytes {
+        return Err(VectorRefusal::OverBound {
+            bytes: resident,
+            max: max_bytes,
+        });
+    }
     let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
@@ -844,11 +851,12 @@ fn row_chunk_bytes(dimension: u32) -> u64 {
     (VERIFY_CHUNK_BYTES / row.max(1)).max(1) * row
 }
 
-/// Bytes verification holds at once: the resident tables and the sidecar as declared, one row chunk, its decoded row, and one row of codes.
+/// Bytes verification holds at once as declared: the resident tables with the sidecar, one row chunk and its header, and per coordinate the decoded row, its codes, the stored codes, and the calibration's running maxima, scales, and encoded scales (four, one, one, four, four, and four bytes).
 pub fn verification_bytes(manifest: &GenerationManifest, dimension: u32) -> u64 {
     resident_bytes(manifest)
         .saturating_add(row_chunk_bytes(dimension))
-        .saturating_add(u64::from(dimension) * 5)
+        .saturating_add(codec::ARTIFACT_HEADER_BYTES as u64)
+        .saturating_add(u64::from(dimension) * 18)
 }
 
 /// Verification reads the row artifact in chunks of about this many bytes.

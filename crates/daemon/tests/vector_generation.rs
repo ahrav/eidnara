@@ -395,7 +395,8 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
             + (1 << 16) / (4 * u64::from(first.sidecar.vector_dimension))
                 * 4
                 * u64::from(first.sidecar.vector_dimension)
-            + 5 * u64::from(first.sidecar.vector_dimension)
+            + 24
+            + 18 * u64::from(first.sidecar.vector_dimension)
     );
     assert!(streamed > 0);
     assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
@@ -1171,10 +1172,14 @@ fn streaming_verification_reads_rows_and_codes_across_chunks() {
     let fixture = Fixture::new();
     let mut many = export();
     let template = many.rows[0].vector.clone();
+    // Each row differs, so a chunk read from the wrong offset cannot reproduce the codes it should.
     many.rows = (0..3000u32)
         .map(|n| {
-            let mut vector = template.clone();
-            vector.rotate_left((n % 8) as usize);
+            let mut raw = template.clone();
+            raw.rotate_left((n % 8) as usize);
+            raw[(n as usize / 8) % 8] += n as f32 * 1e-4;
+            let norm = raw.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let vector = raw.iter().map(|value| value / norm).collect();
             ExportedRow {
                 occurrence_id: format!("{n:064x}"),
                 vector,
@@ -1192,4 +1197,39 @@ fn streaming_verification_reads_rows_and_codes_across_chunks() {
         "beyond the resident tables, verification holds less than the row payload"
     );
     assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
+
+    // A code changed in the last row, past the first chunk, refuses as a code mismatch.
+    let late_code = fixture.restaged(&digest, |dir| {
+        let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
+        let last = codes.len() - 1;
+        codes[last] = codes[last].wrapping_add(1);
+        rehash_file(dir, CODES_FILE, &codes);
+    });
+    assert_eq!(
+        fixture.verify(&late_code).unwrap_err(),
+        VectorRefusal::File {
+            path: CODES_FILE,
+            fault: FileFault::Codes
+        }
+    );
+    // One row of codes more or fewer than the rows refuses as a code mismatch before any code is compared.
+    for extra in [true, false] {
+        let resized = fixture.restaged(&digest, |dir| {
+            let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
+            if extra {
+                codes.extend(std::iter::repeat_n(0u8, DIMENSION as usize));
+            } else {
+                codes.truncate(codes.len() - DIMENSION as usize);
+            }
+            rehash_file(dir, CODES_FILE, &codes);
+        });
+        assert_eq!(
+            fixture.verify(&resized).unwrap_err(),
+            VectorRefusal::File {
+                path: CODES_FILE,
+                fault: FileFault::Codes
+            },
+            "extra row: {extra}"
+        );
+    }
 }
