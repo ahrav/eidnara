@@ -13,7 +13,7 @@ use daemon::vector_admission::Ledger;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
     SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VectorRefusal, VectorSidecar, build,
-    stage, verify,
+    resident_bytes, stage, verification_bytes, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationManifest, GenerationStore,
@@ -379,20 +379,31 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
     };
     assert!(verify(&fixture.store, &digest, &with_checkpoint, u64::MAX).is_ok());
 
-    // The bound is the manifest's payload total, including the sidecar; one byte under it refuses before any payload is read.
-    let total: u64 = first
-        .sidecar
-        .stage_manifest()
+    // The bound is what verification holds at once: the resident tables and sidecar, one row chunk, and one row's codes.
+    // The row and code payloads stream through it, so their sizes are not part of it; one byte under it refuses before any payload is read.
+    let manifest = first.sidecar.stage_manifest();
+    let held = verification_bytes(&manifest, first.sidecar.vector_dimension);
+    let streamed: u64 = manifest
         .files
         .iter()
+        .filter(|file| file.path == ROWS_FILE || file.path == CODES_FILE)
         .map(|file| file.size)
         .sum();
-    assert!(verify(&fixture.store, &digest, &fixture.expected(), total).is_ok());
     assert_eq!(
-        verify(&fixture.store, &digest, &fixture.expected(), total - 1).map(|v| v.digest),
+        held,
+        resident_bytes(&manifest)
+            + (1 << 16) / (4 * u64::from(first.sidecar.vector_dimension))
+                * 4
+                * u64::from(first.sidecar.vector_dimension)
+            + 5 * u64::from(first.sidecar.vector_dimension)
+    );
+    assert!(streamed > 0);
+    assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
+    assert_eq!(
+        verify(&fixture.store, &digest, &fixture.expected(), held - 1).map(|v| v.digest),
         Err(VectorRefusal::OverBound {
-            bytes: total,
-            max: total - 1
+            bytes: held,
+            max: held - 1
         })
     );
 }
@@ -1151,4 +1162,34 @@ impl Fixture {
         fs::set_permissions(dir.join("manifest.json"), fs::Permissions::from_mode(0o600)).unwrap();
         torn_digest
     }
+}
+
+/// A generation larger than one verification chunk streams through several chunks in both passes and verifies under a bound
+/// that holds the resident tables plus one chunk, less than its row payload.
+#[test]
+fn streaming_verification_reads_rows_and_codes_across_chunks() {
+    let fixture = Fixture::new();
+    let mut many = export();
+    let template = many.rows[0].vector.clone();
+    many.rows = (0..3000u32)
+        .map(|n| {
+            let mut vector = template.clone();
+            vector.rotate_left((n % 8) as usize);
+            ExportedRow {
+                occurrence_id: format!("{n:064x}"),
+                vector,
+            }
+        })
+        .collect();
+    let built = build(&fixture.expected(), &many, &fixture.work_dir()).unwrap();
+    let rows_bytes = std::fs::metadata(built.dir.join(ROWS_FILE)).unwrap().len();
+    assert!(rows_bytes > 1 << 16, "the rows span more than one chunk");
+    let digest = fixture.stage(&built).unwrap();
+    let manifest = built.sidecar.stage_manifest();
+    let held = verification_bytes(&manifest, built.sidecar.vector_dimension);
+    assert!(
+        held - resident_bytes(&manifest) < rows_bytes,
+        "beyond the resident tables, verification holds less than the row payload"
+    );
+    assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
 }

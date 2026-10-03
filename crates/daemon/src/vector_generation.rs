@@ -709,7 +709,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
-/// Verification holds every payload in memory, so a manifest whose files total more than `max_bytes` is refused before any payload is held; the store's validation has already streamed each file through a fixed buffer to check its hash, so the bound limits memory, not I/O. The caller bounds its own memory as `live_rows` bounds the export.
+/// Verification streams the row and code artifacts through fixed chunks in two passes, one to calibrate and one to compare the codes, and holds only the resident tables, the sidecar, and two chunks; a generation whose [`verification_bytes`] exceed `max_bytes` is refused before any payload is read. The store's validation has already streamed each file through a fixed buffer to check its hash, so the bound limits memory, not I/O.
 ///
 /// # Errors
 ///
@@ -725,17 +725,7 @@ pub fn verify(
     if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
-    let bytes = manifest
-        .files
-        .iter()
-        .try_fold(0u64, |sum, file| sum.checked_add(file.size))
-        .unwrap_or(u64::MAX);
-    if bytes > max_bytes {
-        return Err(VectorRefusal::OverBound {
-            bytes,
-            max: max_bytes,
-        });
-    }
+    // The sidecar is a resident file, so its declared size is inside the bound checked once the dimension is known.
     let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
@@ -764,20 +754,22 @@ pub fn verify(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
-    // The raw artifact is a temporary: only the decoded rows stay while the codes are computed.
-    let rows = codec::decode_rows(
-        &read_all(&rows_file, ROWS_FILE, declared_size(&generation, ROWS_FILE))?,
-        &layout,
-    )
-    .map_err(VectorRefusal::Rows)?;
+    let bytes = verification_bytes(manifest, sidecar.vector_dimension);
+    if bytes > max_bytes {
+        return Err(VectorRefusal::OverBound {
+            bytes,
+            max: max_bytes,
+        });
+    }
     let fault = |path, fault| VectorRefusal::File { path, fault };
-    if rows.rows.len() as u64 != sidecar.rows {
+    let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
+    let rows = RowStream::open(&rows_file, declared_size(&generation, ROWS_FILE), &layout)?;
+    if rows.count != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
-    let vectors = rows.rows.iter().map(Vec::as_slice);
-    let calibration =
-        scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
+    let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
+    rows.for_each(|_, row| calibrator.push(row).map_err(VectorRefusal::Calibration))?;
+    let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
     let scales_bytes = generation.read_verified_file(SCALES_FILE)?;
     if calibration.scales.encode() != scales_bytes
         || calibration.identity.calibrated_rows != sidecar.calibrated_rows
@@ -787,7 +779,7 @@ pub fn verify(
     }
     let ids: Vec<String> = serde_json::from_slice(&generation.read_verified_file(ROW_IDS_FILE)?)
         .map_err(|_| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
-    if ids.len() != rows.rows.len() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if ids.len() as u64 != rows.count || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
     let tombstones: Vec<String> =
@@ -799,17 +791,31 @@ pub fn verify(
     {
         return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
-    let codes = encode_all(&layout, &calibration.scales, vectors)
-        .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
     let codes_file = File::from(generation.open_verified_file(CODES_FILE)?);
-    if read_all(
-        &codes_file,
-        CODES_FILE,
-        declared_size(&generation, CODES_FILE),
-    )? != codes
-    {
+    let codes_size = declared_size(&generation, CODES_FILE);
+    let dimension = u64::from(layout.dimension);
+    if file_len(&codes_file)? > codes_size {
+        return Err(fault(CODES_FILE, FileFault::Size));
+    }
+    if rows.count.checked_mul(dimension) != Some(codes_size) {
         return Err(fault(CODES_FILE, FileFault::Codes));
     }
+    // The second pass encodes each row under the scales and compares it with the stored codes at the same row.
+    let mut stored = vec![0u8; layout.dimension as usize];
+    rows.for_each(|index, row| {
+        let encoded = scalar::encode(&layout, &calibration.scales, row)
+            .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
+        read_exact_at(&codes_file, &mut stored, index as u64 * dimension)?;
+        if encoded
+            .codes
+            .iter()
+            .map(|code| *code as u8)
+            .ne(stored.iter().copied())
+        {
+            return Err(fault(CODES_FILE, FileFault::Codes));
+        }
+        Ok(())
+    })?;
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
         sidecar,
@@ -822,26 +828,6 @@ pub fn verify(
     })
 }
 
-/// The whole of a verified file, read from its start whatever the descriptor's position and no further than the `size` its manifest declares; more bytes than that refuse as [`FileFault::Size`], as [`ValidatedGeneration::read_verified_file`] refuses them.
-fn read_all(file: &File, path: &'static str, size: u64) -> Result<Vec<u8>, VectorRefusal> {
-    use std::io::Read;
-    let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
-    let mut reader = file.try_clone().map_err(io)?;
-    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0)).map_err(io)?;
-    let mut bytes = Vec::new();
-    reader
-        .take(size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(io)?;
-    if bytes.len() as u64 > size {
-        return Err(VectorRefusal::File {
-            path,
-            fault: FileFault::Size,
-        });
-    }
-    Ok(bytes)
-}
-
 /// The manifest-declared size of `path`, which [`ValidatedGeneration::open_verified_file`] checked the file against.
 fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
     generation
@@ -850,6 +836,101 @@ fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
         .iter()
         .find(|file| file.path == path)
         .map_or(0, |file| file.size)
+}
+
+/// Bytes of one streamed row chunk: whole rows of `dimension` f32 coordinates filling [`VERIFY_CHUNK_BYTES`], at least one row.
+fn row_chunk_bytes(dimension: u32) -> u64 {
+    let row = u64::from(dimension) * 4;
+    (VERIFY_CHUNK_BYTES / row.max(1)).max(1) * row
+}
+
+/// Bytes verification holds at once: the resident tables and the sidecar as declared, one row chunk, its decoded row, and one row of codes.
+pub fn verification_bytes(manifest: &GenerationManifest, dimension: u32) -> u64 {
+    resident_bytes(manifest)
+        .saturating_add(row_chunk_bytes(dimension))
+        .saturating_add(u64::from(dimension) * 5)
+}
+
+/// Verification reads the row artifact in chunks of about this many bytes.
+const VERIFY_CHUNK_BYTES: u64 = 1 << 16;
+
+fn io_refusal(error: io::Error) -> VectorRefusal {
+    VectorRefusal::Io(error.kind().to_string())
+}
+
+fn read_exact_at(file: &File, into: &mut [u8], offset: u64) -> Result<(), VectorRefusal> {
+    std::os::unix::fs::FileExt::read_exact_at(file, into, offset).map_err(io_refusal)
+}
+
+fn file_len(file: &File) -> Result<u64, VectorRefusal> {
+    Ok(file.metadata().map_err(io_refusal)?.len())
+}
+
+/// The original-row artifact read through one fixed chunk: the header is checked once, then rows are decoded chunk by chunk under the layout.
+struct RowStream<'a> {
+    file: &'a File,
+    layout: RowLayout,
+    count: u64,
+}
+
+impl<'a> RowStream<'a> {
+    /// Checks the header and that the file holds exactly the declared rows; more bytes than `size` refuse as [`FileFault::Size`].
+    fn open(file: &'a File, size: u64, layout: &RowLayout) -> Result<Self, VectorRefusal> {
+        if file_len(file)? > size {
+            return Err(VectorRefusal::File {
+                path: ROWS_FILE,
+                fault: FileFault::Size,
+            });
+        }
+        let header_len = codec::ARTIFACT_HEADER_BYTES.min(usize::try_from(size).unwrap_or(0));
+        let mut header = vec![0u8; header_len];
+        read_exact_at(file, &mut header, 0)?;
+        let count = codec::decode_header(&header, layout).map_err(VectorRefusal::Rows)?;
+        let body = size - codec::ARTIFACT_HEADER_BYTES as u64;
+        if count.checked_mul(u64::from(layout.dimension) * 4) != Some(body) {
+            return Err(VectorRefusal::Rows(codec::ArtifactRejection::RowBytes {
+                declared: count,
+                bytes: usize::try_from(body).unwrap_or(usize::MAX),
+            }));
+        }
+        Ok(Self {
+            file,
+            layout: *layout,
+            count,
+        })
+    }
+
+    /// Calls `each` with every row's index and decoded coordinates in file order; a row outside the layout refuses at its index.
+    fn for_each(
+        &self,
+        mut each: impl FnMut(usize, &[f32]) -> Result<(), VectorRefusal>,
+    ) -> Result<(), VectorRefusal> {
+        let row_bytes = u64::from(self.layout.dimension) * 4;
+        let chunk_rows = row_chunk_bytes(self.layout.dimension) / row_bytes;
+        let mut chunk = vec![0u8; usize::try_from(chunk_rows * row_bytes).unwrap_or(0)];
+        let mut index = 0u64;
+        while index < self.count {
+            let rows = chunk_rows.min(self.count - index);
+            let bytes = &mut chunk[..usize::try_from(rows * row_bytes).unwrap_or(0)];
+            read_exact_at(
+                self.file,
+                bytes,
+                codec::ARTIFACT_HEADER_BYTES as u64 + index * row_bytes,
+            )?;
+            for raw in bytes.chunks_exact(usize::try_from(row_bytes).unwrap_or(1)) {
+                let position = usize::try_from(index).unwrap_or(usize::MAX);
+                let row = codec::decode(raw, &self.layout).map_err(|rejection| {
+                    VectorRefusal::Rows(codec::ArtifactRejection::Row {
+                        index: position,
+                        rejection,
+                    })
+                })?;
+                each(position, &row)?;
+                index += 1;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(), VectorRefusal> {
@@ -1003,23 +1084,23 @@ mod tests {
     }
 
     #[test]
-    fn a_verified_file_is_read_no_further_than_its_manifest_size() {
+    fn a_row_artifact_longer_than_its_manifest_size_is_refused_before_any_row_is_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(ROWS_FILE);
-        fs::write(&path, b"0123456789").unwrap();
+        // Bytes appended after the hash was taken are refused rather than read.
+        fs::write(&path, [0u8; 30]).unwrap();
         let file = File::open(&path).unwrap();
-        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
-        // The descriptor's position after one read does not change the next.
-        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
-
-        // Bytes appended after the hash was taken are refused rather than read to the end.
-        fs::write(&path, b"0123456789ab").unwrap();
+        let layout = RowLayout {
+            dimension: 2,
+            metric: Metric::InnerProduct,
+            unit_norm_tolerance: 1e-3,
+        };
         assert_eq!(
-            read_all(&file, ROWS_FILE, 10).unwrap_err(),
-            VectorRefusal::File {
+            RowStream::open(&file, 24, &layout).err(),
+            Some(VectorRefusal::File {
                 path: ROWS_FILE,
                 fault: FileFault::Size
-            }
+            })
         );
     }
 }

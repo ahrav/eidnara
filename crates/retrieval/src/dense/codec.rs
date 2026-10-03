@@ -288,16 +288,21 @@ pub fn encode_rows<'a>(
     Ok(bytes)
 }
 
-/// The header, metric, dimension, and byte count are checked before any row is read.
-pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, ArtifactRejection> {
+/// The row count an artifact header declares, after the magic, version, metric, reserved byte, and dimension are checked against `layout`; `header` is the artifact's first [`ARTIFACT_HEADER_BYTES`] bytes or fewer.
+///
+/// # Errors
+///
+/// The same header rejections [`decode_rows`] makes.
+pub fn decode_header(header: &[u8], layout: &RowLayout) -> Result<u64, ArtifactRejection> {
     if layout.dimension == 0 {
         return Err(ArtifactRejection::ZeroDimension);
     }
     layout.check().map_err(ArtifactRejection::Layout)?;
-    if bytes.len() < ARTIFACT_HEADER_BYTES {
-        return Err(ArtifactRejection::ShortHeader { bytes: bytes.len() });
+    if header.len() < ARTIFACT_HEADER_BYTES {
+        return Err(ArtifactRejection::ShortHeader {
+            bytes: header.len(),
+        });
     }
-    let (header, body) = bytes.split_at(ARTIFACT_HEADER_BYTES);
     if header[..8] != ARTIFACT_MAGIC {
         return Err(ArtifactRejection::Magic);
     }
@@ -323,7 +328,15 @@ pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, Art
             expected: layout.dimension,
         });
     }
-    let row_count = u64::from_le_bytes(header[16..24].try_into().expect("eight header bytes"));
+    Ok(u64::from_le_bytes(
+        header[16..24].try_into().expect("eight header bytes"),
+    ))
+}
+
+/// The header, metric, dimension, and byte count are checked before any row is read.
+pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, ArtifactRejection> {
+    let row_count = decode_header(bytes, layout)?;
+    let body = &bytes[ARTIFACT_HEADER_BYTES..];
     let row_bytes = u64::from(layout.dimension) * 4;
     let mismatch = ArtifactRejection::RowBytes {
         declared: row_count,

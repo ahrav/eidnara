@@ -457,7 +457,7 @@ impl std::fmt::Debug for VerifiedComposition {
 }
 
 /// Verifies one composition generation and every member under `expected`, and re-checks the topology under `max_deltas` so a composition current admission would refuse does not verify.
-/// Each member is verified under `max_member_bytes`, the byte bound [`verify`] takes; every member's payload is held at once, so the caller's memory bound is `max_member_bytes` times one more than `max_deltas`.
+/// Each member is verified under `max_member_bytes`, the byte bound [`verify`] takes on what verification holds at once; members are verified one after another, and each verified member keeps only its resident tables.
 ///
 /// # Errors
 ///

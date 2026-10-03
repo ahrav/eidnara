@@ -145,36 +145,70 @@ pub fn calibrate<'a>(
     layout: &RowLayout,
     rows: impl IntoIterator<Item = &'a [f32]>,
 ) -> Result<Calibration, CalibrationRejection> {
-    layout.check().map_err(CalibrationRejection::Layout)?;
-    let dimension = layout.dimension as usize;
-    let mut max_abs = vec![0.0f32; dimension];
-    let mut count = 0u64;
-    for (index, row) in rows.into_iter().enumerate() {
-        codec::validate(row, layout)
+    let mut calibrator = Calibrator::new(layout)?;
+    for row in rows {
+        calibrator.push(row)?;
+    }
+    calibrator.finish()
+}
+
+/// [`calibrate`] one row at a time, so a caller streaming rows from a file holds one row, not all of them.
+pub struct Calibrator {
+    layout: RowLayout,
+    max_abs: Vec<f32>,
+    count: u64,
+}
+
+impl Calibrator {
+    /// # Errors
+    ///
+    /// A layout that is not a generation predicate.
+    pub fn new(layout: &RowLayout) -> Result<Self, CalibrationRejection> {
+        layout.check().map_err(CalibrationRejection::Layout)?;
+        Ok(Self {
+            layout: *layout,
+            max_abs: vec![0.0f32; layout.dimension as usize],
+            count: 0,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// A row outside the layout, reported at its index among the rows pushed.
+    pub fn push(&mut self, row: &[f32]) -> Result<(), CalibrationRejection> {
+        let index = usize::try_from(self.count).unwrap_or(usize::MAX);
+        codec::validate(row, &self.layout)
             .map_err(|rejection| CalibrationRejection::Row { index, rejection })?;
-        for (max, value) in max_abs.iter_mut().zip(row) {
+        for (max, value) in self.max_abs.iter_mut().zip(row) {
             *max = max.max(value.abs());
         }
-        count += 1;
+        self.count += 1;
+        Ok(())
     }
-    if count == 0 {
-        return Err(CalibrationRejection::NoRows);
-    }
-    let mut scales = Vec::with_capacity(dimension);
-    for (coordinate, max) in max_abs.into_iter().enumerate() {
-        let scale = if max == 0.0 { 1.0 } else { max / 127.0 };
-        if scale == 0.0 {
-            return Err(CalibrationRejection::ScaleUnderflow { coordinate });
+
+    /// # Errors
+    ///
+    /// No rows pushed, or a nonzero coordinate whose scale rounds to zero.
+    pub fn finish(self) -> Result<Calibration, CalibrationRejection> {
+        if self.count == 0 {
+            return Err(CalibrationRejection::NoRows);
         }
-        scales.push(scale);
+        let mut scales = Vec::with_capacity(self.max_abs.len());
+        for (coordinate, max) in self.max_abs.into_iter().enumerate() {
+            let scale = if max == 0.0 { 1.0 } else { max / 127.0 };
+            if scale == 0.0 {
+                return Err(CalibrationRejection::ScaleUnderflow { coordinate });
+            }
+            scales.push(scale);
+        }
+        let scales = Scales { scales };
+        let identity = CalibrationIdentity {
+            recipe: ScalarRecipe::SymmetricInt8V1,
+            calibrated_rows: self.count,
+            scales_digest: scales.digest(),
+        };
+        Ok(Calibration { scales, identity })
     }
-    let scales = Scales { scales };
-    let identity = CalibrationIdentity {
-        recipe: ScalarRecipe::SymmetricInt8V1,
-        calibrated_rows: count,
-        scales_digest: scales.digest(),
-    };
-    Ok(Calibration { scales, identity })
 }
 
 /// The codes of one row and how many coordinates were clamped into range.
