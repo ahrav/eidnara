@@ -46,7 +46,8 @@ function harness(transport = new FakeKernelTransport(new FakeKernel())) {
     const kernelClient: KernelClientResolver = ({ sessionId, projectRoot }) =>
         new KernelClient({ transport, enabled: true, sessionId, projectRoot });
     const deps = { kernelClient, resolveProjectPath: () => "git:route-project" };
-    const run = (args: Record<string, unknown>) => executeEidnaraSearch(deps, args, ctx);
+    const run = (args: Record<string, unknown>, abort?: AbortSignal) =>
+        executeEidnaraSearch(deps, args, abort ? { ...ctx, abort } : ctx);
     return { kernel: transport.kernel, transport, run };
 }
 
@@ -109,6 +110,10 @@ describe("eidnara_search through the fused route", () => {
         expect(direct.text).toContain("Direct hit.");
 
         transport.calls.length = 0;
+        const atLimit = Array.from({ length: ROUTE_MAX_SELECTORS }, (_, n) => id(n + 10)).join(" ");
+        await run({ query: atLimit });
+        expect(methods(transport)).toEqual(["retrieval.query", "kernel.read"]);
+        transport.calls.length = 0;
         const many = Array.from({ length: ROUTE_MAX_SELECTORS + 1 }, (_, n) => id(n + 10)).join(
             " ",
         );
@@ -146,6 +151,14 @@ describe("eidnara_search through the fused route", () => {
         const execution = await run({ query: "memory text" });
         expect(execution.text).toContain("No results found");
         expect(methods(transport)).toEqual(["retrieval.query"]);
+
+        transport.calls.length = 0;
+        kernel.routeReply = () => fused([{}, {}]);
+        const unmatched = await run({ query: "memory text" });
+        expect(unmatched.text).toContain(
+            "Memory: the fused ranking matched no current memory decisions.",
+        );
+        expect(methods(transport)).toEqual(["retrieval.query"]);
     });
 
     it("falls back to the labeled snapshot scan only for a disabled or unavailable route", async () => {
@@ -168,6 +181,42 @@ describe("eidnara_search through the fused route", () => {
             { kind: "terminal", terminal: "unauthorized" },
             { kind: "terminal", terminal: "deadline" },
             { kind: "terminal", terminal: "cancelled" },
+            { kind: "terminal", terminal: "required_context_failure" },
+            {
+                ...fused([]),
+                entries: [
+                    {
+                        occurrence_id: "occ-0",
+                        position: 1,
+                        lanes: { dense: { position: 1, raw: 0.5 } },
+                        canonical: {
+                            decision_object_id: id(1),
+                            source_revision: 1,
+                            visibility: "hidden",
+                        },
+                    },
+                ],
+            },
+            {
+                ...fused([]),
+                entries: [
+                    {
+                        occurrence_id: "occ-0",
+                        position: 2,
+                        lanes: { dense: { position: 1, raw: 0.5 } },
+                    },
+                ],
+            },
+            {
+                ...fused([]),
+                entries: [
+                    {
+                        occurrence_id: "occ-0",
+                        position: 1,
+                        lanes: { sparse: { position: 1, raw: 0.5 } },
+                    },
+                ],
+            },
             { kind: "fused", entries: "not-a-list" },
             { kind: "terminal", terminal: "made_up" },
         ];
@@ -232,7 +281,9 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).not.toContain("Other domain.");
         expect(execution.text).not.toContain("Use Redis");
         expect(execution.text).not.toContain("Still current.");
-        expect(execution.text).toContain(`not rendered: ${id(1)}, ${id(2)}, ${id(5)}, ${id(4)}`);
+        expect(execution.text).toContain(
+            "Memory: 4 ranked memories changed or became unreadable after ranking and were not rendered.",
+        );
     });
 
     it("labels a result the route validated as labeled", async () => {
@@ -249,12 +300,78 @@ describe("eidnara_search through the fused route", () => {
             summary: "Verified rule.",
             labeled: false,
         });
-        kernel.routeReply = () => fused([{ object: id(1), labeled: true }, { object: id(2) }]);
+        kernel.routeReply = () =>
+            fused([{ object: id(1) }, { object: id(2) }, { object: id(1), labeled: true }]);
         const execution = await run({ query: "rule" });
         expect(execution.text).toContain(
             `id=${id(1)} category=NAMING match=fused lanes=dense trust=[labeled]`,
         );
         expect(execution.text).toContain(`id=${id(2)} category=NAMING match=fused lanes=dense\n`);
+    });
+
+    it("stops at the caller's abort and renders nothing withdrawn after ranking", async () => {
+        const { kernel, transport, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Withdrawn text.",
+        });
+        kernel.routeReply = () => {
+            const object = kernel.objects.get(id(1));
+            if (object) object.invalidated_commit_seq = kernel.tip;
+            return fused([{ object: id(1) }]);
+        };
+        const withdrawn = await run({ query: "anything" });
+        expect(withdrawn.text).not.toContain("Withdrawn text.");
+        expect(withdrawn.text).toContain("1 ranked memory changed or became unreadable");
+
+        transport.calls.length = 0;
+        const controller = new AbortController();
+        kernel.routeReply = () => {
+            controller.abort();
+            return fused([{ object: id(1) }]);
+        };
+        const aborted = await run({ query: "anything" }, controller.signal);
+        expect(aborted.status).toBe("invalid");
+        expect(methods(transport)).toEqual(["retrieval.query"]);
+
+        transport.calls.length = 0;
+        const early = await run({ query: "anything" }, controller.signal);
+        expect(early.status).toBe("invalid");
+        expect(transport.calls).toHaveLength(0);
+    });
+
+    it("reports a degraded or truncated ranking and renders a ranked anti-memory warning", async () => {
+        const { kernel, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "REJECTED_APPROACH",
+            summary: renderAntiMemoryContent({
+                trigger: "cache backend",
+                rejectedStrategy: "Use Redis",
+                rejectionReason: "The project must work offline",
+                saferAlternative: "Use the embedded store",
+            }),
+        });
+        kernel.routeReply = () =>
+            fused([{ object: id(1) }], {
+                degraded: true,
+                truncated: true,
+                lanes: {
+                    exact: { status: "complete" },
+                    lexical: { status: "complete" },
+                    dense: { status: "unavailable", reason: "lane_busy" },
+                },
+            });
+        const execution = await run({ query: "cache" });
+        expect(execution.text).toContain(
+            "Memory: the fused ranking is degraded: dense unavailable (lane_busy).",
+        );
+        expect(execution.text).toContain(
+            "Memory: the fused ranking was truncated at the route's result bound.",
+        );
+        expect(execution.text).toContain("[anti-memory warning]");
+        expect(execution.text).toContain("Previously rejected: Use Redis.");
     });
 
     it("refuses a ranking whose daemon connection changed before hydration", async () => {

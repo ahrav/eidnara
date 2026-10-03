@@ -3,9 +3,9 @@ import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
-    MEMORY_DOMAIN_ID,
     type MemoryState,
     type ReadRow,
+    ROUTE_LANES,
     type RouteLane,
     renderToolStateText,
     unavailable,
@@ -20,8 +20,6 @@ import {
 
 export const ROUTE_MAX_SELECTORS = 16;
 export const ROUTE_SEARCH_DEADLINE_MS = 10_000;
-
-const LANE_ORDER: readonly RouteLane[] = ["exact", "lexical", "dense"];
 
 export type RouteSearch =
     | { kind: "ranked"; results: KernelMemorySearchResult[]; notes: string[] }
@@ -56,7 +54,6 @@ function servesRevision(row: ReadRow | undefined, revision: number): row is Read
     return (
         row !== undefined &&
         isMemoryDecisionRow(row) &&
-        row.object.domain_id === MEMORY_DOMAIN_ID &&
         row.object.source_revision === revision &&
         row.object.invalidated_commit_seq === null
     );
@@ -96,10 +93,6 @@ export async function searchThroughRoute(args: {
             text: `Error: the memory search route answered ${ranked.terminal}; no results were returned.`,
         };
     }
-    if (ranked.connectionIdentity !== connection) {
-        return refusedState(unavailable("snapshot_diverged"));
-    }
-
     const decisions = new Map<string, RankedDecision>();
     for (const entry of ranked.entries) {
         const reference = entry.canonical;
@@ -121,6 +114,9 @@ export async function searchThroughRoute(args: {
     }
     const selected = [...decisions.values()].slice(0, args.limit);
     const notes: string[] = [];
+    if (ranked.entries.length > 0 && decisions.size === 0) {
+        notes.push("Memory: the fused ranking matched no current memory decisions.");
+    }
     if (ranked.degraded) notes.push(degradedNote(ranked.lanes));
     if (ranked.truncated) {
         notes.push("Memory: the fused ranking was truncated at the route's result bound.");
@@ -143,7 +139,9 @@ export async function searchThroughRoute(args: {
     const nowMs = args.nowMs ?? Date.now();
     const results: KernelMemorySearchResult[] = [];
     const stale: string[] = [];
+    const unresolved = new Set(read.unresolvedObjectIds);
     for (const decision of selected) {
+        if (unresolved.has(decision.objectId)) continue;
         const row = rows.get(decision.objectId);
         if (decision.conflicting || !servesRevision(row, decision.revision)) {
             stale.push(decision.objectId);
@@ -153,13 +151,13 @@ export async function searchThroughRoute(args: {
         const result = memoryResultFromRow(row, 1 / (results.length + 1), "fused");
         results.push({
             ...result,
-            lanes: LANE_ORDER.filter((lane) => decision.lanes.has(lane)),
+            lanes: ROUTE_LANES.filter((lane) => decision.lanes.has(lane)),
             ...(decision.labeled ? { policyLabel: "labeled" } : {}),
         });
     }
     if (stale.length > 0) {
         notes.push(
-            `Memory: ranked memories changed or became unreadable after ranking and were not rendered: ${stale.join(", ")}`,
+            `Memory: ${stale.length} ranked ${stale.length === 1 ? "memory" : "memories"} changed or became unreadable after ranking and ${stale.length === 1 ? "was" : "were"} not rendered.`,
         );
     }
     if (read.unresolvedObjectIds.length > 0) {

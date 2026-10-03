@@ -91,6 +91,7 @@ export {
     type ReadDecision,
     type ReadPayload,
     type ReadRow,
+    ROUTE_LANES,
     type RouteCanonicalReference,
     type RouteEntry,
     type RouteLane,

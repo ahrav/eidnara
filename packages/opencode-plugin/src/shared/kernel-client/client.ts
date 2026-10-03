@@ -169,8 +169,7 @@ export interface QueryArgs extends CallOptions {
     destination: "local" | "remote";
 }
 
-/** A `retrieval.query` answer with the connection identity it arrived on. */
-export type QueryResult = KernelResult<QueryPayload & { connectionIdentity?: string }>;
+export type QueryResult = KernelResult<QueryPayload>;
 
 /**
  * A read projected to the value injectors and status surfaces carry: the
@@ -572,7 +571,7 @@ export class KernelClient {
     async query(args: QueryArgs): Promise<QueryResult> {
         const deadline = this.deadline(args);
         if (!(deadline instanceof Deadline)) return { state: deadline };
-        const { result, connectionIdentity } = await this.call(
+        const { result } = await this.call(
             "retrieval.query",
             () =>
                 this.wireBody("retrieval.query", {
@@ -583,8 +582,7 @@ export class KernelClient {
             { signal: args.signal, deadline, reissuable: true },
             parseQueryResponse,
         );
-        if (!isAvailable(result)) return result;
-        return connectionIdentity === undefined ? result : { ...result, connectionIdentity };
+        return result;
     }
 
     private commitBody(

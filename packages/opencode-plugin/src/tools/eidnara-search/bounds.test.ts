@@ -56,6 +56,9 @@ describe("prepareExplicitQuery", () => {
     });
 
     it("admits a query at exactly the byte cap through byte preflight", () => {
+        expect(MAX_QUERY_BYTES).toBe(4096);
+        expect(MAX_QUERY_ATOMS).toBe(16);
+        expect(MAX_SEARCH_RESULT_LIMIT).toBe(32);
         const raw = "a".repeat(MAX_QUERY_BYTES);
         const outcome = prepareExplicitQuery(raw);
         if (!outcome.ok) {

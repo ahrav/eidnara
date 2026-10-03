@@ -3,8 +3,8 @@ import { estimateTokens } from "../../shared/token-estimator";
 /** The query validator checks the fused route's 4 KiB UTF-8 limit before trimming or tokenization. */
 export const MAX_QUERY_BYTES = 4096;
 export const MAX_QUERY_TOKENS = 512;
-/** The memory ranker scans every operand against every served row, so the operand count bounds its work. */
-export const MAX_QUERY_ATOMS = 64;
+/** The memory ranker scans every operand against every served row, so the operand count bounds its work; the fused route's lexical lane admits 16. */
+export const MAX_QUERY_ATOMS = 16;
 /** Missing or non-finite result-limit requests default to 10. */
 export const DEFAULT_SEARCH_RESULT_LIMIT = 10;
 /** The fused route serves at most 32 entries. */

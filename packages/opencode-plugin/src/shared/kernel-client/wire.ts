@@ -477,7 +477,7 @@ const ROUTE_TERMINALS = [
 ] as const;
 export type RouteTerminal = (typeof ROUTE_TERMINALS)[number];
 
-const ROUTE_LANES = ["exact", "lexical", "dense"] as const;
+export const ROUTE_LANES = ["exact", "lexical", "dense"] as const;
 export type RouteLane = (typeof ROUTE_LANES)[number];
 
 /** The canonical decision a ranked claim occurrence validated to on the daemon's explicit-search surface. */

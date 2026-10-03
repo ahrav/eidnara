@@ -122,7 +122,7 @@ describe("createEidnaraSearchTools", () => {
             },
         });
         const byteResult = await tools.eidnara_search.execute(
-            { query: "a".repeat(16 * 1024 + 1) },
+            { query: "a".repeat(4097) },
             toolContext(),
         );
         expect(byteResult).toStartWith("Error: query is too large:");

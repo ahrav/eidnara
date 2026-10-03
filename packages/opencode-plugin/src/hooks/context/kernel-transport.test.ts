@@ -132,6 +132,20 @@ describe("createKernelTransport method guard", () => {
     });
 });
 
+describe("createKernelTransport ranking route", () => {
+    test("retrieval.query passes the method guard and reaches the module transport", async () => {
+        const transport = createKernelTransport(managedTransport());
+        const sent = transport.call({
+            sessionId: SESSION,
+            projectRoot: PROJECT,
+            method: "retrieval.query",
+            body: { method: "retrieval.query", v: 1, session_id: SESSION, query: "x" },
+        });
+        // The fixture's demand start refuses to run, which proves the call got past the guard to the dial.
+        await expect(sent).rejects.toThrow(/demand start must not run/);
+    });
+});
+
 describe("createKernelTransport store lifecycle translation", () => {
     function storageTransport(storage: "starting" | "unavailable"): HostModuleTransport {
         return new HostModuleTransport({

@@ -874,7 +874,7 @@ export type ModuleMethod =
     | "guidance.get"
     | KernelMethod;
 
-/** The daemon's `kernel.*` routes, issued only through the shared kernel client. */
+/** The daemon's `kernel.*` routes and its `retrieval.query` ranking, issued only through the shared kernel client. */
 export type KernelMethod =
     | "kernel.read"
     | "kernel.commit"
@@ -882,4 +882,5 @@ export type KernelMethod =
     | "kernel.egress.decide"
     | "kernel.artifact.ingest.begin"
     | "kernel.artifact.ingest.page"
-    | "kernel.artifact.ingest.finish";
+    | "kernel.artifact.ingest.finish"
+    | "retrieval.query";
