@@ -1567,15 +1567,15 @@ impl HandlerCore {
                 drop(budget);
                 return terminal_response(terminal);
             }
-            // The embedding is awaited in place under the request's own budget; scan work is submitted only after it settles.
+            // The embedding is awaited in place under the request's own budget; scan work is submitted only after it settles. Cancellation drops the wait, which leaves the inference queue; a native call already started stays owned by the lane's tracked worker.
             let deadline = tokio::time::Instant::from_std(shared.deadline());
-            let result = shared.bridge(embedder.embed(&query, deadline)).await;
+            let result = shared.race(embedder.embed(&query, deadline)).await;
             if shared.is_exhausted() {
                 let terminal = exhaustion(&shared);
                 drop(budget);
                 return terminal_response(terminal);
             }
-            match Some(result) {
+            match result {
                 Some(Ok(vector)) => Embedded::Vector(vector),
                 Some(Err(EmbedFailure::Unavailable(reason))) => Embedded::Unavailable(reason),
                 Some(Err(EmbedFailure::Faulted)) | None => {

@@ -1308,6 +1308,28 @@ async fn backfill_inputs_past_512_exact_tokens_stop_as_over_limit() {
         );
     }
     assert_eq!(engine.calls(), 2, "one native call per admitted text");
+    let lexical: i64 = inspect(dir.path())
+        .query_row(
+            "SELECT COUNT(*) FROM occurrences WHERE occurrence_id=?1",
+            [occurrence_of(&rows, &over)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        lexical, 1,
+        "the lexical occurrence survives the dense refusal"
+    );
+    let over_limit: i64 = inspect(dir.path())
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs WHERE stop_reason='input_over_limit'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        over_limit, 1,
+        "the over-limit disposition is counted on its own"
+    );
     drop(projection);
 }
 

@@ -721,10 +721,13 @@ and
 `queries_and_batch_texts_share_one_native_call_at_a_time` (a full query queue
 is `LaneBusy`) and
 `a_timed_out_query_keeps_its_grant_and_permit_until_the_native_call_returns`
-(a wait that reaches the deadline is `LaneBusy`).
-Guarantee: An embedding lane that is busy (its query queue is full, or the
-query's asynchronous wait for the inference slot reaches the request deadline),
-starting, disabled, or failing, or that refuses the input, degrades the request to the exact and lexical fusion
+(the component reports `LaneBusy` when the wait reaches the deadline it was
+given; the route passes its own request deadline, so the request then ends as
+`deadline`, as `the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`
+asserts).
+Guarantee: An embedding lane that is busy (its query queue is full when the
+query asks to wait), starting, disabled, or failing, or that refuses the input,
+degrades the request to the exact and lexical fusion
 with the dense lane reported `unavailable` and a closed reason taken from the
 lane's typed refusal, within the original deadline and never as `deadline` or
 as dense completion; a request without prose outside its selector mentions is

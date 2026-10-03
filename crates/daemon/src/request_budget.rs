@@ -74,6 +74,18 @@ impl SharedBudget {
         }
     }
 
+    /// `race` drops `work` at cancellation and answers `None`, for work whose physical execution is owned elsewhere and survives its future.
+    pub async fn race<T>(&self, work: impl Future<Output = T>) -> Option<T> {
+        tokio::select! {
+            biased;
+            output = work => Some(output),
+            () = self.cancel.cancelled() => {
+                self.exhaustion();
+                None
+            }
+        }
+    }
+
     pub fn deadline(&self) -> Instant {
         self.deadline
     }

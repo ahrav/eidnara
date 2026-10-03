@@ -503,7 +503,7 @@ impl LocalEmbeddingsComponent {
         Ok(lane)
     }
 
-    /// Embeds one admitted query text through the inference scheduler. The query waits asynchronously, ahead of background texts, behind at most `max_waiting_queries` other queries; past that it is refused at once as busy. At `deadline` the wait ends as busy and the waiter leaves the queue. A native call already started keeps its grant and admission permit until it returns, after this future is dropped.
+    /// Embeds one admitted query text through the inference scheduler. The query waits asynchronously, ahead of background texts, behind at most `max_waiting_queries` other queries; past that it is refused at once as busy. At `deadline` the wait ends as busy and the waiter leaves the queue. A native call already started keeps its grant and admission permit until it returns, after this future is dropped. The worker's copy of the text is bounded by the admission permit it holds: `per_waiter_charge_bound` budgets each permit for a text of `max_text_bytes`.
     ///
     /// # Errors
     ///
@@ -898,7 +898,6 @@ impl From<tokio::task::JoinError> for PanickedBackend {
     }
 }
 
-/// `Invariant` failures and panicked backends mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
 /// A background grant, or `None` once shutdown has begun.
 async fn background_grant(inner: &LocalEmbeddingsInner) -> Option<scheduler::Grant> {
     tokio::select! {
@@ -919,11 +918,10 @@ async fn embed_texts_in_turn(
     let mut vectors = Vec::with_capacity(items.len());
     let mut next = Some(first);
     for item in items {
-        let grant = match next.take() {
+        let _grant = match next.take() {
             Some(grant) => grant,
             None => background_grant(inner).await.ok_or_else(shutting_down)?,
         };
-        let _grant = grant;
         if let Some(reason) = lane_failure_reason(inner) {
             return Err(InferenceError::Artifact(reason));
         }
@@ -936,6 +934,7 @@ async fn embed_texts_in_turn(
     Ok(vectors)
 }
 
+/// `Invariant` failures and panicked backends mark the lane failing before any sink receives the error, preventing later callers from receiving vectors from a suspect backend.
 fn settle_inference(
     inner: &LocalEmbeddingsInner,
     dims: usize,
@@ -1119,7 +1118,6 @@ impl LocalEmbeddingsComponent {
     ) -> tokio::sync::oneshot::Receiver<Result<Vec<Vec<f32>>, QueryFault>> {
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<Vec<f32>>, QueryFault>>();
         let inner = Arc::clone(&self.inner);
-        let lane_task = lane;
         // The tracked task owns the native call; the handler future only waits for its response.
         // The handler owns the deadline: dropping `rx` on expiry or route loss closes `tx`, which cancels a queued call before native work starts.
         self.inner.tracker.spawn(async move {
@@ -1157,13 +1155,13 @@ impl LocalEmbeddingsComponent {
                 let _ = tx.send(Err(QueryFault::Engine(InferenceError::Artifact(reason))));
                 return;
             }
-            let lane_blocking = Arc::clone(&lane_task);
+            let lane_blocking = Arc::clone(&lane);
             let joined =
                 tokio::task::spawn_blocking(move || lane_blocking.backend.embed(&[text.as_str()]))
                     .await;
             // The vector contract is checked here, while the permit is still held, so a malformed engine result quarantines the lane even when the handler has already expired or been cancelled and no later worker can slip past `lane_failure_reason` first.
-            let result = settle_inference(&inner, lane_task.lane.dims, 1, joined)
-                .map_err(QueryFault::Engine);
+            let result =
+                settle_inference(&inner, lane.lane.dims, 1, joined).map_err(QueryFault::Engine);
             let _ = tx.send(result);
         });
         rx
@@ -1209,14 +1207,12 @@ impl LocalEmbeddingsComponent {
         let handler_query_permit = Arc::new(query_permit);
         let worker_query_permit = Arc::clone(&handler_query_permit);
         let content_sha256 = protocol::sha256_hex(text.as_bytes());
-        let rx = self.spawn_query_worker(
+        let mut rx = self.spawn_query_worker(
             Arc::clone(&lane),
             text,
             deadline,
             (worker_query_permit, text_charge),
         );
-
-        let mut rx = rx;
         let result = tokio::select! {
             biased;
             result = &mut rx => match result {
@@ -1885,6 +1881,127 @@ mod tests {
         .await
         .unwrap();
         assert!(component.inner.scheduler.try_acquire().is_some());
+    }
+
+    /// Runs one native call per `step`, recording each call's text in call order.
+    #[derive(Default)]
+    struct SteppedEngine {
+        steps: std::sync::Mutex<usize>,
+        stepped: std::sync::Condvar,
+        texts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SteppedEngine {
+        fn step(&self) {
+            *self.steps.lock().unwrap() += 1;
+            self.stepped.notify_all();
+        }
+
+        fn started(&self) -> usize {
+            self.texts.lock().unwrap().len()
+        }
+    }
+
+    impl EmbeddingEngine for SteppedEngine {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, InferenceError> {
+            self.texts
+                .lock()
+                .unwrap()
+                .extend(texts.iter().map(|text| (*text).to_owned()));
+            let mut steps = self.steps.lock().unwrap();
+            while *steps == 0 {
+                steps = self.stepped.wait(steps).unwrap();
+            }
+            *steps -= 1;
+            Ok(texts.iter().map(|_| vec![1.0]).collect())
+        }
+
+        fn untruncated_token_len(&self, text: &str) -> Result<EmbedTokens, InferenceError> {
+            Ok(EmbedTokens::new(text.split_whitespace().count() as u32))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_batch_yields_the_slot_to_a_waiting_query_between_its_texts() {
+        let engine = Arc::new(SteppedEngine::default());
+        let component = LocalEmbeddingsComponent::ready_with_engine(
+            lane(),
+            Arc::clone(&engine) as Arc<dyn EmbeddingEngine>,
+            LocalEmbeddingsLimits {
+                max_waiting_queries: 1,
+                ..LocalEmbeddingsLimits::default()
+            },
+        )
+        .unwrap();
+        let first = component
+            .preflight_embedding_for_lane(&lane(), "t1")
+            .unwrap();
+        let second = component
+            .preflight_embedding_for_lane(&lane(), "t2")
+            .unwrap();
+        let SubmitOutcome::Queued { job_id: first_job } =
+            component.submit_admitted(&first, "a").unwrap()
+        else {
+            panic!("the first text is queued");
+        };
+        yield_until(|| engine.started() == 1).await;
+        let SubmitOutcome::Queued { job_id: second_job } =
+            component.submit_admitted(&second, "b").unwrap()
+        else {
+            panic!("the second text is queued");
+        };
+        yield_until(|| component.inner.scheduler.waiting() == (0, 1)).await;
+        let query = {
+            let component = component.clone();
+            tokio::spawn(async move {
+                let admitted = component
+                    .preflight_embedding_for_lane(&lane(), "q")
+                    .unwrap();
+                let far = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                component.embed_query(&admitted, far).await
+            })
+        };
+        yield_until(|| component.inner.scheduler.waiting() == (1, 1)).await;
+        for _ in 0..3 {
+            engine.step();
+        }
+        assert_eq!(query.await.unwrap().unwrap(), vec![1.0]);
+        yield_until(|| engine.started() == 3).await;
+        assert_eq!(*engine.texts.lock().unwrap(), ["t1", "q", "t2"]);
+        yield_until(|| {
+            component.job_status(&first_job) == Some("ready")
+                && component.job_status(&second_job) == Some("ready")
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_expired_waiting_query_leaves_the_queue_before_the_slot_frees() {
+        let component = LocalEmbeddingsComponent::ready_with_engine(
+            lane(),
+            Arc::new(NoopEngine(1.0)),
+            LocalEmbeddingsLimits {
+                max_waiting_queries: 1,
+                ..LocalEmbeddingsLimits::default()
+            },
+        )
+        .unwrap();
+        let holder = component
+            .inner
+            .scheduler
+            .acquire(scheduler::Class::Background)
+            .await
+            .unwrap();
+        let admitted = component
+            .preflight_embedding_for_lane(&lane(), "q")
+            .unwrap();
+        let soon = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        assert!(matches!(
+            component.embed_query(&admitted, soon).await,
+            Err(DenseUnavailable::LaneBusy { .. })
+        ));
+        yield_until(|| component.inner.scheduler.waiting() == (0, 0)).await;
+        drop(holder);
     }
 
     fn lane() -> LaneInfo {

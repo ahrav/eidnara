@@ -188,8 +188,9 @@ impl Scheduler {
     fn release(&self) {
         let mut state = self.lock();
         while let Some(waiter) = state.next() {
-            waiter.granted.store(true, Ordering::Release);
+            // `granted` is set only for a delivered wake, under the lock the dropping waiter also takes, so a waiter whose receiver was already gone is never told it holds the slot.
             if waiter.wake.send(()).is_ok() {
+                waiter.granted.store(true, Ordering::Release);
                 return;
             }
         }
@@ -249,11 +250,16 @@ mod tests {
     }
 
     async fn settle(scheduler: &Scheduler, queries: usize, background: usize) {
-        for _ in 0..1000 {
+        for attempt in 0..20_000 {
             if scheduler.waiting() == (queries, background) {
                 return;
             }
-            tokio::task::yield_now().await;
+            // Yield first; under load, give other workers wall time.
+            if attempt < 1000 {
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
         panic!(
             "waiters never reached {queries} queries and {background} background: {:?}",
@@ -275,10 +281,10 @@ mod tests {
             settle(&scheduler, queries.len(), 2).await;
         }
         // An active background holder does not let a fifth query wait.
-        assert_eq!(
-            scheduler.acquire(Class::Query).await.err(),
-            Some(Refusal::QueueFull)
-        );
+        let refused = tokio::time::timeout(Duration::from_secs(1), scheduler.acquire(Class::Query))
+            .await
+            .expect("a full queue refuses at once");
+        assert_eq!(refused.err(), Some(Refusal::QueueFull));
         // Each granted query is replaced by another, so queries never stop arriving.
         let labels = [
             "q5", "q6", "q7", "q8", "q9", "q10", "q11", "q12", "q13", "q14",
@@ -368,14 +374,130 @@ mod tests {
             .unwrap();
     }
 
+    /// Waiters dropped while the holder releases never leave two grants live: each released slot reaches exactly one listening waiter or goes idle.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn waiters_dropped_during_release_never_double_grant() {
+        use std::sync::atomic::AtomicUsize;
+        let scheduler = Scheduler::new(4);
+        let active = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        for round in 0..500 {
+            let holder = scheduler.acquire(Class::Query).await.unwrap();
+            let mut tasks = Vec::new();
+            for class in [Class::Query, Class::Background, Class::Query] {
+                let scheduler = Arc::clone(&scheduler);
+                let active = Arc::clone(&active);
+                let most = Arc::clone(&most);
+                tasks.push(tokio::spawn(async move {
+                    struct Active(Arc<AtomicUsize>);
+                    impl Drop for Active {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                    if let Ok(grant) = scheduler.acquire(class).await {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        // Declared after the grant, so an abort drops it first and the count falls before the slot is released.
+                        let _active = Active(Arc::clone(&active));
+                        tokio::task::yield_now().await;
+                        drop(_active);
+                        drop(grant);
+                    }
+                }));
+            }
+            settle(&scheduler, 2, 1).await;
+            let release = tokio::spawn(async move { drop(holder) });
+            // Abort one waiter in the same instant the holder releases.
+            tasks[round % 3].abort();
+            release.await.unwrap();
+            for task in tasks {
+                let _ = task.await;
+            }
+            tokio::time::timeout(Duration::from_secs(1), scheduler.idle())
+                .await
+                .expect("every grant was released");
+            assert_eq!(scheduler.waiting(), (0, 0));
+        }
+        assert_eq!(most.load(Ordering::SeqCst), 1);
+    }
+
+    /// A waiter whose receiver is already gone when the slot reaches it is never marked granted, so its own drop cannot release the slot a second time; the slot moves on to the next listening waiter.
+    #[tokio::test]
+    async fn a_waiter_whose_receiver_is_gone_is_never_marked_granted() {
+        let scheduler = Scheduler::new(4);
+        let holder = scheduler.acquire(Class::Query).await.unwrap();
+        let gone = Arc::new(AtomicBool::new(false));
+        {
+            let (wake, receiver) = oneshot::channel();
+            drop(receiver);
+            let mut state = scheduler.lock();
+            let id = state.next_id;
+            state.next_id += 1;
+            state.queries.push_back(Waiter {
+                id,
+                granted: Arc::clone(&gone),
+                wake,
+            });
+        }
+        let listening = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move { scheduler.acquire(Class::Query).await.map(drop) })
+        };
+        settle(&scheduler, 2, 0).await;
+        drop(holder);
+        assert_eq!(listening.await.unwrap(), Ok(()));
+        assert!(
+            !gone.load(Ordering::SeqCst),
+            "an undelivered wake grants nothing"
+        );
+        assert!(
+            scheduler.try_acquire().is_some(),
+            "the slot is free once the listener drops its grant"
+        );
+    }
+
+    /// The streak counts only query grants made while background work waits, so queries granted before a background text arrives do not shorten its wait.
+    #[test]
+    fn the_streak_counts_only_while_background_waits() {
+        let waiter = |state: &mut State| {
+            let (wake, _) = oneshot::channel();
+            let id = state.next_id;
+            state.next_id += 1;
+            Waiter {
+                id,
+                granted: Arc::new(AtomicBool::new(false)),
+                wake,
+            }
+        };
+        let mut state = State::default();
+        for _ in 0..12 {
+            let query = waiter(&mut state);
+            state.queries.push_back(query);
+        }
+        for _ in 0..QUERY_STREAK {
+            assert!(state.next().is_some());
+        }
+        assert_eq!(state.streak, 0, "no background waited");
+        let background = waiter(&mut state);
+        let background_id = background.id;
+        state.background.push_back(background);
+        let next = state.next().unwrap();
+        assert_ne!(
+            next.id, background_id,
+            "a fresh streak serves the query first"
+        );
+        assert_eq!(state.streak, 1);
+    }
+
     #[tokio::test]
     async fn zero_waiting_queries_refuses_every_query_behind_a_holder() {
         let scheduler = Scheduler::new(0);
         let holder = scheduler.acquire(Class::Query).await.unwrap();
-        assert_eq!(
-            scheduler.acquire(Class::Query).await.err(),
-            Some(Refusal::QueueFull)
-        );
+        let refused = tokio::time::timeout(Duration::from_secs(1), scheduler.acquire(Class::Query))
+            .await
+            .expect("a full queue refuses at once");
+        assert_eq!(refused.err(), Some(Refusal::QueueFull));
         drop(holder);
         assert!(scheduler.acquire(Class::Query).await.is_ok());
     }

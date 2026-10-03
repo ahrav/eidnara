@@ -93,7 +93,7 @@ A free slot goes to the oldest query; after eight query grants made while
 background work waits, the next grant goes to the oldest background waiter
 (`scheduler.rs:50-61`). At most `max_waiting_queries` queries wait, and the holder
 is not a waiter (`scheduler.rs:139-141`). Batch workers take one grant per text
-(`mod.rs:903-927`), so a query waits at most one background text. The mixed-order
+(`mod.rs:902-936`), so a query waits at most one background text. The mixed-order
 test now asserts query, query, query, batch
 (`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The saturated
 product workload and the RP2.9 service bound are still missing, so the record

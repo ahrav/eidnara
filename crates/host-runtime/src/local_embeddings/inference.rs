@@ -207,8 +207,6 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
     Ok(VerifiedOrtLibrary { file })
 }
 
-/// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
-/// Shortens `text` to at most `max_bytes` without splitting a character.
 /// Intra-op threads for every native session in this process, fixed at first use, so the lane that certifies a bundle and the lane that serves it run with the same count.
 pub fn inference_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -218,7 +216,7 @@ pub fn inference_threads() -> usize {
 }
 
 /// Half the host's parallelism, at least one thread and at most four.
-pub fn threads_for(parallelism: usize) -> usize {
+fn threads_for(parallelism: usize) -> usize {
     (parallelism / 2).clamp(1, 4)
 }
 
@@ -227,6 +225,8 @@ pub fn threads_for(parallelism: usize) -> usize {
 pub static CAPTURED_INTRA_THREADS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
+/// Shortens `text` to at most `max_bytes` without splitting a character.
 fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
     let mut end = text.len().min(max_bytes);
     while !text.is_char_boundary(end) {
