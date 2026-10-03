@@ -227,6 +227,10 @@ pub fn install(home: &Path, manifest: &[u8], campaign: &[u8]) -> Result<(), Inst
         .mode(0o700)
         .create(&dir)
         .map_err(|error| write(&[], error))?;
+    // Syncing `home` makes a new `search-admission` entry durable before the records inside it are.
+    std::fs::File::open(home)
+        .and_then(|parent| parent.sync_all())
+        .map_err(|error| write(&[], error))?;
     // The daemon reads the directory without following links and refuses one that is not the caller's own and owner-only, so the installer refuses the same directory before writing into it.
     let directory =
         crate::projection_lifecycle::open_directory(&dir).map_err(|error| write(&[], error))?;
