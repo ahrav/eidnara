@@ -282,10 +282,10 @@ fn quotient_codes(row: &[f32], scales: &[f32], codes: &mut [i8]) -> u32 {
     clipped
 }
 
-/// Coordinates [`Encoder`] codes together; a block whose products are all clear of a half-integer stays on the product path.
+/// Coordinates [`Encoder`] codes together; a block whose products are all clear of every rounding midpoint stays on the product path.
 const ENCODE_BLOCK: usize = 32;
 
-/// A product farther than this from its nearest integer lies within `2^-14` of a half-integer, where the product may round otherwise than the quotient.
+/// A product farther than this from its nearest integer lies within `2^-14` of a midpoint between two integers, where the product may round otherwise than the quotient.
 const NEAR_HALF: f32 = 0.5 - 1.0 / 16384.0;
 
 /// Adding and subtracting `1.5 * 2^23` rounds an f32 of magnitude at most `2^22` to an integer, ties to even, in the default rounding mode.
@@ -293,9 +293,9 @@ const ROUNDING_BIAS: f32 = 12_582_912.0;
 
 /// [`encode_validated_into`] for many rows under one set of scales, with the same codes and clamp counts.
 ///
-/// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`.
-/// A quotient of two f32 values with magnitude at most 128 is a half-integer or at least `2^-26` from every half-integer, and the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
-/// So a product farther than `2^-14` from every half-integer rounds as the quotient does, and a product past 128 in magnitude clamps as it does; a block holding a product near a half-integer takes the f64 quotient.
+/// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`, or below `2^-126` with `v / s` when the product leaves the normal range, where both round to zero.
+/// The exact quotient of two f32 values is a midpoint between two integers or at least `2^-26` from every such midpoint, so the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
+/// Up to 128 in magnitude the product lies within `2^-15.9` of the quotient, so a product farther than `2^-14` from every midpoint rounds as the quotient does, and a product past 128 clamps as the quotient does; a block holding a product near a midpoint takes the f64 quotient.
 pub struct Encoder<'a> {
     scales: &'a Scales,
     /// Empty when some reciprocal is not a normal f32; every coordinate then takes the f64 quotient.
@@ -351,7 +351,7 @@ impl<'a> Encoder<'a> {
     }
 }
 
-/// `None` when some product lies within `2^-14` of a half-integer.
+/// `None` when some product lies within `2^-14` of a midpoint between two integers.
 fn product_codes(
     values: &[f32; ENCODE_BLOCK],
     reciprocals: &[f32; ENCODE_BLOCK],
