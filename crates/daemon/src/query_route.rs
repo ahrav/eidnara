@@ -1025,6 +1025,12 @@ fn admit_lexical(
             return Err(exhaustion(budget).into());
         }
         Completion::Incomplete(IncompleteReason::ScanBound) => LaneStatus::Incomplete("scan_bound"),
+        Completion::Incomplete(IncompleteReason::CommonTerms) => {
+            LaneStatus::Incomplete("common_terms")
+        }
+        Completion::Incomplete(IncompleteReason::RankBudget) => {
+            LaneStatus::Incomplete("rank_budget")
+        }
         Completion::Incomplete(IncompleteReason::AcceptedBound) => {
             LaneStatus::Incomplete("accepted_bound")
         }

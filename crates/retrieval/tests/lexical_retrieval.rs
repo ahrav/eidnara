@@ -14,8 +14,9 @@ use kernel::{
 };
 use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
 use retrieval::lexical::{
-    Authority, Completion, IncompleteReason, LexicalBounds, Probe, Retrieval, RetrievalBounds,
-    RetrievalRefusal, Window, admit, analyze, compile, retrieve, retrieve_with_hook_for_test, scan,
+    Authority, Completion, IncompleteReason, LexicalBounds, Probe, QUALIFYING_MATCHES,
+    RANKED_MATCH_BUDGET, Retrieval, RetrievalBounds, RetrievalRefusal, Window, admit, analyze,
+    compile, retrieve, retrieve_with_hook_for_test, scan,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::Connection;
@@ -1020,7 +1021,7 @@ fn a_dead_row_that_fills_the_page_past_the_bound_leaves_the_result_complete() {
 }
 
 #[test]
-fn a_repeated_probe_runs_the_engine_once_and_replays_its_counters() {
+fn a_repeated_probe_runs_the_engine_once_and_adds_no_work() {
     let fixture = Fixture::all_admitted();
     project_bulk(&fixture, 2500);
     let wide = RetrievalBounds {
@@ -1061,7 +1062,13 @@ fn a_repeated_probe_runs_the_engine_once_and_replays_its_counters() {
     assert_eq!(single.consumed.probes, 1);
     assert_eq!(single.consumed.scanned_rows, 2504);
     assert_eq!(repeated.consumed.probes, 4);
-    assert_eq!(repeated.consumed.scanned_rows, 4 * 2504);
+    // Counters record engine work, so the repeats add no counted or scanned rows.
+    assert_eq!(repeated.consumed.scanned_rows, 2504);
+    assert_eq!(repeated.consumed.counted_rows, single.consumed.counted_rows);
+    assert_eq!(
+        repeated.consumed.ranked_matches,
+        single.consumed.ranked_matches
+    );
     assert_eq!(keyed(&repeated), keyed(&single));
     assert!(
         repeated
@@ -1090,7 +1097,7 @@ fn a_repeated_probe_runs_the_engine_once_and_replays_its_counters() {
     assert_eq!(distinct.consumed.probes, 4);
     assert_eq!(
         distinct.consumed.scanned_rows,
-        2 * forward.consumed.scanned_rows
+        forward.consumed.scanned_rows
     );
 }
 
@@ -1446,11 +1453,13 @@ fn an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion
         .unwrap();
     assert!(!budget.is_exhausted(), "only the SQLite handler stopped");
     assert!(polls.load(Ordering::Relaxed) >= 11);
+    // Every probe is counted before any is ranked, so the interrupt lands while parse is counted.
     assert_eq!(
         interrupted.consumed.probes, 1,
-        "fetch completed before parse stopped"
+        "fetch was counted before parse stopped"
     );
-    assert_eq!(interrupted.consumed.scanned_rows, 1);
+    assert!(interrupted.consumed.counted_rows > 0);
+    assert_eq!(interrupted.consumed.scanned_rows, 0);
     assert_eq!(
         interrupted.completion,
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
@@ -1488,4 +1497,269 @@ fn a_held_kernel_reader_does_not_outlive_the_budget() {
     assert!(retrieval.contributions.is_empty());
     assert_eq!(retrieval.consumed.batches, 0);
     assert_eq!(retrieval.consumed.probes, 1);
+}
+
+/// 20,001 rows whose terms match exactly the counts the D26b boundaries name: `t19999`, `t20000`, and `t20001` match that many rows;
+/// `c15000` matches 15,000 rows and `d14999`, `d15000`, `d15001` match that many, so a pair sums to 29,999, 30,000, or 30,001.
+fn project_thresholds(fixture: &Fixture) {
+    let rows: Vec<Row> = (0..20_001)
+        .map(|n: usize| {
+            let mut terms = vec![format!("row{n}")];
+            for (term, count) in [
+                ("t19999", 19_999),
+                ("t20000", 20_000),
+                ("t20001", 20_001),
+                ("c15000", 15_000),
+                ("d14999", 14_999),
+                ("d15000", 15_000),
+                ("d15001", 15_001),
+            ] {
+                if n < count {
+                    terms.push(term.to_string());
+                }
+            }
+            Row::claim(&format!("threshold-{n}"), &terms.join(" "))
+        })
+        .collect();
+    for chunk in rows.chunks(4000) {
+        fixture.project(chunk);
+    }
+}
+
+#[test]
+fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
+    assert_eq!((QUALIFYING_MATCHES, RANKED_MATCH_BUDGET), (20_000, 30_000));
+    let fixture = Fixture::all_admitted();
+    project_thresholds(&fixture);
+    let run = |request: &str| {
+        fixture
+            .retrieve(&probes(request), bounds(), &EvalBudget::unbounded())
+            .unwrap()
+    };
+
+    // A probe at or under the threshold is counted exactly and ranked; one row past it is common and unranked.
+    for (term, count) in [("t19999", 19_999), ("t20000", 20_000)] {
+        let ranked = run(term);
+        assert_eq!(ranked.consumed.counted_rows, count, "{term}");
+        assert_eq!(ranked.consumed.ranked_matches, count, "{term}");
+        assert_eq!(
+            ranked.completion,
+            Completion::Incomplete(IncompleteReason::ScanBound)
+        );
+    }
+    let common = run("t20001");
+    assert_eq!(
+        common.consumed.counted_rows, 20_001,
+        "one lookahead row past the threshold"
+    );
+    assert_eq!(common.consumed.ranked_matches, 0);
+    assert_eq!(
+        common.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    assert_eq!(common.consumed.scanned_rows, bounds().scan_rows.get());
+
+    // The cumulative budget admits a pair summing to 29,999 or 30,000 and skips the larger probe at 30,001.
+    for (second, count) in [("d14999", 14_999), ("d15000", 15_000)] {
+        let both = run(&format!("c15000 {second}"));
+        assert_eq!(both.consumed.ranked_matches, 15_000 + count, "{second}");
+        assert_eq!(
+            both.completion,
+            Completion::Incomplete(IncompleteReason::ScanBound)
+        );
+    }
+    let skipped = run("c15000 d15001");
+    assert_eq!(skipped.consumed.ranked_matches, 15_000);
+    assert_eq!(
+        skipped.completion,
+        Completion::Incomplete(IncompleteReason::RankBudget)
+    );
+
+    // A repeated probe is counted and ranked once.
+    let repeated = run("t19999 t19999");
+    assert_eq!(repeated.consumed.counted_rows, 19_999);
+    assert_eq!(repeated.consumed.ranked_matches, 19_999);
+    assert_eq!(repeated.consumed.probes, 2);
+}
+
+#[test]
+fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifying_probe() {
+    let fixture = Fixture::all_admitted();
+    project_thresholds(&fixture);
+    let tight = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    };
+    let scanned = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(scan(
+                conn,
+                &probes("t20001"),
+                tight,
+                &EvalBudget::unbounded(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    let newest: Vec<String> = fixture
+        .raw()
+        .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 't20001' ORDER BY rowid DESC LIMIT 5")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(scanned.hits(), 5);
+    let only_common = fixture
+        .retrieve(&probes("t20001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(
+        only_common.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    assert_eq!(only_common.consumed.ranked_matches, 0);
+    assert!(
+        only_common
+            .contributions
+            .iter()
+            .all(|contribution| newest.contains(&contribution.occurrence_id))
+    );
+
+    // The rare probe is ranked and the common one skipped; the skip stays visible.
+    let mixed = fixture
+        .retrieve(&probes("row7 t20001"), tight, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(mixed.consumed.ranked_matches, 1);
+    assert_eq!(
+        mixed.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    assert_eq!(mixed.consumed.scanned_rows, 1);
+}
+
+/// D26b lexical gate at one million occurrences: an open-loop Poisson schedule of rare, qualifying, mixed, and common-only
+/// queries, each timed from its scheduled arrival to the end of its bounded scan. Run in release on the D21 host with
+/// `--ignored`; `EIDNARA_LEXICAL_SCALE_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
+#[test]
+#[ignore = "builds a 1M-occurrence projection; run in release on the D21 host with --ignored"]
+fn lexical_scan_p99_at_one_million_occurrences() {
+    const OCCURRENCES: usize = 1_000_000;
+    let queries: usize = std::env::var("EIDNARA_LEXICAL_SCALE_QUERIES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(600);
+    let rate_per_second: f64 = std::env::var("EIDNARA_LEXICAL_SCALE_RATE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10.0);
+    let fixture = Fixture::all_admitted();
+    let built = Instant::now();
+    let mut chunk = Vec::with_capacity(1000);
+    for n in 0..OCCURRENCES {
+        // Filler of 0 to 96 tokens spreads the ranks, and `k*` terms match exactly 20,000 rows each, the largest qualifying probe.
+        let text = format!(
+            "w{} m{} k{} c{} common{}",
+            n % 50_000,
+            n % 500,
+            n % 50,
+            n % 5,
+            " filler".repeat(n % 97)
+        );
+        chunk.push(Row::claim(&format!("scale-{n}"), &text));
+        if chunk.len() == 1000 {
+            fixture.project(&chunk);
+            chunk.clear();
+        }
+    }
+    fixture.project(&chunk);
+    eprintln!(
+        "projected {OCCURRENCES} occurrences in {:?}",
+        built.elapsed()
+    );
+    let mix = [
+        "w123",
+        "m42",
+        "w7 c3",
+        "common",
+        "c1 c2",
+        "m1 m2",
+        "w4242 m17",
+        "k3",
+        "k3 m5",
+    ];
+    // A fixed linear congruential stream keeps the schedule reproducible.
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut uniform = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+    };
+    let mut at = 0.0f64;
+    let schedule: Vec<(f64, &str)> = (0..queries)
+        .map(|index| {
+            at += -uniform().ln() / rate_per_second;
+            (at, mix[index % mix.len()])
+        })
+        .collect();
+    let start = Instant::now();
+    let mut samples = Vec::with_capacity(queries);
+    let mut ranked = 0usize;
+    for (scheduled, request) in &schedule {
+        let due = start + Duration::from_secs_f64(*scheduled);
+        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        let sent = start.elapsed().as_secs_f64();
+        let scanned = fixture
+            .store
+            .with_conn(|conn| {
+                Ok(scan(
+                    conn,
+                    &probes(request),
+                    bounds(),
+                    &EvalBudget::unbounded(),
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        let done = start.elapsed().as_secs_f64();
+        assert!(scanned.hits() <= bounds().scan_rows.get() * 2);
+        ranked += 1;
+        samples.push((*scheduled, sent, done, *request));
+    }
+    let latency = |range: std::ops::Range<usize>| {
+        let mut micros: Vec<u64> = samples[range]
+            .iter()
+            .map(|(scheduled, _, done, _)| ((done - scheduled) * 1e6) as u64)
+            .collect();
+        micros.sort_unstable();
+        let p = |q: f64| micros[((micros.len() as f64 * q).ceil() as usize).saturating_sub(1)];
+        (p(0.5), p(0.99), *micros.last().unwrap())
+    };
+    let cold = latency(0..50);
+    let warm = latency(50..queries);
+    eprintln!(
+        "offered {queries} sent {} completed {ranked}; cold p50/p99/max us {cold:?}; warm p50/p99/max us {warm:?}",
+        samples.len()
+    );
+    if let Some(path) = std::env::var_os("EIDNARA_LEXICAL_SCALE_SAMPLES") {
+        let rows: Vec<String> = samples
+            .iter()
+            .map(|(scheduled, sent, done, request)| {
+                format!("{{\"scheduled_s\":{scheduled},\"sent_s\":{sent},\"done_s\":{done},\"query\":\"{request}\"}}")
+            })
+            .collect();
+        std::fs::write(path, rows.join("\n")).unwrap();
+    }
+    if std::env::var_os("EIDNARA_LEXICAL_SCALE_KEEP").is_some() {
+        eprintln!("kept projection under {}", fixture.root.path().display());
+        std::mem::forget(fixture);
+    }
+    assert!(
+        warm.1 <= 50_000,
+        "warm lexical p99 {}us exceeds 50ms",
+        warm.1
+    );
 }

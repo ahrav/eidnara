@@ -20,8 +20,8 @@ pub use index::{
     EngineIdentity, OCCURRENCE_ID_COLUMN, ROWID_WORDS, probe_engine, rowid, rowids, verify_rows,
 };
 pub use retrieve::{
-    Authority, Completion, Consumed, Contribution, IncompleteReason, Retrieval, RetrievalBounds,
-    RetrievalRefusal, Scan, admit, retrieve, scan,
+    Authority, Completion, Consumed, Contribution, IncompleteReason, QUALIFYING_MATCHES,
+    RANKED_MATCH_BUDGET, Retrieval, RetrievalBounds, RetrievalRefusal, Scan, admit, retrieve, scan,
 };
 #[cfg(feature = "test-support")]
 pub use retrieve::{Window, retrieve_with_hook_for_test};
