@@ -3482,7 +3482,7 @@ impl Handler {
             .await
     }
 
-    /// Counts `run_unit` submissions; `cancel_before_step` cancels the request at its first `run_step` submission.
+    /// Counts `run_unit` submissions; `cancel_before_step` cancels the request when the handler first reads its cancellation, before any embedding or unit runs.
     pub async fn dispatch_value_for_test_observed(
         &self,
         route: RouteHandle,

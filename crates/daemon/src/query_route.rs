@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use host_runtime::RouteHandle;
@@ -554,28 +554,49 @@ pub enum EmbedFailure {
     Faulted,
 }
 
+/// One query embedding, awaited by the route before it submits any blocking scan work.
 pub trait QueryEmbedder: Send + Sync {
-    fn embed(&self, text: &str) -> EmbedResult;
+    /// Embeds `text`, finishing by `deadline`.
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        deadline: tokio::time::Instant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EmbedResult> + Send + 'a>>;
 }
 
-/// Parent Q5: a busy lane degrades at once; the route does not retry inside the deadline.
+/// The query waits for the inference slot ahead of background texts; a full query queue or a wait that reaches the deadline degrades the lane as busy.
 impl QueryEmbedder for LocalEmbeddingsComponent {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedFailure> {
-        let lane = match self.status() {
-            LocalEmbeddingsStatus::Ready(lane) => lane,
-            LocalEmbeddingsStatus::Starting => return Err(EmbedFailure::Unavailable("starting")),
-            LocalEmbeddingsStatus::Disabled { .. } => {
-                return Err(EmbedFailure::Unavailable("disabled"));
-            }
-            LocalEmbeddingsStatus::Failing { .. } => {
-                return Err(EmbedFailure::Unavailable("failing"));
-            }
-        };
-        let admitted = self
-            .preflight_embedding_for_lane(&lane, text)
-            .map_err(embed_refusal)?;
-        self.embed_admitted(&admitted).map_err(embed_refusal)
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        deadline: tokio::time::Instant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EmbedResult> + Send + 'a>> {
+        Box::pin(embed_ready_query(self, text, deadline))
     }
+}
+
+async fn embed_ready_query(
+    component: &LocalEmbeddingsComponent,
+    text: &str,
+    deadline: tokio::time::Instant,
+) -> Result<Vec<f32>, EmbedFailure> {
+    let lane = match component.status() {
+        LocalEmbeddingsStatus::Ready(lane) => lane,
+        LocalEmbeddingsStatus::Starting => return Err(EmbedFailure::Unavailable("starting")),
+        LocalEmbeddingsStatus::Disabled { .. } => {
+            return Err(EmbedFailure::Unavailable("disabled"));
+        }
+        LocalEmbeddingsStatus::Failing { .. } => {
+            return Err(EmbedFailure::Unavailable("failing"));
+        }
+    };
+    let admitted = component
+        .preflight_embedding_for_lane(&lane, text)
+        .map_err(embed_refusal)?;
+    component
+        .embed_query(&admitted, deadline)
+        .await
+        .map_err(embed_refusal)
 }
 
 fn embed_refusal(refusal: DenseUnavailable) -> EmbedFailure {
@@ -1541,33 +1562,20 @@ impl HandlerCore {
             });
         let embedded = if embeds {
             let embedder = self.query_embedder(&lifecycle);
-            let slot: Arc<Mutex<Option<EmbedResult>>> = Arc::default();
-            let text = query.clone();
-            let written = Arc::clone(&slot);
-            let observed = shared.clone();
-            let step = runner.run_step(Box::new(move || {
-                if observed.is_exhausted() {
-                    return;
-                }
-                let result = embedder.embed(&text);
-                *written
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
-            }));
-            if let Err(failed) = budget.shared().bridge(step).await {
-                drop(budget);
-                return blocking_failure(failed);
-            }
             if shared.is_exhausted() {
                 let terminal = exhaustion(&shared);
                 drop(budget);
                 return terminal_response(terminal);
             }
-            let result = slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            match result {
+            // The embedding is awaited in place under the request's own budget; scan work is submitted only after it settles.
+            let deadline = tokio::time::Instant::from_std(shared.deadline());
+            let result = shared.bridge(embedder.embed(&query, deadline)).await;
+            if shared.is_exhausted() {
+                let terminal = exhaustion(&shared);
+                drop(budget);
+                return terminal_response(terminal);
+            }
+            match Some(result) {
                 Some(Ok(vector)) => Embedded::Vector(vector),
                 Some(Err(EmbedFailure::Unavailable(reason))) => Embedded::Unavailable(reason),
                 Some(Err(EmbedFailure::Faulted)) | None => {
@@ -1709,16 +1717,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_lane_that_is_not_ready_is_an_unavailability_never_a_fault() {
+    #[tokio::test]
+    async fn a_lane_that_is_not_ready_is_an_unavailability_never_a_fault() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         let unsupported = LocalEmbeddingsComponent::unsupported("no lane");
         assert_eq!(
-            unsupported.embed("query"),
+            unsupported.embed("query", deadline).await,
             Err(EmbedFailure::Unavailable("disabled"))
         );
         let starting = LocalEmbeddingsComponent::new(None);
         assert!(matches!(
-            starting.embed("query"),
+            starting.embed("query", deadline).await,
             Err(EmbedFailure::Unavailable("starting" | "disabled"))
         ));
     }

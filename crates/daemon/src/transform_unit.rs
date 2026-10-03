@@ -32,12 +32,6 @@ pub(crate) trait UnitRunner: Send + Sync {
         work: Box<dyn FnOnce() -> UnitOutcome + Send>,
     ) -> Pin<Box<dyn Future<Output = Result<UnitOutcome, BlockingWorkFailed>> + Send + 'static>>;
 
-    /// Runs `work` on the same tracked primitive as a unit; the work reports through state it captures.
-    fn run_step(
-        &self,
-        work: Box<dyn FnOnce() + Send>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>>;
-
     /// The request's cancellation, for a unit to read at its head before it does any work.
     fn cancel_signal(&self) -> CancelSignal;
 }
@@ -48,13 +42,6 @@ impl UnitRunner for RequestCtx {
         work: Box<dyn FnOnce() -> UnitOutcome + Send>,
     ) -> Pin<Box<dyn Future<Output = Result<UnitOutcome, BlockingWorkFailed>> + Send + 'static>>
     {
-        Box::pin(self.run_blocking(work))
-    }
-
-    fn run_step(
-        &self,
-        work: Box<dyn FnOnce() + Send>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>> {
         Box::pin(self.run_blocking(work))
     }
 
@@ -89,24 +76,10 @@ impl UnitRunner for DetachedRunner {
         })
     }
 
-    fn run_step(
-        &self,
-        work: Box<dyn FnOnce() + Send>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), BlockingWorkFailed>> + Send + 'static>> {
+    fn cancel_signal(&self) -> CancelSignal {
         if self.cancel_before_step {
             self.cancel.cancel();
         }
-        let joined = tokio::task::spawn_blocking(work);
-        Box::pin(async move {
-            match joined.await {
-                Ok(()) => Ok(()),
-                Err(join) if join.is_panic() => Err(BlockingWorkFailed::Panicked),
-                Err(_) => Err(BlockingWorkFailed::RuntimeStopped),
-            }
-        })
-    }
-
-    fn cancel_signal(&self) -> CancelSignal {
         CancelSignal::observing(self.cancel.clone())
     }
 }

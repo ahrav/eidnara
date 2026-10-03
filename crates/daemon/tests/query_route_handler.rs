@@ -298,10 +298,16 @@ struct ScriptedEmbedder {
 }
 
 impl QueryEmbedder for ScriptedEmbedder {
-    fn embed(&self, _text: &str) -> EmbedResult {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(self.delay);
-        self.outcome.clone()
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _deadline: tokio::time::Instant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EmbedResult> + Send + 'a>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.outcome.clone()
+        })
     }
 }
 

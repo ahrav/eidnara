@@ -82,3 +82,16 @@ instead of interpreting an arbitrary harness timeout as a successful join.
 - Missing evidence: Approved native service/drain contract, public budget
   bridge, supervisor slice registration, and RP2.9 cancellation bounds.
 - Conclusion: Needs human input. No timeout is asserted to terminate native code.
+
+### Q: Does a query keep one budget and its ownership through native work?
+
+The fused route awaits the in-process embedding under its request budget and
+submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1572`).
+`LocalEmbeddingsComponent::embed_query` ends its wait at the request deadline and
+leaves the queue (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`); a
+started native call keeps its grant, admission permit, and input charge in the
+tracked worker until it returns (`mod.rs:1103-1160`). Shutdown closes the
+scheduler, drains the tracker, then waits for the slot to go idle before it
+writes the terminal lane state (`mod.rs:1627-1641`). Tests:
+`mod.rs:1841-1877` and `scheduler.rs:312-369`. The maintenance supervisor slice
+remains unexercised.

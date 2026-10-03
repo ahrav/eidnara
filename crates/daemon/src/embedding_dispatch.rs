@@ -65,6 +65,9 @@ impl InputEnvelope {
     };
 }
 
+/// The product cap on one backfill input's exact untruncated token count, below any wider lane window or manifest envelope. A longer input keeps its lexical occurrence and stops as `input_over_limit`.
+pub const BACKFILL_MAX_TOKENS: u64 = 512;
+
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const MAX_ELIGIBILITY_PAGES_PER_PASS: usize = 2;
 
@@ -750,10 +753,11 @@ impl<'a> EmbeddingDispatcher<'a> {
         let admitted = self
             .local_embeddings
             .preflight_embedding_for_lane(pass.lane, &job.text)?;
-        if u64::from(admitted.tokens().get()) > envelope.tokens {
+        let max_tokens = envelope.tokens.min(BACKFILL_MAX_TOKENS);
+        if u64::from(admitted.tokens().get()) > max_tokens {
             return Err(DenseUnavailable::TokenOverflow {
                 tokens: admitted.tokens(),
-                max_tokens: EmbedTokens::new(u32::try_from(envelope.tokens).unwrap_or(u32::MAX)),
+                max_tokens: EmbedTokens::new(u32::try_from(max_tokens).unwrap_or(u32::MAX)),
             });
         }
         Ok(admitted)

@@ -100,3 +100,12 @@ None.
   classification.
 - Conclusion: resolved - the handler classifies before embedding and `execute`
   gates the dense lane on `has_prose`.
+
+### Q: What does `busy` mean once queries wait for the inference slot?
+
+The route awaits the embedding in place under the request budget
+(`crates/daemon/src/query_route.rs:1572`). The query waits asynchronously for the
+slot ahead of background texts; it is refused as `LaneBusy` when
+`max_waiting_queries` queries already wait, and its wait ends as `LaneBusy` at the
+request deadline (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`).
+Both map to the dense lane's `busy` reason (`query_route.rs:602-612`).

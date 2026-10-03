@@ -183,7 +183,7 @@ async fn expired_waiter_releases_its_slot_without_engine_work() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn mixed_batch_and_query_waiters_share_fifo_cpu_without_starvation() {
+async fn a_waiting_query_takes_the_slot_ahead_of_a_waiting_batch_text() {
     let engine = DeterministicEngine::new();
     let gate = engine.block_calls();
     let limits = waiter_limits(2);
@@ -213,6 +213,10 @@ async fn mixed_batch_and_query_waiters_share_fifo_cpu_without_starvation() {
         tokio::task::yield_now().await;
     }
     let third = spawn_query(&host, &lane, "query-third", 30_000).await;
+    // The third query must be queued before the slot frees, or the batch text is the only waiter.
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
 
     DeterministicEngine::release_calls(&gate);
     for query in [first, second, third] {
@@ -224,7 +228,7 @@ async fn mixed_batch_and_query_waiters_share_fifo_cpu_without_starvation() {
     yield_until(|| engine.calls.load(std::sync::atomic::Ordering::SeqCst) == 4).await;
     assert_eq!(
         *engine.call_texts.lock().expect("call text lock"),
-        ["query-first", "query-second", "batch-middle", "query-third"]
+        ["query-first", "query-second", "query-third", "batch-middle"]
     );
 
     host.shutdown().await.expect("graceful shutdown");

@@ -84,3 +84,17 @@ bounds block acceptance; optional/unreached inference cannot satisfy the
   weighted scheduling, a reserve size, or a starvation timeout.
   The shared RP2.7 query-lane prerequisite and RP2.1.U3 priority integration
   must both remain explicit in the implementation handoff.
+
+### Q: What does the inference scheduler change for this property?
+
+The shared FIFO CPU semaphore is replaced by one scheduler with FIFO query and
+background queues (`crates/host-runtime/src/local_embeddings/scheduler.rs:39-61`).
+A free slot goes to the oldest query; after eight query grants made while
+background work waits, the next grant goes to the oldest background waiter
+(`scheduler.rs:50-61`). At most `max_waiting_queries` queries wait, and the holder
+is not a waiter (`scheduler.rs:139-141`). Batch workers take one grant per text
+(`mod.rs:903-927`), so a query waits at most one background text. The mixed-order
+test now asserts query, query, query, batch
+(`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The saturated
+product workload and the RP2.9 service bound are still missing, so the record
+stays `partial`.

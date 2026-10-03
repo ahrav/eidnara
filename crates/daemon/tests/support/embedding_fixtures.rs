@@ -194,8 +194,17 @@ pub fn component(
     engine: &Arc<TestEngine>,
     limits: LocalEmbeddingsLimits,
 ) -> LocalEmbeddingsComponent {
+    component_with_lane(engine, limits, lane(FINGERPRINT))
+}
+
+/// [`component`] serving `lane`.
+pub fn component_with_lane(
+    engine: &Arc<TestEngine>,
+    limits: LocalEmbeddingsLimits,
+    lane: LaneInfo,
+) -> LocalEmbeddingsComponent {
     LocalEmbeddingsComponent::ready_with_engine(
-        lane(FINGERPRINT),
+        lane,
         Arc::clone(engine) as Arc<dyn EmbeddingEngine>,
         limits,
     )
