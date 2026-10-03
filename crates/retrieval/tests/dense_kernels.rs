@@ -48,10 +48,18 @@ fn scale() -> impl Strategy<Value = f32> {
 fn value_for(scale: f32) -> impl Strategy<Value = f32> {
     let near = (-260i32..=260, -2i32..=2, any::<bool>()).prop_map(move |(half, step, exact)| {
         let target = (half as f32 * 0.5) * scale;
-        let target = if exact { target } else { target + f32::EPSILON * target * 0.5 };
+        let target = if exact {
+            target
+        } else {
+            target + f32::EPSILON * target * 0.5
+        };
         let mut value = target;
         for _ in 0..step.unsigned_abs() {
-            value = if step > 0 { value.next_up() } else { value.next_down() };
+            value = if step > 0 {
+                value.next_up()
+            } else {
+                value.next_down()
+            };
         }
         value
     });
@@ -105,7 +113,11 @@ fn ties_and_their_neighbours_code_as_the_quotient_does_in_wide_rows() {
                 .map(|i| {
                     let mut value = ((i as f32 - 384.0) * 0.5) * scale;
                     for _ in 0..offset.unsigned_abs() {
-                        value = if offset > 0 { value.next_up() } else { value.next_down() };
+                        value = if offset > 0 {
+                            value.next_up()
+                        } else {
+                            value.next_down()
+                        };
                     }
                     value
                 })
@@ -113,7 +125,10 @@ fn ties_and_their_neighbours_code_as_the_quotient_does_in_wide_rows() {
             let mut expected = Vec::new();
             encode_validated_into(&layout, &scales, &row, &mut expected);
             let stored: Vec<u8> = expected.iter().map(|code| *code as u8).collect();
-            assert!(encoder.matches(&layout, &row, &stored), "scale {scale}, offset {offset}");
+            assert!(
+                encoder.matches(&layout, &row, &stored),
+                "scale {scale}, offset {offset}"
+            );
         }
     }
 }

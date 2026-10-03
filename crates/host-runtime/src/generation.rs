@@ -32,9 +32,10 @@ use crate::instance::{
 };
 use crate::lifecycle::{LifecycleTransactionLock, is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, hash_copy_from, is_stale_mtime, is_temp_name,
-    open_created_dir, open_or_create_parents, open_rel_nofollow, path_names_descriptor,
-    read_dir_names, read_dir_names_partitioned, rename_no_replace, same_snapshot,
+    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, hash_copy_from, is_stale_mtime,
+    is_temp_name, open_created_dir, open_or_create_parents, open_rel_nofollow,
+    path_names_descriptor, read_dir_names, read_dir_names_partitioned, rename_no_replace,
+    same_snapshot,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -360,7 +361,12 @@ impl PendingGeneration {
             .files
             .iter()
             .position(|file| file.path == rel_path)
-            .filter(|index| generation.retained.get(*index).is_some_and(|slot| slot.streamed))
+            .filter(|index| {
+                generation
+                    .retained
+                    .get(*index)
+                    .is_some_and(|slot| slot.streamed)
+            })
             .ok_or_else(|| invalid("file is not streamed"))?;
         let fd = generation.retained[index]
             .fd
@@ -390,7 +396,9 @@ impl PendingGeneration {
             pending.push((stream.index, stream.fd, stream.hasher, stream.read));
         }
         for (index, slot) in generation.retained.iter_mut().enumerate() {
-            if slot.streamed && let Some(fd) = slot.fd.take() {
+            if slot.streamed
+                && let Some(fd) = slot.fd.take()
+            {
                 pending.push((index, fd, sha2::Sha256::new(), 0));
             }
         }
@@ -528,7 +536,11 @@ impl ValidatedGeneration {
 
     /// The descriptor [`GenerationStore::validate_retaining`] hashed for `rel_path`, with its shape checked again; its bytes are not hashed a second time. Each descriptor is taken once; a path validation did not retain, or one already taken, opens through [`Self::open_verified_file`].
     pub fn take_verified_file(&mut self, rel_path: &str) -> Result<OwnedFd, GenerationError> {
-        let index = self.manifest.files.iter().position(|file| file.path == rel_path);
+        let index = self
+            .manifest
+            .files
+            .iter()
+            .position(|file| file.path == rel_path);
         let hashed = |slot: &mut Retained| (!slot.streamed).then(|| slot.fd.take()).flatten();
         match index.and_then(|index| Some((index, hashed(self.retained.get_mut(index)?)?))) {
             Some((index, fd)) => {
@@ -3031,7 +3043,9 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let src = tempfile::tempdir().expect("src");
         let store = store_at(root.path());
-        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5)).map(|i| (i % 249) as u8).collect();
+        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5))
+            .map(|i| (i % 249) as u8)
+            .collect();
         let sources = ["codes.int8", "rows.f32"].map(|name| SourceSpec {
             rel_path: name.to_owned(),
             source: write_source(src.path(), name, &payload),
@@ -3086,7 +3100,9 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let src = tempfile::tempdir().expect("src");
         let store = store_at(root.path());
-        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5)).map(|i| (i % 241) as u8).collect();
+        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5))
+            .map(|i| (i % 241) as u8)
+            .collect();
         let sources = ["codes.int8", "rows.f32"].map(|name| SourceSpec {
             rel_path: name.to_owned(),
             source: write_source(src.path(), name, &payload),
@@ -3095,13 +3111,23 @@ mod tests {
             expected_sha256: None,
         });
         let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
-        let rows = store.root().join(GENERATIONS_DIR_NAME).join(&digest).join("rows.f32");
+        let rows = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(&digest)
+            .join("rows.f32");
 
         // A stream read in part is hashed to its end, and its descriptor returns rewound.
         let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
-        assert!(pending.stream("codes.int8").is_err(), "a hashed file has no stream");
+        assert!(
+            pending.stream("codes.int8").is_err(),
+            "a hashed file has no stream"
+        );
         let mut stream = pending.stream("rows.f32").unwrap();
-        assert!(pending.stream("rows.f32").is_err(), "a stream is taken once");
+        assert!(
+            pending.stream("rows.f32").is_err(),
+            "a stream is taken once"
+        );
         let mut head = vec![0u8; 1000];
         stream.read_exact(&mut head).unwrap();
         assert_eq!(head, payload[..1000]);

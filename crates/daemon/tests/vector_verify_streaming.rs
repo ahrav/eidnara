@@ -172,7 +172,10 @@ fn bytes_that_diverge_from_the_manifest_refuse_as_the_store_ahead_of_their_meani
     let digest = fixture.layer(1, 10).digest;
     let dir = fixture.generation_dir(&digest);
     let verify_of = || verify(&fixture.store, &digest, &fixture.expected(), u64::MAX);
-    for (file, offset) in [(ROWS_FILE, codec::row_offset(2, DIMENSION) as usize), (CODES_FILE, 0)] {
+    for (file, offset) in [
+        (ROWS_FILE, codec::row_offset(2, DIMENSION) as usize),
+        (CODES_FILE, 0),
+    ] {
         let pristine = fs::read(dir.join(file)).unwrap();
         let mut corrupt = pristine.clone();
         corrupt[offset..offset + 4].copy_from_slice(&2.0f32.to_le_bytes());

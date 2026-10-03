@@ -327,48 +327,64 @@ impl<'a> Encoder<'a> {
         if stored.len() != row.len() {
             return false;
         }
-        let mut codes = [0i8; ENCODE_BLOCK];
-        let mut differ = 0u8;
-        for (start, stored) in (0..row.len()).step_by(ENCODE_BLOCK).zip(stored.chunks(ENCODE_BLOCK)) {
-            let end = start + stored.len();
+        let quotient_differ = |start: usize, stored: &[u8]| {
+            let mut codes = [0i8; ENCODE_BLOCK];
             let codes = &mut codes[..stored.len()];
-            let values = &row[start..end];
-            let product = <&[f32; ENCODE_BLOCK]>::try_from(values).ok().zip(
-                self.reciprocals
-                    .get(start..end)
-                    .and_then(|reciprocals| <&[f32; ENCODE_BLOCK]>::try_from(reciprocals).ok()),
-            );
-            let clear = product.is_some_and(|(values, reciprocals)| {
-                product_codes(values, reciprocals, codes.try_into().expect("a whole block"))
-            });
-            if !clear {
-                quotient_codes(values, &self.scales.scales[start..end], codes);
-            }
-            // The fold reads every byte of the block, so the comparison vectorizes.
-            differ = codes
-                .iter()
-                .zip(stored)
-                .fold(differ, |differ, (code, byte)| differ | (*code as u8 ^ byte));
+            let end = start + stored.len();
+            quotient_codes(&row[start..end], &self.scales.scales[start..end], codes);
+            differ_bits(codes, stored)
+        };
+        if self.reciprocals.is_empty() {
+            return (0..row.len())
+                .step_by(ENCODE_BLOCK)
+                .zip(stored.chunks(ENCODE_BLOCK))
+                .fold(0, |differ, (start, stored)| {
+                    differ | quotient_differ(start, stored)
+                })
+                == 0;
         }
+        let (values, _) = row.as_chunks::<ENCODE_BLOCK>();
+        let (reciprocals, _) = self.reciprocals.as_chunks::<ENCODE_BLOCK>();
+        let (blocks, tail) = stored.as_chunks::<ENCODE_BLOCK>();
+        let mut differ = 0u8;
+        for (index, ((values, reciprocals), stored)) in
+            values.iter().zip(reciprocals).zip(blocks).enumerate()
+        {
+            differ |= match product_differ(values, reciprocals, stored) {
+                Some(block) => block,
+                None => quotient_differ(index * ENCODE_BLOCK, stored),
+            };
+        }
+        differ |= quotient_differ(row.len() - tail.len(), tail);
         differ == 0
     }
 }
 
-/// `false` when some product lies within `2^-14` of a midpoint between two integers.
-fn product_codes(
+/// Nonzero when some code differs from its stored byte; the fold reads every byte, so it vectorizes.
+fn differ_bits(codes: &[i8], stored: &[u8]) -> u8 {
+    codes
+        .iter()
+        .zip(stored)
+        .fold(0, |differ, (code, byte)| differ | (*code as u8 ^ byte))
+}
+
+/// The bits [`differ_bits`] folds for the codes of `values` from their products; `None` when some product lies within `2^-14` of a midpoint between two integers.
+fn product_differ(
     values: &[f32; ENCODE_BLOCK],
     reciprocals: &[f32; ENCODE_BLOCK],
-    codes: &mut [i8; ENCODE_BLOCK],
-) -> bool {
+    stored: &[u8; ENCODE_BLOCK],
+) -> Option<u8> {
     let mut near = false;
-    for ((code, value), reciprocal) in codes.iter_mut().zip(values).zip(reciprocals) {
+    let mut differ = 0u8;
+    for ((value, reciprocal), byte) in values.iter().zip(reciprocals).zip(stored) {
         // A finite value times a normal reciprocal is never NaN. Up to `2^22` in magnitude the bias rounds the product exactly and its distance to the rounded integer is exact; past that, the product and the quotient both code as 127 or -127 whichever path the block takes.
         let product = value * reciprocal;
         let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
         near |= (product - rounded).abs() > NEAR_HALF;
-        *code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
+        let code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
+        differ |= code as u8 ^ byte;
     }
-    !near
+    (!near).then_some(differ)
 }
 
 /// One byte per code, two's complement.

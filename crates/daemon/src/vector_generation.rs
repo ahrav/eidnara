@@ -888,7 +888,14 @@ fn check_meaning(
     let mut compare = encoder.as_ref().filter(|_| codes_verdict.is_ok());
     let mut codes_verdict = codes_verdict;
     let chunk_rows = rows.chunk_rows();
-    let mut stored = vec![0u8; if compare.is_some() { chunk_rows * dimension } else { 0 }];
+    let mut stored = vec![
+        0u8;
+        if compare.is_some() {
+            chunk_rows * dimension
+        } else {
+            0
+        }
+    ];
     let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
     // The decoder validates each row under the layout before it reaches the calibrator or the encoder; the stored codes of each row chunk are read as the chunk starts.
     rows.for_each(|index, row| {
@@ -904,7 +911,11 @@ fn check_meaning(
                 return Ok(());
             }
         }
-        if !encoder.matches(&layout, row, &stored[slot * dimension..(slot + 1) * dimension]) {
+        if !encoder.matches(
+            &layout,
+            row,
+            &stored[slot * dimension..(slot + 1) * dimension],
+        ) {
             (codes_verdict, compare) = (Err(fault(CODES_FILE, FileFault::Codes)), None);
         }
         Ok(())
@@ -1075,7 +1086,6 @@ fn decode_list(bytes: &[u8], declared: u64) -> Option<Vec<String>> {
 fn io_refusal(error: io::Error) -> VectorRefusal {
     VectorRefusal::Io(error.kind().to_string())
 }
-
 
 /// The original-row artifact read through one fixed chunk: the header is checked once, then rows are decoded chunk by chunk under the layout.
 struct RowStream<'a> {
