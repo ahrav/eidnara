@@ -36,9 +36,10 @@ exported at `crates/retrieval/src/lib.rs` and exercised by
 `crates/retrieval/tests/dense_numerics.rs`, `dense_scalar.rs`, and
 `dense_properties.rs`. The references in `dense_numerics.rs` are written from
 the formulas and call no scorer or comparator of `retrieval::dense`. The
-fixtures exercise the scalar scorers only; a blocked or vectorized path (U5)
-needs its own tail, alignment, and extrema fixtures, which are not measured
-here.
+fixtures exercise the scalar scorers. The term-table scan
+(`TermTable::score_rows`) is scalar code with its own chunk-tail, tile-boundary,
+alignment, and extrema fixture; a vectorized path (U5) needs its own fixtures,
+which are not measured here.
 
 ## Index
 
@@ -55,30 +56,38 @@ here.
 ### dense-quantized-score-matches-weighted-reference
 
 Type: safety
-Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:299`)
-is called from `crates/retrieval/tests/` only at this base; no producer scans
-codes yet.
+Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:293`)
+and `TermTable::score_rows` (`scalar.rs:405`) are called from
+`crates/retrieval/tests/` only at this base; no producer scans codes yet.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
-`extreme_scales_and_codes_score_finite_and_match_the_reference`, and
-`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`.
+`extreme_scales_and_codes_score_finite_and_match_the_reference`,
+`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`,
+`term_table_scores_match_the_reference_for_every_chunk_and_tile_shape`, and
+`term_table_scores_the_fixture_like_the_row_scorer`.
 Guarantee: The quantized score of a document is
 `sum_j (s_j * s_j) * i32(c_query_j) * i32(c_doc_j)` with the weight and the
 integer product widened to f64 before they multiply, accumulated from `+0.0`
-in increasing coordinate order.
+in increasing coordinate order, whether `QuantizedQuery::score` forms each term
+or `TermTable::score_rows` looks it up.
 Check: `always` - for every fixture row, the production score bits equal the
 independent reference's bits; the fixture's order under an unweighted integer
 dot differs from the weighted order, and squaring the scale or forming the term
-in f32 changes at least one score's bits. `always` because every scored row
-must carry the contract's exact value.
+in f32 changes at least one score's bits. The term-table scan's bits equal the
+reference's for dimensions 1 to 40 with 0, 1, 2, and 17 rows, and for
+dimensions 15, 16, 17, 384, and 385 with 511, 512, 513, and 1100 rows.
+`always` because every scored row must carry the contract's exact value.
 Fault/timing angle: none; scoring is a pure function.
 Required faults and enabling state: Scales that differ by two orders of
 magnitude across coordinates, codes at `+127` and `-127`, scales at
-`f32::MAX`, `f32::MIN_POSITIVE`, and the smallest subnormal.
+`f32::MAX`, `f32::MIN_POSITIVE`, and the smallest subnormal, dimensions that
+leave a partial 16-coordinate chunk, and row counts that leave a partial
+512-row tile.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:335`) was read against the formula and the tests run
-against it.
+`weighted_dot` (`scalar.rs:460`) and `QuantizedQuery::term_table`
+(`scalar.rs:341`) were read against the formula and the tests run
+against both.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
 `nonuniform_scales_rank_differently_from_a_raw_integer_dot`.
@@ -185,7 +194,7 @@ Open questions:
 ### dense-invalid-query-never-enters-scoring
 
 Type: safety
-Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:299`) is reached
+Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:309`) is reached
 from tests only; `rescore` validates its query the same way through
 `codec::validate`.
 Status: active

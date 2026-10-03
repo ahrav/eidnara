@@ -334,6 +334,129 @@ impl<'s> QuantizedQuery<'s> {
     pub fn score(&self, doc: &[i8]) -> f64 {
         weighted_dot(self.scales, &self.codes, doc)
     }
+
+    /// Every term [`Self::score`] can add, tabulated once so a scan over many rows looks each term up.
+    ///
+    /// The table holds `2048 * dimension` bytes. Building it forms `256 * dimension` terms, as many as scoring 256 rows with [`Self::score`] forms.
+    pub fn term_table(&self) -> TermTable {
+        let mut terms = vec![0.0f64; self.codes.len() * CODE_VALUES];
+        for ((weight, q), entries) in self
+            .scales
+            .weights
+            .iter()
+            .zip(&self.codes)
+            .zip(terms.as_chunks_mut::<CODE_VALUES>().0)
+        {
+            let q = f64::from(*q);
+            for (entry, code) in entries.iter_mut().zip(&CODE_AS_F64) {
+                // `q * code` is the integer product, exact in f64; adding `+0.0` turns a `-0.0` product into the `+0.0` that widening the zero i32 product gives.
+                let product = q * *code + 0.0;
+                *entry = *weight * product;
+            }
+        }
+        TermTable {
+            dimension: self.codes.len(),
+            terms,
+        }
+    }
+}
+
+/// Entries per coordinate in a [`TermTable`], one for each byte a code can occupy.
+const CODE_VALUES: usize = 256;
+
+const CODE_AS_F64: [f64; CODE_VALUES] = {
+    let mut values = [0.0f64; CODE_VALUES];
+    let mut byte = 0;
+    while byte < CODE_VALUES {
+        values[byte] = byte as u8 as i8 as f64;
+        byte += 1;
+    }
+    values
+};
+
+/// Coordinates a [`TermTable`] scan adds per pass over its rows; their terms occupy 32 KiB, sized for the L1 data cache.
+const TABLE_CHUNK: usize = 16;
+
+/// Rows a [`TermTable`] scan carries through every chunk before it moves on, so each chunk's terms are loaded once per this many rows.
+const TABLE_ROWS: usize = 512;
+
+pub struct TermTable {
+    dimension: usize,
+    terms: Vec<f64>,
+}
+
+impl std::fmt::Debug for TermTable {
+    /// Terms derive from the query embedding, so diagnostics show only the dimension.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TermTable")
+            .field("dimension", &self.dimension)
+            .finish()
+    }
+}
+
+impl TermTable {
+    /// Scores `out.len()` rows stored back to back in `codes`, writing [`QuantizedQuery::score`] of row `i` to `out[i]`.
+    ///
+    /// Each row sums its terms from `+0.0` in increasing coordinate order. Rows advance together one chunk of coordinates at a time, which keeps that chunk's terms cached; the order within each row is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// When `codes` is not `out.len()` rows of the table's dimension.
+    pub fn score_rows(&self, codes: &[i8], out: &mut [f64]) {
+        let dimension = self.dimension;
+        assert_eq!(
+            Some(codes.len()),
+            out.len().checked_mul(dimension),
+            "codes of one calibration have one length"
+        );
+        debug_assert!(
+            !codes.contains(&i8::MIN),
+            "the reserved code -128 never reaches scoring"
+        );
+        let chunked = dimension / TABLE_CHUNK * TABLE_CHUNK;
+        let (chunks, tail) = self.terms.split_at(chunked * CODE_VALUES);
+        let rows_per_tile = TABLE_ROWS * dimension;
+        for (tile, sums) in codes.chunks(rows_per_tile).zip(out.chunks_mut(TABLE_ROWS)) {
+            sums.fill(0.0);
+            for (index, chunk) in chunks
+                .as_chunks::<{ TABLE_CHUNK * CODE_VALUES }>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let start = index * TABLE_CHUNK;
+                for (row, sum) in tile.chunks_exact(dimension).zip(sums.iter_mut()) {
+                    let bytes: &[i8; TABLE_CHUNK] = row[start..start + TABLE_CHUNK]
+                        .try_into()
+                        .expect("a chunk lies inside the row");
+                    let mut acc = *sum;
+                    for quad in 0..TABLE_CHUNK / 4 {
+                        let word =
+                            u32::from_le_bytes(std::array::from_fn(|i| bytes[4 * quad + i] as u8));
+                        let (low, high) = (word as u16, (word >> 16) as u16);
+                        let terms = 4 * quad * CODE_VALUES;
+                        acc += chunk[terms + usize::from(low as u8)];
+                        acc += chunk[terms + CODE_VALUES + usize::from(low >> 8)];
+                        acc += chunk[terms + 2 * CODE_VALUES + usize::from(high as u8)];
+                        acc += chunk[terms + 3 * CODE_VALUES + usize::from(high >> 8)];
+                    }
+                    *sum = acc;
+                }
+            }
+            for (row, sum) in tile.chunks_exact(dimension).zip(sums.iter_mut()) {
+                let mut acc = *sum;
+                for (terms, code) in tail
+                    .as_chunks::<CODE_VALUES>()
+                    .0
+                    .iter()
+                    .zip(&row[chunked..])
+                {
+                    acc += terms[usize::from(*code as u8)];
+                }
+                *sum = acc;
+            }
+        }
+    }
 }
 
 /// `sum_j (s_j * s_j) * (c_query_j * c_doc_j)` in f64, increasing coordinate order, starting at `+0.0`; the integer product is formed in i32 and lies in `[-16129, 16129]`.
