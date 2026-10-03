@@ -951,23 +951,31 @@ fn supported_target() -> Result<&'static str, (&'static str, &'static str)> {
     Ok(target)
 }
 
+/// The extra byte preserves oversized-record detection. `O_NONBLOCK` lets a FIFO input reach the regular-file check immediately.
+fn read_admission_input(path: &Path) -> Result<Vec<u8>, String> {
+    let describe = |error: std::io::Error| format!("{}: {error}", path.display());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(describe)?;
+    if !file.metadata().map_err(describe)?.is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
+    let mut bytes = Vec::new();
+    file.take(daemon::projection_lifecycle::MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(describe)?;
+    Ok(bytes)
+}
+
 /// Installs both records under the data home after bounded reads; prints `installed` or the refusal.
 fn install_search_admission(manifest: &Path, campaign: &Path) -> i32 {
-    let limit = daemon::projection_lifecycle::MAX_RECORD_BYTES;
-    let read = |path: &Path| -> Result<Vec<u8>, String> {
-        let file =
-            std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let mut bytes = Vec::new();
-        file.take(limit + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        Ok(bytes)
-    };
     let outcome = host_runtime::data_dir_path(None)
         .map_err(|_| "no data directory".to_owned())
         .and_then(|home| {
-            let manifest = read(manifest)?;
-            let campaign = read(campaign)?;
+            let manifest = read_admission_input(manifest)?;
+            let campaign = read_admission_input(campaign)?;
             daemon::projection_admission::install(&home, &manifest, &campaign)
                 .map_err(|refusal| refusal.to_string())
         });
@@ -2452,6 +2460,28 @@ mod tests {
             result,
             Err(GenerationError::NativePayloadInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn an_admission_input_that_is_a_fifo_is_refused_without_a_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("input");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .expect("mkfifo");
+        let read = std::thread::spawn(move || read_admission_input(&fifo));
+        let started = Instant::now();
+        while !read.is_finished() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            read.is_finished(),
+            "the read blocked on a FIFO without a writer"
+        );
+        assert!(read.join().expect("join").is_err());
     }
 
     #[test]

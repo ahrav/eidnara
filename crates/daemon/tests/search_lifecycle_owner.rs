@@ -4795,6 +4795,30 @@ fn records_that_deny_the_bootstrap_register_nothing() {
     assert_eq!(control(home), ControlState::Absent);
 }
 
+#[test]
+fn a_registration_takes_the_largest_allowance_the_installed_limits_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    owner.register_projection(now(), &slice_budget()).unwrap();
+    match control(home) {
+        ControlState::Intent(intent) => assert_eq!(intent.episodes.allowance, 2),
+        other => panic!("{other:?}"),
+    }
+}
+
 /// Without installed records the daemon records nothing and hooks stay closed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn absent_records_register_nothing() {

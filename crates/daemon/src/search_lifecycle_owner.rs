@@ -557,18 +557,32 @@ impl SearchLifecycleOwner {
             .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
         let bound = limit(inputs.manifest(), Transition::Rebuilding.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        let generation_id = format!("gen-{}", identity.generation_epoch);
+        let allowance = (1..=REGISTRATION_ALLOWANCE)
+            .rev()
+            .find(|allowance| {
+                replacement_spec(
+                    inputs.manifest(),
+                    identity.clone(),
+                    Transition::Rebuilding,
+                    *allowance,
+                    &generation_id,
+                )
+                .is_ok()
+            })
+            .unwrap_or(1);
         let request = LifecycleRequest {
             transition: Transition::Rebuilding,
             selected_generation: "unregistered".to_owned(),
             kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
             consumer: ConsumerBinding {
                 consumer_id: REGISTERED_CONSUMER.to_owned(),
-                generation_id: format!("gen-{}", identity.generation_epoch),
+                generation_id,
             },
             cause: Cause::Registration,
             attempt_id: format!("registration-{}", identity.kernel_incarnation_id),
             recovery_target: None,
-            allowance: REGISTRATION_ALLOWANCE,
+            allowance,
             deadline: now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
             authorization_ref: None,
         };
