@@ -1354,17 +1354,22 @@ fn canonical_references(
     before_phase: &mut impl FnMut(Phase),
 ) -> Result<(BTreeMap<String, CanonicalReference>, usize), QueryFailure> {
     let claims: Vec<String> = ranked.iter().flatten().map(|id| id.to_string()).collect();
-    let reach = limits.result_rows.get() + 1;
+    let reach = limits.result_rows.get().saturating_add(1);
     let mut references = BTreeMap::new();
     let (mut survivors, mut validated, mut claim) = (0, 0, 0);
-    for entry in ranked {
+    for (index, entry) in ranked.iter().enumerate() {
         if survivors == reach {
             break;
         }
         if let Some(occurrence_id) = entry {
             if claim == validated {
-                // Using `validated` as the growth target makes batches grow geometrically during denial runs until `limits.validation_batch` caps their size.
-                let size = (reach - survivors)
+                // Counting ranked entries before flattening lets non-claim entries fill the remaining rows. Using `validated` as the growth target makes batches grow geometrically during denial runs until `limits.validation_batch` caps their size.
+                let within_reach = ranked[index..]
+                    .iter()
+                    .take(reach - survivors)
+                    .flatten()
+                    .count();
+                let size = within_reach
                     .max(validated)
                     .min(limits.validation_batch.get());
                 let batch = &claims[validated..claims.len().min(validated + size)];

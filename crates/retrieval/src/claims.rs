@@ -445,6 +445,12 @@ pub fn read_selected_claims(
     bounds: ClaimCandidateBounds,
     occurrence_ids: &[String],
 ) -> Result<SelectedClaims, ClaimCandidateError> {
+    if occurrence_ids.len() > bounds.max_rows.get() {
+        return Err(ProjectionError::TooManyRecords {
+            count: occurrence_ids.len(),
+        }
+        .into());
+    }
     let (rows, target) = guarded_rows(conn, kernel, budget, bounds, |conn| {
         selected_claim_candidates(conn, occurrence_ids)
     })?;

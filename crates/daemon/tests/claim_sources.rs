@@ -29,11 +29,11 @@ use retrieval::batch::{
     row_identities,
 };
 use retrieval::claims::{
-    CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateBounds, SurfaceValidation,
-    UseDenial, UseVerdict, classify_live_claims, judge_selected_for_surface, read_selected_claims,
-    validate_for_surface,
+    CandidateState, ClaimCandidate, ClaimCandidateBatch, ClaimCandidateBounds, ClaimCandidateError,
+    SurfaceValidation, UseDenial, UseVerdict, classify_live_claims, judge_selected_for_surface,
+    read_selected_claims, validate_for_surface,
 };
-use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
+use retrieval::{PersistBounds, ProjectionError, ProjectionIdentity, install_identity};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
@@ -2364,6 +2364,48 @@ fn revalidate(
         &EvalBudget::unbounded(),
     )
     .unwrap()
+}
+
+#[test]
+fn a_selected_read_refuses_a_selection_past_its_row_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let (corpus, projection, batch, _) = one_decision_validated(dir.path());
+    let mut bounds = candidate_bounds();
+    bounds.max_rows = NonZeroUsize::new(2).unwrap();
+    let repeated = vec![batch.candidates[0].row.occurrence_id.clone(); 3];
+    let refused = projection
+        .read(|conn| {
+            Ok(read_selected_claims(
+                conn,
+                &corpus.kernel,
+                &EvalBudget::unbounded(),
+                bounds,
+                &repeated,
+            ))
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            refused,
+            Err(ClaimCandidateError::Projection(
+                ProjectionError::TooManyRecords { count: 3 }
+            ))
+        ),
+        "{refused:?}"
+    );
+    let within = projection
+        .read(|conn| {
+            Ok(read_selected_claims(
+                conn,
+                &corpus.kernel,
+                &EvalBudget::unbounded(),
+                bounds,
+                &repeated[..2],
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(within.rows.len(), 2);
 }
 
 /// A projection row naming an artifact other than the one its canonical

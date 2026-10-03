@@ -698,6 +698,98 @@ async fn claim_validation_reads_only_the_claims_the_answer_can_reach() {
     fixture.daemon.shutdown().await;
 }
 
+/// A validation batch reads the claims within the ranked entries that fill the remaining result rows and the truncation witness. A non-claim entry fills the witness position, so a corrupt claim ranked past it leaves the bounded answer unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_claim_entry_counts_toward_the_claims_a_batch_reaches() {
+    const COPY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let healthy = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let lexical_id = healthy
+        .fused
+        .entries()
+        .iter()
+        .find(|entry| entry.lane(Lane::Lexical).is_some())
+        .map(|entry| entry.occurrence().to_string())
+        .unwrap();
+    fixture.non_claim_lexical_copy(&lexical_id, COPY);
+    let full = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let entries = full.body["entries"].as_array().unwrap();
+    let witness = entries
+        .iter()
+        .position(|entry| entry["occurrence_id"] == COPY)
+        .unwrap_or_else(|| panic!("the copy is served: {}", full.body));
+    assert!(witness >= 1, "{}", full.body);
+    assert!(entries[witness]["canonical"].is_null(), "{}", full.body);
+    assert!(
+        entries[..witness]
+            .iter()
+            .all(|entry| entry["canonical"]["decision_object_id"].is_string()),
+        "{}",
+        full.body
+    );
+    let corrupt = entries[witness + 1..]
+        .iter()
+        .find(|entry| {
+            entry["canonical"]["decision_object_id"].is_string()
+                && entry["canonical"]["decision_object_id"] != "rule"
+        })
+        .and_then(|entry| entry["occurrence_id"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "a claim the exact lane never reads ranks past the copy: {}",
+                full.body
+            )
+        });
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::new(witness).unwrap();
+    let before = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(before.body["entries"].as_array().unwrap().len(), witness);
+    assert_eq!(before.body["truncated"], true);
+    fixture
+        .projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE exact_associations SET extraction_version=7 WHERE occurrence_id=?1",
+                [corrupt],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.run(&limits(), budget.shared(), QUERY, |_| {}).err(),
+        Some(QueryFailure::Unavailable("claim_validation"))
+    );
+    let after = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(after.body, before.body);
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_largest_result_row_bound_serves_the_whole_surviving_ranking() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let mut wide = limits();
+    wide.result_rows = wide.fused_union;
+    let expected = fixture.run(&wide, budget.shared(), QUERY, |_| {}).unwrap();
+    assert!(!entry_ids(&expected.body).is_empty(), "{}", expected.body);
+    let mut unbounded = limits();
+    unbounded.result_rows = NonZeroUsize::MAX;
+    let outcome = fixture
+        .run(&unbounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(outcome.body, expected.body);
+    fixture.daemon.shutdown().await;
+}
+
 /// A run of denied claims grows each validation batch to the claims validated before it, so the batches over the run stay logarithmic in its length while the answer stays the one a single wide validation gives.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_run_of_denied_claims_is_validated_in_logarithmically_many_batches() {

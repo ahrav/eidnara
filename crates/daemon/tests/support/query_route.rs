@@ -358,6 +358,31 @@ impl Fixture {
             .unwrap();
     }
 
+    /// The lexical row makes the `messages` copy searchable by the same terms as `occurrence_id`.
+    pub fn non_claim_lexical_copy(&self, occurrence_id: &str, copy_id: &str) {
+        self.projection
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at)
+                     SELECT ?2,tuple,lineage_id,'messages',revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
+                     FROM occurrences WHERE occurrence_id=?1",
+                    [occurrence_id, copy_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO lexical(rowid,original,parts,occurrence_id)
+                     SELECT 1<<41,original,parts,?2
+                     FROM lexical WHERE occurrence_id=?1",
+                    [occurrence_id, copy_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
     pub fn run(
         &self,
         limits: &QueryRouteLimits,
