@@ -7,8 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use daemon::vector_generation::{
-    CODES_FILE, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE, SIDECAR_FILE, VectorRefusal,
-    VectorSidecar, verify,
+    CODES_FILE, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE, SIDECAR_FILE, TOMBSTONES_FILE,
+    VectorRefusal, VectorSidecar, verify,
 };
 use host_runtime::generation::GenerationManifest;
 use retrieval::dense::codec::{self, ArtifactRejection, RowRejection};
@@ -172,17 +172,26 @@ fn bytes_that_diverge_from_the_manifest_refuse_as_the_store_ahead_of_their_meani
     let digest = fixture.layer(1, 10).digest;
     let dir = fixture.generation_dir(&digest);
     let verify_of = || verify(&fixture.store, &digest, &fixture.expected(), u64::MAX);
+    // Rows and codes take a value their meaning check also refuses; each table and the sidecar take one flipped bit, read before its hash completes.
     for (file, offset) in [
         (ROWS_FILE, codec::row_offset(2, DIMENSION) as usize),
         (CODES_FILE, 0),
+        (SCALES_FILE, 0),
+        (ROW_IDS_FILE, 2),
+        (TOMBSTONES_FILE, 0),
+        (SIDECAR_FILE, 10),
     ] {
         let pristine = fs::read(dir.join(file)).unwrap();
         let mut corrupt = pristine.clone();
-        corrupt[offset..offset + 4].copy_from_slice(&2.0f32.to_le_bytes());
+        if file == ROWS_FILE || file == CODES_FILE {
+            corrupt[offset..offset + 4].copy_from_slice(&2.0f32.to_le_bytes());
+        } else {
+            corrupt[offset] ^= 1;
+        }
         fs::write(dir.join(file), &corrupt).unwrap();
         assert!(
             matches!(verify_of(), Err(VectorRefusal::Store(_))),
-            "{file}: the hash refusal wins over the row or code refusal"
+            "{file}: the hash refusal wins over any refusal about the bytes' meaning"
         );
         // A refusal before the row pass still hashes the streamed files.
         assert!(

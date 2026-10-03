@@ -343,7 +343,10 @@ pub(crate) fn hash_copy_from(
 ) -> io::Result<(u64, String)> {
     let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
     loop {
-        let count = rustix::io::read(source, &mut buffer)?;
+        let count = match rustix::io::read(source, &mut buffer) {
+            Err(rustix::io::Errno::INTR) => continue,
+            result => result?,
+        };
         if count == 0 {
             break;
         }
