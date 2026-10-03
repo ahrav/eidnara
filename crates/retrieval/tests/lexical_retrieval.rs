@@ -119,7 +119,7 @@ fn open_store(dir: &Path) -> SqliteStore {
         .with_conn_unfenced(|conn| {
             conn.pragma_update(None, "cache_size", -(8 * 1024))?;
             conn.pragma_update(None, "temp_store", "MEMORY")?;
-            conn.pragma_update(None, "mmap_size", 0x7fff_0000_i64)
+            conn.pragma_update(None, "mmap_size", 0x4_0000_0000_i64)
         })
         .unwrap();
     store

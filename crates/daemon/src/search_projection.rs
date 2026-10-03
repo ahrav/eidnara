@@ -24,7 +24,9 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 /// The page cache the projection connection is allowed, in KiB.
 pub const CACHE_KIB: u32 = 8 * 1024;
 /// The bytes of the database file the projection connection may memory-map (`PRAGMA mmap_size`).
-pub const MMAP_BYTES: i64 = 0x7fff_0000;
+/// A one-million-occurrence projection exceeds the bundled library's default 0x7fff0000-byte cap, so the connection's memory-mapping limit is 16 GiB.
+/// `.cargo/config.toml` sets the library's compile-time memory-mapping cap to 16 GiB.
+pub const MMAP_BYTES: i64 = 0x4_0000_0000;
 /// Pages SQLite may hold in memory for one transient index or sort.
 const TEMP_STORE_MEMORY: &str = "MEMORY";
 /// The suffixes SQLite appends to a database's whole file name for its write-ahead log, shared-memory index, and rollback journal.
