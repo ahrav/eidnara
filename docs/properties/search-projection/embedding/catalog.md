@@ -129,7 +129,7 @@ cannot report the bounded-liveness or resource checks as passed.
 | [embedding-completion-is-identity-fenced](#embedding-completion-is-identity-fenced) | safety | test-only | always | active | high |
 | [embedding-complete-requires-durable-vector](#embedding-complete-requires-durable-vector) | safety | test-only | always | active | high |
 | [embedding-restart-retries-durable-pending](#embedding-restart-retries-durable-pending) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
-| [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
+| [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | default-production | always (per admitted episode; RP2.9-blocked) | active | medium |
 | [embedding-identity-gc-preserves-live-work](#embedding-identity-gc-preserves-live-work) | safety | test-only | always | active | medium |
 | [embedding-supervisor-shares-budget-and-joins](#embedding-supervisor-shares-budget-and-joins) | safety | test-only | always | active | medium |
 | [embedding-dispatch-scan-makes-bounded-progress](#embedding-dispatch-scan-makes-bounded-progress) | liveness | test-only | always | active | high |
