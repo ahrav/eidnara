@@ -2177,8 +2177,10 @@ Exercised: partial - The frozen construction corpus compares owned boundary
 inputs, length-only snapshots, exact transcript and prompt bytes, and refusal
 behavior. It also checks a frozen-size lookup hit through a borrowed block ID.
 The scripted producer pins captured prompts on two delta lanes.
-The fingerprint literal, three truncation differentials, golden, and marker
-test also pass. No test crosses a binary upgrade during an in-flight firing.
+The fingerprint test, three truncation differentials, golden, and marker
+test also pass. Since `bdf564e3a` the fingerprint test pins the SHA-256 hex
+digest of the `id:kind:len` join rather than the join itself. No test
+crosses a binary upgrade during an in-flight firing.
 Guarantee: The history_summarizer receives the same prompt bytes, and the durable
 chunk fingerprint still matches across restart.
 Check: `always` - [`truncate_history_summarizer_input_if_needed`][trunc] returns bytes
@@ -2193,8 +2195,9 @@ flight across a restart, so the stored string no longer equals the recomputed
 one and publication fails with `FingerprintMismatch`. The [snapshot][snap-build]
 stores `byte_len: block.bytes.len()` without retaining content. Its
 [`as_item`][as-item] view feeds the fingerprint, which writes the same UTF-8
-length into the literal `id:kind:len|...`, stored in
-[`HistorySummarizerDurableState.chunk_fingerprint`][fp-field] and compared by
+length into the `id:kind:len|...` join, stored in
+[`HistorySummarizerDurableState.chunk_fingerprint`][fp-field] as its
+SHA-256 hex digest since `bdf564e3a`, and compared by
 [`verify_chunk_fingerprint`][fp-verify] and the [publish predicate][fp-predicate].
 Truncation binary-searches UTF-16 unit positions with an uncached
 `estimate_tokens` per probe; the differential's [header][diff-header] says the
@@ -2216,8 +2219,29 @@ corpus][construction-corpus], and the [producer capture][firing-capture]; all
 unaudited.
 Impact: HistorySummarizer prompt bytes change, or an in-flight firing fails
 publication after a restart.
-Open questions: None. Exact bytes, including the truncation probe sequence,
-remain required; this construction change does not relax that contract.
+Open questions:
+
+- Exact bytes, including the truncation probe sequence, remain required;
+  this construction change does not relax that contract. Resolved.
+- `bdf564e3a` (#859 PR C) is itself the fingerprint format change this
+  record's Fault/timing angle names. A firing recorded by an earlier binary
+  stores the joined form, and its effect on the upgraded binary has
+  three cases, read in `crates/daemon/src/history_summarizer.rs` at
+  `0ff62b29a`. An `AwaitingProducer` firing with a live producer run reattaches
+  (`handle_restart_load`, `:903-954`, arm `:912-939`): the daemon recomputes the
+  fingerprint from the current snapshot as a digest
+  (`crates/daemon/src/lib.rs:5111-5113`), and `publish_validated_chunk`
+  compares it with the stored joined form, rejects it as
+  `FingerprintMismatch`, and abandons the run with the failure backoff
+  (`history_summarizer.rs:637-652`). A reserved `Publishing` firing takes
+  `RepublishReserved` (`:940-944`): `republish_reserved` reuses the stored
+  fingerprint as the observed one (`:1144`), so the format change does not
+  reject it, and it remains subject to the current publication fences. A
+  `Firing` or `Validating` firing, an unreserved `Publishing` firing, and a
+  placeholder run abandon through `AbandonClass::Restarted` (`:925-930`,
+  `:945-952`).
+  Is the one-time abandon of reattached firings across that upgrade
+  accepted? (needs human input)
 
 ### cron-next-occurrence-matches-the-minute-stepper
 
@@ -3115,10 +3139,10 @@ evaluation of this area and its disposition are recorded in
 [boundary-view]: ../../../../crates/daemon/src/lib.rs#L17556-L17606
 [construction-corpus]: ../../../../crates/daemon/src/lib.rs#L18499
 [firing-capture]: ../../../../crates/daemon/src/lib.rs#L25527
-[fp]: ../../../../crates/daemon/src/history_summarizer.rs#L152
-[fp-field]: ../../../../crates/memory-store/src/lib.rs#L673
-[fp-verify]: ../../../../crates/daemon/src/history_summarizer.rs#L326
-[fp-predicate]: ../../../../crates/daemon/src/history_summarizer.rs#L407-L417
+[fp]: ../../../../crates/daemon/src/history_summarizer.rs#L166-L173
+[fp-field]: ../../../../crates/memory-store/src/lib.rs#L969
+[fp-verify]: ../../../../crates/daemon/src/history_summarizer.rs#L476-L487
+[fp-predicate]: ../../../../crates/daemon/src/history_summarizer.rs#L637-L652
 [diff-header]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
 [cap]: ../../../../crates/daemon/src/conditional_note_evaluation.rs#L31-L34

@@ -254,3 +254,19 @@ Two cheaper unit-level assertions worth having regardless, both pure:
   rejections. Notably, the fix has an existing shape to follow: classify a
   persistent validation rejection the way a permanent chain exhaustion is
   classified.
+
+### Q: Does #859 PR C's model-chain digest change the chunk retry key?
+
+- Sources examined: `git show bdf564e3a`; `crates/memory-store/src/lib.rs:540-553`,
+  `crates/daemon/src/history_summarizer.rs:175-179`, and
+  `crates/daemon/src/history_summarizer_chunk.rs:709-723` at `0ff62b29a`.
+- Findings: `HistorySummarizerChunkRetry` stores `model_chain_digest`, the
+  SHA-256 hex digest of the serialized chain, and `chunk_failures` compares it
+  with the digest of the current chain. A changed chain still restarts the
+  count. A record written with the chain itself loads with an empty digest
+  and restarts its count, which
+  `chunk_failures_count_per_chunk_and_ignore_provider_errors`
+  (`history_summarizer.rs:2730`) asserts.
+- Missing evidence: None.
+- Conclusion: resolved with answer: the key's meaning is unchanged; the
+  stored form is a digest.

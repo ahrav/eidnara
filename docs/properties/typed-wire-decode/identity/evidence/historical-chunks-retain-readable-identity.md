@@ -23,7 +23,10 @@ Lenses: state/persistence, failure recovery, versioning, resource boundaries.
    from nonsynthetic, nonsystem blocks within the selected ordinal range.
    Each item gets `block.bytes.len()`, not rendered transcript length.
 6. `crates/daemon/src/history_summarizer.rs:140-157` joins `id:kind:byte_len` items.
-   It is a literal fingerprint string, not a cryptographic content hash.
+   It is a literal fingerprint string, not a cryptographic content hash. At
+   `0ff62b29a` this no longer holds: `bdf564e3a` (#859 PR C) returns the
+   SHA-256 hex digest of the same join (`:166-173`). It is a hash of item
+   fields, not of content bytes.
 7. Lines 326-334 reject mismatches. Same-length content drift is outside this
    string's detection ability; selected-range identities cover another domain.
 
@@ -77,3 +80,31 @@ assembly. A cross-binary in-flight recovery run remains missing evidence.
 - Missing evidence: replacement decoder, frozen old rows, and upgrade execution.
 - Conclusion: unresolved. `/testing:test-strategy` owns readability and item
   oracles; a new crash claim would route to simulation/crash-testing separately.
+
+### Q: Does `bdf564e3a`'s digest fingerprint change this record?
+
+- Sources examined: `git show bdf564e3a -- crates/daemon/src/history_summarizer.rs`;
+  `crates/daemon/src/history_summarizer.rs:155-173` and `:6232-6268` at
+  `0ff62b29a`.
+- Findings: The fingerprint is the SHA-256 hex digest of the joined
+  `id:kind:byte_len` string. The joined string stays the comparable artifact
+  and equal items give an equal digest, so the Check holds. A firing in
+  flight across an upgrade to `bdf564e3a`, which stores the joined form, has
+  three cases, read in `crates/daemon/src/history_summarizer.rs` at
+  `0ff62b29a`. An `AwaitingProducer` firing with a live producer run reattaches
+  (`handle_restart_load`, `:903-954`, arm `:912-939`): the daemon recomputes the
+  fingerprint from the current snapshot as a digest
+  (`crates/daemon/src/lib.rs:5111-5113`), and `publish_validated_chunk`
+  compares it with the stored joined form, rejects it as
+  `FingerprintMismatch`, and abandons the run with the failure backoff
+  (`history_summarizer.rs:637-652`). A reserved `Publishing` firing takes
+  `RepublishReserved` (`:940-944`): `republish_reserved` reuses the stored
+  fingerprint as the observed one (`:1144`), so the format change does not
+  reject it, and it remains subject to the current publication fences. A
+  `Firing` or `Validating` firing, an unreserved `Publishing` firing, and a
+  placeholder run abandon through `AbandonClass::Restarted` (`:925-930`,
+  `:945-952`). None of the
+  three depends on the decoder.
+- Missing evidence: Which binary is the old baseline for the upgrade window.
+- Conclusion: needs human input; the record stays `active`, and the
+  catalog's open questions name the choice.

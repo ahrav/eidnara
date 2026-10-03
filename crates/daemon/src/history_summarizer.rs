@@ -20,7 +20,7 @@ use memory_store::{
     HistorySummarizerPublishResult, HistorySummarizerSelectedMessageIdentity,
     HistorySummarizerUserMemoryCandidate, LoadedState, MemoryReviewerActivation,
     MemoryReviewerNonadmissionCode, MemoryStore, MemoryStoreError, PendingPublication,
-    StoredHistorySegment, bounded_summarizer_detail,
+    StoredHistorySegment,
     summarizer_timeline::{AbandonClass, FiringOutcome, FiringTrigger, NoFire, NoFireReason},
 };
 
@@ -163,13 +163,19 @@ pub struct ChunkSnapshotItem<'a> {
     pub byte_len: usize,
 }
 
-/// The fingerprint omits content bytes so diagnostics retain item-level fields.
 pub fn compute_chunk_fingerprint(items: &[ChunkSnapshotItem<'_>]) -> String {
-    items
+    let pieces = items
         .iter()
         .map(|item| format!("{}:{}:{}", item.id, item.kind, item.byte_len))
         .collect::<Vec<_>>()
-        .join("|")
+        .join("|");
+    crate::vector_generation::sha256_hex(pieces.as_bytes())
+}
+
+pub fn model_chain_digest(model_chain: &[String]) -> String {
+    crate::vector_generation::sha256_hex(
+        &serde_json::to_vec(model_chain).expect("a model chain serializes"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +199,12 @@ pub enum HistorySummarizerStateError {
     MissingProducerIds { firing_seq: u64 },
     #[error("history_summarizer chunk fingerprint mismatch: expected {expected}, found {found}")]
     FingerprintMismatch { expected: String, found: String },
+    #[error("history_summarizer producer {field} takes {bytes} serialized bytes, over {limit}")]
+    ProducerIdentityOverBound {
+        field: &'static str,
+        bytes: usize,
+        limit: usize,
+    },
     #[error("store: {0}")]
     Store(MemoryStoreError),
     #[error("publish: {0}")]
@@ -349,7 +361,7 @@ pub fn abandon_with_detail(
         firing_seq: current.firing_seq,
         failure_backoff_at_ms: Some(failure_backoff_at_ms),
         last_failure: detail
-            .map(bounded_summarizer_detail)
+            .map(|detail| bounded_detail(&detail))
             .or_else(|| current.last_failure.clone()),
         consecutive_publish_failures: current.consecutive_publish_failures,
         chunk_retry: current.chunk_retry.clone(),
@@ -368,21 +380,18 @@ pub fn record_chunk_failure(
     model_chain: &[String],
     token_budget: usize,
 ) -> HistorySummarizerDurableState {
-    let failures = current
-        .chunk_retry
-        .as_ref()
-        .filter(|retry| {
-            retry.chunk_start == chunk_start
-                && retry.model_chain == model_chain
-                && retry.token_budget == token_budget
-        })
-        .map_or(0, |retry| retry.failures);
+    let failures = crate::history_summarizer_chunk::chunk_failures(
+        current.chunk_retry.as_ref(),
+        chunk_start,
+        model_chain,
+        token_budget,
+    );
     let mut next = current.clone();
     next.chunk_retry = Some(HistorySummarizerChunkRetry {
         chunk_start,
         chunk_end,
         failures: failures.saturating_add(1),
-        model_chain: model_chain.to_vec(),
+        model_chain_digest: model_chain_digest(model_chain),
         token_budget,
     });
     next
@@ -440,9 +449,15 @@ fn retain_backoff(
     let mut next = current.clone();
     next.failure_backoff_at_ms = Some(failure_backoff_at_ms);
     next.last_failure = detail
-        .map(bounded_summarizer_detail)
+        .map(|detail| bounded_detail(&detail))
         .or_else(|| current.last_failure.clone());
     next
+}
+
+pub use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
+
+pub(crate) fn bounded_detail(detail: &str) -> String {
+    detail[..detail.floor_char_boundary(memory_store::MAX_RAW_SUMMARIZER_DETAIL_BYTES)].to_string()
 }
 
 /// Whether a state's recorded reservation belongs to its own firing; a reservation carried from an earlier firing is not one this firing can publish.
@@ -1598,9 +1613,24 @@ pub fn history_summarizer_producer_session_id(
         .collect();
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "project" } else { slug };
+    // Two long project names that share a prefix still name distinct producer sessions.
+    let slug = if slug.len() > MAX_PRODUCER_SESSION_SLUG_BYTES {
+        let digest = fnv1a_hex16(slug);
+        format!(
+            "{}-{digest}",
+            &slug[..MAX_PRODUCER_SESSION_SLUG_BYTES - digest.len() - 1]
+        )
+    } else {
+        slug.to_string()
+    };
     let lineage = fnv1a_hex16(session_id);
     format!("eidnara-history_summarizer:{slug}:{lineage}:{firing_seq}")
 }
+
+const MAX_PRODUCER_SESSION_SLUG_BYTES: usize = 48;
+
+pub const MAX_PRODUCER_IDENTITY_BYTES: usize =
+    host_runtime::model_execution::protocol::MAX_RUN_ID_BYTES;
 
 /// Zero-padding preserves the full 64-bit FNV-1a output.
 fn fnv1a_hex16(input: &str) -> String {
@@ -1810,6 +1840,16 @@ where
     if request.model_chain.is_empty() {
         return Err(HistorySummarizerDriveError::NoModels);
     }
+    let harness_bytes = memory_store::serialized_str_len(request.harness);
+    if harness_bytes > MAX_PRODUCER_IDENTITY_BYTES {
+        return Err(HistorySummarizerDriveError::State(
+            HistorySummarizerStateError::ProducerIdentityOverBound {
+                field: "harness",
+                bytes: harness_bytes,
+                limit: MAX_PRODUCER_IDENTITY_BYTES,
+            },
+        ));
+    }
 
     let mut auth_blocked_providers = Vec::new();
     let mut all_failures_permanent = true;
@@ -1858,10 +1898,24 @@ where
             request.session_id,
             fired.firing_seq,
         );
-        let handle = match producer
+        let started = match producer
             .start(&producer_session_id, request.system, request.prompt, model)
             .await
         {
+            Ok(handle)
+                if memory_store::serialized_str_len(&handle.run_id)
+                    > MAX_PRODUCER_IDENTITY_BYTES =>
+            {
+                let purge_result = producer.purge_session(&producer_session_id).await;
+                Err(attach_cleanup(
+                    HistorySummarizerProducerError::MissingRunId,
+                    purge_result,
+                    "purge",
+                ))
+            }
+            started => started,
+        };
+        let handle = match started {
             Ok(handle) => {
                 if let Some(started) = request.producer_started {
                     started.store(true, Ordering::Relaxed);
@@ -2689,7 +2743,7 @@ mod tests {
                 chunk_start: 5,
                 chunk_end: 7,
                 failures: 2,
-                model_chain: chain.clone(),
+                model_chain_digest: model_chain_digest(&chain),
                 token_budget: 8_000,
             })
         );
@@ -2699,7 +2753,7 @@ mod tests {
                 chunk_start: 9,
                 chunk_end: 11,
                 failures: 1,
-                model_chain: chain.clone(),
+                model_chain_digest: model_chain_digest(&chain),
                 token_budget: 8_000,
             }),
             "a different chunk restarts the count"
@@ -2711,7 +2765,7 @@ mod tests {
                 chunk_start: 5,
                 chunk_end: 7,
                 failures: 1,
-                model_chain: other_chain.clone(),
+                model_chain_digest: model_chain_digest(&other_chain),
                 token_budget: 8_000,
             }),
             "a different model chain restarts the count"
@@ -2722,7 +2776,7 @@ mod tests {
                 chunk_start: 5,
                 chunk_end: 7,
                 failures: 1,
-                model_chain: chain.clone(),
+                model_chain_digest: model_chain_digest(&chain),
                 token_budget: 4_000,
             }),
             "a different configured budget restarts the count"
@@ -2750,6 +2804,50 @@ mod tests {
         assert_eq!(
             abandon_with_detail(&twice, 1, None, AbandonClass::ProducerFailed).chunk_retry,
             twice.chunk_retry
+        );
+        let legacy: HistorySummarizerChunkRetry = serde_json::from_value(serde_json::json!({
+            "chunk_start": 5,
+            "chunk_end": 7,
+            "failures": 6,
+            "model_chain": chain,
+            "token_budget": 8_000,
+        }))
+        .unwrap();
+        assert_eq!(legacy.model_chain_digest, "");
+        let legacy_state = HistorySummarizerDurableState {
+            chunk_retry: Some(legacy),
+            ..HistorySummarizerDurableState::default()
+        };
+        assert_eq!(
+            crate::history_summarizer_chunk::chunk_failures(
+                legacy_state.chunk_retry.as_ref(),
+                5,
+                &chain,
+                8_000
+            ),
+            0
+        );
+        assert_eq!(
+            record_chunk_failure(&legacy_state, 5, 7, &chain, 8_000)
+                .chunk_retry
+                .map(|retry| retry.failures),
+            Some(1),
+            "a retry stored with the chain itself restarts its count"
+        );
+        let long_chain: Vec<String> = (0..1_000).map(|n| format!("prov/model-{n}")).collect();
+        let long = record_chunk_failure(&twice, 5, 7, &long_chain, 8_000);
+        assert_eq!(
+            long.chunk_retry.as_ref().unwrap().model_chain_digest.len(),
+            64
+        );
+        assert_eq!(
+            crate::history_summarizer_chunk::chunk_failures(
+                long.chunk_retry.as_ref(),
+                5,
+                &long_chain,
+                8_000
+            ),
+            1
         );
 
         let failed = |class, detail: &str| {
@@ -3090,13 +3188,13 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_bound() {
-        use memory_store::MAX_SUMMARIZER_DETAIL_BYTES;
-        let detail = format!("{}\u{e9}tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
-        let bounded = bounded_summarizer_detail(detail.clone());
-        assert_eq!(bounded, "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+    fn a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound() {
+        let raw_bound = memory_store::MAX_RAW_SUMMARIZER_DETAIL_BYTES;
+        let detail = format!("{}\u{e9}tail", "a".repeat(raw_bound - 1));
+        let bounded = bounded_detail(&detail);
+        assert_eq!(bounded, "a".repeat(raw_bound - 1));
         let short = "a short detail";
-        assert_eq!(bounded_summarizer_detail(short.to_string()), short);
+        assert_eq!(bounded_detail(short), short);
         let current = HistorySummarizerDurableState::default();
         let next = retain_backoff(&current, 5, Some(detail.clone()));
         assert_eq!(next.last_failure.as_deref(), Some(bounded.as_str()));
@@ -3158,6 +3256,7 @@ mod tests {
         observed_systems: Vec<String>,
         await_run_ids: Vec<String>,
         cancels: Vec<String>,
+        purges: Vec<String>,
         attempt_closes: usize,
         closes: usize,
         connection_closed: bool,
@@ -3261,6 +3360,14 @@ mod tests {
         async fn cancel(&mut self, run_id: &str) -> Result<(), HistorySummarizerProducerError> {
             self.cancels.push(run_id.to_string());
             self.cancel_results.pop_front().unwrap_or(Ok(()))
+        }
+
+        async fn purge_session(
+            &mut self,
+            session_id: &str,
+        ) -> Result<(), HistorySummarizerProducerError> {
+            self.purges.push(session_id.to_string());
+            Ok(())
         }
 
         async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {
@@ -3749,7 +3856,7 @@ mod tests {
                 chunk_start: 2,
                 chunk_end: 4,
                 failures: 7,
-                model_chain: vec!["prov/model".to_string()],
+                model_chain_digest: model_chain_digest(&["prov/model".to_string()]),
                 token_budget: 8_000,
             }),
             ..Default::default()
@@ -3802,7 +3909,7 @@ mod tests {
                 chunk_start: 2,
                 chunk_end: 4,
                 failures: 1,
-                model_chain: vec!["prov/model".to_string()],
+                model_chain_digest: model_chain_digest(&["prov/model".to_string()]),
                 token_budget: 8_000,
             }),
             "the revised bytes start their own count"
@@ -4152,6 +4259,233 @@ mod tests {
         let state = overflow_store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(state.state, HistorySummarizerPhase::Idle);
         assert_eq!(state.firing_seq, 1);
+    }
+
+    #[tokio::test]
+    async fn a_producer_start_failure_records_a_bounded_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec![format!("prov/{}", "\u{1}".repeat(4_000))];
+        let mut producer = ScriptedProducer::default().with_start(Err(
+            HistorySummarizerProducerError::context_overflow("\"".repeat(4_000)),
+        ));
+        run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        let detail = state.last_failure.expect("the failure is recorded");
+        assert!(detail.contains("producer start"), "{detail}");
+        assert!(
+            memory_store::serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES,
+            "{}",
+            detail.len()
+        );
+        assert!(
+            memory_store::serialized_str_len(&detail) > MAX_SUMMARIZER_DETAIL_BYTES - 6,
+            "the cut keeps as much as fits"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_bearing_start_failure_stays_within_its_bound_once_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model".to_string()];
+        let message = "password=abc next ".repeat(MAX_SUMMARIZER_DETAIL_BYTES / 18);
+        let mut producer = ScriptedProducer::default().with_start(Err(
+            HistorySummarizerProducerError::context_overflow(message),
+        ));
+        run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        let detail = store
+            .load("ses")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .last_failure
+            .expect("the failure is recorded");
+        assert!(detail.contains("<REDACTED:password>"), "{detail}");
+        assert!(
+            memory_store::serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES,
+            "{}",
+            detail.len()
+        );
+    }
+
+    async fn stored_start_failure_detail(message: String) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model".to_string()];
+        let mut producer = ScriptedProducer::default().with_start(Err(
+            HistorySummarizerProducerError::context_overflow(message),
+        ));
+        run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        store
+            .load("ses")
+            .unwrap()
+            .meta
+            .history_summarizer
+            .last_failure
+            .expect("the failure is recorded")
+    }
+
+    fn checksummed_github_token() -> String {
+        const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        let body: String = (0..30)
+            .map(|index| char::from(DIGITS[(index * 37 + 11) % DIGITS.len()]))
+            .collect();
+        let mut crc = u32::MAX;
+        for byte in body.bytes() {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let mut checksum = !crc;
+        let mut encoded = [b'0'; 6];
+        for slot in encoded.iter_mut().rev() {
+            *slot = DIGITS[(checksum % 62) as usize];
+            checksum /= 62;
+        }
+        format!("ghp_{body}{}", std::str::from_utf8(&encoded).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_crosses_the_detail_bound_is_redacted_whole() {
+        let token = checksummed_github_token();
+        let prefix_of = |text: &str| text.contains(&token[..12]);
+
+        let probe = stored_start_failure_detail("MARKER".to_string()).await;
+        let offset = probe.find("MARKER").expect("the message is recorded");
+        let offset = memory_store::serialized_str_len(&probe[..offset]);
+        let filler = MAX_SUMMARIZER_DETAIL_BYTES - 30 - offset - 1;
+        let message = format!("{} {token} tail", "a".repeat(filler));
+        let whole = context_core::redaction::redact_durable_text(&message).text;
+        assert!(!prefix_of(&whole), "the whole message redacts the token");
+        let full = probe.replace("MARKER", &message);
+        let raw_cut =
+            memory_store::prefix_within_serialized_bytes(&full, MAX_SUMMARIZER_DETAIL_BYTES);
+        assert!(
+            raw_cut.ends_with(&token[..30]),
+            "the bound falls inside the token"
+        );
+        let cut_redacted = context_core::redaction::redact_durable_text(raw_cut).text;
+        assert!(
+            prefix_of(&cut_redacted),
+            "a cut token is no longer recognized"
+        );
+
+        let detail = stored_start_failure_detail(message).await;
+
+        assert!(!prefix_of(&detail), "{detail}");
+        assert!(
+            context_core::redaction::contains_redaction_token(&detail),
+            "{detail}"
+        );
+        assert!(
+            memory_store::serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES,
+            "{}",
+            detail.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_id_over_the_producer_identity_bound_is_a_start_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model".to_string()];
+        let run_id = "\"".repeat(MAX_PRODUCER_IDENTITY_BYTES / 2 + 1);
+        let mut producer = ScriptedProducer::default().with_start(Ok(run_handle(&run_id)));
+        let error = run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::MissingRunId)
+            ),
+            "{error}"
+        );
+        assert!(producer.await_run_ids.is_empty());
+        assert_eq!(
+            producer.purges,
+            vec![history_summarizer_producer_session_id("proj", "ses", 1)],
+            "the producer session is deleted so its run ends without sending the rejected id"
+        );
+        assert!(producer.cancels.is_empty(), "{:?}", producer.cancels);
+        assert_eq!(producer.closes, 1);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        assert_eq!(state.producer_run_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_harness_over_the_producer_identity_bound_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model".to_string()];
+        let harness = "h".repeat(MAX_PRODUCER_IDENTITY_BYTES + 1);
+        let mut producer = ScriptedProducer::default();
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        let before = store.load("ses").unwrap();
+        request.harness = &harness;
+        let error = run_history_summarizer_firing(&mut producer, request)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                HistorySummarizerDriveError::State(
+                    HistorySummarizerStateError::ProducerIdentityOverBound {
+                        field: "harness",
+                        ..
+                    }
+                )
+            ),
+            "{error}"
+        );
+        assert!(producer.observed_starts.is_empty());
+        let after = store.load("ses").unwrap();
+        assert_eq!(after.row_version, before.row_version);
+        assert_eq!(
+            after.meta.history_summarizer,
+            before.meta.history_summarizer
+        );
     }
 
     #[tokio::test]
@@ -6032,7 +6366,8 @@ mod tests {
                 byte_len: 2,
             },
         ]);
-        assert_eq!(fingerprint, "m1:user:3|m2:assistant:2");
+        let digest = |pieces: &str| crate::vector_generation::sha256_hex(pieces.as_bytes());
+        assert_eq!(fingerprint, digest("m1:user:3|m2:assistant:2"));
         for (bytes, byte_len) in [("", 0), ("🙂", 4), ("e\u{301}", 3), ("中文", 6)] {
             assert_eq!(bytes.len(), byte_len);
             assert_eq!(
@@ -6041,10 +6376,45 @@ mod tests {
                     kind: "text",
                     byte_len: bytes.len(),
                 }]),
-                format!("m:|:text:{byte_len}")
+                digest(&format!("m:|:text:{byte_len}"))
             );
         }
-        assert_eq!(compute_chunk_fingerprint(&[]), "");
+        assert_eq!(compute_chunk_fingerprint(&[]), digest(""));
+        let long_id = "m".repeat(crate::wire::MAX_MID_BYTES);
+        let many: Vec<_> = (0..10_000)
+            .map(|byte_len| ChunkSnapshotItem {
+                id: &long_id,
+                kind: "tool_result",
+                byte_len,
+            })
+            .collect();
+        assert_eq!(compute_chunk_fingerprint(&many).len(), 64);
+    }
+
+    #[test]
+    fn a_producer_session_id_keeps_a_bounded_slug() {
+        let session = history_summarizer_producer_session_id(&"s".repeat(4_096), "ses", u64::MAX);
+        assert!(session.len() <= MAX_PRODUCER_IDENTITY_BYTES, "{session}");
+        let slug = session
+            .strip_prefix("eidnara-history_summarizer:")
+            .and_then(|rest| rest.split(':').next())
+            .expect("the id carries a slug");
+        assert_eq!(slug.len(), MAX_PRODUCER_SESSION_SLUG_BYTES, "{session}");
+        assert!(!session.contains(&"s".repeat(MAX_PRODUCER_SESSION_SLUG_BYTES + 1)));
+    }
+
+    #[test]
+    fn long_project_slugs_that_share_a_prefix_keep_distinct_producer_session_ids() {
+        let shared = "p".repeat(MAX_PRODUCER_SESSION_SLUG_BYTES);
+        let left = history_summarizer_producer_session_id(&format!("{shared}-left"), "ses", 1);
+        let right = history_summarizer_producer_session_id(&format!("{shared}-right"), "ses", 1);
+        assert_ne!(left, right);
+        assert!(left.len() <= MAX_PRODUCER_IDENTITY_BYTES, "{left}");
+        let short = history_summarizer_producer_session_id("proj", "ses", 1);
+        assert_eq!(
+            short,
+            "eidnara-history_summarizer:proj:".to_string() + &fnv1a_hex16("ses") + ":1"
+        );
     }
 
     #[test]
@@ -6543,7 +6913,7 @@ mod tests {
             chunk_start: 1,
             chunk_end: 3,
             failures: 8,
-            model_chain: vec!["prov/model".to_string()],
+            model_chain_digest: model_chain_digest(&["prov/model".to_string()]),
             token_budget: 8_000,
         });
         let meta = test_meta_with_history_summarizer(awaiting);
@@ -6569,7 +6939,7 @@ mod tests {
                 chunk_start: 1,
                 chunk_end: 3,
                 failures: 8,
-                model_chain: vec!["prov/model".to_string()],
+                model_chain_digest: model_chain_digest(&["prov/model".to_string()]),
                 token_budget: 8_000,
             }),
             "the refire is still a placeholder firing"

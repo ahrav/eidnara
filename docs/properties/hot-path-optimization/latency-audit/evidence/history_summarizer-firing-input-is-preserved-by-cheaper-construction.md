@@ -23,21 +23,22 @@ sequence, not only its budget, decides the output bytes.
   blocks from its caller's projection.
 - Production fingerprint consumers use [`as_item`][as-item]: the builder at
   [fingerprint construction][fp-call] and the [restart path][fp-restart].
-  [`compute_chunk_fingerprint`][fp] formats `id:kind:byte_len` joined by `|`.
-  The unit is UTF-8 bytes, not UTF-16 units or Unicode scalars. Equal-length
-  content edits intentionally preserve this diagnostic fingerprint; the
-  exact selected-range identity fence is unchanged.
-  The baseline leaves `:` and `|` unescaped. This format is not an injective
-  encoding, and these checks make no uniqueness claim. Escaping delimiters
-  would change durable fingerprint bytes and is outside this preservation
-  change's scope.
+  [`compute_chunk_fingerprint`][fp] formats `id:kind:byte_len` joined by `|`;
+  since `bdf564e3a` (#859 PR C) it returns the SHA-256 hex digest of that
+  join instead of the join. The unit is UTF-8 bytes, not UTF-16 units or
+  Unicode scalars. Equal-length content edits intentionally preserve the
+  fingerprint; the exact selected-range identity fence is unchanged.
+  The join leaves `:` and `|` unescaped. It is not an injective encoding,
+  the digest inherits that, and these checks make no uniqueness claim.
+  Escaping delimiters would change durable fingerprint bytes and is outside
+  this preservation change's scope.
 - [Boundary construction][boundary-view] borrows block IDs with `Cow` and
   shares each original `Arc<str>` from the projection. This adds no cache,
   global state, or retained-resident-byte allowance.
 - The string is stored in
   [`HistorySummarizerDurableState.chunk_fingerprint`][fp-field], compared by
   [`verify_chunk_fingerprint`][fp-verify], and rejected by the publish
-  predicate at [`:407-417`][fp-predicate] with `FingerprintMismatch` after
+  predicate at [`:637-652`][fp-predicate] with `FingerprintMismatch` after
   abandoning the matching run.
 - [`truncate_history_summarizer_input_if_needed`][trunc] returns the input when
   `estimate_tokens(input) <= token_budget`, else binary-searches UTF-16 unit
@@ -57,7 +58,8 @@ sequence, not only its budget, decides the output bytes.
   that each input exceeds its budget before comparing exact output;
   [`truncation_uses_marker_and_keeps_multibyte_boundaries`][t-marker] checks
   the marker suffix and scalar boundaries;
-  [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-fp] pins the literal.
+  [`chunk_fingerprint_uses_id_kind_and_byte_length`][t-fp] pins the digest
+  of the literal join (the literal itself before `bdf564e3a`).
 - The [construction corpus][construction-corpus] compares an owned boundary
   reference with production construction, including pointer identity for
   borrowed IDs and shared original bytes. Its copied-string snapshot oracle
@@ -107,6 +109,37 @@ producer test covers unflagged synthetic delta replay and normalized cached
 prefixes. No test crosses a binary upgrade during an in-flight firing.
 
 ## Investigation log
+
+### Q: Does `bdf564e3a` change what this record preserves?
+
+- Sources examined: `git show bdf564e3a -- crates/daemon/src/history_summarizer.rs`;
+  [`fp`][fp], [`t-fp`][t-fp], [`fp-verify`][fp-verify], and
+  [`fp-predicate`][fp-predicate] at `0ff62b29a` (these five links and
+  [`fp-field`][fp-field] point at `0ff62b29a`; the other links keep the
+  baselines above).
+- Findings: The fingerprint is now `sha256_hex` of the same join, so a
+  length-only snapshot item still yields the same fingerprint as one that
+  carries the bytes, and the Check holds. The commit is a format change of
+  the kind the failure scenario names. A firing recorded before it stores
+  the joined form, and the upgrade has
+  three cases, read in `crates/daemon/src/history_summarizer.rs` at
+  `0ff62b29a`. An `AwaitingProducer` firing with a live producer run reattaches
+  (`handle_restart_load`, `:903-954`, arm `:912-939`): the daemon recomputes the
+  fingerprint from the current snapshot as a digest
+  (`crates/daemon/src/lib.rs:5111-5113`), and `publish_validated_chunk`
+  compares it with the stored joined form, rejects it as
+  `FingerprintMismatch`, and abandons the run with the failure backoff
+  (`history_summarizer.rs:637-652`). A reserved `Publishing` firing takes
+  `RepublishReserved` (`:940-944`): `republish_reserved` reuses the stored
+  fingerprint as the observed one (`:1144`), so the format change does not
+  reject it, and it remains subject to the current publication fences. A
+  `Firing` or `Validating` firing, an unreserved `Publishing` firing, and a
+  placeholder run abandon through `AbandonClass::Restarted` (`:925-930`,
+  `:945-952`).
+- Missing evidence: An owner decision on the one-time abandon of reattached
+  firings; a test that crosses the upgrade.
+- Conclusion: needs human input for the upgrade window; the record stays
+  `active`.
 
 ### Q: May truncation relax to "any prefix within budget plus the marker"?
 
@@ -235,11 +268,11 @@ only the five values asserted by the retained tests.
 [handler-observers]: ../../../../../crates/daemon/src/lib.rs#L8412-L8424
 [identity-exclusion]: ../../../../../crates/daemon/src/wire.rs#L615-L617
 [assembly-identity]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs#L646-L658
-[fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L140-L158
-[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L673
-[fp-verify]: ../../../../../crates/daemon/src/history_summarizer.rs#L326-L334
-[fp-predicate]: ../../../../../crates/daemon/src/history_summarizer.rs#L407-L417
-[t-fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L3925
+[fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L155-L173
+[fp-field]: ../../../../../crates/memory-store/src/lib.rs#L969
+[fp-verify]: ../../../../../crates/daemon/src/history_summarizer.rs#L476-L487
+[fp-predicate]: ../../../../../crates/daemon/src/history_summarizer.rs#L637-L652
+[t-fp]: ../../../../../crates/daemon/src/history_summarizer.rs#L6232
 [fp-restart]: ../../../../../crates/daemon/src/lib.rs#L4942-L4944
 [diff-header]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L1-L11
 [diff-ref]: ../../../../../crates/daemon/tests/history_summarizer_truncate_differential.rs#L13-L58
