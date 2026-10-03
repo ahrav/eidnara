@@ -1,6 +1,7 @@
 //! Selects one global pool of quantized candidates over a composition's resolved layers.
 //! Resolution runs first, so only each occurrence's winning row is scored; each winner scores its own layer's codes under a query encoded with that layer's scales.
 //! The walk is the oracle's: a row enters judgment only when it could enter the pool, the kernel judges it in bounded batches before it is admitted, a rejected row takes no place in the pool, and the pool is re-judged once at the end.
+//! The pool is then rescored against each entry's original f32 row from the same layer, and the best `K` under the retained-f32 arithmetic are returned.
 //! A walk that ends before every live required row was visited, that reaches a storage bound, or whose authority moved returns no candidate; only a coverage shortfall leaves the pool in place, marked incomplete.
 
 use std::num::NonZeroUsize;
@@ -10,7 +11,7 @@ use kernel::applicability::EvalBudget;
 use storage::GuardedConn;
 
 use super::capacity::CandidateCapacity;
-use super::codec::{Metric, RowLayout};
+use super::codec::{self, Metric, RowLayout, RowRejection};
 use super::layered::{
     self, Cursor, LayerAccount, LayeredQuery, LayeredRefusal, Resolving, fault_refusal,
 };
@@ -20,8 +21,9 @@ use super::oracle::{
 };
 use super::resolve::{Layer, RowFault};
 use super::scalar::{self, QuantizedQuery, QueryRefusal, Scales};
+use super::score::{Ranked, rank_order, score};
 use crate::batch::VectorGeneration;
-use crate::eligibility::Authority;
+use crate::eligibility::{Authority, OccurrenceCandidate};
 
 /// A layer's int8 codes by row index, in the order of the layer's identifiers.
 pub trait CodeAccess {
@@ -304,4 +306,73 @@ fn select_inner<'a>(
         layers: ranked.layers,
         winners,
     })
+}
+
+/// The pool rescored against its original rows: at most `k` entries, best first, with the terms each was judged under.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rescored {
+    pub ranked: Vec<Ranked>,
+    pub candidates: Vec<OccurrenceCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RescoreRefusal<E> {
+    #[error("the query is not a member of the generation: {0}")]
+    Query(RowRejection),
+    #[error("the original row of occurrence {occurrence_id} could not be read: {fault}")]
+    Read { occurrence_id: String, fault: E },
+    #[error(
+        "the original row of occurrence {occurrence_id} is not a member of the generation: {rejection}"
+    )]
+    Row {
+        occurrence_id: String,
+        rejection: RowRejection,
+    },
+}
+
+/// Reads the original row of every pool entry through `read`, in pool order and once each, scores it against `query` with the retained-f32 arithmetic, and returns the `k` best under the dense order.
+/// Only pool entries are read, and each from the winning layer row the pool names, so the result is `Top(k, A, f32_score)` over the accepted set `A`.
+pub fn rescore_pool<E>(
+    pool: &CandidatePool,
+    layout: &RowLayout,
+    query: &[f32],
+    k: NonZeroUsize,
+    mut read: impl FnMut(&WinnerRow) -> Result<Vec<f32>, E>,
+) -> Result<Rescored, RescoreRefusal<E>> {
+    codec::validate(query, layout).map_err(RescoreRefusal::Query)?;
+    let ranking = &pool.ranking;
+    let mut scored = Vec::with_capacity(pool.winners.len());
+    for (index, (winner, candidate)) in pool.winners.iter().zip(&ranking.candidates).enumerate() {
+        let occurrence_id = &candidate.occurrence_id;
+        let row = read(winner).map_err(|fault| RescoreRefusal::Read {
+            occurrence_id: occurrence_id.clone(),
+            fault,
+        })?;
+        codec::validate(&row, layout).map_err(|rejection| RescoreRefusal::Row {
+            occurrence_id: occurrence_id.clone(),
+            rejection,
+        })?;
+        scored.push((score(layout.metric, query, &row), index));
+    }
+    scored.sort_by(|left, right| {
+        rank_order(
+            (left.0, &ranking.candidates[left.1].occurrence_id),
+            (right.0, &ranking.candidates[right.1].occurrence_id),
+        )
+    });
+    scored.truncate(k.get());
+    let candidates: Vec<OccurrenceCandidate> = scored
+        .iter()
+        .map(|(_, index)| ranking.candidates[*index].clone())
+        .collect();
+    let ranked = scored
+        .into_iter()
+        .zip(&candidates)
+        .map(|((score, _), candidate)| Ranked {
+            occurrence_id: candidate.occurrence_id.clone(),
+            class: candidate.class,
+            score,
+        })
+        .collect();
+    Ok(Rescored { ranked, candidates })
 }

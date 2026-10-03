@@ -15,8 +15,8 @@ pub mod scalar;
 pub mod score;
 
 pub use candidates::{
-    CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, LayerCodes, ScanBounds, WinnerRow,
-    select_candidates,
+    CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, LayerCodes, RescoreRefusal,
+    Rescored, ScanBounds, WinnerRow, rescore_pool, select_candidates,
 };
 pub use capacity::{CandidateCapacity, CandidatePolicy, CapacityRefusal};
 pub use codec::{Metric, RowLayout, RowRejection};

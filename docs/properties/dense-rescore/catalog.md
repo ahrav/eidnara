@@ -14,8 +14,10 @@ implementation ticket reconstructs the records its change makes executable
 from the specification's T1 to T7 seams and verifies them against the code
 that implements them. The RP2.6.U1 ticket
 ([#609](https://github.com/ahrav/eidnara/issues/609)) lands the numerical
-records, and the RP2.6.U2 ticket
+records, the RP2.6.U2 ticket
 ([#610](https://github.com/ahrav/eidnara/issues/610)) lands the candidate-pool
+records, and the RP2.6.U3 ticket
+([#613](https://github.com/ahrav/eidnara/issues/613)) lands the pinned-rescore
 records.
 
 This part owns the dense numerical contract, the quantized candidate pool, the
@@ -55,6 +57,10 @@ here.
 | [dense-rejected-leaders-never-starve-eligible-rows](#dense-rejected-leaders-never-starve-eligible-rows) | liveness | test-only | always | active | high |
 | [dense-pool-never-mixes-authority-states](#dense-pool-never-mixes-authority-states) | safety | test-only | always | active | high |
 | [dense-scan-bounds-end-with-no-candidate](#dense-scan-bounds-end-with-no-candidate) | safety | test-only | always | active | high |
+| [dense-rescore-reads-only-accepted-rows-from-their-pinned-layers](#dense-rescore-reads-only-accepted-rows-from-their-pinned-layers) | safety | test-only | always | active | high |
+| [dense-rescore-is-the-top-k-of-the-pool](#dense-rescore-is-the-top-k-of-the-pool) | safety | test-only | always | active | high |
+| [dense-missing-original-quarantines-without-substitute](#dense-missing-original-quarantines-without-substitute) | safety | test-only | always | active | medium |
+| [dense-stage-evidence-keeps-coverage-and-recall-apart](#dense-stage-evidence-keeps-coverage-and-recall-apart) | safety | test-only | always | active | medium |
 
 ## Records
 
@@ -360,3 +366,131 @@ Impact: An unbounded batch or set exhausts memory; a truncated pool labeled
 complete loses neighbors silently.
 Open questions:
 - Parent Q6 approval of the production byte bounds (needs human input).
+
+### dense-rescore-reads-only-accepted-rows-from-their-pinned-layers
+
+Type: safety
+Reachability: test-only - `rank_compressed`
+(`crates/daemon/src/vector_reader.rs:697`) has no production caller at this
+base; #620 puts it behind the dense lane.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
+`a_promotion_and_prune_after_selection_leave_the_rescore_on_the_pinned_files`,
+and `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`.
+Guarantee: The rescore reads one original row per pool entry, by a positioned
+read of the member and row the entry's winner names, through the descriptors
+the view verified; it never reads a superseded, masked, or unselected row and
+never consults the selector, so a promotion and prune after selection leave it
+on the pinned files.
+Check: `always` - the observed reads equal the pool's winner rows in pool
+order, one each; the base's stale rows are never read; after a replacement is
+published and the store pruned mid-ranking, every read names the old member
+and the ranking is the old content's. `always` because every rescore must
+read only what the scan accepted.
+Fault/timing angle: The window between selection and the first original read.
+Required faults and enabling state: A delta that supersedes and masks; a
+publication and a prune inside `RescoreEvent::AfterSelection`.
+Confidence: high - [evidence](evidence/dense-rescore-reads-only-accepted-rows-from-their-pinned-layers.md).
+Real lifecycle generations, pins, and positioned reads; no SQLite vectors.
+Existing check: `crates/daemon/tests/vector_reader.rs`
+`old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_pruned`
+for the f32 layered ranking.
+Impact: Reading the current selector's files or a stale row rescores a pool
+against data the scan did not select.
+Open questions: None.
+
+### dense-rescore-is-the-top-k-of-the-pool
+
+Type: safety
+Reachability: test-only - as above; `rescore_pool`
+(`crates/retrieval/src/dense/candidates.rs:335`) is pure.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
+`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`.
+Guarantee: For the accepted pool `A`, the result is exactly
+`Top(K, A, f32_score)` under the dense order, with distinct identities for
+equal rows and every returned score the retained-f32 score of its row.
+Check: `always` - the rescored identifiers and scores equal the shared f64
+reference over the pool's own vectors; with negative scores, an underfilled
+pool, and two equal rows the order equals the full reference. `always`
+because rescore defines the returned dense ranking.
+Fault/timing angle: none.
+Required faults and enabling state: An opposite-axis query, a pool larger
+than the eligible set, two identical rows.
+Confidence: high - [evidence](evidence/dense-rescore-is-the-top-k-of-the-pool.md).
+Existing check: `crates/retrieval/tests/dense_numerics.rs` for `rescore`.
+Impact: A rescore that reorders or drops pool entries returns a ranking the
+contract does not define.
+Open questions: None.
+
+### dense-missing-original-quarantines-without-substitute
+
+Type: safety
+Reachability: test-only - as above.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
+`a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`, and
+`cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`.
+Guarantee: An accepted row that is missing (a short read or an index past the
+layer) or fails the codec refuses the whole request as `Corrupt` naming the
+member and quarantines the view, so every later ranking over it refuses; an
+I/O failure other than a short read refuses as `Io` and quarantines nothing,
+and cancellation refuses as `Budget`; nothing older, quantized, or
+reconstructed stands in, and no shorter ranking is returned.
+Check: `always` - a rows file cut to its header after selection refuses with
+`Missing` after one read and quarantines the view; NaN rows refuse with
+`Rejected`; a cancelled budget refuses with no read and no quarantine; a
+re-acquisition re-verifies, recovery takes the prior verified composition, and
+its ranking excludes an occurrence retired in the kernel meanwhile. `always`
+because a corrupt generation must never yield a result.
+Fault/timing angle: Corruption between selection and the original reads.
+Required faults and enabling state: A truncated and a NaN-filled rows file
+inside `RescoreEvent::AfterSelection`; a prior composition to recover to.
+Confidence: medium - [evidence](evidence/dense-missing-original-quarantines-without-substitute.md).
+The quarantine flag lives on the shared view; persistence across a restart is
+the verification a new acquisition runs.
+Existing check: `crates/daemon/tests/vector_reader.rs` truncated-row
+refusal for the f32 layered ranking.
+Impact: A substitute row returns scores for bytes the generation never held.
+Open questions:
+- Parent Q4: persistent quarantine is re-verification on acquisition, which
+  refuses a member whose files no longer hash; a transient fault that leaves
+  the files intact is served again after re-acquisition (needs human input).
+- The I/O classification is constructed only by reading; no test injects an
+  I/O error other than a short read.
+- Process-restart evidence here is a fresh acquisition in the same process,
+  which reads only durable state; it is not a separate process and not
+  power-loss evidence.
+
+### dense-stage-evidence-keeps-coverage-and-recall-apart
+
+Type: safety
+Reachability: test-only - the stage record is assembled by the test from
+`CompressedRanking`, which returns the pool and the rescored ranking apart.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`the_alpha_sweep_keeps_candidate_coverage_and_rescored_recall_as_separate_stage_records`.
+Guarantee: For alpha in `{1, 2, 5, 10, 20, 50}` the baseline, candidate, and
+rescored identity sets are retained with separate candidate-coverage and
+rescored Recall@10 fields against one frozen eligible f32 baseline; an empty
+baseline yields no value rather than a perfect score.
+Check: `always` - six records with the alphas in order, ten baseline
+identities each, coverage non-decreasing in alpha, recall at most coverage,
+the widest pool covering the baseline with the rescore equal to it, and no
+value for an empty baseline. `always` because every sweep must keep the
+stages apart.
+Fault/timing angle: none.
+Required faults and enabling state: Sixty fixed rows, every fifth
+unadmitted.
+Confidence: medium - [evidence](evidence/dense-stage-evidence-keeps-coverage-and-recall-apart.md).
+On this corpus coverage and recall are equal at every alpha, which the
+specification allows; the corpus is not the RP2.9 frozen corpus.
+Existing check: none.
+Impact: A collapsed field hides whether a miss came from the pool or the
+rescore.
+Open questions:
+- Parent Q6 and RP2.9 own the frozen corpus, the target, and the aggregation;
+  this record measures nothing against them (needs human input).

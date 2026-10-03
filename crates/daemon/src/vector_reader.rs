@@ -8,6 +8,7 @@ use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationStore, PinnedGeneration, ValidatedGeneration,
@@ -19,8 +20,10 @@ use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::codec::{self, ARTIFACT_HEADER_BYTES, RowLayout};
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
-    Layer, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, Precedence, RowAccess,
-    RowFault, rank_layers,
+    CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, Layer,
+    LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, LayeredRefusal as Layered,
+    OracleBounds, OracleRefusal, Precedence, RescoreRefusal, Rescored, RowAccess, RowFault,
+    RowRejection, ScanBounds, WinnerRow, rank_layers, rescore_pool, select_candidates,
 };
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
@@ -164,6 +167,28 @@ impl PinnedLayer {
         Ok(bytes)
     }
 
+    /// The original f32 row of `index`, with a short or missing row told apart from an I/O failure and from bytes the codec refuses.
+    fn original(&self, index: usize) -> Result<Vec<f32>, OriginalFault> {
+        if index >= self.occurrence_ids.len() {
+            return Err(OriginalFault::Missing(format!(
+                "row {index} is past the {} rows the layer declares",
+                self.occurrence_ids.len()
+            )));
+        }
+        let width = self.dimension() * 4;
+        let offset = ARTIFACT_HEADER_BYTES as u64 + index as u64 * width as u64;
+        let mut bytes = vec![0u8; width];
+        self.rows
+            .read_exact_at(&mut bytes, offset)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::UnexpectedEof => {
+                    OriginalFault::Missing(format!("row {index}: {error}"))
+                }
+                _ => OriginalFault::Io(format!("row {index}: {error}")),
+            })?;
+        codec::decode_shape(&bytes, self.sidecar.vector_dimension).map_err(OriginalFault::Rejected)
+    }
+
     /// The int8 codes of row `index`; they score with this layer's scales and no other's.
     ///
     /// # Errors
@@ -173,6 +198,20 @@ impl PinnedLayer {
         let bytes = self.read_row_bytes(&self.codes, 0, self.dimension(), index)?;
         scalar::decode_codes(&bytes, self.sidecar.vector_dimension)
             .map_err(|rejection| RowFault::Unavailable(rejection.to_string()))
+    }
+}
+
+impl CodeAccess for PinnedLayer {
+    fn row_count(&self) -> usize {
+        self.occurrence_ids.len()
+    }
+
+    /// The candidate scan checks the dimension and the reserved code.
+    fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault> {
+        let bytes = self.read_row_bytes(&self.codes, 0, self.dimension(), index)?;
+        into.clear();
+        into.extend(bytes.iter().map(|byte| *byte as i8));
+        Ok(())
     }
 }
 
@@ -200,7 +239,9 @@ pub struct PinnedVectors {
     layers: Vec<PinnedLayer>,
     _record: ValidatedGeneration,
     resident: Reservation,
-    _pinned: Pinned,
+    pinned: Pinned,
+    /// Set when a positioned read found an accepted row missing or corrupt; every later ranking over this view refuses.
+    quarantined: AtomicBool,
 }
 
 impl std::fmt::Debug for PinnedVectors {
@@ -229,6 +270,15 @@ impl PinnedVectors {
     /// ```
     pub fn layers(&self) -> &[PinnedLayer] {
         &self.layers
+    }
+
+    /// Bytes on disk the view pins: the record and every member's files.
+    pub fn pinned_bytes(&self) -> u64 {
+        self.pinned.bytes()
+    }
+
+    pub fn is_quarantined(&self) -> bool {
+        self.quarantined.load(Ordering::Acquire)
     }
 
     pub fn members(&self) -> Vec<String> {
@@ -459,7 +509,8 @@ fn hand_off(
         layers,
         _record: record,
         resident,
-        _pinned: pinned,
+        pinned,
+        quarantined: AtomicBool::new(false),
     }))
 }
 
@@ -478,6 +529,8 @@ pub struct RankRequest<'a> {
 pub enum RankRefusal {
     #[error("the view's {field} is not the request's")]
     Identity { field: &'static str },
+    #[error("the view of composition {digest} is quarantined")]
+    Quarantined { digest: String },
     #[error("one page of rows needs {bytes} bytes of scratch: {refusal}")]
     Scratch {
         bytes: u64,
@@ -501,17 +554,13 @@ pub fn rank(
     budget: &EvalBudget,
     grant: &Admission,
 ) -> Result<LayeredRanking, RankRefusal> {
-    let expected = request.expected;
-    for layer in &view.layers {
-        vector_generation::check_identity(&layer.sidecar, expected).map_err(|refusal| {
-            RankRefusal::Identity {
-                field: match refusal {
-                    VectorRefusal::Identity { field } => field,
-                    _ => "identity",
-                },
-            }
-        })?;
+    if view.is_quarantined() {
+        return Err(RankRefusal::Quarantined {
+            digest: view.digest.clone(),
+        });
     }
+    let expected = request.expected;
+    check_view(view, expected).map_err(|field| RankRefusal::Identity { field })?;
     // The page's decoded rows plus the one raw row being read.
     let bytes = u64::try_from(request.bounds.page_rows.min(request.bounds.max_rows).get())
         .ok()
@@ -541,4 +590,263 @@ pub fn rank(
         max_entries: request.max_entries,
     };
     Ok(rank_layers(conn, kernel, &query, budget)?)
+}
+
+/// Every layer's sidecar against the request's expectation; the refused field names the mismatch.
+fn check_view(view: &PinnedVectors, expected: &ExpectedVectors<'_>) -> Result<(), &'static str> {
+    for layer in &view.layers {
+        vector_generation::check_identity(&layer.sidecar, expected).map_err(
+            |refusal| match refusal {
+                VectorRefusal::Identity { field } => field,
+                _ => "identity",
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// Why an accepted occurrence's original row did not come back.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum OriginalFault {
+    /// The row is not where the verified layer declares it: the file is shorter, or the index is past its rows.
+    #[error("the row is missing: {0}")]
+    Missing(String),
+    #[error("the row's bytes are not a row of the generation: {0}")]
+    Rejected(RowRejection),
+    /// The read failed for a reason other than a short file.
+    #[error("the row could not be read: {0}")]
+    Io(String),
+}
+
+/// Not `Debug`: the query row is embedding content.
+pub struct CompressedRequest<'a> {
+    /// What the caller expects the view to be; every identity field of every layer is rechecked first.
+    pub expected: &'a ExpectedVectors<'a>,
+    pub query: &'a [f32],
+    pub authority: Authority<'a>,
+    pub capacity: CandidateCapacity,
+    pub bounds: ScanBounds,
+    /// Rows and tombstones the layers may carry together.
+    pub max_entries: NonZeroUsize,
+    /// Generations the view may hold, the base included.
+    pub max_layers: NonZeroUsize,
+    /// Bytes on disk the view may pin.
+    pub max_pinned_bytes: u64,
+    /// Original-row bytes the rescore may read. Each pool entry is one positioned read of exactly one row, so a full pool reads `R` rows and nothing else.
+    pub max_read_bytes: u64,
+}
+
+/// The rescored ranking and the quantized pool it came from, kept apart so candidate coverage and rescored quality are measured on their own stages.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressedRanking {
+    pub pool: CandidatePool,
+    pub rescored: Rescored,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum CompressedRefusal {
+    #[error("the view's {field} is not the request's")]
+    Identity { field: &'static str },
+    #[error("the view of composition {digest} is quarantined")]
+    Quarantined { digest: String },
+    #[error("the view holds {layers} generations, over the bound of {limit}")]
+    Layers { layers: usize, limit: usize },
+    #[error("the view pins {bytes} bytes, over the bound of {limit}")]
+    PinnedBytes { bytes: u64, limit: u64 },
+    #[error("a full pool reads {bytes} original-row bytes, over the bound of {limit}")]
+    ReadBytes { bytes: u64, limit: u64 },
+    #[error("the ranking needs {bytes} bytes of {class:?}: {refusal}")]
+    Reservation {
+        class: ResourceClass,
+        bytes: u64,
+        refusal: vector_admission::Refusal,
+    },
+    #[error(transparent)]
+    Candidates(CandidateRefusal),
+    #[error("the request's budget ended during the rescore")]
+    Budget,
+    /// An accepted occurrence's original row is missing or corrupt in member `member`; the view is quarantined and nothing older or reconstructed stands in for it.
+    #[error("the original row of occurrence {occurrence_id} in member {member}: {fault}")]
+    Corrupt {
+        member: String,
+        occurrence_id: String,
+        fault: OriginalFault,
+    },
+    /// An accepted row's read failed for a reason other than its absence; the view stays usable.
+    #[error("the original row of occurrence {occurrence_id} in member {member}: {fault}")]
+    Io {
+        member: String,
+        occurrence_id: String,
+        fault: OriginalFault,
+    },
+}
+
+/// Where a compressed ranking stands; a test may hold or mutate the store here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescoreEvent<'a> {
+    /// The pool is selected; no original row has been read.
+    AfterSelection,
+    /// The original row `row` of member `member` is about to be read.
+    ReadOriginal { member: &'a str, row: usize },
+}
+
+/// Selects one quantized pool over the view's layers inside the caller's read transaction, then rescores it from the original rows of the same pinned layers and returns the best `K`.
+/// The view's identity, quarantine, generation count, pinned bytes, and the full pool's read bytes are checked, and the code scratch and the pool's row buffers are reserved in the ledger that holds the view's tables, before the projection is read.
+/// An accepted row that is missing or fails the codec quarantines the view: the request refuses, and so does every later ranking over the view.
+/// Run it through the request's blocking seam with the `Arc<PinnedVectors>` moved into the work, as [`rank`] is.
+pub fn rank_compressed(
+    view: &PinnedVectors,
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &CompressedRequest<'_>,
+    budget: &EvalBudget,
+    grant: &Admission,
+    observe: &mut dyn FnMut(RescoreEvent<'_>),
+) -> Result<CompressedRanking, CompressedRefusal> {
+    if view.is_quarantined() {
+        return Err(CompressedRefusal::Quarantined {
+            digest: view.digest.clone(),
+        });
+    }
+    check_view(view, request.expected).map_err(|field| CompressedRefusal::Identity { field })?;
+    if view.layers.len() > request.max_layers.get() {
+        return Err(CompressedRefusal::Layers {
+            layers: view.layers.len(),
+            limit: request.max_layers.get(),
+        });
+    }
+    if view.pinned_bytes() > request.max_pinned_bytes {
+        return Err(CompressedRefusal::PinnedBytes {
+            bytes: view.pinned_bytes(),
+            limit: request.max_pinned_bytes,
+        });
+    }
+    let dimension = u64::from(view.layout.dimension);
+    let pool = request.capacity.candidates().get() as u64;
+    let read_bytes = pool.saturating_mul(codec::row_bytes(view.layout.dimension));
+    if read_bytes > request.max_read_bytes {
+        return Err(CompressedRefusal::ReadBytes {
+            bytes: read_bytes,
+            limit: request.max_read_bytes,
+        });
+    }
+    let ledger = view.resident.ledger();
+    let reserve = |class: ResourceClass, bytes: u64| {
+        ledger
+            .reserve(grant, class, bytes)
+            .map_err(|refusal| CompressedRefusal::Reservation {
+                class,
+                bytes,
+                refusal,
+            })
+    };
+    // One block of codes and one raw code row while the scan runs.
+    let _scratch = reserve(
+        ResourceClass::Scratch,
+        (retrieval::dense::BLOCK_ROWS as u64 + 1).saturating_mul(dimension),
+    )?;
+    // Every pool entry's decoded original row, held until the rescore sorts them.
+    let _rows = reserve(ResourceClass::RowBuffers, read_bytes)?;
+    let layers = view.resolver_layers();
+    let codes: Vec<LayerCodes<'_>> = view
+        .layers
+        .iter()
+        .map(|layer| LayerCodes {
+            scales: &layer.scales,
+            codes: layer,
+        })
+        .collect();
+    let query = CandidateQuery {
+        generation: request.expected.generation,
+        metric: view.layout.metric,
+        unit_norm_tolerance: view.layout.unit_norm_tolerance,
+        query: request.query,
+        authority: request.authority,
+        capacity: request.capacity,
+        bounds: request.bounds,
+        layers: &layers,
+        codes: &codes,
+        max_entries: request.max_entries,
+    };
+    let pool = select_candidates(conn, kernel, &query, budget).map_err(|refusal| {
+        if code_corruption(&refusal) {
+            view.quarantined.store(true, Ordering::Release);
+        }
+        CompressedRefusal::Candidates(refusal)
+    })?;
+    observe(RescoreEvent::AfterSelection);
+    let rescored = rescore_pool(
+        &pool,
+        &view.layout,
+        request.query,
+        request.capacity.k(),
+        |winner: &WinnerRow| {
+            if budget.check().is_err() {
+                return Err(None);
+            }
+            let layer = &view.layers[winner.layer];
+            observe(RescoreEvent::ReadOriginal {
+                member: &layer.digest,
+                row: winner.row,
+            });
+            layer
+                .original(winner.row)
+                .map_err(|fault| Some((winner.layer, fault)))
+        },
+    );
+    match rescored {
+        Ok(rescored) => Ok(CompressedRanking { pool, rescored }),
+        Err(RescoreRefusal::Query(rejection)) => Err(CompressedRefusal::Candidates(
+            CandidateRefusal::Layered(Layered::Oracle(OracleRefusal::Query(rejection))),
+        )),
+        Err(RescoreRefusal::Read { fault: None, .. }) => Err(CompressedRefusal::Budget),
+        Err(RescoreRefusal::Read {
+            occurrence_id,
+            fault: Some((layer, fault)),
+        }) => {
+            let member = view.layers[layer].digest.clone();
+            if matches!(fault, OriginalFault::Io(_)) {
+                return Err(CompressedRefusal::Io {
+                    member,
+                    occurrence_id,
+                    fault,
+                });
+            }
+            view.quarantined.store(true, Ordering::Release);
+            Err(CompressedRefusal::Corrupt {
+                member,
+                occurrence_id,
+                fault,
+            })
+        }
+        Err(RescoreRefusal::Row {
+            occurrence_id,
+            rejection,
+        }) => {
+            view.quarantined.store(true, Ordering::Release);
+            let member = pool
+                .ranking
+                .candidates
+                .iter()
+                .zip(&pool.winners)
+                .find(|(candidate, _)| candidate.occurrence_id == occurrence_id)
+                .map(|(_, winner)| view.layers[winner.layer].digest.clone())
+                .unwrap_or_default();
+            Err(CompressedRefusal::Corrupt {
+                member,
+                occurrence_id,
+                fault: OriginalFault::Rejected(rejection),
+            })
+        }
+    }
+}
+
+/// Codes the scan could not read or that the recipe refuses: the generation's own bytes are bad.
+fn code_corruption(refusal: &CandidateRefusal) -> bool {
+    matches!(
+        refusal,
+        CandidateRefusal::Layered(Layered::Oracle(
+            OracleRefusal::Unreadable { .. } | OracleRefusal::StoredRow { .. }
+        ))
+    )
 }
