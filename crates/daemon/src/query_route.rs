@@ -536,7 +536,7 @@ fn oracle_refusal(refusal: OracleRefusal) -> DenseRefusal {
     }
 }
 
-/// A complete walk serves; a coverage shortfall serves marked incomplete; an ended budget ends the request; every other stop degrades the lane with its reason.
+/// A complete walk serves; a coverage shortfall serves marked incomplete; an ended budget ends the request; every other stop degrades the lane with its reason. The exhaustive producer keeps its rows at the row bound and serves that stop itself.
 fn lane_status(completion: DenseCompletion) -> Result<LaneStatus, DenseRefusal> {
     let reason = match completion {
         DenseCompletion::Complete => return Ok(LaneStatus::Complete),
@@ -575,7 +575,10 @@ impl CompressedLimits {
     pub fn capacity(&self, dense: &DenseLimits) -> Result<CandidateCapacity, LimitsRefusal> {
         let capacity = CandidateCapacity::new(dense.k.get(), self.candidates)
             .map_err(LimitsRefusal::DenseCapacity)?
-            .expect("a positive k yields a pool");
+            .ok_or(LimitsRefusal::Dense {
+                bound: "k",
+                value: 0,
+            })?;
         for (bound, value) in [
             ("candidates", capacity.candidates().get()),
             ("scan_page_rows", self.scan.page_rows.get()),
@@ -613,20 +616,22 @@ impl DenseVectors {
         }
     }
 
-    pub fn view(&self) -> &Arc<PinnedVectors> {
-        &self.view
-    }
-
-    pub fn limits(&self) -> &CompressedLimits {
-        &self.limits
-    }
-
     /// Runs `observe` at every scan window and rescore event, on the blocking thread that ranks, so a test can hold the physical work there.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_observer_for_test(mut self, observe: DenseObserver) -> Self {
         self.observe = Some(observe);
         self
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn observe(&self, event: RescoreEvent<'_>) {
+        if let Some(observe) = &self.observe {
+            observe(event);
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn observe(&self, _event: RescoreEvent<'_>) {}
 }
 
 /// The compressed producer: one quantized pool over the view's pinned codes, rescored from the same pinned original rows.
@@ -644,6 +649,7 @@ impl DenseProducer for CompressedProducer {
         request: DenseRequest<'_>,
     ) -> Result<DenseRanking, DenseRefusal> {
         let vectors = &self.vectors;
+        // Installation checked the pool against the route's limits; a producer built outside the handler is checked here.
         let capacity = vectors
             .limits
             .capacity(&self.limits)
@@ -667,12 +673,7 @@ impl DenseProducer for CompressedProducer {
             max_pinned_bytes: vectors.limits.max_pinned_bytes,
             max_read_bytes: vectors.limits.max_read_bytes,
         };
-        let mut observe = |_event: RescoreEvent<'_>| {
-            #[cfg(any(test, feature = "test-support"))]
-            if let Some(observe) = &vectors.observe {
-                observe(_event);
-            }
-        };
+        let mut observe = |event: RescoreEvent<'_>| vectors.observe(event);
         let ranking = rank_compressed(
             &vectors.view,
             conn,
@@ -694,6 +695,17 @@ impl DenseProducer for CompressedProducer {
             status,
         })
     }
+}
+
+/// Installed vectors need declared dense limits whose `k` gives an admissible pool.
+fn check_pair(
+    limits: Option<&QueryRouteLimits>,
+    vectors: &DenseVectors,
+) -> Result<(), LimitsRefusal> {
+    let dense = limits
+        .and_then(|limits| limits.dense)
+        .ok_or(LimitsRefusal::DenseUndeclared)?;
+    vectors.limits.capacity(&dense).map(|_| ())
 }
 
 fn compressed_refusal(refusal: CompressedRefusal) -> DenseRefusal {
@@ -1695,31 +1707,36 @@ impl HandlerCore {
         if let Some(limits) = &limits {
             limits.validate()?;
         }
-        *self
+        // Route limits, then vectors: both setters take the locks in this order and check the pair before either changes.
+        let mut route = self
             .query_route
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = limits.map(Arc::new);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let vectors = self
+            .dense_vectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vectors) = vectors.as_ref() {
+            check_pair(limits.as_ref(), vectors)?;
+        }
+        *route = limits.map(Arc::new);
         Ok(())
     }
 
-    /// Installs the composition the dense lane ranks through, or removes it so the lane runs the exhaustive producer. The pool the installed limits give is checked against the route's dense limits first.
+    /// Installs the composition the dense lane ranks through, or removes it so the lane runs the exhaustive producer. The pool the installed limits give is checked against the route's dense limits first, and a later change of route limits is checked against it again.
     pub fn set_dense_vectors(&self, vectors: Option<DenseVectors>) -> Result<(), LimitsRefusal> {
-        if let Some(vectors) = &vectors {
-            let route = self
-                .query_route
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            let dense = route
-                .as_deref()
-                .and_then(|limits| limits.dense)
-                .ok_or(LimitsRefusal::DenseUndeclared)?;
-            vectors.limits().capacity(&dense)?;
-        }
-        *self
+        let route = self
+            .query_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut installed = self
             .dense_vectors
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = vectors;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vectors) = &vectors {
+            check_pair(route.as_deref(), vectors)?;
+        }
+        *installed = vectors;
         Ok(())
     }
 
@@ -1769,12 +1786,6 @@ impl HandlerCore {
             return unavailable_response("no_lifecycle");
         };
         let shared = budget.shared().clone();
-        // Cloned before the unit is submitted and moved into it, so the view's pins and charges stay with the physical work.
-        let dense_vectors = self
-            .dense_vectors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let RouteScope {
             store,
             project,
@@ -1820,6 +1831,12 @@ impl HandlerCore {
             drop(budget);
             return terminal_response(terminal);
         }
+        // Cloned once the embedding settled and moved into the unit, so the view's pins and charges stay with the physical work.
+        let dense_vectors = self
+            .dense_vectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {
                 Ok(reader) => reader,

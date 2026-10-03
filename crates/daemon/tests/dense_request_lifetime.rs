@@ -314,7 +314,7 @@ impl HostHandler for Hosted {
 struct Host {
     client: Client,
     route: ClientRoute,
-    published: Arc<Mutex<Vec<Instant>>>,
+    published: Arc<Mutex<Vec<(Instant, Census)>>>,
     join: tokio::task::JoinHandle<Result<(), host_runtime::HostError>>,
     stop: CancellationToken,
     _dir: tempfile::TempDir,
@@ -327,7 +327,10 @@ async fn watchdog<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 impl Host {
-    async fn start(daemon: Arc<KernelDaemon>) -> Self {
+    async fn start(
+        daemon: Arc<KernelDaemon>,
+        ledger: Arc<daemon::vector_admission::Ledger>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (activated, ready) = oneshot::channel();
         let project = daemon.project().to_owned();
@@ -351,7 +354,10 @@ impl Host {
             let published = Arc::clone(&published);
             Arc::new(move |kind, channel| {
                 if kind == host_runtime::wire::FrameType::Error && channel != 0 {
-                    published.lock().unwrap().push(Instant::now());
+                    published
+                        .lock()
+                        .unwrap()
+                        .push((Instant::now(), ledger.census()));
                 }
             })
         };
@@ -418,6 +424,7 @@ struct Hold {
     entered: mpsc::Receiver<()>,
     release: mpsc::Sender<()>,
     census: Arc<Mutex<Option<(Census, Instant)>>>,
+    after_release: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn hold_at(
@@ -430,7 +437,20 @@ fn hold_at(
     let release_rx = Mutex::new(Some(release_rx));
     let census = Arc::new(Mutex::new(None));
     let recorded = Arc::clone(&census);
+    let after_release = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&after_release);
     let observed = vectors.with_observer_for_test(Arc::new(move |event| {
+        if recorded.lock().unwrap().is_some() {
+            if matches!(
+                event,
+                RescoreEvent::Scan(Window::Visited(_) | Window::AfterJudgment)
+                    | RescoreEvent::AfterSelection
+                    | RescoreEvent::ReadOriginal { .. }
+            ) {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            return;
+        }
         if !stage(&event) {
             return;
         }
@@ -447,6 +467,7 @@ fn hold_at(
             entered,
             release,
             census,
+            after_release,
         },
     )
 }
@@ -481,7 +502,7 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
         .set_dense_vectors(Some(vectors.clone()))
         .unwrap();
     let daemon = Arc::new(daemon);
-    let host = Host::start(Arc::clone(&daemon)).await;
+    let host = Host::start(Arc::clone(&daemon), Arc::clone(&store.ledger)).await;
     let project = daemon.project().to_owned();
 
     let served = watchdog(host.client.request(
@@ -510,12 +531,15 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
         None
     );
 
-    let stages: [(&str, Stage); 3] = [
+    let stages: [(&str, Stage); 4] = [
         ("scan", |event| {
             matches!(event, RescoreEvent::Scan(Window::Visited(_)))
         }),
         ("validation", |event| {
             matches!(event, RescoreEvent::Scan(Window::AfterJudgment))
+        }),
+        ("revalidation", |event| {
+            matches!(event, RescoreEvent::Scan(Window::BeforeRevalidation))
         }),
         ("original read", |event| {
             matches!(event, RescoreEvent::ReadOriginal { .. })
@@ -530,6 +554,7 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
             entered,
             release,
             census,
+            after_release,
         } = hold;
         let control = async {
             watchdog(tokio::task::spawn_blocking(move || {
@@ -593,9 +618,9 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
                 .contains_key(&ResourceClass::RowBuffers)
         );
         let started = Instant::now();
-        let published = loop {
+        let (published, census_at_publication) = loop {
             if let Some(published) = host.published.lock().unwrap().get(errors_before) {
-                break *published;
+                break published.clone();
             }
             assert!(
                 started.elapsed() < Duration::from_secs(10),
@@ -607,10 +632,24 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
             published >= released_at,
             "{name}: settled before the work ended"
         );
+        for class in [ResourceClass::Scratch, ResourceClass::RowBuffers] {
+            assert!(
+                !census_at_publication.held.contains_key(&class),
+                "{name}: {class:?} was still charged when the request settled"
+            );
+        }
+        assert_eq!(
+            after_release.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{name}: the work stopped at its next checkpoint"
+        );
         assert!(!view.is_quarantined(), "{name}");
     }
 
-    daemon.handler().set_dense_vectors(Some(vectors)).unwrap();
+    daemon
+        .handler()
+        .set_dense_vectors(Some(vectors.clone()))
+        .unwrap();
     let again = watchdog(host.client.request(
         host.route,
         request(&project),
@@ -620,8 +659,50 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
     .unwrap();
     assert_eq!(json_of(&again.body)["kind"], "fused");
     host.stop().await;
+
+    let (held, hold) = hold_at(vectors, Arc::clone(&store.ledger), |event| {
+        matches!(event, RescoreEvent::ReadOriginal { .. })
+    });
+    daemon.handler().set_dense_vectors(Some(held)).unwrap();
+    let aborted = {
+        let daemon = Arc::clone(&daemon);
+        let body: Value = serde_json::from_slice(&request(&project)).unwrap();
+        tokio::spawn(async move { daemon.outcome(body).await })
+    };
+    let Hold {
+        entered,
+        release,
+        census,
+        ..
+    } = hold;
+    watchdog(tokio::task::spawn_blocking(move || {
+        entered.recv_timeout(Duration::from_secs(20)).unwrap()
+    }))
+    .await
+    .unwrap();
+    aborted.abort();
+    assert!(aborted.await.unwrap_err().is_cancelled());
     daemon.handler().set_dense_vectors(None).unwrap();
     drop(view);
+    let while_held = store.ledger.census();
+    assert!(
+        while_held.held[&ResourceClass::Scratch] > 0,
+        "the aborted handler's work keeps its charges"
+    );
+    assert!(
+        while_held.pinned > 0,
+        "the unit's clone is the last one, and it still pins the view"
+    );
+    release.send(()).unwrap();
+    let started = Instant::now();
+    while census.lock().unwrap().is_none() || store.ledger.census().pinned > 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the unit's exit releases the view"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(store.ledger.census().held.is_empty());
     let daemon = Arc::try_unwrap(daemon)
         .ok()
         .expect("the host released the daemon");

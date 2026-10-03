@@ -530,8 +530,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:639`) only when `set_dense_vectors`
-(`query_route.rs:1706`) has installed a composition, and no production caller
+(`crates/daemon/src/query_route.rs:644`) only when `set_dense_vectors`
+(`query_route.rs:1727`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -548,9 +548,13 @@ and no stage receives a fresh budget.
 Check: `always` - a cancellation at the first visited row, after the first
 judgment, and at the first original read each end `Terminal::Cancelled` with
 the budget's exhaustion `Cancelled` and its deadline unchanged; a 300 ms
-budget held 400 ms after selection ends `Terminal::Deadline`; through the real
-host, a client cancellation at each stage answers no value. `always` because
-every dense request runs under one budget.
+budget held 400 ms after selection ends `Terminal::Deadline` with the same
+deadline; through the real host, a client cancellation at the first visited
+row, after a judgment, before the final re-judgment, and at an original read
+answers no value, and no scan, judgment, selection, or read event follows the
+release; a request whose answer was returned keeps it when its token is
+cancelled afterwards. `always` because every dense request runs under one
+budget.
 Fault/timing angle: Cancellation inside each stage's window.
 Required faults and enabling state: A `CancellationToken` cancelled from the
 ranking thread's observer; a client-side cancellation through the host.
@@ -564,6 +568,9 @@ Open questions:
 - Parent Q5 approval of the bridge and the cancellation checkpoints, which are
   the walk's row and batch checks and one check per original read (needs
   human input).
+- The validation stages hold between eligibility batches and before the
+  final re-judgment; an interrupt inside a running kernel statement is
+  witnessed only by the kernel's and storage's own progress-handler tests.
 
 ### dense-charges-stay-held-through-physical-work
 
@@ -575,15 +582,19 @@ Exercised: yes - `crates/daemon/tests/dense_request_lifetime.rs`
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`.
 Guarantee: The dense unit owns a clone of the view's `Arc`, taken before the
-unit is submitted (`query_route.rs:1773`), so the view's pins and the
+unit is submitted (`query_route.rs:1835`), so the view's pins and the
 ranking's `Scratch` and `RowBuffers` reservations stay charged until the
 blocking work returns; a cancelled request settles only after that work ends,
 and every charge is released when it does.
 Check: `always` - with the ranking thread held at each stage after the client
 cancelled, no error frame is published for 200 ms; on release the ledger
-still holds `Scratch`, `RowBuffers`, and the pinned bytes, the error frame is
-published no earlier than the release, and the reservations drop to zero
-afterwards. `always` because no charge may go before its work.
+still holds `Scratch`, `RowBuffers`, and the pinned bytes; the error frame is
+published no earlier than the release, and the ledger's census at
+publication holds neither reservation; after a handler future is aborted
+while its work is held, and the view is uninstalled and every other `Arc`
+dropped, the ledger still holds the scratch and the pins until the release,
+and both drop to zero after it. `always` because no charge may go before its
+work.
 Fault/timing angle: The interval between logical cancellation and the
 physical return of the blocking work.
 Required faults and enabling state: A held observer on the blocking thread,
@@ -595,6 +606,12 @@ exceed the ledger while the old work still runs.
 Open questions:
 - A permanently blocked read is visible only as unresolved blocking work; no
   test holds one indefinitely.
+- The returned hits, at most `k` rows, leave the ledger when
+  `rank_compressed` returns; their bound through fusion is RP2.7's fused-union
+  cap.
+- The view's `Admission` grant is checked when a reservation is taken; a grant
+  invalidated mid-query does not cancel the request, which the owner that
+  installs the view (#897) decides.
 
 ### dense-reused-connection-stays-isolated
 
@@ -606,10 +623,11 @@ Exercised: yes - `query_route_compressed.rs`
 Guarantee: The projection's connection carries one request's stop predicate
 only for that request's read; after request A ends cancelled, request B on the
 same connection completes even when A's token is cancelled again during B's
-original reads.
-Check: `always` - A ends `Cancelled`; B ends with a complete dense lane and an
-unexhausted budget. `always` because a reused connection must never carry an
-earlier caller's cancellation.
+original reads, and after request C completes uncancelled, request D
+completes when C's token is first cancelled during D's original reads.
+Check: `always` - A ends `Cancelled`; B and D end with a complete dense lane
+and an unexhausted budget; C's answer stands. `always` because a reused
+connection must never carry an earlier caller's cancellation.
 Fault/timing angle: A late cancellation of A inside B's ranking.
 Required faults and enabling state: Two sequential requests on one
 `SearchProjection`.
@@ -629,15 +647,18 @@ Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
 `the_pool_the_limits_give_is_checked_before_a_view_is_installed` and
-`vectors_install_only_under_declared_dense_limits`.
+`vectors_install_only_under_declared_dense_limits`, which also refuses a
+later route-limit change that the installed vectors cannot serve.
 Guarantee: A composition installs only under declared dense limits, and only
 when the pool `CompressedLimits::capacity` (`query_route.rs:575`) derives from
 the lane's `k` and the alpha policy passes the capacity checks and fits the
 kernel's one re-judgment batch, with scan pages within the batch as well.
 Check: `always` - no dense limits refuses `DenseUndeclared`; alpha 0.5
 refuses `DenseCapacity(Alpha)`; a pool of 2048 refuses at `candidates`; pages
-of 2000 refuse at `scan_page_rows`; alpha 4 with `k` 64 yields 256. `always`
-because an unapproved pool must never reach a request.
+of 2000 refuse at `scan_page_rows`; alpha 4 with `k` 64 yields 256; with
+vectors installed, route limits raising `k` to 1000 refuse `OverCap` and route
+limits without dense limits refuse `DenseUndeclared`. `always` because an
+unapproved pool must never reach a request.
 Fault/timing angle: none.
 Required faults and enabling state: The listed limits.
 Confidence: high - [evidence](evidence/dense-producer-limits-are-checked-at-installation.md).
@@ -653,19 +674,24 @@ Type: safety
 Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
-`view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_and_quarantines`
-and `the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
+`view_bounds_degrade_the_lane_and_a_missing_original_ends_the_request_and_quarantines`,
+`each_view_and_scan_bound_degrades_the_lane_with_its_own_reason`,
+`a_view_of_another_kernel_incarnation_degrades_the_lane`, and
+`the_compressed_producer_serves_the_dense_lane_with_exact_original_scores`.
 Guarantee: A served compressed ranking reaches fusion with each hit's exact
 original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
 `quarantined`; cancellation and deadlines end the request with their own
-terminals (`compressed_refusal`, `query_route.rs:699`; `lane_status`,
+terminals (`compressed_refusal`, `query_route.rs:711`; `lane_status`,
 `query_route.rs:540`).
 Check: `always` - the dense positions and raw score bits equal the f64
-reference; the degraded answer marks `degraded`; the corruption and the
-quarantine reasons are those strings. `always` because no failure may pass as
-a successful dense completion.
+reference; the degraded answer marks `degraded`; pinned bytes and read bytes
+degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
+`heap_over_bound`, a one-byte batch as `batch_bytes`, a full ledger as
+`reservation`, and a view of another kernel incarnation as `identity`; the
+corruption and the quarantine reasons are those strings. `always` because no
+failure may pass as a successful dense completion.
 Fault/timing angle: Corruption between selection and the reads.
 Required faults and enabling state: A one-byte read bound; a rows file cut
 after selection.
@@ -677,3 +703,5 @@ Open questions:
 - Parent Q7: both plugins' full-path witnesses through the delivered route
   are outside this test set; the live producer is configured in #897
   (needs human input).
+- A quarantined view keeps the lane unavailable until its owner uninstalls or
+  replaces it with `set_dense_vectors`; nothing reinstalls a view on its own.

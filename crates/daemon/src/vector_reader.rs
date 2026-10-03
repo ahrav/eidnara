@@ -767,6 +767,16 @@ pub fn rank_compressed(
         }
         CompressedRefusal::Candidates(refusal)
     })?;
+    // A discarded pool holds no entry, so it is returned for its completion and nothing is read.
+    if pool.ranking.ranked.is_empty() {
+        return Ok(CompressedRanking {
+            pool,
+            rescored: Rescored {
+                ranked: Vec::new(),
+                candidates: Vec::new(),
+            },
+        });
+    }
     observe(RescoreEvent::AfterSelection);
     let rescored = rescore_pool(
         &pool,

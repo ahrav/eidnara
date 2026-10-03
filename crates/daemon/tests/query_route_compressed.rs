@@ -275,6 +275,7 @@ async fn a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline() {
             std::thread::sleep(Duration::from_millis(400));
         }
     });
+    let deadline = budget.deadline();
     let outcome = run(&fixture, 2, vectors, &budget);
     assert!(
         matches!(outcome, Err(QueryFailure::Terminal(Terminal::Deadline))),
@@ -282,6 +283,9 @@ async fn a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline() {
         outcome.err()
     );
     assert_eq!(budget.shared().exhaustion(), Some(Exhaustion::Deadline));
+    assert_eq!(budget.deadline(), deadline);
+    assert_eq!(composition.charged(ResourceClass::Scratch), 0);
+    assert_eq!(composition.charged(ResourceClass::RowBuffers), 0);
     fixture.daemon.shutdown().await;
 }
 
@@ -316,6 +320,123 @@ async fn a_late_cancellation_of_one_request_leaves_the_next_on_the_reused_connec
     assert_eq!(outcome.statuses[2], LaneStatus::Complete);
     assert!(!budget_b.shared().is_exhausted());
     assert_eq!(dense_positions(&outcome).len(), 2);
+
+    let (token_c, budget_c) = request_budget(10_000);
+    let served = run(&fixture, 2, composition.vectors(), &budget_c).unwrap();
+    assert_eq!(served.statuses[2], LaneStatus::Complete);
+    let (_token_d, budget_d) = request_budget(10_000);
+    let vectors = {
+        let token = token_c.clone();
+        composition.observed(move |event| {
+            if matches!(event, RescoreEvent::ReadOriginal { .. }) {
+                token.cancel();
+            }
+        })
+    };
+    let outcome = run(&fixture, 2, vectors, &budget_d).unwrap();
+    assert!(token_c.is_cancelled());
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+    assert!(!budget_d.shared().is_exhausted());
+    assert_eq!(
+        served.statuses[2],
+        LaneStatus::Complete,
+        "C's answer stands"
+    );
+    assert_eq!(budget_c.shared().exhaustion(), Some(Exhaustion::Cancelled));
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
+    let fixture = Fixture::build().await;
+    let mut composition = Composition::of(&fixture);
+    let degraded = |composition: &Composition, limits: CompressedLimits| {
+        let vectors = DenseVectors::new(
+            Arc::clone(&composition.view),
+            composition.store.admission.clone(),
+            limits,
+        );
+        let (_token, budget) = request_budget(10_000);
+        run(&fixture, 2, vectors, &budget).unwrap().statuses[2].clone()
+    };
+    let mut pinned = compressed_limits();
+    pinned.max_pinned_bytes = 1;
+    assert_eq!(
+        degraded(&composition, pinned),
+        LaneStatus::Unavailable("view_bound")
+    );
+    let mut rows = compressed_limits();
+    rows.scan.max_rows = NonZeroUsize::new(1).unwrap();
+    assert_eq!(
+        degraded(&composition, rows),
+        LaneStatus::Unavailable("row_bound")
+    );
+    let mut heap = compressed_limits();
+    heap.scan.storage.heap_bytes = NonZeroUsize::new(1).unwrap();
+    assert_eq!(
+        degraded(&composition, heap),
+        LaneStatus::Unavailable("heap_over_bound")
+    );
+    let mut batch = compressed_limits();
+    batch.scan.storage.batch_bytes = NonZeroUsize::new(1).unwrap();
+    assert_eq!(
+        degraded(&composition, batch),
+        LaneStatus::Unavailable("batch_bytes")
+    );
+    let tables = composition.store.ledger.census().resident;
+    composition
+        .store
+        .set_limit(daemon::vector_admission::RESIDENT_LIMIT, tables);
+    let vectors = DenseVectors::new(
+        Arc::clone(&composition.view),
+        composition.store.admission.clone(),
+        compressed_limits(),
+    );
+    let (_token, budget) = request_budget(10_000);
+    assert_eq!(
+        run(&fixture, 2, vectors, &budget).unwrap().statuses[2].clone(),
+        LaneStatus::Unavailable("reservation")
+    );
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_of_another_kernel_incarnation_degrades_the_lane() {
+    let fixture = Fixture::build().await;
+    let mut store = Vectors::for_projection(projection_identity("another"), generation());
+    let rows: Vec<ExportedRow> = {
+        let mut ids: Vec<String> = fixture
+            .live_candidates()
+            .into_iter()
+            .map(|candidate| candidate.occurrence_id)
+            .collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| ExportedRow {
+                vector: vector_for(&id),
+                occurrence_id: id,
+            })
+            .collect()
+    };
+    let base = store.layer_from(&LiveRows {
+        generation: generation(),
+        kernel_incarnation_id: "another".to_owned(),
+        checkpoint: ProjectionCheckpoint {
+            snapshot_commit_seq: 1,
+            checkpoint_commit_seq: 2,
+            hold_id: "hold".to_owned(),
+        },
+        rows,
+        tombstones: Vec::new(),
+    });
+    store
+        .publish(&store.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut store, &mut |_| {}).unwrap();
+    let vectors = DenseVectors::new(view, store.admission.clone(), compressed_limits());
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, vectors, &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Unavailable("identity"));
     fixture.daemon.shutdown().await;
 }
 
@@ -426,6 +547,22 @@ async fn vectors_install_only_under_declared_dense_limits() {
         ))),
         Err(LimitsRefusal::Dense { .. })
     ));
+    let mut larger = with_dense(2);
+    larger.dense.as_mut().unwrap().k = NonZeroUsize::new(1000).unwrap();
+    assert!(
+        matches!(
+            handler.set_query_route_limits(Some(larger)),
+            Err(LimitsRefusal::DenseCapacity(
+                CapacityRefusal::OverCap { .. }
+            ))
+        ),
+        "route limits are checked against the installed vectors"
+    );
+    assert!(matches!(
+        handler.set_query_route_limits(Some(limits())),
+        Err(LimitsRefusal::DenseUndeclared)
+    ));
     handler.set_dense_vectors(None).unwrap();
+    handler.set_query_route_limits(Some(limits())).unwrap();
     fixture.daemon.shutdown().await;
 }
