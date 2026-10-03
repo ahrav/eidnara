@@ -1745,6 +1745,12 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         let outcome = fixture.retrieve(&probes(request), bounds(), &budget);
         let done = Instant::now();
         let (outcome, counted, ranked) = match outcome {
+            Ok(retrieval)
+                if retrieval.completion
+                    == Completion::Incomplete(IncompleteReason::BudgetExhausted) =>
+            {
+                ("censored: budget exhausted".to_string(), 0, 0)
+            }
             Ok(retrieval) => (
                 format!("{:?}", retrieval.completion),
                 retrieval.consumed.counted_rows,
@@ -1890,7 +1896,7 @@ fn an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhausti
         scan_rows: NonZeroUsize::new(5).unwrap(),
         ..bounds()
     };
-    let run_until = |request: &str, stop_after: usize| {
+    let run_until = |request: &str, tight: RetrievalBounds, stop_after: usize| {
         let flag = Arc::new(AtomicBool::new(false));
         let budget = EvalBudget::new(None, Arc::clone(&flag));
         let polls = Arc::new(AtomicUsize::new(0));
@@ -1923,15 +1929,26 @@ fn an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhausti
             });
         (outcome, polls.load(Ordering::Relaxed))
     };
-    for request in ["t20001", "t20000", "c15000 d15000"] {
-        let (complete, total) = run_until(request, usize::MAX);
+    // A wide scan bound makes the common scan, not its count, most of the `t20001` work at 4,096 rows.
+    let wide = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4096).unwrap(),
+        max_accepted: NonZeroUsize::new(MAX_ELIGIBILITY_CANDIDATES).unwrap(),
+        ..bounds()
+    };
+    for (request, tight) in [
+        ("t20001", tight),
+        ("t20001", wide),
+        ("t20000", tight),
+        ("c15000 d15000", tight),
+    ] {
+        let (complete, total) = run_until(request, tight, usize::MAX);
         assert!(!matches!(
             complete.unwrap().completion,
             Completion::Incomplete(IncompleteReason::BudgetExhausted)
         ));
         assert!(total > 8, "{request} polled {total} times");
         for step in 0..8 {
-            let (outcome, _) = run_until(request, total * step / 8);
+            let (outcome, _) = run_until(request, tight, total * step / 8);
             match outcome {
                 Err(RetrievalRefusal::BudgetExhausted) => {}
                 Ok(retrieval) => {
