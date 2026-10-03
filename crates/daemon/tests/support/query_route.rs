@@ -166,6 +166,11 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn build() -> Self {
+        Self::build_with(&[]).await
+    }
+
+    /// [`Self::build`] with each `(object, summary)` in `extra` committed beside the three decisions.
+    pub async fn build_with(extra: &[(&str, &str)]) -> Self {
         let daemon = KernelDaemon::start().await;
         let store = daemon.store();
         let kernel_incarnation = store
@@ -183,16 +188,15 @@ impl Fixture {
                 "source_revision": revision,
             })
         };
-        let created = daemon
-            .commit(
-                "create",
-                vec![
-                    json!({"op": "insert_decision", "spec": spec("rule", 1, "Keep the public contract explicit.")}),
-                    json!({"op": "insert_decision", "spec": spec("other", 1, "Name things after the contract.")}),
-                    json!({"op": "insert_decision", "spec": spec("third", 1, "Short names win.")}),
-                ],
-            )
-            .await;
+        let mut decisions = vec![
+            json!({"op": "insert_decision", "spec": spec("rule", 1, "Keep the public contract explicit.")}),
+            json!({"op": "insert_decision", "spec": spec("other", 1, "Name things after the contract.")}),
+            json!({"op": "insert_decision", "spec": spec("third", 1, "Short names win.")}),
+        ];
+        decisions.extend(extra.iter().map(
+            |(object, summary)| json!({"op": "insert_decision", "spec": spec(object, 1, summary)}),
+        ));
+        let created = daemon.commit("create", decisions).await;
         assert_eq!(created["state"]["kind"], "available", "{created}");
         let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
             .as_str()

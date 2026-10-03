@@ -697,3 +697,61 @@ async fn claim_validation_reads_only_the_claims_the_answer_can_reach() {
     assert_eq!(after.body, before.body);
     fixture.daemon.shutdown().await;
 }
+
+/// A run of denied claims grows each validation batch to the claims validated before it, so the batches over the run stay logarithmic in its length while the answer stays the one a single wide validation gives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_of_denied_claims_is_validated_in_logarithmically_many_batches() {
+    let bulk: Vec<String> = (0..12).map(|n| format!("bulk{n}")).collect();
+    let mut extra: Vec<(&str, &str)> = bulk
+        .iter()
+        .map(|object| (object.as_str(), "An explicit contract stays explicit."))
+        .collect();
+    extra.push(("keeper", "A contract."));
+    let fixture = Fixture::build_with(&extra).await;
+    // The kernel retires every matching decision but the keeper while their descriptors stay live, so revalidation admits their occurrences and claim validation denies them.
+    let retired: Vec<serde_json::Value> = bulk
+        .iter()
+        .map(String::as_str)
+        .chain(["rule", "other"])
+        .map(|object| serde_json::json!({"op": "retire_decision", "object_id": object}))
+        .collect();
+    let committed = fixture
+        .daemon
+        .commit("retire-bulk-without-sources", retired)
+        .await;
+    assert_eq!(committed["state"]["kind"], "available", "{committed}");
+    let query = "explicit contract";
+    let (_token, budget) = request_budget(10_000);
+    let mut wide = limits();
+    wide.result_rows = wide.fused_union;
+    let survivors = fixture.run(&wide, budget.shared(), query, |_| {}).unwrap();
+    let first = &survivors.body["entries"][0];
+    assert_eq!(
+        first["canonical"]["decision_object_id"], "keeper",
+        "{}",
+        survivors.body
+    );
+    let denied = first["position"].as_u64().unwrap() as usize - 1;
+    assert!(denied >= 16, "{}", survivors.body);
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::MIN;
+    let mut batches = 0usize;
+    let answer = fixture
+        .run(&bounded, budget.shared(), query, |phase| {
+            batches += usize::from(phase == Phase::ClaimValidation);
+        })
+        .unwrap();
+    assert_eq!(answer.body["entries"][0], *first, "{}", answer.body);
+    // Batches of 2, 2, 4, 8, ... cover the run and the two answer rows; a batch of the remaining room alone would take one per two denials.
+    let reach = bounded.result_rows.get() + 1;
+    let bound = 2
+        + (denied + reach)
+            .div_ceil(reach)
+            .next_power_of_two()
+            .trailing_zeros() as usize;
+    assert!(
+        batches <= bound && batches < (denied + reach).div_ceil(reach),
+        "{batches} batches over a run of {denied} denials, bound {bound}"
+    );
+    fixture.daemon.shutdown().await;
+}

@@ -1363,8 +1363,10 @@ fn canonical_references(
         }
         if let Some(occurrence_id) = entry {
             if claim == validated {
-                // ponytail: a batch holds only the claims the remaining rows could serve, so denials past the row bound validate one claim per batch; grow the batch if denial runs matter.
-                let size = (reach - survivors).min(limits.validation_batch.get());
+                // Using `validated` as the growth target makes batches grow geometrically during denial runs until `limits.validation_batch` caps their size.
+                let size = (reach - survivors)
+                    .max(validated)
+                    .min(limits.validation_batch.get());
                 let batch = &claims[validated..claims.len().min(validated + size)];
                 before_phase(Phase::ClaimValidation);
                 check(budget)?;
