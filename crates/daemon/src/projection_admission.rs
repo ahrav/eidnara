@@ -185,8 +185,16 @@ pub enum InstallRefusal {
     IdentityMismatch,
     #[error("{record} exceeds {limit} bytes")]
     TooLarge { record: &'static str, limit: u64 },
-    #[error("the admission directory could not be written: {0}")]
-    Write(String),
+    #[error("the admission directory is refused: {0}")]
+    Directory(&'static str),
+    /// `replaced` names the records already renamed into place before the failure.
+    #[error(
+        "the admission directory could not be written ({replaced:?} already replaced): {reason}"
+    )]
+    Write {
+        replaced: Vec<&'static str>,
+        reason: String,
+    },
 }
 
 /// Installs an owner's runtime manifest and campaign evidence under `<home>/search-admission/` after the same parse the daemon applies at every refresh, refusing a pair whose invalidation identities disagree. Each record is written owner-only to a temporary file, synced, renamed into place, and the directory is synced, so a reader sees the prior record or the new one. Installation grants nothing: the daemon still binds both records to the running projection identity, coverage, and lane before any hook opens.
@@ -209,29 +217,43 @@ pub fn install(home: &Path, manifest: &[u8], campaign: &[u8]) -> Result<(), Inst
         return Err(InstallRefusal::IdentityMismatch);
     }
     let dir = home.join(ADMISSION_DIR);
-    let write = |error: std::io::Error| InstallRefusal::Write(error.kind().to_string());
+    let mut replaced = Vec::new();
+    let write = |replaced: &[&'static str], error: std::io::Error| InstallRefusal::Write {
+        replaced: replaced.to_vec(),
+        reason: error.kind().to_string(),
+    };
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&dir)
-        .map_err(write)?;
+        .map_err(|error| write(&[], error))?;
+    // The daemon reads the directory without following links and refuses one that is not the caller's own and owner-only, so the installer refuses the same directory before writing into it.
+    let directory =
+        crate::projection_lifecycle::open_directory(&dir).map_err(|error| write(&[], error))?;
+    let metadata = directory.metadata().map_err(|error| write(&[], error))?;
+    crate::projection_lifecycle::owner_only_directory(&metadata)
+        .map_err(InstallRefusal::Directory)?;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
     for (record, bytes) in [(MANIFEST_RECORD, manifest), (EVIDENCE_RECORD, campaign)] {
-        let temp = dir.join(format!(".{record}.{}", std::process::id()));
+        let temp = dir.join(format!(".{record}.{}-{unique}", std::process::id()));
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(&temp)
-            .map_err(write)?;
+            .map_err(|error| write(&replaced, error))?;
         let written = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
         if let Err(error) = written.and_then(|()| std::fs::rename(&temp, dir.join(record))) {
             let _ = std::fs::remove_file(&temp);
-            return Err(write(error));
+            return Err(write(&replaced, error));
         }
+        replaced.push(record);
     }
-    std::fs::File::open(&dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(write)
+    directory
+        .sync_all()
+        .map_err(|error| write(&replaced, error))
 }
 
 fn bounded_name(name: &str) -> String {

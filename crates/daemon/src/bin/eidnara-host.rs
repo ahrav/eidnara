@@ -2455,6 +2455,24 @@ mod tests {
     }
 
     #[test]
+    fn install_search_admission_takes_exactly_two_paths() {
+        let args = |values: &[&str]| -> Vec<std::ffi::OsString> {
+            values.iter().map(std::ffi::OsString::from).collect()
+        };
+        assert!(matches!(
+            parse_args(&args(&["install-search-admission", "m.json", "c.json"])),
+            Ok(Command::InstallSearchAdmission { .. })
+        ));
+        for arity in [
+            &["install-search-admission"][..],
+            &["install-search-admission", "m.json"],
+            &["install-search-admission", "a", "b", "c"],
+        ] {
+            assert!(parse_args(&args(arity)).is_err(), "{arity:?}");
+        }
+    }
+
+    #[test]
     fn a_development_manifest_is_trusted_only_by_a_debug_build() {
         let Some("linux-x64-gnu") = build_target() else {
             return;

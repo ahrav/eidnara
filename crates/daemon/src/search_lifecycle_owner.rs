@@ -66,7 +66,7 @@ pub const MAINTENANCE_TENURE_SLICES: u32 = 4;
 /// The consumer a registered projection reads the kernel through.
 pub const REGISTERED_CONSUMER: &str = "search-projection";
 /// Episodes a registration rebuild may consume before its record must be renewed.
-pub const REGISTRATION_ALLOWANCE: u32 = 3;
+const REGISTRATION_ALLOWANCE: u32 = 3;
 
 /// One claim-source slice examines at most 64 decisions or one commit page of at most 64 commits, 65,536 rows, and 64 MiB of payload, and ends within `SLICE_IDLE`. The row and byte bounds admit any commit the daemon's own routes and producers write, so no ordinary commit blocks the runner as oversized.
 pub const CLAIM_SLICE_BOUNDS: ClaimSliceBounds = ClaimSliceBounds {
@@ -536,7 +536,9 @@ impl SearchLifecycleOwner {
             .clone()
     }
 
-    /// Records the first build of an absent projection under the installed records, so a qualified installation registers and maintains its projection without an operator request. The request names the kernel incarnation in its attempt identity, so a repeat replays the record already there.
+    /// Records the first build of an absent projection under the installed records, so a qualified installation registers and maintains its projection automatically. The attempt identity names the kernel incarnation; the slice loop calls this only while the record is absent.
+    ///
+    /// A record written with `Cause::Registration` is unreadable to a build that predates the cause, so rolling such a home back to an older binary requires removing the record.
     ///
     /// Missing, refused, or identity-mismatched records, a lane that is not ready, and limits that cannot bound the build refuse here and record nothing; admission stays closed with the refusal visible in the request's error.
     ///
@@ -1605,6 +1607,7 @@ fn replacement_spec(
 /// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
+    let mut registration_reporter = SliceReporter::default();
     let mut claim_report = None;
     loop {
         // One claim-source slice runs before each lifecycle slice, so a large source backlog advances a bounded page at a time and every lifecycle slice still runs.
@@ -1685,35 +1688,8 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
             return;
         }
         // An unregistered home with installed records records its first build; the next slice starts it.
-        let registered = if matches!(outcome, SliceOutcome::Unregistered) {
-            let register_owner = Arc::clone(&owner);
-            let registration = tokio::task::spawn_blocking(move || {
-                register_owner.register_projection(
-                    crate::now_ms(),
-                    &EvalBudget::unbounded().bounded_by(Instant::now() + SLICE_IDLE),
-                )
-            })
-            .await;
-            match registration {
-                Ok(Ok(Some(_))) => true,
-                Ok(Ok(None)) => false,
-                Ok(Err(error)) => {
-                    if let Some(report) = reporter.report(
-                        &SliceOutcome::Blocked(format!("registration refused: {error}")),
-                        Instant::now(),
-                    ) {
-                        eprintln!("daemon: search lifecycle {report}");
-                    }
-                    false
-                }
-                Err(join) => {
-                    eprintln!("daemon: search registration ended abnormally: {join}");
-                    false
-                }
-            }
-        } else {
-            false
-        };
+        let registered = matches!(outcome, SliceOutcome::Unregistered)
+            && register_if_admitted(&owner, &cancel, &mut registration_reporter).await;
         let advanced = claims_continue
             || registered
             || match &outcome {
@@ -1730,6 +1706,44 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
             () = cancel.cancelled() => return,
             () = tokio::time::sleep(SLICE_IDLE) => {}
             () = owner.requested.notified() => {}
+        }
+    }
+}
+
+/// Records the first build of an unregistered home on the blocking pool; `true` when a record was written. A refusal repeats every idle period while the records stand, so `reporter` prints it once per repeat interval.
+async fn register_if_admitted(
+    owner: &Arc<SearchLifecycleOwner>,
+    cancel: &CancellationToken,
+    reporter: &mut SliceReporter,
+) -> bool {
+    let register_owner = Arc::clone(owner);
+    let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let register_budget = budget.bounded_by(Instant::now() + SLICE_IDLE);
+    let mut registration = tokio::task::spawn_blocking(move || {
+        register_owner.register_projection(crate::now_ms(), &register_budget)
+    });
+    let registration = tokio::select! {
+        biased;
+        outcome = &mut registration => outcome,
+        () = cancel.cancelled() => {
+            budget.cancel();
+            registration.await
+        }
+    };
+    match registration {
+        Ok(Ok(recorded)) => recorded.is_some(),
+        Ok(Err(error)) => {
+            if let Some(report) = reporter.report(
+                &SliceOutcome::Blocked(format!("registration refused: {error}")),
+                Instant::now(),
+            ) {
+                eprintln!("daemon: search lifecycle {report}");
+            }
+            false
+        }
+        Err(join) => {
+            eprintln!("daemon: search registration ended abnormally: {join}");
+            false
         }
     }
 }

@@ -1351,7 +1351,7 @@ pub(crate) fn read_owner_only_record(dir: &Path, record: &str) -> Result<RecordR
 }
 
 /// Requires the caller's own directory with no group or other permission bits; every reader and the opener judge the directory by this one predicate.
-fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
+pub(crate) fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
     if !metadata.is_dir() {
         return Err("the lifecycle path is not a directory");
     }

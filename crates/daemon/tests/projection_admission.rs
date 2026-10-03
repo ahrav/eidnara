@@ -1094,4 +1094,29 @@ fn installation_validates_and_publishes_owner_only_records() {
             .unwrap()
             .applies_to(&identity)
     );
+
+    // A second valid pair replaces the first.
+    let mut next = identity.clone();
+    next.generation_epoch += 1;
+    install(
+        home.path(),
+        &serde_json::to_vec(&manifest_json(&next, &ProjectionHook::ALL)).unwrap(),
+        &serde_json::to_vec(&campaign_json(&next)).unwrap(),
+    )
+    .unwrap();
+    let reinstalled = AdmissionInputs::read(home.path()).unwrap();
+    assert!(reinstalled.applies_to(&next) && !reinstalled.applies_to(&identity));
+
+    // A directory the daemon would refuse is refused before anything is written.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(
+        install(home.path(), &manifest, &campaign),
+        Err(InstallRefusal::Directory(_))
+    ));
+    let linked = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(target.path(), linked.path().join(ADMISSION_DIR)).unwrap();
+    assert!(install(linked.path(), &manifest, &campaign).is_err());
+    assert!(fs::read_dir(target.path()).unwrap().next().is_none());
 }
