@@ -157,6 +157,17 @@ describe("truncateUtf8Bytes", () => {
         expect(cut).toBe("🎉");
         expect(isValidUnicode(cut)).toBe(true);
     });
+
+    it("keeps every code point that fits at each 1-, 2-, 3-, and 4-byte boundary", () => {
+        const text = "aé漢🎉";
+        const expected = ["", "a", "a", "aé", "aé", "aé", "aé漢", "aé漢", "aé漢", "aé漢", text];
+        expect(expected.map((_, bytes) => truncateUtf8Bytes(text, bytes))).toEqual(expected);
+    });
+
+    it("counts a lone surrogate as its 3-byte replacement encoding", () => {
+        expect(truncateUtf8Bytes("\uD800x", 3)).toBe("\uD800");
+        expect(truncateUtf8Bytes("\uD800x", 2)).toBe("");
+    });
 });
 
 describe("QueryBoundsError", () => {

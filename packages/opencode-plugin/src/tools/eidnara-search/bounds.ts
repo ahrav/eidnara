@@ -109,21 +109,23 @@ export function prepareExplicitQuery(raw: string): ExplicitQueryPreparation {
     return { ok: true, query: trimmed };
 }
 
-/** The function returns the longest prefix of `text` whose UTF-8 encoding is at most `maxBytes` without splitting surrogate pairs. */
+/** The function returns the longest prefix of `text` that preserves surrogate pairs and fits within `maxBytes` UTF-8 bytes. */
 export function truncateUtf8Bytes(text: string, maxBytes: number): string {
     if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
     return text.slice(0, utf8PrefixEnd(text, maxBytes));
 }
 
-/** Iterating by code point keeps a surrogate pair as one 4-byte unit so the cut never lands inside it. */
+/** A surrogate pair encodes as one 4-byte code point; a lone surrogate encodes as 3-byte U+FFFD. The cut falls on a code point boundary. */
 function utf8PrefixEnd(text: string, maxBytes: number): number {
     let bytes = 0;
     let end = 0;
-    for (const char of text) {
-        const charBytes = Buffer.byteLength(char, "utf8");
-        if (bytes + charBytes > maxBytes) break;
-        bytes += charBytes;
-        end += char.length;
+    while (end < text.length) {
+        const unit = text.charCodeAt(end);
+        const pair = (unit & 0xfc00) === 0xd800 && (text.charCodeAt(end + 1) & 0xfc00) === 0xdc00;
+        const size = pair ? 4 : unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+        if (bytes + size > maxBytes) break;
+        bytes += size;
+        end += pair ? 2 : 1;
     }
     return end;
 }
