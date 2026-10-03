@@ -876,7 +876,7 @@ fn correction_retirement_and_replay_cannot_resurrect_stale_rows() {
     );
     let after = corpus.inventory();
     assert_eq!(after, new_rule.iter().cloned().collect());
-    // Retirement commits before the successor's publication, so no commit between them holds both revisions.
+    // Both revisions are live at a snapshot S exactly when `published_at <= S < retired_at`, so retirement commits no later than the successor's publication.
     let db = corpus.kernel_db();
     let commit_of = |object_id: &str, column: &str| -> i64 {
         db.query_row(
@@ -907,7 +907,7 @@ fn correction_retirement_and_replay_cannot_resurrect_stale_rows() {
         .map(|row| commit_of(&descriptor_object(row), "created_commit_seq"))
         .min()
         .unwrap();
-    assert!(retired_at < published_at, "{retired_at} vs {published_at}");
+    assert!(retired_at <= published_at, "{retired_at} vs {published_at}");
 
     let replay = corpus.materialize();
     assert_eq!((replay.published, replay.retired), (0, 0), "{replay:?}");
@@ -2486,6 +2486,11 @@ fn validation_refuses_a_kernel_of_another_incarnation() {
 }
 
 fn slice_bounds(decisions: usize) -> ClaimSliceBounds {
+    batched_bounds(1, decisions)
+}
+
+/// Pages of `decisions` decisions or two commits, applied `batch` items per kernel commit.
+fn batched_bounds(batch: usize, decisions: usize) -> ClaimSliceBounds {
     ClaimSliceBounds {
         decisions: NonZeroUsize::new(decisions).unwrap(),
         decision_bytes: NonZeroU64::new(1 << 20).unwrap(),
@@ -2494,6 +2499,7 @@ fn slice_bounds(decisions: usize) -> ClaimSliceBounds {
             max_rows: NonZeroUsize::new(64).unwrap(),
             max_payload_bytes: NonZeroU64::new(1 << 20).unwrap(),
         },
+        batch: NonZeroUsize::new(batch).unwrap(),
     }
 }
 
@@ -2684,6 +2690,13 @@ fn bootstrap_and_replay_publish_memories_from_before_and_after_registration() {
 /// Revisions, a retirement, and a recreation that race the scan converge to the currently admissible decisions, and no slice leaves a predecessor live beside its successor.
 #[test]
 fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
+    // Per-item commits and whole-page batches reach the same state.
+    for batch in [1, 64] {
+        changes_racing_the_bootstrap_converge_without_serving_two_revisions_at(batch);
+    }
+}
+
+fn changes_racing_the_bootstrap_converge_without_serving_two_revisions_at(batch: usize) {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
@@ -2696,8 +2709,8 @@ fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
         corpus.decide(seed);
     }
     let mut progress = ClaimProgress::default();
-    corpus.start(&mut progress, slice_bounds(2));
-    corpus.slice(&mut progress, slice_bounds(2));
+    corpus.start(&mut progress, batched_bounds(batch, 2));
+    corpus.slice(&mut progress, batched_bounds(batch, 2));
     assert_eq!(
         corpus.live_objects(),
         BTreeSet::from(["a".to_string(), "b".to_string()])
@@ -2709,7 +2722,7 @@ fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
     corpus.retire("b");
     corpus.decide(memory("b-again", "Beta, recreated."));
     let pairs = [("a", "z-alpha"), ("d", "d2")];
-    corpus.catch_up(&mut progress, slice_bounds(2), |corpus| {
+    corpus.catch_up(&mut progress, batched_bounds(batch, 2), |corpus| {
         let live = corpus.live_objects();
         for (predecessor, successor) in pairs {
             assert!(
@@ -2732,6 +2745,13 @@ fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
 /// A restart repeats the bootstrap from the first decision, and a restart after a page was applied without its acknowledgement replays it; both answer from receipts, lose no change, and leave the checkpoint behind every unacknowledged effect.
 #[test]
 fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
+    // Per-item commits and whole-page batches reach the same state.
+    for batch in [1, 64] {
+        restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently_at(batch);
+    }
+}
+
+fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently_at(batch: usize) {
     let dir = tempfile::tempdir().unwrap();
     let mut corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
@@ -2744,13 +2764,13 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
         corpus.decide(seed);
     }
     let mut progress = ClaimProgress::default();
-    corpus.start(&mut progress, slice_bounds(2));
-    corpus.slice(&mut progress, slice_bounds(2));
+    corpus.start(&mut progress, batched_bounds(batch, 2));
+    corpus.slice(&mut progress, batched_bounds(batch, 2));
     assert_eq!(corpus.inventory(), ledger(&seeds[..2]));
 
     // A restart forgets the scan position; the registration answers from its receipt.
     let mut restarted = ClaimProgress::default();
-    let reports = corpus.catch_up(&mut restarted, slice_bounds(2), |_| {});
+    let reports = corpus.catch_up(&mut restarted, batched_bounds(batch, 2), |_| {});
     assert_eq!(
         reports.iter().map(|report| report.replayed).sum::<usize>(),
         4,
@@ -2762,7 +2782,7 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
     corpus.decide(memory("r4", "Four."));
     let skipped = corpus.faulted_slice(
         &mut restarted,
-        slice_bounds(2),
+        batched_bounds(batch, 2),
         EpisodeFault::SkipAcknowledgement,
     );
     assert_eq!(skipped.published, 2, "{skipped:?}");
@@ -2777,14 +2797,14 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
     drop(corpus);
     corpus = Corpus::open(dir.path());
     let mut reopened = ClaimProgress::default();
-    let registered = corpus.slice(&mut reopened, slice_bounds(2));
+    let registered = corpus.slice(&mut reopened, batched_bounds(batch, 2));
     assert!(matches!(registered.end, MaterializationEnd::Continues));
     assert_eq!(
         corpus.checkpoint(),
         caught_up,
         "a replayed registration acknowledges nothing"
     );
-    let replayed = corpus.catch_up(&mut reopened, slice_bounds(2), |_| {});
+    let replayed = corpus.catch_up(&mut reopened, batched_bounds(batch, 2), |_| {});
     assert!(
         replayed.iter().map(|report| report.replayed).sum::<usize>() >= 8,
         "the repeated scan and the replayed page answer from receipts: {replayed:?}"
@@ -2903,6 +2923,13 @@ fn an_exhausted_budget_stops_between_decisions_and_commits_and_keeps_completed_w
 /// A cancelled budget moves nothing; excluded decisions are reported with their exclusion; a decision of another project publishes under that project's own scope; a lost history boundary blocks without acknowledging past it, every time.
 #[test]
 fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
+    // Per-item commits and whole-page batches reach the same state.
+    for batch in [1, 64] {
+        cancellation_exclusions_and_missing_history_are_reported_not_completed_at(batch);
+    }
+}
+
+fn cancellation_exclusions_and_missing_history_are_reported_not_completed_at(batch: usize) {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
@@ -2955,7 +2982,7 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
     ClaimMaterializer::register(&corpus.kernel, NOW).unwrap();
     let report = corpus
         .materializer()
-        .run_slice(&mut progress, slice_bounds(8), &cancelled, NOW)
+        .run_slice(&mut progress, batched_bounds(batch, 8), &cancelled, NOW)
         .unwrap();
     assert!(
         matches!(report.end, MaterializationEnd::Exhausted),
@@ -2969,7 +2996,7 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
     );
     assert!(corpus.inventory().is_empty());
 
-    let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    let reports = corpus.catch_up(&mut progress, batched_bounds(batch, 8), |_| {});
     let named =
         |object: &str, exclusion: ClaimExclusion| (object.to_string(), format!("{exclusion:?}"));
     let exclusions: BTreeSet<(String, String)> = reports
@@ -3019,7 +3046,7 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
     assert!(deleted > 0);
     let held = corpus.checkpoint();
     for _ in 0..2 {
-        let report = corpus.slice(&mut progress, slice_bounds(8));
+        let report = corpus.slice(&mut progress, batched_bounds(batch, 8));
         assert!(
             matches!(&report.end, MaterializationEnd::Blocked(ClaimBlocked::Stream(blocked))
                 if format!("{blocked:?}").contains("MissingHistory")),
@@ -3137,6 +3164,13 @@ fn a_failing_scan_read_still_lets_change_pages_advance_the_checkpoint() {
 
 #[test]
 fn a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions() {
+    // Per-item commits and whole-page batches reach the same state.
+    for batch in [1, 64] {
+        a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions_at(batch);
+    }
+}
+
+fn a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions_at(batch: usize) {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
@@ -3156,8 +3190,8 @@ fn a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions() {
         })
         .unwrap();
     let mut progress = ClaimProgress::default();
-    corpus.start(&mut progress, slice_bounds(1));
-    corpus.slice(&mut progress, slice_bounds(1));
+    corpus.start(&mut progress, batched_bounds(batch, 1));
+    corpus.slice(&mut progress, batched_bounds(batch, 1));
     assert_eq!(corpus.live_objects(), BTreeSet::from(["a".to_string()]));
 
     corpus
@@ -3167,7 +3201,7 @@ fn a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions() {
             Ok(String::new())
         })
         .unwrap();
-    corpus.catch_up(&mut progress, slice_bounds(1), |corpus| {
+    corpus.catch_up(&mut progress, batched_bounds(batch, 1), |corpus| {
         let live = corpus.live_objects();
         assert!(
             !(live.contains("a") && live.contains("b")),
@@ -3179,6 +3213,13 @@ fn a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions() {
 
 #[test]
 fn a_permanently_refused_publication_is_excluded_and_the_checkpoint_moves_past_it() {
+    // Per-item commits and whole-page batches reach the same state.
+    for batch in [1, 64] {
+        a_permanently_refused_publication_is_excluded_and_the_checkpoint_moves_past_it_at(batch);
+    }
+}
+
+fn a_permanently_refused_publication_is_excluded_and_the_checkpoint_moves_past_it_at(batch: usize) {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
@@ -3222,11 +3263,11 @@ fn a_permanently_refused_publication_is_excluded_and_the_checkpoint_moves_past_i
     decide_long("long-before");
     corpus.decide(memory("kept-before", "Kept before."));
     let mut progress = ClaimProgress::default();
-    corpus.slice(&mut progress, slice_bounds(8));
+    corpus.slice(&mut progress, batched_bounds(batch, 8));
     decide_long("long-after");
     corpus.decide(memory("kept-after", "Kept after."));
 
-    let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    let reports = corpus.catch_up(&mut progress, batched_bounds(batch, 8), |_| {});
     let refused: BTreeSet<String> = reports
         .iter()
         .flat_map(|report| report.exclusions.iter())
@@ -3296,4 +3337,114 @@ fn a_released_consumer_catches_up_first_and_the_next_start_rebuilds_from_the_inv
         corpus.inventory(),
         ledger(&[seeds[1], memory("s3", "Three."), memory("s4", "Four.")])
     );
+}
+
+/// The kernel commits that created and invalidated each descriptor `seed` could publish, in representation order; `None` for a representation it has no descriptor for.
+fn descriptor_commits(corpus: &Corpus, seed: Seed<'_>) -> Vec<(i64, Option<i64>)> {
+    let db = corpus.kernel_db();
+    seed.ledger()
+        .0
+        .iter()
+        .map(|expected| {
+            let encoded = encode_preserving_span(&Occurrence {
+                class: expected.class,
+                identity: &[(expected.field, &expected.object_id)],
+                revision: &expected.revision.to_string(),
+                representation: expected.representation,
+                span: None,
+            })
+            .unwrap();
+            let object_id =
+                kernel::descriptor_object_id(&encoded.lineage_id, &expected.revision.to_string());
+            db.query_row(
+                "SELECT created_commit_seq,invalidated_commit_seq FROM object_registry WHERE object_id=?1",
+                [object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// A whole scan page publishes in one kernel commit, and a change page applies its commits together until one touches a decision an earlier commit of the batch touched; that commit starts the next batch, so a decision published and retired in one page is retired after the commit that published it.
+#[test]
+fn a_page_applies_in_one_commit_until_a_change_touches_a_decision_already_in_the_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    let seeds = [
+        memory("p1", "One."),
+        memory("p2", "Two."),
+        memory("p3", "Three."),
+    ];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let bounds = ClaimSliceBounds {
+        commits: CommitPageBounds {
+            max_commits: NonZeroUsize::new(8).unwrap(),
+            ..bounds()
+        },
+        ..batched_bounds(64, 8)
+    };
+    let mut progress = ClaimProgress::default();
+    corpus.start(&mut progress, bounds);
+    let tip = corpus.kernel.tip().unwrap();
+    let scan = corpus.slice(&mut progress, bounds);
+    assert_eq!((scan.bootstrapped, scan.published), (3, 6), "{scan:?}");
+    assert_eq!(
+        corpus.kernel.tip().unwrap(),
+        tip + 1,
+        "the page is one commit"
+    );
+    let page_commit = tip + 1;
+    for seed in seeds {
+        assert!(
+            descriptor_commits(&corpus, seed)
+                .iter()
+                .all(|commits| *commits == (page_commit, None))
+        );
+    }
+    corpus.catch_up(&mut progress, bounds, |_| {});
+    assert_eq!(corpus.checkpoint(), Some(corpus.kernel.tip().unwrap()));
+
+    let inserted = memory("q1", "Inserted, then retired.");
+    let kept = memory("q2", "Kept.");
+    corpus.decide(inserted);
+    corpus.retire("q1");
+    corpus.decide(kept);
+    let tip = corpus.kernel.tip().unwrap();
+    let changes = corpus.slice(&mut progress, bounds);
+    assert!(
+        matches!(changes.end, MaterializationEnd::ReachedTarget),
+        "{changes:?}"
+    );
+    assert_eq!(
+        (changes.commits_consumed, changes.published, changes.retired),
+        (3, 4, 2),
+        "{changes:?}"
+    );
+    // The insert commits alone; the retirement and the unrelated insert commit together after it.
+    assert_eq!(corpus.kernel.tip().unwrap(), tip + 2);
+    assert!(
+        descriptor_commits(&corpus, inserted)
+            .iter()
+            .all(|commits| *commits == (tip + 1, Some(tip + 2)))
+    );
+    assert!(
+        descriptor_commits(&corpus, kept)
+            .iter()
+            .all(|commits| *commits == (tip + 2, None))
+    );
+    assert_eq!(corpus.checkpoint(), Some(tip), "{changes:?}");
+    let settled = corpus.catch_up(&mut progress, bounds, |_| {});
+    assert_eq!(
+        settled.iter().map(|report| report.published).sum::<usize>(),
+        0,
+        "the batches' own commits change no decision"
+    );
+    assert_eq!(corpus.checkpoint(), Some(corpus.kernel.tip().unwrap()));
+    let mut expected = ledger(&seeds);
+    expected.extend(ledger(&[kept]));
+    assert_eq!(corpus.inventory(), expected);
 }
