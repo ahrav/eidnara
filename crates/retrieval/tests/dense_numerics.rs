@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 
 use kernel::source_identity::OccurrenceClass;
 use retrieval::dense::codec::{Metric, RowLayout, RowRejection};
-use retrieval::dense::scalar::{QuantizedQuery, QueryRefusal, Scales, encode};
+use retrieval::dense::scalar::{QuantizedQuery, QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::score::TopK;
 use retrieval::dense::{
     CandidateCapacity, CandidatePolicy, CapacityRefusal, Ranked, inner_product, rank_order, rescore,
@@ -533,6 +533,46 @@ fn extreme_scales_and_codes_score_finite_and_match_the_reference() {
                 assert!(production.is_finite());
                 assert_eq!(production.to_bits(), reference.to_bits());
             }
+        }
+    }
+}
+
+#[test]
+fn scales_from_every_constructor_score_like_the_reference() {
+    let unit = |raw: [f32; 4]| {
+        let norm = raw
+            .iter()
+            .map(|v| f64::from(*v).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        raw.iter()
+            .map(|v| (f64::from(*v) / norm) as f32)
+            .collect::<Vec<f32>>()
+    };
+    let rows = [
+        fixture_query(),
+        unit([0.5, 0.5, 0.5, 0.5]),
+        unit([-0.7, 0.0, 0.25, 0.66]),
+    ];
+    let calibrated = calibrate(&layout(), rows.iter().map(Vec::as_slice))
+        .unwrap()
+        .scales;
+    let literal = Scales::from_values(calibrated.as_slice().to_vec(), DIMENSION).unwrap();
+    let decoded = Scales::decode(&calibrated.encode(), DIMENSION).unwrap();
+    for (path, scales) in [
+        ("calibrate", &calibrated),
+        ("from_values", &literal),
+        ("decode", &decoded),
+        ("fixture", &fixture_scales()),
+    ] {
+        let query = QuantizedQuery::new(&layout(), scales, &fixture_query()).unwrap();
+        for (id, codes) in fixture_codes() {
+            let reference = reference_quantized(scales.as_slice(), query.codes(), &codes);
+            assert_eq!(
+                query.score(&codes).to_bits(),
+                reference.to_bits(),
+                "{path} {id}"
+            );
         }
     }
 }
