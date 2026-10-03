@@ -14,7 +14,9 @@ implementation ticket reconstructs the records its change makes executable
 from the specification's T1 to T7 seams and verifies them against the code
 that implements them. The RP2.6.U1 ticket
 ([#609](https://github.com/ahrav/eidnara/issues/609)) lands the numerical
-records below.
+records, and the RP2.6.U2 ticket
+([#610](https://github.com/ahrav/eidnara/issues/610)) lands the candidate-pool
+records.
 
 This part owns the dense numerical contract, the quantized candidate pool, the
 retained-f32 rescore, and their resource and cancellation obligations. Fusion,
@@ -49,13 +51,17 @@ here.
 | [dense-order-is-total-and-keeps-distinct-identities](#dense-order-is-total-and-keeps-distinct-identities) | safety | default-production | always | active | high |
 | [dense-candidate-capacity-is-checked-before-allocation](#dense-candidate-capacity-is-checked-before-allocation) | safety | test-only | always | active | high |
 | [dense-invalid-query-never-enters-scoring](#dense-invalid-query-never-enters-scoring) | safety | test-only | always | active | high |
+| [dense-pool-is-the-top-r-of-the-eligible-resolved-set](#dense-pool-is-the-top-r-of-the-eligible-resolved-set) | safety | test-only | always | active | high |
+| [dense-rejected-leaders-never-starve-eligible-rows](#dense-rejected-leaders-never-starve-eligible-rows) | liveness | test-only | always | active | high |
+| [dense-pool-never-mixes-authority-states](#dense-pool-never-mixes-authority-states) | safety | test-only | always | active | high |
+| [dense-scan-bounds-end-with-no-candidate](#dense-scan-bounds-end-with-no-candidate) | safety | test-only | always | active | high |
 
 ## Records
 
 ### dense-quantized-score-matches-weighted-reference
 
 Type: safety
-Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:299`)
+Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:305`)
 is called from `crates/retrieval/tests/` only at this base; no producer scans
 codes yet.
 Status: active
@@ -77,7 +83,7 @@ Required faults and enabling state: Scales that differ by two orders of
 magnitude across coordinates, codes at `+127` and `-127`, scales at
 `f32::MAX`, `f32::MIN_POSITIVE`, and the smallest subnormal.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:335`) was read against the formula and the tests run
+`weighted_dot` (`scalar.rs:341`) was read against the formula and the tests run
 against it.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
@@ -164,8 +170,8 @@ or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
-size, and #610's scan witness supplies the evidence that the pool is sized from
-it.
+size, and the candidate scan sizes its pool from it
+(`crates/retrieval/src/dense/candidates.rs:233`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -185,7 +191,7 @@ Open questions:
 ### dense-invalid-query-never-enters-scoring
 
 Type: safety
-Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:299`) is reached
+Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:305`) is reached
 from tests only; `rescore` validates its query the same way through
 `codec::validate`.
 Status: active
@@ -211,3 +217,130 @@ Existing check: `dense_scalar.rs`
 Impact: A malformed query scores every candidate with a meaningless value.
 Open questions:
 - Parent Q2 approval of refusing an all-zero-code query (needs human input).
+
+### dense-pool-is-the-top-r-of-the-eligible-resolved-set
+
+Type: safety
+Reachability: test-only - `select_candidates`
+(`crates/retrieval/src/dense/candidates.rs:178`) has no production caller at
+this base; #613 connects it to pinned generations.
+Status: active
+Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
+`a_stable_scan_returns_exactly_the_top_r_of_the_eligible_resolved_set` (pool
+sizes 1, 3, 5, 6, 20 by page sizes 1, 2, 8, plus an underfilled pool),
+`only_resolved_winners_are_scored_and_each_scores_under_its_own_layer`, and
+`a_coverage_shortfall_keeps_the_pool_and_says_so`.
+Guarantee: Under a stable authority with sufficient bounds, the pool is
+exactly `Top(R, E, quantized_score)` in the U1 order, where `E` is the set of
+resolved winners the projection lists as live and the kernel judges eligible;
+each winner scores its own layer's codes under the query encoded with that
+layer's scales, and the pool names each entry's winning layer row.
+Check: `always` - the pool's identifiers and score bits equal an independent
+full sort of `E` under the restated formula; an underfilled pool holds `E` and
+nothing else; tombstoned and superseded rows are never scored (one score per
+winner); ranked, candidate, and winner-row positions name one identity.
+`always` because every completed scan must satisfy it.
+Fault/timing angle: none for the stable case.
+Required faults and enabling state: Unadmitted leaders interleaved with
+eligible rows; a delta that supersedes one row, tombstones another, and has its
+own calibration; a pool larger than `E`; a winner missing from the layers.
+Confidence: high - [evidence](evidence/dense-pool-is-the-top-r-of-the-eligible-resolved-set.md).
+The tests use the real kernel and the retrieval eligibility adapter.
+Existing check: `crates/retrieval/tests/dense_layered.rs` covers the same walk
+over f32 rows.
+Impact: A pool built from stale, ineligible, or wrong-layer rows sends the
+wrong candidates to rescore.
+Open questions:
+- Parent Q3: the projected predicates and full authority identity the pool
+  carries are the existing snapshot and incarnation stamps (needs human
+  input).
+
+### dense-rejected-leaders-never-starve-eligible-rows
+
+Type: liveness
+Reachability: test-only - as above.
+Status: active
+Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
+`a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_eligible_suffix`.
+Guarantee: Rows the kernel rejects take no place in the pool and do not end
+the scan, so twenty hidden leaders ahead of a pool of four and pages of four
+leave the four best eligible rows in the pool.
+Check: `always` - the pool equals the reference top four of the eligible
+suffix and at least four hidden rows were judged; the unchecked
+top-R-then-filter over the same rows returns nothing, so the fixture separates
+the two. `always` because the bound is the scan's own population, which it
+always completes when its bounds allow.
+Fault/timing angle: none.
+Required faults and enabling state: A rejected score prefix longer than both
+the pool and the page.
+Confidence: high - [evidence](evidence/dense-rejected-leaders-never-starve-eligible-rows.md).
+Existing check: `dense_oracle.rs`
+`a_higher_scoring_excluded_row_never_displaces_an_eligible_one_and_stays_a_policy_exclusion`.
+Impact: Ineligible near neighbors would hide every eligible result.
+Open questions: None.
+
+### dense-pool-never-mixes-authority-states
+
+Type: safety
+Reachability: test-only - as above.
+Status: active
+Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
+`a_kernel_change_between_batches_discards_the_pool`,
+`a_change_to_an_excluded_row_discards_the_pool_too`, and
+`unavailable_canonical_validation_admits_no_candidate`.
+Guarantee: Every batch of one scan, including batches whose verdicts only
+excluded rows, is judged under one kernel snapshot and incarnation; a change
+between batches or before the final re-judgment discards the pool, and a
+validation failure refuses the scan with no candidate.
+Check: `always` - after a retirement, an admission of a row already judged
+hidden, or a kernel restore between batches, the completion names the change
+and the pool is empty; a kernel refusal returns an error, never an empty
+complete pool. `always` because a mixed-stamp pool must never be returned.
+Fault/timing angle: The window between two eligibility batches and between the
+last batch and the re-judgment.
+Required faults and enabling state: A kernel commit or restore inside the
+walk's hook after a judgment; a corrupt identity field the kernel refuses.
+Confidence: high - [evidence](evidence/dense-pool-never-mixes-authority-states.md).
+`judge_tracked` (`crates/retrieval/src/eligibility.rs:282`) compares each
+batch's stamps with the first.
+Existing check: `dense_oracle.rs` snapshot and restore tests for the f32 walk.
+Impact: A pool judged under two authority states could hold a row a newer
+policy excludes.
+Open questions:
+- Parent Q3 approval of snapshot plus incarnation as the usable authority
+  identity, and of discard without restart (needs human input).
+
+### dense-scan-bounds-end-with-no-candidate
+
+Type: safety
+Reachability: test-only - as above.
+Status: active
+Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
+`each_storage_and_row_bound_saturates_alone_and_returns_no_candidate` and
+`an_ended_budget_returns_no_candidate`.
+Guarantee: The scan-row bound, the batch-byte bound on rows selected for
+judgment, the heap-byte bound on the accepted set, the preallocated-slot
+check, the kernel batch limit on the pool, and the request budget each stop
+the scan alone; every stop except a coverage shortfall returns no candidate,
+and the slot check and pool limit refuse before any row is read.
+Check: `always` - one row short of the population ends `RowBound`; a batch
+bound one byte below the smallest selected row ends `BatchBytes`; a heap bound
+of the slots plus one byte ends `HeapBytes`, and the exact bound for the pool
+completes with the same pool; slots one byte over the bound refuse with no row
+visited; a pool of 2000 refuses `BatchOverBound`; cancellation after a page
+ends `BudgetExhausted`; each returns an empty pool. `always` because a
+truncated pool must never pass as complete.
+Fault/timing angle: Cancellation after a page is judged.
+Required faults and enabling state: Each bound set at, and one unit below,
+the value the fixture needs.
+Confidence: high - [evidence](evidence/dense-scan-bounds-end-with-no-candidate.md).
+Batch bytes are checked before a selected candidate is pushed
+(`oracle.rs:652`) and heap bytes before an eligible row moves into the set
+(`Progress::hold`, `oracle.rs:876`).
+Existing check: `dense_oracle.rs`
+`the_row_bound_stops_the_walk_as_incomplete_and_a_bound_at_the_population_stays_complete`
+for the f32 walk, which keeps its partial ranking.
+Impact: An unbounded batch or set exhausts memory; a truncated pool labeled
+complete loses neighbors silently.
+Open questions:
+- Parent Q6 approval of the production byte bounds (needs human input).

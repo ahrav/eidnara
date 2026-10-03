@@ -13,7 +13,8 @@ use storage::GuardedConn;
 
 use super::codec::{self, Metric, RowLayout};
 use super::oracle::{
-    self, ExhaustiveRanking, OracleBounds, OracleRefusal, PageRow, RowSource, Walk, Window,
+    self, ExhaustiveRanking, Lane, OracleBounds, OracleRefusal, PageRow, RowSource, StorageBounds,
+    Walk, Window,
 };
 use super::resolve::{self, Layer, ResolveRefusal, RowFault, Winner};
 use crate::batch::VectorGeneration;
@@ -75,33 +76,33 @@ static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// The live required rows in identifier order, for a walk that draws vectors or codes from resolved layers.
+pub(super) fn live_sql() -> &'static str {
+    &LIVE_SQL
+}
+
 /// Merges the winners, in identifier order, with the walk's rows in the same order.
-struct ResolvedRows<'a> {
-    layers: &'a [Layer<'a>],
-    winners: Vec<Winner<'a>>,
+pub(super) struct Cursor<'a> {
+    pub winners: Vec<Winner<'a>>,
     next: usize,
     revoked: usize,
     /// The last page read was visited in full and had no rows after it, so every winner still ahead of the cursor is past the live population.
     exhausted: bool,
 }
 
-impl RowSource for ResolvedRows<'_> {
-    fn page_sql(&self) -> &str {
-        &LIVE_SQL
+impl<'a> Cursor<'a> {
+    fn new(winners: Vec<Winner<'a>>) -> Self {
+        Self {
+            winners,
+            next: 0,
+            revoked: 0,
+            exhausted: false,
+        }
     }
 
-    fn after_page(&mut self, more: bool) {
-        self.exhausted = !more;
-    }
-
-    /// Winners before the visited row are not live any more; the winner at it is its vector; a winner after it waits.
-    fn vector(
-        &mut self,
-        row: &PageRow<'_>,
-        layout: &RowLayout,
-        into: &mut Vec<f32>,
-    ) -> Result<bool, OracleRefusal> {
-        let visited = row.occurrence_id.as_bytes();
+    /// Winners before the visited row are not live any more; the winner at it is returned; a winner after it waits.
+    pub fn seek(&mut self, visited: &str) -> Option<Winner<'a>> {
+        let visited = visited.as_bytes();
         while let Some(winner) = self.winners.get(self.next) {
             match winner.occurrence_id.as_bytes().cmp(visited) {
                 std::cmp::Ordering::Less => {
@@ -110,35 +111,91 @@ impl RowSource for ResolvedRows<'_> {
                 }
                 std::cmp::Ordering::Equal => {
                     self.next += 1;
-                    let occurrence_id = winner.occurrence_id;
-                    let vector = match self.layers[winner.layer].rows.row(winner.row) {
-                        Ok(vector) => vector,
-                        Err(RowFault::Rejected(rejection)) => {
-                            return Err(OracleRefusal::StoredRow {
-                                occurrence_id: occurrence_id.to_owned(),
-                                rejection,
-                            });
-                        }
-                        Err(RowFault::Unavailable(detail)) => {
-                            return Err(OracleRefusal::Unreadable {
-                                occurrence_id: occurrence_id.to_owned(),
-                                detail,
-                            });
-                        }
-                    };
-                    codec::validate_length(&vector, layout.dimension).map_err(|rejection| {
-                        OracleRefusal::StoredRow {
-                            occurrence_id: occurrence_id.to_owned(),
-                            rejection,
-                        }
-                    })?;
-                    *into = vector;
-                    return Ok(true);
+                    return Some(winner.clone());
                 }
-                std::cmp::Ordering::Greater => return Ok(false),
+                std::cmp::Ordering::Greater => return None,
             }
         }
-        Ok(false)
+        None
+    }
+
+    pub fn after_page(&mut self, more: bool) {
+        self.exhausted = !more;
+    }
+}
+
+/// A row source that draws the resolved winners through a [`Cursor`].
+pub(super) trait Resolving<'a>: RowSource {
+    fn cursor(&self) -> &Cursor<'a>;
+}
+
+/// The original f32 row of each resolved winner.
+struct ResolvedRows<'a> {
+    layers: &'a [Layer<'a>],
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Resolving<'a> for ResolvedRows<'a> {
+    fn cursor(&self) -> &Cursor<'a> {
+        &self.cursor
+    }
+}
+
+impl RowSource for ResolvedRows<'_> {
+    type Payload = Vec<f32>;
+
+    fn page_sql(&self) -> &str {
+        live_sql()
+    }
+
+    fn after_page(&mut self, more: bool) {
+        self.cursor.after_page(more);
+    }
+
+    fn load(
+        &mut self,
+        row: &PageRow<'_>,
+        layout: &RowLayout,
+        into: &mut Vec<f32>,
+    ) -> Result<bool, OracleRefusal> {
+        let Some(winner) = self.cursor.seek(row.occurrence_id) else {
+            return Ok(false);
+        };
+        let occurrence_id = winner.occurrence_id;
+        let vector = self.layers[winner.layer]
+            .rows
+            .row(winner.row)
+            .map_err(|fault| fault_refusal(occurrence_id, fault))?;
+        codec::validate_length(&vector, layout.dimension).map_err(|rejection| {
+            OracleRefusal::StoredRow {
+                occurrence_id: occurrence_id.to_owned(),
+                rejection,
+            }
+        })?;
+        *into = vector;
+        Ok(true)
+    }
+
+    fn score(
+        &self,
+        request: &Walk<'_>,
+        lanes: &[Lane<Vec<f32>>],
+        scores: &mut Vec<f64>,
+    ) -> Result<(), OracleRefusal> {
+        oracle::score_originals(request, lanes, scores)
+    }
+}
+
+pub(super) fn fault_refusal(occurrence_id: &str, fault: RowFault) -> OracleRefusal {
+    match fault {
+        RowFault::Rejected(rejection) => OracleRefusal::StoredRow {
+            occurrence_id: occurrence_id.to_owned(),
+            rejection,
+        },
+        RowFault::Unavailable(detail) => OracleRefusal::Unreadable {
+            occurrence_id: occurrence_id.to_owned(),
+            detail,
+        },
     }
 }
 
@@ -173,6 +230,25 @@ fn rank_layers_inner(
     budget: &EvalBudget,
     hook: impl FnMut(Window<'_>),
 ) -> Result<LayeredRanking, LayeredRefusal> {
+    let (ranking, _) = walk_resolved(conn, kernel, request, None, budget, hook, |cursor| {
+        ResolvedRows {
+            layers: request.layers,
+            cursor,
+        }
+    })?;
+    Ok(ranking)
+}
+
+/// Resolves the layers, walks the live required rows through the source `source` builds over the winners, and accounts for every winner the walk did not score. Returns the source so a caller can read the winners it drew from.
+pub(super) fn walk_resolved<'a, S: Resolving<'a>>(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &LayeredQuery<'a>,
+    storage: Option<StorageBounds>,
+    budget: &EvalBudget,
+    hook: impl FnMut(Window<'_>),
+    source: impl FnOnce(Cursor<'a>) -> S,
+) -> Result<(LayeredRanking, S), LayeredRefusal> {
     budget.check().map_err(|_| OracleRefusal::BudgetExhausted)?;
     if let Some(layer) = request
         .layers
@@ -192,13 +268,7 @@ fn rank_layers_inner(
         revoked: 0,
         unvisited: 0,
     };
-    let mut source = ResolvedRows {
-        layers: request.layers,
-        winners: resolved.winners,
-        next: 0,
-        revoked: 0,
-        exhausted: false,
-    };
+    let mut source = source(Cursor::new(resolved.winners));
     let walk = Walk {
         generation: request.generation,
         layout: RowLayout {
@@ -209,20 +279,25 @@ fn rank_layers_inner(
         query: request.query,
         authority: request.authority,
         bounds: request.bounds,
+        storage,
     };
     let ranking = oracle::walk(conn, kernel, &walk, budget, &mut source, hook)?;
-    let remaining = source.winners.len() - source.next;
-    account.revoked = source.revoked;
+    let cursor = source.cursor();
+    let remaining = cursor.winners.len() - cursor.next;
+    account.revoked = cursor.revoked;
     // Only a walk whose last page had nothing after it knows that the winners past its last row are not live; how the walk then ended does not matter.
-    if source.exhausted {
+    if cursor.exhausted {
         account.revoked += remaining;
     } else {
         account.unvisited = remaining;
     }
-    Ok(LayeredRanking {
-        ranking,
-        layers: account,
-    })
+    Ok((
+        LayeredRanking {
+            ranking,
+            layers: account,
+        },
+        source,
+    ))
 }
 
 #[cfg(test)]
