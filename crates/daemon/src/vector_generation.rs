@@ -1033,8 +1033,8 @@ pub fn verification_bytes(manifest: &GenerationManifest, sidecar: &VectorSidecar
         .saturating_add(table_scratch_bytes(manifest).max(row_pass))
 }
 
-/// Verification reads the row artifact in chunks of about this many bytes.
-const VERIFY_CHUNK_BYTES: u64 = 1 << 16;
+/// Verification reads the row artifact in chunks of about this many bytes, and the codes of the same rows beside them.
+pub const VERIFY_CHUNK_BYTES: u64 = 1 << 18;
 
 /// Whether two strictly increasing lists share an entry, decided in one merge walk.
 fn share_an_entry(left: &[String], right: &[String]) -> bool {
