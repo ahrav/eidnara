@@ -8,9 +8,9 @@ R-sized state; zero K does no work.
 
 ## Evidence trail
 
-- `CandidateCapacity::new` (`crates/retrieval/src/dense/capacity.rs:37`)
+- `CandidateCapacity::new` (`crates/retrieval/src/dense/capacity.rs:38`)
   checks alpha, then zero `K`, then the exact product, then the cap.
-- `ceil_product` (`capacity.rs:69`) decomposes alpha into a 53-bit mantissa
+- `ceil_product` (`capacity.rs:70`) decomposes alpha into a 53-bit mantissa
   and a binary exponent, multiplies in `u128`, and shifts with rounding up.
 - `CandidateCapacity` has private fields, so a pool size exists only after
   every check passed.

@@ -24,7 +24,7 @@ fn layout() -> RowLayout {
 fn policy(alpha: f64, cap: usize) -> CandidatePolicy {
     CandidatePolicy {
         alpha,
-        cap: NonZeroUsize::new(cap).unwrap(),
+        cap: nz(cap),
     }
 }
 
@@ -56,7 +56,12 @@ fn reference_f32(query: &[f32], row: &[f32]) -> f64 {
 }
 
 /// The full sort the production order must match: score descending, then identifier bytes ascending, with no tolerance.
+/// Plain comparisons equal `total_cmp` on finite scores other than `-0.0`, which the scorers never produce, so every input is checked for that domain.
 fn reference_order(mut scored: Vec<(f64, String)>) -> Vec<(u64, String)> {
+    for (score, id) in &scored {
+        assert!(score.is_finite(), "{id} scores finite");
+        assert_ne!(score.to_bits(), (-0.0f64).to_bits(), "{id} scores no -0.0");
+    }
     scored.sort_by(|(a, a_id), (b, b_id)| {
         if a > b {
             std::cmp::Ordering::Less
@@ -110,7 +115,7 @@ fn bits(words: [u32; 4]) -> Vec<f32> {
 /// Unequal scales: coordinate 0 is calibrated two hundred times finer than coordinate 1.
 fn fixture_scales() -> Scales {
     Scales::from_values(
-        bits([0x3a81_0204, 0x3e21_4285, 0x3c81_0204, 0x3d01_0204]).to_vec(),
+        bits([0x3a81_0204, 0x3e21_4285, 0x3c81_0204, 0x3d01_0204]),
         DIMENSION,
     )
     .unwrap()
@@ -203,7 +208,7 @@ fn the_capacity_takes_the_ceiling_of_the_exact_binary_product() {
 }
 
 #[test]
-fn a_malformed_alpha_refuses_before_zero_k_and_before_any_size_is_formed() {
+fn a_malformed_alpha_refuses_before_zero_k_is_considered() {
     for alpha in [
         f64::NAN,
         f64::INFINITY,
@@ -272,6 +277,77 @@ fn a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted() {
     );
 }
 
+/// Alpha of `2^53` and above takes the left-shift path, whose bits must be checked before they shift out.
+#[test]
+fn a_large_alpha_shifts_exactly_or_refuses() {
+    let two_53 = 2f64.powi(53);
+    let pool = |alpha: f64, k: usize| {
+        CandidateCapacity::new(k, policy(alpha, usize::MAX)).map(|c| c.unwrap().candidates().get())
+    };
+    assert_eq!(pool(two_53, 1), Ok(1 << 53));
+    assert_eq!(pool(two_53, 1 << 10), Ok(1 << 63));
+    assert_eq!(
+        pool(two_53, 1 << 11),
+        Err(CapacityRefusal::Unrepresentable {
+            alpha: two_53,
+            k: 1 << 11
+        })
+    );
+    let wide = 2f64.powi(100) * (1.0 + f64::EPSILON);
+    assert_eq!(
+        pool(wide, 1 << 40),
+        Err(CapacityRefusal::Unrepresentable {
+            alpha: wide,
+            k: 1 << 40
+        }),
+        "the shifted product exceeds a u128"
+    );
+    assert_eq!(pool(1.0f64.next_up(), 1), Ok(2), "just above one rounds up");
+}
+
+/// Integer alphas and dyadic fractions `a / 2^s` have exact products computable in integers, independent of the f64 decomposition.
+#[test]
+fn the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 2048,
+            rng_algorithm: RngAlgorithm::ChaCha,
+            ..Config::default()
+        },
+        TestRng::from_seed(RngAlgorithm::ChaCha, b"dense-candidate-capacity-seed-01"),
+    );
+    let k = prop_oneof![1usize..=4096, any::<usize>().prop_map(|k| k.max(1))];
+    runner
+        .run(&(1u64..=(1 << 53), k.clone()), |(a, k)| {
+            let expected = k.checked_mul(usize::try_from(a).unwrap());
+            let actual = CandidateCapacity::new(k, policy(a as f64, usize::MAX))
+                .ok()
+                .map(|c| c.unwrap().candidates().get());
+            prop_assert_eq!(actual, expected);
+            Ok(())
+        })
+        .unwrap();
+    runner
+        .run(&(0u64..(1 << 19), 0u32..=20, k), |(half, s, k)| {
+            let numerator = 2 * half + 1;
+            let alpha = numerator as f64 / 2f64.powi(s as i32);
+            prop_assume!(alpha >= 1.0);
+            let exact = (u128::from(numerator) * k as u128).div_ceil(1u128 << s);
+            let expected = usize::try_from(exact).ok();
+            let actual = CandidateCapacity::new(k, policy(alpha, usize::MAX))
+                .ok()
+                .map(|c| c.unwrap().candidates().get());
+            prop_assert_eq!(actual, expected);
+            if let Some(pool) = actual {
+                prop_assert!(pool >= k);
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
 // ---- Query transform ----
 
 #[test]
@@ -317,10 +393,10 @@ fn the_query_transform_refuses_invalid_queries_before_any_code_exists() {
     let wide = Scales::from_values(vec![1.0; 5], 5).unwrap();
     assert_eq!(
         QuantizedQuery::new(&layout(), &wide, &fixture_query()).unwrap_err(),
-        QueryRefusal::Row(RowRejection::Dimension {
+        QueryRefusal::ScalesDimension {
             expected: 4,
             actual: 5
-        })
+        }
     );
 }
 
@@ -458,16 +534,12 @@ fn the_fixture_rejects_unweighted_and_f32_first_quantized_scoring() {
     };
     let weighted = order_of(&|codes| reference_quantized(scales.as_slice(), query.codes(), codes));
     let raw = order_of(&|codes| unweighted(query.codes(), codes));
-    let ids = |order: &[(u64, String)]| -> Vec<String> {
-        order.iter().map(|(_, id)| id.clone()).collect()
-    };
     let position = |order: &[(u64, String)], id: &str| order.iter().position(|(_, row)| row == id);
     assert!(position(&weighted, "coarse") < position(&weighted, "fine"));
     assert!(
         position(&raw, "coarse") > position(&raw, "fine"),
         "the unweighted dot reverses them"
     );
-    assert_ne!(ids(&weighted), ids(&raw));
     let mut bits_differ = false;
     for (_, codes) in &rows {
         let f32_first = f32_first_quantized(scales.as_slice(), query.codes(), codes);

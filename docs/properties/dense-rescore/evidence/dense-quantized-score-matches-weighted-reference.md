@@ -7,7 +7,7 @@ dot, and an unweighted int8 dot is incompatible.
 
 ## Evidence trail
 
-- `weighted_dot` (`crates/retrieval/src/dense/scalar.rs:332`) forms
+- `weighted_dot` (`crates/retrieval/src/dense/scalar.rs:335`) forms
   `f64(s) * f64(s)` and `i32(q) * i32(d)`, converts the product to f64, and
   adds each term to a `+0.0` accumulator in coordinate order.
 - `QuantizedQuery::score` (`scalar.rs`) calls `weighted_dot` with the scales

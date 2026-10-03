@@ -273,6 +273,9 @@ pub enum QueryRefusal {
     /// Every coordinate rounds to code zero under the layer's scales, so every quantized score is zero.
     #[error("every coordinate of the query encodes to code zero")]
     ZeroCodes,
+    /// The scales belong to a calibration of another dimension than the layout, a wiring fault of the generation rather than of the query.
+    #[error("the scales have {actual} coordinates, not the layout's {expected}")]
+    ScalesDimension { expected: u32, actual: usize },
 }
 
 /// A query encoded under one layer's scales. Its documents are that layer's codes, because scoring weights each product by those scales squared.
@@ -300,11 +303,10 @@ impl<'s> QuantizedQuery<'s> {
     ) -> Result<Self, QueryRefusal> {
         layout.check()?;
         if scales.scales.len() != layout.dimension as usize {
-            return Err(RowRejection::Dimension {
+            return Err(QueryRefusal::ScalesDimension {
                 expected: layout.dimension,
                 actual: scales.scales.len(),
-            }
-            .into());
+            });
         }
         let Encoded { codes, .. } = encode(layout, scales, query)?;
         if codes.iter().all(|code| *code == 0) {
@@ -313,11 +315,12 @@ impl<'s> QuantizedQuery<'s> {
         Ok(Self { scales, codes })
     }
 
+    /// The query's codes, derived from its embedding, for the scan that scores them.
     pub fn codes(&self) -> &[i8] {
         &self.codes
     }
 
-    /// [`weighted_dot`] of the query's codes with `doc`, a row of codes from the same layer.
+    /// [`weighted_dot`] of the query's codes with `doc`, a row [`decode_codes`] produced from the same layer, so its length is the dimension and no code is `-128`.
     pub fn score(&self, doc: &[i8]) -> f64 {
         weighted_dot(self.scales, &self.codes, doc)
     }

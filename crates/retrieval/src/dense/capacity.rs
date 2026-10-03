@@ -30,10 +30,11 @@ pub struct CandidateCapacity {
 }
 
 impl CandidateCapacity {
+    /// `Ok(None)` is a zero `k` under a valid alpha: an empty ranking that needs no work.
+    ///
     /// # Errors
     ///
     /// In this order: an alpha that is not finite or is below one, a pool size that does not fit a `usize`, and a pool larger than the cap.
-    /// `Ok(None)` is a zero `k` under a valid alpha: an empty ranking that needs no work.
     pub fn new(k: usize, policy: CandidatePolicy) -> Result<Option<Self>, CapacityRefusal> {
         let alpha = policy.alpha;
         if !(alpha.is_finite() && alpha >= 1.0) {
@@ -43,7 +44,7 @@ impl CandidateCapacity {
             return Ok(None);
         };
         let candidates = ceil_product(alpha, k.get())
-            .and_then(NonZeroUsize::new)
+            .map(|candidates| NonZeroUsize::new(candidates).expect("ceil(alpha * k) >= k >= 1"))
             .ok_or(CapacityRefusal::Unrepresentable { alpha, k: k.get() })?;
         if candidates > policy.cap {
             return Err(CapacityRefusal::OverCap {
@@ -67,6 +68,10 @@ impl CandidateCapacity {
 
 /// `ceil(alpha * k)` in exact integer arithmetic: a finite alpha of at least one is `m * 2^e` with a 53-bit `m`, so `m * k` fits a `u128` and the scaling by `2^e` is a shift.
 fn ceil_product(alpha: f64, k: usize) -> Option<usize> {
+    debug_assert!(
+        alpha.is_finite() && alpha >= 1.0,
+        "the caller checked alpha"
+    );
     let bits = alpha.to_bits();
     let biased = i32::try_from((bits >> 52) & 0x7ff).expect("eleven bits fit an i32");
     let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
@@ -85,28 +90,4 @@ fn ceil_product(alpha: f64, k: usize) -> Option<usize> {
         product.div_ceil(unit)
     };
     usize::try_from(scaled).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_exact_ceiling_matches_small_cases_and_powers_of_two() {
-        assert_eq!(ceil_product(1.0, 64), Some(64));
-        assert_eq!(ceil_product(4.0, 64), Some(256));
-        assert_eq!(ceil_product(1.5, 3), Some(5));
-        assert_eq!(ceil_product(2.5, 2), Some(5));
-        assert_eq!(ceil_product(1.0, usize::MAX), Some(usize::MAX));
-        assert_eq!(ceil_product(2.0, usize::MAX), None);
-        assert_eq!(ceil_product(f64::MAX, 1), None);
-    }
-
-    /// `1.1` is slightly above eleven tenths in binary, so `1.1 * 10` rounds to exactly `11.0` in f64 while the exact product exceeds eleven.
-    #[test]
-    fn the_ceiling_is_taken_of_the_exact_product_not_its_f64_rounding() {
-        let alpha = 1.1f64;
-        assert_eq!(alpha * 10.0, 11.0, "the f64 product rounds to eleven");
-        assert_eq!(ceil_product(alpha, 10), Some(12));
-    }
 }

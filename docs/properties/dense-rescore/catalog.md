@@ -35,7 +35,10 @@ The observation point is the public API of `crates/retrieval/src/dense/`,
 exported at `crates/retrieval/src/lib.rs` and exercised by
 `crates/retrieval/tests/dense_numerics.rs`, `dense_scalar.rs`, and
 `dense_properties.rs`. The references in `dense_numerics.rs` are written from
-the formulas and call no scorer or comparator of `retrieval::dense`.
+the formulas and call no scorer or comparator of `retrieval::dense`. The
+fixtures exercise the scalar scorers only; a blocked or vectorized path (U5)
+needs its own tail, alignment, and extrema fixtures, which are not measured
+here.
 
 ## Index
 
@@ -52,7 +55,7 @@ the formulas and call no scorer or comparator of `retrieval::dense`.
 ### dense-quantized-score-matches-weighted-reference
 
 Type: safety
-Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:296`)
+Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:299`)
 is called from `crates/retrieval/tests/` only at this base; no producer scans
 codes yet.
 Status: active
@@ -74,7 +77,7 @@ Required faults and enabling state: Scales that differ by two orders of
 magnitude across coordinates, codes at `+127` and `-127`, scales at
 `f32::MAX`, `f32::MIN_POSITIVE`, and the smallest subnormal.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:332`) was read against the formula and the tests run
+`weighted_dot` (`scalar.rs:335`) was read against the formula and the tests run
 against it.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
@@ -144,21 +147,25 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `CandidateCapacity::new`
-(`crates/retrieval/src/dense/capacity.rs:37`) has no production caller at this
+(`crates/retrieval/src/dense/capacity.rs:38`) has no production caller at this
 base.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `the_capacity_is_ceil_alpha_times_k_and_never_below_k`,
 `the_capacity_takes_the_ceiling_of_the_exact_binary_product`,
-`a_malformed_alpha_refuses_before_zero_k_and_before_any_size_is_formed`,
+`a_malformed_alpha_refuses_before_zero_k_is_considered`,
 `zero_k_under_a_valid_alpha_is_an_empty_ranking_with_no_capacity`,
 `an_unrepresentable_product_refuses_before_the_cap_is_consulted`, and
-`a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted`; the unit test
-`the_ceiling_is_taken_of_the_exact_product_not_its_f64_rounding`.
+`a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted`,
+`a_large_alpha_shifts_exactly_or_refuses`, and the seeded property
+`the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas`.
 Guarantee: `R = ceil(alpha * K)` is computed exactly; alpha that is not finite
 or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.
-Every outcome is decided from three scalars, before any R-sized state exists.
+Every outcome is decided from three scalars, before any R-sized state exists;
+the private fields make `CandidateCapacity` the only source of a checked pool
+size, and #610's scan witness supplies the evidence that the pool is sized from
+it.
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -178,7 +185,7 @@ Open questions:
 ### dense-invalid-query-never-enters-scoring
 
 Type: safety
-Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:296`) is reached
+Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:299`) is reached
 from tests only; `rescore` validates its query the same way through
 `codec::validate`.
 Status: active
@@ -189,7 +196,8 @@ Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `rescore_refuses_an_invalid_query_or_row_before_scoring`.
 Guarantee: A query with the wrong dimension, a non-finite coordinate, zero
 norm, a norm outside the layout's tolerance, a layout without a valid
-tolerance, scales of another dimension, or all-zero codes produces a typed
+tolerance, scales of another dimension (refused as `ScalesDimension`, a generation
+wiring fault), or all-zero codes produces a typed
 refusal and no quantized query exists to score with.
 Check: `always` - each witness returns its refusal; an accepted query's codes
 equal the stored-row encoding under the same scales. `always` because scoring
