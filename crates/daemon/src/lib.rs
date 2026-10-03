@@ -13667,6 +13667,13 @@ impl HandlerCore {
         self.kernel.disable_background_sampler();
     }
 
+    /// Lets a paused claim-source runner run again.
+    #[cfg(feature = "test-support")]
+    pub fn resume_claim_sources_for_test(&self) {
+        self.claim_sources_paused
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     /// Keeps the claim-source runner from running, so a test that drives the materializer or counts kernel commits sees no background publication. A slice already in flight finishes first.
     #[cfg(feature = "test-support")]
     pub fn pause_claim_sources_for_test(&self) {

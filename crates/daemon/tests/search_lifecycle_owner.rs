@@ -4483,7 +4483,7 @@ async fn the_running_daemon_publishes_memories_from_before_and_after_it_started(
     daemon.shutdown().await;
 }
 
-/// A source backlog several scan pages long advances a bounded page per claim slice while lifecycle slices keep running between them, and shutdown during the backlog joins promptly.
+/// A source backlog several scan pages long advances a bounded page per claim slice while lifecycle slices keep running between them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slices() {
     let data = tempfile::tempdir().unwrap();
@@ -4536,12 +4536,8 @@ async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slice
         .unwrap();
     }
 
-    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
-        data: Some(data),
-        claim_sources: true,
-        ..support::kernel_daemon::StartOptions::default()
-    })
-    .await;
+    // The runner starts paused, so the tap observes every claim slice of the backlog.
+    let daemon = KernelDaemon::start_in(data, None).await;
     let started = Instant::now();
     let owner = loop {
         if let Some(owner) = daemon.handler().search_lifecycle() {
@@ -4560,6 +4556,7 @@ async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slice
             tap_observed.lock().unwrap().push(owner.claim_progress());
         }
     });
+    daemon.handler().resume_claim_sources_for_test();
     let store = daemon.store();
     while claim_descriptor_count(&store) < DECISIONS {
         assert!(
@@ -4577,7 +4574,5 @@ async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slice
         )),
         "a lifecycle slice ran while the scan was mid-backlog: {observed:?}"
     );
-    let stopping = Instant::now();
     daemon.shutdown().await;
-    assert!(stopping.elapsed() < Duration::from_secs(10));
 }

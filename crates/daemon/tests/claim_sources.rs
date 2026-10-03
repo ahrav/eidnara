@@ -2774,7 +2774,11 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
         caught_up,
         "a replayed registration acknowledges nothing"
     );
-    corpus.catch_up(&mut reopened, slice_bounds(2), |_| {});
+    let replayed = corpus.catch_up(&mut reopened, slice_bounds(2), |_| {});
+    assert!(
+        replayed.iter().map(|report| report.replayed).sum::<usize>() >= 8,
+        "the repeated scan and the replayed page answer from receipts: {replayed:?}"
+    );
     assert!(!corpus.live_objects().contains("r4"));
     assert_eq!(corpus.inventory(), ledger(&seeds));
     assert!(corpus.checkpoint() > caught_up);
@@ -2852,33 +2856,37 @@ fn an_exhausted_budget_stops_between_decisions_and_commits_and_keeps_completed_w
 
     // A lost acknowledgement reply on the slice path is reconciled from the durable checkpoint.
     corpus.decide(memory("x6", "Six."));
+    let prior = corpus.checkpoint().unwrap();
     let lost = corpus.faulted_slice(
         &mut progress,
         slice_bounds(8),
         EpisodeFault::LoseAcknowledgementReply,
     );
     assert!(
-        matches!(
-            lost.end,
-            MaterializationEnd::ReachedTarget | MaterializationEnd::Continues
-        ),
+        matches!(lost.end, MaterializationEnd::ReachedTarget),
         "{lost:?}"
     );
+    assert!(lost.acknowledged_through > prior);
     assert_eq!(corpus.checkpoint(), Some(lost.acknowledged_through));
-    let failed = {
-        corpus.decide(memory("x7", "Seven."));
-        corpus.faulted_slice(
-            &mut progress,
-            slice_bounds(8),
-            EpisodeFault::FailAcknowledgement,
-        )
-    };
+    assert!(corpus.live_objects().contains("x6"));
+    corpus.decide(memory("x7", "Seven."));
+    let held = corpus.checkpoint();
+    let failed = corpus.faulted_slice(
+        &mut progress,
+        slice_bounds(8),
+        EpisodeFault::FailAcknowledgement,
+    );
     assert!(
         matches!(
             failed.end,
             MaterializationEnd::Blocked(ClaimBlocked::AcknowledgementUnresolved { .. })
         ),
         "{failed:?}"
+    );
+    assert_eq!(
+        corpus.checkpoint(),
+        held,
+        "a failed acknowledgement moves nothing"
     );
 }
 
