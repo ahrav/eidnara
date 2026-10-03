@@ -266,6 +266,63 @@ pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytes
     Ok(codes)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum QueryRefusal {
+    #[error("the query is not a member of the generation: {0}")]
+    Row(#[from] RowRejection),
+    /// Every coordinate rounds to code zero under the layer's scales, so every quantized score is zero.
+    #[error("every coordinate of the query encodes to code zero")]
+    ZeroCodes,
+}
+
+/// A query encoded under one layer's scales. Its documents are that layer's codes, because scoring weights each product by those scales squared.
+#[derive(Clone, PartialEq)]
+pub struct QuantizedQuery<'s> {
+    scales: &'s Scales,
+    codes: Vec<i8>,
+}
+
+impl std::fmt::Debug for QuantizedQuery<'_> {
+    /// Codes derive from the query embedding, so diagnostics show only the dimension.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuantizedQuery")
+            .field("dimension", &self.codes.len())
+            .finish()
+    }
+}
+
+impl<'s> QuantizedQuery<'s> {
+    /// Validates `query` against `layout` and encodes it under `scales` exactly as a stored row is encoded, clipping included.
+    pub fn new(
+        layout: &RowLayout,
+        scales: &'s Scales,
+        query: &[f32],
+    ) -> Result<Self, QueryRefusal> {
+        layout.check()?;
+        if scales.scales.len() != layout.dimension as usize {
+            return Err(RowRejection::Dimension {
+                expected: layout.dimension,
+                actual: scales.scales.len(),
+            }
+            .into());
+        }
+        let Encoded { codes, .. } = encode(layout, scales, query)?;
+        if codes.iter().all(|code| *code == 0) {
+            return Err(QueryRefusal::ZeroCodes);
+        }
+        Ok(Self { scales, codes })
+    }
+
+    pub fn codes(&self) -> &[i8] {
+        &self.codes
+    }
+
+    /// [`weighted_dot`] of the query's codes with `doc`, a row of codes from the same layer.
+    pub fn score(&self, doc: &[i8]) -> f64 {
+        weighted_dot(self.scales, &self.codes, doc)
+    }
+}
+
 /// `sum_j (s_j * s_j) * (c_query_j * c_doc_j)` in f64, increasing coordinate order, starting at `+0.0`; the integer product is formed in i32 and lies in `[-16129, 16129]`.
 ///
 /// Inputs must not contain the reserved `-128`: it widens to a product outside the recipe's
