@@ -767,7 +767,7 @@ pub fn rank_compressed(
         }
         CompressedRefusal::Candidates(refusal)
     })?;
-    // A discarded pool holds no entry, so it is returned for its completion and nothing is read.
+    // An empty pool, discarded or with no eligible row, is returned for its completion and nothing is read.
     if pool.ranking.ranked.is_empty() {
         return Ok(CompressedRanking {
             pool,

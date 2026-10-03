@@ -531,7 +531,7 @@ Open questions:
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
 (`crates/daemon/src/query_route.rs:644`) only when `set_dense_vectors`
-(`query_route.rs:1727`) has installed a composition, and no production caller
+(`query_route.rs:1728`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -582,7 +582,7 @@ Exercised: yes - `crates/daemon/tests/dense_request_lifetime.rs`
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`.
 Guarantee: The dense unit owns a clone of the view's `Arc`, taken before the
-unit is submitted (`query_route.rs:1835`), so the view's pins and the
+unit is submitted (`query_route.rs:1836`), so the view's pins and the
 ranking's `Scratch` and `RowBuffers` reservations stay charged until the
 blocking work returns; a cancelled request settles only after that work ends,
 and every charge is released when it does.
@@ -705,3 +705,7 @@ Open questions:
   (needs human input).
 - A quarantined view keeps the lane unavailable until its owner uninstalls or
   replaces it with `set_dense_vectors`; nothing reinstalls a view on its own.
+- The handler reads route limits before the embedding wait and clones the
+  vectors after it, so a concurrent reinstallation can pair old limits with
+  new vectors; `CompressedProducer::rank` re-checks the pool and degrades the
+  lane as `capacity`, which no test constructs.

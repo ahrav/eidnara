@@ -649,7 +649,7 @@ impl DenseProducer for CompressedProducer {
         request: DenseRequest<'_>,
     ) -> Result<DenseRanking, DenseRefusal> {
         let vectors = &self.vectors;
-        // Installation checked the pool against the route's limits; a producer built outside the handler is checked here.
+        // Installation checked the pool against the route's limits; this check covers a producer built outside the handler and a request whose limits were read before a concurrent reinstallation.
         let capacity = vectors
             .limits
             .capacity(&self.limits)
@@ -1700,6 +1700,7 @@ fn unavailable_response(reason: &'static str) -> PreparedOutcome {
 }
 
 impl HandlerCore {
+    /// With dense vectors installed, the new limits must declare dense limits that serve them; uninstall the vectors first to remove dense limits.
     pub fn set_query_route_limits(
         &self,
         limits: Option<QueryRouteLimits>,
