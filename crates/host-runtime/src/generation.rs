@@ -286,7 +286,7 @@ pub struct ValidatedGeneration {
     pub digest: String,
     pub manifest: GenerationManifest,
     dir: OwnedFd,
-    /// The descriptors [`GenerationStore::validate_retaining`] hashed, one slot per manifest file in manifest order; empty after [`GenerationStore::validate`].
+    /// The descriptors [`GenerationStore::validate_streaming`] opened, one slot per manifest file in manifest order; empty after [`GenerationStore::validate`].
     retained: Vec<Retained>,
 }
 
@@ -296,7 +296,7 @@ struct Retained {
     streamed: bool,
 }
 
-/// Heap bytes a generation from [`GenerationStore::validate_retaining`] or [`GenerationStore::validate_streaming`] holds per manifest file for its retained descriptors.
+/// Heap bytes a generation from [`GenerationStore::validate_streaming`] holds per manifest file for its retained descriptors.
 pub const RETAINED_FILE_BYTES: usize = size_of::<Retained>();
 
 /// A generation [`GenerationStore::validate_streaming`] validated except the hashes of its streamed files. [`Self::finish`] checks those hashes and is the only way to the [`ValidatedGeneration`].
@@ -534,7 +534,7 @@ impl ValidatedGeneration {
         self.read_whole(fd, rel_path)
     }
 
-    /// The descriptor [`GenerationStore::validate_retaining`] hashed for `rel_path`, with its shape checked again; its bytes are not hashed a second time. Each descriptor is taken once; a path validation did not retain, or one already taken, opens through [`Self::open_verified_file`].
+    /// The descriptor [`GenerationStore::validate_streaming`] hashed for `rel_path`, with its shape checked again; its bytes are not hashed a second time. Each descriptor is taken once; a path validation did not retain, or one already taken, opens through [`Self::open_verified_file`].
     pub fn take_verified_file(&mut self, rel_path: &str) -> Result<OwnedFd, GenerationError> {
         let index = self
             .manifest
@@ -852,7 +852,7 @@ impl GenerationStore {
         self.validate_keeping(digest, false, &[])
     }
 
-    /// [`Self::validate_retaining`] that checks the shape of each file in `streamed` and leaves its hash to the [`StreamedFile`] the caller reads it through, so each byte is read once.
+    /// [`Self::validate`] that keeps open the descriptor it opened for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads a file without hashing it again. Each file in `streamed` has its shape checked and its hash left to the [`StreamedFile`] the caller reads it through, so each of its bytes is read once.
     pub fn validate_streaming(
         &self,
         digest: &str,
@@ -860,11 +860,6 @@ impl GenerationStore {
     ) -> Result<PendingGeneration, GenerationError> {
         let generation = self.validate_keeping(digest, true, streamed)?;
         Ok(PendingGeneration { generation })
-    }
-
-    /// [`Self::validate`] that keeps open the descriptor it hashed for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads the bytes validation hashed without hashing them again.
-    pub fn validate_retaining(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
-        self.validate_keeping(digest, true, &[])
     }
 
     fn validate_keeping(
@@ -3055,22 +3050,28 @@ mod tests {
         });
         let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
         let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let retained = || {
+            store
+                .validate_streaming(&digest, &[])
+                .and_then(|pending| pending.finish([]))
+                .unwrap()
+        };
 
-        let mut generation = store.validate_retaining(&digest).unwrap();
+        let mut generation = retained();
         assert_eq!(generation.take_verified_bytes("rows.f32").unwrap(), payload);
         // A second take opens and hashes the file afresh.
         assert_eq!(generation.take_verified_bytes("rows.f32").unwrap(), payload);
         assert!(generation.take_verified_file("missing").is_err());
 
         // The retained descriptor's shape is checked when it is taken, not only when it was hashed.
-        let mut generation = store.validate_retaining(&digest).unwrap();
+        let mut generation = retained();
         let codes = dir.join("codes.int8");
         std::fs::set_permissions(&codes, std::fs::Permissions::from_mode(0o640)).unwrap();
         assert!(generation.take_verified_file("codes.int8").is_err());
         std::fs::set_permissions(&codes, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         // A path renamed over after validation leaves the hashed inode unlinked, which the shape check refuses.
-        let mut generation = store.validate_retaining(&digest).unwrap();
+        let mut generation = retained();
         let replacement = dir.join("replacement");
         std::fs::write(&replacement, &payload).unwrap();
         std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -3078,7 +3079,7 @@ mod tests {
         assert!(generation.take_verified_file("rows.f32").is_err());
 
         // A file grown after validation diverges from its manifest size.
-        let mut generation = store.validate_retaining(&digest).unwrap();
+        let mut generation = retained();
         std::fs::OpenOptions::new()
             .append(true)
             .open(&codes)
