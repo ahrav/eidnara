@@ -4,6 +4,7 @@ import {
     parseCommitResponse,
     parseKernelResponse,
     parsePreviewResponse,
+    parseQueryResponse,
     parseReadResponse,
 } from "./wire";
 
@@ -390,5 +391,64 @@ describe("parsePreviewResponse", () => {
         const parsed = parsePreviewResponse({ state: { kind: "invalid", reason: "not_found" } });
         expect(parsed.state).toEqual({ kind: "invalid", reason: "not_found" });
         expect(parsed.payload).toBeNull();
+    });
+});
+
+describe("parseQueryResponse", () => {
+    const lanes = {
+        exact: { status: "complete" },
+        lexical: { status: "complete" },
+        dense: { status: "complete" },
+    };
+    function ranking(positions: number[]) {
+        return {
+            kind: "fused",
+            degraded: false,
+            truncated: false,
+            lanes,
+            entries: positions.map((position, index) => ({
+                occurrence_id: `occ-${index}`,
+                position,
+                score: 0.5,
+                lanes: { dense: { position, raw: 0.5 } },
+            })),
+        };
+    }
+
+    test("keeps the fused positions of survivors the daemon filtered around", () => {
+        const parsed = parseQueryResponse(ranking([2, 4, 5]));
+        expect(parsed.state).toEqual({ kind: "available" });
+        if (parsed.payload?.kind !== "fused") throw new Error("expected a fused ranking");
+        expect(parsed.payload.entries.map((entry) => entry.position)).toEqual([2, 4, 5]);
+    });
+
+    test("refuses positions that repeat, go backwards, or start below one", () => {
+        for (const positions of [[1, 1], [3, 2], [0]]) {
+            expect(parseQueryResponse(ranking(positions))).toEqual({
+                state: UNRECOGNIZED,
+                payload: null,
+            });
+        }
+    });
+
+    test("keeps a daemon state-only envelope's typed state", () => {
+        for (const state of [
+            { kind: "unavailable", reason: "store_starting" },
+            { kind: "unavailable", reason: "store_unsupported" },
+            { kind: "invalid", reason: "project_mismatch" },
+        ]) {
+            expect(parseQueryResponse({ state })).toEqual({ state, payload: null });
+        }
+    });
+
+    test("refuses an envelope whose state is malformed or claims availability without a ranking", () => {
+        expect(parseQueryResponse({ state: { kind: "unavailable", reason: "made_up" } })).toEqual({
+            state: UNRECOGNIZED,
+            payload: null,
+        });
+        expect(parseQueryResponse({ state: { kind: "available" } })).toEqual({
+            state: UNRECOGNIZED,
+            payload: null,
+        });
     });
 });

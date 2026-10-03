@@ -567,7 +567,7 @@ export class KernelClient {
         return this.transport.connectionIdentity?.();
     }
 
-    /** One `retrieval.query` ranking within the call's deadline, whose remainder rides as `remaining_ms` so the daemon stops at the same instant. A ranking has no side effects, so an ambiguous transport outcome reissues once. */
+    /** One `retrieval.query` ranking within the call's deadline. Each attempt floors the remaining monotonic budget to whole milliseconds for `remaining_ms`, which the daemon decodes as a `u64`. A ranking has no side effects, so an ambiguous transport outcome reissues once. */
     async query(args: QueryArgs): Promise<QueryResult> {
         const deadline = this.deadline(args);
         if (!(deadline instanceof Deadline)) return { state: deadline };
@@ -576,7 +576,7 @@ export class KernelClient {
             () =>
                 this.wireBody("retrieval.query", {
                     query: args.query,
-                    remaining_ms: Math.max(1, deadline.remainingMs()),
+                    remaining_ms: Math.max(1, Math.floor(deadline.remainingMs())),
                     destination: args.destination,
                 }),
             { signal: args.signal, deadline, reissuable: true },
