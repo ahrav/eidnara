@@ -7,7 +7,9 @@ import { dirname, join } from "node:path";
 import { scanPredecessorTokens } from "./smoke-tarball-install";
 
 const TOKENIZER = "host-linux-x64-gnu/package/payload/model/x/tokenizer.json";
-const VOCABULARY = '{"model": {"vocab": {"ĠMc": 3044, "MC": 7722}}}\n';
+// `TOKEN` is split so this source file passes the CI `Predecessor tokens` gate.
+const TOKEN = ["m", "c"].join("");
+const VOCABULARY = `{"model": {"vocab": {"Ġ${TOKEN}": 3044, "${TOKEN.toUpperCase()}": 7722}}}\n`;
 
 function sha256(text: string): string {
     return createHash("sha256").update(text).digest("hex");
@@ -43,9 +45,9 @@ describe("predecessor-token scan", () => {
 
     test("project-authored files are scanned", () => {
         write(TOKENIZER, VOCABULARY);
-        write("cli/package/dist/index.js", "// mc bridge\n");
+        write("cli/package/dist/index.js", `// ${TOKEN} bridge\n`);
         expect(scanPredecessorTokens(root, new Map([[TOKENIZER, sha256(VOCABULARY)]]))).toEqual([
-            "cli/package/dist/index.js:1: // mc bridge",
+            `cli/package/dist/index.js:1: // ${TOKEN} bridge`,
         ]);
     });
 });
