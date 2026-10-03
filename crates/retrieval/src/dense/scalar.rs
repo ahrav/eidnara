@@ -64,6 +64,8 @@ pub enum ScalarBytesRejection {
 #[derive(Clone, PartialEq)]
 pub struct Scales {
     scales: Vec<f32>,
+    /// `f64(s_j) * f64(s_j)`, the weight [`weighted_dot`] applies at coordinate `j`; squaring a widened f32 is exact in f64.
+    weights: Vec<f64>,
 }
 
 impl std::fmt::Debug for Scales {
@@ -90,7 +92,15 @@ impl Scales {
         {
             return Err(ScalarBytesRejection::NotPositiveFinite { coordinate });
         }
-        Ok(Self { scales })
+        Ok(Self::weighted(scales))
+    }
+
+    fn weighted(scales: Vec<f32>) -> Self {
+        let weights = scales
+            .iter()
+            .map(|scale| f64::from(*scale) * f64::from(*scale))
+            .collect();
+        Self { scales, weights }
     }
 
     pub fn as_slice(&self) -> &[f32] {
@@ -201,7 +211,7 @@ impl Calibrator {
             }
             scales.push(scale);
         }
-        let scales = Scales { scales };
+        let scales = Scales::weighted(scales);
         let identity = CalibrationIdentity {
             recipe: ScalarRecipe::SymmetricInt8V1,
             calibrated_rows: self.count,
@@ -340,7 +350,7 @@ impl<'s> QuantizedQuery<'s> {
 /// Panics on unequal lengths so a shape error can never become a silently truncated score.
 pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
     assert_eq!(
-        scales.scales.len(),
+        scales.weights.len(),
         query.len(),
         "codes of one calibration have one length"
     );
@@ -350,14 +360,13 @@ pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
         "codes of one calibration have one length"
     );
     let mut sum = 0.0f64;
-    for ((scale, q), d) in scales.scales.iter().zip(query).zip(doc) {
+    for ((weight, q), d) in scales.weights.iter().zip(query).zip(doc) {
         debug_assert!(
             *q != i8::MIN && *d != i8::MIN,
             "the reserved code -128 never reaches scoring"
         );
-        let weight = f64::from(*scale) * f64::from(*scale);
         let product = i32::from(*q) * i32::from(*d);
-        let term = weight * f64::from(product);
+        let term = *weight * f64::from(product);
         sum += term;
     }
     sum
