@@ -324,7 +324,7 @@
   },
   "model_lane": {
     "execution_provider": "cpu",
-    "id": "gte-modernbert-base-f16",
+    "id": "gte-modernbert-base-f32",
     "platforms": [
       "linux-x64-gnu"
     ],

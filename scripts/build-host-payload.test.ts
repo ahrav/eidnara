@@ -24,12 +24,15 @@ import {
     LAUNCHER_PATH,
     loadReleaseContext,
     MANIFEST_SCHEMA,
+    buildPayload,
     PAYLOAD_TARGET,
     type PayloadManifest,
     payloadManifestDigest,
     validatePayloadManifest,
     validatePayloadPackageDir,
+    verifyPayloadDir,
 } from "./build-host-payload";
+import { acquireInputs } from "./host-inputs";
 
 const rootDir = join(import.meta.dir, "..");
 const RUST_PARSER = "crates/daemon/src/bin/eidnara-host.rs";
@@ -94,19 +97,49 @@ function fakeAddonModule(
     return `module.exports = { buildProfile: () => ${JSON.stringify(profile)}, buildTarget: () => ${JSON.stringify(target)}${counter} };\n`;
 }
 
+/** A root with the committed release files, except that each lock input names a small local file, so payload builds run without the real model and runtime bytes. */
+async function fixtureRoot(dir: string): Promise<string> {
+    mkdirSync(join(dir, "packages"), { recursive: true });
+    mkdirSync(join(dir, "fixture-inputs"), { recursive: true });
+    cpSync(join(rootDir, "release"), join(dir, "release"), { recursive: true });
+    cpSync(join(rootDir, PAYLOAD_TARGET.dir), join(dir, PAYLOAD_TARGET.dir), {
+        recursive: true,
+    });
+    rmSync(join(dir, PAYLOAD_TARGET.dir, "payload"), { recursive: true, force: true });
+    rmSync(join(dir, PAYLOAD_TARGET.dir, "payload-manifest.json"), { force: true });
+    const lockPath = join(dir, "release/production-inputs.lock.json");
+    const lock = JSON.parse(readFileSync(lockPath, "utf8")) as {
+        inputs: Record<string, Record<string, unknown>>;
+    };
+    for (const [key, input] of Object.entries(lock.inputs)) {
+        const bytes = Buffer.from(`fixture ${key}\n`);
+        writeFileSync(join(dir, "fixture-inputs", key), bytes);
+        input.sha256 = sha256(bytes);
+        input.size_bytes = bytes.length;
+        input.source = `repo:fixture-inputs/${key}`;
+        delete input.archive;
+    }
+    writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+    await acquireInputs(dir, { inputsDir: join(dir, "target", "host-inputs") });
+    return dir;
+}
+
 describe("build-host-payload", () => {
     let tmp: string;
+    let fixture: string;
+    let lockSha256: string;
     let launcherPath: string;
     let releaseAddon: string;
     let debugAddon: string;
     let built: DevPayloadResult;
     const contractPath = join(rootDir, "release/host-release.json");
-    const lockSha256 = sha256(
-        readFileSync(join(rootDir, "release/production-inputs.lock.json")),
-    );
 
-    beforeAll(() => {
+    beforeAll(async () => {
         tmp = mkdtempSync(join(tmpdir(), "eidnara-payload-"));
+        fixture = await fixtureRoot(join(tmp, "fixture"));
+        lockSha256 = sha256(
+            readFileSync(join(fixture, "release/production-inputs.lock.json")),
+        );
         launcherPath = join(tmp, "eidnara-host");
         writeExecutable(
             launcherPath,
@@ -116,7 +149,7 @@ describe("build-host-payload", () => {
         writeFileSync(releaseAddon, fakeAddonModule("release", "linux-x86_64"));
         debugAddon = join(tmp, "debug-addon.cjs");
         writeFileSync(debugAddon, fakeAddonModule("debug", "linux-x86_64"));
-        built = buildDevPayload(rootDir, {
+        built = await buildDevPayload(fixture, {
             outDir: join(tmp, "out"),
             launcherPath,
             addonPath: releaseAddon,
@@ -127,7 +160,7 @@ describe("build-host-payload", () => {
         rmSync(tmp, { recursive: true, force: true });
     });
 
-    test("manifest key sets equal the daemon parser's struct fields", () => {
+    test("manifest key sets equal the daemon parser's struct fields", async () => {
         const source = readFileSync(join(rootDir, RUST_PARSER), "utf8");
         const { manifest } = built;
         expect(new Set(Object.keys(manifest))).toEqual(
@@ -151,21 +184,21 @@ describe("build-host-payload", () => {
         expect(schemaLiteral?.[1]).toBe(MANIFEST_SCHEMA);
     });
 
-    test("digests recompute from the committed release files", () => {
+    test("digests recompute from the release files", async () => {
         const contractBytes = readFileSync(
-            join(rootDir, "release/host-release.json"),
+            join(fixture, "release/host-release.json"),
         );
         const trimmed =
             contractBytes.at(-1) === 0x0a
                 ? contractBytes.subarray(0, -1)
                 : contractBytes;
         const lockBytes = readFileSync(
-            join(rootDir, "release/production-inputs.lock.json"),
+            join(fixture, "release/production-inputs.lock.json"),
         );
         const lock = JSON.parse(lockBytes.toString("utf8")) as {
             release_contract_sha256: string;
         };
-        const context = loadReleaseContext(rootDir);
+        const context = loadReleaseContext(fixture);
         expect(context.contractSha256).toBe(sha256(trimmed));
         expect(context.contractSha256).toBe(lock.release_contract_sha256);
         expect(context.lockSha256).toBe(sha256(lockBytes));
@@ -177,7 +210,7 @@ describe("build-host-payload", () => {
         );
     });
 
-    test("dev manifest shape: sorted files, modes, literals", () => {
+    test("dev manifest shape: sorted files, modes, literals", async () => {
         const { manifest, outDir } = built;
         const paths = manifest.files.map((entry) => entry.path);
         for (let i = 1; i < paths.length; i += 1) {
@@ -201,8 +234,8 @@ describe("build-host-payload", () => {
         expect(built.addonSha256).toBe(sha256(readFileSync(releaseAddon)));
     });
 
-    test("validator rejects malformed manifests", () => {
-        const context = loadReleaseContext(rootDir);
+    test("validator rejects malformed manifests", async () => {
+        const context = loadReleaseContext(fixture);
         const valid = built.manifest;
         expect(() => validatePayloadManifest(valid, context)).not.toThrow();
 
@@ -252,42 +285,97 @@ describe("build-host-payload", () => {
         );
     });
 
-    test("debug-profile addon is refused", () => {
-        expect(() =>
-            buildDevPayload(rootDir, {
+    test("development and production builds stage every locked input at its locked bytes", async () => {
+        const context = loadReleaseContext(fixture);
+        const production = await buildPayload(fixture, "production", {
+            outDir: join(tmp, "out-production"),
+            launcherPath,
+            addonPath: releaseAddon,
+        });
+        expect(production.manifest.mode).toBe("production");
+        for (const result of [built, production]) {
+            for (const input of context.inputs) {
+                const entry = result.manifest.files.find((file) => file.path === input.payload_path);
+                expect(entry).toEqual({
+                    path: input.payload_path,
+                    type: "file",
+                    size: input.size_bytes,
+                    mode: "644",
+                    sha256: input.sha256,
+                });
+                expect(sha256(readFileSync(join(result.outDir, input.payload_path)))).toBe(input.sha256);
+            }
+        }
+        const stripped = (result: DevPayloadResult) =>
+            result.manifest.files.filter((file) => file.path !== LAUNCHER_PATH);
+        expect(stripped(production)).toEqual(stripped(built));
+    });
+
+    test("a manifest that omits or alters a locked input is refused", async () => {
+        const context = loadReleaseContext(fixture);
+        const input = context.inputs[0]!;
+        const omitted = cloneManifest(built.manifest);
+        omitted.files = omitted.files.filter((file) => file.path !== input.payload_path);
+        expect(() => validatePayloadManifest(omitted, context)).toThrow(/locked input/);
+        const altered = cloneManifest(built.manifest);
+        for (const file of altered.files) {
+            if (file.path === input.payload_path) file.sha256 = "0".repeat(64);
+        }
+        expect(() => validatePayloadManifest(altered, context)).toThrow(/locked input/);
+    });
+
+    test("a missing or wrong cache entry refuses the build before the output tree changes", async () => {
+        const context = loadReleaseContext(fixture);
+        const input = context.inputs[0]!;
+        const cache = join(tmp, "cache-wrong");
+        cpSync(join(fixture, "target", "host-inputs"), cache, { recursive: true });
+        writeFileSync(join(cache, input.sha256), "wrong same-name bytes");
+        await expect(
+            buildDevPayload(fixture, { outDir: built.outDir, launcherPath, addonPath: releaseAddon, inputsDir: cache }),
+        ).rejects.toThrow(/cache entry/);
+        rmSync(join(cache, input.sha256));
+        await expect(
+            buildDevPayload(fixture, { outDir: built.outDir, launcherPath, addonPath: releaseAddon, inputsDir: cache }),
+        ).rejects.toThrow(/is missing/);
+        expect(() => verifyPayloadDir(built.outDir, built.manifest)).not.toThrow();
+    });
+
+    test("debug-profile addon is refused", async () => {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-debug"),
                 launcherPath,
                 addonPath: debugAddon,
             }),
-        ).toThrow(/release-profile addon/);
+        ).rejects.toThrow(/release-profile addon/);
     });
 
-    test("an addon built for another native target is refused", () => {
+    test("an addon built for another native target is refused", async () => {
         const foreignAddon = join(tmp, "foreign-addon.cjs");
         writeFileSync(foreignAddon, fakeAddonModule("release", "darwin-arm64"));
-        expect(() =>
-            buildDevPayload(rootDir, {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-foreign"),
                 launcherPath,
                 addonPath: foreignAddon,
             }),
-        ).toThrow(/linux-x86_64 addon; .* reports darwin-arm64/);
+        ).rejects.toThrow(/linux-x86_64 addon; .* reports darwin-arm64/);
     });
 
-    test("an addon without the estimateTokens export is refused", () => {
+    test("an addon without the estimateTokens export is refused", async () => {
         const stale = join(tmp, "stale-addon.cjs");
         writeFileSync(stale, fakeAddonModule("release", "linux-x86_64", null));
-        expect(() =>
-            buildDevPayload(rootDir, {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-stale"),
                 launcherPath,
                 addonPath: stale,
             }),
-        ).toThrow(/estimateTokens/);
+        ).rejects.toThrow(/estimateTokens/);
         expect(existsSync(join(tmp, "out-stale", "payload"))).toBe(false);
     });
 
-    test("an estimateTokens export that cannot count a probe string is refused", () => {
+    test("an estimateTokens export that cannot count a probe string is refused", async () => {
         for (const [name, body] of [
             ["zero", "() => 0"],
             ["fraction", "() => 1.5"],
@@ -296,23 +384,22 @@ describe("build-host-payload", () => {
         ] as const) {
             const broken = join(tmp, `broken-${name}-addon.cjs`);
             writeFileSync(broken, fakeAddonModule("release", "linux-x86_64", body));
-            expect(
-                () =>
-                    buildDevPayload(rootDir, {
-                        outDir: join(tmp, `out-broken-${name}`),
-                        launcherPath,
-                        addonPath: broken,
-                    }),
+            await expect(
+                buildDevPayload(fixture, {
+                    outDir: join(tmp, `out-broken-${name}`),
+                    launcherPath,
+                    addonPath: broken,
+                }),
                 name,
-            ).toThrow(/estimateTokens/);
+            ).rejects.toThrow(/estimateTokens/);
         }
     });
 
-    test("relative launcher, addon, and out paths resolve against the working directory", () => {
+    test("relative launcher, addon, and out paths resolve against the working directory", async () => {
         const previousCwd = process.cwd();
         process.chdir(tmp);
         try {
-            const result = buildDevPayload(rootDir, {
+            const result = await buildDevPayload(fixture, {
                 outDir: "out-relative",
                 launcherPath: "./eidnara-host",
                 addonPath: "./release-addon.cjs",
@@ -324,30 +411,23 @@ describe("build-host-payload", () => {
         }
     });
 
-    /** Copies the release files and the payload package into a fresh root under `tmp`. */
+    /** Copies the fixture root's release files, inputs, and payload package into a fresh root under `tmp`. */
     function shadowRoot(name: string): { shadow: string; packageDir: string } {
         const shadow = join(tmp, name);
         mkdirSync(join(shadow, "packages"), { recursive: true });
-        cpSync(join(rootDir, "release"), join(shadow, "release"), {
-            recursive: true,
-        });
-        cpSync(
-            join(rootDir, PAYLOAD_TARGET.dir),
-            join(shadow, PAYLOAD_TARGET.dir),
-            {
-                recursive: true,
-            },
-        );
+        for (const dir of ["release", "fixture-inputs", "target", PAYLOAD_TARGET.dir]) {
+            cpSync(join(fixture, dir), join(shadow, dir), { recursive: true });
+        }
         return { shadow, packageDir: join(shadow, PAYLOAD_TARGET.dir) };
     }
 
     /** A shadow root whose payload package has a dev payload staged into it. */
-    function stagedShadow(name: string): {
+    async function stagedShadow(name: string): Promise<{
         shadow: string;
         packageDir: string;
-    } {
+    }> {
         const root = shadowRoot(name);
-        buildDevPayload(root.shadow, {
+        await buildDevPayload(root.shadow, {
             outDir: root.packageDir,
             launcherPath,
             addonPath: releaseAddon,
@@ -356,7 +436,7 @@ describe("build-host-payload", () => {
         return root;
     }
 
-    test("validatePayloadPackageDir accepts the committed package and rejects extra files", () => {
+    test("validatePayloadPackageDir accepts the committed package and rejects extra files", async () => {
         expect(() => validatePayloadPackageDir(rootDir)).not.toThrow();
 
         const { shadow, packageDir } = shadowRoot("shadow-root");
@@ -369,13 +449,13 @@ describe("build-host-payload", () => {
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/files/);
     }, 30_000);
 
-    test("a staged package with a stale manifest fails the package check", () => {
-        const { shadow, packageDir } = stagedShadow("shadow-staged");
+    test("a staged package with a stale manifest fails the package check", async () => {
+        const { shadow, packageDir } = await stagedShadow("shadow-staged");
         chmodSync(join(packageDir, LAUNCHER_PATH), 0o644);
         expect(() => validatePayloadPackageDir(shadow)).toThrow(/mode drift/);
     });
 
-    test("the default launcher is target/debug only; a release-only tree is refused", () => {
+    test("the default launcher is target/debug only; a release-only tree is refused", async () => {
         const { shadow } = shadowRoot("shadow-launcher");
         const releaseOnly = join(shadow, "target", "release", "eidnara-host");
         mkdirSync(join(shadow, "target", "release"), { recursive: true });
@@ -383,12 +463,12 @@ describe("build-host-payload", () => {
             releaseOnly,
             fakeLauncherScript(contractPath, lockSha256),
         );
-        expect(() =>
+        await expect(
             buildDevPayload(shadow, {
                 outDir: join(tmp, "out-launcher"),
                 addonPath: releaseAddon,
             }),
-        ).toThrow(/no locally compiled debug eidnara-host/);
+        ).rejects.toThrow(/no locally compiled debug eidnara-host/);
 
         const debug = join(shadow, "target", "debug", "eidnara-host");
         mkdirSync(join(shadow, "target", "debug"), { recursive: true });
@@ -396,14 +476,14 @@ describe("build-host-payload", () => {
             debug,
             `${fakeLauncherScript(contractPath, lockSha256)}# debug\n`,
         );
-        const result = buildDevPayload(shadow, {
+        const result = await buildDevPayload(shadow, {
             outDir: join(tmp, "out-launcher"),
             addonPath: releaseAddon,
         });
         expect(result.launcherSha256).toBe(sha256(readFileSync(debug)));
     });
 
-    test("a launcher built from a different release contract or lock is refused", () => {
+    test("a launcher built from a different release contract or lock is refused", async () => {
         const staleContract = join(tmp, "stale-host-release.json");
         writeFileSync(staleContract, '{"stale":true}\n');
         const staleLauncher = join(tmp, "stale-eidnara-host");
@@ -411,53 +491,53 @@ describe("build-host-payload", () => {
             staleLauncher,
             fakeLauncherScript(staleContract, lockSha256),
         );
-        expect(() =>
-            buildDevPayload(rootDir, {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-stale"),
                 launcherPath: staleLauncher,
                 addonPath: releaseAddon,
             }),
-        ).toThrow(/different release\/host-release.json/);
+        ).rejects.toThrow(/different release\/host-release.json/);
 
         const staleLock = join(tmp, "stale-lock-eidnara-host");
         writeExecutable(
             staleLock,
             fakeLauncherScript(contractPath, "0".repeat(64)),
         );
-        expect(() =>
-            buildDevPayload(rootDir, {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-stale-lock"),
                 launcherPath: staleLock,
                 addonPath: releaseAddon,
             }),
-        ).toThrow(/different release\/production-inputs.lock.json/);
+        ).rejects.toThrow(/different release\/production-inputs.lock.json/);
     });
 
-    test("a launcher that cannot answer release-info is refused", () => {
+    test("a launcher that cannot answer release-info is refused", async () => {
         const foreign = join(tmp, "foreign-eidnara-host");
         writeExecutable(
             foreign,
             "#!/bin/sh\necho not eidnara-host >&2\nexit 1\n",
         );
-        expect(() =>
-            buildDevPayload(rootDir, {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-foreign-launcher"),
                 launcherPath: foreign,
                 addonPath: releaseAddon,
             }),
-        ).toThrow(/failed `release-info`: not eidnara-host/);
+        ).rejects.toThrow(/failed `release-info`: not eidnara-host/);
     });
 
-    test("a staged payload tree without a manifest fails the package check", () => {
-        const { shadow, packageDir } = stagedShadow("shadow-orphan");
+    test("a staged payload tree without a manifest fails the package check", async () => {
+        const { shadow, packageDir } = await stagedShadow("shadow-orphan");
         rmSync(join(packageDir, "payload-manifest.json"));
         expect(() => validatePayloadPackageDir(shadow)).toThrow(
             /manifest.json is missing/,
         );
     });
 
-    test("a symlinked payload root fails the package check", () => {
-        const { shadow, packageDir } = stagedShadow("shadow-symlink");
+    test("a symlinked payload root fails the package check", async () => {
+        const { shadow, packageDir } = await stagedShadow("shadow-symlink");
         const outside = join(tmp, "outside-payload");
         renameSync(join(packageDir, "payload"), outside);
         symlinkSync(outside, join(packageDir, "payload"));
@@ -466,8 +546,8 @@ describe("build-host-payload", () => {
         );
     });
 
-    test("a symlinked manifest fails the package check", () => {
-        const { shadow, packageDir } = stagedShadow("shadow-manifest-symlink");
+    test("a symlinked manifest fails the package check", async () => {
+        const { shadow, packageDir } = await stagedShadow("shadow-manifest-symlink");
         const outside = join(tmp, "outside-manifest.json");
         renameSync(join(packageDir, "payload-manifest.json"), outside);
         symlinkSync(outside, join(packageDir, "payload-manifest.json"));
@@ -476,7 +556,7 @@ describe("build-host-payload", () => {
         );
     });
 
-    test("a symlinked package.json fails the package check", () => {
+    test("a symlinked package.json fails the package check", async () => {
         const { shadow, packageDir } = shadowRoot("shadow-package-symlink");
         const outside = join(tmp, "outside-package.json");
         renameSync(join(packageDir, "package.json"), outside);
@@ -486,19 +566,19 @@ describe("build-host-payload", () => {
         );
     });
 
-    test("a source that is not a regular file is refused before it is read", () => {
+    test("a source that is not a regular file is refused before it is read", async () => {
         const fifo = join(tmp, "addon.fifo");
         expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
-        expect(() =>
-            buildDevPayload(rootDir, {
+        await expect(
+            buildDevPayload(fixture, {
                 outDir: join(tmp, "out-fifo"),
                 launcherPath,
                 addonPath: fifo,
             }),
-        ).toThrow(/addon source must be a regular file/);
+        ).rejects.toThrow(/addon source must be a regular file/);
     });
 
-    test("the CLI refuses a flag where a path value is expected", () => {
+    test("the CLI refuses a flag where a path value is expected", async () => {
         const script = join(rootDir, "scripts", "build-host-payload.ts");
         const run = Bun.spawnSync(
             ["bun", script, "--dev", "--out", "--check"],
@@ -513,7 +593,7 @@ describe("build-host-payload", () => {
         expect(existsSync(join(tmp, "--check"))).toBe(false);
     });
 
-    test("the CLI accepts only native addon files for --addon", () => {
+    test("the CLI accepts only native addon files for --addon", async () => {
         const script = join(rootDir, "scripts", "build-host-payload.ts");
         const run = Bun.spawnSync(
             [
@@ -534,7 +614,7 @@ describe("build-host-payload", () => {
         expect(existsSync(join(tmp, "out-cjs"))).toBe(false);
     });
 
-    test("payloadManifestDigest equals the digest of the written file minus its newline", () => {
+    test("payloadManifestDigest equals the digest of the written file minus its newline", async () => {
         const bytes = readFileSync(built.manifestPath);
         expect(bytes.at(-1)).toBe(0x0a);
         expect(built.digest).toBe(sha256(bytes.subarray(0, -1)));

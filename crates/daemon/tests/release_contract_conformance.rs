@@ -493,3 +493,86 @@ fn published_closure_manifest_schema_matches_the_runtime_types() {
         "published dependency kinds must equal DependencyKind's serialized variants"
     );
 }
+
+/// The committed f32 bundle manifest and corpus are the bytes the lock pins, and the
+/// manifest's fingerprint is the canonical embedding-space fingerprint over them. The
+/// literals restate the approved artifact identities independently of the lock.
+#[test]
+fn committed_f32_bundle_matches_the_approved_identities_and_the_lock() {
+    use host_runtime::local_embeddings::bundle::{BundleManifest, canonical_fingerprint};
+    use sha2::Digest as _;
+
+    let sha256 = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+    let bundle_dir = format!(
+        "{}/../../release/local-embeddings/gte-modernbert-base-f32",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let corpus = std::fs::read(format!("{bundle_dir}/corpus.json")).expect("corpus");
+    assert_eq!(corpus.len(), 49_056);
+    assert_eq!(
+        sha256(&corpus),
+        "df864f8a8ab3c914b9be5dbd340f9a1f83061b75a0a735845babdeb9db5e266d"
+    );
+    let manifest_bytes = std::fs::read(format!("{bundle_dir}/manifest.json")).expect("manifest");
+    let manifest: BundleManifest =
+        serde_json::from_slice(&manifest_bytes).expect("manifest parses");
+    assert_eq!(manifest.model, "gte-modernbert-base-f32");
+    assert_eq!(
+        manifest.model_file.sha256,
+        "947f31df7effaeec4edb57c50e4ed7e0f2034d9336063f92615b92e3e0d24d78"
+    );
+    assert_eq!(manifest.corpus.sha256, sha256(&corpus));
+    assert_eq!(manifest.fingerprint, canonical_fingerprint(&manifest));
+
+    let lock: serde_json::Value =
+        serde_json::from_str(daemon::production_inputs::PRODUCTION_INPUTS_LOCK_JSON)
+            .expect("production inputs lock parses");
+    let inputs = &lock["inputs"];
+    let pinned = |key: &str| {
+        (
+            inputs[key]["sha256"].as_str().expect("sha256").to_owned(),
+            inputs[key]["size_bytes"].as_u64().expect("size"),
+        )
+    };
+    assert_eq!(
+        pinned("bundle_manifest"),
+        (sha256(&manifest_bytes), manifest_bytes.len() as u64)
+    );
+    assert_eq!(pinned("corpus"), (sha256(&corpus), corpus.len() as u64));
+    assert_eq!(
+        pinned("model_onnx"),
+        (manifest.model_file.sha256.clone(), 596_392_315)
+    );
+    for (key, artifact) in [
+        ("tokenizer", &manifest.tokenizer.tokenizer),
+        ("config", &manifest.tokenizer.config),
+        ("special_tokens_map", &manifest.tokenizer.special_tokens_map),
+        ("tokenizer_config", &manifest.tokenizer.tokenizer_config),
+    ] {
+        assert_eq!(pinned(key).0, artifact.sha256, "{key} digest");
+        assert_eq!(
+            inputs[key]["payload_path"].as_str(),
+            Some(format!("payload/model/gte-modernbert-base-f32/{}", artifact.name).as_str())
+        );
+    }
+    assert_eq!(
+        pinned("ort_runtime"),
+        (
+            "ffc84d48e845cf0b562ba4ea5ca32aaafc0d4069019fef4f63095b307d0270ad".to_owned(),
+            22_065_056
+        )
+    );
+    assert_eq!(
+        inputs["ort_runtime"]["archive"],
+        serde_json::json!({
+            "member": "onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so.1.24.2",
+            "sha256": "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6",
+            "size_bytes": 8_123_282
+        })
+    );
+    assert_eq!(lock["model_lane"]["id"], "gte-modernbert-base-f32");
+    assert_eq!(
+        lock["package_size_limits_bytes"]["@eidnara/host-linux-x64-gnu"]["unpacked_max"],
+        900 * 1024 * 1024
+    );
+}

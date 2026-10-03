@@ -50,9 +50,8 @@ export interface PreparedManagedLaunchTarget {
     retained: RetainedBootstrap;
     /**
      * The digest the daemon's `--payload-manifest-digest` argument carries.
-     * A development-mode payload carries none: the daemon's trusted path
-     * accepts only `mode: "production"`, and its unqualified path (debug
-     * builds only) walks the payload directory without a manifest.
+     * Every installed payload stages through the daemon's trusted path, which
+     * accepts `mode: "production"` and, in debug builds, `mode: "development"`.
      */
     payloadManifestDigest: string | undefined;
     payloadDir?: string;
@@ -374,10 +373,9 @@ function verifyPackage(packageDir: string, target: PayloadTarget): VerifiedPaylo
     return {
         payloadDir: packageDir,
         launcherPath: join(packageDir, LAUNCHER_REL_PATH),
-        payloadManifestDigest:
-            manifest.mode === "production"
-                ? sha256(manifestBytes.subarray(0, manifestBytes.length - trailingNewline))
-                : undefined,
+        payloadManifestDigest: sha256(
+            manifestBytes.subarray(0, manifestBytes.length - trailingNewline),
+        ),
         launcherDigest: launcher.sha256,
     };
 }

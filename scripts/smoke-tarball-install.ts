@@ -8,9 +8,13 @@ import {
     statSync,
     writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { canonicalJson } from "./build-host-payload";
+import { lockedInputs } from "./host-inputs";
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.1.0";
@@ -22,11 +26,15 @@ const PACKAGE_DIRS: Record<string, string> = {
     "@eidnara/cli": "packages/cli",
     [PAYLOAD_PACKAGE]: "packages/host-linux-x64-gnu",
 };
+const ORT_LIBRARY = "payload/ort/libonnxruntime.so";
 const PAYLOAD_FILES = [
     "payload-manifest.json",
     "payload/bin/eidnara-host",
     "payload/native/shm_native.node",
+    ...lockedInputs(rootDir).map((input) => input.payload_path),
 ];
+/** Certification of the real model runs after publication; the lane reports `starting` until it settles. */
+const LANE_SETTLE_TIMEOUT_MS = 900_000;
 /** Packages an operator installs directly. */
 const PARENT_PACKAGES = ["@eidnara/opencode", "@eidnara/pi", "@eidnara/cli"];
 /** The `@eidnara/*` edges each packed manifest must declare, all pinned to VERSION. */
@@ -449,6 +457,55 @@ function assertDaemon(
     );
 }
 
+interface LaneObservation {
+    status: Record<string, unknown>;
+    doctor: Record<string, unknown>;
+    state: unknown;
+    reason: unknown;
+    check: Record<string, unknown> | undefined;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : undefined;
+}
+
+/** Polls `daemon status` until the embedding lane leaves `starting`, then reads `daemon doctor` once. */
+function settledLane(cli: string, project: string): LaneObservation {
+    const deadline = Date.now() + LANE_SETTLE_TIMEOUT_MS;
+    for (;;) {
+        const status = daemon(cli, project, "status").parsed;
+        const lane = record(record(status.readiness)?.local_embeddings);
+        if (lane?.state !== "starting" || Date.now() > deadline) {
+            const doctor = daemon(cli, project, "doctor").parsed;
+            const checks = Array.isArray(doctor.checks) ? doctor.checks : [];
+            const check = checks
+                .map(record)
+                .find((candidate) => candidate?.id === "readiness.local_embeddings");
+            return { status, doctor, state: lane?.state, reason: lane?.reason, check };
+        }
+        Bun.sleepSync(1000);
+    }
+}
+
+/** Replaces the installed ORT library with other ELF bytes and rewrites the payload manifest to match, so payload validation passes and component initialization fails. */
+function breakInstalledRuntime(installedPayload: string): void {
+    const broken = readFileSync(join(installedPayload, "payload/native/shm_native.node"));
+    writeFileSync(join(installedPayload, ORT_LIBRARY), broken);
+    const manifestPath = join(installedPayload, "payload-manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        files: { path: string; size: number; sha256: string }[];
+    };
+    for (const entry of manifest.files) {
+        if (entry.path === ORT_LIBRARY) {
+            entry.size = broken.length;
+            entry.sha256 = createHash("sha256").update(broken).digest("hex");
+        }
+    }
+    writeFileSync(manifestPath, `${canonicalJson(manifest)}\n`);
+}
+
 function main(): void {
     const keep = process.argv.includes("--keep");
     const payloadDir = join(rootDir, PACKAGE_DIRS[PAYLOAD_PACKAGE] ?? "");
@@ -686,6 +743,14 @@ function main(): void {
             state: "running",
             command: "status",
         });
+        const ready = settledLane(cli, project);
+        assert(
+            ready.state === "ready" &&
+                ready.reason === "healthy" &&
+                ready.check?.status === "pass",
+            "the installed payload's embedding lane reports ready in daemon status and passes daemon doctor",
+            JSON.stringify({ status: ready.status.readiness, check: ready.check }),
+        );
         // The shipped review commands reach the running daemon through the
         // installed transport.
         const reviewStatus = run([cli, "review", "status", "--json"], {
@@ -740,6 +805,24 @@ function main(): void {
             state: "stopped",
             reason: "not_running",
         });
+
+        breakInstalledRuntime(installedPayload);
+        stopped = false;
+        const restart = daemon(cli, project, "start", START_TIMEOUT_MS);
+        assertDaemon("start with an ORT library that fails to initialize", restart, 0, {
+            ok: true,
+            state: "running",
+        });
+        const degraded = settledLane(cli, project);
+        assert(
+            degraded.state === "degraded" &&
+                degraded.reason === "local_embeddings_degraded" &&
+                degraded.check?.status === "fail" &&
+                degraded.check?.reason === "local_embeddings_degraded",
+            "a validated payload whose embedding component fails reports degraded in daemon status and daemon doctor",
+            JSON.stringify({ status: degraded.status.readiness, check: degraded.check }),
+        );
+        stopped = daemon(cli, project, "stop").result.code === 0;
     } finally {
         if (startAttempted && !stopped)
             run([cli, "daemon", "stop", "--json"], { cwd: project });

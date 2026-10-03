@@ -1226,7 +1226,9 @@ fn trusted_payload_sources(
         || manifest.release.id != "eidnara-host-release"
         || manifest.release.version != release_contract::RELEASE_VERSION
         || manifest.release_contract_sha256 != release_contract::release_contract_sha256()
-        || manifest.mode != "production"
+        // A development manifest carries the debug launcher, so only a debug build stages one.
+        || !(manifest.mode == "production"
+            || (manifest.mode == "development" && cfg!(debug_assertions)))
         || manifest.package.name != expected_package
         || manifest.package.version != release_contract::RELEASE_VERSION
         || manifest.package.target != target
@@ -2403,6 +2405,54 @@ mod tests {
             result,
             Err(GenerationError::NativePayloadInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn a_development_manifest_is_trusted_only_by_a_debug_build() {
+        let Some("linux-x64-gnu") = build_target() else {
+            return;
+        };
+        let payload = tempfile::tempdir().expect("payload");
+        let launcher_path = payload.path().join("payload/bin/eidnara-host");
+        std::fs::create_dir_all(launcher_path.parent().expect("launcher parent")).expect("mkdir");
+        std::fs::write(&launcher_path, b"launcher").expect("launcher");
+        let hash = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+        for (mode, trusted) in [
+            ("development", cfg!(debug_assertions)),
+            ("production", true),
+            ("other", false),
+        ] {
+            let manifest = serde_json::json!({
+                "schema": PAYLOAD_MANIFEST_SCHEMA,
+                "release": {"id": "eidnara-host-release", "version": release_contract::RELEASE_VERSION},
+                "release_contract_sha256": release_contract::release_contract_sha256(),
+                "production_inputs_lock_sha256":
+                    daemon::production_inputs::production_inputs_lock_sha256(),
+                "mode": mode,
+                "package": {
+                    "name": "@eidnara/host-linux-x64-gnu",
+                    "version": release_contract::RELEASE_VERSION,
+                    "target": "linux-x64-gnu"
+                },
+                "platform_floor": {"kernel_min": "4.18", "glibc_min": "2.28"},
+                "local_embeddings": "certified_cpu",
+                "launcher": "payload/bin/eidnara-host",
+                "files": [{
+                    "path": "payload/bin/eidnara-host",
+                    "type": "file",
+                    "size": 8,
+                    "mode": "755",
+                    "sha256": hash(b"launcher")
+                }]
+            });
+            let bytes = serde_json::to_vec(&manifest).expect("manifest");
+            std::fs::write(payload.path().join("payload-manifest.json"), &bytes).expect("write");
+            assert_eq!(
+                trusted_payload_sources(payload.path(), &hash(&bytes)).is_ok(),
+                trusted,
+                "mode {mode}"
+            );
+        }
     }
 
     #[test]

@@ -705,7 +705,7 @@ async fn production_bundle_from_environment_certifies_offline() {
         LocalEmbeddingsStatus::Ready(lane) => lane,
         other => panic!("production bundle did not certify: {other:?}"),
     };
-    assert_eq!(lane.model, "gte-modernbert-base-f16");
+    assert_eq!(lane.model, "gte-modernbert-base-f32");
     assert_eq!(lane.dims, 768);
     assert_eq!(lane.table_epoch, 1);
 

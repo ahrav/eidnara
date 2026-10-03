@@ -5,10 +5,13 @@ Third-party notices for @eidnara/host-linux-x64-gnu
 - ONNX Runtime (CPU shared library, payload/ort/) — MIT.
   Copyright (c) Microsoft Corporation.
   https://github.com/microsoft/onnxruntime/blob/main/LICENSE
-- gte-modernbert-base-f16 model, tokenizer, and configuration files
-  (payload/model/gte-modernbert-base-f16/) — Apache-2.0.
+- gte-modernbert-base f32 ONNX model, tokenizer, and configuration files
+  (payload/model/gte-modernbert-base-f32/) — Apache-2.0.
   https://huggingface.co/Alibaba-NLP/gte-modernbert-base
+- The bundle manifest and certification corpus
+  (release/local-embeddings/gte-modernbert-base-f32/) — MIT, this repository.
 
 The ONNX Runtime and model slots are populated only from inputs recorded in
-release/production-inputs.lock.json. No third-party bytes are committed to
-this repository.
+release/production-inputs.lock.json. The repository commits only the
+project-authored bundle manifest and corpus; every third-party byte is fetched
+and verified against the lock.
