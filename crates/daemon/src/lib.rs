@@ -40980,12 +40980,21 @@ mod tests {
 
     async fn fire_and_settle(handler: &Handler, store: &MemoryStore, messages: &[IngressMessage]) {
         loop {
-            if store.load("ses").is_ok() {
-                expire_history_summarizer_backoff(store);
-            }
+            let firing_seq = match store.load("ses") {
+                Ok(loaded) => {
+                    expire_history_summarizer_backoff(store);
+                    loaded.meta.history_summarizer.firing_seq
+                }
+                Err(_) => 0,
+            };
             let response = call_transform(handler, messages.to_vec()).await;
             if response["history_summarizer"]["fired"] == true {
-                wait_for_idle(store).await;
+                // The spawned firing persists its fired state after the response, so the
+                // settled row is the one whose sequence advanced and returned to idle.
+                wait_for_history_summarizer_state(store, |state| {
+                    state.firing_seq > firing_seq && state.state == HistorySummarizerPhase::Idle
+                })
+                .await;
                 return;
             }
             assert_eq!(
