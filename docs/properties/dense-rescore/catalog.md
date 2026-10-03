@@ -171,7 +171,7 @@ unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
 size, and the candidate scan sizes its pool from it
-(`crates/retrieval/src/dense/candidates.rs:252`).
+(`crates/retrieval/src/dense/candidates.rs:253`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -222,7 +222,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:191`) has no production caller at
+(`crates/retrieval/src/dense/candidates.rs:192`) has no production caller at
 this base; #613 connects it to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`

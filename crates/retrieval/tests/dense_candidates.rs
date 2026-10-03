@@ -199,6 +199,14 @@ fn assert_aligned(coded: &[Coded], pool: &CandidatePool) {
     }
 }
 
+/// A discarded pool keeps no row, no candidate, no winner, and no authority stamp.
+fn assert_discarded(pool: &CandidatePool) {
+    assert!(pool.ranking.ranked.is_empty());
+    assert!(pool.ranking.candidates.is_empty());
+    assert!(pool.winners.is_empty());
+    assert!(pool.ranking.snapshot.is_none() && pool.ranking.incarnation.is_none());
+}
+
 /// Corpus objects with a vector, each at its row in the base layer.
 fn base_positions(fixture: &Fixture, base: &Coded) -> BTreeMap<&'static str, (usize, usize)> {
     OBJECTS
@@ -433,7 +441,7 @@ fn a_kernel_change_between_batches_discards_the_pool() {
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::SnapshotChanged)
     );
-    assert!(pool.ranking.ranked.is_empty() && pool.winners.is_empty());
+    assert_discarded(&pool);
 
     let manifest = fixture.backup();
     let pool = select(&fixture, &layers, &codes, &query, 8, roomy(2), |window| {
@@ -446,7 +454,7 @@ fn a_kernel_change_between_batches_discards_the_pool() {
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::KernelIncarnationChanged)
     );
-    assert!(pool.ranking.ranked.is_empty());
+    assert_discarded(&pool);
 }
 
 /// Admitting `alpha` after the walk judged it hidden moves the snapshot: the exclusion described facts that no longer hold, so the pool cannot be complete.
@@ -483,7 +491,7 @@ fn a_change_to_an_excluded_row_discards_the_pool_too() {
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::SnapshotChanged)
     );
-    assert!(pool.ranking.ranked.is_empty());
+    assert_discarded(&pool);
 }
 
 #[test]
@@ -543,7 +551,7 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
         short.ranking.completion,
         Completion::Incomplete(IncompleteReason::RowBound)
     );
-    assert!(short.ranking.ranked.is_empty());
+    assert_discarded(&short);
     let exact = run(
         3,
         ScanBounds {
@@ -577,7 +585,7 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
         short.ranking.completion,
         Completion::Incomplete(IncompleteReason::BatchBytes)
     );
-    assert!(short.ranking.ranked.is_empty());
+    assert_discarded(&short);
     // Each page starts its count afresh: two rows per page fit twice the largest row, below the scan's total.
     assert!(every.iter().map(selected_bytes).sum::<usize>() > 2 * largest);
     assert_eq!(
@@ -602,7 +610,7 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
         heap.ranking.completion,
         Completion::Incomplete(IncompleteReason::HeapBytes)
     );
-    assert!(heap.ranking.ranked.is_empty());
+    assert_discarded(&heap);
     // The peak the walk holds: rows visited in identifier order, one per page, each offered while it outranks the worst of three.
     let eligible = base_positions(&fixture, &coded[0]);
     let scored = reference_pool(&fixture, &coded, &query, &eligible, usize::MAX);
@@ -759,7 +767,7 @@ fn an_ended_budget_returns_no_candidate() {
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
     );
-    assert!(pool.ranking.ranked.is_empty() && pool.winners.is_empty());
+    assert_discarded(&pool);
 }
 
 #[test]
@@ -804,7 +812,7 @@ fn a_coverage_shortfall_keeps_the_pool_and_says_so() {
         bounded.ranking.completion,
         Completion::Incomplete(IncompleteReason::RowBound)
     );
-    assert!(bounded.ranking.ranked.is_empty() && bounded.ranking.snapshot.is_none());
+    assert_discarded(&bounded);
 }
 
 #[test]
@@ -860,7 +868,7 @@ fn an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush() {
         pool.ranking.completion,
         Completion::Incomplete(IncompleteReason::BudgetExhausted)
     );
-    assert!(pool.ranking.ranked.is_empty());
+    assert_discarded(&pool);
 }
 
 #[test]

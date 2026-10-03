@@ -80,7 +80,7 @@ pub(super) struct Walk<'a> {
 /// Byte limits on the two stores a walk fills, counted separately: the temporary rows one page selects for judgment, and the accepted set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageBounds {
-    /// Bytes of the candidates one page selects for judgment, each counted as [`selected_bytes`] counts it. Until the set fills, every row of a page is selected, so the bound covers `page_rows` rows at their largest.
+    /// Bytes of the candidates one page selects for judgment, each counted as [`selected_bytes`] counts it. Until the set fills, every row of a page is selected, so the bound covers `page_rows` rows at their largest. The kernel's verdict report for a batch is the kernel's own allocation and stays outside the count.
     pub batch_bytes: NonZeroUsize,
     /// Bytes of the accepted set while the walk runs: its preallocated entries plus the strings each admitted entry owns, as [`held_bytes`] counts them. The final re-judgment moves the same entries through two more vectors of at most `k` slots.
     pub heap_bytes: NonZeroUsize,

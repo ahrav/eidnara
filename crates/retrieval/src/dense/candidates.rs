@@ -25,6 +25,7 @@ use crate::eligibility::Authority;
 
 /// A layer's int8 codes by row index, in the order of the layer's identifiers.
 pub trait CodeAccess {
+    /// Rows of codes held; a scan refuses a layer whose identifiers number otherwise.
     fn row_count(&self) -> usize;
 
     /// Writes the codes of row `index` into `into`; the caller checks them against the recipe.
@@ -105,7 +106,7 @@ pub enum CandidateRefusal {
     Query { layer: usize, refusal: QueryRefusal },
     #[error("{codes} code sets were supplied for {layers} layers")]
     Codes { layers: usize, codes: usize },
-    #[error("layer {layer} holds {rows} rows but {codes} rows of codes")]
+    #[error("layer {layer} names {rows} occurrences but holds {codes} rows of codes")]
     CodeRows {
         layer: usize,
         rows: usize,
@@ -222,8 +223,8 @@ fn select_inner<'a>(
             codes: request.codes.len(),
         });
     }
-    for (layer, (rows, codes)) in request.layers.iter().zip(request.codes).enumerate() {
-        let (rows, codes) = (rows.rows.row_count(), codes.codes.row_count());
+    for (layer, (named, codes)) in request.layers.iter().zip(request.codes).enumerate() {
+        let (rows, codes) = (named.occurrence_ids.len(), codes.codes.row_count());
         if rows != codes {
             return Err(CandidateRefusal::CodeRows { layer, rows, codes });
         }
