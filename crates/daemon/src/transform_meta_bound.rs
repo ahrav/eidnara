@@ -733,8 +733,8 @@ fn every_metadata_field_has_a_recorded_bound_within_the_headroom() {
     let table = recorded_metadata_bounds();
     let total = object(&table);
     assert!(
-        total < 128 * 1024,
-        "the recorded bounds sum to {total} bytes"
+        total <= 3 * (512 * 1024) / 4,
+        "the recorded bounds sum to {total} bytes, over three quarters of the 512 KiB durable-text guard"
     );
     let with_selection = total + SELECTED_IDENTITY_BUDGET_BYTES;
     assert!(

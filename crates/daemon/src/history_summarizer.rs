@@ -3195,8 +3195,12 @@ mod tests {
         assert_eq!(bounded, "a".repeat(raw_bound - 1));
         let short = "a short detail";
         assert_eq!(bounded_detail(short), short);
-        let next = retain_backoff(&HistorySummarizerDurableState::default(), 5, Some(detail));
+        let current = HistorySummarizerDurableState::default();
+        let next = retain_backoff(&current, 5, Some(detail.clone()));
         assert_eq!(next.last_failure.as_deref(), Some(bounded.as_str()));
+        let abandoned =
+            abandon_with_detail(&current, 5, Some(detail), AbandonClass::ProducerFailed);
+        assert_eq!(abandoned.last_failure.as_deref(), Some(bounded.as_str()));
     }
 
     fn test_selected_range_identities() -> Vec<HistorySummarizerSelectedMessageIdentity> {

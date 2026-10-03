@@ -8960,6 +8960,11 @@ impl HandlerCore {
                 completion,
             } => {
                 let waited_at = Instant::now();
+                #[cfg(test)]
+                transform::run_transform_attempt_hook(&format!(
+                    "emergency_wait:{}",
+                    env.parsed.session_id
+                ));
                 let completed = self
                     .await_live_history_summarizer_completion(completion)
                     .await;
@@ -37124,6 +37129,29 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_connect_failure_records_its_detail_cut_to_the_detail_bound() {
+        let producer = Arc::new(ProducerState::default());
+        let (_handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        assert_eq!(
+            store.load("ses").unwrap().meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        let detail = format!(
+            "producer connect: {}",
+            "x".repeat(memory_store::MAX_SUMMARIZER_DETAIL_BYTES)
+        );
+        let hook: ConnectFailureCommitHook = Arc::new(Mutex::new(None));
+        record_history_summarizer_connect_failure(&store, "ses", 5, &detail, &hook).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(
+            state.last_failure.as_deref(),
+            Some(&detail[..memory_store::MAX_SUMMARIZER_DETAIL_BYTES])
+        );
+        assert_eq!(state.failure_backoff_at_ms, Some(5));
+        assert_eq!(state.counters.connect_failed, 1);
+    }
+
+    #[test]
     fn agent_drops_append_rejects_malformed_command_ids_and_raw_drops() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -39424,7 +39452,17 @@ mod tests {
 
         let release = {
             let producer = Arc::clone(&producer);
+            let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+            let armed_tx = Mutex::new(Some(armed_tx));
+            transform::install_transform_attempt_hook("emergency_wait:ses", move || {
+                if let Some(tx) = armed_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
             tokio::spawn(async move {
+                armed_rx
+                    .await
+                    .expect("the emergency pass reaches its live wait");
                 tokio::time::sleep(Duration::from_millis(1_200)).await;
                 producer.block_output.store(false, Ordering::SeqCst);
                 producer.notify.notify_waiters();
@@ -41058,12 +41096,21 @@ mod tests {
 
     async fn fire_and_settle(handler: &Handler, store: &MemoryStore, messages: &[IngressMessage]) {
         loop {
-            if store.load("ses").is_ok() {
-                expire_history_summarizer_backoff(store);
-            }
+            let firing_seq = match store.load("ses") {
+                Ok(loaded) => {
+                    expire_history_summarizer_backoff(store);
+                    loaded.meta.history_summarizer.firing_seq
+                }
+                Err(_) => 0,
+            };
             let response = call_transform(handler, messages.to_vec()).await;
             if response["history_summarizer"]["fired"] == true {
-                wait_for_idle(store).await;
+                // The spawned firing persists its fired state after the response, so the
+                // settled row is the one whose sequence advanced and returned to idle.
+                wait_for_history_summarizer_state(store, |state| {
+                    state.firing_seq > firing_seq && state.state == HistorySummarizerPhase::Idle
+                })
+                .await;
                 return;
             }
             assert_eq!(

@@ -27,6 +27,13 @@ use crate::transform::{
 };
 
 const SESSION: &str = "read-bound";
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 /// Live messages after the covered pair the request repeats.
 const TAIL: u64 = 8;
 /// Largest non-archived index under any pressure (WP-P08).
@@ -626,6 +633,7 @@ fn assert_bytes_bound(
 
 #[test]
 fn every_pass_read_is_bounded_independent_of_history_size() {
+    let _serial = serial();
     let sizes = [100usize, 5_000, 50_000];
     let together = sizes.map(|h| measure(h, h, MEMORIES));
     let history_only = measure(50_000, 100, MEMORIES);
@@ -754,6 +762,7 @@ fn measure_native(rows: usize) -> Measured {
 
 #[test]
 fn native_pass_reads_are_bounded_independent_of_stored_rows() {
+    let _serial = serial();
     let small = measure_native(100);
     let large = measure_native(5_000);
     report("native", "rows=100", &small);

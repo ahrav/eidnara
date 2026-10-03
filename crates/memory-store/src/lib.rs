@@ -954,6 +954,25 @@ pub struct MemoryReviewerNonadmission {
     pub latest: Option<RecordedNonadmission>,
 }
 
+/// `detail` within [`MAX_SUMMARIZER_DETAIL_BYTES`] JSON-escaped bytes, cut at a character
+/// boundary; a value already within the bound is returned unchanged.
+pub fn bounded_summarizer_detail(detail: String) -> String {
+    if serialized_str_len(&detail) <= MAX_SUMMARIZER_DETAIL_BYTES {
+        detail
+    } else {
+        prefix_within_serialized_bytes(&detail, MAX_SUMMARIZER_DETAIL_BYTES).to_string()
+    }
+}
+
+/// Deserialization bounds stored `last_failure` and `last_no_fire` values to
+/// [`MAX_SUMMARIZER_DETAIL_BYTES`], preserving the byte limit in loaded states and
+/// carry-forward copies.
+fn deserialize_bounded_summarizer_detail<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|detail| detail.map(bounded_summarizer_detail))
+}
+
 /// The durable history_summarizer state stored inside [`ModuleMeta`]. Idle keeps
 /// `firing_seq` as the monotonic last-issued sequence and clears the in-flight
 /// identifiers; abandon paths additionally set `failure_backoff_at_ms`.
@@ -1008,13 +1027,15 @@ pub struct HistorySummarizerDurableState {
     /// spawned task whose stderr a supervised deployment never captures, so the error
     /// must live in durable state to be diagnosable from a state dump. Cleared when a
     /// later firing establishes its producer run.
-    #[serde(default)]
+    /// `last_failure` holds at most [`MAX_SUMMARIZER_DETAIL_BYTES`] bytes; deserialization bounds longer stored values.
+    #[serde(default, deserialize_with = "deserialize_bounded_summarizer_detail")]
     pub last_failure: Option<String>,
     /// Why the most recent pass declined to fire (reason discriminant only, no numbers,
     /// so steady-state passes rewrite nothing). The twin of `last_failure` for the
     /// pre-fire half: a supervised rig cannot read the transform response's diagnostics
     /// block, so the skip branch must be readable from the state dump. Cleared on fire.
-    #[serde(default)]
+    /// `last_no_fire` holds at most [`MAX_SUMMARIZER_DETAIL_BYTES`] bytes; deserialization bounds longer stored values.
+    #[serde(default, deserialize_with = "deserialize_bounded_summarizer_detail")]
     pub last_no_fire: Option<String>,
     /// Consecutive failures on the history_summarizer publication path. This is diagnostic-only
     /// state: it makes repeated fence/outbox failures visible without affecting bytes.
@@ -2145,7 +2166,8 @@ pub struct ModuleMeta {
     /// Last normalized `todowrite` view captured on a bust pass. This is deliberately
     /// session-scoped: a todo list is the working state of one conversation, not a
     /// project-shared memory or preference.
-    #[serde(default)]
+    /// A stored value over either task-list byte limit deserializes as `Some("[]")`.
+    #[serde(default, deserialize_with = "deserialize_bounded_todo_state")]
     pub last_todo_state: Option<String>,
     /// Message id that owns the last captured todo state. Host-side todo forwarding uses
     /// this to make retries of one tool result harmless without suppressing newer states.
@@ -5988,6 +6010,21 @@ pub fn todo_state_within_bounds(state: &str) -> bool {
     within(state) && within(&redact_durable_text(state).text)
 }
 
+/// A stored task list over its bound loads as the empty list.
+fn deserialize_bounded_todo_state<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|state| {
+        state.map(|state| {
+            if todo_state_within_bounds(&state) {
+                state
+            } else {
+                "[]".to_string()
+            }
+        })
+    })
+}
+
 fn serialized_text_len(text: &str) -> usize {
     serialized_str_len(text) + 2
 }
@@ -6310,16 +6347,9 @@ fn prepare_state_sync(
             MAX_NOTE_NUDGE_ANCHORS,
             anchors.len(),
         )?;
-        for anchor in anchors {
-            let serialized = serde_json::to_vec(anchor)
-                .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
-            within_bound(
-                "note_nudge_anchor bytes",
-                MAX_NOTE_NUDGE_ANCHOR_BYTES,
-                serialized.len(),
-            )?;
-        }
     }
+    // Redaction can lengthen a value, so each byte bound below measures the
+    // prepared text the row stores.
     let note_nudge_anchors = request
         .note_nudge_anchors
         .map(|anchors| {
@@ -6327,12 +6357,20 @@ fn prepare_state_sync(
                 .iter()
                 .map(|anchor| {
                     write.identity("note_nudge_message_id", &anchor.message_id)?;
-                    Ok(NoteNudgeAnchorSeed {
+                    let prepared = NoteNudgeAnchorSeed {
                         message_id: anchor.message_id.clone(),
                         text: write.content("note_nudge_text", &anchor.text)?,
-                    })
+                    };
+                    let serialized = serde_json::to_vec(&prepared)
+                        .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
+                    within_bound(
+                        "note_nudge_anchor bytes",
+                        MAX_NOTE_NUDGE_ANCHOR_BYTES,
+                        serialized.len(),
+                    )?;
+                    Ok(prepared)
                 })
-                .collect::<Result<Vec<_>, MemoryStoreError>>()
+                .collect::<Result<Vec<_>, ModuleStateSyncError>>()
         })
         .transpose()?;
     if let Some(pair) = request.todo_synthetic_anchor {
@@ -6368,36 +6406,18 @@ fn prepare_state_sync(
             marker.end_message_id.len(),
         )?;
     }
-    if let Some(Some(state)) = request.deferred_execute_state {
-        within_bound(
-            "deferred_execute_state reason bytes",
-            MAX_STATE_SYNC_DIRECTIVE_BYTES,
-            state.reason.len(),
-        )?;
-    }
-    if let Some(state) = request.channel2_nudge_state {
-        within_bound(
-            "channel2_nudge_state bytes",
-            MAX_STATE_SYNC_DIRECTIVE_BYTES,
-            state.len(),
-        )?;
-    }
-    if let Some(state) = request.last_todo_state.as_deref() {
-        within_bound("last_todo_state bytes", MAX_TODO_STATE_BYTES, state.len())?;
-        within_bound(
-            "last_todo_state serialized bytes",
-            MAX_TODO_STATE_SERIALIZED_BYTES,
-            serialized_text_len(state),
-        )?;
-    }
     let deferred_execute_state = request
         .deferred_execute_state
         .map(|state| {
             state
                 .map(|state| {
-                    Ok::<_, MemoryStoreError>(DeferredExecuteState {
-                        reason: write.content("deferred_execute_reason", &state.reason)?,
-                    })
+                    let reason = write.content("deferred_execute_reason", &state.reason)?;
+                    within_bound(
+                        "deferred_execute_state reason bytes",
+                        MAX_STATE_SYNC_DIRECTIVE_BYTES,
+                        reason.len(),
+                    )?;
+                    Ok::<_, ModuleStateSyncError>(DeferredExecuteState { reason })
                 })
                 .transpose()
         })
@@ -6406,6 +6426,13 @@ fn prepare_state_sync(
         .channel2_nudge_state
         .map(|value| write.content("channel2_nudge_state", value))
         .transpose()?;
+    if let Some(state) = channel2_nudge_state.as_deref() {
+        within_bound(
+            "channel2_nudge_state bytes",
+            MAX_STATE_SYNC_DIRECTIVE_BYTES,
+            state.len(),
+        )?;
+    }
     let strip_seeds = request
         .strip_seeds
         .iter()
@@ -6420,6 +6447,14 @@ fn prepare_state_sync(
         .as_deref()
         .map(|value| write.content("last_todo_state", value))
         .transpose()?;
+    if let Some(state) = last_todo_state.as_deref() {
+        within_bound("last_todo_state bytes", MAX_TODO_STATE_BYTES, state.len())?;
+        within_bound(
+            "last_todo_state serialized bytes",
+            MAX_TODO_STATE_SERIALIZED_BYTES,
+            serialized_text_len(state),
+        )?;
+    }
     let acked_watermarks_json = serde_json::to_string(&request.acked_watermarks)
         .map_err(|error| ModuleStateSyncError::Serde(error.to_string()))?;
     within_bound(
@@ -24559,6 +24594,17 @@ mod tests {
                 "last_todo_state serialized bytes",
             ),
             (
+                "todo state that redaction grows past the bound",
+                with(ModuleStateSyncRequest {
+                    last_todo_state: Some(format!(
+                        "{}\npassword=hunter-two",
+                        "t".repeat(MAX_TODO_STATE_BYTES - "\npassword=hunter-two".len())
+                    )),
+                    ..history_segment_sync(0, &[])
+                }),
+                "last_todo_state bytes",
+            ),
+            (
                 "marker id",
                 with(ModuleStateSyncRequest {
                     pending_compaction_marker: Some(Some(&over_marker)),
@@ -24626,6 +24672,23 @@ mod tests {
         store
             .set_todo_state("ses", &"t".repeat(MAX_TODO_STATE_BYTES), "m1", "h")
             .unwrap();
+        let grows_past_the_bound = format!(
+            "{}\npassword=hunter-two",
+            "t".repeat(MAX_TODO_STATE_BYTES - "\npassword=hunter-two".len())
+        );
+        assert!(matches!(
+            store.set_todo_state("ses", &grows_past_the_bound, "m2", "h2"),
+            Err(MemoryStoreError::Redaction(RedactionErrorKind::InputLimit))
+        ));
+        assert_eq!(
+            store
+                .load("ses")
+                .unwrap()
+                .meta
+                .last_todo_state
+                .map(|state| state.len()),
+            Some(MAX_TODO_STATE_BYTES)
+        );
     }
 
     #[test]
@@ -26043,6 +26106,67 @@ mod tests {
             content: "published summary".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_stored_task_list_over_the_bound_loads_as_the_empty_list() {
+        let stored = |state: Option<&str>| {
+            let mut meta = serde_json::to_value(ModuleMeta::default()).unwrap();
+            meta["last_todo_state"] = serde_json::json!(state);
+            serde_json::from_value::<ModuleMeta>(meta)
+                .unwrap()
+                .last_todo_state
+        };
+        let over = "t".repeat(MAX_TODO_STATE_BYTES + 1);
+        assert_eq!(stored(Some(&over)).as_deref(), Some("[]"));
+        let at = "t".repeat(MAX_TODO_STATE_BYTES);
+        assert_eq!(stored(Some(&at)).as_deref(), Some(at.as_str()));
+        assert_eq!(stored(None), None);
+    }
+
+    #[test]
+    fn a_stored_failure_detail_over_the_bound_loads_cut_to_the_bound() {
+        let over = format!("{}\\u00e9tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        let legacy = format!(r#"{{"last_failure":"{over}","last_no_fire":"{over}"}}"#);
+        let state: HistorySummarizerDurableState = serde_json::from_str(&legacy).unwrap();
+        let bounded = Some("a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        assert_eq!(state.last_failure, bounded);
+        assert_eq!(state.last_no_fire, bounded);
+        let absent: HistorySummarizerDurableState = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.last_failure, None);
+        assert_eq!(absent.last_no_fire, None);
+    }
+
+    #[test]
+    fn an_abandoned_firing_records_its_failure_detail_cut_to_the_detail_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit_with_block_identities_for_test(
+                "ses",
+                None,
+                &CoreState::empty(),
+                &publishing_meta(),
+                &selected_identity_delta(),
+            )
+            .unwrap();
+        let detail = format!("{}\u{e9}tail", "a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1));
+        store
+            .abandon_history_summarizer_run_if_matching(
+                "ses",
+                &publish_predicate(),
+                None,
+                Some(&detail),
+                summarizer_timeline::AbandonClass::ProducerFailed,
+            )
+            .unwrap()
+            .expect("the matching run is abandoned");
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, HistorySummarizerPhase::Idle);
+        assert_eq!(
+            state.last_failure,
+            Some("a".repeat(MAX_SUMMARIZER_DETAIL_BYTES - 1))
+        );
     }
 
     #[test]

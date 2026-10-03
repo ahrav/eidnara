@@ -2241,11 +2241,21 @@ pub(crate) fn resolve_window(
         }
     }
     let mut seen = HashSet::with_capacity(req.messages.len());
-    if let Some(duplicate) = req.messages.iter().find(|m| !seen.insert(m.mid.as_str())) {
-        return Err(TransformError::InvalidWindow(format!(
-            "message id {:?} appears twice in the window",
-            duplicate.mid
-        )));
+    for (index, message) in req.messages.iter().enumerate() {
+        if message.mid.len() > crate::wire::MAX_MID_BYTES {
+            return Err(TransformError::InvalidWindow(format!(
+                "message id at index {} is {} bytes, over the {}-byte bound",
+                index,
+                message.mid.len(),
+                crate::wire::MAX_MID_BYTES
+            )));
+        }
+        if !seen.insert(message.mid.as_str()) {
+            return Err(TransformError::InvalidWindow(format!(
+                "message id {:?} appears twice in the window",
+                message.mid
+            )));
+        }
     }
     let (_, resolved) = resolve_coverage(store, req, &[])?;
     apply_resolution(req, resolved);
@@ -15024,6 +15034,24 @@ pub(crate) mod tests {
             dup,
             TransformError::InvalidWindow(message) if message.contains("\"same\"")
         ));
+        let long_mid = "m".repeat(crate::wire::MAX_MID_BYTES + 1);
+        let at_bound = "\u{e9}".repeat(crate::wire::MAX_MID_BYTES / 2);
+        assert_eq!(at_bound.len(), crate::wire::MAX_MID_BYTES);
+        let mut fits = req("dup", "cfg0", vec![item(&at_bound, 1, "x")]);
+        resolve_window(&s, &mut fits).expect("a mid at the bound resolves");
+        let over = transform(
+            &s,
+            &req("dup", "cfg0", vec![item(&long_mid, 1, "x")]),
+            &pctx("git:proj", "/nonexistent-docs", 0),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &over,
+                TransformError::InvalidWindow(message) if message.contains("129 bytes")
+            ),
+            "{over:?}"
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
