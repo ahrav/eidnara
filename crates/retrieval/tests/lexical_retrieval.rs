@@ -97,8 +97,9 @@ fn admission(object: &str) -> AdmissionRequest {
     }
 }
 
+/// Opens the projection with the pragmas the daemon's `SearchProjection::pin_connection` pins, so the latency gate measures the production connection.
 fn open_store(dir: &Path) -> SqliteStore {
-    open_sqlite(
+    let store = open_sqlite(
         &StorageDescriptor {
             module_id: "eidnara-test".to_string(),
             storage_namespace: "search-projection".to_string(),
@@ -113,7 +114,15 @@ fn open_store(dir: &Path) -> SqliteStore {
         },
         retrieval::BASELINE,
     )
-    .unwrap()
+    .unwrap();
+    store
+        .with_conn_unfenced(|conn| {
+            conn.pragma_update(None, "cache_size", -(8 * 1024))?;
+            conn.pragma_update(None, "temp_store", "MEMORY")?;
+            conn.pragma_update(None, "mmap_size", 0x7fff_0000_i64)
+        })
+        .unwrap();
+    store
 }
 
 fn batch_bounds() -> BatchBounds {
