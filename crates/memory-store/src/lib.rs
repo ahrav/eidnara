@@ -2098,7 +2098,8 @@ pub struct ModuleMeta {
     /// Last normalized `todowrite` view captured on a bust pass. This is deliberately
     /// session-scoped: a todo list is the working state of one conversation, not a
     /// project-shared memory or preference.
-    #[serde(default)]
+    /// A stored value over either task-list byte limit deserializes as `Some("[]")`.
+    #[serde(default, deserialize_with = "deserialize_bounded_todo_state")]
     pub last_todo_state: Option<String>,
     /// Message id that owns the last captured todo state. Host-side todo forwarding uses
     /// this to make retries of one tool result harmless without suppressing newer states.
@@ -5725,9 +5726,26 @@ pub const MAX_TODO_STATE_SERIALIZED_BYTES: usize = 2 * MAX_TODO_STATE_BYTES + 2;
 /// before persistence.
 pub fn bounded_todo_state(state_json: &str) -> Option<String> {
     let redacted = redact_durable_text(state_json).text;
-    let within = redacted.len() <= MAX_TODO_STATE_BYTES
-        && serialized_text_len(&redacted) <= MAX_TODO_STATE_SERIALIZED_BYTES;
-    within.then_some(redacted)
+    within_todo_state_bounds(&redacted).then_some(redacted)
+}
+
+fn within_todo_state_bounds(state_json: &str) -> bool {
+    state_json.len() <= MAX_TODO_STATE_BYTES
+        && serialized_text_len(state_json) <= MAX_TODO_STATE_SERIALIZED_BYTES
+}
+
+fn deserialize_bounded_todo_state<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|state| {
+        state.map(|state| {
+            if within_todo_state_bounds(&state) {
+                state
+            } else {
+                "[]".to_string()
+            }
+        })
+    })
 }
 
 fn serialized_text_len(text: &str) -> usize {
@@ -24768,6 +24786,22 @@ mod tests {
             content: "published summary".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_stored_task_list_over_the_bound_loads_as_the_empty_list() {
+        let stored = |state: Option<&str>| {
+            let mut meta = serde_json::to_value(ModuleMeta::default()).unwrap();
+            meta["last_todo_state"] = serde_json::json!(state);
+            serde_json::from_value::<ModuleMeta>(meta)
+                .unwrap()
+                .last_todo_state
+        };
+        let over = "t".repeat(MAX_TODO_STATE_BYTES + 1);
+        assert_eq!(stored(Some(&over)).as_deref(), Some("[]"));
+        let at = "t".repeat(MAX_TODO_STATE_BYTES);
+        assert_eq!(stored(Some(&at)).as_deref(), Some(at.as_str()));
+        assert_eq!(stored(None), None);
     }
 
     #[test]
