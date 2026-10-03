@@ -277,8 +277,9 @@ fn a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted() {
     );
 }
 
-/// Alpha of `2^53` and above takes the left-shift path, whose bits must be checked before they shift out.
+/// Alpha of `2^52` and above takes the left-shift path, whose bits are checked before they shift out; the widths assume a 64-bit `usize`.
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn a_large_alpha_shifts_exactly_or_refuses() {
     let two_53 = 2f64.powi(53);
     let pool = |alpha: f64, k: usize| {
@@ -302,25 +303,39 @@ fn a_large_alpha_shifts_exactly_or_refuses() {
         }),
         "the shifted product exceeds a u128"
     );
+    // `2^52 * 2^52` shifted by 24 is `2^128`: an unchecked shift wraps to zero, which fits a `usize`.
+    let wraps = 2f64.powi(76);
+    assert_eq!(
+        pool(wraps, 1 << 52),
+        Err(CapacityRefusal::Unrepresentable {
+            alpha: wraps,
+            k: 1 << 52
+        })
+    );
     assert_eq!(pool(1.0f64.next_up(), 1), Ok(2), "just above one rounds up");
 }
 
 /// Integer alphas and dyadic fractions `a / 2^s` have exact products computable in integers, independent of the f64 decomposition.
 #[test]
+#[cfg(target_pointer_width = "64")]
 fn the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas() {
     use proptest::prelude::*;
     use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-    let mut runner = TestRunner::new_with_rng(
-        Config {
-            cases: 2048,
-            rng_algorithm: RngAlgorithm::ChaCha,
-            ..Config::default()
-        },
-        TestRng::from_seed(RngAlgorithm::ChaCha, b"dense-candidate-capacity-seed-01"),
-    );
+    let runner = |seed: &[u8; 32]| {
+        TestRunner::new_with_rng(
+            Config {
+                cases: 2048,
+                rng_algorithm: RngAlgorithm::ChaCha,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, seed),
+        )
+    };
+    let cases = std::cell::Cell::new(0u32);
     let k = prop_oneof![1usize..=4096, any::<usize>().prop_map(|k| k.max(1))];
-    runner
+    runner(b"dense-candidate-capacity-integer")
         .run(&(1u64..=(1 << 53), k.clone()), |(a, k)| {
+            cases.set(cases.get() + 1);
             let expected = k.checked_mul(usize::try_from(a).unwrap());
             let actual = CandidateCapacity::new(k, policy(a as f64, usize::MAX))
                 .ok()
@@ -329,11 +344,13 @@ fn the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas() {
             Ok(())
         })
         .unwrap();
-    runner
-        .run(&(0u64..(1 << 19), 0u32..=20, k), |(half, s, k)| {
+    assert_eq!(cases.replace(0), 2048);
+    runner(b"dense-candidate-capacity-dyadic0")
+        .run(&(0u64..(1 << 19), 0u32..20, k), |(half, s, k)| {
             let numerator = 2 * half + 1;
             let alpha = numerator as f64 / 2f64.powi(s as i32);
             prop_assume!(alpha >= 1.0);
+            cases.set(cases.get() + 1);
             let exact = (u128::from(numerator) * k as u128).div_ceil(1u128 << s);
             let expected = usize::try_from(exact).ok();
             let actual = CandidateCapacity::new(k, policy(alpha, usize::MAX))
@@ -346,6 +363,7 @@ fn the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas() {
             Ok(())
         })
         .unwrap();
+    assert_eq!(cases.get(), 2048, "every accepted dyadic case ran");
 }
 
 // ---- Query transform ----
