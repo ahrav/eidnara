@@ -16,7 +16,9 @@
     "lint": "bun run --cwd packages/fs-observer lint && bun run --cwd packages/opencode-plugin lint && bun run --cwd packages/pi-plugin lint && bun run --cwd packages/cli lint && bun run --cwd packages/e2e-tests lint",
     "test": "bun run --cwd packages/shm-native test && bun run --cwd packages/fs-observer test && bun run --cwd packages/opencode-plugin test && bun run --cwd packages/pi-plugin test && bun run --cwd packages/cli test && bun run --cwd packages/e2e-tests test && bun test ./scripts",
     "build": "bun run --cwd packages/shm-native build:js && bun run --cwd packages/fs-observer build && bun run --cwd packages/opencode-plugin build && bun run --cwd packages/pi-plugin build && bun run --cwd packages/cli build",
+    "inputs:fetch": "bun scripts/host-inputs.ts",
     "payload:dev": "bun scripts/build-host-payload.ts --dev",
+    "payload:release": "bun scripts/build-host-payload.ts --release",
     "smoke:tarballs": "bun scripts/smoke-tarball-install.ts",
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
     "check:repo": "scripts/forbid-comment-markers.sh && bun run typecheck && bun run lint && bun run test && bun run build && git diff --exit-code -- packages/opencode-plugin/src/tui-compiled && ! git ls-files --others -- packages/opencode-plugin/src/tui-compiled | grep ."

@@ -922,11 +922,29 @@ jobs:
           bun run --cwd packages/opencode-plugin test
           bun run --cwd packages/pi-plugin test
 
+      # actions/cache v6.1.0; entries are content-addressed by sha256, and
+      # `inputs:fetch` re-verifies every restored entry against the lock.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target/host-inputs
+          key: host-inputs-${{ hashFiles('release/production-inputs.lock.json') }}
+
       - name: Payload and tarball smoke
+        # The payload stages the locked model, tokenizer, corpus, and ORT
+        # library; the smoke installs it from tarballs and requires the
+        # embedding lane to report ready, then degraded once its ORT library
+        # is replaced. The ignored witnesses serve a real embedding through
+        # the trusted payload path and report degraded for a broken runtime.
+        env:
+          EIDNARA_HOST_TEST_PAYLOAD_DIR: "${{ github.workspace }}\
+            /packages/host-linux-x64-gnu"
         run: |
           cargo +1.98 build -p daemon --bin eidnara-host --locked
+          bun run inputs:fetch
           bun run payload:dev
           bun run smoke:tarballs
+          cargo +1.98 test -p daemon --test payload_local_embeddings \
+            --locked -- --ignored --test-threads 1
 
       - name: Rust-mode E2E
         # OpenCode is pinned to the version the harness closure under

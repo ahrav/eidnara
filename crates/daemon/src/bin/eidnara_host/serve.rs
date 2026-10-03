@@ -15,9 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use hmac::{Hmac, Mac};
-use host_runtime::generation::{
-    GenerationStore, UNQUALIFIED_INPUTS_LOCK_SHA256, ValidatedGeneration,
-};
+use host_runtime::generation::{GenerationStore, ValidatedGeneration};
 use host_runtime::harness_closure::{
     ClosureCandidate, ClosureManifest, HarnessClosureStore, ValidatedHarnessClosure,
     manifest_digest,
@@ -1062,27 +1060,21 @@ fn local_embeddings_component(generation: &ValidatedGeneration) -> LocalEmbeddin
         local_embeddings_from_manifest(
             &generation.manifest.files,
             &generation.descriptor_root_path(),
-            &generation.manifest.inputs_lock_sha256,
         )
     }
 }
 
-/// An unqualified generation without the ORT library (the development payload) is a build
-/// without local embeddings: `unsupported`, which status and doctor skip. A qualified
-/// generation pins ORT in its production inputs lock, so one that lacks it, or ships it without
-/// the bundle manifest, is a broken payload: `degraded`, which they surface.
+/// Every Linux generation runs the embedding lane, so a validated generation that lacks the ORT
+/// library or the bundle manifest is a broken payload: `degraded`, which status and doctor
+/// surface. `unsupported` is reserved for platforms the host does not ship.
 #[cfg(not(target_os = "macos"))]
 fn local_embeddings_from_manifest(
     files: &[host_runtime::generation::ManifestFile],
     descriptor_root: &Path,
-    inputs_lock_sha256: &str,
 ) -> LocalEmbeddingsComponent {
-    const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f16";
+    const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f32";
     const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
     let Some(ort) = files.iter().find(|entry| entry.path == ORT_LIBRARY) else {
-        if inputs_lock_sha256 == UNQUALIFIED_INPUTS_LOCK_SHA256 {
-            return LocalEmbeddingsComponent::unsupported("local_embeddings_unsupported");
-        }
         return LocalEmbeddingsComponent::new(None);
     };
     let bundle_dir = descriptor_root.join(BUNDLE_DIR);
@@ -1099,8 +1091,19 @@ fn local_embeddings_from_manifest(
         ort_library: descriptor_root.join(ORT_LIBRARY),
         bundle_manifest_sha256: Some(bundle_manifest.sha256.clone()),
         ort_library_sha256: ort.sha256.clone(),
-        limits: LocalEmbeddingsLimits::default(),
+        limits: lane_limits(),
     }))
+}
+
+/// The daemon embeds one text per inference call: backfill admits single-item jobs and queries
+/// carry one text. One row keeps certification and every admitted batch at the single window the
+/// bundle certifies, instead of `[64, max_tokens]` tensors no supported host can hold.
+#[cfg(not(target_os = "macos"))]
+fn lane_limits() -> LocalEmbeddingsLimits {
+    LocalEmbeddingsLimits {
+        max_batch_items: 1,
+        ..LocalEmbeddingsLimits::default()
+    }
 }
 
 /// Revalidates startup state and runs the fixed host profile until shutdown.
@@ -1236,56 +1239,73 @@ pub fn run() -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
-    /// The development payload ships neither ORT nor a bundle: the lane is unsupported and
-    /// status skips it. A payload with ORT but no bundle manifest is degraded, so a packaging
-    /// regression surfaces instead of hiding behind `unsupported`.
+    /// Startup certification runs `[max_batch_items, max_tokens]` token tensors through the f32
+    /// graph, and serving admits the same shape. A 512-token single-row window certifies in
+    /// seconds under 1.5 GB of RSS; one 8192-token row alone exceeds the 90 s hard
+    /// certification budget at one intra-op thread, and 64 such rows exceed 150 GB.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_shipped_lane_certifies_and_serves_one_window_within_the_startup_envelope() {
+        use host_runtime::local_embeddings::bundle::BundleManifest;
+        const QUALIFIED_TOKENS_PER_CALL: u64 = 512;
+        let path = format!(
+            "{}/../../release/local-embeddings/gte-modernbert-base-f32/manifest.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let manifest: BundleManifest =
+            serde_json::from_slice(&std::fs::read(path).expect("committed bundle manifest"))
+                .expect("bundle manifest parses");
+        let limits = lane_limits();
+        let rows = u64::try_from(limits.max_batch_items).expect("row count fits u64");
+        assert!(
+            rows * manifest.max_tokens <= QUALIFIED_TOKENS_PER_CALL,
+            "the largest certified call is [{rows}, {}]",
+            manifest.max_tokens
+        );
+        assert!(u64::from(manifest.recommended_batch.rows) <= rows);
+        assert!(u64::from(manifest.recommended_batch.token_budget) <= rows * manifest.max_tokens);
+    }
+
+    /// A Linux generation without ORT or without the bundle manifest is degraded, never
+    /// `unsupported`, so a packaging regression surfaces in status and doctor.
     #[cfg(not(target_os = "macos"))]
     #[tokio::test]
-    async fn local_embeddings_manifest_distinguishes_absent_from_incomplete_payloads() {
-        use host_runtime::SecondaryComponent;
+    async fn local_embeddings_manifest_reports_any_incomplete_payload_as_degraded() {
         use host_runtime::generation::ManifestFile;
         use host_runtime::local_embeddings::LocalEmbeddingsStatus;
+        use host_runtime::{CompositeComponent, SecondaryComponent};
         let file = |path: &str| ManifestFile {
             path: path.to_owned(),
             mode: 0o644,
             size: 1,
             sha256: "ab".repeat(32),
         };
-        let reason = |component: LocalEmbeddingsComponent| async move {
+        let root = Path::new("/generation");
+        for files in [
+            vec![file("payload/other")],
+            vec![file("payload/ort/libonnxruntime.so")],
+            vec![file("payload/model/gte-modernbert-base-f32/manifest.json")],
+        ] {
+            let component = local_embeddings_from_manifest(&files, root);
             SecondaryComponent::initialize(&component)
                 .await
                 .expect("disabled lane initializes");
-            match component.status() {
-                LocalEmbeddingsStatus::Disabled { reason } => reason,
-                other => panic!("expected a disabled lane, got {other:?}"),
-            }
-        };
-        let root = Path::new("/generation");
-        let qualified = "cd".repeat(32);
-        let absent = local_embeddings_from_manifest(
-            &[file("payload/other")],
-            root,
-            UNQUALIFIED_INPUTS_LOCK_SHA256,
-        );
-        assert_eq!(reason(absent).await, "local_embeddings_unsupported");
-        // A qualified payload pins ORT in the production inputs lock, so its absence is a
-        // packaging regression on a supported platform, not a build without the lane.
-        let missing_from_qualified =
-            local_embeddings_from_manifest(&[file("payload/other")], root, &qualified);
-        assert_eq!(reason(missing_from_qualified).await, "no bundle configured");
-        let incomplete = local_embeddings_from_manifest(
-            &[file("payload/ort/libonnxruntime.so")],
-            root,
-            UNQUALIFIED_INPUTS_LOCK_SHA256,
-        );
-        assert_eq!(reason(incomplete).await, "no bundle configured");
+            assert!(matches!(
+                component.status(),
+                LocalEmbeddingsStatus::Disabled { reason } if reason == "no bundle configured"
+            ));
+            let health = CompositeComponent::health(&component).await;
+            assert_eq!(
+                health.metrics.expect("metrics")["local_embeddings_state"],
+                "degraded"
+            );
+        }
         let complete = local_embeddings_from_manifest(
             &[
                 file("payload/ort/libonnxruntime.so"),
-                file("payload/model/gte-modernbert-base-f16/manifest.json"),
+                file("payload/model/gte-modernbert-base-f32/manifest.json"),
             ],
             root,
-            &qualified,
         );
         SecondaryComponent::initialize(&complete)
             .await

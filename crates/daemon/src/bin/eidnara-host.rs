@@ -1,7 +1,8 @@
 //! `eidnara-host` is the lifecycle and serve executable.
 //!
 //! `eidnara-host` depends on `daemon` and `host-runtime`; neither dependency depends on `eidnara-host`.
-//! `--version`, `release-info`, and `input-lock-digest` have no side effects.
+//! `--version`, `release-info`, `input-lock-digest`, and `build-profile` have no side effects.
+//! `build-profile` prints `debug` when debug assertions are compiled in and `release` otherwise; payload builders match it against the manifest mode.
 //! Each lifecycle command emits exactly one `eidnara.daemon/v1` JSON object on stdout.
 //! Exit 0 means `ok:true`; exit 1 indicates an operational failure.
 //! Exit 2 indicates a usage error and makes no lifecycle call.
@@ -287,6 +288,7 @@ enum Command {
     Version,
     ReleaseInfo,
     InputLockDigest,
+    BuildProfile,
     Status,
     Start {
         payload_dir: Option<PathBuf>,
@@ -300,7 +302,7 @@ enum Command {
     Serve,
 }
 
-const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version (probe is an alias of status)";
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest|build-profile> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version (probe is an alias of status)";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -354,6 +356,7 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
         "--version" => Ok(Command::Version),
         "release-info" => Ok(Command::ReleaseInfo),
         "input-lock-digest" => Ok(Command::InputLockDigest),
+        "build-profile" => Ok(Command::BuildProfile),
         "status" | "probe" => Ok(Command::Status),
         "start" => Ok(Command::Start {
             payload_dir,
@@ -1226,7 +1229,9 @@ fn trusted_payload_sources(
         || manifest.release.id != "eidnara-host-release"
         || manifest.release.version != release_contract::RELEASE_VERSION
         || manifest.release_contract_sha256 != release_contract::release_contract_sha256()
-        || manifest.mode != "production"
+        // A development manifest carries the debug launcher, so only a debug build stages one.
+        || !(manifest.mode == "production"
+            || (manifest.mode == "development" && cfg!(debug_assertions)))
         || manifest.package.name != expected_package
         || manifest.package.version != release_contract::RELEASE_VERSION
         || manifest.package.target != target
@@ -1912,6 +1917,17 @@ fn real_main() -> i32 {
             );
             0
         }
+        Command::BuildProfile => {
+            println!(
+                "{}",
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                }
+            );
+            0
+        }
         Command::Status => emit(cmd_probe()),
         Command::Start {
             payload_dir,
@@ -2403,6 +2419,54 @@ mod tests {
             result,
             Err(GenerationError::NativePayloadInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn a_development_manifest_is_trusted_only_by_a_debug_build() {
+        let Some("linux-x64-gnu") = build_target() else {
+            return;
+        };
+        let payload = tempfile::tempdir().expect("payload");
+        let launcher_path = payload.path().join("payload/bin/eidnara-host");
+        std::fs::create_dir_all(launcher_path.parent().expect("launcher parent")).expect("mkdir");
+        std::fs::write(&launcher_path, b"launcher").expect("launcher");
+        let hash = |bytes: &[u8]| format!("{:x}", sha2::Sha256::digest(bytes));
+        for (mode, trusted) in [
+            ("development", cfg!(debug_assertions)),
+            ("production", true),
+            ("other", false),
+        ] {
+            let manifest = serde_json::json!({
+                "schema": PAYLOAD_MANIFEST_SCHEMA,
+                "release": {"id": "eidnara-host-release", "version": release_contract::RELEASE_VERSION},
+                "release_contract_sha256": release_contract::release_contract_sha256(),
+                "production_inputs_lock_sha256":
+                    daemon::production_inputs::production_inputs_lock_sha256(),
+                "mode": mode,
+                "package": {
+                    "name": "@eidnara/host-linux-x64-gnu",
+                    "version": release_contract::RELEASE_VERSION,
+                    "target": "linux-x64-gnu"
+                },
+                "platform_floor": {"kernel_min": "4.18", "glibc_min": "2.28"},
+                "local_embeddings": "certified_cpu",
+                "launcher": "payload/bin/eidnara-host",
+                "files": [{
+                    "path": "payload/bin/eidnara-host",
+                    "type": "file",
+                    "size": 8,
+                    "mode": "755",
+                    "sha256": hash(b"launcher")
+                }]
+            });
+            let bytes = serde_json::to_vec(&manifest).expect("manifest");
+            std::fs::write(payload.path().join("payload-manifest.json"), &bytes).expect("write");
+            assert_eq!(
+                trusted_payload_sources(payload.path(), &hash(&bytes)).is_ok(),
+                trusted,
+                "mode {mode}"
+            );
+        }
     }
 
     #[test]

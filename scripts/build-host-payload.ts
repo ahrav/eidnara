@@ -15,6 +15,14 @@ import { createRequire } from "node:module";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+    defaultInputsDir,
+    isRecord,
+    type LockedInput,
+    lockedInputs,
+    verifiedCacheEntry,
+} from "./host-inputs";
+
 function fail(message: string): never {
     throw new Error(`eidnara-host payload: ${message}`);
 }
@@ -50,7 +58,7 @@ export const PAYLOAD_TARGET = {
 
 const PATH_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
-/** Extensions the CLI accepts for `--addon`; `buildDevPayload` also accepts a CommonJS module so tests can run without a compiled addon. */
+/** Extensions the CLI accepts for `--addon`; `buildPayload` also accepts a CommonJS module so tests can run without a compiled addon. */
 const NATIVE_ADDON_EXTENSIONS = new Set([".so", ".node"]);
 
 export interface PayloadFileEntry {
@@ -60,6 +68,9 @@ export interface PayloadFileEntry {
     mode: "644" | "755";
     sha256: string;
 }
+
+/** A development payload carries the debug launcher and stages through debug builds only; a production payload carries the release launcher. */
+export type PayloadMode = "development" | "production";
 
 export interface PlatformFloor {
     kernel_min: string;
@@ -72,7 +83,7 @@ export interface PayloadManifest {
     release: { id: string; version: string };
     release_contract_sha256: string;
     production_inputs_lock_sha256: string;
-    mode: "development";
+    mode: PayloadMode;
     package: { name: string; version: string; target: string };
     platform_floor: PlatformFloor;
     local_embeddings: string;
@@ -98,9 +109,11 @@ export interface ReleaseContext {
     contract: ReleaseContract;
     contractSha256: string;
     lockSha256: string;
+    /** Inputs every payload stages at their locked paths, sizes, and digests. */
+    inputs: LockedInput[];
 }
 
-export interface DevPayloadResult {
+export interface PayloadResult {
     outDir: string;
     manifestPath: string;
     manifest: PayloadManifest;
@@ -156,10 +169,6 @@ function readJson(rootDir: string, relative: string): unknown {
     }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function asContract(value: unknown): ReleaseContract {
     const where = RELEASE_CONTRACT_PATH;
     if (!isRecord(value)) fail(`${where} must be an object`);
@@ -196,6 +205,7 @@ function asContract(value: unknown): ReleaseContract {
     ) {
         fail(`${where}: packages.payloads must be an array of strings`);
     }
+    // SAFETY: every field `ReleaseContract` declares was type-checked above.
     return value as unknown as ReleaseContract;
 }
 
@@ -223,7 +233,7 @@ export function loadReleaseContext(rootDir: string): ReleaseContext {
             `${packageJsonPath}: version must be the release version ${contract.release.version}`,
         );
     }
-    return { contract, contractSha256, lockSha256 };
+    return { contract, contractSha256, lockSha256, inputs: lockedInputs(rootDir) };
 }
 
 export function platformFloorFor(
@@ -326,8 +336,8 @@ export function validatePayloadManifest(
     if (manifest.production_inputs_lock_sha256 !== context.lockSha256) {
         fail("payload manifest cites a stale production-inputs lock digest");
     }
-    if (manifest.mode !== "development")
-        fail("payload manifest mode must be development");
+    if (manifest.mode !== "development" && manifest.mode !== "production")
+        fail("payload manifest mode must be development or production");
     assertExactKeys(manifest.package, ["name", "version", "target"], "package");
     if (
         manifest.package.name !== PAYLOAD_TARGET.package ||
@@ -396,6 +406,19 @@ export function validatePayloadManifest(
     if (!launcherSeen)
         fail(`payload manifest must list the launcher ${LAUNCHER_PATH}`);
     if (!addonSeen) fail(`payload manifest must list the addon ${ADDON_PATH}`);
+    // A payload missing a locked input would launch without its embedding lane, so every locked input is required at its locked bytes.
+    for (const input of context.inputs) {
+        const entry = files.find((candidate) => isRecord(candidate) && candidate.path === input.payload_path);
+        if (
+            !isRecord(entry) ||
+            entry.mode !== "644" ||
+            entry.size !== input.size_bytes ||
+            entry.sha256 !== input.sha256
+        ) {
+            fail(`payload manifest must list locked input ${input.key} at ${input.payload_path} with its locked size and sha256`);
+        }
+    }
+    // SAFETY: `assertExactKeys` and the checks above proved every `PayloadManifest` field.
     return manifest as unknown as PayloadManifest;
 }
 
@@ -537,13 +560,14 @@ function assertGlibcLinuxX64Host(): void {
     }
 }
 
-/** A development payload launches only through the daemon's unqualified path, which release builds refuse (`payload_sources` in `eidnara-host.rs`), so only the debug launcher is a candidate. */
-function defaultLauncherPath(rootDir: string): string {
-    const candidate = join(rootDir, "target", "debug", "eidnara-host");
+/** A development payload launches through the daemon's development path, which only debug builds accept (`trusted_payload_sources` in `eidnara-host.rs`), so its default launcher is the debug build; a production payload carries the release build. */
+function defaultLauncherPath(rootDir: string, mode: PayloadMode): string {
+    const profile = mode === "development" ? "debug" : "release";
+    const candidate = join(rootDir, "target", profile, "eidnara-host");
     if (existsSync(candidate)) return candidate;
     return fail(
-        "no locally compiled debug eidnara-host binary found; run " +
-            "`cargo build -p daemon --bin eidnara-host --locked` first",
+        `no locally compiled ${profile} eidnara-host binary found; run ` +
+            `\`cargo build -p daemon --bin eidnara-host --locked${mode === "development" ? "" : " --release"}\` first`,
     );
 }
 
@@ -584,6 +608,16 @@ function assertLauncherMatchesRelease(
     }
 }
 
+function assertLauncherProfile(launcherPath: string, mode: PayloadMode): void {
+    const expected = mode === "development" ? "debug" : "release";
+    const profile = launcherOutput(launcherPath, "build-profile");
+    if (profile !== expected) {
+        fail(
+            `${mode} payload requires a ${expected} eidnara-host; ${launcherPath} reports ${profile}`,
+        );
+    }
+}
+
 function defaultAddonPath(rootDir: string): string {
     const candidate = join(rootDir, "target", "release", "libshm_native.so");
     if (existsSync(candidate)) return candidate;
@@ -599,15 +633,25 @@ function stageFile(source: string, destination: string, mode: number): void {
     chmodSync(destination, mode);
 }
 
-export function buildDevPayload(
+export interface BuildPayloadOptions {
+    outDir: string;
+    launcherPath?: string;
+    addonPath?: string;
+    /** Content-addressed input cache `bun run inputs:fetch` fills; defaults to `target/host-inputs`. */
+    inputsDir?: string;
+}
+
+/** Builds a payload whose manifest names `mode`; development and production builds stage the same verified locked inputs. */
+export async function buildPayload(
     rootDir: string,
-    options: { outDir: string; launcherPath?: string; addonPath?: string },
-): DevPayloadResult {
+    mode: PayloadMode,
+    options: BuildPayloadOptions,
+): Promise<PayloadResult> {
     assertGlibcLinuxX64Host();
     const context = loadReleaseContext(rootDir);
     // Absolute paths keep `readSourceFile` (working-directory relative) and `probeAddon` (`require`, module-directory relative) reading the same file.
     const launcherPath = resolve(
-        options.launcherPath ?? defaultLauncherPath(rootDir),
+        options.launcherPath ?? defaultLauncherPath(rootDir, mode),
     );
     const addonPath = resolve(options.addonPath ?? defaultAddonPath(rootDir));
     if (!existsSync(launcherPath))
@@ -616,6 +660,14 @@ export function buildDevPayload(
     const launcherBytes = readSourceFile(launcherPath, "launcher");
     const addonBytes = readSourceFile(addonPath, "addon");
     assertLauncherMatchesRelease(launcherPath, context);
+    assertLauncherProfile(launcherPath, mode);
+    // Every cached input is proven before the output tree is touched, so a wrong or partial cache leaves the previous payload in place.
+    const inputsDir = options.inputsDir ?? defaultInputsDir(rootDir);
+    const inputSources: { input: LockedInput; source: string }[] = [];
+    for (const input of context.inputs) {
+        assertSafePayloadPath(input.payload_path);
+        inputSources.push({ input, source: await verifiedCacheEntry(inputsDir, input, input.key) });
+    }
 
     const outDir = resolve(options.outDir);
     const payloadDir = join(outDir, "payload");
@@ -627,6 +679,7 @@ export function buildDevPayload(
 
     const launcherDest = join(outDir, LAUNCHER_PATH);
     const addonDest = join(outDir, ADDON_PATH);
+    const entries: PayloadFileEntry[] = [];
     try {
         stageFile(launcherPath, launcherDest, 0o755);
         stageFile(addonPath, addonDest, 0o644);
@@ -637,14 +690,24 @@ export function buildDevPayload(
         const { profile, target } = probeAddon(probePath);
         if (profile !== "release") {
             fail(
-                `dev payload requires a release-profile addon; ${addonPath} reports ${profile}`,
+                `payload requires a release-profile addon; ${addonPath} reports ${profile}`,
             );
         }
         if (target !== PAYLOAD_TARGET.nativeTarget) {
             fail(
-                `dev payload requires a ${PAYLOAD_TARGET.nativeTarget} addon; ` +
+                `payload requires a ${PAYLOAD_TARGET.nativeTarget} addon; ` +
                     `${addonPath} reports ${target}`,
             );
+        }
+        for (const { input, source } of inputSources) {
+            stageFile(source, join(outDir, input.payload_path), 0o644);
+            entries.push({
+                path: input.payload_path,
+                type: "file",
+                size: input.size_bytes,
+                mode: "644",
+                sha256: input.sha256,
+            });
         }
     } catch (error) {
         rmSync(payloadDir, { recursive: true, force: true });
@@ -653,7 +716,7 @@ export function buildDevPayload(
 
     const launcherSha256 = sha256Hex(launcherBytes);
     const addonSha256 = sha256Hex(addonBytes);
-    const entries: PayloadFileEntry[] = [
+    entries.push(
         {
             path: LAUNCHER_PATH,
             type: "file",
@@ -668,7 +731,7 @@ export function buildDevPayload(
             mode: "644",
             sha256: addonSha256,
         },
-    ];
+    );
     const files = entries.sort((a, b) =>
         a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
     );
@@ -680,7 +743,7 @@ export function buildDevPayload(
         },
         release_contract_sha256: context.contractSha256,
         production_inputs_lock_sha256: context.lockSha256,
-        mode: "development",
+        mode,
         package: {
             name: PAYLOAD_TARGET.package,
             version: context.contract.release.version,
@@ -776,8 +839,11 @@ export function validatePayloadPackageDir(rootDir: string): void {
 }
 
 const USAGE =
-    "usage: bun scripts/build-host-payload.ts --dev [--out <dir>] [--launcher <path>] [--addon <path>]\n" +
+    "usage: bun scripts/build-host-payload.ts (--dev | --release) [--out <dir>] [--launcher <path>] [--addon <path>] [--inputs-dir <dir>]\n" +
     "       bun scripts/build-host-payload.ts --check";
+
+const PATH_OPTIONS = ["--out", "--launcher", "--addon", "--inputs-dir"] as const;
+type PathOption = (typeof PATH_OPTIONS)[number];
 
 function usageError(message: string): never {
     console.error(message);
@@ -785,35 +851,33 @@ function usageError(message: string): never {
     process.exit(2);
 }
 
-function main(): void {
+async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const flags = new Set<string>();
-    const values: { out?: string; launcher?: string; addon?: string } = {};
+    const values: Partial<Record<PathOption, string>> = {};
     for (let i = 0; i < args.length; i += 1) {
         const arg = args[i];
-        if (arg === "--out" || arg === "--launcher" || arg === "--addon") {
+        if (PATH_OPTIONS.includes(arg as PathOption)) {
             const value = args[i + 1];
             // A path that begins with `--` is passed as `./--name`.
             if (value === undefined || value.startsWith("--")) {
                 usageError(`${arg} requires a path`);
             }
-            values[arg.slice(2) as keyof typeof values] = value;
+            values[arg as PathOption] = value;
             i += 1;
-        } else if (arg === "--check" || arg === "--dev") {
+        } else if (arg === "--check" || arg === "--dev" || arg === "--release") {
             flags.add(arg);
         } else {
             usageError(`unknown argument: ${arg}`);
         }
     }
     if (flags.size !== 1)
-        usageError("exactly one of --dev or --check is required");
+        usageError("exactly one of --dev, --release, or --check is required");
     if (flags.has("--check") && Object.keys(values).length > 0) {
-        usageError("--out, --launcher, and --addon apply to --dev only");
+        usageError("--out, --launcher, --addon, and --inputs-dir apply to --dev and --release only");
     }
-    if (
-        values.addon !== undefined &&
-        !NATIVE_ADDON_EXTENSIONS.has(extname(values.addon))
-    ) {
+    const addon = values["--addon"];
+    if (addon !== undefined && !NATIVE_ADDON_EXTENSIONS.has(extname(addon))) {
         usageError(
             `--addon must name a ${[...NATIVE_ADDON_EXTENSIONS].join(" or ")} file`,
         );
@@ -828,15 +892,17 @@ function main(): void {
             );
             return;
         }
-        const result = buildDevPayload(rootDir, {
-            outDir: values.out ?? join(rootDir, PAYLOAD_TARGET.dir),
-            ...(values.launcher === undefined
-                ? {}
-                : { launcherPath: values.launcher }),
-            ...(values.addon === undefined ? {} : { addonPath: values.addon }),
+        const mode: PayloadMode = flags.has("--dev") ? "development" : "production";
+        const launcher = values["--launcher"];
+        const inputsDir = values["--inputs-dir"];
+        const result = await buildPayload(rootDir, mode, {
+            outDir: values["--out"] ?? join(rootDir, PAYLOAD_TARGET.dir),
+            ...(launcher === undefined ? {} : { launcherPath: launcher }),
+            ...(addon === undefined ? {} : { addonPath: addon }),
+            ...(inputsDir === undefined ? {} : { inputsDir }),
         });
         console.log(
-            `built development payload at ${result.outDir} ` +
+            `built ${mode} payload at ${result.outDir} ` +
                 `(payload-manifest digest ${result.digest}, launcher sha256 ${result.launcherSha256})`,
         );
     } catch (error) {
@@ -845,4 +911,4 @@ function main(): void {
     }
 }
 
-if (import.meta.main) main();
+if (import.meta.main) await main();

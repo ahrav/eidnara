@@ -156,16 +156,18 @@ describe("managed lifecycle owner", () => {
         expect(prepare(f, true)?.payloadManifestDigest).toBe(f.manifestDigest);
     });
 
-    test("a development-mode payload stages but carries no manifest digest", () => {
+    test("a development-mode payload stages through the trusted manifest digest", () => {
         const f = fixture();
-        writeManifest(f, { ...f.manifest, mode: "development" });
+        const text = writeManifest(f, { ...f.manifest, mode: "development" });
 
         const target = prepare(f, true);
 
         expect(target?.kind).toBe("retained-fd");
         expect(target?.retained.path).toContain(f.launcherDigest);
-        // `crates/daemon/src/bin/eidnara-host.rs` accepts `--payload-manifest-digest` only for `mode: "production"`; a development payload takes the unqualified path, which reads no manifest.
-        expect(target?.payloadManifestDigest).toBeUndefined();
+        // `crates/daemon/src/bin/eidnara-host.rs` stages a development manifest through its trusted path in debug builds.
+        expect(target?.payloadManifestDigest).toBe(
+            createHash("sha256").update(text.slice(0, -1)).digest("hex"),
+        );
     });
 
     test("a payload whose mode is neither production nor development is invalid", () => {

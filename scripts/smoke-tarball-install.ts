@@ -8,9 +8,13 @@ import {
     statSync,
     writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { canonicalJson } from "./build-host-payload";
+import { isRecord, lockedInputs } from "./host-inputs";
 
 const rootDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.1.0";
@@ -22,11 +26,25 @@ const PACKAGE_DIRS: Record<string, string> = {
     "@eidnara/cli": "packages/cli",
     [PAYLOAD_PACKAGE]: "packages/host-linux-x64-gnu",
 };
+const ORT_LIBRARY = "payload/ort/libonnxruntime.so";
+const LOCKED_INPUTS = lockedInputs(rootDir);
 const PAYLOAD_FILES = [
     "payload-manifest.json",
     "payload/bin/eidnara-host",
     "payload/native/shm_native.node",
+    ...LOCKED_INPUTS.map((input) => input.payload_path),
 ];
+/** Locked inputs fetched from upstream, keyed by their path in the extracted payload tarball. */
+const LOCKED_THIRD_PARTY = new Map(
+    LOCKED_INPUTS.filter((input) => !input.source.startsWith("repo:")).map((input) => [
+        join(PAYLOAD_PACKAGE.slice("@eidnara/".length), "package", input.payload_path),
+        input.sha256,
+    ]),
+);
+/** The locked hard budget for embedding certification after publication; the lane reports `starting` until it settles. */
+const CERTIFICATION_BUDGET_MS = certificationBudgetMs();
+/** Polling outlasts the budget so a miss reports its elapsed time instead of a bare timeout. */
+const LANE_SETTLE_TIMEOUT_MS = 2 * CERTIFICATION_BUDGET_MS;
 /** Packages an operator installs directly. */
 const PARENT_PACKAGES = ["@eidnara/opencode", "@eidnara/pi", "@eidnara/cli"];
 /** The `@eidnara/*` edges each packed manifest must declare, all pinned to VERSION. */
@@ -366,7 +384,14 @@ function readPiPeerVersions(rootDir: string): Record<string, string> {
     return versions;
 }
 
-function scanPredecessorTokens(extractedRoot: string): string[] {
+/**
+ * `lockedThirdParty` maps an extracted path to the sha256 the production-inputs lock pins for it.
+ * Among files eligible for scanning, a matching lock-pinned sha256 identifies upstream data, such as a tokenizer vocabulary, that is exempt from predecessor-token checks.
+ */
+export function scanPredecessorTokens(
+    extractedRoot: string,
+    lockedThirdParty: ReadonlyMap<string, string>,
+): string[] {
     const hits: string[] = [];
     for (const path of walkFiles(extractedRoot)) {
         const rel = relative(extractedRoot, path);
@@ -379,6 +404,12 @@ function scanPredecessorTokens(extractedRoot: string): string[] {
         const bytes = readFileSync(path);
         // A NUL byte within the first 8 KiB marks a binary, matching `grep -I`.
         if (bytes.subarray(0, 8192).includes(0)) continue;
+        const locked = lockedThirdParty.get(rel);
+        if (
+            locked !== undefined &&
+            createHash("sha256").update(bytes).digest("hex") === locked
+        )
+            continue;
         let text = bytes.toString("utf8");
         if (rel.endsWith(".map")) {
             // Source-map mappings encode positions, not source identifiers.
@@ -447,6 +478,76 @@ function assertDaemon(
         `eidnara daemon ${action} --json exits ${code} with ${summary}`,
         describe(got.result),
     );
+}
+
+function certificationBudgetMs(): number {
+    const lock = JSON.parse(
+        readFileSync(join(rootDir, "release/production-inputs.lock.json"), "utf8"),
+    ) as {
+        cold_start_budgets_ms?: Record<string, { hard?: unknown }>;
+    };
+    const hard =
+        lock.cold_start_budgets_ms?.linux_local_embeddings_certification_post_publication?.hard;
+    if (typeof hard !== "number" || !Number.isSafeInteger(hard) || hard <= 0)
+        throw new Error("the lock names no local-embeddings certification hard budget");
+    return hard;
+}
+
+interface LaneObservation {
+    status: ReturnType<typeof daemon>;
+    state: unknown;
+    reason: unknown;
+    check: Record<string, unknown> | undefined;
+    /** Milliseconds from the first status read, which follows publication, to the settled one. */
+    elapsedMs: number;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+    return isRecord(value) ? value : undefined;
+}
+
+/** Polls `daemon status` until the embedding lane leaves `starting`, then reads `daemon doctor` once. */
+function settledLane(cli: string, project: string): LaneObservation {
+    const started = Date.now();
+    for (;;) {
+        const status = daemon(cli, project, "status");
+        const lane = record(record(status.parsed.readiness)?.local_embeddings);
+        const elapsedMs = Date.now() - started;
+        if (lane?.state !== "starting" || elapsedMs > LANE_SETTLE_TIMEOUT_MS) {
+            const doctor = daemon(cli, project, "doctor").parsed;
+            const checks = Array.isArray(doctor.checks) ? doctor.checks : [];
+            const check = checks
+                .map(record)
+                .find((candidate) => candidate?.id === "readiness.local_embeddings");
+            return { status, state: lane?.state, reason: lane?.reason, check, elapsedMs };
+        }
+        Bun.sleepSync(250);
+    }
+}
+
+function assertSettledWithinBudget(lane: LaneObservation): void {
+    assert(
+        lane.elapsedMs <= CERTIFICATION_BUDGET_MS,
+        `the embedding lane settles within the locked ${CERTIFICATION_BUDGET_MS} ms certification budget`,
+        `${lane.elapsedMs} ms`,
+    );
+}
+
+/** Replaces the installed ORT library with other ELF bytes and rewrites the payload manifest to match, so payload validation passes and component initialization fails. */
+function breakInstalledRuntime(installedPayload: string): void {
+    const broken = readFileSync(join(installedPayload, "payload/native/shm_native.node"));
+    writeFileSync(join(installedPayload, ORT_LIBRARY), broken);
+    const manifestPath = join(installedPayload, "payload-manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        files: { path: string; size: number; sha256: string }[];
+    };
+    for (const entry of manifest.files) {
+        if (entry.path === ORT_LIBRARY) {
+            entry.size = broken.length;
+            entry.sha256 = createHash("sha256").update(broken).digest("hex");
+        }
+    }
+    writeFileSync(manifestPath, `${canonicalJson(manifest)}\n`);
 }
 
 function main(): void {
@@ -561,7 +662,7 @@ function main(): void {
             cliEntry.startsWith("#!/usr/bin/env node"),
             "@eidnara/cli dist/index.js starts with a node shebang",
         );
-        const tokenHits = scanPredecessorTokens(extractedDir);
+        const tokenHits = scanPredecessorTokens(extractedDir, LOCKED_THIRD_PARTY);
         assert(
             tokenHits.length === 0,
             "no predecessor tokens in extracted tarballs",
@@ -681,11 +782,21 @@ function main(): void {
             existsSync(connection),
             `${relative(tmpRoot, connection)} exists`,
         );
-        assertDaemon("status", daemon(cli, project, "status"), 0, {
+        // Certification runs after publication, so status reports the lane `starting`, and fails, until it settles.
+        const ready = settledLane(cli, project);
+        assertSettledWithinBudget(ready);
+        assertDaemon("status", ready.status, 0, {
             ok: true,
             state: "running",
             command: "status",
         });
+        assert(
+            ready.state === "ready" &&
+                ready.reason === "healthy" &&
+                ready.check?.status === "pass",
+            "the installed payload's embedding lane reports ready in daemon status and passes daemon doctor",
+            JSON.stringify({ status: ready.status.parsed.readiness, check: ready.check }),
+        );
         // The shipped review commands reach the running daemon through the
         // installed transport.
         const reviewStatus = run([cli, "review", "status", "--json"], {
@@ -740,6 +851,25 @@ function main(): void {
             state: "stopped",
             reason: "not_running",
         });
+
+        breakInstalledRuntime(installedPayload);
+        stopped = false;
+        const restart = daemon(cli, project, "start", START_TIMEOUT_MS);
+        assertDaemon("start with an ORT library that fails to initialize", restart, 0, {
+            ok: true,
+            state: "running",
+        });
+        const degraded = settledLane(cli, project);
+        assertSettledWithinBudget(degraded);
+        assert(
+            degraded.state === "degraded" &&
+                degraded.reason === "local_embeddings_degraded" &&
+                degraded.check?.status === "fail" &&
+                degraded.check?.reason === "local_embeddings_degraded",
+            "a validated payload whose embedding component fails reports degraded in daemon status and daemon doctor",
+            JSON.stringify({ status: degraded.status.parsed.readiness, check: degraded.check }),
+        );
+        stopped = daemon(cli, project, "stop").result.code === 0;
     } finally {
         if (startAttempted && !stopped)
             run([cli, "daemon", "stop", "--json"], { cwd: project });
@@ -748,18 +878,20 @@ function main(): void {
     }
 }
 
-try {
-    main();
-    console.log("tarball smoke: ok");
-} catch (error) {
-    if (!(error instanceof SmokeFailure)) {
-        failures.push(
-            error instanceof Error
-                ? (error.stack ?? error.message)
-                : String(error),
-        );
+if (import.meta.main) {
+    try {
+        main();
+        console.log("tarball smoke: ok");
+    } catch (error) {
+        if (!(error instanceof SmokeFailure)) {
+            failures.push(
+                error instanceof Error
+                    ? (error.stack ?? error.message)
+                    : String(error),
+            );
+        }
+        console.error(`tarball smoke: ${failures.length} check(s) failed`);
+        for (const failure of failures) console.error(`  - ${failure}`);
+        process.exit(1);
     }
-    console.error(`tarball smoke: ${failures.length} check(s) failed`);
-    for (const failure of failures) console.error(`  - ${failure}`);
-    process.exit(1);
 }
