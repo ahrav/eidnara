@@ -1952,6 +1952,66 @@ fn a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers() {
     assert_eq!(retrieval.consumed.ranked_matches, 3000);
 }
 
+#[test]
+fn dead_rows_at_the_front_of_a_large_tie_group_neither_take_slots_nor_hide_truncation() {
+    let fixture = Fixture::all_admitted();
+    let mut tied: Vec<Row> = (0..3000)
+        .map(|n| Row::claim(&format!("tie-{n}"), &format!("tiegroup filler {n}")))
+        .collect();
+    tied.reverse();
+    for chunk in tied.chunks(1000) {
+        fixture.project(chunk);
+    }
+    let mut ids: Vec<String> = tied.iter().map(Row::occurrence_id).collect();
+    ids.sort();
+    let tombstone = |dead: &[String]| {
+        let mut raw = fixture.raw();
+        let tx = raw.transaction().unwrap();
+        for occurrence_id in dead {
+            tx.execute(
+                "INSERT INTO occurrence_tombstones(occurrence_id, invalidated_commit_seq, reason, recorded_at) VALUES (?1, 99, 'retired', 0)",
+                [occurrence_id],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    };
+    let request = probes("tiegroup");
+    let scan_rows = bounds().scan_rows.get();
+    let scanned = |fixture: &Fixture| {
+        fixture
+            .store
+            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+            .unwrap()
+            .unwrap()
+    };
+
+    let dead = 2 * scan_rows + 7;
+    tombstone(&ids[..dead]);
+    let kept = scanned(&fixture);
+    assert_eq!(
+        kept.hit_ids().collect::<Vec<_>>(),
+        ids[dead..dead + scan_rows].to_vec()
+    );
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert!(retrieval.reasons.contains(&IncompleteReason::ScanBound));
+
+    tombstone(&ids[dead..ids.len() - scan_rows]);
+    let kept = scanned(&fixture);
+    assert_eq!(
+        kept.hit_ids().collect::<Vec<_>>(),
+        ids[ids.len() - scan_rows..].to_vec()
+    );
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert!(!retrieval.reasons.contains(&IncompleteReason::ScanBound));
+}
+
 /// An interrupt from the connection's progress handler at any point of counting, ranking, or a common scan ends the request as
 /// budget exhaustion with no contributions, and the connection serves the next request normally.
 #[test]
