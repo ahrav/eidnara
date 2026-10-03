@@ -484,11 +484,13 @@ impl KernelStore {
         let published_new = match publish {
             Ok(PublishOutcome::Published) => {
                 staged.consume();
+                self.count_published_artifact(byte_length);
                 true
             }
             // A retained temp link makes the object's link count two, which
             // `verify_object` rejects.
             Ok(PublishOutcome::PublishedTempRetained) => {
+                self.count_published_artifact(byte_length);
                 if let Err(error) = durable_unlink(tmp, &temp_name) {
                     let mapped =
                         self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
@@ -671,17 +673,70 @@ impl KernelStore {
         digest: &str,
         byte_length: u64,
     ) -> Result<(), ArtifactError> {
-        let usage = regular_file_bytes(objects, &|| false)
-            .map_err(|error| {
-                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
-            })?
-            .expect("an uncancellable walk completes");
+        let usage = self.counted_artifact_usage(objects)?;
         let already_present = object_is_present(objects, digest);
         let projected = usage.saturating_add(if already_present { 0 } else { byte_length });
         if projected > self.artifact_cap {
             return Err(ArtifactError::capacity(usage, self.artifact_cap));
         }
         Ok(())
+    }
+
+    /// A walk racing an unlink can count the removed object, so the walk caches its total only if `generation` remains unchanged.
+    fn counted_artifact_usage(&self, objects: &File) -> Result<u64, ArtifactError> {
+        let generation = {
+            let usage = self
+                .artifact_usage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(bytes) = usage.bytes {
+                return Ok(bytes);
+            }
+            usage.generation
+        };
+        #[cfg(feature = "test-support")]
+        self.artifact_census_walks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let walked = regular_file_bytes(objects, &|| false)
+            .map_err(|error| {
+                self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed)
+            })?
+            .expect("an uncancellable walk completes");
+        let mut usage = self
+            .artifact_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if usage.generation == generation {
+            usage.bytes = Some(walked);
+        }
+        Ok(walked)
+    }
+
+    fn count_published_artifact(&self, byte_length: u64) {
+        let mut usage = self
+            .artifact_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(bytes) = usage.bytes.as_mut() {
+            *bytes = bytes.saturating_add(byte_length);
+        }
+    }
+
+    /// Clears the cached count before an object below `objects` is unlinked, so the next ingest walks the tree.
+    pub(super) fn forget_artifact_usage(&self) {
+        let mut usage = self
+            .artifact_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        usage.generation = usage.generation.wrapping_add(1);
+        usage.bytes = None;
+    }
+
+    /// Ingestion walks of the object tree on this store since it opened.
+    #[cfg(feature = "test-support")]
+    pub fn artifact_census_walks_for_test(&self) -> usize {
+        self.artifact_census_walks
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn merge_replayed_classification(
@@ -833,6 +888,7 @@ impl KernelStore {
         }
         match self.shard_directory(digest, false) {
             Ok(Some(shard)) => {
+                self.forget_artifact_usage();
                 if durable_unlink(&shard, &digest[2..]).is_err() {
                     self.latch_cas_failure();
                 }
