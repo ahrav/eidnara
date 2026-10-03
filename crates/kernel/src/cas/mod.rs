@@ -24,7 +24,9 @@ use std::sync::atomic::Ordering;
 use rustix::fs::{self as rfs, AtFlags};
 
 use super::{CommitIntent, RepositoryProvenance, Sensitivity};
-use crate::durable_fs::{StorageError, open_or_create_secure_directory, open_secure_directory};
+use crate::durable_fs::{
+    StorageError, create_secure_directories, open_or_create_secure_directory, open_secure_directory,
+};
 use crate::{KernelError, KernelStore};
 
 /// Default total artifact capacity in bytes.
@@ -555,7 +557,58 @@ impl KernelStore {
                 other => other,
             }
         };
-        let shard = Arc::new(opened?);
+        Ok(Some(Self::hold_shard(&mut shards, name, opened?)?))
+    }
+
+    /// The shard directories of `digests` in order. Every missing shard is created as [`Self::shard_directory`] creates one, with the new shards' syncs issued together and the objects directory synced once.
+    pub(super) fn shard_directories(
+        &self,
+        digests: &[&str],
+    ) -> Result<Vec<Arc<File>>, StorageError> {
+        let mut shards = self
+            .shard_directories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut missing: Vec<&str> = digests
+            .iter()
+            .map(|digest| &digest[..2])
+            .filter(|name| !shards.contains_key(*name))
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        let mut absent = Vec::new();
+        for name in missing {
+            match open_secure_directory(&self.objects_directory, name) {
+                Ok(directory) => {
+                    Self::hold_shard(&mut shards, name, directory)?;
+                }
+                Err(StorageError::Other(source))
+                    if source.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    absent.push(name);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !absent.is_empty() {
+            let created = create_secure_directories(&self.objects_directory, &absent)?;
+            for (name, directory) in absent.into_iter().zip(created) {
+                Self::hold_shard(&mut shards, name, directory)?;
+            }
+        }
+        Ok(digests
+            .iter()
+            .map(|digest| Arc::clone(&shards[&digest[..2]]))
+            .collect())
+    }
+
+    /// Caches `directory` as shard `name`.
+    fn hold_shard(
+        shards: &mut std::collections::BTreeMap<String, Arc<File>>,
+        name: &str,
+        directory: File,
+    ) -> Result<Arc<File>, StorageError> {
+        let shard = Arc::new(directory);
         // A shard renamed to another two-character name would be reached here
         // under that name while its objects keep the digests of the name it was
         // created under. The directory this store already holds is the only
@@ -571,7 +624,7 @@ impl KernelStore {
             }
         }
         shards.insert(name.to_string(), Arc::clone(&shard));
-        Ok(Some(shard))
+        Ok(shard)
     }
 
     pub(super) fn cas_is_failed(&self) -> bool {

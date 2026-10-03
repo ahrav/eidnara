@@ -554,6 +554,49 @@ impl Envelope<'_> {
         stored_receipt(self.tx, &RedactedIntent::new(intent)?)
     }
 
+    /// Records `intent`'s receipt at this commit, so a later commit or preview under `intent` replays `result` as if `intent` had committed on its own. A caller that applies several keyed operations in one commit records each operation's receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Conflict` when the key is already recorded, and `InvalidInput` for a reserved producer or a malformed intent.
+    pub fn record_receipt(
+        &mut self,
+        intent: CommitIntent,
+        result: &str,
+    ) -> Result<(), KernelError> {
+        intent.refuse_reserved_producer()?;
+        let intent = RedactedIntent::new(intent)?;
+        if stored_receipt(self.tx, &intent)?.is_some() {
+            return Err(KernelError::Conflict);
+        }
+        let receipt_id = operation_identity(&intent);
+        let result = redact(result)?;
+        self.tx
+            .execute_cached(
+                "INSERT INTO operation_receipts(
+                     receipt_id,producer,operation_key,request_digest,commit_seq,result_payload,created_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    receipt_id,
+                    intent.producer,
+                    intent.operation_key,
+                    intent.request_digest,
+                    self.commit_seq,
+                    result.text.as_bytes(),
+                    current_time_ms(),
+                ],
+            )
+            .map_err(map_sqlite)?;
+        record(
+            self.tx,
+            "operation_receipt",
+            &receipt_id,
+            "result_payload",
+            &result,
+            Some(self.commit_seq),
+        )
+    }
+
     /// Succession is judged before invalidation because a superseded object is
     /// also invalidated, and advancement last because both of the others also
     /// leave a later change event.

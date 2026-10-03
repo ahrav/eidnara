@@ -22,9 +22,10 @@ use super::{
 };
 use crate::current_time_ms;
 use crate::durable_fs::{
-    PublishOutcome, StorageError, classify_errno, classify_io, create_new_file, durable_unlink,
-    open_regular_nofollow, publish_noreplace_between_locked, sync_directory,
-    sync_publish_directories_with, temp_name, write_and_sync,
+    MAX_CONCURRENT_SYNCS, PublishOutcome, StorageError, classify_errno, classify_io,
+    create_new_file, durable_unlink, open_regular_nofollow, publish_noreplace_between_locked,
+    sync_all_concurrently, sync_directory, sync_publish_directories_with, temp_name, unlink_temp,
+    write_and_sync,
 };
 use crate::envelope::{ObjectRow, PendingChange, check_fence, commit_with_writer};
 use crate::object_write::map_write_error;
@@ -665,6 +666,287 @@ impl KernelStore {
                 }))
             }
         }
+    }
+
+    /// Retains every request's exact payload, then commits their references and `operation` in one commit under `intent`, with each request's own receipt recorded in it.
+    ///
+    /// Each payload is admitted as [`Self::ingest_exact_artifact`] admits it, and each distinct digest is staged durably before the writer is held. Requests with equal bytes share one object and each record their own evidence. The batch reserves every request in one transaction, publishes the objects, syncs each directory once, and commits the references, the request receipts, and `operation`'s writes together, so a later [`Self::ingest_exact_artifact`] of any request replays its receipt. `operation` receives the handles in request order and returns the receipt result recorded under `intent`. With no requests the batch is one commit of `operation`. When `intent` replays a stored receipt, the batch runs no operation, references nothing new, and returns that receipt.
+    ///
+    /// # Errors
+    ///
+    /// Refuses the whole batch for any request [`Self::ingest_exact_artifact`] would refuse, a request whose own key is already recorded, an `operation` error, and an exhausted `budget` while waiting for the writer. A refused batch releases its reservations and removes the bytes it published that nothing references. The error does not name the refused request; ingesting each request alone reports it.
+    pub fn ingest_exact_artifacts_with(
+        &self,
+        intent: crate::CommitIntent,
+        requests: Vec<ArtifactIngestRequest>,
+        budget: Option<&crate::applicability::EvalBudget>,
+        operation: impl FnOnce(
+            &mut crate::Envelope<'_>,
+            &[ArtifactHandle],
+        ) -> Result<String, KernelError>,
+    ) -> Result<crate::CommitReceipt, KernelError> {
+        intent.refuse_reserved_producer()?;
+        if requests.is_empty() {
+            let mut writer = match budget {
+                Some(budget) => self.lock_writer_within(&budget.acquire_limit())?,
+                None => self.lock_writer()?,
+            };
+            return commit_with_writer(
+                &mut writer,
+                self.lease_epoch(),
+                intent,
+                |envelope| operation(envelope, &[]),
+                || Ok(()),
+            );
+        }
+        // A batch committed before replays its receipt whatever has happened to its bytes since.
+        let receipt_wait = budget
+            .and_then(crate::applicability::EvalBudget::deadline)
+            .unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(30));
+        if let (_, Some(receipt)) = self.preview(receipt_wait, |preview| {
+            preview.stored_receipt(intent.clone())
+        })? {
+            return Ok(receipt);
+        }
+        if self.cas_is_failed() {
+            return Err(KernelError::Io);
+        }
+        let prepared = requests
+            .into_iter()
+            .map(|request| PreparedArtifact::new(request, PayloadFidelity::Exact))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| KernelError::InvalidInput)?;
+        // The first request with each digest stages and publishes its object; later ones reference it.
+        let mut first_with = std::collections::HashMap::new();
+        let distinct: Vec<usize> = (0..prepared.len())
+            .filter(|&index| {
+                *first_with
+                    .entry(prepared[index].digest.as_str())
+                    .or_insert(index)
+                    == index
+            })
+            .collect();
+        let distinct_prepared: Vec<&PreparedArtifact> =
+            distinct.iter().map(|&index| &prepared[index]).collect();
+        #[cfg(feature = "test-support")]
+        self.staged_artifacts
+            .fetch_add(distinct.len(), std::sync::atomic::Ordering::SeqCst);
+        let storage = |error| {
+            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
+            KernelError::Io
+        };
+        let tmp = &self.tmp_directory;
+        let objects = &self.objects_directory;
+        let names: Vec<String> = distinct_prepared
+            .iter()
+            .map(|prepared| temp_name(&format!("artifact-{}", prepared.digest)))
+            .collect();
+        let mut staged = Vec::with_capacity(distinct.len());
+        // Staging holds at most one chunk of temporary files open at a time.
+        for chunk in distinct_prepared
+            .iter()
+            .zip(&names)
+            .collect::<Vec<_>>()
+            .chunks(MAX_CONCURRENT_SYNCS)
+        {
+            let mut temps = Vec::with_capacity(chunk.len());
+            for (prepared, name) in chunk {
+                let mut temp = create_new_file(tmp, name).map_err(storage)?;
+                staged.push(StagedObject {
+                    directory: tmp,
+                    name,
+                    consumed: false,
+                });
+                std::io::Write::write_all(&mut temp, &prepared.bytes)
+                    .map_err(classify_io)
+                    .map_err(storage)?;
+                temps.push(temp);
+            }
+            sync_all_concurrently(&temps.iter().collect::<Vec<_>>()).map_err(storage)?;
+        }
+
+        let mut writer = match budget {
+            Some(budget) => self.lock_writer_within(&budget.acquire_limit())?,
+            None => self.lock_writer()?,
+        };
+        let usage = self
+            .counted_artifact_usage(objects)
+            .map_err(|_| KernelError::Io)?;
+        let added = distinct_prepared
+            .iter()
+            .filter(|prepared| !object_is_present(objects, &prepared.digest))
+            .map(|prepared| prepared.bytes.len() as u64)
+            .fold(0_u64, u64::saturating_add);
+        if usage.saturating_add(added) > self.artifact_cap {
+            return Err(KernelError::Io);
+        }
+        let shards = self
+            .shard_directories(
+                &distinct_prepared
+                    .iter()
+                    .map(|prepared| prepared.digest.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(storage)?;
+        let now = current_time_ms();
+        let epoch = i64::try_from(self.lease_epoch()).map_err(|_| KernelError::InvalidInput)?;
+        let reservations: Vec<String> = prepared
+            .iter()
+            .map(|prepared| {
+                format!(
+                    "{}-{}",
+                    prepared.digest,
+                    crate::durable_fs::next_unique_id()
+                )
+            })
+            .collect();
+        let reservation = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| KernelError::Io)?;
+        check_fence(&reservation, self.lease_epoch())?;
+        for (prepared, reservation_id) in prepared.iter().zip(&reservations) {
+            // A digest under active reclamation, or one whose re-admission is blocked, must not be re-admitted.
+            if artifact_is_reclaiming(&reservation, &prepared.digest)?
+                || artifact_is_blocked(&reservation, &prepared.digest)?
+            {
+                return Err(KernelError::Conflict);
+            }
+            reservation
+                .execute_cached(
+                    "INSERT INTO artifact_ingestion_reservations(
+                         reservation_id,artifact_digest,artifact_reference,state,writer_epoch,
+                         created_at,heartbeat_at,lease_expires_at
+                     ) VALUES (?1,?2,?3,'Live',?4,?5,?5,?6)",
+                    params![
+                        reservation_id,
+                        prepared.digest,
+                        prepared.artifact_reference,
+                        epoch,
+                        now,
+                        now.saturating_add(RESERVATION_MS),
+                    ],
+                )
+                .map_err(|_| KernelError::Io)?;
+        }
+        reservation.commit().map_err(|_| KernelError::Io)?;
+
+        let mut published_new = vec![false; distinct.len()];
+        let published = self.publish_staged(
+            &distinct_prepared,
+            &names,
+            &shards,
+            &mut staged,
+            &mut published_new,
+        );
+        let outcome = published.and_then(|()| {
+            // Each shard that received an object and the temporary directory the objects left are synced once.
+            let mut synced = std::collections::HashSet::new();
+            let mut directories: Vec<&File> = distinct_prepared
+                .iter()
+                .zip(&shards)
+                .filter(|(prepared, _)| synced.insert(&prepared.digest[..2]))
+                .map(|(_, shard)| shard.as_ref())
+                .collect();
+            directories.push(tmp);
+            sync_all_concurrently(&directories).map_err(storage)?;
+            for ((prepared, shard), new) in
+                distinct_prepared.iter().zip(&shards).zip(&published_new)
+            {
+                verify_object(shard, &prepared.digest[2..], prepared, *new)
+                    .map_err(|_| KernelError::Io)?;
+            }
+            if self.cas_is_failed() {
+                return Err(KernelError::Io);
+            }
+            let handles: Vec<ArtifactHandle> = prepared
+                .iter()
+                .map(|prepared| ArtifactHandle {
+                    digest: prepared.digest.clone(),
+                    evidence_id: redact_lossy(&prepared.request.evidence_id).text,
+                })
+                .collect();
+            commit_with_writer(
+                &mut writer,
+                self.lease_epoch(),
+                intent,
+                |envelope| {
+                    for (prepared, reservation_id) in prepared.iter().zip(&reservations) {
+                        let evidence_id =
+                            insert_reference(envelope, prepared, reservation_id, &mut None)?;
+                        envelope.record_receipt(prepared.request.intent.clone(), &evidence_id)?;
+                    }
+                    operation(envelope, &handles)
+                },
+                || Ok(()),
+            )
+        });
+        match outcome {
+            Ok(receipt) if !receipt.replayed => Ok(receipt),
+            outcome => {
+                // Requests are cleaned last to first, so the first request with a digest, the one that published its object, releases its reservation after every duplicate has, and removes the object it added.
+                for (index, (prepared, reservation_id)) in
+                    prepared.iter().zip(&reservations).enumerate().rev()
+                {
+                    let new = distinct
+                        .iter()
+                        .position(|&first| first == index)
+                        .is_some_and(|position| published_new[position]);
+                    self.cleanup_failed_reference(
+                        &mut writer,
+                        reservation_id,
+                        &prepared.digest,
+                        new,
+                        IngestFaults::default(),
+                    );
+                }
+                outcome
+            }
+        }
+    }
+
+    /// Publishes each staged temporary file under its digest and records which ones this batch added.
+    fn publish_staged(
+        &self,
+        prepared: &[&PreparedArtifact],
+        names: &[String],
+        shards: &[std::sync::Arc<File>],
+        staged: &mut [StagedObject<'_>],
+        published_new: &mut [bool],
+    ) -> Result<(), KernelError> {
+        let tmp = &self.tmp_directory;
+        let storage = |error| {
+            self.map_cas_storage_error(error, ArtifactErrorKind::IngestionFailClosed);
+            KernelError::Io
+        };
+        for (index, prepared) in prepared.iter().enumerate() {
+            let byte_length = prepared.bytes.len() as u64;
+            match publish_noreplace_between_locked(
+                tmp,
+                &names[index],
+                &shards[index],
+                &prepared.digest[2..],
+            )
+            .map_err(storage)?
+            {
+                PublishOutcome::Published => {
+                    staged[index].consume();
+                    self.count_published_artifact(byte_length);
+                    published_new[index] = true;
+                }
+                // A retained temp link makes the object's link count two, which `verify_object` rejects. The batch syncs the temporary directory after every publication, which makes these unlinks durable.
+                PublishOutcome::PublishedTempRetained => {
+                    self.count_published_artifact(byte_length);
+                    published_new[index] = true;
+                    unlink_temp(tmp, &names[index]).map_err(storage)?;
+                    staged[index].consume();
+                }
+                PublishOutcome::AlreadyExists => {
+                    unlink_temp(tmp, &names[index]).map_err(storage)?;
+                    staged[index].consume();
+                }
+            }
+        }
+        Ok(())
     }
 
     fn check_budget(
