@@ -760,7 +760,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
-/// Verification streams the row and code artifacts one chunk of rows at a time in two passes, one to calibrate and one to compare the codes, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store's validation has already streamed each file through a fixed buffer to check its hash, so the bound limits memory, not I/O.
+/// Verification streams the row and code artifacts one chunk of rows at a time in two passes, one to calibrate and one to compare the codes, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store's validation streams each file through a fixed buffer to check its hash and keeps the descriptor it hashed, and verification reads every file through that descriptor, so each byte is hashed once and the bound limits memory, not I/O.
 ///
 /// # Errors
 ///
@@ -771,9 +771,8 @@ pub fn verify(
     expected: &ExpectedVectors<'_>,
     max_bytes: u64,
 ) -> Result<VerifiedVectors, VectorRefusal> {
-    let generation = store.validate(digest)?;
-    let manifest = &generation.manifest;
-    if manifest.target != VECTOR_TARGET {
+    let mut generation = store.validate_retaining(digest)?;
+    if generation.manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
     let within = |bytes: u64| {
@@ -786,8 +785,8 @@ pub fn verify(
             Ok(())
         }
     };
-    within(manifest_verification_bytes(manifest))?;
-    let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
+    within(manifest_verification_bytes(&generation.manifest))?;
+    let sidecar_bytes = generation.take_verified_bytes(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
     if sidecar.schema != SIDECAR_SCHEMA {
@@ -802,7 +801,7 @@ pub fn verify(
     if !sidecar.inventories_exactly() {
         return Err(VectorRefusal::NotVectors("inventory"));
     }
-    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != *manifest {
+    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != generation.manifest {
         return Err(VectorRefusal::NotVectors("manifest binding"));
     }
     // The projection schema holds no checkpoint without these, so a sidecar naming one came from no export.
@@ -818,9 +817,9 @@ pub fn verify(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    within(verification_bytes(manifest, &sidecar))?;
+    within(verification_bytes(&generation.manifest, &sidecar))?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
-    let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
+    let rows_file = File::from(generation.take_verified_file(ROWS_FILE)?);
     let rows = RowStream::open(&rows_file, declared_size(&generation, ROWS_FILE), &layout)?;
     if rows.count != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
@@ -832,7 +831,7 @@ pub fn verify(
         Ok(())
     })?;
     let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
-    let scales_bytes = generation.read_verified_file(SCALES_FILE)?;
+    let scales_bytes = generation.take_verified_bytes(SCALES_FILE)?;
     if calibration.scales.encode() != scales_bytes
         || calibration.identity.calibrated_rows != sidecar.calibrated_rows
         || sha256_hex(&scales_bytes) != sidecar.scales_sha256
@@ -840,13 +839,13 @@ pub fn verify(
         return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
     drop(scales_bytes);
-    let ids = decode_list(&generation.read_verified_file(ROW_IDS_FILE)?, rows.count)
+    let ids = decode_list(&generation.take_verified_bytes(ROW_IDS_FILE)?, rows.count)
         .ok_or_else(|| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
     if ids.len() as u64 != rows.count || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
     let tombstones = decode_list(
-        &generation.read_verified_file(TOMBSTONES_FILE)?,
+        &generation.take_verified_bytes(TOMBSTONES_FILE)?,
         sidecar.tombstones,
     )
     .ok_or_else(|| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
@@ -856,7 +855,7 @@ pub fn verify(
     {
         return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
-    let codes_file = File::from(generation.open_verified_file(CODES_FILE)?);
+    let codes_file = File::from(generation.take_verified_file(CODES_FILE)?);
     let codes_size = declared_size(&generation, CODES_FILE);
     let dimension = layout.dimension as usize;
     if file_len(&codes_file)? > codes_size {
@@ -904,7 +903,7 @@ pub fn verify(
     })
 }
 
-/// The manifest-declared size of `path`, which [`ValidatedGeneration::open_verified_file`] checked the file against.
+/// The manifest-declared size of `path`, which [`ValidatedGeneration::take_verified_file`] checked the file against.
 fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
     generation
         .manifest
@@ -939,10 +938,12 @@ fn manifest_heap(manifest: &GenerationManifest) -> u64 {
     (strings + manifest.files.capacity() * size_of::<ManifestFile>()) as u64
 }
 
-/// Verification retains the resident tables, the validated manifest, and two manifest digests: one in the validated generation and one in the result.
+/// Verification retains the resident tables, the validated manifest, one descriptor slot per manifest file, and two manifest digests: one in the validated generation and one in the result.
 fn kept_bytes(manifest: &GenerationManifest) -> u64 {
+    let slots = manifest.files.len() * size_of::<Option<std::os::fd::OwnedFd>>();
     resident_bytes(manifest)
         .saturating_add(manifest_heap(manifest))
+        .saturating_add(slots as u64)
         .saturating_add(2 * PAYLOAD_MANIFEST_DIGEST_LEN as u64)
 }
 

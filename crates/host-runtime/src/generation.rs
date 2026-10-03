@@ -285,6 +285,8 @@ pub struct ValidatedGeneration {
     pub digest: String,
     pub manifest: GenerationManifest,
     dir: OwnedFd,
+    /// The descriptors [`GenerationStore::validate_retaining`] hashed, one slot per manifest file in manifest order; empty after [`GenerationStore::validate`].
+    retained: Vec<Option<OwnedFd>>,
 }
 
 /// The wire shape of [`MEMBERS_FILE_NAME`].
@@ -389,7 +391,29 @@ impl ValidatedGeneration {
 
     /// Returns file bytes only when their length equals the manifest entry size.
     pub fn read_verified_file(&self, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
-        let fd = self.open_verified_file(rel_path)?;
+        self.read_whole(self.open_verified_file(rel_path)?, rel_path)
+    }
+
+    /// [`Self::read_verified_file`] through [`Self::take_verified_file`].
+    pub fn take_verified_bytes(&mut self, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
+        let fd = self.take_verified_file(rel_path)?;
+        self.read_whole(fd, rel_path)
+    }
+
+    /// The descriptor [`GenerationStore::validate_retaining`] hashed for `rel_path`, with its shape checked again; its bytes are not hashed a second time. Each descriptor is taken once; a path validation did not retain, or one already taken, opens through [`Self::open_verified_file`].
+    pub fn take_verified_file(&mut self, rel_path: &str) -> Result<OwnedFd, GenerationError> {
+        let index = self.manifest.files.iter().position(|file| file.path == rel_path);
+        match index.and_then(|index| Some((index, self.retained.get_mut(index)?.take()?))) {
+            Some((index, fd)) => {
+                check_file_shape(&fd, &self.manifest.files[index])?;
+                Ok(fd)
+            }
+            None => self.open_verified_file(rel_path),
+        }
+    }
+
+    /// Reads `fd` from its current offset, which verification leaves at the start.
+    fn read_whole(&self, fd: OwnedFd, rel_path: &str) -> Result<Vec<u8>, GenerationError> {
         let size = self
             .manifest
             .files
@@ -450,6 +474,25 @@ fn open_rel_file(dir: &OwnedFd, rel: &str) -> Option<OwnedFd> {
 }
 
 fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), GenerationError> {
+    check_file_shape(fd, entry)?;
+    let (total, sha256) = hash_copy(fd, None, entry.size).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            invalid("file grew past its manifest size")
+        } else {
+            invalid("file read failed")
+        }
+    })?;
+    if total != entry.size || sha256 != entry.sha256 {
+        return Err(invalid("file hash diverges from the manifest"));
+    }
+    // The hash advanced `fd`'s offset, so rewind before returning it to callers.
+    rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0))
+        .map_err(|_| invalid("file rewind after verification failed"))?;
+    Ok(())
+}
+
+/// Checks type, owner, link count, mode, and size against `entry`; the bytes are not read.
+fn check_file_shape(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), GenerationError> {
     // The stager emits only `0o600` and `0o700`; a set-ID or sticky bit in a manifest names
     // permission semantics no generation can legitimately carry.
     if entry.mode & !0o777 != 0 {
@@ -471,19 +514,6 @@ fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), G
     if stat.st_size as u64 != entry.size {
         return Err(invalid("file size diverges from the manifest"));
     }
-    let (total, sha256) = hash_copy(fd, None, entry.size).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::InvalidData {
-            invalid("file grew past its manifest size")
-        } else {
-            invalid("file read failed")
-        }
-    })?;
-    if total != entry.size || sha256 != entry.sha256 {
-        return Err(invalid("file hash diverges from the manifest"));
-    }
-    // The hash advanced `fd`'s offset, so rewind before returning it to callers.
-    rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0))
-        .map_err(|_| invalid("file rewind after verification failed"))?;
     Ok(())
 }
 
@@ -680,17 +710,31 @@ impl GenerationStore {
 
     /// Failed validation never selects another generation.
     pub fn validate(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
+        self.validate_keeping(digest, false)
+    }
+
+    /// [`Self::validate`] that keeps open the descriptor it hashed for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads the bytes validation hashed without hashing them again.
+    pub fn validate_retaining(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
+        self.validate_keeping(digest, true)
+    }
+
+    fn validate_keeping(
+        &self,
+        digest: &str,
+        retain: bool,
+    ) -> Result<ValidatedGeneration, GenerationError> {
         if !is_canonical_payload_digest(digest) {
             return Err(invalid("generation digest is noncanonical"));
         }
         let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
             return Err(invalid("generation directory is missing or insecure"));
         };
-        let manifest = self.validate_in_dir(&dir, digest)?;
+        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain)?;
         Ok(ValidatedGeneration {
             digest: digest.to_owned(),
             manifest,
             dir,
+            retained,
         })
     }
 
@@ -794,9 +838,11 @@ impl GenerationStore {
         &self,
         dir: &OwnedFd,
         digest: &str,
-    ) -> Result<GenerationManifest, GenerationError> {
+        retain: bool,
+    ) -> Result<(GenerationManifest, Vec<Option<OwnedFd>>), GenerationError> {
         let manifest = Self::read_manifest_in_dir(dir, digest)?;
         let mut expected: BTreeSet<String> = BTreeSet::new();
+        let mut retained = Vec::with_capacity(if retain { manifest.files.len() } else { 0 });
         for entry in &manifest.files {
             // The same path rules the stager enforces bound length and depth before the walk.
             validate_rel_path(&entry.path)?;
@@ -806,6 +852,9 @@ impl GenerationStore {
             let fd = open_rel_file(dir, &entry.path)
                 .ok_or_else(|| invalid("manifest-listed file is missing"))?;
             verify_file_against_entry(&fd, entry)?;
+            if retain {
+                retained.push(Some(fd));
+            }
         }
         let mut found: BTreeSet<String> = BTreeSet::new();
         walk_generation_tree(dir, "", &expected, &mut found)?;
@@ -819,7 +868,7 @@ impl GenerationStore {
                 return Err(invalid("manifest-listed file is missing"));
             }
         }
-        Ok(manifest)
+        Ok((manifest, retained))
     }
 
     pub fn available_bytes(&self) -> Result<u64, GenerationError> {
@@ -2828,6 +2877,61 @@ mod tests {
         grown.push(0);
         std::fs::write(dir.join("rows.f32"), &grown).unwrap();
         assert!(generation.read_verified_file("rows.f32").is_err());
+    }
+
+    #[test]
+    fn retained_descriptors_are_taken_once_and_rechecked_for_shape() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5)).map(|i| (i % 249) as u8).collect();
+        let sources = ["codes.int8", "rows.f32"].map(|name| SourceSpec {
+            rel_path: name.to_owned(),
+            source: write_source(src.path(), name, &payload),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        });
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+
+        let mut generation = store.validate_retaining(&digest).unwrap();
+        assert_eq!(generation.take_verified_bytes("rows.f32").unwrap(), payload);
+        // A second take opens and hashes the file afresh.
+        assert_eq!(generation.take_verified_bytes("rows.f32").unwrap(), payload);
+        assert!(generation.take_verified_file("missing").is_err());
+
+        // The retained descriptor's shape is checked when it is taken, not only when it was hashed.
+        let mut generation = store.validate_retaining(&digest).unwrap();
+        let codes = dir.join("codes.int8");
+        std::fs::set_permissions(&codes, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(generation.take_verified_file("codes.int8").is_err());
+        std::fs::set_permissions(&codes, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A path renamed over after validation leaves the hashed inode unlinked, which the shape check refuses.
+        let mut generation = store.validate_retaining(&digest).unwrap();
+        let replacement = dir.join("replacement");
+        std::fs::write(&replacement, &payload).unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&replacement, dir.join("rows.f32")).unwrap();
+        assert!(generation.take_verified_file("rows.f32").is_err());
+
+        // A file grown after validation diverges from its manifest size.
+        let mut generation = store.validate_retaining(&digest).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&codes)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &[0]))
+            .unwrap();
+        assert!(generation.take_verified_bytes("codes.int8").is_err());
+
+        // Plain validation retains nothing, so a take hashes the file and refuses changed bytes.
+        std::fs::write(&codes, &payload).unwrap();
+        let mut generation = store.validate(&digest).unwrap();
+        let mut changed = payload.clone();
+        changed[0] ^= 1;
+        std::fs::write(&codes, &changed).unwrap();
+        assert!(generation.take_verified_bytes("codes.int8").is_err());
     }
 
     /// Persisted manifest bytes must equal the canonical serialization of the decoded manifest.
