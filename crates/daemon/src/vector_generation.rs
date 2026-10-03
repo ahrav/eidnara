@@ -760,7 +760,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
-/// Verification streams the row and code artifacts one chunk of rows at a time in two passes, one to calibrate and one to compare the codes, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store's validation streams each file through a fixed buffer to check its hash and keeps the descriptor it hashed, and verification reads every file through that descriptor, so each byte is hashed once and the bound limits memory, not I/O.
+/// Verification streams the row and code artifacts one chunk of rows at a time in one pass that calibrates the rows and compares the stored codes with the rows encoded under the stored scales, then requires the stored scales to be the calibration, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store's validation streams each file through a fixed buffer to check its hash and keeps the descriptor it hashed, and verification reads every file through that descriptor, so each byte is hashed once and the bound limits memory, not I/O.
 ///
 /// # Errors
 ///
@@ -824,14 +824,67 @@ pub fn verify(
     if rows.count != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
+    let dimension = layout.dimension as usize;
+    // Codes encoded under the stored scales are the codes encoded under the calibration whenever the two scales are equal, which is checked before any code refusal, so one pass over the rows both calibrates and compares the codes.
+    // Each refusal about the scales or codes files is held until every check that precedes it in refusal order has passed.
+    let scales_bytes = generation.take_verified_bytes(SCALES_FILE);
+    let stored_scales = scales_bytes
+        .as_ref()
+        .ok()
+        .and_then(|bytes| Scales::decode(bytes, layout.dimension).ok());
+    let codes_size = declared_size(&generation, CODES_FILE);
+    let codes_file = generation
+        .take_verified_file(CODES_FILE)
+        .map_err(VectorRefusal::from)
+        .and_then(|fd| {
+            let file = File::from(fd);
+            if file_len(&file)? > codes_size {
+                return Err(fault(CODES_FILE, FileFault::Size));
+            }
+            if rows.count.checked_mul(dimension as u64) != Some(codes_size) {
+                return Err(fault(CODES_FILE, FileFault::Codes));
+            }
+            Ok(file)
+        });
+    let mut compare = codes_file.as_ref().ok().zip(stored_scales.as_ref());
+    let mut codes_verdict = Ok(());
+    let chunk_rows = rows.chunk_rows();
+    let mut stored = vec![0u8; if compare.is_some() { chunk_rows * dimension } else { 0 }];
+    let mut codes = Vec::with_capacity(dimension);
     let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
-    // The decoder validates each row under the layout before it reaches the calibrator or the encoder.
-    rows.for_each(|_, row| {
+    // The decoder validates each row under the layout before it reaches the calibrator or the encoder; the stored codes of each row chunk are read as the chunk starts.
+    rows.for_each(|index, row| {
         calibrator.push_validated(row);
+        let Some((file, scales)) = compare else {
+            return Ok(());
+        };
+        let slot = index % chunk_rows;
+        if slot == 0 {
+            let chunk = (rows.count - index as u64).min(chunk_rows as u64) as usize;
+            if let Err(refusal) = read_exact_at(
+                file,
+                &mut stored[..chunk * dimension],
+                (index * dimension) as u64,
+            ) {
+                (codes_verdict, compare) = (Err(refusal), None);
+                return Ok(());
+            }
+        }
+        scalar::encode_validated_into(&layout, scales, row, &mut codes);
+        if codes
+            .iter()
+            .map(|code| *code as u8)
+            .ne(stored[slot * dimension..(slot + 1) * dimension]
+                .iter()
+                .copied())
+        {
+            (codes_verdict, compare) = (Err(fault(CODES_FILE, FileFault::Codes)), None);
+        }
         Ok(())
     })?;
+    drop((stored, codes, stored_scales));
     let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
-    let scales_bytes = generation.take_verified_bytes(SCALES_FILE)?;
+    let scales_bytes = scales_bytes?;
     if calibration.scales.encode() != scales_bytes
         || calibration.identity.calibrated_rows != sidecar.calibrated_rows
         || sha256_hex(&scales_bytes) != sidecar.scales_sha256
@@ -855,42 +908,8 @@ pub fn verify(
     {
         return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
-    let codes_file = File::from(generation.take_verified_file(CODES_FILE)?);
-    let codes_size = declared_size(&generation, CODES_FILE);
-    let dimension = layout.dimension as usize;
-    if file_len(&codes_file)? > codes_size {
-        return Err(fault(CODES_FILE, FileFault::Size));
-    }
-    if rows.count.checked_mul(dimension as u64) != Some(codes_size) {
-        return Err(fault(CODES_FILE, FileFault::Codes));
-    }
-    // The second pass reads the stored codes of each row chunk as the chunk starts, then compares each row's encoding with its slice.
-    let chunk_rows = rows.chunk_rows();
-    let mut stored = vec![0u8; chunk_rows * dimension];
-    let mut codes = Vec::with_capacity(dimension);
-    rows.for_each(|index, row| {
-        let slot = index % chunk_rows;
-        if slot == 0 {
-            let chunk = (rows.count - index as u64).min(chunk_rows as u64) as usize;
-            read_exact_at(
-                &codes_file,
-                &mut stored[..chunk * dimension],
-                (index * dimension) as u64,
-            )?;
-        }
-        scalar::encode_validated_into(&layout, &calibration.scales, row, &mut codes);
-        if codes
-            .iter()
-            .map(|code| *code as u8)
-            .ne(stored[slot * dimension..(slot + 1) * dimension]
-                .iter()
-                .copied())
-        {
-            return Err(fault(CODES_FILE, FileFault::Codes));
-        }
-        Ok(())
-    })?;
-    drop(stored);
+    let codes_file = codes_file?;
+    codes_verdict?;
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
         sidecar,
@@ -974,7 +993,7 @@ fn manifest_verification_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Heap bytes verification holds at once under `manifest` and its decoded `sidecar`.
-/// It retains the resident tables, the manifest, and one string slot per declared row and tombstone, and beside them holds the larger of the table scratch and one row pass: a row chunk, the stored codes of its rows, the artifact header, and per coordinate the decoded row, its codes, the running maxima, the encoded scales, and the scales file read for comparison (four, one, four, four, and four bytes).
+/// It retains the resident tables, the manifest, and one string slot per declared row and tombstone, and beside them holds the larger of the table scratch and one row pass: a row chunk, the stored codes of its rows, the artifact header, and per coordinate the decoded row, its codes, the running maxima, the stored scales decoded, and the scales file (four, one, four, four, and four bytes); after the pass the calibrated scales and their encoding take the place of the row, the maxima, and the stored scales.
 pub fn verification_bytes(manifest: &GenerationManifest, sidecar: &VectorSidecar) -> u64 {
     let chunk = row_chunk_bytes(sidecar.vector_dimension);
     let row_pass = chunk
