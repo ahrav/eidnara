@@ -267,8 +267,12 @@ pub fn encode_validated_into(
     );
     codes.clear();
     codes.resize(row.len(), 0);
+    quotient_codes(row, &scales.scales, codes)
+}
+
+fn quotient_codes(row: &[f32], scales: &[f32], codes: &mut [i8]) -> u32 {
     let mut clipped = 0u32;
-    for ((code, value), scale) in codes.iter_mut().zip(row).zip(&scales.scales) {
+    for ((code, value), scale) in codes.iter_mut().zip(row).zip(scales) {
         let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
         let clamped = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
         clipped += u32::from(clamped != rounded);
@@ -276,6 +280,96 @@ pub fn encode_validated_into(
         *code = clamped as i8;
     }
     clipped
+}
+
+/// Coordinates [`Encoder`] codes together; a block whose products are all clear of a half-integer stays on the product path.
+const ENCODE_BLOCK: usize = 32;
+
+/// A product farther than this from its nearest integer lies within `2^-14` of a half-integer, where the product may round otherwise than the quotient.
+const NEAR_HALF: f32 = 0.5 - 1.0 / 16384.0;
+
+/// Adding and subtracting `1.5 * 2^23` rounds an f32 of magnitude at most `2^22` to an integer, ties to even, in the default rounding mode.
+const ROUNDING_BIAS: f32 = 12_582_912.0;
+
+/// [`encode_validated_into`] for many rows under one set of scales, with the same codes and clamp counts.
+///
+/// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`.
+/// A quotient of two f32 values with magnitude at most 128 is a half-integer or at least `2^-26` from every half-integer, and the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
+/// So a product farther than `2^-14` from every half-integer rounds as the quotient does, and a product past 128 in magnitude clamps as it does; a block holding a product near a half-integer takes the f64 quotient.
+pub struct Encoder<'a> {
+    scales: &'a Scales,
+    /// Empty when some reciprocal is not a normal f32; every coordinate then takes the f64 quotient.
+    reciprocals: Vec<f32>,
+}
+
+impl<'a> Encoder<'a> {
+    pub fn new(scales: &'a Scales) -> Self {
+        let reciprocals: Vec<f32> = scales.scales.iter().map(|scale| 1.0 / scale).collect();
+        let reciprocals = if reciprocals.iter().all(|reciprocal| reciprocal.is_normal()) {
+            reciprocals
+        } else {
+            Vec::new()
+        };
+        Self {
+            scales,
+            reciprocals,
+        }
+    }
+
+    /// The codes and clamp count [`encode_validated_into`] writes for a `row` that [`codec::validate`] has accepted under `layout`.
+    pub fn encode_validated_into(
+        &self,
+        layout: &RowLayout,
+        row: &[f32],
+        codes: &mut Vec<i8>,
+    ) -> u32 {
+        if self.reciprocals.is_empty() {
+            return encode_validated_into(layout, self.scales, row, codes);
+        }
+        debug_assert_eq!(row.len(), layout.dimension as usize);
+        assert_eq!(
+            self.scales.scales.len(),
+            row.len(),
+            "scales of one calibration match the layout"
+        );
+        codes.clear();
+        codes.resize(row.len(), 0);
+        let (values, tail) = row.as_chunks::<ENCODE_BLOCK>();
+        let (reciprocals, _) = self.reciprocals.as_chunks::<ENCODE_BLOCK>();
+        let (blocks, tail_codes) = codes.as_chunks_mut::<ENCODE_BLOCK>();
+        let mut clipped = 0u32;
+        for (index, ((values, reciprocals), codes)) in
+            values.iter().zip(reciprocals).zip(blocks).enumerate()
+        {
+            clipped += product_codes(values, reciprocals, codes).unwrap_or_else(|| {
+                let start = index * ENCODE_BLOCK;
+                quotient_codes(values, &self.scales.scales[start..start + ENCODE_BLOCK], codes)
+            });
+        }
+        let start = row.len() - tail.len();
+        clipped + quotient_codes(tail, &self.scales.scales[start..], tail_codes)
+    }
+}
+
+/// `None` when some product lies within `2^-14` of a half-integer.
+fn product_codes(
+    values: &[f32; ENCODE_BLOCK],
+    reciprocals: &[f32; ENCODE_BLOCK],
+    codes: &mut [i8; ENCODE_BLOCK],
+) -> Option<u32> {
+    let mut near = false;
+    let mut clipped = 0u32;
+    for ((code, value), reciprocal) in codes.iter_mut().zip(values).zip(reciprocals) {
+        // Past 128 every product and quotient clamps alike, and clamping first keeps the bias exact.
+        let product = (value * reciprocal).clamp(-128.0, 128.0);
+        let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
+        // Within one of its rounded integer, the product's distance to it is exact.
+        near |= (product - rounded).abs() > NEAR_HALF;
+        let clamped = rounded.clamp(f32::from(CODE_MIN), f32::from(CODE_MAX));
+        clipped += u32::from(clamped != rounded);
+        *code = clamped as i32 as i8;
+    }
+    (!near).then_some(clipped)
 }
 
 /// One byte per code, two's complement.
