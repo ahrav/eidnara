@@ -25,13 +25,17 @@ export function renderAntiMemoryWarning(result: AntiMemorySearchResult): string 
     });
 }
 
+function lanesOf(result: KernelMemorySearchResult): string {
+    return result.lanes && result.lanes.length > 0 ? ` lanes=${result.lanes.join(",")}` : "";
+}
+
 function formatResult(result: KernelMemorySearchResult, index: number): string {
     if (result.source === "anti_memory") {
         const policy = result.policyLabel
             ? ` status=${boundDynamicField(result.policyLabel)}`
             : " status=active";
         return [
-            `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${policy}`,
+            `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${lanesOf(result)}${policy}`,
             renderAntiMemoryWarning(result),
             // The rationale renders only in this full-result view; the compact auto-search hint keeps the warning-line field set.
             ...(result.rationale ? [`Rationale: ${boundDynamicField(result.rationale)}`] : []),
@@ -40,7 +44,7 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
     const source = result.sourceName ? ` source=${boundDynamicField(result.sourceName)}` : "";
     const policy = result.policyLabel ? ` trust=[${boundDynamicField(result.policyLabel)}]` : "";
     return [
-        `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${policy}`,
+        `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${lanesOf(result)}${policy}`,
         boundDynamicField(result.content),
     ].join("\n");
 }

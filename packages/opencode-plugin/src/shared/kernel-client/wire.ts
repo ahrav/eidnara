@@ -6,6 +6,7 @@
 
 import { isRecord } from "../record-type-guard";
 import {
+    available,
     CONFLICT_REASONS,
     type ConflictReason,
     type DaemonInvalidReason,
@@ -461,6 +462,123 @@ export function parseCommitResponse(raw: unknown): Parsed<CommitPayload> {
             tokens,
             merged,
             dispositions,
+        },
+    };
+}
+
+/** Terminal codes `retrieval.query` answers instead of a ranking. */
+const ROUTE_TERMINALS = [
+    "unauthorized",
+    "deadline",
+    "cancelled",
+    "lane_unavailable",
+    "required_context_failure",
+    "disabled",
+] as const;
+export type RouteTerminal = (typeof ROUTE_TERMINALS)[number];
+
+const ROUTE_LANES = ["exact", "lexical", "dense"] as const;
+export type RouteLane = (typeof ROUTE_LANES)[number];
+
+/** The canonical decision a ranked claim occurrence validated to on the daemon's explicit-search surface. */
+export interface RouteCanonicalReference {
+    decision_object_id: string;
+    source_revision: number;
+    /** `labeled` obliges the rendered result to carry the claim's label. */
+    visibility: "visible" | "labeled";
+}
+
+export interface RouteEntry {
+    occurrence_id: string;
+    /** 1-based fused display position. */
+    position: number;
+    /** Lanes that ranked the occurrence, in route lane order. */
+    lanes: RouteLane[];
+    canonical: RouteCanonicalReference | null;
+}
+
+export type QueryPayload =
+    | {
+          kind: "fused";
+          degraded: boolean;
+          truncated: boolean;
+          lanes: Record<RouteLane, { status: string; reason: string | null }>;
+          entries: RouteEntry[];
+      }
+    | { kind: "terminal"; terminal: RouteTerminal; reason: string | null };
+
+function parseRouteEntry(raw: unknown): RouteEntry | null {
+    if (!isRecord(raw) || typeof raw.occurrence_id !== "string") return null;
+    if (!isNonNegativeInteger(raw.position) || raw.position < 1 || !isRecord(raw.lanes)) {
+        return null;
+    }
+    const contributing = raw.lanes;
+    if (Object.keys(contributing).some((lane) => !ROUTE_LANES.includes(lane as RouteLane))) {
+        return null;
+    }
+    const lanes = ROUTE_LANES.filter((lane) => contributing[lane] !== undefined);
+    let canonical: RouteCanonicalReference | null = null;
+    if (raw.canonical !== undefined) {
+        const reference = raw.canonical;
+        if (
+            !isRecord(reference) ||
+            typeof reference.decision_object_id !== "string" ||
+            !isNonNegativeInteger(reference.source_revision) ||
+            (reference.visibility !== "visible" && reference.visibility !== "labeled")
+        ) {
+            return null;
+        }
+        canonical = {
+            decision_object_id: reference.decision_object_id,
+            source_revision: reference.source_revision,
+            visibility: reference.visibility,
+        };
+    }
+    return { occurrence_id: raw.occurrence_id, position: raw.position, lanes, canonical };
+}
+
+/** `retrieval.query` answers a bare ranking or terminal document rather than a kernel state envelope; any other shape is `unrecognized_state`. */
+export function parseQueryResponse(raw: unknown): Parsed<QueryPayload> {
+    if (!isRecord(raw)) return failed();
+    if (raw.kind === "terminal") {
+        if (!ROUTE_TERMINALS.includes(raw.terminal as RouteTerminal)) return failed();
+        if (raw.reason !== undefined && typeof raw.reason !== "string") return failed();
+        return {
+            state: available(),
+            payload: {
+                kind: "terminal",
+                terminal: raw.terminal as RouteTerminal,
+                reason: typeof raw.reason === "string" ? raw.reason : null,
+            },
+        };
+    }
+    if (raw.kind !== "fused") return failed();
+    if (typeof raw.degraded !== "boolean" || typeof raw.truncated !== "boolean") return failed();
+    if (!isRecord(raw.lanes) || !Array.isArray(raw.entries)) return failed();
+    const lanes = {} as Record<RouteLane, { status: string; reason: string | null }>;
+    for (const lane of ROUTE_LANES) {
+        const status = raw.lanes[lane];
+        if (!isRecord(status) || typeof status.status !== "string") return failed();
+        if (status.reason !== undefined && typeof status.reason !== "string") return failed();
+        lanes[lane] = {
+            status: status.status,
+            reason: typeof status.reason === "string" ? status.reason : null,
+        };
+    }
+    const entries: RouteEntry[] = [];
+    for (const item of raw.entries) {
+        const entry = parseRouteEntry(item);
+        if (!entry || entry.position !== entries.length + 1) return failed();
+        entries.push(entry);
+    }
+    return {
+        state: available(),
+        payload: {
+            kind: "fused",
+            degraded: raw.degraded,
+            truncated: raw.truncated,
+            lanes,
+            entries,
         },
     };
 }

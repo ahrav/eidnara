@@ -75,7 +75,45 @@ describe("createEidnaraSearchTool", () => {
         expect(text).toContain(`id=${OBJECT_A}`);
         expect(text).toContain("category=CONSTRAINTS");
         expect(text).not.toContain(`id=${OBJECT_B}`);
-        expect(tool.transport.methods()).toEqual(["kernel.read"]);
+        expect(tool.transport.methods()).toEqual(["retrieval.query", "kernel.read"]);
+    });
+
+    it("returns hydrated fused-route text by default, without the snapshot scan", async () => {
+        const tool = harness();
+        tool.kernel.seedDecision({
+            object_id: OBJECT_B,
+            decision_kind: "NAMING",
+            summary: "Handlers end in Handler.",
+        });
+        tool.kernel.routeReply = () => ({
+            kind: "fused",
+            degraded: false,
+            truncated: false,
+            lanes: {
+                exact: { status: "complete" },
+                lexical: { status: "complete" },
+                dense: { status: "complete" },
+            },
+            entries: [
+                {
+                    occurrence_id: "occ-1",
+                    position: 1,
+                    score: 0.5,
+                    lanes: { dense: { position: 1, raw: 0.9 } },
+                    canonical: {
+                        decision_object_id: OBJECT_B,
+                        source_revision: 1,
+                        visibility: "visible",
+                    },
+                },
+            ],
+        });
+        const text = textOf(await tool.execute({ query: "class suffix convention" }));
+        expect(text).toContain(`id=${OBJECT_B}`);
+        expect(text).toContain("match=fused lanes=dense");
+        expect(text).toContain("Handlers end in Handler.");
+        expect(text).not.toContain("legacy snapshot");
+        expect(tool.transport.methods()).toEqual(["retrieval.query", "kernel.read"]);
     });
 
     it("resolves an object-id query directly from the kernel", async () => {
@@ -90,7 +128,7 @@ describe("createEidnaraSearchTool", () => {
         expect(text).toContain("[1] [memory]");
         expect(text).toContain(OBJECT_A);
         expect(text).toContain("Direct id hit for the short-circuit.");
-        const read = tool.transport.calls[0]?.body as { object_ids?: string[] };
+        const read = tool.transport.calls[1]?.body as { object_ids?: string[] };
         expect(read.object_ids).toEqual([OBJECT_A]);
     });
 

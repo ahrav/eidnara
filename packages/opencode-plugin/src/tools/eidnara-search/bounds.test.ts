@@ -92,7 +92,7 @@ describe("prepareExplicitQuery", () => {
     });
 
     it("rejects a token-cap overflow for a query under the byte and atom caps", () => {
-        const raw = Array.from({ length: 8000 }, (_, index) =>
+        const raw = Array.from({ length: MAX_QUERY_BYTES }, (_, index) =>
             ((index * 2654435761) % 36).toString(36),
         ).join("");
         expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(MAX_QUERY_BYTES);

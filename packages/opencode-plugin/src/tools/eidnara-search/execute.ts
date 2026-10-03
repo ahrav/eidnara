@@ -27,6 +27,7 @@ import {
 } from "./kernel-memory-search";
 import { normalizeEidnaraSearchArgs, prepareQueryFromNormalizedArgs } from "./query-input";
 import { type ExplicitDeliveryReason, type PackedSearchResults, packSearchResults } from "./render";
+import { searchThroughRoute } from "./route-search";
 import type { EidnaraSearchArgs, EidnaraSearchSource, EidnaraSearchToolDeps } from "./types";
 
 const VALID_SOURCES: ReadonlySet<EidnaraSearchSource> = new Set(["memory"]);
@@ -174,13 +175,28 @@ export async function executeEidnaraSearch(
         return completeFrom([]);
     }
 
-    // The `memory` source is served by the daemon through the kernel client, gated on
-    // freshness: a lagging projector answers `stale` and the search says so instead of
-    // ranking rows that may miss recent writes.
     const client = deps.kernelClient({
         sessionId: toolContext.sessionID,
         projectRoot,
     });
+    const limit = normalizeSearchResultLimit(args.limit);
+    const routed = await searchThroughRoute({
+        client,
+        query,
+        limit,
+        ...(toolContext.abort ? { signal: toolContext.abort } : {}),
+    });
+    if (routed.kind === "refused") return { status: "invalid", text: routed.text };
+    if (routed.kind === "ranked") {
+        return completeFrom(
+            routed.results,
+            routed.notes.length > 0 ? routed.notes.join("\n") : undefined,
+        );
+    }
+
+    // The legacy snapshot scan answers only when the route reports itself disabled or unavailable, and its result names that fallback. The snapshot read is gated on
+    // freshness: a lagging projector answers `stale` and the search says so instead of
+    // ranking rows that may miss recent writes.
     // An id query filters the read so a named object beyond the daemon's row cap still resolves; the chunked read splits a list over the client's filter bound into filtered requests and splits on byte-budget truncation, so every named id resolves or is reported unresolved by name.
     const idQuery = parseObjectIdQuery(query);
     // The gate judges the lag of registered consumers. A deployment with no consumer at all
@@ -221,7 +237,9 @@ export async function executeEidnaraSearch(
         return { status: "invalid", text: `Error: ${renderToolStateText(memory.state)}` };
     }
     const { rows: memoryRows, truncated: memoryTruncated, unresolvedObjectIds } = memory;
-    const notes: string[] = [];
+    const notes: string[] = [
+        `Memory: the fused search route is unavailable (${routed.reason}); results come from the legacy snapshot scan.`,
+    ];
     if (freshnessNote) notes.push(freshnessNote);
     if (unresolvedObjectIds.length > 0) {
         notes.push(
@@ -232,11 +250,11 @@ export async function executeEidnaraSearch(
     if (memoryTruncated) {
         notes.push("Memory: the memory read was truncated; older memories were not searched.");
     }
-    const memoryNote = notes.length > 0 ? notes.join("\n") : undefined;
+    const memoryNote = notes.join("\n");
     const hits = searchKernelMemoryRows({
         rows: memoryRows,
         query,
-        limit: normalizeSearchResultLimit(args.limit),
+        limit,
         excludeObjectIds: new Set(),
     });
     return completeFrom(hits ?? [], memoryNote);

@@ -1,13 +1,14 @@
 import { estimateTokens } from "../../shared/token-estimator";
 
-/** The query validator checks the 16 KiB UTF-8 limit before trimming or tokenization. */
-export const MAX_QUERY_BYTES = 16 * 1024;
+/** The query validator checks the fused route's 4 KiB UTF-8 limit before trimming or tokenization. */
+export const MAX_QUERY_BYTES = 4096;
 export const MAX_QUERY_TOKENS = 512;
 /** The memory ranker scans every operand against every served row, so the operand count bounds its work. */
 export const MAX_QUERY_ATOMS = 64;
 /** Missing or non-finite result-limit requests default to 10. */
 export const DEFAULT_SEARCH_RESULT_LIMIT = 10;
-export const MAX_SEARCH_RESULT_LIMIT = 50;
+/** The fused route serves at most 32 entries. */
+export const MAX_SEARCH_RESULT_LIMIT = 32;
 export const MAX_RENDERED_RESULT_TOKENS = 4096;
 /** Renderers must apply the 1024-byte field limit before tokenization or compression. */
 export const MAX_RENDER_FIELD_BYTES = 1024;

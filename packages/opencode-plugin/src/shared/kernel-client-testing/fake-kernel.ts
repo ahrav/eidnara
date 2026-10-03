@@ -273,6 +273,11 @@ export class FakeKernel {
     readonly gatedSurfaceStates = new Map<Surface, MemoryState>();
     /** Forces the next commit to answer with this state. */
     nextCommitState: MemoryState | null = null;
+    /** The `retrieval.query` answer; the default reports the route disabled, so a search falls back to the snapshot scan. */
+    routeReply: (body: Record<string, unknown>) => WireReply = () => ({
+        kind: "terminal",
+        terminal: "disabled",
+    });
     /** Every read reply carries this `truncated` flag, standing in for a daemon that dropped rows to fit its per-read bounds. */
     readTruncated = false;
     /** Rows served per unfiltered read when set, standing in for the daemon's newest-rows cap; a read with an `object_ids` filter ignores it, as the daemon's cap never binds a filter-sized read. */
@@ -874,6 +879,8 @@ export class FakeKernel {
         switch (call.method) {
             case "kernel.read":
                 return this.readReply(body, projectRoot);
+            case "retrieval.query":
+                return this.routeReply(body);
             case "kernel.commit":
                 return body.preview === true
                     ? this.previewReply(body, projectRoot)

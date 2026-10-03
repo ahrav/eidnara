@@ -7,6 +7,7 @@
 
 import { createHash } from "node:crypto";
 
+import type { Deadline } from "../../shared/host-client";
 import {
     isAvailable,
     isMemoryDecisionRow,
@@ -32,8 +33,10 @@ export interface MemorySearchResult {
     /** Kernel object id of the memory (`mem_<32hex>`). */
     objectId: string;
     category: string;
-    /** `exact` for an object-id lookup, `lexical` for term-overlap ranking. */
-    matchType: "exact" | "lexical";
+    /** `exact` for an object-id lookup, `lexical` for term-overlap ranking, `fused` for the daemon's ranked route. */
+    matchType: KernelMemoryMatchType;
+    /** The route lanes that ranked a `fused` result. */
+    lanes?: readonly string[];
     sourceName?: string;
     policyLabel?: string;
     /** Exact SHA-256 digest of the served revision's content bytes. */
@@ -53,14 +56,16 @@ export interface AntiMemorySearchResult {
     saferAlternative: string | null;
     /** Decision rationale served alongside the anti-memory summary; lexical ranking scores it, so renderers that show ranked text include it. */
     rationale?: string;
-    matchType: "exact" | "lexical" | "semantic";
+    matchType: KernelMemoryMatchType | "semantic";
+    /** The route lanes that ranked a `fused` result. */
+    lanes?: readonly string[];
     policyLabel?: string;
 }
 
 export type KernelMemorySearchResult = MemorySearchResult | AntiMemorySearchResult;
 
-/** How a result matched: `exact` for an object-id lookup, `lexical` for term-overlap ranking. */
-export type KernelMemoryMatchType = "exact" | "lexical";
+/** How a result matched: `exact` for an object-id lookup, `lexical` for term-overlap ranking, `fused` for the daemon's ranked route. */
+export type KernelMemoryMatchType = "exact" | "lexical" | "fused";
 
 export type ChunkedObjectRead =
     | {
@@ -92,6 +97,8 @@ export async function readObjectRowsChunked(args: {
     /** Any length; the read issues one filtered request per `MAX_READ_OBJECT_IDS` ids, the client's filter bound. */
     objectIds: readonly string[];
     signal?: AbortSignal;
+    /** Each chunk's read receives this deadline's remainder, so every chunk ends by the same instant. */
+    deadline?: Deadline;
 }): Promise<ChunkedObjectRead> {
     const rows: ReadRow[] = [];
     const unresolvedObjectIds: string[] = [];
@@ -108,6 +115,7 @@ export async function readObjectRowsChunked(args: {
             objectIds: chunk,
             asOf: snapshot,
             ...(args.signal ? { signal: args.signal } : {}),
+            ...(args.deadline ? { deadlineMs: args.deadline.remainingMs() } : {}),
         });
         if (!isAvailable(read)) return { ok: false, state: read.state };
         if (snapshot === null) {
@@ -229,7 +237,7 @@ export interface KernelMemorySearchArgs {
 }
 
 /** An anti-memory past its rendered expiry never surfaces as a search hit; an unparseable summary never counts as expired. */
-function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
+export function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
     const decision = row.decision;
     if (decision?.decision_kind !== ANTI_MEMORY_CATEGORY) return false;
     const payload = antiMemoryPayloadFromSummary(decision.payload.summary);

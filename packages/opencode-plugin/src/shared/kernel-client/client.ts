@@ -22,7 +22,9 @@ import {
     type PreviewPayload,
     parseCommitResponse,
     parsePreviewResponse,
+    parseQueryResponse,
     parseReadResponse,
+    type QueryPayload,
     type ReadPayload,
     type ReadRow,
     type Sensitivity,
@@ -161,6 +163,14 @@ export function isAvailable<P>(result: KernelResult<P>): result is { state: Avai
 }
 
 export type ReadResult = KernelResult<ReadPayload>;
+
+export interface QueryArgs extends CallOptions {
+    query: string;
+    destination: "local" | "remote";
+}
+
+/** A `retrieval.query` answer with the connection identity it arrived on. */
+export type QueryResult = KernelResult<QueryPayload & { connectionIdentity?: string }>;
 
 /**
  * A read projected to the value injectors and status surfaces carry: the
@@ -551,6 +561,30 @@ export class KernelClient {
         if (!isSnapshotDiverged(first.state)) return first;
         this.tokens.dropProject(this.projectRoot);
         return await this.readAt(args, null, deadline);
+    }
+
+    /** The daemon connection the next call would send on; a change between two calls means a different daemon may have answered them. */
+    connectionIdentity(): string | undefined {
+        return this.transport.connectionIdentity?.();
+    }
+
+    /** One `retrieval.query` ranking within the call's deadline, whose remainder rides as `remaining_ms` so the daemon stops at the same instant. A ranking has no side effects, so an ambiguous transport outcome reissues once. */
+    async query(args: QueryArgs): Promise<QueryResult> {
+        const deadline = this.deadline(args);
+        if (!(deadline instanceof Deadline)) return { state: deadline };
+        const { result, connectionIdentity } = await this.call(
+            "retrieval.query",
+            () =>
+                this.wireBody("retrieval.query", {
+                    query: args.query,
+                    remaining_ms: Math.max(1, deadline.remainingMs()),
+                    destination: args.destination,
+                }),
+            { signal: args.signal, deadline, reissuable: true },
+            parseQueryResponse,
+        );
+        if (!isAvailable(result)) return result;
+        return connectionIdentity === undefined ? result : { ...result, connectionIdentity };
     }
 
     private commitBody(

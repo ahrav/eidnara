@@ -18,6 +18,8 @@ const toolContext = (sessionID = "ses-search") =>
 
 const OBJECT_A = `mem_${"a".repeat(32)}`;
 const OBJECT_B = `mem_${"b".repeat(32)}`;
+const LEGACY_NOTE =
+    "Memory: the fused search route is unavailable (disabled); results come from the legacy snapshot scan.";
 
 /** A kernel client over an in-memory fake; `transport.calls` records every daemon round trip. */
 function kernelHarness(
@@ -38,6 +40,11 @@ function kernelHarness(
         kernelClient,
         deps: { kernelClient, resolveProjectPath: () => "git:repo-project" },
     };
+}
+
+/** The `kernel.read` calls, without the route ranking that precedes the snapshot fallback. */
+function kernelReads(harness: { transport: FakeKernelTransport }) {
+    return harness.transport.calls.filter((call) => call.method === "kernel.read");
 }
 
 function seed(kernel: FakeKernel, object_id: string, summary: string, kind = "ARCHITECTURE"): void {
@@ -130,7 +137,7 @@ describe("createEidnaraSearchTools", () => {
         expect(resolveCalls).toHaveLength(0);
     });
 
-    it("clamps an over-cap limit to 50 instead of rejecting", async () => {
+    it("clamps an over-cap limit to the route's 32 results instead of rejecting", async () => {
         const harness = kernelHarness();
         seedMany(harness.kernel, 60, (index) => `Clamped probe ${index}.`);
         const tools = createEidnaraSearchTools(harness.deps);
@@ -138,7 +145,7 @@ describe("createEidnaraSearchTools", () => {
             { query: "clamped probe", limit: 10_000 },
             toolContext(),
         );
-        expect(result).toStartWith('Found 50 results for "clamped probe":');
+        expect(result).toContain('Found 32 results for "clamped probe":');
     });
 
     it("preserves an explicit empty sources list as no sources", async () => {
@@ -221,7 +228,7 @@ describe("createEidnaraSearchTools", () => {
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).toContain("category=CONSTRAINTS");
         expect(result).not.toContain(`id=${OBJECT_B}`);
-        const read = harness.transport.calls[0]?.body as { surface: string; gated: boolean };
+        const read = kernelReads(harness)[0]?.body as { surface: string; gated: boolean };
         expect(read).toMatchObject({ surface: "explicit_search", gated: true });
     });
 
@@ -271,7 +278,7 @@ describe("createEidnaraSearchTools", () => {
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).toContain("Direct id hit.");
         expect(result).toContain("match=exact");
-        const read = harness.transport.calls[0]?.body as {
+        const read = kernelReads(harness)[0]?.body as {
             surface: string;
             gated: boolean;
             object_ids?: string[];
@@ -294,7 +301,7 @@ describe("createEidnaraSearchTools", () => {
         expect(result).toContain("Oldest row, dropped by the byte budget.");
         expect(result).toContain(`id=${OBJECT_B}`);
         expect(result).not.toContain("unresolved");
-        const idReads = harness.transport.calls.map(
+        const idReads = kernelReads(harness).map(
             (call) => (call.body as { object_ids?: string[] }).object_ids,
         );
         expect(idReads[0]).toEqual([OBJECT_A, OBJECT_B]);
@@ -307,7 +314,7 @@ describe("createEidnaraSearchTools", () => {
         const tools = createEidnaraSearchTools(harness.deps);
         const result = await tools.eidnara_search.execute({ query: OBJECT_A }, toolContext());
         expect(result).toStartWith(
-            `Memory: unresolved object id (the daemon read stayed truncated): ${OBJECT_A}`,
+            `${LEGACY_NOTE}\nMemory: unresolved object id (the daemon read stayed truncated): ${OBJECT_A}`,
         );
     });
 
@@ -373,18 +380,18 @@ describe("createEidnaraSearchTools", () => {
         );
         expect(result).toContain(`id=${OBJECT_A}`);
         expect(result).toContain("Results are read from the canonical tip.");
-        expect(
-            harness.transport.calls.map((call) => (call.body as { gated: boolean }).gated),
-        ).toEqual([true, false]);
+        expect(kernelReads(harness).map((call) => (call.body as { gated: boolean }).gated)).toEqual(
+            [true, false],
+        );
 
         // An id query takes the same fallback through the chunked read.
         harness.transport.calls.length = 0;
         const byId = await tools.eidnara_search.execute({ query: OBJECT_A }, toolContext());
         expect(byId).toContain(`id=${OBJECT_A}`);
         expect(byId).toContain("Results are read from the canonical tip.");
-        expect(
-            harness.transport.calls.map((call) => (call.body as { gated: boolean }).gated),
-        ).toEqual([true, false]);
+        expect(kernelReads(harness).map((call) => (call.body as { gated: boolean }).gated)).toEqual(
+            [true, false],
+        );
 
         // Any other refusal stays an error after one read.
         harness.transport.calls.length = 0;
@@ -394,7 +401,7 @@ describe("createEidnaraSearchTools", () => {
         });
         const busy = await tools.eidnara_search.execute({ query: "anything" }, toolContext());
         expect(busy).toStartWith("Error: ");
-        expect(harness.transport.calls).toHaveLength(1);
+        expect(kernelReads(harness)).toHaveLength(1);
     });
 
     it("renders the disabled state from a disabled kernel client", async () => {
@@ -477,10 +484,10 @@ describe("executeEidnaraSearch", () => {
         expect(execution.status).toBe("complete");
         if (execution.status !== "complete") return;
         expect(execution.reason).toBe("delivered");
-        expect(execution.prePack).toHaveLength(50);
-        expect(execution.delivered.length).toBeLessThan(50);
+        expect(execution.prePack).toHaveLength(32);
+        expect(execution.delivered.length).toBeLessThan(32);
         expect(execution.delivered).toEqual(execution.prePack.slice(0, execution.delivered.length));
-        expect(execution.omittedCount).toBe(50 - execution.delivered.length);
+        expect(execution.omittedCount).toBe(32 - execution.delivered.length);
         const omitted = execution.prePack[execution.prePack.length - 1];
         expect(execution.delivered).not.toContain(omitted);
         expect(execution.text).not.toContain(`id=${omitted?.objectId}`);
@@ -514,7 +521,7 @@ describe("executeEidnaraSearch", () => {
         );
         expect(execution.status).toBe("complete");
         if (execution.status !== "complete") return;
-        expect(execution.text).toStartWith("Memory: the memory read was truncated");
+        expect(execution.text).toStartWith(`${LEGACY_NOTE}\nMemory: the memory read was truncated`);
         expect(execution.tokenCount).toBe(estimateTokens(execution.text));
         expect(execution.tokenCount).toBeLessThanOrEqual(MAX_RENDERED_RESULT_TOKENS);
     });
