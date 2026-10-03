@@ -42,7 +42,7 @@ impl CodeAccess for Vec<Vec<i8>> {
 
     fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault> {
         let codes = self.get(index).ok_or_else(|| {
-            RowFault::Unavailable(format!(
+            RowFault::Missing(format!(
                 "row {index} is past the {} resident rows",
                 self.len()
             ))
@@ -320,12 +320,17 @@ pub enum RescoreRefusal<E> {
     #[error("the query is not a member of the generation: {0}")]
     Query(RowRejection),
     #[error("the original row of occurrence {occurrence_id} could not be read: {fault}")]
-    Read { occurrence_id: String, fault: E },
+    Read {
+        occurrence_id: String,
+        winner: WinnerRow,
+        fault: E,
+    },
     #[error(
         "the original row of occurrence {occurrence_id} is not a member of the generation: {rejection}"
     )]
     Row {
         occurrence_id: String,
+        winner: WinnerRow,
         rejection: RowRejection,
     },
 }
@@ -346,10 +351,12 @@ pub fn rescore_pool<E>(
         let occurrence_id = &candidate.occurrence_id;
         let row = read(winner).map_err(|fault| RescoreRefusal::Read {
             occurrence_id: occurrence_id.clone(),
+            winner: *winner,
             fault,
         })?;
         codec::validate(&row, layout).map_err(|rejection| RescoreRefusal::Row {
             occurrence_id: occurrence_id.clone(),
+            winner: *winner,
             rejection,
         })?;
         scored.push((score(layout.metric, query, &row), index));

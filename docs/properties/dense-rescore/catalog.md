@@ -177,7 +177,7 @@ unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
 size, and the candidate scan sizes its pool from it
-(`crates/retrieval/src/dense/candidates.rs:253`).
+(`crates/retrieval/src/dense/candidates.rs:255`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -228,7 +228,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:192`) has no production caller at
+(`crates/retrieval/src/dense/candidates.rs:194`) has no production caller at
 this base; #613 connects it to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
@@ -371,13 +371,16 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:697`) has no production caller at this
+(`crates/daemon/src/vector_reader.rs:685`) has no production caller at this
 base; #620 puts it behind the dense lane.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
 `a_promotion_and_prune_after_selection_leave_the_rescore_on_the_pinned_files`,
 and `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`.
+Physical order here means how rows spread across a composition's layers; the
+order of rows within one layer file is fixed by the format, which writes and
+verifies identifiers in strictly increasing byte order.
 Guarantee: The rescore reads one original row per pool entry, by a positioned
 read of the member and row the entry's winner names, through the descriptors
 the view verified; it never reads a superseded, masked, or unselected row and
@@ -404,11 +407,15 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - as above; `rescore_pool`
-(`crates/retrieval/src/dense/candidates.rs:335`) is pure.
+(`crates/retrieval/src/dense/candidates.rs:340`) is pure.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
-`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`.
+`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`;
+`crates/retrieval/tests/dense_candidates.rs`
+`the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier`
+and
+`the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed_or_malformed_row`.
 Guarantee: For the accepted pool `A`, the result is exactly
 `Top(K, A, f32_score)` under the dense order, with distinct identities for
 equal rows and every returned score the retained-f32 score of its row.
@@ -432,17 +439,27 @@ Reachability: test-only - as above.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
-`a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`, and
-`cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`.
+`a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
+`missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
+and `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`;
+the unit test
+`a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` in
+`crates/daemon/src/vector_reader.rs`.
 Guarantee: An accepted row that is missing (a short read or an index past the
-layer) or fails the codec refuses the whole request as `Corrupt` naming the
-member and quarantines the view, so every later ranking over it refuses; an
-I/O failure other than a short read refuses as `Io` and quarantines nothing,
-and cancellation refuses as `Budget`; nothing older, quantized, or
-reconstructed stands in, and no shorter ranking is returned.
+layer) or fails the codec or the layout refuses the whole request as
+`Corrupt` naming the member and the occurrence and quarantines the view, so
+every later ranking over it refuses; codes the scan finds missing quarantine
+it the same way; a read error other than a short read is `RowFault::Unavailable`
+and refuses as `Io`, or as `OracleRefusal::ReadFailed` in the scan, and
+quarantines nothing; cancellation refuses as `Budget`; nothing older,
+quantized, or reconstructed stands in, and no shorter ranking is returned.
 Check: `always` - a rows file cut to its header after selection refuses with
-`Missing` after one read and quarantines the view; NaN rows refuse with
-`Rejected`; a cancelled budget refuses with no read and no quarantine; a
+`Missing` after one read, quarantines the view, and releases the scratch and
+row buffers; NaN rows and doubled, finite rows refuse with `Rejected` naming
+the member and the pool's best entry; an emptied codes file refuses the scan
+and quarantines the view, while a cancelled scan does not; the read
+classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
+with no read and no quarantine; a
 re-acquisition re-verifies, recovery takes the prior verified composition, and
 its ranking excludes an occurrence retired in the kernel meanwhile. `always`
 because a corrupt generation must never yield a result.
@@ -459,8 +476,8 @@ Open questions:
 - Parent Q4: persistent quarantine is re-verification on acquisition, which
   refuses a member whose files no longer hash; a transient fault that leaves
   the files intact is served again after re-acquisition (needs human input).
-- The I/O classification is constructed only by reading; no test injects an
-  I/O error other than a short read.
+- The I/O classification is checked at the classifier; no test makes a real
+  file return a read error other than a short read.
 - Process-restart evidence here is a fresh acquisition in the same process,
   which reads only durable state; it is not a separate process and not
   power-loss evidence.
@@ -478,7 +495,8 @@ rescored identity sets are retained with separate candidate-coverage and
 rescored Recall@10 fields against one frozen eligible f32 baseline; an empty
 baseline yields no value rather than a perfect score.
 Check: `always` - six records with the alphas in order, ten baseline
-identities each, coverage non-decreasing in alpha, recall at most coverage,
+identities each, coverage below one at alpha one, coverage non-decreasing in
+alpha, recall at most coverage,
 the widest pool covering the baseline with the rescore equal to it, and no
 value for an empty baseline. `always` because every sweep must keep the
 stages apart.
@@ -486,8 +504,11 @@ Fault/timing angle: none.
 Required faults and enabling state: Sixty fixed rows, every fifth
 unadmitted.
 Confidence: medium - [evidence](evidence/dense-stage-evidence-keeps-coverage-and-recall-apart.md).
-On this corpus coverage and recall are equal at every alpha, which the
-specification allows; the corpus is not the RP2.9 frozen corpus.
+The corpus clusters sixty rows around the query so that coverage at alpha one
+is below one; coverage and recall are equal at each alpha, which the
+specification allows; every alpha from five up pools all 48 eligible rows, so
+those four records measure one state; the corpus is not the RP2.9 frozen
+corpus.
 Existing check: none.
 Impact: A collapsed field hides whether a miss came from the pool or the
 rescore.

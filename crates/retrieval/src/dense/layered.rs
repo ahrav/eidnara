@@ -187,7 +187,11 @@ pub(super) fn fault_refusal(occurrence_id: &str, fault: RowFault) -> OracleRefus
             occurrence_id: occurrence_id.to_owned(),
             rejection,
         },
-        RowFault::Unavailable(detail) => OracleRefusal::Unreadable {
+        RowFault::Missing(detail) => OracleRefusal::Unreadable {
+            occurrence_id: occurrence_id.to_owned(),
+            detail,
+        },
+        RowFault::Unavailable(detail) => OracleRefusal::ReadFailed {
             occurrence_id: occurrence_id.to_owned(),
             detail,
         },

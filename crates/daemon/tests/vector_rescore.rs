@@ -10,14 +10,15 @@ use daemon::vector_admission::{RESIDENT_LIMIT, ResourceClass};
 use daemon::vector_composition::SelectorState;
 use daemon::vector_generation::ROWS_FILE;
 use daemon::vector_reader::{
-    CompressedRanking, CompressedRefusal, CompressedRequest, OriginalFault, PinnedVectors,
-    RankRefusal, RescoreEvent, rank_compressed,
+    CompressedRanking, CompressedRefusal, CompressedRequest, PinnedVectors, RankRefusal,
+    RescoreEvent, rank_compressed,
 };
 use kernel::applicability::EvalBudget;
 use retrieval::dense::codec::ARTIFACT_HEADER_BYTES;
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
-    CandidateCapacity, CandidatePolicy, Completion, IncompleteReason, ScanBounds, StorageBounds,
+    BLOCK_ROWS, CandidateCapacity, CandidatePolicy, CandidateRefusal, Completion, IncompleteReason,
+    LayeredRefusal, OracleRefusal, RowFault, ScanBounds, StorageBounds,
 };
 use support::dense_projection::{Projection, occurrence_id, reference};
 use support::vector_store::{Fixture, unit};
@@ -305,8 +306,7 @@ fn negative_scores_ties_and_an_underfilled_pool_keep_the_global_order() {
         .publish(&fixture.compose(1, &base, &[]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    let mut negative = axis(0);
-    negative[0] = -1.0;
+    let negative = negative_axis();
     let vectors: BTreeMap<String, Vec<f32>> = map(&corpus).into_iter().collect();
     for query in [axis(0), negative, axis(4)] {
         let (ranking, reads) = rank_simple(&fixture, &projection, &view, &query, 5, 8);
@@ -471,12 +471,14 @@ fn a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set
     match outcome {
         Err(CompressedRefusal::Corrupt { member, fault, .. }) => {
             assert_eq!(member, new_base.digest);
-            assert!(matches!(fault, OriginalFault::Missing(_)), "{fault:?}");
+            assert!(matches!(fault, RowFault::Missing(_)), "{fault:?}");
         }
         other => panic!("{other:?}"),
     }
     assert_eq!(reads.len(), 1, "the first missing row ends the request");
     assert!(view.is_quarantined());
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
     let (again, reads) = run(
         &fixture,
         &projection,
@@ -523,44 +525,163 @@ fn a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set
     let _ = replaced;
 }
 
+/// Rewrites every original row of `digest` in place after selection; the bytes stay where the layer declares them.
+fn rewrite_rows(fixture: &Fixture, digest: &str, rewrite: fn(&mut [u8])) -> impl FnMut() {
+    let rows = fixture.generation_dir(digest).join(ROWS_FILE);
+    move || {
+        let mut bytes = std::fs::read(&rows).unwrap();
+        let width = 8 * 4;
+        for row in bytes[ARTIFACT_HEADER_BYTES..].chunks_mut(width) {
+            rewrite(row);
+        }
+        std::fs::write(&rows, bytes).unwrap();
+    }
+}
+
 #[test]
 fn a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute() {
+    // A NaN coordinate fails the row's own decode; a doubled row is finite but leaves the unit-norm tolerance, which only the rescore's layout check sees.
+    let nan = |row: &mut [u8]| row[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    let doubled = |row: &mut [u8]| {
+        for word in row.chunks_mut(4) {
+            let value = f32::from_le_bytes(word.try_into().unwrap()) * 2.0;
+            word.copy_from_slice(&value.to_le_bytes());
+        }
+    };
+    let rewrites: [fn(&mut [u8]); 2] = [nan, doubled];
+    for rewrite in rewrites {
+        let mut fixture = Fixture::new();
+        let projection = projection(&fixture, &OBJECTS);
+        let base = fixture.layer_from(&export(&corpus(), &[], 10));
+        fixture
+            .publish(&fixture.compose(1, &base, &[]).unwrap())
+            .unwrap();
+        let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+        let (outcome, reads) = run(
+            &fixture,
+            &projection,
+            &view,
+            &axis(0),
+            capacity(5, 5),
+            &ROOMY,
+            &EvalBudget::unbounded(),
+            rewrite_rows(&fixture, &base.digest, rewrite),
+        );
+        let first = occurrence_id("alpha");
+        match outcome {
+            Err(CompressedRefusal::Corrupt {
+                member,
+                occurrence_id,
+                fault: RowFault::Rejected(_),
+            }) => {
+                assert_eq!(member, base.digest);
+                assert_eq!(occurrence_id, first, "the pool's best entry is read first");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(reads.len(), 1);
+        assert!(view.is_quarantined());
+    }
+}
+
+#[test]
+fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);
-    let corpus = corpus();
-    let base = fixture.layer_from(&export(&corpus, &[], 10));
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
     fixture
         .publish(&fixture.compose(1, &base, &[]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    let rows = fixture.generation_dir(&base.digest).join(ROWS_FILE);
+
+    // An ended budget and a moved authority refuse or discard without touching the view.
+    let cancelled = EvalBudget::unbounded();
+    cancelled.cancel();
     let (outcome, _) = run(
         &fixture,
         &projection,
         &view,
         &axis(0),
-        capacity(5, 5),
+        capacity(2, 3),
+        &ROOMY,
+        &cancelled,
+        || panic!("a cancelled scan selects nothing"),
+    );
+    assert!(
+        matches!(outcome, Err(CompressedRefusal::Candidates(_))),
+        "{outcome:?}"
+    );
+    assert!(!view.is_quarantined());
+
+    // The codes file is cut to nothing: the first winner's codes are missing.
+    let codes = fixture
+        .generation_dir(&base.digest)
+        .join(daemon::vector_generation::CODES_FILE);
+    std::fs::write(&codes, []).unwrap();
+    let (outcome, reads) = run(
+        &fixture,
+        &projection,
+        &view,
+        &axis(0),
+        capacity(2, 3),
         &ROOMY,
         &EvalBudget::unbounded(),
-        || {
-            // Every row's first coordinate becomes NaN; the bytes stay in place.
-            let mut bytes = std::fs::read(&rows).unwrap();
-            let width = 8 * 4;
-            for row in 0..5 {
-                let at = ARTIFACT_HEADER_BYTES + row * width;
-                bytes[at..at + 4].copy_from_slice(&f32::NAN.to_le_bytes());
-            }
-            std::fs::write(&rows, bytes).unwrap();
-        },
+        || panic!("nothing is selected"),
     );
-    assert!(matches!(
-        outcome,
-        Err(CompressedRefusal::Corrupt {
-            fault: OriginalFault::Rejected(_),
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            outcome,
+            Err(CompressedRefusal::Candidates(CandidateRefusal::Layered(
+                LayeredRefusal::Oracle(OracleRefusal::Unreadable { .. })
+            )))
+        ),
+        "{outcome:?}"
+    );
+    assert!(reads.is_empty());
     assert!(view.is_quarantined());
+}
+
+#[test]
+fn a_view_of_another_identity_is_refused_first() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let mut expected = fixture.expected();
+    expected.kernel_incarnation_id = "another-kernel";
+    let query = axis(0);
+    let request = CompressedRequest {
+        expected: &expected,
+        query: &query,
+        authority: projection.authority(),
+        capacity: capacity(2, 3),
+        bounds: scan_bounds(),
+        max_entries: NonZeroUsize::new(64).unwrap(),
+        max_layers: NonZeroUsize::new(8).unwrap(),
+        max_pinned_bytes: u64::MAX,
+        max_read_bytes: u64::MAX,
+    };
+    let outcome = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank_compressed(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &EvalBudget::unbounded(),
+                &fixture.admission,
+                &mut |_| panic!("nothing is selected"),
+            ))
+        })
+        .unwrap();
+    assert!(
+        matches!(outcome, Err(CompressedRefusal::Identity { .. })),
+        "{outcome:?}"
+    );
 }
 
 #[test]
@@ -669,7 +790,8 @@ fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     );
     // A resident limit the view's tables already fill leaves no room for the pool's row buffers.
     let tables = fixture.ledger.census().resident;
-    fixture.set_limit(RESIDENT_LIMIT, tables + 9 * 8);
+    let code_scratch = (BLOCK_ROWS as u64 + 1) * 8;
+    fixture.set_limit(RESIDENT_LIMIT, tables + code_scratch);
     let (refused, _) = run(
         &fixture,
         &projection,
@@ -709,15 +831,19 @@ fn fraction(found: &[String], baseline: &[String]) -> Option<f64> {
     })
 }
 
-/// A fixed corpus of sixty unit rows spread by a small linear congruential sequence, so quantization reorders neighbors.
+/// The sweep's query: a fixed unit direction the corpus clusters around.
+const CENTER: [f32; 8] = [0.6, -0.3, 0.4, 0.2, -0.1, 0.5, 0.25, -0.15];
+
+/// A fixed corpus of sixty unit rows: the center plus a small offset drawn from a linear congruential sequence, so neighbors sit closer than the int8 step and quantization reorders them.
 fn spread_corpus(objects: &[String]) -> Vec<(String, Vec<f32>)> {
     let mut state: u32 = 0x2545_f491;
     objects
         .iter()
         .map(|object| {
-            let raw: [f32; 8] = std::array::from_fn(|_| {
+            let raw: [f32; 8] = std::array::from_fn(|coordinate| {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+                let offset = (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+                CENTER[coordinate] + 0.05 * offset
             });
             (object.clone(), unit(raw))
         })
@@ -750,7 +876,7 @@ fn the_alpha_sweep_keeps_candidate_coverage_and_rescored_recall_as_separate_stag
         .publish(&fixture.compose(1, &base, &[]).unwrap())
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
-    let query = rows[7].1.clone();
+    let query = unit(CENTER);
     let eligible: Vec<(String, Vec<f32>)> = rows
         .iter()
         .filter(|(object, _)| admitted.contains(&object.as_str()))
@@ -816,6 +942,12 @@ fn the_alpha_sweep_keeps_candidate_coverage_and_rescored_recall_as_separate_stag
             .collect::<Vec<_>>(),
         [1, 2, 5, 10, 20, 50]
     );
-    // An empty eligible set is its own case, never a manufactured perfect score.
+    // The stages differ where the pool is narrow: quantization drops part of the baseline at alpha one.
+    assert!(
+        records[0].candidate_coverage < Some(1.0),
+        "{:?}",
+        records[0]
+    );
+    // The stage helper gives an empty baseline no value rather than a perfect score.
     assert_eq!(fraction(&[], &[]), None);
 }

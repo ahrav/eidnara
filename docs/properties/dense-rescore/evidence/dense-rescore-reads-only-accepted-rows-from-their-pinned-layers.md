@@ -8,12 +8,12 @@ prune.
 
 ## Evidence trail
 
-- `rank_compressed` (`crates/daemon/src/vector_reader.rs:697`) selects the
+- `rank_compressed` (`crates/daemon/src/vector_reader.rs:685`) selects the
   pool through `select_candidates` over the view's own layers, then rescores
   through `rescore_pool` with a read closure that names
   `view.layers[winner.layer]` and `winner.row`.
-- `PinnedLayer::original` (`vector_reader.rs:171`) reads one row at its offset
-  through the descriptor verification hashed.
+- `PinnedLayer::row` reads one row at its offset through the descriptor
+  verification hashed.
 - Nothing in the rescore reads the selector.
 
 ## Failure scenario

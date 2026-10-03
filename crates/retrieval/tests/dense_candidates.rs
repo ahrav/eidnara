@@ -14,7 +14,7 @@ use retrieval::dense::scalar::{QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::{
     CandidateCapacity, CandidatePolicy, CandidatePool, CandidateQuery, CandidateRefusal,
     Completion, IncompleteReason, Layer, LayerCodes, LayeredRefusal, Metric, OracleRefusal,
-    ScanBounds, StorageBounds, Window,
+    RescoreRefusal, ScanBounds, StorageBounds, Window, WinnerRow, rescore_pool,
 };
 use retrieval::eligibility::OccurrenceCandidate;
 
@@ -947,5 +947,130 @@ fn a_reserved_stored_code_refuses_as_unreadable() {
         Err(CandidateRefusal::Layered(LayeredRefusal::Oracle(
             OracleRefusal::Unreadable { ref occurrence_id, .. }
         ))) if *occurrence_id == alpha
+    ));
+}
+
+/// A pool of `rows` in the given order, each its own winner row, with no stamps.
+fn synthetic_pool(ids: &[&str]) -> CandidatePool {
+    let candidates: Vec<OccurrenceCandidate> = ids
+        .iter()
+        .map(|id| {
+            OccurrenceCandidate::new(
+                (*id).to_owned(),
+                kernel::source_identity::OccurrenceClass::CanonicalClaims,
+                "object".to_owned(),
+                1,
+                DIGEST.to_owned(),
+            )
+        })
+        .collect();
+    CandidatePool {
+        ranking: retrieval::dense::ExhaustiveRanking {
+            ranked: candidates
+                .iter()
+                .map(|candidate| retrieval::dense::Ranked {
+                    occurrence_id: candidate.occurrence_id.clone(),
+                    class: candidate.class,
+                    score: 0.0,
+                })
+                .collect(),
+            candidates,
+            completion: Completion::Complete,
+            coverage: retrieval::dense::DenseCoverage::default(),
+            snapshot: None,
+            incarnation: None,
+            consumed: retrieval::dense::Consumed::default(),
+        },
+        layers: retrieval::dense::LayerAccount::default(),
+        winners: (0..ids.len())
+            .map(|row| WinnerRow { layer: 0, row })
+            .collect(),
+    }
+}
+
+#[test]
+fn the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier() {
+    let ids = ["d", "b", "c", "a"];
+    let pool = synthetic_pool(&ids);
+    let rows = [
+        axis(1),
+        axis(0),
+        axis(0),
+        unit([0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ];
+    let mut reads = Vec::new();
+    let rescored = rescore_pool(
+        &pool,
+        &layout(),
+        &axis(0),
+        NonZeroUsize::new(3).unwrap(),
+        |winner| {
+            reads.push(winner.row);
+            Ok::<_, ()>(rows[winner.row].clone())
+        },
+    )
+    .unwrap();
+    assert_eq!(reads, [0, 1, 2, 3]);
+    let order: Vec<&str> = rescored
+        .ranked
+        .iter()
+        .map(|row| row.occurrence_id.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        ["b", "c", "a"],
+        "equal scores keep identifier order; k cuts the rest"
+    );
+    assert_eq!(rescored.ranked[0].score, 1.0);
+    for (row, candidate) in rescored.ranked.iter().zip(&rescored.candidates) {
+        assert_eq!(row.occurrence_id, candidate.occurrence_id);
+    }
+}
+
+#[test]
+fn the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed_or_malformed_row()
+{
+    let pool = synthetic_pool(&["a", "b", "c"]);
+    let k = NonZeroUsize::new(3).unwrap();
+    let mut reads = 0;
+    let zero = vec![0.0f32; 8];
+    assert_eq!(
+        rescore_pool(&pool, &layout(), &zero, k, |_| {
+            reads += 1;
+            Ok::<_, ()>(axis(0))
+        }),
+        Err(RescoreRefusal::Query(
+            retrieval::dense::RowRejection::ZeroNorm
+        ))
+    );
+    assert_eq!(reads, 0);
+    let mut reads = 0;
+    let failed = rescore_pool(&pool, &layout(), &axis(0), k, |winner| {
+        reads += 1;
+        if winner.row == 1 {
+            Err("torn")
+        } else {
+            Ok(axis(0))
+        }
+    });
+    assert_eq!(
+        failed,
+        Err(RescoreRefusal::Read {
+            occurrence_id: "b".to_owned(),
+            winner: WinnerRow { layer: 0, row: 1 },
+            fault: "torn"
+        })
+    );
+    assert_eq!(reads, 2);
+    let malformed = rescore_pool(&pool, &layout(), &axis(0), k, |winner| {
+        Ok::<_, ()>(if winner.row == 2 {
+            vec![2.0; 8]
+        } else {
+            axis(0)
+        })
+    });
+    assert!(matches!(
+        malformed,
+        Err(RescoreRefusal::Row { ref occurrence_id, winner: WinnerRow { row: 2, .. }, .. }) if occurrence_id == "c"
     ));
 }

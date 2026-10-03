@@ -6,7 +6,7 @@
 
 ## Evidence trail
 
-- `rescore_pool` (`crates/retrieval/src/dense/candidates.rs:335`) validates
+- `rescore_pool` (`crates/retrieval/src/dense/candidates.rs:340`) validates
   the query and each row, scores with `score`, sorts with `rank_order`, and
   truncates to `k`.
 

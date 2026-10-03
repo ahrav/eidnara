@@ -8,11 +8,16 @@ classifications.
 
 ## Evidence trail
 
-- `PinnedLayer::original` classifies a short read and an index past the rows
-  as `Missing`, codec refusals as `Rejected`, and other read errors as `Io`.
-- `rank_compressed` sets the view's quarantine flag for `Missing`, `Rejected`,
-  and code corruption found by the scan, and refuses `Quarantined` on every
-  later call; `rank` refuses the same way.
+- `PinnedLayer::read_row_bytes` classifies an index past the rows and a short
+  read as `RowFault::Missing` and any other read error as
+  `RowFault::Unavailable` (`read_fault`); `RowAccess::row` adds codec
+  refusals as `Rejected`.
+- `layered::fault_refusal` maps `Missing` to `OracleRefusal::Unreadable` and
+  `Unavailable` to `OracleRefusal::ReadFailed`, so the scan keeps the two
+  apart too.
+- `rescore_refusal` quarantines the view for `Missing` and `Rejected`, and
+  `rank_compressed` for codes the scan finds unreadable or malformed; both
+  refuse `Quarantined` on every later call, and so does `rank`.
 - The rescore checks the budget before every read and refuses `Budget`
   without touching the flag.
 - `vector_composition::recover` and `acquire` re-verify every member, so a

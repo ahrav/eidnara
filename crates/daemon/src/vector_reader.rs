@@ -21,9 +21,9 @@ use retrieval::dense::codec::{self, ARTIFACT_HEADER_BYTES, RowLayout};
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
     CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, Layer,
-    LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, LayeredRefusal as Layered,
-    OracleBounds, OracleRefusal, Precedence, RescoreRefusal, Rescored, RowAccess, RowFault,
-    RowRejection, ScanBounds, WinnerRow, rank_layers, rescore_pool, select_candidates,
+    LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, OracleRefusal,
+    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, WinnerRow,
+    rank_layers, rescore_pool, select_candidates,
 };
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
@@ -155,7 +155,7 @@ impl PinnedLayer {
         index: usize,
     ) -> Result<Vec<u8>, RowFault> {
         if index >= self.occurrence_ids.len() {
-            return Err(RowFault::Unavailable(format!(
+            return Err(RowFault::Missing(format!(
                 "row {index} is past the {} rows the layer declares",
                 self.occurrence_ids.len()
             )));
@@ -163,30 +163,8 @@ impl PinnedLayer {
         let offset = header as u64 + index as u64 * width as u64;
         let mut bytes = vec![0u8; width];
         file.read_exact_at(&mut bytes, offset)
-            .map_err(|error| RowFault::Unavailable(format!("row {index}: {error}")))?;
+            .map_err(|error| read_fault(index, &error))?;
         Ok(bytes)
-    }
-
-    /// The original f32 row of `index`, with a short or missing row told apart from an I/O failure and from bytes the codec refuses.
-    fn original(&self, index: usize) -> Result<Vec<f32>, OriginalFault> {
-        if index >= self.occurrence_ids.len() {
-            return Err(OriginalFault::Missing(format!(
-                "row {index} is past the {} rows the layer declares",
-                self.occurrence_ids.len()
-            )));
-        }
-        let width = self.dimension() * 4;
-        let offset = ARTIFACT_HEADER_BYTES as u64 + index as u64 * width as u64;
-        let mut bytes = vec![0u8; width];
-        self.rows
-            .read_exact_at(&mut bytes, offset)
-            .map_err(|error| match error.kind() {
-                std::io::ErrorKind::UnexpectedEof => {
-                    OriginalFault::Missing(format!("row {index}: {error}"))
-                }
-                _ => OriginalFault::Io(format!("row {index}: {error}")),
-            })?;
-        codec::decode_shape(&bytes, self.sidecar.vector_dimension).map_err(OriginalFault::Rejected)
     }
 
     /// The int8 codes of row `index`; they score with this layer's scales and no other's.
@@ -240,7 +218,7 @@ pub struct PinnedVectors {
     _record: ValidatedGeneration,
     resident: Reservation,
     pinned: Pinned,
-    /// Set when a positioned read found an accepted row missing or corrupt; every later ranking over this view refuses.
+    /// Set when a read found this view's rows or codes missing or corrupt; every later ranking over this view refuses. The flag belongs to this view alone: another acquisition of the same composition re-verifies its members and refuses one whose files no longer hash.
     quarantined: AtomicBool,
 }
 
@@ -277,8 +255,12 @@ impl PinnedVectors {
         self.pinned.bytes()
     }
 
+    fn quarantine(&self) {
+        self.quarantined.store(true, Ordering::Relaxed);
+    }
+
     pub fn is_quarantined(&self) -> bool {
-        self.quarantined.load(Ordering::Acquire)
+        self.quarantined.load(Ordering::Relaxed)
     }
 
     pub fn members(&self) -> Vec<String> {
@@ -605,17 +587,12 @@ fn check_view(view: &PinnedVectors, expected: &ExpectedVectors<'_>) -> Result<()
     Ok(())
 }
 
-/// Why an accepted occurrence's original row did not come back.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum OriginalFault {
-    /// The row is not where the verified layer declares it: the file is shorter, or the index is past its rows.
-    #[error("the row is missing: {0}")]
-    Missing(String),
-    #[error("the row's bytes are not a row of the generation: {0}")]
-    Rejected(RowRejection),
-    /// The read failed for a reason other than a short file.
-    #[error("the row could not be read: {0}")]
-    Io(String),
+/// A failed positioned read: a file that ends before the row is a missing row; any other error is a failed read.
+fn read_fault(index: usize, error: &std::io::Error) -> RowFault {
+    match error.kind() {
+        std::io::ErrorKind::UnexpectedEof => RowFault::Missing(format!("row {index}: {error}")),
+        _ => RowFault::Unavailable(format!("row {index}: {error}")),
+    }
 }
 
 /// Not `Debug`: the query row is embedding content.
@@ -661,24 +638,35 @@ pub enum CompressedRefusal {
         bytes: u64,
         refusal: vector_admission::Refusal,
     },
+    /// The scan refused; when the generation's own codes were missing or malformed, the view is quarantined too.
     #[error(transparent)]
     Candidates(CandidateRefusal),
+    #[error("the query is not a member of the generation: {0}")]
+    Query(RowRejection),
     #[error("the request's budget ended during the rescore")]
     Budget,
-    /// An accepted occurrence's original row is missing or corrupt in member `member`; the view is quarantined and nothing older or reconstructed stands in for it.
+    /// An accepted occurrence's original row is missing or malformed in member `member`; the view is quarantined and nothing older or reconstructed stands in for it.
     #[error("the original row of occurrence {occurrence_id} in member {member}: {fault}")]
     Corrupt {
         member: String,
         occurrence_id: String,
-        fault: OriginalFault,
+        fault: RowFault,
     },
-    /// An accepted row's read failed for a reason other than its absence; the view stays usable.
-    #[error("the original row of occurrence {occurrence_id} in member {member}: {fault}")]
+    /// An accepted row's read failed with its bytes possibly intact; the view stays usable.
+    #[error(
+        "reading the original row of occurrence {occurrence_id} in member {member} failed: {detail}"
+    )]
     Io {
         member: String,
         occurrence_id: String,
-        fault: OriginalFault,
+        detail: String,
     },
+}
+
+/// Why the rescore stopped reading.
+enum ReadStop {
+    Budget,
+    Fault(RowFault),
 }
 
 /// Where a compressed ranking stands; a test may hold or mutate the store here.
@@ -722,8 +710,8 @@ pub fn rank_compressed(
         });
     }
     let dimension = u64::from(view.layout.dimension);
-    let pool = request.capacity.candidates().get() as u64;
-    let read_bytes = pool.saturating_mul(codec::row_bytes(view.layout.dimension));
+    let row_bytes = codec::row_bytes(view.layout.dimension);
+    let read_bytes = (request.capacity.candidates().get() as u64).saturating_mul(row_bytes);
     if read_bytes > request.max_read_bytes {
         return Err(CompressedRefusal::ReadBytes {
             bytes: read_bytes,
@@ -745,8 +733,8 @@ pub fn rank_compressed(
         ResourceClass::Scratch,
         (retrieval::dense::BLOCK_ROWS as u64 + 1).saturating_mul(dimension),
     )?;
-    // Every pool entry's decoded original row, held until the rescore sorts them.
-    let _rows = reserve(ResourceClass::RowBuffers, read_bytes)?;
+    // The rescore reads one row at a time: its raw bytes and its decoded coordinates.
+    let _rows = reserve(ResourceClass::RowBuffers, row_bytes.saturating_mul(2))?;
     let layers = view.resolver_layers();
     let codes: Vec<LayerCodes<'_>> = view
         .layers
@@ -770,7 +758,7 @@ pub fn rank_compressed(
     };
     let pool = select_candidates(conn, kernel, &query, budget).map_err(|refusal| {
         if code_corruption(&refusal) {
-            view.quarantined.store(true, Ordering::Release);
+            view.quarantine();
         }
         CompressedRefusal::Candidates(refusal)
     })?;
@@ -782,62 +770,53 @@ pub fn rank_compressed(
         request.capacity.k(),
         |winner: &WinnerRow| {
             if budget.check().is_err() {
-                return Err(None);
+                return Err(ReadStop::Budget);
             }
             let layer = &view.layers[winner.layer];
             observe(RescoreEvent::ReadOriginal {
                 member: &layer.digest,
                 row: winner.row,
             });
-            layer
-                .original(winner.row)
-                .map_err(|fault| Some((winner.layer, fault)))
+            layer.row(winner.row).map_err(ReadStop::Fault)
         },
     );
-    match rescored {
-        Ok(rescored) => Ok(CompressedRanking { pool, rescored }),
-        Err(RescoreRefusal::Query(rejection)) => Err(CompressedRefusal::Candidates(
-            CandidateRefusal::Layered(Layered::Oracle(OracleRefusal::Query(rejection))),
-        )),
-        Err(RescoreRefusal::Read { fault: None, .. }) => Err(CompressedRefusal::Budget),
-        Err(RescoreRefusal::Read {
+    rescored
+        .map(|rescored| CompressedRanking { pool, rescored })
+        .map_err(|refusal| rescore_refusal(view, refusal))
+}
+
+/// A missing or malformed accepted row quarantines the view; a failed read and an ended budget leave it usable.
+fn rescore_refusal(view: &PinnedVectors, refusal: RescoreRefusal<ReadStop>) -> CompressedRefusal {
+    let (occurrence_id, winner, fault) = match refusal {
+        RescoreRefusal::Query(rejection) => return CompressedRefusal::Query(rejection),
+        RescoreRefusal::Read {
+            fault: ReadStop::Budget,
+            ..
+        } => return CompressedRefusal::Budget,
+        RescoreRefusal::Read {
             occurrence_id,
-            fault: Some((layer, fault)),
-        }) => {
-            let member = view.layers[layer].digest.clone();
-            if matches!(fault, OriginalFault::Io(_)) {
-                return Err(CompressedRefusal::Io {
-                    member,
-                    occurrence_id,
-                    fault,
-                });
-            }
-            view.quarantined.store(true, Ordering::Release);
-            Err(CompressedRefusal::Corrupt {
-                member,
-                occurrence_id,
-                fault,
-            })
-        }
-        Err(RescoreRefusal::Row {
+            winner,
+            fault: ReadStop::Fault(fault),
+        } => (occurrence_id, winner, fault),
+        RescoreRefusal::Row {
             occurrence_id,
+            winner,
             rejection,
-        }) => {
-            view.quarantined.store(true, Ordering::Release);
-            let member = pool
-                .ranking
-                .candidates
-                .iter()
-                .zip(&pool.winners)
-                .find(|(candidate, _)| candidate.occurrence_id == occurrence_id)
-                .map(|(_, winner)| view.layers[winner.layer].digest.clone())
-                .unwrap_or_default();
-            Err(CompressedRefusal::Corrupt {
-                member,
-                occurrence_id,
-                fault: OriginalFault::Rejected(rejection),
-            })
-        }
+        } => (occurrence_id, winner, RowFault::Rejected(rejection)),
+    };
+    let member = view.layers[winner.layer].digest.clone();
+    if let RowFault::Unavailable(detail) = fault {
+        return CompressedRefusal::Io {
+            member,
+            occurrence_id,
+            detail,
+        };
+    }
+    view.quarantine();
+    CompressedRefusal::Corrupt {
+        member,
+        occurrence_id,
+        fault,
     }
 }
 
@@ -845,8 +824,33 @@ pub fn rank_compressed(
 fn code_corruption(refusal: &CandidateRefusal) -> bool {
     matches!(
         refusal,
-        CandidateRefusal::Layered(Layered::Oracle(
+        CandidateRefusal::Layered(LayeredRefusal::Oracle(
             OracleRefusal::Unreadable { .. } | OracleRefusal::StoredRow { .. }
         ))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a file that ends before the row reads as a missing row; every other error leaves the row's bytes possibly intact.
+    #[test]
+    fn a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read() {
+        let short = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        assert!(matches!(read_fault(3, &short), RowFault::Missing(_)));
+        for kind in [
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let error = std::io::Error::from(kind);
+            assert!(
+                matches!(read_fault(3, &error), RowFault::Unavailable(_)),
+                "{kind:?}"
+            );
+        }
+        let eio = std::io::Error::from_raw_os_error(5);
+        assert!(matches!(read_fault(3, &eio), RowFault::Unavailable(_)));
+    }
 }

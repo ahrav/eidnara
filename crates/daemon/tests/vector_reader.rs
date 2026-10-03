@@ -465,7 +465,7 @@ fn no_composition_or_a_short_resident_limit_refuses_before_any_layer_and_a_trunc
     std::fs::write(&rows, &bytes[..bytes.len() - 8]).unwrap();
     let layer = &view.layers()[0];
     assert!(layer.row(3).is_ok());
-    assert!(matches!(layer.row(4), Err(RowFault::Unavailable(_))));
+    assert!(matches!(layer.row(4), Err(RowFault::Missing(_))));
     let refusal = rank_view(&fixture, &projection, &view, &axis(0), 8).unwrap_err();
     assert!(
         matches!(
