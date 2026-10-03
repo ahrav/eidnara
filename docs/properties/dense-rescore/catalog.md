@@ -442,8 +442,9 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 and `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`;
-the unit test
-`a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` in
+the unit tests
+`a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
+`only_missing_or_malformed_codes_count_as_code_corruption` in
 `crates/daemon/src/vector_reader.rs`.
 Guarantee: An accepted row that is missing (a short read or an index past the
 layer) or fails the codec or the layout refuses the whole request as
@@ -476,8 +477,10 @@ Open questions:
 - Parent Q4: persistent quarantine is re-verification on acquisition, which
   refuses a member whose files no longer hash; a transient fault that leaves
   the files intact is served again after re-acquisition (needs human input).
-- The I/O classification is checked at the classifier; no test makes a real
-  file return a read error other than a short read.
+- The I/O classification is checked at the classifier and the
+  code-corruption predicate; no test makes a real file return a read error
+  other than a short read, so the rescore's `Io` arm and the scan's
+  `ReadFailed` arm are reached only by reading.
 - Process-restart evidence here is a fresh acquisition in the same process,
   which reads only durable state; it is not a separate process and not
   power-loss evidence.

@@ -594,7 +594,7 @@ fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_
         .unwrap();
     let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
 
-    // An ended budget and a moved authority refuse or discard without touching the view.
+    // A cancelled scan refuses without touching the view.
     let cancelled = EvalBudget::unbounded();
     cancelled.cancel();
     let (outcome, _) = run(

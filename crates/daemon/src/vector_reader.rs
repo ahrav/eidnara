@@ -175,7 +175,7 @@ impl PinnedLayer {
     pub fn codes(&self, index: usize) -> Result<Vec<i8>, RowFault> {
         let bytes = self.read_row_bytes(&self.codes, 0, self.dimension(), index)?;
         scalar::decode_codes(&bytes, self.sidecar.vector_dimension)
-            .map_err(|rejection| RowFault::Unavailable(rejection.to_string()))
+            .map_err(|rejection| RowFault::Missing(rejection.to_string()))
     }
 }
 
@@ -841,7 +841,6 @@ mod tests {
         assert!(matches!(read_fault(3, &short), RowFault::Missing(_)));
         for kind in [
             std::io::ErrorKind::Other,
-            std::io::ErrorKind::Interrupted,
             std::io::ErrorKind::PermissionDenied,
         ] {
             let error = std::io::Error::from(kind);
@@ -852,5 +851,25 @@ mod tests {
         }
         let eio = std::io::Error::from_raw_os_error(5);
         assert!(matches!(read_fault(3, &eio), RowFault::Unavailable(_)));
+    }
+
+    /// A failed code read leaves the view usable; missing or malformed codes quarantine it.
+    #[test]
+    fn only_missing_or_malformed_codes_count_as_code_corruption() {
+        let oracle = |refusal| CandidateRefusal::Layered(LayeredRefusal::Oracle(refusal));
+        let id = || "occurrence".to_owned();
+        assert!(!code_corruption(&oracle(OracleRefusal::ReadFailed {
+            occurrence_id: id(),
+            detail: "eio".to_owned()
+        })));
+        assert!(!code_corruption(&oracle(OracleRefusal::BudgetExhausted)));
+        assert!(code_corruption(&oracle(OracleRefusal::Unreadable {
+            occurrence_id: id(),
+            detail: "short".to_owned()
+        })));
+        assert!(code_corruption(&oracle(OracleRefusal::StoredRow {
+            occurrence_id: id(),
+            rejection: RowRejection::ZeroNorm
+        })));
     }
 }

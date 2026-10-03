@@ -13,7 +13,7 @@ use crate::batch::ProjectionCheckpoint;
 pub enum RowFault {
     #[error("the row is not a member of the generation: {0}")]
     Rejected(#[from] RowRejection),
-    /// The row is not where its layer declares it: the index is past the rows, or the file ends before the row does.
+    /// The row is not where its layer declares it, or its codes are outside the recipe: the index is past the rows, the file ends before the row does, or a code is malformed.
     #[error("the row is missing: {0}")]
     Missing(String),
     /// The read itself failed; the row's bytes may be intact.
