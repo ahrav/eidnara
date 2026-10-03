@@ -70,16 +70,23 @@ fn row_and_scales() -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
 }
 
 #[test]
-fn the_encoder_codes_every_row_as_the_quotient_does() {
+fn the_encoder_matches_exactly_the_codes_the_quotient_writes() {
     runner()
         .run(&row_and_scales(), |(row, scales)| {
             let layout = layout(row.len());
             let scales = Scales::from_values(scales, layout.dimension).unwrap();
             let mut expected = Vec::new();
-            let expected_clipped = encode_validated_into(&layout, &scales, &row, &mut expected);
-            let mut codes = vec![i8::MIN; 3];
-            let clipped = Encoder::new(&scales).encode_validated_into(&layout, &row, &mut codes);
-            prop_assert_eq!((codes, clipped), (expected, expected_clipped));
+            encode_validated_into(&layout, &scales, &row, &mut expected);
+            let mut stored: Vec<u8> = expected.iter().map(|code| *code as u8).collect();
+            let encoder = Encoder::new(&scales);
+            prop_assert!(encoder.matches(&layout, &row, &stored));
+            // Every byte is compared: changing any one of them, in a whole block or the tail, is seen.
+            for index in 0..stored.len() {
+                stored[index] ^= 1;
+                prop_assert!(!encoder.matches(&layout, &row, &stored), "byte {}", index);
+                stored[index] ^= 1;
+            }
+            prop_assert!(!encoder.matches(&layout, &row, &stored[1..]));
             Ok(())
         })
         .unwrap();
@@ -104,10 +111,9 @@ fn ties_and_their_neighbours_code_as_the_quotient_does_in_wide_rows() {
                 })
                 .collect();
             let mut expected = Vec::new();
-            let expected_clipped = encode_validated_into(&layout, &scales, &row, &mut expected);
-            let mut codes = Vec::new();
-            let clipped = encoder.encode_validated_into(&layout, &row, &mut codes);
-            assert_eq!((codes, clipped), (expected, expected_clipped), "scale {scale}, offset {offset}");
+            encode_validated_into(&layout, &scales, &row, &mut expected);
+            let stored: Vec<u8> = expected.iter().map(|code| *code as u8).collect();
+            assert!(encoder.matches(&layout, &row, &stored), "scale {scale}, offset {offset}");
         }
     }
 }

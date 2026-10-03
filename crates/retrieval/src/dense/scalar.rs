@@ -291,7 +291,7 @@ const NEAR_HALF: f32 = 0.5 - 1.0 / 16384.0;
 /// Adding and subtracting `1.5 * 2^23` rounds an f32 of magnitude at most `2^22` to an integer, ties to even, in the default rounding mode.
 const ROUNDING_BIAS: f32 = 12_582_912.0;
 
-/// [`encode_validated_into`] for many rows under one set of scales, with the same codes and clamp counts.
+/// Checks stored codes against [`encode_validated_into`] for many rows under one set of scales.
 ///
 /// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`, or below `2^-126` with `v / s` when the product leaves the normal range, where both round to zero.
 /// The exact quotient of two f32 values is a midpoint between two integers or at least `2^-26` from every such midpoint, so the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
@@ -316,60 +316,60 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    /// The codes and clamp count [`encode_validated_into`] writes for a `row` that [`codec::validate`] has accepted under `layout`.
-    pub fn encode_validated_into(
-        &self,
-        layout: &RowLayout,
-        row: &[f32],
-        codes: &mut Vec<i8>,
-    ) -> u32 {
-        if self.reciprocals.is_empty() {
-            return encode_validated_into(layout, self.scales, row, codes);
-        }
+    /// Whether `stored` holds, byte for byte, the codes [`encode_validated_into`] writes for a `row` that [`codec::validate`] has accepted under `layout`.
+    pub fn matches(&self, layout: &RowLayout, row: &[f32], stored: &[u8]) -> bool {
         debug_assert_eq!(row.len(), layout.dimension as usize);
         assert_eq!(
             self.scales.scales.len(),
             row.len(),
             "scales of one calibration match the layout"
         );
-        codes.clear();
-        codes.resize(row.len(), 0);
-        let (values, tail) = row.as_chunks::<ENCODE_BLOCK>();
-        let (reciprocals, _) = self.reciprocals.as_chunks::<ENCODE_BLOCK>();
-        let (blocks, tail_codes) = codes.as_chunks_mut::<ENCODE_BLOCK>();
-        let mut clipped = 0u32;
-        for (index, ((values, reciprocals), codes)) in
-            values.iter().zip(reciprocals).zip(blocks).enumerate()
-        {
-            clipped += product_codes(values, reciprocals, codes).unwrap_or_else(|| {
-                let start = index * ENCODE_BLOCK;
-                quotient_codes(values, &self.scales.scales[start..start + ENCODE_BLOCK], codes)
-            });
+        if stored.len() != row.len() {
+            return false;
         }
-        let start = row.len() - tail.len();
-        clipped + quotient_codes(tail, &self.scales.scales[start..], tail_codes)
+        let mut codes = [0i8; ENCODE_BLOCK];
+        let mut differ = 0u8;
+        for (start, stored) in (0..row.len()).step_by(ENCODE_BLOCK).zip(stored.chunks(ENCODE_BLOCK)) {
+            let end = start + stored.len();
+            let codes = &mut codes[..stored.len()];
+            let values = &row[start..end];
+            let product = <&[f32; ENCODE_BLOCK]>::try_from(values).ok().zip(
+                self.reciprocals
+                    .get(start..end)
+                    .and_then(|reciprocals| <&[f32; ENCODE_BLOCK]>::try_from(reciprocals).ok()),
+            );
+            let clear = product.is_some_and(|(values, reciprocals)| {
+                product_codes(values, reciprocals, codes.try_into().expect("a whole block"))
+            });
+            if !clear {
+                quotient_codes(values, &self.scales.scales[start..end], codes);
+            }
+            // The fold reads every byte of the block, so the comparison vectorizes.
+            differ = codes
+                .iter()
+                .zip(stored)
+                .fold(differ, |differ, (code, byte)| differ | (*code as u8 ^ byte));
+        }
+        differ == 0
     }
 }
 
-/// `None` when some product lies within `2^-14` of a midpoint between two integers.
+/// `false` when some product lies within `2^-14` of a midpoint between two integers.
 fn product_codes(
     values: &[f32; ENCODE_BLOCK],
     reciprocals: &[f32; ENCODE_BLOCK],
     codes: &mut [i8; ENCODE_BLOCK],
-) -> Option<u32> {
+) -> bool {
     let mut near = false;
-    let mut clipped = 0u32;
     for ((code, value), reciprocal) in codes.iter_mut().zip(values).zip(reciprocals) {
-        // Past 128 every product and quotient clamps alike, and clamping first keeps the bias exact.
-        let product = (value * reciprocal).clamp(-128.0, 128.0);
+        // A finite value times a normal reciprocal is never NaN. Past 128 every product and quotient clamps alike, and clamping first keeps the bias exact.
+        let product = (value * reciprocal).max(-128.0).min(128.0);
         let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
         // Within one of its rounded integer, the product's distance to it is exact.
         near |= (product - rounded).abs() > NEAR_HALF;
-        let clamped = rounded.clamp(f32::from(CODE_MIN), f32::from(CODE_MAX));
-        clipped += u32::from(clamped != rounded);
-        *code = clamped as i32 as i8;
+        *code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
     }
-    (!near).then_some(clipped)
+    !near
 }
 
 /// One byte per code, two's complement.

@@ -851,7 +851,6 @@ pub fn verify(
     let mut codes_verdict = Ok(());
     let chunk_rows = rows.chunk_rows();
     let mut stored = vec![0u8; if compare.is_some() { chunk_rows * dimension } else { 0 }];
-    let mut codes = Vec::with_capacity(dimension);
     let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
     // The decoder validates each row under the layout before it reaches the calibrator or the encoder; the stored codes of each row chunk are read as the chunk starts.
     rows.for_each(|index, row| {
@@ -871,18 +870,12 @@ pub fn verify(
                 return Ok(());
             }
         }
-        encoder.encode_validated_into(&layout, row, &mut codes);
-        // The fold reads every byte of the row, so the comparison vectorizes.
-        let differ = codes
-            .iter()
-            .zip(&stored[slot * dimension..(slot + 1) * dimension])
-            .fold(0u8, |differ, (code, byte)| differ | (*code as u8 ^ byte));
-        if differ != 0 {
+        if !encoder.matches(&layout, row, &stored[slot * dimension..(slot + 1) * dimension]) {
             (codes_verdict, compare) = (Err(fault(CODES_FILE, FileFault::Codes)), None);
         }
         Ok(())
     })?;
-    drop((stored, codes, encoder));
+    drop((stored, encoder));
     drop(stored_scales);
     let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
     let scales_bytes = scales_bytes?;
@@ -994,13 +987,13 @@ fn manifest_verification_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Heap bytes verification holds at once under `manifest` and its decoded `sidecar`.
-/// It retains the resident tables, the manifest, and one string slot per declared row and tombstone, and beside them holds the larger of the table scratch and one row pass: a row chunk, the stored codes of its rows, the artifact header, and per coordinate the decoded row, its codes, the running maxima, the stored scales decoded, their reciprocals, and the scales file (four, one, four, four, four, and four bytes); after the pass the calibrated scales and their encoding take the place of the row, the maxima, and the stored scales.
+/// It retains the resident tables, the manifest, and one string slot per declared row and tombstone, and beside them holds the larger of the table scratch and one row pass: a row chunk, the stored codes of its rows, the artifact header, and per coordinate the decoded row, the running maxima, the stored scales decoded, their reciprocals, and the scales file (four bytes each); after the pass the calibrated scales and their encoding take the place of the row, the maxima, and the stored scales.
 pub fn verification_bytes(manifest: &GenerationManifest, sidecar: &VectorSidecar) -> u64 {
     let chunk = row_chunk_bytes(sidecar.vector_dimension);
     let row_pass = chunk
         .saturating_add(chunk / 4)
         .saturating_add(codec::ARTIFACT_HEADER_BYTES as u64)
-        .saturating_add(u64::from(sidecar.vector_dimension).saturating_mul(21));
+        .saturating_add(u64::from(sidecar.vector_dimension).saturating_mul(20));
     let slots = sidecar
         .rows
         .saturating_add(sidecar.tombstones)
