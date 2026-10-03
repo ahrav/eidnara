@@ -295,7 +295,7 @@ const ROUNDING_BIAS: f32 = 12_582_912.0;
 ///
 /// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`, or below `2^-126` with `v / s` when the product leaves the normal range, where both round to zero.
 /// The exact quotient of two f32 values is a midpoint between two integers or at least `2^-26` from every such midpoint, so the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
-/// Up to 128 in magnitude the product lies within `2^-15.9` of the quotient, so a product farther than `2^-14` from every midpoint rounds as the quotient does, and a product past 128 clamps as the quotient does; a block holding a product near a midpoint takes the f64 quotient.
+/// Up to 128 in magnitude the product lies within `2^-15.9` of the quotient, so a product farther than `2^-14` from every midpoint rounds as the quotient does, and a product past 128 clamps to the code the quotient clamps to; a block holding a product near a midpoint takes the f64 quotient.
 pub struct Encoder<'a> {
     scales: &'a Scales,
     /// Empty when some reciprocal is not a normal f32; every coordinate then takes the f64 quotient.
@@ -362,10 +362,9 @@ fn product_codes(
 ) -> bool {
     let mut near = false;
     for ((code, value), reciprocal) in codes.iter_mut().zip(values).zip(reciprocals) {
-        // A finite value times a normal reciprocal is never NaN. Past 128 every product and quotient clamps alike, and clamping first keeps the bias exact.
-        let product = (value * reciprocal).max(-128.0).min(128.0);
+        // A finite value times a normal reciprocal is never NaN. Up to `2^22` in magnitude the bias rounds the product exactly and its distance to the rounded integer is exact; past that, the product and the quotient both code as 127 or -127 whichever path the block takes.
+        let product = value * reciprocal;
         let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
-        // Within one of its rounded integer, the product's distance to it is exact.
         near |= (product - rounded).abs() > NEAR_HALF;
         *code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
     }

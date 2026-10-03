@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use host_runtime::generation::{
     FILE_HASH_BUFFER_BYTES, GenerationError, GenerationManifest, GenerationStore, ManifestFile,
-    StageMeta, ValidatedGeneration,
+    PendingGeneration, RETAINED_FILE_BYTES, StageMeta, StreamedFile, ValidatedGeneration,
 };
 use host_runtime::lifecycle::{LifecycleTransactionLock, PAYLOAD_MANIFEST_DIGEST_LEN};
 use retrieval::ProjectionIdentity;
@@ -771,8 +771,48 @@ pub fn verify(
     expected: &ExpectedVectors<'_>,
     max_bytes: u64,
 ) -> Result<VerifiedVectors, VectorRefusal> {
-    let mut generation = store.validate_retaining(digest)?;
-    if generation.manifest.target != VECTOR_TARGET {
+    let mut pending = store.validate_streaming(digest, &[ROWS_FILE, CODES_FILE])?;
+    let mut rows = pending.stream(ROWS_FILE).ok();
+    let mut codes = pending.stream(CODES_FILE).ok();
+    let meaning = check_meaning(
+        &mut pending,
+        rows.as_mut(),
+        codes.as_mut(),
+        expected,
+        max_bytes,
+    );
+    // Bytes that diverge from the manifest refuse as the store refuses them, ahead of any refusal about their meaning.
+    let mut generation = pending.finish(rows.into_iter().chain(codes))?;
+    let tables = meaning?;
+    Ok(VerifiedVectors {
+        digest: digest.to_owned(),
+        sidecar: tables.sidecar,
+        rows: File::from(generation.take_verified_file(ROWS_FILE)?),
+        codes: File::from(generation.take_verified_file(CODES_FILE)?),
+        generation,
+        scales: tables.scales,
+        occurrence_ids: tables.occurrence_ids,
+        tombstones: tables.tombstones,
+    })
+}
+
+/// What [`check_meaning`] decodes and [`VerifiedVectors`] keeps.
+struct Tables {
+    sidecar: VectorSidecar,
+    scales: Scales,
+    occurrence_ids: Vec<String>,
+    tombstones: Vec<String>,
+}
+
+/// The checks of [`verify`] past the store's, with the row and code artifacts read through `rows` and `codes`, which are `None` when the manifest names no such file.
+fn check_meaning(
+    generation: &mut PendingGeneration,
+    rows_file: Option<&mut StreamedFile>,
+    codes_file: Option<&mut StreamedFile>,
+    expected: &ExpectedVectors<'_>,
+    max_bytes: u64,
+) -> Result<Tables, VectorRefusal> {
+    if generation.manifest().target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
     let within = |bytes: u64| {
@@ -785,7 +825,7 @@ pub fn verify(
             Ok(())
         }
     };
-    within(manifest_verification_bytes(&generation.manifest))?;
+    within(manifest_verification_bytes(generation.manifest()))?;
     let sidecar_bytes = generation.take_verified_bytes(SIDECAR_FILE)?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
@@ -801,7 +841,7 @@ pub fn verify(
     if !sidecar.inventories_exactly() {
         return Err(VectorRefusal::NotVectors("inventory"));
     }
-    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != generation.manifest {
+    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != *generation.manifest() {
         return Err(VectorRefusal::NotVectors("manifest binding"));
     }
     // The projection schema holds no checkpoint without these, so a sidecar naming one came from no export.
@@ -817,11 +857,15 @@ pub fn verify(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    within(verification_bytes(&generation.manifest, &sidecar))?;
+    within(verification_bytes(generation.manifest(), &sidecar))?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
-    let rows_file = File::from(generation.take_verified_file(ROWS_FILE)?);
-    let rows = RowStream::open(&rows_file, declared_size(&generation, ROWS_FILE), &layout)?;
-    if rows.count != sidecar.rows {
+    // The bound manifest lists both artifacts, so the store streamed both.
+    let (Some(rows_file), Some(codes_file)) = (rows_file, codes_file) else {
+        return Err(VectorRefusal::NotVectors("inventory"));
+    };
+    let mut rows = RowStream::open(rows_file, &layout)?;
+    let row_count = rows.count;
+    if row_count != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
     let dimension = layout.dimension as usize;
@@ -832,41 +876,31 @@ pub fn verify(
         .as_ref()
         .ok()
         .and_then(|bytes| Scales::decode(bytes, layout.dimension).ok());
-    let codes_size = declared_size(&generation, CODES_FILE);
-    let codes_file = generation
-        .take_verified_file(CODES_FILE)
-        .map_err(VectorRefusal::from)
-        .and_then(|fd| {
-            let file = File::from(fd);
-            if file_len(&file)? > codes_size {
-                return Err(fault(CODES_FILE, FileFault::Size));
-            }
-            if rows.count.checked_mul(dimension as u64) != Some(codes_size) {
-                return Err(fault(CODES_FILE, FileFault::Codes));
-            }
-            Ok(file)
-        });
+    let codes_size = codes_file.size();
+    let codes_verdict = if codes_file.len_on_disk().map_err(io_refusal)? > codes_size {
+        Err(fault(CODES_FILE, FileFault::Size))
+    } else if row_count.checked_mul(dimension as u64) != Some(codes_size) {
+        Err(fault(CODES_FILE, FileFault::Codes))
+    } else {
+        Ok(())
+    };
     let encoder = stored_scales.as_ref().map(scalar::Encoder::new);
-    let mut compare = codes_file.as_ref().ok().zip(encoder.as_ref());
-    let mut codes_verdict = Ok(());
+    let mut compare = encoder.as_ref().filter(|_| codes_verdict.is_ok());
+    let mut codes_verdict = codes_verdict;
     let chunk_rows = rows.chunk_rows();
     let mut stored = vec![0u8; if compare.is_some() { chunk_rows * dimension } else { 0 }];
     let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
     // The decoder validates each row under the layout before it reaches the calibrator or the encoder; the stored codes of each row chunk are read as the chunk starts.
     rows.for_each(|index, row| {
         calibrator.push_validated(row);
-        let Some((file, encoder)) = compare else {
+        let Some(encoder) = compare else {
             return Ok(());
         };
         let slot = index % chunk_rows;
         if slot == 0 {
-            let chunk = (rows.count - index as u64).min(chunk_rows as u64) as usize;
-            if let Err(refusal) = read_exact_at(
-                file,
-                &mut stored[..chunk * dimension],
-                (index * dimension) as u64,
-            ) {
-                (codes_verdict, compare) = (Err(refusal), None);
+            let chunk = (row_count - index as u64).min(chunk_rows as u64) as usize;
+            if let Err(error) = codes_file.read_exact(&mut stored[..chunk * dimension]) {
+                (codes_verdict, compare) = (Err(io_refusal(error)), None);
                 return Ok(());
             }
         }
@@ -886,9 +920,9 @@ pub fn verify(
         return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
     drop(scales_bytes);
-    let ids = decode_list(&generation.take_verified_bytes(ROW_IDS_FILE)?, rows.count)
+    let ids = decode_list(&generation.take_verified_bytes(ROW_IDS_FILE)?, row_count)
         .ok_or_else(|| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
-    if ids.len() as u64 != rows.count || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if ids.len() as u64 != row_count || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
     let tombstones = decode_list(
@@ -902,28 +936,13 @@ pub fn verify(
     {
         return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
-    let codes_file = codes_file?;
     codes_verdict?;
-    Ok(VerifiedVectors {
-        digest: digest.to_owned(),
+    Ok(Tables {
         sidecar,
-        generation,
-        rows: rows_file,
-        codes: codes_file,
         scales: calibration.scales,
         occurrence_ids: ids,
         tombstones,
     })
-}
-
-/// The manifest-declared size of `path`, which [`ValidatedGeneration::take_verified_file`] checked the file against.
-fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
-    generation
-        .manifest
-        .files
-        .iter()
-        .find(|file| file.path == path)
-        .map_or(0, |file| file.size)
 }
 
 /// Bytes of one streamed row chunk: whole rows of `dimension` f32 coordinates filling [`VERIFY_CHUNK_BYTES`], at least one row.
@@ -953,7 +972,7 @@ fn manifest_heap(manifest: &GenerationManifest) -> u64 {
 
 /// Verification retains the resident tables, the validated manifest, one descriptor slot per manifest file, and two manifest digests: one in the validated generation and one in the result.
 fn kept_bytes(manifest: &GenerationManifest) -> u64 {
-    let slots = manifest.files.len() * size_of::<Option<std::os::fd::OwnedFd>>();
+    let slots = manifest.files.len() * RETAINED_FILE_BYTES;
     resident_bytes(manifest)
         .saturating_add(manifest_heap(manifest))
         .saturating_add(slots as u64)
@@ -1057,25 +1076,19 @@ fn io_refusal(error: io::Error) -> VectorRefusal {
     VectorRefusal::Io(error.kind().to_string())
 }
 
-fn read_exact_at(file: &File, into: &mut [u8], offset: u64) -> Result<(), VectorRefusal> {
-    std::os::unix::fs::FileExt::read_exact_at(file, into, offset).map_err(io_refusal)
-}
-
-fn file_len(file: &File) -> Result<u64, VectorRefusal> {
-    Ok(file.metadata().map_err(io_refusal)?.len())
-}
 
 /// The original-row artifact read through one fixed chunk: the header is checked once, then rows are decoded chunk by chunk under the layout.
 struct RowStream<'a> {
-    file: &'a File,
+    file: &'a mut StreamedFile,
     layout: RowLayout,
     count: u64,
 }
 
 impl<'a> RowStream<'a> {
-    /// Checks the header and that the file holds exactly the declared rows; more bytes than `size` refuse as [`FileFault::Size`].
-    fn open(file: &'a File, size: u64, layout: &RowLayout) -> Result<Self, VectorRefusal> {
-        if file_len(file)? > size {
+    /// Checks the header and that the file holds exactly the declared rows; more bytes than its manifest size refuse as [`FileFault::Size`].
+    fn open(file: &'a mut StreamedFile, layout: &RowLayout) -> Result<Self, VectorRefusal> {
+        let size = file.size();
+        if file.len_on_disk().map_err(io_refusal)? > size {
             return Err(VectorRefusal::File {
                 path: ROWS_FILE,
                 fault: FileFault::Size,
@@ -1083,7 +1096,7 @@ impl<'a> RowStream<'a> {
         }
         let header_len = codec::ARTIFACT_HEADER_BYTES.min(usize::try_from(size).unwrap_or(0));
         let mut header = vec![0u8; header_len];
-        read_exact_at(file, &mut header, 0)?;
+        file.read_exact(&mut header).map_err(io_refusal)?;
         let count = codec::decode_header(&header, layout).map_err(VectorRefusal::Rows)?;
         codec::check_body(count, size - codec::ARTIFACT_HEADER_BYTES as u64, layout)
             .map_err(VectorRefusal::Rows)?;
@@ -1100,7 +1113,7 @@ impl<'a> RowStream<'a> {
 
     /// Calls `each` with every row's index and decoded coordinates in file order; a row outside the layout refuses at its index.
     fn for_each(
-        &self,
+        &mut self,
         mut each: impl FnMut(usize, &[f32]) -> Result<(), VectorRefusal>,
     ) -> Result<(), VectorRefusal> {
         let row_bytes = codec::row_bytes(self.layout.dimension) as usize;
@@ -1111,11 +1124,7 @@ impl<'a> RowStream<'a> {
         let mut index = 0;
         while index < count {
             let bytes = &mut chunk[..chunk_rows.min(count - index) * row_bytes];
-            read_exact_at(
-                self.file,
-                bytes,
-                codec::row_offset(index as u64, self.layout.dimension),
-            )?;
+            self.file.read_exact(bytes).map_err(io_refusal)?;
             for raw in bytes.chunks_exact(row_bytes) {
                 each(
                     index,
@@ -1325,26 +1334,5 @@ mod tests {
         assert_eq!(decode_list(br#"["a","b"] []"#, 2), None);
         assert_eq!(decode_list(br#"["a",1]"#, 2), None);
         assert_eq!(decode_list(b"[]", 0), Some(Vec::new()));
-    }
-
-    #[test]
-    fn a_row_artifact_longer_than_its_manifest_size_is_refused_before_any_row_is_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(ROWS_FILE);
-        // Bytes appended after the hash was taken are refused rather than read.
-        fs::write(&path, [0u8; 30]).unwrap();
-        let file = File::open(&path).unwrap();
-        let layout = RowLayout {
-            dimension: 2,
-            metric: Metric::InnerProduct,
-            unit_norm_tolerance: 1e-3,
-        };
-        assert_eq!(
-            RowStream::open(&file, 24, &layout).err(),
-            Some(VectorRefusal::File {
-                path: ROWS_FILE,
-                fault: FileFault::Size
-            })
-        );
     }
 }

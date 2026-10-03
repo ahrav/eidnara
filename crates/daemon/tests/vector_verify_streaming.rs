@@ -165,3 +165,35 @@ fn a_bad_code_never_hides_an_earlier_fault() {
         );
     }
 }
+
+#[test]
+fn bytes_that_diverge_from_the_manifest_refuse_as_the_store_ahead_of_their_meaning() {
+    let fixture = Fixture::new();
+    let digest = fixture.layer(1, 10).digest;
+    let dir = fixture.generation_dir(&digest);
+    let verify_of = || verify(&fixture.store, &digest, &fixture.expected(), u64::MAX);
+    for (file, offset) in [(ROWS_FILE, codec::row_offset(2, DIMENSION) as usize), (CODES_FILE, 0)] {
+        let pristine = fs::read(dir.join(file)).unwrap();
+        let mut corrupt = pristine.clone();
+        corrupt[offset..offset + 4].copy_from_slice(&2.0f32.to_le_bytes());
+        fs::write(dir.join(file), &corrupt).unwrap();
+        assert!(
+            matches!(verify_of(), Err(VectorRefusal::Store(_))),
+            "{file}: the hash refusal wins over the row or code refusal"
+        );
+        // A refusal before the row pass still hashes the streamed files.
+        assert!(
+            matches!(
+                verify(&fixture.store, &digest, &fixture.expected(), 0),
+                Err(VectorRefusal::Store(_))
+            ),
+            "{file}: the hash refusal wins over the bound refusal"
+        );
+        fs::write(dir.join(file), &pristine).unwrap();
+    }
+    assert!(verify_of().is_ok());
+    assert!(matches!(
+        verify(&fixture.store, &digest, &fixture.expected(), 0),
+        Err(VectorRefusal::OverBound { .. })
+    ));
+}
