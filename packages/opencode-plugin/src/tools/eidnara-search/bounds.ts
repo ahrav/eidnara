@@ -109,9 +109,28 @@ export function prepareExplicitQuery(raw: string): ExplicitQueryPreparation {
     return { ok: true, query: trimmed };
 }
 
-/** The function returns the longest prefix of `text` that preserves surrogate pairs and fits within `maxBytes` UTF-8 bytes. */
+/** The cast supplies the `String.prototype.isWellFormed` signature for ES2022 library typings. */
+export function isWellFormed(text: string): boolean {
+    return (text as string & { isWellFormed(): boolean }).isWellFormed();
+}
+
+const utf8Encoder = new TextEncoder();
+let utf8Scratch = new Uint8Array(MAX_RENDER_FIELD_BYTES);
+
+/** `truncateUtf8Bytes` returns the longest prefix of `text` that preserves surrogate pairs and fits within `maxBytes` UTF-8 bytes. */
 export function truncateUtf8Bytes(text: string, maxBytes: number): string {
-    if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+    // A UTF-16 code unit encodes to at most 3 bytes.
+    if (text.length * 3 <= maxBytes) return text;
+    if (text.length <= maxBytes && Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+    // Every code unit encodes to at least one byte, so the cut falls within the first `maxBytes + 1` units.
+    const window = text.length > maxBytes ? text.slice(0, maxBytes + 1) : text;
+    if (Number.isSafeInteger(maxBytes) && maxBytes >= 0 && isWellFormed(window)) {
+        if (utf8Scratch.length < maxBytes) utf8Scratch = new Uint8Array(maxBytes);
+        let { read } = utf8Encoder.encodeInto(window, utf8Scratch.subarray(0, maxBytes));
+        // In a well-formed window a cut after a high surrogate splits a pair.
+        if (read > 0 && (window.charCodeAt(read - 1) & 0xfc00) === 0xd800) read -= 1;
+        return text.slice(0, read);
+    }
     return text.slice(0, utf8PrefixEnd(text, maxBytes));
 }
 
