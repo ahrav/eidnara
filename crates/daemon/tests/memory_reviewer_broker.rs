@@ -1735,7 +1735,7 @@ fn a_hold_released_between_the_verdict_and_the_load_is_not_disclosed() {
 #[test]
 fn a_capture_expiring_during_the_load_is_not_disclosed() {
     let fixture = Fixture::open();
-    let retain_until = now_ms() + 300;
+    let retain_until = now_ms() + 2_000;
     let handle = fixture
         .store
         .ingest_artifact(ArtifactIngestRequest {

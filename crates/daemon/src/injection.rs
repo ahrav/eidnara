@@ -202,13 +202,22 @@ pub fn capture_todo_state_on_bust(
     if !is_bust_pass || todo_tool_present == Some(false) {
         return false;
     }
-    let Some((owner_message_id, state_json)) = newest_todowrite_state_json(tail) else {
+    let Some((owner_message_id, state_json)) = newest_bounded_todowrite_state_json(tail) else {
         return false;
     };
     meta.last_todo_state = Some(state_json.clone());
     meta.last_todo_state_owner_message_id = Some(owner_message_id);
     meta.last_todo_state_hash = Some(todo_state_hash(&state_json));
     true
+}
+
+fn newest_bounded_todowrite_state_json(tail: &[SelItem]) -> Option<(String, String)> {
+    newest_todowrite_state_json(tail)
+        .map(|(owner_message_id, state_json)| (owner_message_id, bounded_todo_state(state_json)))
+}
+
+fn bounded_todo_state(normalized: String) -> String {
+    memory_store::bounded_todo_state(&normalized).unwrap_or_else(|| "[]".to_string())
 }
 
 /// Advances injection from persisted metadata without capturing visible calls.
@@ -244,9 +253,12 @@ pub fn injection_pending_after_capture(
         return frozen.is_some();
     }
 
-    let visible_state = newest_todowrite_state_json(tail).map(|(_, state_json)| state_json);
+    let visible_state = newest_bounded_todowrite_state_json(tail).map(|(_, state_json)| state_json);
     let persisted_state = visible_state.as_deref().or(meta.last_todo_state.as_deref());
-    let Some(normalized) = persisted_state.and_then(normalize_todo_state_json) else {
+    let Some(normalized) = persisted_state
+        .and_then(normalize_todo_state_json)
+        .map(bounded_todo_state)
+    else {
         return false;
     };
     let Some(todos) = parse_todo_state(&normalized) else {
@@ -303,7 +315,7 @@ pub fn advance_injection(
     let Some(state_json) = effective_state_json else {
         return InjectionOutcome::None;
     };
-    let Some(normalized) = normalize_todo_state_json(state_json) else {
+    let Some(normalized) = normalize_todo_state_json(state_json).map(bounded_todo_state) else {
         return InjectionOutcome::None;
     };
     let Some(next) = build_synthetic_todo_pair(&normalized) else {
@@ -712,6 +724,116 @@ mod tests {
 
         assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
         assert_eq!(outcome, InjectionOutcome::Clear);
+    }
+
+    #[test]
+    fn a_todo_state_over_its_bound_reads_as_an_empty_list_and_clears_the_frozen_pair() {
+        let at = |bytes: usize| {
+            let base = active_state("");
+            let state = active_state(&"t".repeat(bytes - base.len()));
+            assert_eq!(state.len(), bytes);
+            state
+        };
+        let captured = at(memory_store::MAX_TODO_STATE_BYTES);
+        let mut meta = ModuleMeta::default();
+        let first = advance_injection_after_capture(
+            &mut meta,
+            &[todowrite_tail_item("m1#0", 1, &captured)],
+            None,
+            true,
+            None,
+        );
+        let InjectionOutcome::Replace(todo) = first else {
+            panic!("a state at its bound freezes a synthetic todo: {first:?}");
+        };
+        assert_eq!(meta.last_todo_state.as_deref(), Some(captured.as_str()));
+        let frozen = (*todo).freeze_at(Some("m1".to_string()));
+
+        let over = [todowrite_tail_item(
+            "m2#0",
+            2,
+            &at(memory_store::MAX_TODO_STATE_BYTES + 1),
+        )];
+        assert!(injection_pending_after_capture(
+            &meta,
+            &over,
+            Some(&frozen),
+            None
+        ));
+        let outcome = advance_injection_after_capture(&mut meta, &over, Some(&frozen), true, None);
+        assert_eq!(outcome, InjectionOutcome::Clear);
+        assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
+        assert_eq!(meta.last_todo_state_owner_message_id.as_deref(), Some("m2"));
+
+        // A state at MAX_TODO_STATE_BYTES reads as an empty list when redaction expands it
+        // beyond that limit.
+        let secret = " password=hunter-two";
+        let base = active_state(secret);
+        let grows = active_state(&format!(
+            "{}{secret}",
+            "t".repeat(memory_store::MAX_TODO_STATE_BYTES - base.len())
+        ));
+        assert_eq!(grows.len(), memory_store::MAX_TODO_STATE_BYTES);
+        let mut meta = ModuleMeta::default();
+        let outcome = advance_injection_after_capture(
+            &mut meta,
+            &[todowrite_tail_item("m3#0", 3, &grows)],
+            None,
+            true,
+            None,
+        );
+        assert_eq!(outcome, InjectionOutcome::None, "{outcome:?}");
+        assert_eq!(meta.last_todo_state.as_deref(), Some("[]"));
+    }
+
+    #[test]
+    fn a_persisted_state_that_normalizes_past_its_bound_clears_the_frozen_pair() {
+        let entry = r#"{"content":"","status":""}"#;
+        let raw = format!("[{}]", vec![entry; 150].join(","));
+        assert!(raw.len() <= memory_store::MAX_TODO_STATE_BYTES);
+        let normalized = normalize_todo_state_json(&raw).unwrap();
+        assert!(normalized.len() > memory_store::MAX_TODO_STATE_BYTES);
+        let frozen = frozen_for(&active_state("active"));
+        assert_eq!(
+            advance_injection(Some(&raw), Some(&frozen), true, None),
+            InjectionOutcome::Clear
+        );
+        assert_eq!(
+            advance_injection(Some(&raw), None, true, None),
+            InjectionOutcome::None
+        );
+    }
+
+    #[test]
+    fn the_pending_gate_reads_a_persisted_state_over_its_bound_as_the_advance_does() {
+        let entry = r#"{"content":"","status":""}"#;
+        let raw = format!("[{}]", vec![entry; 150].join(","));
+        assert!(raw.len() <= memory_store::MAX_TODO_STATE_BYTES);
+        assert!(
+            normalize_todo_state_json(&raw).unwrap().len() > memory_store::MAX_TODO_STATE_BYTES
+        );
+        let mut meta = ModuleMeta {
+            last_todo_state: Some(raw.clone()),
+            ..Default::default()
+        };
+        let frozen = frozen_for(&active_state("active"));
+
+        assert!(
+            injection_pending_after_capture(&meta, &[], Some(&frozen), None),
+            "the frozen pair is still to clear"
+        );
+        assert_eq!(
+            advance_injection_after_capture(&mut meta, &[], Some(&frozen), true, None),
+            InjectionOutcome::Clear
+        );
+        assert!(
+            !injection_pending_after_capture(&meta, &[], None, None),
+            "a cleared over-bound state leaves no transition pending"
+        );
+        assert_eq!(
+            advance_injection_after_capture(&mut meta, &[], None, true, None),
+            InjectionOutcome::None
+        );
     }
 
     #[test]

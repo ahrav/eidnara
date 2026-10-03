@@ -210,6 +210,8 @@ pub enum WireError {
     },
 }
 
+pub const MAX_MID_BYTES: usize = 128;
+
 /// Projects messages into stable blocks in input order.
 ///
 /// Empty message IDs, message IDs containing `#`, message IDs that repeat,

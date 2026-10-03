@@ -190,7 +190,7 @@ mod unix {
     fn take_blocked_slot(counters: &BackendCounters) -> bool {
         counters
             .active_blocked
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
                 active.checked_sub(1)
             })
             .is_ok()

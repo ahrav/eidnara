@@ -383,8 +383,8 @@ function resolveActiveModel(
 }
 
 /**
- * Resolved at boot. `nativeActive` is whether OpenCode's own `compaction.auto` or `compaction.prune`
- * owns the window when Eidnara does not; `undefined` when the host's setting could not be read.
+ * Resolved at boot. `nativeActive` is whether OpenCode's own `compaction.auto` owns the window when
+ * Eidnara does not; pruning alone does not fold. `undefined` when the host's setting could not be read.
  */
 export interface CompactionOwnership {
     enabled: boolean;

@@ -69,6 +69,7 @@ pub struct HistorySummarizerBuiltChunk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MessageMeta {
     ordinal: u64,
+    mid: String,
     message_id: String,
     anchorable: bool,
 }
@@ -76,6 +77,7 @@ struct MessageMeta {
 #[derive(Debug, Clone)]
 struct FlatMessage<'a> {
     ordinal: u64,
+    mid: &'a str,
     role: &'a str,
     blocks: Vec<&'a FlatBlock>,
 }
@@ -92,8 +94,66 @@ struct ChunkBlock {
     is_tool_only: bool,
 }
 
+pub const SELECTED_IDENTITY_BUDGET_BYTES: usize = 256 * 1024;
+
 #[derive(Debug)]
-struct Builder {
+struct IdentitySelection<'a> {
+    by_mid: &'a BTreeMap<String, Vec<BlockIdentity>>,
+    selected: Vec<HistorySummarizerSelectedMessageIdentity>,
+    serialized_len: usize,
+    missing: Option<String>,
+    refused_len: Option<usize>,
+}
+
+impl<'a> IdentitySelection<'a> {
+    fn new(by_mid: &'a BTreeMap<String, Vec<BlockIdentity>>) -> Self {
+        Self {
+            by_mid,
+            selected: Vec::new(),
+            serialized_len: "[]".len(),
+            missing: None,
+            refused_len: None,
+        }
+    }
+
+    fn admit(&mut self, meta: &[MessageMeta], first_block: bool) -> bool {
+        let mut serialized_len = self.serialized_len;
+        let mut entries = Vec::new();
+        let mut missing = None;
+        for meta in meta {
+            let Some(block_identities) = self.by_mid.get(&meta.mid) else {
+                missing.get_or_insert_with(|| meta.mid.clone());
+                continue;
+            };
+            let entry = HistorySummarizerSelectedMessageIdentity {
+                mid: meta.mid.clone(),
+                block_identities: block_identities.clone(),
+            };
+            let separator = usize::from(!self.selected.is_empty() || !entries.is_empty());
+            serialized_len += separator
+                + serde_json::to_vec(&entry)
+                    .expect("a selected identity serializes")
+                    .len();
+            entries.push(entry);
+        }
+        if serialized_len > SELECTED_IDENTITY_BUDGET_BYTES {
+            if first_block {
+                self.refused_len = Some(serialized_len);
+            }
+            return false;
+        }
+        if self.missing.is_none() {
+            self.missing = missing;
+        }
+        self.selected.extend(entries);
+        self.serialized_len = serialized_len;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct Builder<'a> {
+    identities: Option<IdentitySelection<'a>>,
     budget: usize,
     total_tokens: usize,
     lines: Vec<String>,
@@ -109,13 +169,15 @@ struct Builder {
     aliases: FrozenAliasTable,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
     fn new(
         budget: usize,
         start_ordinal: u64,
         tool_call_summaries: HashMap<String, String>,
+        identities: Option<IdentitySelection<'a>>,
     ) -> Self {
         Self {
+            identities,
             budget,
             total_tokens: 0,
             lines: Vec::new(),
@@ -163,6 +225,7 @@ impl Builder {
         let last_block_id = last_block_id(message);
         let meta = MessageMeta {
             ordinal: message.ordinal,
+            mid: message.mid.to_string(),
             message_id: last_block_id.clone().unwrap_or_default(),
             anchorable: last_block_id.is_some(),
         };
@@ -320,7 +383,13 @@ impl Builder {
             estimate_tokens("\n")
         };
         let block_tokens = estimate_tokens(&block_text) + separator_tokens;
-        if self.total_tokens + block_tokens > self.budget && self.total_tokens > 0 {
+        let first_block = self.lines.is_empty();
+        if (self.total_tokens + block_tokens > self.budget && self.total_tokens > 0)
+            || self
+                .identities
+                .as_mut()
+                .is_some_and(|identities| !identities.admit(&block.meta, first_block))
+        {
             self.aliases.aliases.truncate(issued_before);
             self.current_block = Some(block);
             return false;
@@ -419,6 +488,25 @@ pub fn build_history_summarizer_chunk(
     token_budget: usize,
     eligible_end_ordinal: u64,
 ) -> HistorySummarizerBuiltChunk {
+    build_chunk(
+        messages,
+        blocks,
+        start_ordinal,
+        token_budget,
+        eligible_end_ordinal,
+        None,
+    )
+    .0
+}
+
+fn build_chunk<'a>(
+    messages: &'a [Arc<IngressMessage>],
+    blocks: &[FlatBlock],
+    start_ordinal: u64,
+    token_budget: usize,
+    eligible_end_ordinal: u64,
+    identities: Option<IdentitySelection<'a>>,
+) -> (HistorySummarizerBuiltChunk, Option<IdentitySelection<'a>>) {
     let total_count = messages
         .iter()
         .filter(|message| !message.ck.meta.synthetic)
@@ -440,7 +528,7 @@ pub fn build_history_summarizer_chunk(
         .min()
         .unwrap_or(start_ordinal);
     let tool_call_summaries = build_tool_call_summary_lookup(blocks);
-    let mut builder = Builder::new(token_budget, start, tool_call_summaries);
+    let mut builder = Builder::new(token_budget, start, tool_call_summaries, identities);
     let blocks_by_mid = grouped_blocks_by_mid(blocks);
     let mut highest_scanned_ordinal = end_placeholder(start);
     for message in messages.iter().filter(|message| !message.ck.meta.synthetic) {
@@ -454,6 +542,7 @@ pub fn build_history_summarizer_chunk(
         // Builder records system-role messages as pending metadata without rendering them.
         let flat_message = FlatMessage {
             ordinal: message.ordinal,
+            mid: &message.mid,
             role,
             blocks: blocks_by_mid
                 .get(message.mid.as_str())
@@ -474,6 +563,7 @@ pub fn build_history_summarizer_chunk(
         }
     }
     let _ = builder.flush_current_block();
+    let identities = builder.identities.take();
     let tool_only_ranges = merge_tool_only_ranges(&builder.tool_only_ranges);
     let end = builder.last_ordinal;
     let text = builder.lines.join("\n");
@@ -495,7 +585,7 @@ pub fn build_history_summarizer_chunk(
             byte_len: block.bytes.len(),
         })
         .collect();
-    HistorySummarizerBuiltChunk {
+    let built = HistorySummarizerBuiltChunk {
         text,
         chunk: HistorySummarizerChunk {
             start_index: start,
@@ -512,7 +602,8 @@ pub fn build_history_summarizer_chunk(
         has_more: end.max(highest_scanned_ordinal)
             < eligible_end_ordinal.saturating_sub(1).min(total_count),
         commit_cluster_count: builder.commit_cluster_count,
-    }
+    };
+    (built, identities)
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +644,10 @@ pub enum HistorySummarizerNoFireReason {
     },
     MissingBlockIdentity {
         message_id: String,
+    },
+    IdentityBudget {
+        serialized_bytes: usize,
+        budget: usize,
     },
 }
 
@@ -874,22 +969,39 @@ pub fn assemble_history_summarizer_firing(
         config.token_budget,
     );
     let token_budget = retry_token_budget(config.token_budget, chunk_failures);
-    let mut chunk =
-        build_history_summarizer_chunk(messages, live, chunk_start, token_budget, eligible_end);
+    let (mut chunk, mut identities) = build_chunk(
+        messages,
+        live,
+        chunk_start,
+        token_budget,
+        eligible_end,
+        Some(IdentitySelection::new(block_identities_by_mid)),
+    );
     // A placeholder firing calls no model, so its chunk can spend the configured budget the retry shrink withheld on reaching the result of a tool arc that opens the chunk; a result even that budget cannot hold leaves the chunk as built.
     if chunk_failures >= PLACEHOLDER_AFTER_FAILURES
         && let Some(reach) = placeholder_reach(&chunk.chunk, eligible_end)
     {
-        let reaching = build_history_summarizer_chunk(
+        let (reaching, reaching_identities) = build_chunk(
             messages,
             live,
             chunk_start,
             config.token_budget,
             reach + 1,
+            Some(IdentitySelection::new(block_identities_by_mid)),
         );
         if reaching.chunk.end_index >= reach {
             chunk = reaching;
+            identities = reaching_identities;
         }
+    }
+    let identities = identities.expect("firing assembly charges selected identities");
+    if let Some(serialized_bytes) = identities.refused_len {
+        return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
+            HistorySummarizerNoFireReason::IdentityBudget {
+                serialized_bytes,
+                budget: SELECTED_IDENTITY_BUDGET_BYTES,
+            },
+        ));
     }
     let input_source = presented_input(&mut chunk, token_budget);
     if chunk.text.is_empty() || chunk.chunk.lines.is_empty() {
@@ -910,24 +1022,12 @@ pub fn assemble_history_summarizer_firing(
         ));
     }
 
-    let mut selected_range_identities = Vec::new();
-    for message in messages.iter().filter(|message| {
-        !message.ck.meta.synthetic
-            && message.ordinal >= chunk.chunk.start_index
-            && message.ordinal <= chunk.chunk.end_index
-    }) {
-        let Some(block_identities) = block_identities_by_mid.get(&message.mid) else {
-            return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
-                HistorySummarizerNoFireReason::MissingBlockIdentity {
-                    message_id: message.mid.clone(),
-                },
-            ));
-        };
-        selected_range_identities.push(HistorySummarizerSelectedMessageIdentity {
-            mid: message.mid.clone(),
-            block_identities: block_identities.clone(),
-        });
+    if let Some(message_id) = identities.missing {
+        return Ok(AssembleHistorySummarizerFiringOutcome::NoFire(
+            HistorySummarizerNoFireReason::MissingBlockIdentity { message_id },
+        ));
     }
+    let selected_range_identities = identities.selected;
 
     let boundary_dates = native_boundary_dates(messages);
     let reference_blocks = build_reference_blocks_from_stored(
@@ -1627,6 +1727,277 @@ mod tests {
         );
         assert_eq!(built.chunk.lines[0].message_id, "a1#1");
         assert_eq!(built.chunk.lines[1].message_id, "t2#0");
+    }
+
+    struct BudgetCase {
+        messages: Vec<Arc<IngressMessage>>,
+        identities: BTreeMap<String, Vec<BlockIdentity>>,
+        blocks: Vec<Vec<usize>>,
+    }
+
+    impl BudgetCase {
+        fn new(roles_and_mids: &[(&str, &str)]) -> Self {
+            let messages: Vec<_> = roles_and_mids
+                .iter()
+                .enumerate()
+                .map(|(index, (role, mid))| {
+                    msg(
+                        mid,
+                        index as u64 + 1,
+                        role,
+                        vec![text(&format!("turn {index}"))],
+                    )
+                })
+                .collect();
+            let mut blocks: Vec<Vec<usize>> = Vec::new();
+            for (index, (role, _)) in roles_and_mids.iter().enumerate() {
+                match blocks.last_mut() {
+                    Some(block) if roles_and_mids[block[0]].0 == *role => block.push(index),
+                    _ => blocks.push(vec![index]),
+                }
+            }
+            let identities = roles_and_mids
+                .iter()
+                .map(|(_, mid)| {
+                    (
+                        mid.to_string(),
+                        vec![
+                            BlockIdentity {
+                                kind_tag: "text".to_string(),
+                                byte_fingerprint: "0".repeat(64),
+                            },
+                            BlockIdentity {
+                                kind_tag: "tool_call".to_string(),
+                                byte_fingerprint: "f".repeat(30_000),
+                            },
+                        ],
+                    )
+                })
+                .collect();
+            Self {
+                messages,
+                identities,
+                blocks,
+            }
+        }
+
+        fn selection(&self, blocks: usize) -> Vec<HistorySummarizerSelectedMessageIdentity> {
+            self.blocks[..blocks]
+                .iter()
+                .flatten()
+                .map(|&index| {
+                    let mid = &self.messages[index].mid;
+                    HistorySummarizerSelectedMessageIdentity {
+                        mid: mid.clone(),
+                        block_identities: self.identities[mid].clone(),
+                    }
+                })
+                .collect()
+        }
+
+        fn serialized_len(&self, blocks: usize) -> usize {
+            serde_json::to_vec(&self.selection(blocks)).unwrap().len()
+        }
+
+        fn fit_prefix_to(&mut self, blocks: usize, target: usize) {
+            let last = *self.blocks[blocks - 1].last().unwrap();
+            let mid = self.messages[last].mid.clone();
+            let current = self.serialized_len(blocks);
+            let fingerprint = &mut self.identities.get_mut(&mid).unwrap()[1].byte_fingerprint;
+            let len = (fingerprint.len() + target).checked_sub(current).unwrap();
+            *fingerprint = "f".repeat(len);
+            assert_eq!(self.serialized_len(blocks), target);
+        }
+
+        fn oracle(&self) -> Option<usize> {
+            (1..=self.blocks.len())
+                .rev()
+                .find(|&blocks| self.serialized_len(blocks) <= SELECTED_IDENTITY_BUDGET_BYTES)
+        }
+
+        fn assemble(&self) -> AssembleHistorySummarizerFiringOutcome {
+            let (_dir, store) = store_for_tests();
+            let projection = project_messages(&self.messages).unwrap();
+            let end = self.messages.len() as u64 + 1;
+            let outcome = assemble_history_summarizer_firing(
+                &store,
+                &self.messages,
+                &projection.blocks,
+                &self.identities,
+                HistorySummarizerAssemblerConfig {
+                    session_id: "ses-identity-budget".to_string(),
+                    project_path: "/proj".to_string(),
+                    project_slug: "proj".to_string(),
+                    model_chain: vec!["prov/model".to_string()],
+                    token_budget: 1_000_000,
+                    boundary: crate::boundary::BoundaryResolution {
+                        protected_start_ordinal: end,
+                        eligible_head: 0..end,
+                        n_tokens: 0.0,
+                        floored_by_live_prompt: false,
+                        fenced_by_open_arc: false,
+                        true_raw_eligible_tokens: 10.0,
+                        oversize_atomic_unit: false,
+                        raw_message_count: self.messages.len() as u64,
+                        boundary_reason: "test".to_string(),
+                    },
+                    memory_enabled: false,
+                    project_memory: None,
+                    auto_promote: true,
+                    user_memory_collection_enabled: false,
+                    extraction_free: false,
+                    in_emergency: true,
+                    force_keep_last_history_segment: false,
+                    fold_is_only_reclaim: false,
+                    failure_backoff_at_ms: 0,
+                    min_chunk_tokens: 0,
+                },
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                store
+                    .load("ses-identity-budget")
+                    .unwrap()
+                    .meta
+                    .history_summarizer,
+                memory_store::HistorySummarizerDurableState::default(),
+                "assembly reserves nothing"
+            );
+            outcome
+        }
+
+        fn assert_matches_oracle(&self, case: &str) {
+            let outcome = self.assemble();
+            let Some(blocks) = self.oracle() else {
+                let AssembleHistorySummarizerFiringOutcome::NoFire(
+                    HistorySummarizerNoFireReason::IdentityBudget {
+                        serialized_bytes,
+                        budget,
+                    },
+                ) = outcome
+                else {
+                    panic!("{case}: an indivisible first block no-fires: {outcome:?}");
+                };
+                assert_eq!(serialized_bytes, self.serialized_len(1), "{case}");
+                assert_eq!(budget, SELECTED_IDENTITY_BUDGET_BYTES, "{case}");
+                return;
+            };
+            let AssembleHistorySummarizerFiringOutcome::Fire(firing) = outcome else {
+                panic!("{case}: a fitting prefix fires: {outcome:?}");
+            };
+            let last = *self.blocks[blocks - 1].last().unwrap();
+            let end_ordinal = self.messages[last].ordinal;
+            assert_eq!(firing.to_ordinal, end_ordinal, "{case}");
+            assert_eq!(firing.chunk.chunk.end_index, end_ordinal, "{case}");
+            assert_eq!(
+                firing.selected_range_identities,
+                self.selection(blocks),
+                "{case}"
+            );
+            assert!(
+                serde_json::to_vec(&firing.selected_range_identities)
+                    .unwrap()
+                    .len()
+                    <= SELECTED_IDENTITY_BUDGET_BYTES,
+                "{case}"
+            );
+            let projection = project_messages(&self.messages).unwrap();
+            let unbudgeted = build_history_summarizer_chunk(
+                &self.messages,
+                &projection.blocks,
+                1,
+                1_000_000,
+                end_ordinal + 1,
+            );
+            assert_eq!(firing.chunk.text, unbudgeted.text, "{case}");
+            let items: Vec<_> = unbudgeted
+                .snapshot
+                .iter()
+                .map(ChunkSnapshotOwnedItem::as_item)
+                .collect();
+            assert_eq!(
+                firing.chunk_fingerprint,
+                compute_chunk_fingerprint(&items),
+                "{case}"
+            );
+        }
+    }
+
+    const BUDGET_MIDS: [(&str, &str); 12] = [
+        ("user", "u1"),
+        ("assistant", "a2"),
+        ("assistant", "a3"),
+        ("user", "u4"),
+        ("assistant", "a5"),
+        ("user", "u6"),
+        ("user", "u7"),
+        ("assistant", "a8"),
+        ("user", "u9"),
+        ("assistant", "a10"),
+        ("user", "u11"),
+        ("assistant", "a12"),
+    ];
+
+    #[test]
+    fn an_over_budget_selection_stops_at_the_longest_prefix_of_whole_blocks() {
+        for (case, offset, expected_blocks) in [
+            ("budget - 1", -1i64, 5),
+            ("exact", 0, 5),
+            ("budget + 1", 1, 4),
+        ] {
+            let mut budget_case = BudgetCase::new(&BUDGET_MIDS);
+            assert!(
+                budget_case.serialized_len(budget_case.blocks.len())
+                    > SELECTED_IDENTITY_BUDGET_BYTES
+            );
+            let target = SELECTED_IDENTITY_BUDGET_BYTES
+                .checked_add_signed(offset as isize)
+                .unwrap();
+            budget_case.fit_prefix_to(5, target);
+            assert_eq!(budget_case.oracle(), Some(expected_blocks), "{case}");
+            budget_case.assert_matches_oracle(case);
+        }
+    }
+
+    #[test]
+    fn an_indivisible_first_block_over_the_identity_budget_no_fires() {
+        for (case, offset) in [("budget - 1", -1i64), ("exact", 0), ("budget + 1", 1)] {
+            let mut budget_case =
+                BudgetCase::new(&[("user", "u1"), ("user", "u2"), ("assistant", "a3")]);
+            let target = SELECTED_IDENTITY_BUDGET_BYTES
+                .checked_add_signed(offset as isize)
+                .unwrap();
+            budget_case.fit_prefix_to(1, target);
+            assert_eq!(budget_case.oracle().is_some(), offset <= 0, "{case}");
+            budget_case.assert_matches_oracle(case);
+        }
+    }
+
+    #[test]
+    fn escaped_and_unicode_mids_are_charged_as_they_serialize() {
+        let mids = [
+            ("user", "u\"quoted\"1"),
+            ("assistant", "a\\back\\2"),
+            ("user", "u\u{1f4a1}\u{e9}3"),
+            ("assistant", "a\n\t4"),
+            ("user", "u\u{7}5"),
+        ];
+        for offset in [-1i64, 0, 1] {
+            let mut budget_case = BudgetCase::new(&mids);
+            let target = SELECTED_IDENTITY_BUDGET_BYTES
+                .checked_add_signed(offset as isize)
+                .unwrap();
+            budget_case.fit_prefix_to(4, target);
+            assert!(
+                budget_case.selection(4).iter().any(|entry| {
+                    serde_json::to_string(&entry.mid).unwrap().len() > entry.mid.len() + 2
+                }),
+                "escaping changes the charged length"
+            );
+            assert_eq!(budget_case.oracle(), Some(if offset <= 0 { 4 } else { 3 }));
+            budget_case.assert_matches_oracle(&format!("escaped mids, offset {offset}"));
+        }
     }
 
     fn tiny_chunk_assemble(in_emergency: bool) -> AssembleHistorySummarizerFiringOutcome {

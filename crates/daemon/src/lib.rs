@@ -5899,11 +5899,12 @@ impl HandlerCore {
         loaded: &memory_store::LoadedState,
         reason: &str,
     ) {
-        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason) {
+        let reason = memory_store::bounded_summarizer_detail(reason.to_string());
+        if loaded.meta.history_summarizer.last_no_fire.as_deref() == Some(reason.as_str()) {
             return;
         }
         let mut meta = loaded.meta.clone();
-        meta.history_summarizer.last_no_fire = Some(reason.to_string());
+        meta.history_summarizer.last_no_fire = Some(reason);
         let _ = store.commit(session_id, loaded.row_version, &loaded.core, &meta);
     }
 
@@ -8955,6 +8956,11 @@ impl HandlerCore {
                 completion,
             } => {
                 let waited_at = Instant::now();
+                #[cfg(test)]
+                transform::run_transform_attempt_hook(&format!(
+                    "emergency_wait:{}",
+                    env.parsed.session_id
+                ));
                 let completed = self
                     .await_live_history_summarizer_completion(completion)
                     .await;
@@ -17603,7 +17609,8 @@ fn record_history_summarizer_connect_failure(
         let loaded = store.load(session_id)?;
         let mut meta = loaded.meta.clone();
         if meta.history_summarizer.state == HistorySummarizerPhase::Idle {
-            meta.history_summarizer.last_failure = Some(detail.to_string());
+            meta.history_summarizer.last_failure =
+                Some(memory_store::bounded_summarizer_detail(detail.to_string()));
             meta.history_summarizer.failure_backoff_at_ms = Some(failure_backoff_at_ms);
             let counters = &mut meta.history_summarizer.counters;
             counters.connect_failed = counters.connect_failed.saturating_add(1);
@@ -36270,6 +36277,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages: Vec<_> = (1..=4_000)
+            .map(|ordinal| {
+                let escaped_mid = format!("{}{ordinal}", "\u{1}".repeat(100));
+                wire_with_role(&escaped_mid, ordinal, "assistant", "k")
+            })
+            .collect();
+        let response = call_transform(&handler, messages).await;
+        let diagnostics = &response["history_summarizer"];
+        assert_eq!(diagnostics["fired"], false, "{diagnostics}");
+        assert!(
+            diagnostics["no_fire"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("assemble:IdentityBudget")),
+            "{diagnostics}"
+        );
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(state.state, memory_store::HistorySummarizerPhase::Idle);
+        assert_eq!(state.firing_seq, 0);
+        assert!(state.selected_range_identities.is_empty());
+        assert_eq!(state.chunk_range, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_autonomous_cycle_fires_publishes_and_next_pass_folds_across_start_ordinals() {
         // The daemon numbers the window from 1; a system lead is skipped, so the chunk starts at
         // the first user message.
@@ -36983,6 +37018,29 @@ mod tests {
         assert!(!summary.chars().any(char::is_control));
         assert!(!summary.contains('\n'));
         assert!(summary.chars().count() <= 500);
+    }
+
+    #[test]
+    fn an_idle_connect_failure_records_its_detail_cut_to_the_detail_bound() {
+        let producer = Arc::new(ProducerState::default());
+        let (_handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+        assert_eq!(
+            store.load("ses").unwrap().meta.history_summarizer.state,
+            HistorySummarizerPhase::Idle
+        );
+        let detail = format!(
+            "producer connect: {}",
+            "x".repeat(memory_store::MAX_SUMMARIZER_DETAIL_BYTES)
+        );
+        let hook: ConnectFailureCommitHook = Arc::new(Mutex::new(None));
+        record_history_summarizer_connect_failure(&store, "ses", 5, &detail, &hook).unwrap();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(
+            state.last_failure.as_deref(),
+            Some(&detail[..memory_store::MAX_SUMMARIZER_DETAIL_BYTES])
+        );
+        assert_eq!(state.failure_backoff_at_ms, Some(5));
+        assert_eq!(state.counters.connect_failed, 1);
     }
 
     #[test]
@@ -39286,7 +39344,17 @@ mod tests {
 
         let release = {
             let producer = Arc::clone(&producer);
+            let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+            let armed_tx = Mutex::new(Some(armed_tx));
+            transform::install_transform_attempt_hook("emergency_wait:ses", move || {
+                if let Some(tx) = armed_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
             tokio::spawn(async move {
+                armed_rx
+                    .await
+                    .expect("the emergency pass reaches its live wait");
                 tokio::time::sleep(Duration::from_millis(1_200)).await;
                 producer.block_output.store(false, Ordering::SeqCst);
                 producer.notify.notify_waiters();
@@ -40912,12 +40980,21 @@ mod tests {
 
     async fn fire_and_settle(handler: &Handler, store: &MemoryStore, messages: &[IngressMessage]) {
         loop {
-            if store.load("ses").is_ok() {
-                expire_history_summarizer_backoff(store);
-            }
+            let firing_seq = match store.load("ses") {
+                Ok(loaded) => {
+                    expire_history_summarizer_backoff(store);
+                    loaded.meta.history_summarizer.firing_seq
+                }
+                Err(_) => 0,
+            };
             let response = call_transform(handler, messages.to_vec()).await;
             if response["history_summarizer"]["fired"] == true {
-                wait_for_idle(store).await;
+                // The spawned firing persists its fired state after the response, so the
+                // settled row is the one whose sequence advanced and returned to idle.
+                wait_for_history_summarizer_state(store, |state| {
+                    state.firing_seq > firing_seq && state.state == HistorySummarizerPhase::Idle
+                })
+                .await;
                 return;
             }
             assert_eq!(
