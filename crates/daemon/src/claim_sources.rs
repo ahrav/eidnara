@@ -238,8 +238,11 @@ pub struct ClaimSliceBounds {
 pub enum ClaimProgress {
     #[default]
     Unregistered,
-    /// Scanning current decisions after `after` in object-id order.
-    Bootstrap { after: Option<String> },
+    /// Scanning current decisions after `after` in object-id order. Slices alternate between a scan page and a change page, so the durable checkpoint follows retained commits while the scan runs.
+    Bootstrap {
+        after: Option<String>,
+        changes_next: bool,
+    },
     /// The scan is complete; retained commits are applied from the durable checkpoint.
     Changes,
 }
@@ -284,12 +287,16 @@ pub enum EpisodeFault {
     SkipAcknowledgement,
     /// The acknowledgement fails with an outcome-unknown error before it commits.
     FailAcknowledgement,
+    /// The slice's budget is cancelled once this many decisions or commits are complete.
+    ExhaustBudgetAfter(usize),
 }
 
 pub struct ClaimMaterializer<'a> {
     kernel: &'a KernelStore,
     egress: ProviderEgress,
     fault: Option<EpisodeFault>,
+    /// The running slice's budget; kernel writes and reads that have a budgeted entry wait within it.
+    budget: Option<EvalBudget>,
 }
 
 enum Stop {
@@ -298,6 +305,34 @@ enum Stop {
     /// A slice applied its one page.
     PageDone,
 }
+
+impl MaterializationReport {
+    fn start(target: i64, end: MaterializationEnd) -> Self {
+        Self {
+            target,
+            bootstrapped: 0,
+            acknowledged_through: 0,
+            commits_consumed: 0,
+            published: 0,
+            replayed: 0,
+            retired: 0,
+            exclusions: Vec::new(),
+            end,
+        }
+    }
+
+    /// Whether the slice moved durable progress, so the scheduler runs the next one without idling.
+    pub fn advanced(&self) -> bool {
+        match self.end {
+            MaterializationEnd::Continues => true,
+            MaterializationEnd::Exhausted => self.bootstrapped > 0 || self.commits_consumed > 0,
+            MaterializationEnd::ReachedTarget | MaterializationEnd::Blocked(_) => false,
+        }
+    }
+}
+
+/// How long an acknowledgement of fully applied commits may wait for the writer after the slice's own budget is spent.
+const ACKNOWLEDGEMENT_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl From<ClaimBlocked> for Stop {
     fn from(blocked: ClaimBlocked) -> Self {
@@ -323,6 +358,7 @@ impl<'a> ClaimMaterializer<'a> {
             kernel,
             egress,
             fault: None,
+            budget: None,
         }
     }
 
@@ -364,7 +400,21 @@ impl<'a> ClaimMaterializer<'a> {
         }
         .ok_or(KernelError::NotFound)?;
         if checkpoint < receipt.commit_seq {
-            kernel.acknowledge_outbox(CLAIM_CONSUMER, receipt.commit_seq, now)?;
+            match budget {
+                Some(budget) => {
+                    let incarnation = kernel
+                        .capture_commit_read_target_within_budget(budget)?
+                        .incarnation;
+                    kernel.acknowledge_outbox_within_budget(
+                        budget,
+                        CLAIM_CONSUMER,
+                        receipt.commit_seq,
+                        now,
+                        incarnation,
+                    )?;
+                }
+                None => kernel.acknowledge_outbox(CLAIM_CONSUMER, receipt.commit_seq, now)?,
+            }
         }
         Ok(())
     }
@@ -398,9 +448,11 @@ impl<'a> ClaimMaterializer<'a> {
         self.run_episode_inner(bounds, now)
     }
 
-    /// Runs one bounded maintenance slice from `progress` and advances it: the first slice registers the consumer, bootstrap slices publish one page of current decisions, and change slices apply one retained commit page. The report ends `ReachedTarget` once the scan is complete and the checkpoint sits at the captured tip.
+    /// Runs one bounded maintenance slice from `progress` and advances it: the first slice registers the consumer, bootstrap slices alternate between one page of current decisions and one retained commit page, and change slices apply one retained commit page. The report ends `ReachedTarget` only once the scan is complete and the checkpoint sits at the captured tip.
     ///
-    /// The consumer is registered before the scan reads any decision, so every change the scan races is retained for replay. The scan publishes only decisions created at or before the durable checkpoint; a later decision is published by the replay of its own commit, which retires the predecessor it replaced first. Every kernel read and acknowledgement waits within `budget`, and the slice stops between decisions or commits once `budget` is exhausted.
+    /// The consumer is registered before the scan reads any decision, so every change the scan races is retained for replay. The scan publishes only decisions created at or before the durable checkpoint read in the same slice; a later decision is published by the replay of its own commit, which retires the predecessor it replaced first. The proof assumes one writer of the consumer: the daemon's lifecycle owner serializes its slices, and no other production path acknowledges it.
+    ///
+    /// Kernel reads, the retirement and descriptor commits, and the acknowledgement wait within `budget`; artifact retention has no budgeted entry. A slice always completes its first decision or commit, stops between later ones once `budget` is exhausted, and acknowledges every fully applied commit within a short grace.
     ///
     /// # Errors
     ///
@@ -416,7 +468,7 @@ impl<'a> ClaimMaterializer<'a> {
         self.run_slice_inner(progress, bounds, budget, now)
     }
 
-    /// [`Self::run_slice`] under one injected fault; a change slice honors [`EpisodeFault::SkipAcknowledgement`].
+    /// [`Self::run_slice`] under one injected fault.
     #[cfg(feature = "test-support")]
     pub fn run_slice_with_fault_for_test(
         &mut self,
@@ -437,43 +489,64 @@ impl<'a> ClaimMaterializer<'a> {
         budget: &EvalBudget,
         now: i64,
     ) -> Result<MaterializationReport, KernelError> {
-        let mut report = MaterializationReport {
-            target: 0,
-            bootstrapped: 0,
-            acknowledged_through: 0,
-            commits_consumed: 0,
-            published: 0,
-            replayed: 0,
-            retired: 0,
-            exclusions: Vec::new(),
-            end: MaterializationEnd::Continues,
-        };
-        let outcome = match progress {
+        self.budget = Some(budget.clone());
+        let mut report = MaterializationReport::start(0, MaterializationEnd::Continues);
+        let outcome = match progress.clone() {
             ClaimProgress::Unregistered => Self::register_within(self.kernel, Some(budget), now)
                 .map(|()| {
-                    *progress = ClaimProgress::Bootstrap { after: None };
-                }),
-            ClaimProgress::Bootstrap { after } => self
-                .bootstrap_page(after.clone(), bounds, budget, now, &mut report)
+                    *progress = ClaimProgress::Bootstrap {
+                        after: None,
+                        changes_next: false,
+                    };
+                })
+                .map_err(Stop::Failed),
+            ClaimProgress::Bootstrap {
+                after,
+                changes_next: true,
+            } => {
+                *progress = ClaimProgress::Bootstrap {
+                    after,
+                    changes_next: false,
+                };
+                self.change_page(bounds.commits, budget, now, &mut report)
+            }
+            ClaimProgress::Bootstrap {
+                after,
+                changes_next: false,
+            } => self
+                .bootstrap_page(after, bounds, budget, now, &mut report)
                 .map(|next| *progress = next),
-            ClaimProgress::Changes => {
-                match self.change_page(bounds.commits, budget, now, &mut report) {
-                    Ok(()) | Err(Stop::PageDone) => Ok(()),
-                    Err(Stop::Blocked(blocked)) => {
-                        report.end = MaterializationEnd::Blocked(blocked);
-                        Ok(())
-                    }
-                    Err(Stop::Failed(error)) => Err(error),
-                }
-            }
+            ClaimProgress::Changes => self.change_page(bounds.commits, budget, now, &mut report),
         };
+        self.budget = None;
         match outcome {
-            Ok(()) => Ok(report),
-            Err(KernelError::Deadline) if budget.is_exhausted() => {
-                report.end = MaterializationEnd::Exhausted;
-                Ok(report)
+            Ok(()) | Err(Stop::PageDone) => {}
+            Err(Stop::Blocked(ClaimBlocked::UnknownConsumer)) => {
+                *progress = ClaimProgress::Unregistered;
+                report.end = MaterializationEnd::Blocked(ClaimBlocked::UnknownConsumer);
             }
-            Err(error) => Err(error),
+            Err(Stop::Blocked(blocked)) => report.end = MaterializationEnd::Blocked(blocked),
+            Err(Stop::Failed(KernelError::Deadline)) if budget.is_exhausted() => {
+                report.end = MaterializationEnd::Exhausted;
+            }
+            Err(Stop::Failed(error)) => return Err(error),
+        }
+        // A change page that reaches its target during the scan is not catch-up.
+        if matches!(progress, ClaimProgress::Bootstrap { .. })
+            && matches!(report.end, MaterializationEnd::ReachedTarget)
+        {
+            report.end = MaterializationEnd::Continues;
+        }
+        Ok(report)
+    }
+
+    /// Cancels the slice's budget when an injected fault says `completed` items are enough.
+    fn exhaust_on_fault(&self, completed: usize) {
+        if let (Some(EpisodeFault::ExhaustBudgetAfter(limit)), Some(budget)) =
+            (self.fault, &self.budget)
+            && completed >= limit
+        {
+            budget.cancel();
         }
     }
 
@@ -485,14 +558,11 @@ impl<'a> ClaimMaterializer<'a> {
         budget: &EvalBudget,
         now: i64,
         report: &mut MaterializationReport,
-    ) -> Result<ClaimProgress, KernelError> {
-        let Some(checkpoint) = self
+    ) -> Result<ClaimProgress, Stop> {
+        let checkpoint = self
             .kernel
             .outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER)?
-        else {
-            report.end = MaterializationEnd::Blocked(ClaimBlocked::UnknownConsumer);
-            return Ok(ClaimProgress::Unregistered);
-        };
+            .ok_or(ClaimBlocked::UnknownConsumer)?;
         report.acknowledged_through = checkpoint;
         let tip = self.kernel.tip_within_budget(budget)?;
         report.target = tip;
@@ -504,10 +574,14 @@ impl<'a> ClaimMaterializer<'a> {
             budget,
         )?;
         let mut done = after;
+        let mut completed = 0;
         for (object, decision) in &page.decisions {
-            if budget.is_exhausted() {
+            if completed > 0 && budget.is_exhausted() {
                 report.end = MaterializationEnd::Exhausted;
-                return Ok(ClaimProgress::Bootstrap { after: done });
+                return Ok(ClaimProgress::Bootstrap {
+                    after: done,
+                    changes_next: true,
+                });
             }
             if object.created_commit_seq <= checkpoint {
                 let subject = ClaimSubject::from_object(object)?;
@@ -515,21 +589,28 @@ impl<'a> ClaimMaterializer<'a> {
                     Ok(()) => report.bootstrapped += 1,
                     Err(Stop::Blocked(blocked)) => {
                         report.end = MaterializationEnd::Blocked(blocked);
-                        return Ok(ClaimProgress::Bootstrap { after: done });
+                        return Ok(ClaimProgress::Bootstrap {
+                            after: done,
+                            changes_next: true,
+                        });
                     }
-                    Err(Stop::Failed(error)) => return Err(error),
-                    Err(Stop::PageDone) => unreachable!("publication never ends a page"),
+                    Err(stop) => return Err(stop),
                 }
             }
             done = Some(object.object_id.clone());
+            completed += 1;
+            self.exhaust_on_fault(completed);
         }
         Ok(match page.next {
-            Some(next) => ClaimProgress::Bootstrap { after: Some(next) },
+            Some(next) => ClaimProgress::Bootstrap {
+                after: Some(next),
+                changes_next: true,
+            },
             None => ClaimProgress::Changes,
         })
     }
 
-    /// Applies and acknowledges one retained commit page from the durable checkpoint toward a captured target.
+    /// Applies one retained commit page from the durable checkpoint toward a captured target and acknowledges every commit it fully applied.
     fn change_page(
         &self,
         commits: CommitPageBounds,
@@ -541,12 +622,10 @@ impl<'a> ClaimMaterializer<'a> {
             .kernel
             .capture_commit_read_target_within_budget(budget)?;
         report.target = target.through_commit;
-        let Some(checkpoint) = self
+        let checkpoint = self
             .kernel
             .outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER)?
-        else {
-            return Err(ClaimBlocked::UnknownConsumer.into());
-        };
+            .ok_or(ClaimBlocked::UnknownConsumer)?;
         report.acknowledged_through = checkpoint;
         if checkpoint >= target.through_commit {
             report.end = MaterializationEnd::ReachedTarget;
@@ -564,15 +643,25 @@ impl<'a> ClaimMaterializer<'a> {
                 bounds: commits,
             },
             |page| {
-                self.apply_page(page, now, report, Some(budget))?;
-                if budget.is_exhausted() {
-                    return Err(KernelError::Deadline.into());
+                let mut applied = checkpoint;
+                let outcome = self.apply_page(page, now, report, Some(budget), &mut applied);
+                if applied > report.acknowledged_through
+                    && self.fault != Some(EpisodeFault::SkipAcknowledgement)
+                {
+                    // Commits applied before the budget ran out are acknowledged within a short grace, so a page larger than one slice still advances the checkpoint.
+                    let grace = EvalBudget::new(
+                        Some(std::time::Instant::now() + ACKNOWLEDGEMENT_GRACE),
+                        std::sync::Arc::default(),
+                    );
+                    let ack_budget = if budget.is_exhausted() {
+                        &grace
+                    } else {
+                        budget
+                    };
+                    self.acknowledge_within(ack_budget, applied, now, target.incarnation)?;
+                    report.acknowledged_through = applied;
                 }
-                if self.fault == Some(EpisodeFault::SkipAcknowledgement) {
-                    return Err(Stop::PageDone);
-                }
-                self.acknowledge_within(budget, page.through, now, target.incarnation)?;
-                report.acknowledged_through = page.through;
+                outcome?;
                 Err(Stop::PageDone)
             },
         );
@@ -593,17 +682,8 @@ impl<'a> ClaimMaterializer<'a> {
         now: i64,
     ) -> Result<MaterializationReport, KernelError> {
         let target = self.kernel.capture_commit_read_target()?;
-        let mut report = MaterializationReport {
-            target: target.through_commit,
-            bootstrapped: 0,
-            acknowledged_through: 0,
-            commits_consumed: 0,
-            published: 0,
-            replayed: 0,
-            retired: 0,
-            exclusions: Vec::new(),
-            end: MaterializationEnd::ReachedTarget,
-        };
+        let mut report =
+            MaterializationReport::start(target.through_commit, MaterializationEnd::ReachedTarget);
         let checkpoint = match self.kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER)? {
             Some(checkpoint) => checkpoint,
             None => {
@@ -624,7 +704,8 @@ impl<'a> ClaimMaterializer<'a> {
                 bounds,
             },
             |page| {
-                self.apply_page(page, now, &mut report, None)?;
+                let mut applied = 0;
+                self.apply_page(page, now, &mut report, None, &mut applied)?;
                 if self.fault == Some(EpisodeFault::SkipAcknowledgement) {
                     return Ok(());
                 }
@@ -644,16 +725,17 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// Retires and publishes every decision change of `page` in commit order. A `budget` that runs out stops the page between commits; the page is then neither acknowledged nor complete, and its replay is idempotent.
+    /// Retires and publishes every decision change of `page` in commit order and records in `applied` the last commit whose effects are complete. A `budget` that runs out stops the page between commits after the first; replaying the rest is idempotent.
     fn apply_page(
         &self,
         page: &kernel::CommitPage,
         now: i64,
         report: &mut MaterializationReport,
         budget: Option<&EvalBudget>,
+        applied: &mut i64,
     ) -> Result<(), Stop> {
-        for commit in &page.commits {
-            if budget.is_some_and(EvalBudget::is_exhausted) {
+        for (index, commit) in page.commits.iter().enumerate() {
+            if index > 0 && budget.is_some_and(EvalBudget::is_exhausted) {
                 return Err(KernelError::Deadline.into());
             }
             let changes = commit
@@ -670,6 +752,8 @@ impl<'a> ClaimMaterializer<'a> {
                 self.publish_change(row, change, commit.commit_seq, now, report)?;
             }
             report.commits_consumed += 1;
+            *applied = commit.commit_seq;
+            self.exhaust_on_fault(index + 1);
         }
         Ok(())
     }
@@ -775,12 +859,18 @@ impl<'a> ClaimMaterializer<'a> {
             sensitivity: subject.sensitivity,
         };
         for unit in &units.units {
-            let published = publisher.publish(unit, now).map_err(|error| {
-                Stop::Blocked(ClaimBlocked::Publish {
-                    object_id: subject.object_id.clone(),
-                    error,
-                })
-            })?;
+            let published = publisher
+                .publish_within(unit, now, self.budget.as_ref())
+                .map_err(|error| match error {
+                    PublishError::Kernel {
+                        error: KernelError::Deadline,
+                        ..
+                    } => Stop::Failed(KernelError::Deadline),
+                    error => Stop::Blocked(ClaimBlocked::Publish {
+                        object_id: subject.object_id.clone(),
+                        error,
+                    }),
+                })?;
             if published.replayed {
                 report.replayed += 1;
             } else {
@@ -811,32 +901,40 @@ impl<'a> ClaimMaterializer<'a> {
         let Ok(ids) = descriptor_ids(&ClaimSubject::from_object(&state.object)?) else {
             return Ok(());
         };
-        let receipt = self.kernel.commit(
-            CommitIntent {
-                producer: PRODUCER.to_owned(),
-                operation_key: format!("claim-retire:{object_id}:{commit_seq}"),
-                request_digest: identity_digest(ids.join("\u{1f}").as_bytes()),
-                actor: CANONICAL_ROLE.to_owned(),
-                cause: "claim descriptor retirement".to_owned(),
-            },
-            |envelope| {
-                for id in &ids {
-                    if envelope
-                        .object_state(id)?
-                        .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
-                    {
-                        envelope.retire_observation(id)?;
-                    }
+        let intent = CommitIntent {
+            producer: PRODUCER.to_owned(),
+            operation_key: format!("claim-retire:{object_id}:{commit_seq}"),
+            request_digest: identity_digest(ids.join("\u{1f}").as_bytes()),
+            actor: CANONICAL_ROLE.to_owned(),
+            cause: "claim descriptor retirement".to_owned(),
+        };
+        let operation = |envelope: &mut kernel::Envelope<'_>| {
+            for id in &ids {
+                if envelope
+                    .object_state(id)?
+                    .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
+                {
+                    envelope.retire_observation(id)?;
                 }
-                Ok(String::new())
-            },
-        );
-        if let Err(error) = receipt {
-            return Err(ClaimBlocked::Retire {
-                object_id: object_id.to_owned(),
-                error,
             }
-            .into());
+            Ok(String::new())
+        };
+        let receipt = match &self.budget {
+            Some(budget) => self.kernel.commit_within_budget(budget, intent, operation),
+            None => self.kernel.commit(intent, operation),
+        };
+        match receipt {
+            Ok(_) => {}
+            Err(KernelError::Deadline) if self.budget.is_some() => {
+                return Err(Stop::Failed(KernelError::Deadline));
+            }
+            Err(error) => {
+                return Err(ClaimBlocked::Retire {
+                    object_id: object_id.to_owned(),
+                    error,
+                }
+                .into());
+            }
         }
         // Counted from durable state, so a replayed receipt reports what the first commit retired.
         let (_, states) = self.kernel.object_states(&ids)?;
@@ -872,7 +970,7 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// [`Self::acknowledge`] waiting within `budget` under the captured incarnation; a `Deadline` refusal is definite and leaves the page for the next slice.
+    /// [`Self::acknowledge`] waiting within `budget` under the captured incarnation; a `Deadline` refusal is definite and leaves the commits for the next slice.
     fn acknowledge_within(
         &self,
         budget: &EvalBudget,
@@ -880,44 +978,57 @@ impl<'a> ClaimMaterializer<'a> {
         now: i64,
         incarnation: CommitReadIncarnation,
     ) -> Result<(), Stop> {
-        match self.kernel.acknowledge_outbox_within_budget(
-            budget,
-            CLAIM_CONSUMER,
-            through,
-            now,
-            incarnation,
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) if outcome_unknown(error) => {
-                let checkpoint = self
-                    .kernel
-                    .outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER)?;
-                if checkpoint.is_none_or(|checkpoint| checkpoint < through) {
-                    return Err(ClaimBlocked::AcknowledgementUnresolved {
-                        through,
-                        checkpoint,
-                    }
-                    .into());
-                }
-                Ok(())
-            }
-            Err(error) => Err(error.into()),
-        }
+        let acknowledged = self.faulted_acknowledgement(|| {
+            self.kernel.acknowledge_outbox_within_budget(
+                budget,
+                CLAIM_CONSUMER,
+                through,
+                now,
+                incarnation,
+            )
+        });
+        self.reconcile_acknowledgement(acknowledged, through, || {
+            self.kernel
+                .outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER)
+        })
     }
 
     /// A reply lost after the kernel may have committed is reconciled from the durable checkpoint.
     fn acknowledge(&self, through: i64, now: i64) -> Result<(), Stop> {
+        let acknowledged = self.faulted_acknowledgement(|| {
+            self.kernel.acknowledge_outbox(CLAIM_CONSUMER, through, now)
+        });
+        self.reconcile_acknowledgement(acknowledged, through, || {
+            self.kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER)
+        })
+    }
+
+    /// Runs `acknowledge` under the injected acknowledgement fault, if any.
+    fn faulted_acknowledgement(
+        &self,
+        acknowledge: impl FnOnce() -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
         let mut acknowledged = match self.fault {
             Some(EpisodeFault::FailAcknowledgement) => Err(KernelError::Io),
-            _ => self.kernel.acknowledge_outbox(CLAIM_CONSUMER, through, now),
+            _ => acknowledge(),
         };
         if self.fault == Some(EpisodeFault::LoseAcknowledgementReply) && acknowledged.is_ok() {
             acknowledged = Err(KernelError::Io);
         }
+        acknowledged
+    }
+
+    /// An outcome-unknown acknowledgement counts as done only when the durable checkpoint reached `through`.
+    fn reconcile_acknowledgement(
+        &self,
+        acknowledged: Result<(), KernelError>,
+        through: i64,
+        checkpoint: impl FnOnce() -> Result<Option<i64>, KernelError>,
+    ) -> Result<(), Stop> {
         match acknowledged {
             Ok(()) => Ok(()),
             Err(error) if outcome_unknown(error) => {
-                let checkpoint = self.kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER)?;
+                let checkpoint = checkpoint()?;
                 if checkpoint.is_none_or(|checkpoint| checkpoint < through) {
                     return Err(ClaimBlocked::AcknowledgementUnresolved {
                         through,

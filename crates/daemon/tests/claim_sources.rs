@@ -2501,6 +2501,21 @@ fn memory(object: &'static str, summary: &'static str) -> Seed<'static> {
     Seed::scoped(object, MEMORY, "PROJECT_RULES", 1, summary, "")
 }
 
+fn revised(object: &'static str, summary: &'static str) -> Seed<'static> {
+    Seed::scoped(object, MEMORY, "PROJECT_RULES", 2, summary, "")
+}
+
+fn ledger(seeds: &[Seed<'_>]) -> BTreeSet<Expected> {
+    seeds.iter().flat_map(|seed| seed.ledger().0).collect()
+}
+
+const fn scanning(after: Option<String>, changes_next: bool) -> ClaimProgress {
+    ClaimProgress::Bootstrap {
+        after,
+        changes_next,
+    }
+}
+
 impl Corpus {
     fn slice(
         &self,
@@ -2512,7 +2527,18 @@ impl Corpus {
             .unwrap()
     }
 
-    /// Runs slices until one reports the target reached, checking `invariant` after each; returns the reports.
+    fn faulted_slice(
+        &self,
+        progress: &mut ClaimProgress,
+        bounds: ClaimSliceBounds,
+        fault: EpisodeFault,
+    ) -> MaterializationReport {
+        self.materializer()
+            .run_slice_with_fault_for_test(progress, bounds, &EvalBudget::unbounded(), NOW, fault)
+            .unwrap()
+    }
+
+    /// Runs slices until one reports the target reached, checking that every change slice reads at most one commit page and `invariant` after each; returns the reports.
     fn catch_up(
         &self,
         progress: &mut ClaimProgress,
@@ -2523,6 +2549,10 @@ impl Corpus {
         loop {
             let report = self.slice(progress, bounds);
             invariant(self);
+            assert!(
+                report.commits_consumed <= bounds.commits.max_commits.get(),
+                "{report:?}"
+            );
             let end = matches!(report.end, MaterializationEnd::ReachedTarget);
             assert!(
                 matches!(
@@ -2547,15 +2577,7 @@ impl Corpus {
     }
 }
 
-fn revised(object: &'static str, summary: &'static str) -> Seed<'static> {
-    Seed::scoped(object, MEMORY, "PROJECT_RULES", 2, summary, "")
-}
-
-fn ledger(seeds: &[Seed<'_>]) -> BTreeSet<Expected> {
-    seeds.iter().flat_map(|seed| seed.ledger().0).collect()
-}
-
-/// Memories committed before the consumer exists are published by the bootstrap scan a page at a time, and memories committed afterward by the same slices replaying their commits; no fixture call ingests either.
+/// Memories committed before the consumer exists are published by the bootstrap scan a page at a time, and memories committed afterward by the same slices replaying their commits; no fixture call ingests either. Scan pages alternate with change pages, so the checkpoint moves while the scan runs.
 #[test]
 fn bootstrap_and_replay_publish_memories_from_before_and_after_registration() {
     let dir = tempfile::tempdir().unwrap();
@@ -2577,23 +2599,39 @@ fn bootstrap_and_replay_publish_memories_from_before_and_after_registration() {
         matches!(registered.end, MaterializationEnd::Continues),
         "{registered:?}"
     );
-    assert_eq!(progress, ClaimProgress::Bootstrap { after: None });
-    assert_eq!(corpus.checkpoint(), Some(corpus.kernel.tip().unwrap()));
+    assert_eq!(progress, scanning(None, false));
+    let registration = corpus.checkpoint();
+    assert_eq!(registration, Some(corpus.kernel.tip().unwrap()));
 
-    // Five decisions in pages of two take three bootstrap slices; each publishes at most its page and moves the cursor.
+    // Five decisions in pages of two take three scan slices; each publishes at most its page, moves the cursor, and is followed by a change slice that acknowledges the scan's own commits.
     let mut cursors = Vec::new();
-    while let ClaimProgress::Bootstrap { after } = progress.clone() {
-        cursors.push(after);
+    let mut checkpoints = Vec::new();
+    while let ClaimProgress::Bootstrap {
+        after,
+        changes_next,
+    } = progress.clone()
+    {
         let report = corpus.slice(&mut progress, slice_bounds(2));
-        assert!(report.bootstrapped <= 2, "{report:?}");
         assert!(
             matches!(report.end, MaterializationEnd::Continues),
             "{report:?}"
         );
+        if changes_next {
+            assert_eq!(report.bootstrapped, 0, "{report:?}");
+            checkpoints.push(corpus.checkpoint());
+        } else {
+            assert!(report.bootstrapped <= 2, "{report:?}");
+            cursors.push(after);
+        }
     }
     assert_eq!(
         cursors,
         [None, Some("m2".to_string()), Some("m4".to_string())]
+    );
+    assert_eq!(checkpoints.len(), 2);
+    assert!(
+        checkpoints.windows(2).all(|pair| pair[0] < pair[1]) && checkpoints[0] > registration,
+        "the checkpoint advances between scan pages: {checkpoints:?}"
     );
     assert_eq!(progress, ClaimProgress::Changes);
     assert_eq!(corpus.inventory(), ledger(&before));
@@ -2601,15 +2639,31 @@ fn bootstrap_and_replay_publish_memories_from_before_and_after_registration() {
     let after = [
         memory("m6", "Sixth memory."),
         memory("m7", "Seventh memory."),
+        memory("m8", "Eighth memory."),
+        memory("m9", "Ninth memory."),
+        memory("m10", "Tenth memory."),
     ];
     for seed in after {
         corpus.decide(seed);
     }
     let decided = corpus.kernel.tip().unwrap();
-    let reports = corpus.catch_up(&mut progress, slice_bounds(2), |_| {});
+    let mut previous = corpus.checkpoint();
+    let reports = corpus.catch_up(&mut progress, slice_bounds(2), |corpus| {
+        let checkpoint = corpus.checkpoint();
+        assert!(checkpoint >= previous, "the checkpoint never moves back");
+        previous = checkpoint;
+    });
+    let advancing: Vec<_> = reports
+        .iter()
+        .filter(|report| report.commits_consumed > 0)
+        .collect();
+    assert!(
+        advancing.len() >= 3,
+        "a backlog of more than two pages takes several bounded slices: {reports:?}"
+    );
     assert_eq!(
         reports.iter().map(|report| report.published).sum::<usize>(),
-        4
+        10
     );
     let mut all = ledger(&before);
     all.extend(ledger(&after));
@@ -2639,7 +2693,7 @@ fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
         BTreeSet::from(["a".to_string(), "b".to_string()])
     );
 
-    // `a` was published by the scan and `d` is still ahead of it; `z-alpha`, `a`'s successor, sorts ahead of the cursor, so the scan reaches it before the replay retires `a`.
+    // `a` was published by the scan and `d` is still ahead of it; `z-alpha`, `a`'s successor, sorts ahead of the cursor, so the scan reaches it before the replay retires `a`. The object registry is append-only, so a recreation takes a new object id.
     corpus.correct("a", revised("z-alpha", "Alpha, revised."));
     corpus.correct("d", revised("d2", "Delta, revised."));
     corpus.retire("b");
@@ -2665,11 +2719,11 @@ fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
     );
 }
 
-/// A restart repeats the bootstrap from the first decision and a page published without its acknowledgement is replayed; both answer from receipts, lose no decision, and leave the checkpoint behind every unacknowledged effect.
+/// A restart repeats the bootstrap from the first decision, and a restart after a page was applied without its acknowledgement replays it; both answer from receipts, lose no change, and leave the checkpoint behind every unacknowledged effect.
 #[test]
 fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
     let dir = tempfile::tempdir().unwrap();
-    let corpus = Corpus::open(dir.path());
+    let mut corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
     let seeds = [
         memory("r1", "One."),
@@ -2682,12 +2736,10 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
     let mut progress = ClaimProgress::default();
     corpus.slice(&mut progress, slice_bounds(2));
     corpus.slice(&mut progress, slice_bounds(2));
-    let partial = corpus.inventory();
-    assert_eq!(partial, ledger(&seeds[..2]));
+    assert_eq!(corpus.inventory(), ledger(&seeds[..2]));
 
     // A restart forgets the scan position; the registration answers from its receipt.
     let mut restarted = ClaimProgress::default();
-    let tip = corpus.kernel.tip().unwrap();
     let reports = corpus.catch_up(&mut restarted, slice_bounds(2), |_| {});
     assert_eq!(
         reports.iter().map(|report| report.replayed).sum::<usize>(),
@@ -2698,59 +2750,190 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
     let caught_up = corpus.checkpoint();
 
     corpus.decide(memory("r4", "Four."));
-    let skipped = corpus
-        .materializer()
-        .run_slice_with_fault_for_test(
-            &mut restarted,
-            slice_bounds(2),
-            &EvalBudget::unbounded(),
-            NOW,
-            EpisodeFault::SkipAcknowledgement,
-        )
-        .unwrap();
+    let skipped = corpus.faulted_slice(
+        &mut restarted,
+        slice_bounds(2),
+        EpisodeFault::SkipAcknowledgement,
+    );
     assert_eq!(skipped.published, 2, "{skipped:?}");
     assert_eq!(
         corpus.checkpoint(),
         caught_up,
         "the checkpoint stays behind the unacknowledged page"
     );
-    let published = corpus.inventory();
-    let reports = corpus.catch_up(&mut restarted, slice_bounds(2), |_| {});
+    corpus.retire("r4");
+
+    // The process dies here: the store reopens and the runner starts over.
+    drop(corpus);
+    corpus = Corpus::open(dir.path());
+    let mut reopened = ClaimProgress::default();
+    let registered = corpus.slice(&mut reopened, slice_bounds(2));
+    assert!(matches!(registered.end, MaterializationEnd::Continues));
     assert_eq!(
-        (
-            reports.iter().map(|report| report.published).sum::<usize>(),
-            reports.iter().map(|report| report.replayed).sum::<usize>()
-        ),
-        (0, 2)
+        corpus.checkpoint(),
+        caught_up,
+        "a replayed registration acknowledges nothing"
     );
-    assert_eq!(corpus.inventory(), published);
+    corpus.catch_up(&mut reopened, slice_bounds(2), |_| {});
+    assert!(!corpus.live_objects().contains("r4"));
+    assert_eq!(corpus.inventory(), ledger(&seeds));
     assert!(corpus.checkpoint() > caught_up);
-    assert!(corpus.kernel.tip().unwrap() > tip);
 }
 
-/// An exhausted budget moves nothing; excluded decisions and a lost history boundary are reported, never completion.
+/// A budget exhausted partway through a scan page or a change page stops at a decision or commit boundary, keeps every completed effect, acknowledges every fully applied commit, and leaves the rest to the next slice without republishing.
+#[test]
+fn an_exhausted_budget_stops_between_decisions_and_commits_and_keeps_completed_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    let seeds = [
+        memory("x1", "One."),
+        memory("x2", "Two."),
+        memory("x3", "Three."),
+    ];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let mut progress = ClaimProgress::default();
+    corpus.slice(&mut progress, slice_bounds(8));
+    let report = corpus.faulted_slice(
+        &mut progress,
+        slice_bounds(8),
+        EpisodeFault::ExhaustBudgetAfter(1),
+    );
+    assert!(
+        matches!(report.end, MaterializationEnd::Exhausted),
+        "{report:?}"
+    );
+    assert_eq!(report.bootstrapped, 1);
+    assert!(report.advanced());
+    assert_eq!(progress, scanning(Some("x1".to_string()), true));
+    assert_eq!(corpus.inventory(), ledger(&seeds[..1]));
+    let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    assert_eq!(
+        reports.iter().map(|report| report.replayed).sum::<usize>(),
+        0,
+        "the next scan page starts after the completed decision"
+    );
+    assert_eq!(corpus.inventory(), ledger(&seeds));
+
+    let more = [memory("x4", "Four."), memory("x5", "Five.")];
+    for seed in more {
+        corpus.decide(seed);
+    }
+    let before = corpus.checkpoint().unwrap();
+    let report = corpus.faulted_slice(
+        &mut progress,
+        slice_bounds(8),
+        EpisodeFault::ExhaustBudgetAfter(1),
+    );
+    assert!(
+        matches!(report.end, MaterializationEnd::Exhausted),
+        "{report:?}"
+    );
+    assert_eq!(report.commits_consumed, 1);
+    let first = report.acknowledged_through;
+    assert!(first > before, "the applied commit is acknowledged");
+    assert_eq!(corpus.checkpoint(), Some(first));
+    assert_eq!(corpus.inventory(), {
+        let mut expected = ledger(&seeds);
+        expected.extend(ledger(&more[..1]));
+        expected
+    });
+    let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    assert_eq!(
+        reports.iter().map(|report| report.replayed).sum::<usize>(),
+        0,
+        "the applied commit is not replayed"
+    );
+    let mut expected = ledger(&seeds);
+    expected.extend(ledger(&more));
+    assert_eq!(corpus.inventory(), expected);
+
+    // A lost acknowledgement reply on the slice path is reconciled from the durable checkpoint.
+    corpus.decide(memory("x6", "Six."));
+    let lost = corpus.faulted_slice(
+        &mut progress,
+        slice_bounds(8),
+        EpisodeFault::LoseAcknowledgementReply,
+    );
+    assert!(
+        matches!(
+            lost.end,
+            MaterializationEnd::ReachedTarget | MaterializationEnd::Continues
+        ),
+        "{lost:?}"
+    );
+    assert_eq!(corpus.checkpoint(), Some(lost.acknowledged_through));
+    let failed = {
+        corpus.decide(memory("x7", "Seven."));
+        corpus.faulted_slice(
+            &mut progress,
+            slice_bounds(8),
+            EpisodeFault::FailAcknowledgement,
+        )
+    };
+    assert!(
+        matches!(
+            failed.end,
+            MaterializationEnd::Blocked(ClaimBlocked::AcknowledgementUnresolved { .. })
+        ),
+        "{failed:?}"
+    );
+}
+
+/// A cancelled budget moves nothing; excluded decisions are reported with their exclusion; a decision of another project publishes under that project's own scope; a lost history boundary blocks without acknowledging past it, every time.
 #[test]
 fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
     let dir = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(dir.path());
     corpus.seed_kernel();
-    corpus.decide(memory("kept", "Kept."));
-    corpus.decide(Seed {
+    const FOREIGN: &str = "project:foreign";
+    corpus
+        .kernel
+        .commit(intent("foreign-scope"), |envelope| {
+            envelope.insert_scope(ScopeSpec {
+                scope_id: FOREIGN.to_string(),
+                object_id: FOREIGN.to_string(),
+                source_id: FOREIGN.to_string(),
+                domain_id: MEMORY.to_string(),
+                source_kind: "kernel_route".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+                terms: vec![ScopeTermSpec {
+                    dimension: Dimension::Project.as_str().to_string(),
+                    operator: "exact".to_string(),
+                    exact_value: Some("f".repeat(64)),
+                    ..ScopeTermSpec::default()
+                }],
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let kept = memory("kept", "Kept.");
+    let unscoped = Seed {
         scoped: false,
         ..memory("unscoped", "No project.")
-    });
-    corpus.decide(Seed::scoped(
-        "note",
-        OTHER,
-        "PROJECT_RULES",
-        1,
-        "Elsewhere.",
-        "",
-    ));
+    };
+    let note = Seed::scoped("note", OTHER, "PROJECT_RULES", 1, "Elsewhere.", "");
+    let malformed = memory("bad\tid", "Malformed identity.");
+    for seed in [kept, unscoped, note, malformed] {
+        corpus.decide(seed);
+    }
+    let mut foreign = memory("foreign", "Another project's memory.").spec();
+    foreign.scope_id = Some(FOREIGN.to_string());
+    corpus
+        .kernel
+        .commit(intent("foreign-decision"), |envelope| {
+            envelope.insert_decision(foreign.clone())?;
+            envelope.record_admission(admission("foreign"))?;
+            Ok(String::new())
+        })
+        .unwrap();
 
     let cancelled = EvalBudget::unbounded();
     cancelled.cancel();
-    let mut progress = ClaimProgress::Bootstrap { after: None };
+    let mut progress = scanning(None, false);
     ClaimMaterializer::register(&corpus.kernel, NOW).unwrap();
     let report = corpus
         .materializer()
@@ -2760,13 +2943,49 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
         matches!(report.end, MaterializationEnd::Exhausted),
         "{report:?}"
     );
-    assert_eq!(progress, ClaimProgress::Bootstrap { after: None });
+    assert!(!report.advanced());
+    assert_eq!(progress, scanning(None, false));
     assert!(corpus.inventory().is_empty());
 
-    corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    let named =
+        |object: &str, exclusion: ClaimExclusion| (object.to_string(), format!("{exclusion:?}"));
+    let exclusions: BTreeSet<(String, String)> = reports
+        .iter()
+        .flat_map(|report| report.exclusions.iter())
+        .map(|(object, exclusion)| named(object, *exclusion))
+        .collect();
+    let mut expected_exclusions = BTreeSet::new();
+    for seed in [kept, unscoped, note] {
+        for exclusion in seed.ledger().1 {
+            expected_exclusions.insert(named(seed.object, exclusion));
+        }
+    }
+    expected_exclusions.insert(named("bad\tid", ClaimExclusion::MalformedIdentity));
+    expected_exclusions.insert(named(
+        "foreign",
+        ClaimExclusion::EmptyRepresentation(Representation::Rationale),
+    ));
+    assert_eq!(exclusions, expected_exclusions);
+    let foreign_rows: Vec<_> = corpus
+        .inventory()
+        .into_iter()
+        .filter(|row| row.object_id == "foreign")
+        .collect();
+    assert!(!foreign_rows.is_empty());
+    assert!(
+        foreign_rows
+            .iter()
+            .all(|row| row.scope_id.as_deref() == Some(FOREIGN)),
+        "a foreign project's memory keeps its own scope: {foreign_rows:?}"
+    );
     assert_eq!(
         corpus.live_objects(),
-        BTreeSet::from(["kept".to_string(), "note".to_string()])
+        BTreeSet::from([
+            "foreign".to_string(),
+            "kept".to_string(),
+            "note".to_string()
+        ])
     );
 
     corpus.decide(memory("late", "Late."));
@@ -2776,11 +2995,19 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
         .execute("DELETE FROM outbox WHERE commit_seq=?1", [late])
         .unwrap();
     assert!(deleted > 0);
-    let report = corpus.slice(&mut progress, slice_bounds(8));
-    assert!(
-        matches!(&report.end, MaterializationEnd::Blocked(ClaimBlocked::Stream(blocked))
-            if format!("{blocked:?}").contains("MissingHistory")),
-        "{report:?}"
-    );
+    let held = corpus.checkpoint();
+    for _ in 0..2 {
+        let report = corpus.slice(&mut progress, slice_bounds(8));
+        assert!(
+            matches!(&report.end, MaterializationEnd::Blocked(ClaimBlocked::Stream(blocked))
+                if format!("{blocked:?}").contains("MissingHistory")),
+            "{report:?}"
+        );
+        assert_eq!(
+            corpus.checkpoint(),
+            held,
+            "no acknowledgement passes the gap"
+        );
+    }
     assert!(!corpus.live_objects().contains("late"));
 }

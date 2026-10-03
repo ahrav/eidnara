@@ -515,6 +515,7 @@ impl SearchLifecycleOwner {
     }
 
     /// Stops the claim-source runner once any slice in flight returns, so a test can drive the materializer itself.
+    #[cfg(feature = "test-support")]
     pub fn pause_claim_sources(&self) {
         let _progress = self.claims.lock().unwrap_or_else(|p| p.into_inner());
         self.claims_paused
@@ -522,6 +523,7 @@ impl SearchLifecycleOwner {
     }
 
     /// Where the claim-source runner stands.
+    #[cfg(feature = "test-support")]
     pub fn claim_progress(&self) -> ClaimProgress {
         self.claims
             .lock()
@@ -1578,35 +1580,25 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
                 claims.await
             }
         };
-        let claims_continue = match claimed {
-            Ok(Ok(None)) => false,
-            Ok(Ok(Some(report))) => {
-                let continues = matches!(report.end, MaterializationEnd::Continues);
-                let detail = match &report.end {
+        let (claims_continue, detail) = match claimed {
+            Ok(Ok(None)) => (false, None),
+            Ok(Ok(Some(report))) => (
+                report.advanced(),
+                match &report.end {
                     MaterializationEnd::Blocked(blocked) => Some(format!("blocked: {blocked:?}")),
                     _ => None,
-                };
-                if detail != claim_report {
-                    if let Some(detail) = &detail {
-                        eprintln!("daemon: claim sources {detail}");
-                    }
-                    claim_report = detail;
-                }
-                continues
-            }
-            Ok(Err(error)) => {
-                let detail = Some(format!("failed: {error}"));
-                if detail != claim_report {
-                    eprintln!("daemon: claim sources failed: {error}");
-                    claim_report = detail;
-                }
-                false
-            }
-            Err(join) => {
-                eprintln!("daemon: claim source slice ended abnormally: {join}");
-                false
-            }
+                },
+            ),
+            Ok(Err(error)) => (false, Some(format!("failed: {error}"))),
+            Err(join) => (false, Some(format!("slice ended abnormally: {join}"))),
         };
+        // A repeated report is printed once, so a runner held at one commit does not flood the log.
+        if detail != claim_report {
+            if let Some(detail) = &detail {
+                eprintln!("daemon: claim sources {detail}");
+            }
+            claim_report = detail;
+        }
         if cancel.is_cancelled() {
             return;
         }

@@ -153,6 +153,7 @@ impl KernelStore {
             }
             examined += 1;
         }
+        // The byte cut never stops before the first live row and `max_rows` is nonzero, so `examined` is at least 1 whenever rows remain.
         let next = (examined < keys.len()).then(|| keys[examined - 1].0.clone());
         let decisions = load_decisions_for_objects(&tx, requested, &live)?;
         let ids = serde_json::to_string(&live).map_err(|_| KernelError::Io)?;

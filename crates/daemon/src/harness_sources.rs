@@ -462,6 +462,20 @@ impl SourcePublisher<'_> {
     /// Returns identity, revision, or artifact errors before retention, descriptor errors for permanent refusals, and kernel errors including unmet preconditions such as a missing scope. Failures after retention carry the evidence object. Permanent refusals attempt retirement; kernel failures preserve evidence without implying retryability.
     /// A known scope mismatch returns `NotFound` before retention; a scope mismatch detected in the descriptor transaction preserves the retained evidence without publishing it.
     pub fn publish(&self, unit: &SourceUnit, observed_at: i64) -> Result<Published, PublishError> {
+        self.publish_within(unit, observed_at, None)
+    }
+
+    /// [`Self::publish`] whose receipt preview and descriptor commit wait within `budget`; an exhausted budget refuses with [`KernelError::Deadline`] in [`PublishError::Kernel`]. Artifact retention has no budgeted entry and waits as it does for every caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Self::publish`] returns.
+    pub fn publish_within(
+        &self,
+        unit: &SourceUnit,
+        observed_at: i64,
+        budget: Option<&kernel::applicability::EvalBudget>,
+    ) -> Result<Published, PublishError> {
         let identity: Vec<(&str, &str)> = unit
             .identity
             .iter()
@@ -533,9 +547,13 @@ impl SourcePublisher<'_> {
             &request_digest,
             &origin,
         );
+        let receipt_wait = Instant::now() + RECEIPT_WAIT;
+        let preview_deadline = budget
+            .and_then(kernel::applicability::EvalBudget::deadline)
+            .map_or(receipt_wait, |deadline| deadline.min(receipt_wait));
         let (_, (stored, provenance)) = self
             .kernel
-            .preview(Instant::now() + RECEIPT_WAIT, |preview| {
+            .preview(preview_deadline, |preview| {
                 check_scope(preview)?;
                 Ok((
                     preview.stored_receipt(descriptor_intent.clone())?,
@@ -598,7 +616,7 @@ impl SourcePublisher<'_> {
         };
         let mut outcome = None;
         let mut committed_provenance = provenance;
-        let receipt = self.kernel.commit(descriptor_intent, |envelope| {
+        let operation = |envelope: &mut kernel::Envelope<'_>| {
             check_scope(envelope)?;
             // The classes recorded are the ones the commit itself observes, so an admission change since the preview is not carried forward.
             let (source_class, taint_class) = rule.resolve(envelope)?;
@@ -635,7 +653,13 @@ impl SourcePublisher<'_> {
             let result = published.object_id.clone();
             outcome = Some(Ok(published));
             Ok(result)
-        });
+        };
+        let receipt = match budget {
+            Some(budget) => self
+                .kernel
+                .commit_within_budget(budget, descriptor_intent, operation),
+            None => self.kernel.commit(descriptor_intent, operation),
+        };
         match (receipt, outcome) {
             (Ok(receipt), Some(Ok(published))) => Ok(Published {
                 object_id: published.object_id,

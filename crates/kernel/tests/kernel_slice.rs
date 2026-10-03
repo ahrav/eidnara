@@ -1658,6 +1658,51 @@ fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
     assert_eq!(live(&cut), ["decision-object-1"]);
     assert_eq!(cut.next.as_deref(), Some("decision-object-3"));
 
+    // Twin bounds one byte apart separate a cut before the crossing decision from a cut after it.
+    let length = |object: &str| -> u64 {
+        Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT length(decision_payload) FROM decisions WHERE object_id=?1",
+            [object],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as u64
+    };
+    let both = length("decision-object-1") + length("decision-object-4");
+    let short = store
+        .decision_page_within_budget(
+            tip,
+            None,
+            rows(8),
+            NonZeroU64::new(both - 1).unwrap(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(live(&short), ["decision-object-1"]);
+    assert_eq!(short.next.as_deref(), Some("decision-object-3"));
+    let exact = store
+        .decision_page_within_budget(tip, None, rows(8), NonZeroU64::new(both).unwrap(), &budget)
+        .unwrap();
+    assert_eq!(live(&exact), ["decision-object-1", "decision-object-4"]);
+    assert_eq!(exact.next.as_deref(), Some("decision-object-4"));
+
+    // A page of only invalidated rows returns nothing live and still moves the cursor.
+    let empty = store
+        .decision_page_within_budget(tip, Some("decision-object-1"), rows(2), bytes, &budget)
+        .unwrap();
+    assert!(empty.decisions.is_empty());
+    assert_eq!(empty.next.as_deref(), Some("decision-object-3"));
+    // Exactly `max_rows` rows left: the page ends without a cursor.
+    let last = store
+        .decision_page_within_budget(tip, Some("decision-object-3"), rows(2), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&last), ["decision-object-4", "decision-object-5"]);
+    assert_eq!(last.next, None);
+
     let cancelled = kernel::applicability::EvalBudget::unbounded();
     cancelled.cancel();
     assert_eq!(

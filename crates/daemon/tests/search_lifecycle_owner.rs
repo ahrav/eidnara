@@ -4448,6 +4448,7 @@ async fn the_running_daemon_publishes_memories_from_before_and_after_it_started(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert_eq!(claim_descriptor_count(&store), 3);
 
     store
         .commit(
@@ -4473,10 +4474,110 @@ async fn the_running_daemon_publishes_memories_from_before_and_after_it_started(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert_eq!(claim_descriptor_count(&store), 4);
     let owner = daemon.handler().search_lifecycle().unwrap();
     assert_eq!(
         owner.claim_progress(),
         daemon::claim_sources::ClaimProgress::Changes
     );
     daemon.shutdown().await;
+}
+
+/// A source backlog several scan pages long advances a bounded page per claim slice while lifecycle slices keep running between them, and shutdown during the backlog joins promptly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slices() {
+    let data = tempfile::tempdir().unwrap();
+    let kernel_root = data.path().join("eidnara").join("context").join("kernel");
+    const SCOPE: &str = "project:backlog";
+    const DECISIONS: usize = 200;
+    {
+        let seed = KernelStore::open(&kernel_root).unwrap();
+        seed.commit(
+            kernel::CommitIntent {
+                producer: "test".to_string(),
+                operation_key: "seed".to_string(),
+                request_digest: "a".repeat(64),
+                actor: "test".to_string(),
+                cause: "seed".to_string(),
+            },
+            |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "memory".to_string(),
+                    object_id: "domain:memory".to_string(),
+                    name: "memory".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_id: "domain:memory".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                envelope.insert_scope(kernel::ScopeSpec {
+                    scope_id: SCOPE.to_string(),
+                    object_id: SCOPE.to_string(),
+                    source_id: SCOPE.to_string(),
+                    domain_id: "memory".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                    terms: vec![kernel::ScopeTermSpec {
+                        dimension: kernel::Dimension::Project.as_str().to_string(),
+                        operator: "exact".to_string(),
+                        exact_value: Some("c".repeat(64)),
+                        ..kernel::ScopeTermSpec::default()
+                    }],
+                })?;
+                for index in 0..DECISIONS {
+                    let object = format!("backlog-{index:03}");
+                    envelope.insert_decision(seed_decision(&object, SCOPE))?;
+                    admitted(envelope, &object)?;
+                }
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    }
+
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let owner = loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            break owner;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    };
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tap_owner = Arc::downgrade(&owner);
+    let tap_observed = Arc::clone(&observed);
+    owner.tap_slice_events_for_test(move |event| {
+        if let SliceEvent::Waiting { .. } = event
+            && let Some(owner) = tap_owner.upgrade()
+        {
+            tap_observed.lock().unwrap().push(owner.claim_progress());
+        }
+    });
+    let store = daemon.store();
+    while claim_descriptor_count(&store) < DECISIONS {
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "the backlog did not drain"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(claim_descriptor_count(&store), DECISIONS);
+    let observed = observed.lock().unwrap().clone();
+    assert!(
+        observed.iter().any(|progress| matches!(
+            progress,
+            daemon::claim_sources::ClaimProgress::Bootstrap { after: Some(_), .. }
+        )),
+        "a lifecycle slice ran while the scan was mid-backlog: {observed:?}"
+    );
+    let stopping = Instant::now();
+    daemon.shutdown().await;
+    assert!(stopping.elapsed() < Duration::from_secs(10));
 }
