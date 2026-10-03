@@ -192,3 +192,71 @@ fn validation_decides_every_row_as_the_in_order_sum_does() {
         )
         .unwrap();
 }
+
+/// Normal reciprocals and quotients a quarter or more from every midpoint keep every block on the product path, so the product path itself must see each stored byte.
+fn product_path_case() -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
+    (1usize..100).prop_flat_map(|dimension| {
+        let scale = 1.0e-4f32..1.0e-1;
+        let quotient = (-140i32..=140, 0.1f32..0.4, any::<bool>());
+        prop::collection::vec((scale, quotient), dimension).prop_map(|coordinates| {
+            coordinates
+                .into_iter()
+                .map(|(scale, (whole, fraction, below))| {
+                    let quotient = whole as f32 + if below { -fraction } else { fraction };
+                    (quotient * scale, scale)
+                })
+                .unzip()
+        })
+    })
+}
+
+#[test]
+fn the_product_path_sees_every_stored_byte() {
+    runner()
+        .run(&product_path_case(), |(row, scales)| {
+            let layout = layout(row.len());
+            let scales = Scales::from_values(scales, layout.dimension).unwrap();
+            let mut expected = Vec::new();
+            encode_validated_into(&layout, &scales, &row, &mut expected);
+            let mut stored: Vec<u8> = expected.iter().map(|code| *code as u8).collect();
+            let encoder = Encoder::new(&scales);
+            prop_assert!(encoder.matches(&layout, &row, &stored));
+            for index in 0..stored.len() {
+                for bit in [0x01u8, 0x80] {
+                    stored[index] ^= bit;
+                    prop_assert!(
+                        !encoder.matches(&layout, &row, &stored),
+                        "byte {} bit {}",
+                        index,
+                        bit
+                    );
+                    stored[index] ^= bit;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Rows that reach the lane sum's guards: a sum below its `2^-60` floor, and enough coordinates that the margin reaches `1/4`.
+#[test]
+fn validation_past_the_lane_guards_decides_as_the_in_order_sum_does() {
+    let tiny = vec![2.0f32.powi(-40); 4];
+    let wide = row_of(1_500_000, 7, 1.0);
+    for row in [tiny, wide] {
+        let sum = in_order_sum(&row);
+        for tolerance in [0.0, 1e-3, (sum.sqrt() - 1.0).abs(), 1.0, 2.0] {
+            let layout = RowLayout {
+                dimension: row.len() as u32,
+                metric: Metric::InnerProduct,
+                unit_norm_tolerance: tolerance,
+            };
+            assert_eq!(
+                validate(&row, &layout),
+                validate_from_sum(&row, &layout, sum),
+                "dimension {} tolerance {tolerance}",
+                row.len()
+            );
+        }
+    }
+}

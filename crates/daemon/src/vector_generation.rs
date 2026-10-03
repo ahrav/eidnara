@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use host_runtime::generation::{
     FILE_HASH_BUFFER_BYTES, GenerationError, GenerationManifest, GenerationStore, ManifestFile,
-    PendingGeneration, RETAINED_FILE_BYTES, StageMeta, StreamedFile, ValidatedGeneration,
+    RETAINED_FILE_BYTES, StageMeta, StreamedFile, ValidatedGeneration,
 };
 use host_runtime::lifecycle::{LifecycleTransactionLock, PAYLOAD_MANIFEST_DIGEST_LEN};
 use retrieval::ProjectionIdentity;
@@ -295,8 +295,6 @@ pub enum FileFault {
     Identifiers,
     /// The codes are not the rows encoded under the scales.
     Codes,
-    /// The file holds more bytes than its manifest declares.
-    Size,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -760,7 +758,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
-/// Verification streams the row and code artifacts one chunk of rows at a time in one pass that calibrates the rows and compares the stored codes with the rows encoded under the stored scales, then requires the stored scales to be the calibration, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store's validation streams each file through a fixed buffer to check its hash and keeps the descriptor it hashed, and verification reads every file through that descriptor, so each byte is hashed once and the bound limits memory, not I/O.
+/// Verification streams the row and code artifacts one chunk of rows at a time in one pass that calibrates the rows and compares the stored codes with the rows encoded under the stored scales, then requires the stored scales to be the calibration, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store checks each file's inventory entry, mode, and size, and verification reads each file once through a stream that hashes the bytes it returns; the store finishes every hash before any refusal about meaning is returned, so a file whose bytes diverge from the manifest refuses as the store refuses it, and the bound limits memory, not I/O.
 ///
 /// # Errors
 ///
@@ -771,18 +769,11 @@ pub fn verify(
     expected: &ExpectedVectors<'_>,
     max_bytes: u64,
 ) -> Result<VerifiedVectors, VectorRefusal> {
-    let mut pending = store.validate_streaming(digest, &[ROWS_FILE, CODES_FILE])?;
-    let mut rows = pending.stream(ROWS_FILE).ok();
-    let mut codes = pending.stream(CODES_FILE).ok();
-    let meaning = check_meaning(
-        &mut pending,
-        rows.as_mut(),
-        codes.as_mut(),
-        expected,
-        max_bytes,
-    );
+    let mut pending = store.validate_streaming(digest, &VERIFIED_FILES)?;
+    let mut streams = VERIFIED_FILES.map(|path| pending.stream(path));
+    let meaning = check_meaning(pending.manifest(), &mut streams, expected, max_bytes);
     // Bytes that diverge from the manifest refuse as the store refuses them, ahead of any refusal about their meaning.
-    let mut generation = pending.finish(rows.into_iter().chain(codes))?;
+    let mut generation = pending.finish(streams.into_iter().flatten())?;
     let tables = meaning?;
     Ok(VerifiedVectors {
         digest: digest.to_owned(),
@@ -796,6 +787,16 @@ pub fn verify(
     })
 }
 
+/// The files [`verify`] reads, each through the stream that hashes it as it is read, so the bytes checked are the bytes hashed.
+const VERIFIED_FILES: [&str; 6] = [
+    SIDECAR_FILE,
+    ROWS_FILE,
+    CODES_FILE,
+    SCALES_FILE,
+    ROW_IDS_FILE,
+    TOMBSTONES_FILE,
+];
+
 /// What [`check_meaning`] decodes and [`VerifiedVectors`] keeps.
 struct Tables {
     sidecar: VectorSidecar,
@@ -804,15 +805,31 @@ struct Tables {
     tombstones: Vec<String>,
 }
 
-/// The checks of [`verify`] past the store's, with the row and code artifacts read through `rows` and `codes`, which are `None` when the manifest names no such file.
+/// A file's stream, or the store's refusal when the manifest names no such file.
+fn opened(
+    stream: &mut Result<StreamedFile, GenerationError>,
+) -> Result<&mut StreamedFile, VectorRefusal> {
+    stream
+        .as_mut()
+        .map_err(|error| VectorRefusal::Store(error.to_string()))
+}
+
+/// The checks of [`verify`] past the store's, reading [`VERIFIED_FILES`] through `streams` in that order.
 fn check_meaning(
-    generation: &mut PendingGeneration,
-    rows_file: Option<&mut StreamedFile>,
-    codes_file: Option<&mut StreamedFile>,
+    manifest: &GenerationManifest,
+    streams: &mut [Result<StreamedFile, GenerationError>; 6],
     expected: &ExpectedVectors<'_>,
     max_bytes: u64,
 ) -> Result<Tables, VectorRefusal> {
-    if generation.manifest().target != VECTOR_TARGET {
+    let [
+        sidecar_file,
+        rows_file,
+        codes_file,
+        scales_file,
+        ids_file,
+        tombstones_file,
+    ] = streams.each_mut();
+    if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
     let within = |bytes: u64| {
@@ -825,8 +842,8 @@ fn check_meaning(
             Ok(())
         }
     };
-    within(manifest_verification_bytes(generation.manifest()))?;
-    let sidecar_bytes = generation.take_verified_bytes(SIDECAR_FILE)?;
+    within(manifest_verification_bytes(manifest))?;
+    let sidecar_bytes = opened(sidecar_file)?.read_rest()?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
     if sidecar.schema != SIDECAR_SCHEMA {
@@ -841,7 +858,7 @@ fn check_meaning(
     if !sidecar.inventories_exactly() {
         return Err(VectorRefusal::NotVectors("inventory"));
     }
-    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != *generation.manifest() {
+    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != *manifest {
         return Err(VectorRefusal::NotVectors("manifest binding"));
     }
     // The projection schema holds no checkpoint without these, so a sidecar naming one came from no export.
@@ -857,57 +874,43 @@ fn check_meaning(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    within(verification_bytes(generation.manifest(), &sidecar))?;
+    within(verification_bytes(manifest, &sidecar))?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
-    // The bound manifest lists both artifacts, so the store streamed both.
-    let (Some(rows_file), Some(codes_file)) = (rows_file, codes_file) else {
-        return Err(VectorRefusal::NotVectors("inventory"));
-    };
-    let mut rows = RowStream::open(rows_file, &layout)?;
-    let row_count = rows.count;
+    let rows_file = opened(rows_file)?;
+    let row_count = open_rows(rows_file, &layout)?;
     if row_count != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
     let dimension = layout.dimension as usize;
     // Codes encoded under the stored scales are the codes encoded under the calibration whenever the two scales are equal, which is checked before any code refusal, so one pass over the rows both calibrates and compares the codes.
     // Each refusal about the scales or codes files is held until every check that precedes it in refusal order has passed.
-    let scales_bytes = generation.take_verified_bytes(SCALES_FILE);
+    let scales_bytes = opened(scales_file).and_then(|file| Ok(file.read_rest()?));
     let stored_scales = scales_bytes
         .as_ref()
         .ok()
         .and_then(|bytes| Scales::decode(bytes, layout.dimension).ok());
-    let codes_size = codes_file.size();
-    let codes_verdict = if codes_file.len_on_disk().map_err(io_refusal)? > codes_size {
-        Err(fault(CODES_FILE, FileFault::Size))
-    } else if row_count.checked_mul(dimension as u64) != Some(codes_size) {
-        Err(fault(CODES_FILE, FileFault::Codes))
-    } else {
+    let codes_file = opened(codes_file)?;
+    let mut codes_verdict = if row_count.checked_mul(dimension as u64) == Some(codes_file.size()) {
         Ok(())
+    } else {
+        Err(fault(CODES_FILE, FileFault::Codes))
     };
     let encoder = stored_scales.as_ref().map(scalar::Encoder::new);
-    let mut compare = encoder.as_ref().filter(|_| codes_verdict.is_ok());
-    let mut codes_verdict = codes_verdict;
-    let chunk_rows = rows.chunk_rows();
-    let mut stored = vec![
-        0u8;
-        if compare.is_some() {
-            chunk_rows * dimension
-        } else {
-            0
-        }
-    ];
+    let chunk_rows =
+        (row_chunk_bytes(layout.dimension) / codec::row_bytes(layout.dimension)) as usize;
+    let mut stored = vec![0u8; chunk_rows * dimension];
     let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
     // The decoder validates each row under the layout before it reaches the calibrator or the encoder; the stored codes of each row chunk are read as the chunk starts.
-    rows.for_each(|index, row| {
+    for_each_row(rows_file, &layout, row_count, |index, row| {
         calibrator.push_validated(row);
-        let Some(encoder) = compare else {
+        let (Some(encoder), Ok(())) = (&encoder, &codes_verdict) else {
             return Ok(());
         };
         let slot = index % chunk_rows;
         if slot == 0 {
             let chunk = (row_count - index as u64).min(chunk_rows as u64) as usize;
             if let Err(error) = codes_file.read_exact(&mut stored[..chunk * dimension]) {
-                (codes_verdict, compare) = (Err(io_refusal(error)), None);
+                codes_verdict = Err(io_refusal(error));
                 return Ok(());
             }
         }
@@ -916,7 +919,7 @@ fn check_meaning(
             row,
             &stored[slot * dimension..(slot + 1) * dimension],
         ) {
-            (codes_verdict, compare) = (Err(fault(CODES_FILE, FileFault::Codes)), None);
+            codes_verdict = Err(fault(CODES_FILE, FileFault::Codes));
         }
         Ok(())
     })?;
@@ -931,16 +934,13 @@ fn check_meaning(
         return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
     drop(scales_bytes);
-    let ids = decode_list(&generation.take_verified_bytes(ROW_IDS_FILE)?, row_count)
+    let ids = decode_list(&opened(ids_file)?.read_rest()?, row_count)
         .ok_or_else(|| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
     if ids.len() as u64 != row_count || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
-    let tombstones = decode_list(
-        &generation.take_verified_bytes(TOMBSTONES_FILE)?,
-        sidecar.tombstones,
-    )
-    .ok_or_else(|| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
+    let tombstones = decode_list(&opened(tombstones_file)?.read_rest()?, sidecar.tombstones)
+        .ok_or_else(|| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
     if tombstones.len() as u64 != sidecar.tombstones
         || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
         || share_an_entry(&ids, &tombstones)
@@ -1100,64 +1100,43 @@ fn io_refusal(error: io::Error) -> VectorRefusal {
     VectorRefusal::Io(error.kind().to_string())
 }
 
-/// The original-row artifact read through one fixed chunk: the header is checked once, then rows are decoded chunk by chunk under the layout.
-struct RowStream<'a> {
-    file: &'a mut StreamedFile,
-    layout: RowLayout,
-    count: u64,
+/// Checks the original-row artifact's header and that the file holds exactly the rows it declares, and returns their count.
+fn open_rows(file: &mut StreamedFile, layout: &RowLayout) -> Result<u64, VectorRefusal> {
+    let size = file.size();
+    let mut header =
+        vec![0u8; codec::ARTIFACT_HEADER_BYTES.min(usize::try_from(size).unwrap_or(0))];
+    file.read_exact(&mut header).map_err(io_refusal)?;
+    let count = codec::decode_header(&header, layout).map_err(VectorRefusal::Rows)?;
+    codec::check_body(count, size - codec::ARTIFACT_HEADER_BYTES as u64, layout)
+        .map_err(VectorRefusal::Rows)?;
+    Ok(count)
 }
 
-impl<'a> RowStream<'a> {
-    /// Checks the header and that the file holds exactly the declared rows; more bytes than its manifest size refuse as [`FileFault::Size`].
-    fn open(file: &'a mut StreamedFile, layout: &RowLayout) -> Result<Self, VectorRefusal> {
-        let size = file.size();
-        if file.len_on_disk().map_err(io_refusal)? > size {
-            return Err(VectorRefusal::File {
-                path: ROWS_FILE,
-                fault: FileFault::Size,
-            });
+/// Calls `each` with the index and decoded coordinates of each of the `count` rows that follow the header, in file order, read one chunk at a time; a row outside the layout refuses at its index.
+fn for_each_row(
+    file: &mut StreamedFile,
+    layout: &RowLayout,
+    count: u64,
+    mut each: impl FnMut(usize, &[f32]) -> Result<(), VectorRefusal>,
+) -> Result<(), VectorRefusal> {
+    let row_bytes = codec::row_bytes(layout.dimension) as usize;
+    let mut chunk = vec![0u8; row_chunk_bytes(layout.dimension) as usize];
+    let mut decoder = codec::RowDecoder::new(layout);
+    let count = count as usize;
+    let mut index = 0;
+    while index < count {
+        let bytes = &mut chunk
+            [..((count - index) * row_bytes).min(row_chunk_bytes(layout.dimension) as usize)];
+        file.read_exact(bytes).map_err(io_refusal)?;
+        for raw in bytes.chunks_exact(row_bytes) {
+            each(
+                index,
+                decoder.decode(index, raw).map_err(VectorRefusal::Rows)?,
+            )?;
+            index += 1;
         }
-        let header_len = codec::ARTIFACT_HEADER_BYTES.min(usize::try_from(size).unwrap_or(0));
-        let mut header = vec![0u8; header_len];
-        file.read_exact(&mut header).map_err(io_refusal)?;
-        let count = codec::decode_header(&header, layout).map_err(VectorRefusal::Rows)?;
-        codec::check_body(count, size - codec::ARTIFACT_HEADER_BYTES as u64, layout)
-            .map_err(VectorRefusal::Rows)?;
-        Ok(Self {
-            file,
-            layout: *layout,
-            count,
-        })
     }
-
-    fn chunk_rows(&self) -> usize {
-        (row_chunk_bytes(self.layout.dimension) / codec::row_bytes(self.layout.dimension)) as usize
-    }
-
-    /// Calls `each` with every row's index and decoded coordinates in file order; a row outside the layout refuses at its index.
-    fn for_each(
-        &mut self,
-        mut each: impl FnMut(usize, &[f32]) -> Result<(), VectorRefusal>,
-    ) -> Result<(), VectorRefusal> {
-        let row_bytes = codec::row_bytes(self.layout.dimension) as usize;
-        let chunk_rows = self.chunk_rows();
-        let mut chunk = vec![0u8; chunk_rows * row_bytes];
-        let mut decoder = codec::RowDecoder::new(&self.layout);
-        let count = self.count as usize;
-        let mut index = 0;
-        while index < count {
-            let bytes = &mut chunk[..chunk_rows.min(count - index) * row_bytes];
-            self.file.read_exact(bytes).map_err(io_refusal)?;
-            for raw in bytes.chunks_exact(row_bytes) {
-                each(
-                    index,
-                    decoder.decode(index, raw).map_err(VectorRefusal::Rows)?,
-                )?;
-                index += 1;
-            }
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(), VectorRefusal> {
