@@ -378,10 +378,12 @@ function scanPredecessorTokens(extractedRoot: string): string[] {
     const hits: string[] = [];
     for (const path of walkFiles(extractedRoot)) {
         const rel = relative(extractedRoot, path);
+        // The scan covers project-controlled content; the payload's binaries and pinned model files, the tokenizer vocabulary among them, are upstream artifacts verified by digest.
         if (
             rel.endsWith(".node") ||
             rel.endsWith(".tgz") ||
-            rel.includes("/payload/bin/")
+            rel.includes("/payload/bin/") ||
+            rel.includes("/payload/model/")
         )
             continue;
         const bytes = readFileSync(path);
