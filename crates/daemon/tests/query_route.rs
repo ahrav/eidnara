@@ -342,7 +342,11 @@ async fn each_bound_saturates_before_its_protected_work() {
     assert_eq!(entry_ids(&outcome.body).len(), 1);
     assert!(outcome.truncated);
     assert_eq!(outcome.body["truncated"], true);
-    assert_eq!(outcome.fused.entries().len(), total);
+    assert_eq!(
+        outcome.fused.entries().len(),
+        2,
+        "the ranking ends at the survivor that marks the answer truncated"
+    );
 
     let mut bytes = limits();
     bytes.response_bytes = NonZeroUsize::new(200).unwrap();
@@ -645,5 +649,51 @@ async fn a_claim_changed_after_admission_is_dropped_without_renumbering_the_surv
         let (position, score) = earlier[entry["occurrence_id"].as_str().unwrap()];
         assert_eq!((&entry["position"], &entry["score"]), (position, score));
     }
+    fixture.daemon.shutdown().await;
+}
+
+/// Claim validation reads only the claims the answer can serve plus its truncation witness: a corrupt claim row ranked past them fails the full answer closed and leaves an answer bounded to one row unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_validation_reads_only_the_claims_the_answer_can_reach() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let full = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let entries = full.body["entries"].as_array().unwrap();
+    let corrupt = entries
+        .iter()
+        .skip(2)
+        .rfind(|entry| entry["canonical"]["decision_object_id"] != "rule")
+        .and_then(|entry| entry["occurrence_id"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "a claim the exact lane never reads ranks third or later: {}",
+                full.body
+            )
+        });
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::MIN;
+    let before = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    fixture
+        .projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE exact_associations SET extraction_version=7 WHERE occurrence_id=?1",
+                [corrupt],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.run(&limits(), budget.shared(), QUERY, |_| {}).err(),
+        Some(QueryFailure::Unavailable("claim_validation"))
+    );
+    let after = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(after.body, before.body);
     fixture.daemon.shutdown().await;
 }
