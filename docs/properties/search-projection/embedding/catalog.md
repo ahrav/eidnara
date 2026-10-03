@@ -366,14 +366,14 @@ Open questions:
 Type: liveness
 Reachability: default-production - every native call takes a grant from one
 scheduler that serves queries first and a background text after eight query
-grants (`crates/host-runtime/src/local_embeddings/scheduler.rs:50-61`,
-`:126-172`, `:188-199`). Routed and in-process queries wait as `Query`
-(`mod.rs:1113-1170`, `:511-546`); batch texts wait one text at a time as
-`Background` (`mod.rs:902-936`).
+grants (`crates/host-runtime/src/local_embeddings/scheduler.rs:50-59`,
+`:126-172`, `:188-200`). Routed and in-process queries wait as `Query`
+(`mod.rs:1112-1168`, `:511-543`); batch texts wait one text at a time as
+`Background` (`mod.rs:902-935`).
 Status: active
 Exercised: partial - the scheduler queues, priority, the ninth grant, and the
 fifth-waiter refusal behind a background holder are constructed
-(`scheduler.rs:266-310`, `mod.rs:1797-1849`,
+(`scheduler.rs:271-315`, `mod.rs:1793-1845`,
 `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). A saturated
 product backfill workload and the approved service bound are missing.
 Guarantee: Backfill saturation preserves the declared query admission capacity
@@ -395,7 +395,7 @@ fairness grant is source-verified, and the saturated-workload service bound is
 not yet measured.
 Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237` asserts a
 waiting query takes the slot ahead of a waiting batch text;
-`crates/host-runtime/src/local_embeddings/scheduler.rs:266-310` asserts query-first
+`crates/host-runtime/src/local_embeddings/scheduler.rs:271-315` asserts query-first
 FIFO order, the ninth grant to background, and the fifth-waiter refusal. No
 saturated-workload service-bound check exists.
 Impact: Offline backfill consumes the useful lifetime of interactive retrieval.
@@ -445,7 +445,7 @@ Reachability: test-only - no production RP2.1 embedding supervisor slice exists.
 The fused route now awaits in-process query embedding under its request budget
 before any scan unit (`crates/daemon/src/query_route.rs:1572`, `:578-600`), and a
 started native call keeps its grant and admission permit after its caller's
-deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1113-1170`). The
+deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1112-1168`). The
 existing scheduler and kernel budget are separate paths
 (`crates/daemon/src/memory_classifier_scheduler.rs:163-220`;
 `crates/kernel/src/applicability/checkout.rs:146-203`).
@@ -472,9 +472,9 @@ P2 line 53 and P7 line 81 require composition; existing ownership paths are
 source-verified but not composed for RP2.1.
 Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:240-313` and
 `crates/daemon/src/memory_classifier_scheduler.rs:1180-1254` are unaudited cancellation
-checks. `crates/host-runtime/src/local_embeddings/mod.rs:1852-1888` asserts a timed-out
+checks. `crates/host-runtime/src/local_embeddings/mod.rs:1848-1884` asserts a timed-out
 query keeps its grant and permit until the native call returns;
-`crates/host-runtime/src/local_embeddings/scheduler.rs:313-370 and `:422-453`` asserts cancelled,
+`crates/host-runtime/src/local_embeddings/scheduler.rs:318-375` and `scheduler.rs:427-458` asserts cancelled,
 handed-but-untaken, and closed waiters release exactly once. No shared
 embedding/SQLite/dense budget check exists.
 Impact: Deadline renewal, orphaned inference, early capacity reuse, or maintenance
