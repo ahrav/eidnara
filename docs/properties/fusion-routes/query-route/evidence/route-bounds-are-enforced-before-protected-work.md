@@ -20,8 +20,9 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
   budget is derived; `execute` passes `query_bytes` to `classify`, refuses
   more `id:` selectors than `probes` before the first page, passes `probes`
   and `query_bytes` to `analyze_segments`,
-  `probes`/`lexical_scan_rows`/`lexical_accepted`/`validation_batch` to
-  `lexical::scan` and `lexical::admit`, `exact_page_rows` and `exact_pages`
+  `probes`/`lexical_scan_rows`/`lexical_accepted`/`validation_batch`/
+  `lexical_qualifying_matches`/`lexical_rank_budget` to `lexical::scan` and
+  `lexical::admit` through `QueryRouteLimits::lexical_retrieval_bounds`, `exact_page_rows` and `exact_pages`
   to the exact loop, `validation_batch` to the exact lane's admission and to
   revalidation through `judge_eligible`, `fused_union` to `fuse`, measures the
   envelope with `truncated: false` and refuses one over `response_bytes`
@@ -29,7 +30,8 @@ Repository: `/local/home/ahrav/scratch/eidnara`; base `rp27/u2-weighted-rrf` at
   materialization loop, which measures each entry with `measure_json` before
   pushing it.
 - `crates/daemon/tests/query_route.rs`
-  `each_bound_saturates_before_its_protected_work` and the
+  `each_bound_saturates_before_its_protected_work`,
+  `the_lexical_ranking_bounds_report_every_scope_they_skip`, and the
   `response_floor` clause of
   `a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves`;
   `crates/daemon/src/query_route.rs`

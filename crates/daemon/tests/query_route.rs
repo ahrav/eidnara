@@ -13,6 +13,7 @@ use kernel::{ArtifactDestination, ProjectScope};
 use retrieval::eligibility::Authority;
 use retrieval::fusion::Lane;
 use retrieval::install_identity;
+use serde_json::json;
 use support::query_route::{
     ALL_PHASES, FOREIGN, Fixture, QUERY, entry_ids, limits, projection_identity, request_budget,
 };
@@ -318,7 +319,7 @@ async fn each_bound_saturates_before_its_protected_work() {
     pages.exact_pages = NonZeroUsize::new(1).unwrap();
     let (outcome, _) = run(&pages, QUERY);
     let outcome = outcome.unwrap();
-    assert_eq!(outcome.statuses[0], LaneStatus::Incomplete("page_bound"));
+    assert_eq!(outcome.statuses[0], LaneStatus::incomplete("page_bound"));
     assert_eq!(outcome.body["degraded"], true);
     assert_eq!(outcome.body["lanes"]["exact"]["status"], "incomplete");
 
@@ -339,7 +340,7 @@ async fn each_bound_saturates_before_its_protected_work() {
     let outcome = outcome.unwrap();
     assert_eq!(
         outcome.statuses[1],
-        LaneStatus::Incomplete("accepted_bound"),
+        LaneStatus::incomplete("accepted_bound"),
         "{}",
         outcome.body
     );
@@ -351,7 +352,7 @@ async fn each_bound_saturates_before_its_protected_work() {
     let outcome = outcome.unwrap();
     assert_eq!(
         outcome.statuses[1],
-        LaneStatus::Incomplete("scan_bound"),
+        LaneStatus::incomplete("scan_bound"),
         "{}",
         outcome.body
     );
@@ -491,6 +492,26 @@ fn production_limits_are_the_d23_set() {
         limits.response_bytes.get(),
     ];
     assert_eq!(sizes, [4096, 16, 4096, 128, 128, 32, 4, 320, 32, 65_536]);
+    assert_eq!(
+        (
+            limits.lexical_qualifying_matches.get(),
+            limits.lexical_rank_budget.get()
+        ),
+        (20_000, 30_000)
+    );
+    // `lexical_scan_p99_at_one_million_occurrences` in the retrieval crate measures these bounds.
+    let lexical = limits.lexical_retrieval_bounds();
+    assert_eq!(
+        [
+            lexical.max_probes.get(),
+            lexical.scan_rows.get(),
+            lexical.max_accepted.get(),
+            lexical.batch_rows.get(),
+            lexical.qualifying_matches.get(),
+            lexical.rank_budget.get(),
+        ],
+        [16, 4096, 128, 128, 20_000, 30_000]
+    );
     assert_eq!(limits.deadline_ceiling, Duration::from_secs(5));
     let dense = limits.dense.unwrap();
     assert_eq!(
@@ -597,5 +618,54 @@ async fn a_claim_changed_after_admission_is_dropped_without_renumbering_the_surv
         let (position, score) = earlier[entry["occurrence_id"].as_str().unwrap()];
         assert_eq!((&entry["position"], &entry["score"]), (position, score));
     }
+    fixture.daemon.shutdown().await;
+}
+
+/// In the fixture, `explicit` matches two occurrences, `because` three, and `contract` four.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_lexical_ranking_bounds_report_every_scope_they_skip() {
+    let fixture = Fixture::build().await;
+    let run = |qualifying: usize, rank_budget: usize, query: &str| {
+        let mut limits = limits();
+        limits.lexical_qualifying_matches = NonZeroUsize::new(qualifying).unwrap();
+        limits.lexical_rank_budget = NonZeroUsize::new(rank_budget).unwrap();
+        let (_token, budget) = request_budget(10_000);
+        let outcome = fixture
+            .run(&limits, budget.shared(), query, |_| {})
+            .unwrap();
+        let lexical = outcome
+            .fused
+            .entries()
+            .iter()
+            .filter(|entry| entry.lane(Lane::Lexical).is_some())
+            .count();
+        (outcome.body["lanes"]["lexical"].clone(), lexical)
+    };
+    let query = "id:rule because contract explicit";
+    assert_eq!(run(100, 100, query), (json!({"status": "complete"}), 7));
+
+    // Every probe matches more than one row, so each is read unranked.
+    let (lane, lexical) = run(1, 100, QUERY);
+    assert_eq!(
+        lane,
+        json!({"status": "incomplete", "reason": "common_terms"})
+    );
+    assert!(lexical > 0);
+
+    // The smallest qualifying probe is already over the budget, so nothing is ranked.
+    let (lane, lexical) = run(100, 1, QUERY);
+    assert_eq!(
+        lane,
+        json!({"status": "incomplete", "reason": "rank_budget"})
+    );
+    assert_eq!(lexical, 0);
+
+    // `contract` is common and `because` does not fit the budget behind `explicit`; both skips are reported.
+    let (lane, lexical) = run(3, 3, query);
+    assert_eq!(
+        lane,
+        json!({"status": "incomplete", "reason": "common_terms", "also": ["rank_budget"]})
+    );
+    assert_eq!(lexical, 2);
     fixture.daemon.shutdown().await;
 }

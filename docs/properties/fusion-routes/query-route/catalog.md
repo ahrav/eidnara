@@ -313,7 +313,8 @@ Type: safety
 Reachability: test-only
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route.rs`
-`each_bound_saturates_before_its_protected_work` and
+`each_bound_saturates_before_its_protected_work`,
+`the_lexical_ranking_bounds_report_every_scope_they_skip`, and
 `a_lane_that_cannot_run_degrades_the_answer_while_the_other_serves`,
 `crates/daemon/src/query_route.rs`
 `a_response_bound_below_the_empty_envelope_is_refused_at_installation`, and
@@ -321,8 +322,9 @@ Exercised: yes - `crates/daemon/tests/query_route.rs`
 `scope_harness_and_disable_are_decided_before_any_candidate_read`.
 Guarantee: Every bound in `QueryRouteLimits` is checked before the work it
 protects: query bytes before classification, the selector count and lexical
-atoms against `probes` before any page or scan, scan rows and accepted rows
-inside the lexical lane, the fused union inside `fuse`, the validation batch
+atoms against `probes` before any page or scan, the lexical qualifying
+match count and rank budget before the engine ranks any probe, scan rows and
+accepted rows inside the lexical lane, the fused union inside `fuse`, the validation batch
 per kernel call, result rows and response bytes before each entry is
 serialized and the response bytes against the envelope before any entry; an
 absent limit set disables the route; a limit set the kernel could not serve,
@@ -342,7 +344,11 @@ one row reports the exact lane `incomplete` with reason `page_bound`;
 `probes = 1` refuses two selectors as invalid before the exact phase runs and
 reports two prose atoms as the lexical lane `unavailable` while the exact lane
 still serves; `lexical_accepted = 1` and `lexical_scan_rows = 1` report
-`accepted_bound` and `scan_bound`; a query over `query_bytes` is refused as
+`accepted_bound` and `scan_bound`; `lexical_qualifying_matches = 1` reads
+every multi-match probe unranked and reports `common_terms`;
+`lexical_rank_budget = 1` ranks no probe and reports `rank_budget`; a query
+whose common probe and budget-skipped probe both apply reports `common_terms`
+with `also: ["rank_budget"]`, so every skipped scope is named; a query over `query_bytes` is refused as
 invalid at the handler and again by `classify`; a `validation_batch` over the
 kernel's candidate maximum is refused by `set_query_route_limits` and installs
 nothing; a `response_bytes` one below the floor is refused by `validate` with

@@ -14,9 +14,8 @@ use kernel::{
 };
 use retrieval::batch::{BatchBounds, MutationIdentity, ProjectionBatch, apply_batch};
 use retrieval::lexical::{
-    Authority, Completion, IncompleteReason, LexicalBounds, Probe, QUALIFYING_MATCHES,
-    RANKED_MATCH_BUDGET, Retrieval, RetrievalBounds, RetrievalRefusal, Window, admit, analyze,
-    compile, retrieve, retrieve_with_hook_for_test, scan,
+    Authority, Completion, IncompleteReason, LexicalBounds, Probe, Retrieval, RetrievalBounds,
+    RetrievalRefusal, Window, admit, analyze, compile, retrieve, retrieve_with_hook_for_test, scan,
 };
 use retrieval::{OccurrenceRecord, Payload, PersistBounds, ProjectionIdentity, install_identity};
 use rusqlite::Connection;
@@ -130,12 +129,18 @@ fn batch_bounds() -> BatchBounds {
     }
 }
 
+/// D26b's qualification threshold and ranked-match budget, the values the threshold fixtures are built around.
+const QUALIFYING_MATCHES: usize = 20_000;
+const RANK_BUDGET: usize = 30_000;
+
 fn bounds() -> RetrievalBounds {
     RetrievalBounds {
         max_probes: NonZeroUsize::new(8).unwrap(),
         scan_rows: NonZeroUsize::new(64).unwrap(),
         max_accepted: NonZeroUsize::new(64).unwrap(),
         batch_rows: NonZeroUsize::new(2).unwrap(),
+        qualifying_matches: NonZeroUsize::new(QUALIFYING_MATCHES).unwrap(),
+        rank_budget: NonZeroUsize::new(RANK_BUDGET).unwrap(),
     }
 }
 
@@ -1501,7 +1506,7 @@ fn a_held_kernel_reader_does_not_outlive_the_budget() {
 
 /// 20,001 rows whose terms match exactly the counts the D26b boundaries name: `t19999`, `t20000`, and `t20001` match that many rows;
 /// `c15000` matches 15,000 rows and `d14999`, `d15000`, `d15001` match that many, so a pair sums to 29,999, 30,000, or 30,001.
-fn project_thresholds(fixture: &Fixture) {
+fn project_thresholds(fixture: &Fixture) -> Vec<Row> {
     let rows: Vec<Row> = (0..20_001)
         .map(|n: usize| {
             let mut terms = vec![format!("row{n}")];
@@ -1524,11 +1529,12 @@ fn project_thresholds(fixture: &Fixture) {
     for chunk in rows.chunks(4000) {
         fixture.project(chunk);
     }
+    rows
 }
 
 #[test]
 fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
-    assert_eq!((QUALIFYING_MATCHES, RANKED_MATCH_BUDGET), (20_000, 30_000));
+    assert_eq!((QUALIFYING_MATCHES, RANK_BUDGET), (20_000, 30_000));
     let fixture = Fixture::all_admitted();
     project_thresholds(&fixture);
     let run = |request: &str| {
@@ -1590,9 +1596,10 @@ fn ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries() {
 }
 
 #[test]
-fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifying_probe() {
+fn common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only_the_qualifying_probe()
+ {
     let fixture = Fixture::all_admitted();
-    project_thresholds(&fixture);
+    let rows = project_thresholds(&fixture);
     let tight = RetrievalBounds {
         scan_rows: NonZeroUsize::new(5).unwrap(),
         ..bounds()
@@ -1609,7 +1616,7 @@ fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifyi
         })
         .unwrap()
         .unwrap();
-    let newest: Vec<String> = fixture
+    let mut highest: Vec<String> = fixture
         .raw()
         .prepare("SELECT occurrence_id FROM lexical WHERE lexical MATCH 't20001' ORDER BY rowid DESC LIMIT 5")
         .unwrap()
@@ -1617,15 +1624,14 @@ fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifyi
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
+    highest.sort();
     assert_eq!(scanned.hits(), 5);
     let mut hit: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
-    let mut newest_sorted = newest.clone();
     hit.sort();
-    newest_sorted.sort();
-    assert_eq!(
-        hit, newest_sorted,
-        "the common scan keeps the newest rowids"
-    );
+    assert_eq!(hit, highest, "the common scan keeps the highest rowids");
+    // Admitting the kept rows' sources makes every one of them a contribution, so the assertion below sees them all.
+    let objects: Vec<&str> = highest.iter().map(|id| object_of(&rows, id)).collect();
+    fixture.admit(&objects);
     let only_common = fixture
         .retrieve(&probes("t20001"), tight, &EvalBudget::unbounded())
         .unwrap();
@@ -1634,11 +1640,12 @@ fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifyi
         Completion::Incomplete(IncompleteReason::CommonTerms)
     );
     assert_eq!(only_common.consumed.ranked_matches, 0);
+    assert_eq!(ids_of(&only_common), highest);
     assert!(
         only_common
             .contributions
             .iter()
-            .all(|contribution| newest.contains(&contribution.occurrence_id))
+            .all(|contribution| contribution.rank == 0.0)
     );
 
     // The rare probe is ranked and the common one skipped; the skip stays visible.
@@ -1653,26 +1660,61 @@ fn common_probes_are_read_newest_first_and_a_mixed_query_ranks_only_the_qualifyi
     assert_eq!(mixed.consumed.scanned_rows, 1);
 }
 
-/// D26b lexical gate at one million occurrences: an open-loop Poisson schedule of rare, qualifying, mixed, and common-only
-/// queries, each timed from its scheduled arrival to the end of its bounded scan. Run in release on the D21 host with
-/// `--ignored`; `EIDNARA_LEXICAL_SCALE_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
+/// The lexical lane's production retrieval bounds. The daemon's `production_limits_are_the_d23_set` pins
+/// `QueryRouteLimits::production().lexical_retrieval_bounds()` to these same values.
+fn production_bounds() -> RetrievalBounds {
+    let n = |value: usize| NonZeroUsize::new(value).unwrap();
+    RetrievalBounds {
+        max_probes: n(16),
+        scan_rows: n(4096),
+        max_accepted: n(128),
+        batch_rows: n(128),
+        qualifying_matches: n(QUALIFYING_MATCHES),
+        rank_budget: n(RANK_BUDGET),
+    }
+}
+
+/// D26b lexical gate at one million occurrences under the production lexical bounds: an open-loop Poisson schedule of
+/// rare, qualifying, mixed, and common-only queries, each timed from its scheduled arrival to the end of its scan and
+/// admission. Every occurrence whose index is not a multiple of 16 is admitted, so admission judges, accepts, and
+/// revalidates as it does for a mostly eligible corpus. Run in release on the D21 host with `--ignored`;
+/// `EIDNARA_LEXICAL_SCALE_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
 #[test]
 #[ignore = "builds a 1M-occurrence projection; run in release on the D21 host with --ignored"]
 fn lexical_scan_p99_at_one_million_occurrences() {
-    const OCCURRENCES: usize = 1_000_000;
-    let queries: usize = std::env::var("EIDNARA_LEXICAL_SCALE_QUERIES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(600);
-    let rate_per_second: f64 = std::env::var("EIDNARA_LEXICAL_SCALE_RATE")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(10.0);
+    fn setting<T: std::str::FromStr>(name: &str) -> Option<T> {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+    }
+    let occurrences: usize = setting("EIDNARA_LEXICAL_SCALE_OCCURRENCES").unwrap_or(1_000_000);
+    let queries: usize = setting("EIDNARA_LEXICAL_SCALE_QUERIES").unwrap_or(600);
+    let rate_per_second: f64 = setting("EIDNARA_LEXICAL_SCALE_RATE").unwrap_or(10.0);
+    let first_after_build = queries.min(50);
+    assert!(
+        queries > first_after_build,
+        "the warm window needs queries past the first {first_after_build}"
+    );
     let fixture = Fixture::all_admitted();
     let built = Instant::now();
     let mut chunk = Vec::with_capacity(1000);
-    for n in 0..OCCURRENCES {
-        // Filler of 0 to 96 tokens spreads the ranks, and `k*` terms match exactly 20,000 rows each, the largest qualifying probe.
+    let flush = |chunk: &mut Vec<Row>| {
+        fixture.project(chunk);
+        let admitted: Vec<&str> = chunk
+            .iter()
+            .filter(|row| {
+                row.object
+                    .strip_prefix("scale-")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .is_some_and(|n| n % 16 != 0)
+            })
+            .map(|row| row.object.as_str())
+            .collect();
+        fixture.admit(&admitted);
+        chunk.clear();
+    };
+    for n in 0..occurrences {
+        // Filler of 0 to 96 tokens spreads the ranks, and at one million occurrences each `k*` term matches exactly 20,000 rows, the largest qualifying probe.
         let text = format!(
             "w{} m{} k{} c{} common{}",
             n % 50_000,
@@ -1683,13 +1725,12 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         );
         chunk.push(Row::claim(&format!("scale-{n}"), &text));
         if chunk.len() == 1000 {
-            fixture.project(&chunk);
-            chunk.clear();
+            flush(&mut chunk);
         }
     }
-    fixture.project(&chunk);
+    flush(&mut chunk);
     eprintln!(
-        "projected {OCCURRENCES} occurrences in {:?}",
+        "projected and admitted {occurrences} occurrences in {:?}",
         built.elapsed()
     );
     let mix = [
@@ -1698,6 +1739,7 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         "w7 c3",
         "common",
         "c1 c2",
+        "c1 c2 c3 c4",
         "m1 m2",
         "w4242 m17",
         "k3",
@@ -1725,8 +1767,10 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         done_us: u64,
         request: &'static str,
         outcome: String,
+        censored: bool,
         counted: usize,
         ranked: usize,
+        contributions: usize,
     }
     let start = Instant::now();
     let micros =
@@ -1742,21 +1786,23 @@ fn lexical_scan_p99_at_one_million_occurrences() {
             Some(due + Duration::from_secs(5)),
             Arc::new(AtomicBool::new(false)),
         );
-        let outcome = fixture.retrieve(&probes(request), bounds(), &budget);
+        let outcome = fixture.retrieve(&probes(request), production_bounds(), &budget);
         let done = Instant::now();
-        let (outcome, counted, ranked) = match outcome {
+        let (outcome, censored, counted, ranked, contributions) = match outcome {
             Ok(retrieval)
                 if retrieval.completion
                     == Completion::Incomplete(IncompleteReason::BudgetExhausted) =>
             {
-                ("censored: budget exhausted".to_string(), 0, 0)
+                ("budget exhausted".to_string(), true, 0, 0, 0)
             }
             Ok(retrieval) => (
-                format!("{:?}", retrieval.completion),
+                format!("{:?}", retrieval.reasons),
+                false,
                 retrieval.consumed.counted_rows,
                 retrieval.consumed.ranked_matches,
+                retrieval.contributions.len(),
             ),
-            Err(refusal) => (format!("censored: {refusal}"), 0, 0),
+            Err(refusal) => (refusal.to_string(), true, 0, 0, 0),
         };
         samples.push(Sample {
             scheduled_us: micros(due),
@@ -1764,14 +1810,13 @@ fn lexical_scan_p99_at_one_million_occurrences() {
             done_us: micros(done),
             request,
             outcome,
+            censored,
             counted,
             ranked,
+            contributions,
         });
     }
-    let completed = samples
-        .iter()
-        .filter(|sample| !sample.outcome.starts_with("censored"))
-        .count();
+    let completed = samples.iter().filter(|sample| !sample.censored).count();
     let latency = |range: std::ops::Range<usize>| {
         let mut waits: Vec<u64> = samples[range]
             .iter()
@@ -1782,8 +1827,8 @@ fn lexical_scan_p99_at_one_million_occurrences() {
         (p(0.5), p(0.99), *waits.last().unwrap())
     };
     // The page cache holds the projection the build just wrote, so the first queries are first-after-build, not cold-cache.
-    let first = latency(0..50);
-    let warm = latency(50..queries);
+    let first = latency(0..first_after_build);
+    let warm = latency(first_after_build..queries);
     let most_ranked = samples
         .iter()
         .map(|sample| sample.ranked)
@@ -1795,18 +1840,20 @@ fn lexical_scan_p99_at_one_million_occurrences() {
     );
     if let Some(path) = std::env::var_os("EIDNARA_LEXICAL_SCALE_SAMPLES") {
         let mut rows = vec![format!(
-            "{{\"rate_per_second\":{rate_per_second},\"seed\":\"0x9e3779b97f4a7c15\",\"occurrences\":{OCCURRENCES},\"offered\":{queries},\"completed\":{completed}}}"
+            "{{\"rate_per_second\":{rate_per_second},\"seed\":\"0x9e3779b97f4a7c15\",\"occurrences\":{occurrences},\"offered\":{queries},\"completed\":{completed}}}"
         )];
         rows.extend(samples.iter().map(|sample| {
             format!(
-                "{{\"scheduled_us\":{},\"sent_us\":{},\"done_us\":{},\"query\":\"{}\",\"outcome\":\"{}\",\"counted_rows\":{},\"ranked_matches\":{}}}",
+                "{{\"scheduled_us\":{},\"sent_us\":{},\"done_us\":{},\"query\":{:?},\"outcome\":{:?},\"censored\":{},\"counted_rows\":{},\"ranked_matches\":{},\"contributions\":{}}}",
                 sample.scheduled_us,
                 sample.sent_us,
                 sample.done_us,
                 sample.request,
                 sample.outcome,
+                sample.censored,
                 sample.counted,
-                sample.ranked
+                sample.ranked,
+                sample.contributions
             )
         }));
         std::fs::write(path, rows.join("\n")).unwrap();
@@ -1814,6 +1861,16 @@ fn lexical_scan_p99_at_one_million_occurrences() {
     if std::env::var_os("EIDNARA_LEXICAL_SCALE_KEEP").is_some() {
         eprintln!("kept projection under {}", fixture.root.path().display());
         std::mem::forget(fixture);
+    }
+    // A refused, exhausted, or empty answer is not a latency sample the gate may pass on.
+    assert_eq!(completed, queries, "every offered query must complete");
+    for sample in &samples {
+        assert!(
+            sample.contributions > 0,
+            "{} returned no contribution: {}",
+            sample.request,
+            sample.outcome
+        );
     }
     assert!(
         warm.1 <= 50_000,
@@ -1972,4 +2029,121 @@ fn an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhausti
             Completion::Incomplete(IncompleteReason::BudgetExhausted)
         ));
     }
+}
+
+/// Bounds under which the fixture corpus's `parse` (four matches) is common, while `fetch` (two) and `io` (one) qualify
+/// and only one match fits the ranked budget.
+fn small_thresholds() -> RetrievalBounds {
+    RetrievalBounds {
+        qualifying_matches: NonZeroUsize::new(2).unwrap(),
+        rank_budget: NonZeroUsize::new(2).unwrap(),
+        ..bounds()
+    }
+}
+
+#[test]
+fn a_mixed_query_records_both_its_common_skip_and_its_budget_skip() {
+    let fixture = Fixture::all_admitted();
+    for (term, count) in [("parse", 4), ("fetch", 2), ("io", 1)] {
+        assert_eq!(fixture.reference(&probes(term)).len(), count, "{term}");
+    }
+    let retrieval = fixture
+        .retrieve(
+            &probes("parse fetch io"),
+            small_thresholds(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(retrieval.consumed.ranked_matches, 1);
+    assert_eq!(ids_of(&retrieval), vec![fixture.id("delta")]);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    assert_eq!(
+        retrieval.reasons,
+        vec![IncompleteReason::CommonTerms, IncompleteReason::RankBudget]
+    );
+}
+
+#[test]
+fn an_authority_move_outranks_a_coverage_bound_already_recorded() {
+    let fixture = Fixture::all_admitted();
+    let retrieval = fixture
+        .retrieve_with_hook(
+            &probes("parse"),
+            small_thresholds(),
+            &EvalBudget::unbounded(),
+            |window| {
+                if window == Window::BeforeRevalidation {
+                    fixture.retire("gamma");
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::SnapshotChanged),
+        "the same move leaves a complete request `SnapshotChanged`"
+    );
+    assert_eq!(
+        retrieval.reasons,
+        vec![
+            IncompleteReason::CommonTerms,
+            IncompleteReason::SnapshotChanged
+        ]
+    );
+}
+
+#[test]
+fn dead_rows_leading_a_common_probe_neither_take_its_scan_bound_nor_hide_truncation() {
+    let fixture = Fixture::all_admitted();
+    project_bulk(&fixture, 20);
+    let scan_rows = 5;
+    let common = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(scan_rows).unwrap(),
+        ..small_thresholds()
+    };
+    let descending: Vec<String> = fixture
+        .raw()
+        .prepare(
+            "SELECT occurrence_id FROM lexical WHERE lexical MATCH 'parse' ORDER BY rowid DESC",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(descending.len(), 24);
+    // The dead rows fill one whole read of `scan_rows + 1` rows and one more, so a single read finds no live row.
+    let dead = scan_rows + 2;
+    for occurrence_id in &descending[..dead] {
+        tombstone_raw(&fixture, occurrence_id);
+    }
+    let scanned = fixture
+        .store
+        .with_conn(|conn| {
+            Ok(scan(
+                conn,
+                &probes("parse"),
+                common,
+                &EvalBudget::unbounded(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    let mut kept: Vec<String> = scanned.hit_ids().map(str::to_string).collect();
+    kept.sort();
+    let mut expected = descending[dead..dead + scan_rows].to_vec();
+    expected.sort();
+    assert_eq!(kept, expected);
+
+    let retrieval = fixture
+        .retrieve(&probes("parse"), common, &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(
+        retrieval.reasons,
+        vec![IncompleteReason::CommonTerms, IncompleteReason::ScanBound]
+    );
 }
