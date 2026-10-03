@@ -113,17 +113,21 @@ export function packSearchResults(
     const candidateFor = (kept: number) =>
         assemble([...lead, header, ...blocks.slice(0, kept), noticeFor(results.length - kept)]);
 
-    const bestIndex = binarySearchLargestFit(
-        results.length - 2,
-        (index) => estimateTokens(candidateFor(index + 1)) <= MAX_RENDERED_RESULT_TOKENS,
-    );
+    // Each accepted probe is larger than the last, so the final accepted text is the largest fitting prefix.
+    let fit = { text: "", tokens: 0 };
+    const bestIndex = binarySearchLargestFit(results.length - 2, (index) => {
+        const text = candidateFor(index + 1);
+        const tokens = estimateTokens(text);
+        if (tokens > MAX_RENDERED_RESULT_TOKENS) return false;
+        fit = { text, tokens };
+        return true;
+    });
     if (bestIndex >= 0) {
         const kept = bestIndex + 1;
-        const text = candidateFor(kept);
         return {
-            text,
+            text: fit.text,
             delivered: results.slice(0, kept),
-            tokenCount: estimateTokens(text),
+            tokenCount: fit.tokens,
             omittedCount: results.length - kept,
             reason: "delivered",
         };
