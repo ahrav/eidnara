@@ -460,6 +460,14 @@ pub fn read_selected_claims(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedJudgement {
+    /// `verdicts[i]` judges `selected.rows[i]`.
+    pub verdicts: Vec<UseVerdict>,
+    pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
+}
+
 /// `judge_selected_for_surface` reads eligibility verdicts and canonical claim facts at one kernel snapshot and classifies every selected row with those facts. A row is permitted when the kernel permits its object, revision, and artifact on `surface` and the row classifies `Current`. A row whose artifact digest fails the eligibility shape check is classified from the facts alone.
 ///
 /// # Errors
@@ -473,7 +481,7 @@ pub fn judge_selected_for_surface(
     surface: Surface,
     bounds: ClaimFactBounds,
     budget: &EvalBudget,
-) -> Result<Vec<UseVerdict>, ClaimCandidateError> {
+) -> Result<SelectedJudgement, ClaimCandidateError> {
     let check_budget = || {
         budget
             .check()
@@ -550,7 +558,11 @@ pub fn judge_selected_for_surface(
         };
         validated.push(verdict);
     }
-    Ok(validated)
+    Ok(SelectedJudgement {
+        verdicts: validated,
+        snapshot: judged.batch.snapshot,
+        incarnation: judged.batch.incarnation,
+    })
 }
 
 fn classify_rows(

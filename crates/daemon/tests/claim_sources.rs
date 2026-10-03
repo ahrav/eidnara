@@ -1892,7 +1892,7 @@ fn assert_selected_judgement_agrees(
             .unwrap())
         })
         .unwrap();
-    let verdicts = judge_selected_for_surface(
+    let judgement = judge_selected_for_surface(
         &corpus.kernel,
         &selected,
         &ProjectScope::new(project).unwrap(),
@@ -1919,7 +1919,7 @@ fn assert_selected_judgement_agrees(
     let judged: BTreeMap<&str, Option<kernel::SurfaceVisibility>> = selected
         .rows
         .iter()
-        .zip(verdicts)
+        .zip(judgement.verdicts)
         .map(|(row, verdict)| (row.occurrence_id.as_str(), permitted(verdict)))
         .collect();
     assert_eq!(judged, expected, "{surface:?} {project} {destination:?}");

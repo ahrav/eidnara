@@ -14,8 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, ClaimFactBounds, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
-    Surface, SurfaceVisibility,
+    ArtifactDestination, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
@@ -29,6 +29,7 @@ use retrieval::dense::{
 };
 use retrieval::eligibility::{
     Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
+    snapshot_moved,
 };
 use retrieval::exact::{
     Coverage, ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
@@ -1356,6 +1357,7 @@ fn canonical_references(
     let claims: Vec<String> = ranked.iter().flatten().map(|id| id.to_string()).collect();
     let reach = limits.result_rows.get().saturating_add(1);
     let mut references = BTreeMap::new();
+    let mut judged_at = None;
     let (mut survivors, mut validated, mut claim) = (0, 0, 0);
     for (index, entry) in ranked.iter().enumerate() {
         if survivors == reach {
@@ -1381,6 +1383,7 @@ fn canonical_references(
                     authority,
                     budget,
                     batch,
+                    &mut judged_at,
                     &mut references,
                 )?;
                 validated += batch.len();
@@ -1395,13 +1398,14 @@ fn canonical_references(
     Ok((references, survivors))
 }
 
-/// Classifies and validates `batch` at its own fresh kernel snapshot and adds each permitted claim's reference to `references`.
+/// All batches contributing to one answer share the snapshot and incarnation recorded in `judged_at`; a change returns `QueryFailure::Unavailable`.
 fn validate_claims(
     projection: &SearchProjection,
     kernel: &KernelStore,
     authority: Authority<'_>,
     budget: &SharedBudget,
     batch: &[String],
+    judged_at: &mut Option<(EgressSnapshot, CommitReadIncarnation)>,
     references: &mut BTreeMap<String, CanonicalReference>,
 ) -> Result<(), QueryFailure> {
     let refused = |_: ClaimCandidateError| {
@@ -1435,7 +1439,7 @@ fn validate_claims(
         }
         Err(_) => return Err(QueryFailure::Unavailable("claim_validation")),
     };
-    let verdicts = judge_selected_for_surface(
+    let judgement = judge_selected_for_surface(
         kernel,
         &selected,
         authority.project,
@@ -1445,11 +1449,31 @@ fn validate_claims(
         budget.eval(),
     )
     .map_err(refused)?;
+    let (snapshot, incarnation) = judged_at
+        .as_ref()
+        .map_or((None, None), |(snapshot, incarnation)| {
+            (Some(snapshot), Some(incarnation))
+        });
+    match snapshot_moved(
+        snapshot,
+        incarnation,
+        &judgement.snapshot,
+        &judgement.incarnation,
+    ) {
+        Some(AuthorityMoved::Incarnation) => {
+            return Err(QueryFailure::Unavailable("kernel_incarnation_changed"));
+        }
+        Some(AuthorityMoved::Snapshot) => {
+            return Err(QueryFailure::Unavailable("snapshot_changed"));
+        }
+        None => {}
+    }
+    judged_at.get_or_insert((judgement.snapshot, judgement.incarnation));
     references.extend(
         selected
             .rows
             .into_iter()
-            .zip(verdicts)
+            .zip(judgement.verdicts)
             .filter_map(|(row, verdict)| {
                 let UseVerdict::Permitted(visibility) = verdict else {
                     return None;

@@ -14,7 +14,8 @@ use retrieval::eligibility::Authority;
 use retrieval::fusion::Lane;
 use retrieval::install_identity;
 use support::query_route::{
-    ALL_PHASES, FOREIGN, Fixture, QUERY, entry_ids, limits, projection_identity, request_budget,
+    ALL_PHASES, FOREIGN, Fixture, QUERY, entry_ids, intent, limits, projection_identity,
+    request_budget,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -787,6 +788,75 @@ async fn the_largest_result_row_bound_serves_the_whole_surviving_ranking() {
         .run(&unbounded, budget.shared(), QUERY, |_| {})
         .unwrap();
     assert_eq!(outcome.body, expected.body);
+    fixture.daemon.shutdown().await;
+}
+
+/// Claim validation batches for one answer share a kernel snapshot; a commit between batches yields `QueryFailure::Unavailable("snapshot_changed")`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_between_claim_validation_batches_refuses_the_answer() {
+    let bulk: Vec<String> = (0..12).map(|n| format!("bulk{n}")).collect();
+    let extra: Vec<(&str, &str)> = bulk
+        .iter()
+        .map(|object| (object.as_str(), "An explicit contract stays explicit."))
+        .collect();
+    let fixture = Fixture::build_with(&extra).await;
+    let query = "explicit contract";
+    let (_token, budget) = request_budget(10_000);
+    let mut wide = limits();
+    wide.result_rows = wide.fused_union;
+    let ranking = fixture.run(&wide, budget.shared(), query, |_| {}).unwrap();
+    let mut ordered: Vec<String> = Vec::new();
+    for entry in ranking.body["entries"].as_array().unwrap() {
+        let decision = entry["canonical"]["decision_object_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if !ordered.contains(&decision) {
+            ordered.push(decision);
+        }
+    }
+    assert!(ordered.len() >= 4, "{}", ranking.body);
+    let kept = ordered[0].clone();
+    // The kernel retires every ranked decision between the first and the last while their descriptors stay live, so the first batch permits `kept` and the denied run forces later batches.
+    let retired: Vec<serde_json::Value> = ordered[1..ordered.len() - 1]
+        .iter()
+        .map(|object| serde_json::json!({"op": "retire_decision", "object_id": object}))
+        .collect();
+    let committed = fixture.daemon.commit("retire-middle", retired).await;
+    assert_eq!(committed["state"]["kind"], "available", "{committed}");
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::MIN;
+    let mut batches = 0usize;
+    let steady = fixture
+        .run(&bounded, budget.shared(), query, |phase| {
+            batches += usize::from(phase == Phase::ClaimValidation);
+        })
+        .unwrap();
+    assert_eq!(
+        steady.body["entries"][0]["canonical"]["decision_object_id"], kept,
+        "{}",
+        steady.body
+    );
+    assert!(batches >= 2, "{batches} batches: {}", steady.body);
+    let mut seen = 0usize;
+    let outcome = fixture.run(&bounded, budget.shared(), query, |phase| {
+        if phase == Phase::ClaimValidation {
+            seen += 1;
+            if seen == 2 {
+                fixture
+                    .store
+                    .commit(intent("revoke-between-batches"), |envelope| {
+                        envelope.retire_decision(&kept)?;
+                        Ok(String::new())
+                    })
+                    .unwrap();
+            }
+        }
+    });
+    assert_eq!(
+        outcome.err(),
+        Some(QueryFailure::Unavailable("snapshot_changed"))
+    );
     fixture.daemon.shutdown().await;
 }
 
