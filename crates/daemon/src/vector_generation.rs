@@ -826,7 +826,11 @@ pub fn verify(
         return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
     let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
-    rows.for_each(|_, row| calibrator.push(row).map_err(VectorRefusal::Calibration))?;
+    // The decoder validates each row under the layout before it reaches the calibrator or the encoder.
+    rows.for_each(|_, row| {
+        calibrator.push_validated(row);
+        Ok(())
+    })?;
     let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
     let scales_bytes = generation.read_verified_file(SCALES_FILE)?;
     if calibration.scales.encode() != scales_bytes
@@ -864,6 +868,7 @@ pub fn verify(
     // The second pass reads the stored codes of each row chunk as the chunk starts, then compares each row's encoding with its slice.
     let chunk_rows = rows.chunk_rows();
     let mut stored = vec![0u8; chunk_rows * dimension];
+    let mut codes = Vec::with_capacity(dimension);
     rows.for_each(|index, row| {
         let slot = index % chunk_rows;
         if slot == 0 {
@@ -874,10 +879,8 @@ pub fn verify(
                 (index * dimension) as u64,
             )?;
         }
-        let encoded = scalar::encode(&layout, &calibration.scales, row)
-            .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
-        if encoded
-            .codes
+        scalar::encode_validated_into(&layout, &calibration.scales, row, &mut codes);
+        if codes
             .iter()
             .map(|code| *code as u8)
             .ne(stored[slot * dimension..(slot + 1) * dimension]

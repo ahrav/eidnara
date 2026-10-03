@@ -147,10 +147,9 @@ pub fn validate_length(row: &[f32], dimension: u32) -> Result<(), RowRejection> 
     check_dimension(row.len(), dimension)
 }
 
+/// A non-finite coordinate makes the sum of squares non-finite.
 pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
-    layout.check()?;
-    validate_shape(row, layout.dimension)?;
-    check_norm(row, layout.unit_norm_tolerance)
+    validate_from_sum(row, layout, sum_of_squares(row))
 }
 
 /// Validates a row whose sum of squares was accumulated as [`validate`] accumulates it: from `+0.0`, in increasing coordinate order.
@@ -188,12 +187,17 @@ fn check_finite(row: &[f32]) -> Result<(), RowRejection> {
 
 /// The accumulator starts at `+0.0` and each square is added in coordinate order; `Iterator::sum` is not used because its initial value is not part of the contract.
 fn check_norm(row: &[f32], tolerance: f64) -> Result<(), RowRejection> {
+    check_norm_sum(sum_of_squares(row), tolerance)
+}
+
+/// `sum_of_squares` guarantees accumulation from `+0.0` in coordinate order.
+fn sum_of_squares(row: &[f32]) -> f64 {
     let mut sum_of_squares = 0.0f64;
     for value in row {
         let widened = f64::from(*value);
         sum_of_squares += widened * widened;
     }
-    check_norm_sum(sum_of_squares, tolerance)
+    sum_of_squares
 }
 
 /// The admission test is written as the contract's inclusive bound so a NaN sum is refused rather than admitted by a false `>` comparison.

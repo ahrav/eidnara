@@ -179,11 +179,17 @@ impl Calibrator {
         let index = usize::try_from(self.count).unwrap_or(usize::MAX);
         codec::validate(row, &self.layout)
             .map_err(|rejection| CalibrationRejection::Row { index, rejection })?;
+        self.push_validated(row);
+        Ok(())
+    }
+
+    /// [`Self::push`] for a `row` that [`codec::validate`] has accepted under this layout.
+    pub fn push_validated(&mut self, row: &[f32]) {
+        debug_assert_eq!(row.len(), self.max_abs.len());
         for (max, value) in self.max_abs.iter_mut().zip(row) {
             *max = max.max(value.abs());
         }
         self.count += 1;
-        Ok(())
     }
 
     /// # Errors
@@ -225,25 +231,51 @@ pub struct Encoded {
 ///
 /// A layout that is not a generation predicate, or a row outside it.
 pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encoded, RowRejection> {
+    let mut codes = Vec::new();
+    let clipped = encode_into(layout, scales, row, &mut codes)?;
+    Ok(Encoded { codes, clipped })
+}
+
+/// [`encode`] that refills `codes` with one code per coordinate, for buffer reuse across rows, and returns the number of clamped coordinates.
+///
+/// # Errors
+///
+/// The same as [`encode`].
+pub fn encode_into(
+    layout: &RowLayout,
+    scales: &Scales,
+    row: &[f32],
+    codes: &mut Vec<i8>,
+) -> Result<u32, RowRejection> {
     layout.check()?;
     codec::validate(row, layout)?;
+    Ok(encode_validated_into(layout, scales, row, codes))
+}
+
+/// [`encode_into`] for a `row` that [`codec::validate`] has accepted under `layout`.
+pub fn encode_validated_into(
+    layout: &RowLayout,
+    scales: &Scales,
+    row: &[f32],
+    codes: &mut Vec<i8>,
+) -> u32 {
+    debug_assert_eq!(row.len(), layout.dimension as usize);
     assert_eq!(
         scales.scales.len(),
         layout.dimension as usize,
         "scales of one calibration match the layout"
     );
-    let mut codes = Vec::with_capacity(row.len());
+    codes.clear();
+    codes.resize(row.len(), 0);
     let mut clipped = 0u32;
-    for (value, scale) in row.iter().zip(&scales.scales) {
+    for ((code, value), scale) in codes.iter_mut().zip(row).zip(&scales.scales) {
         let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
-        let code = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
-        if code != rounded {
-            clipped += 1;
-        }
+        let clamped = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
+        clipped += u32::from(clamped != rounded);
         // A finite value over a positive finite scale is a finite quotient, and the clamp bounds it to i8, so the cast is exact.
-        codes.push(code as i8);
+        *code = clamped as i8;
     }
-    Ok(Encoded { codes, clipped })
+    clipped
 }
 
 /// One byte per code, two's complement.
