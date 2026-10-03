@@ -1625,9 +1625,9 @@ fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
     let live = |page: &kernel::DecisionPage| -> Vec<String> {
         page.decisions
             .iter()
-            .map(|(object, decision)| {
-                assert_eq!(object.object_id, decision.object_id);
-                object.object_id.clone()
+            .map(|entry| {
+                assert_eq!(entry.object.object_id, entry.decision.object_id);
+                entry.object.object_id.clone()
             })
             .collect()
     };
@@ -1702,6 +1702,49 @@ fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
         .unwrap();
     assert_eq!(live(&last), ["decision-object-4", "decision-object-5"]);
     assert_eq!(last.next, None);
+    let lineage = |page: &kernel::DecisionPage| -> Vec<(String, i64)> {
+        page.decisions
+            .iter()
+            .map(|entry| (entry.object.object_id.clone(), entry.lineage_commit_seq))
+            .collect()
+    };
+    assert_eq!(
+        lineage(&last),
+        [
+            ("decision-object-4".to_string(), inserted.commit_seq),
+            ("decision-object-5".to_string(), inserted.commit_seq),
+        ]
+    );
+
+    // Every decision shares one source lineage, so correcting 4 with 5's spec folds 4 into the live 5 without rewriting 5's row.
+    let folded = store
+        .commit(intent("fold", '3'), |envelope| {
+            envelope.correct_decision("decision-object-4", decision(5))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let after_fold = store
+        .decision_page_within_budget(folded.commit_seq, None, rows(8), bytes, &budget)
+        .unwrap();
+    assert_eq!(
+        lineage(&after_fold),
+        [
+            ("decision-object-1".to_string(), inserted.commit_seq),
+            ("decision-object-5".to_string(), folded.commit_seq),
+        ]
+    );
+    assert_eq!(
+        after_fold.decisions[1].object.created_commit_seq,
+        inserted.commit_seq
+    );
+    // Read before the fold, the survivor still reports its creation commit.
+    let before_fold = store
+        .decision_page_within_budget(tip, Some("decision-object-4"), rows(8), bytes, &budget)
+        .unwrap();
+    assert_eq!(
+        lineage(&before_fold),
+        [("decision-object-5".to_string(), inserted.commit_seq)]
+    );
 
     let cancelled = kernel::applicability::EvalBudget::unbounded();
     cancelled.cancel();

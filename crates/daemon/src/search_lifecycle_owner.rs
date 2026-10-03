@@ -508,6 +508,31 @@ impl SearchLifecycleOwner {
             .map(Some)
     }
 
+    /// The first call permanently pauses the claim-source runner and attempts to release the claim consumer within `SLICE_IDLE`; a consumer behind the tip stays registered at shutdown.
+    pub fn release_claim_sources(&self, now: i64) {
+        let mut progress = self.claims.lock().unwrap_or_else(|p| p.into_inner());
+        if self
+            .claims_paused
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let budget = EvalBudget::new(Some(Instant::now() + SLICE_IDLE), Arc::default());
+        match ClaimMaterializer::new(&self.kernel, kernel::ProviderEgress::LocalOnly).release(
+            &mut progress,
+            CLAIM_SLICE_BOUNDS,
+            &budget,
+            now,
+        ) {
+            Ok(true) => {}
+            Ok(false) if *progress == ClaimProgress::Unregistered => {}
+            Ok(false) => eprintln!(
+                "daemon: claim sources stay registered: the consumer trails the tip at shutdown"
+            ),
+            Err(error) => eprintln!("daemon: claim sources stay registered: {error}"),
+        }
+    }
+
     /// Shares `paused` as the claim-source runner's pause flag.
     pub fn with_claims_paused(mut self, paused: Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.claims_paused = paused;
@@ -1562,6 +1587,16 @@ fn replacement_spec(
 
 /// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
+    run_slice_loop(Arc::clone(&owner), cancel).await;
+    let releasing = Arc::clone(&owner);
+    if let Err(join) =
+        tokio::task::spawn_blocking(move || releasing.release_claim_sources(crate::now_ms())).await
+    {
+        eprintln!("daemon: claim source release ended abnormally: {join}");
+    }
+}
+
+async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
     let mut claim_report = None;
     loop {

@@ -4480,7 +4480,20 @@ async fn the_running_daemon_publishes_memories_from_before_and_after_it_started(
         owner.claim_progress(),
         daemon::claim_sources::ClaimProgress::Changes
     );
+    assert!(
+        store
+            .outbox_consumer_checkpoint(daemon::claim_sources::CLAIM_CONSUMER)
+            .unwrap()
+            .is_some()
+    );
     daemon.shutdown().await;
+    assert_eq!(
+        store
+            .outbox_consumer_checkpoint(daemon::claim_sources::CLAIM_CONSUMER)
+            .unwrap(),
+        None,
+        "a clean stop removes the caught-up claim consumer"
+    );
 }
 
 /// A source backlog several scan pages long advances a bounded page per claim slice while lifecycle slices keep running between them.

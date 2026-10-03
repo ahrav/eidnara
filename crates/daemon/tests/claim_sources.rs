@@ -2527,6 +2527,21 @@ impl Corpus {
             .unwrap()
     }
 
+    /// Runs the registration and reconciliation slices, so the next slice reads the scan's first page.
+    fn start(&self, progress: &mut ClaimProgress, bounds: ClaimSliceBounds) {
+        for _ in 0..64 {
+            let report = self.slice(progress, bounds);
+            assert!(
+                matches!(report.end, MaterializationEnd::Continues),
+                "{report:?}"
+            );
+            if *progress == scanning(None, false) {
+                return;
+            }
+        }
+        panic!("reconciliation never finished: {progress:?}");
+    }
+
     fn faulted_slice(
         &self,
         progress: &mut ClaimProgress,
@@ -2594,12 +2609,7 @@ fn bootstrap_and_replay_publish_memories_from_before_and_after_registration() {
         corpus.decide(seed);
     }
     let mut progress = ClaimProgress::default();
-    let registered = corpus.slice(&mut progress, slice_bounds(2));
-    assert!(
-        matches!(registered.end, MaterializationEnd::Continues),
-        "{registered:?}"
-    );
-    assert_eq!(progress, scanning(None, false));
+    corpus.start(&mut progress, slice_bounds(2));
     let registration = corpus.checkpoint();
     assert_eq!(registration, Some(corpus.kernel.tip().unwrap()));
 
@@ -2686,7 +2696,7 @@ fn changes_racing_the_bootstrap_converge_without_serving_two_revisions() {
         corpus.decide(seed);
     }
     let mut progress = ClaimProgress::default();
-    corpus.slice(&mut progress, slice_bounds(2));
+    corpus.start(&mut progress, slice_bounds(2));
     corpus.slice(&mut progress, slice_bounds(2));
     assert_eq!(
         corpus.live_objects(),
@@ -2734,7 +2744,7 @@ fn restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently() {
         corpus.decide(seed);
     }
     let mut progress = ClaimProgress::default();
-    corpus.slice(&mut progress, slice_bounds(2));
+    corpus.start(&mut progress, slice_bounds(2));
     corpus.slice(&mut progress, slice_bounds(2));
     assert_eq!(corpus.inventory(), ledger(&seeds[..2]));
 
@@ -2799,7 +2809,7 @@ fn an_exhausted_budget_stops_between_decisions_and_commits_and_keeps_completed_w
         corpus.decide(seed);
     }
     let mut progress = ClaimProgress::default();
-    corpus.slice(&mut progress, slice_bounds(8));
+    corpus.start(&mut progress, slice_bounds(8));
     let report = corpus.faulted_slice(
         &mut progress,
         slice_bounds(8),
@@ -2952,7 +2962,11 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
         "{report:?}"
     );
     assert!(!report.advanced());
-    assert_eq!(progress, scanning(None, false));
+    assert_eq!(
+        progress,
+        scanning(None, true),
+        "the cursor stays put and the next slice is a change page"
+    );
     assert!(corpus.inventory().is_empty());
 
     let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
@@ -3020,7 +3034,7 @@ fn cancellation_exclusions_and_missing_history_are_reported_not_completed() {
     assert!(!corpus.live_objects().contains("late"));
 }
 
-/// A consumer removed after its first registration is registered again by the next slice, and the scan republishes from receipts.
+/// A consumer removed after a registration is registered again by the next slice, however many times it was removed, and the scan republishes from receipts. A retirement committed while the consumer was absent is reconciled from the live inventory rather than replayed, so its descriptors do not outlive it.
 #[test]
 fn a_removed_consumer_is_registered_again_and_the_scan_resumes() {
     let dir = tempfile::tempdir().unwrap();
@@ -3033,14 +3047,17 @@ fn a_removed_consumer_is_registered_again_and_the_scan_resumes() {
     let mut progress = ClaimProgress::default();
     corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
     assert_eq!(corpus.inventory(), ledger(&seeds));
-    corpus
-        .kernel
-        .commit(intent("deregister"), |envelope| {
-            envelope.deregister_outbox_consumer(CLAIM_CONSUMER, NOW)?;
-            Ok(String::new())
-        })
-        .unwrap();
-    assert_eq!(corpus.checkpoint(), None);
+    let deregister = |key: &str| {
+        corpus
+            .kernel
+            .commit(intent(key), |envelope| {
+                envelope.deregister_outbox_consumer(CLAIM_CONSUMER, NOW)?;
+                Ok(String::new())
+            })
+            .unwrap();
+        assert_eq!(corpus.checkpoint(), None);
+    };
+    deregister("deregister");
     let refused = corpus.slice(&mut progress, slice_bounds(8));
     assert!(
         matches!(
@@ -3056,5 +3073,227 @@ fn a_removed_consumer_is_registered_again_and_the_scan_resumes() {
     assert_eq!(
         corpus.inventory(),
         ledger(&[seeds[0], seeds[1], memory("q3", "Three.")])
+    );
+
+    deregister("deregister-again");
+    corpus.retire("q1");
+    let mut restarted = ClaimProgress::default();
+    corpus.catch_up(&mut restarted, slice_bounds(8), |_| {});
+    assert!(corpus.checkpoint().is_some());
+    assert_eq!(
+        corpus.inventory(),
+        ledger(&[seeds[1], memory("q3", "Three.")])
+    );
+}
+
+#[test]
+fn a_failing_scan_read_still_lets_change_pages_advance_the_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    corpus.decide(memory("p1", "One."));
+    let mut progress = ClaimProgress::default();
+    corpus.start(&mut progress, slice_bounds(8));
+    assert_eq!(progress, scanning(None, false));
+    Connection::open(corpus.root.join("kernel/kernel.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE decisions SET decision_payload=X'7b' WHERE object_id='p1'",
+            [],
+        )
+        .unwrap();
+    corpus.decide(memory("p2", "Two."));
+    let decided = corpus.kernel.tip().unwrap();
+
+    let mut failures = 0;
+    for _ in 0..4 {
+        match corpus.materializer().run_slice(
+            &mut progress,
+            slice_bounds(8),
+            &EvalBudget::unbounded(),
+            NOW,
+        ) {
+            Ok(_) => {}
+            Err(error) => {
+                assert_eq!(error, KernelError::CorruptCanonicalRow);
+                failures += 1;
+            }
+        }
+    }
+    assert_eq!(
+        failures, 2,
+        "every other slice retries the failing scan page"
+    );
+    assert!(
+        matches!(progress, ClaimProgress::Bootstrap { after: None, .. }),
+        "the scan cursor stays before the failing page: {progress:?}"
+    );
+    assert!(
+        corpus.checkpoint() >= Some(decided),
+        "change pages ran between the failing scan pages"
+    );
+    assert!(corpus.live_objects().contains("p2"));
+}
+
+#[test]
+fn a_fold_into_a_survivor_ahead_of_the_scan_never_serves_both_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    let survivor = revised("b", "Beta folds Alpha.");
+    // `b` shares `a`'s source lineage so correcting `a` with `survivor_spec` folds `a` into the existing `b`.
+    let survivor_spec = DecisionSpec {
+        source_id: "a-lineage".to_string(),
+        ..survivor.spec()
+    };
+    corpus.decide(memory("a", "Alpha."));
+    corpus
+        .kernel
+        .commit(intent("decide:b"), |envelope| {
+            envelope.insert_decision(survivor_spec.clone())?;
+            envelope.record_admission(admission("b"))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let mut progress = ClaimProgress::default();
+    corpus.start(&mut progress, slice_bounds(1));
+    corpus.slice(&mut progress, slice_bounds(1));
+    assert_eq!(corpus.live_objects(), BTreeSet::from(["a".to_string()]));
+
+    corpus
+        .kernel
+        .commit(intent("fold:a:b"), |envelope| {
+            envelope.correct_decision("a", survivor_spec.clone())?;
+            Ok(String::new())
+        })
+        .unwrap();
+    corpus.catch_up(&mut progress, slice_bounds(1), |corpus| {
+        let live = corpus.live_objects();
+        assert!(
+            !(live.contains("a") && live.contains("b")),
+            "the predecessor is live beside its survivor: {live:?}"
+        );
+    });
+    assert_eq!(corpus.inventory(), ledger(&[survivor]));
+}
+
+#[test]
+fn a_permanently_refused_publication_is_excluded_and_the_checkpoint_moves_past_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    // Artifact ingestion refuses a domain id longer than 1,024 bytes, which the decision write accepts.
+    let long_domain = "d".repeat(1025);
+    corpus
+        .kernel
+        .commit(intent("long-domain"), |envelope| {
+            envelope.insert_domain(DomainSpec {
+                domain_id: long_domain.clone(),
+                object_id: "long-domain-object".to_string(),
+                name: "A domain with a long id".to_string(),
+                source_kind: "fixture".to_string(),
+                source_id: "long-domain".to_string(),
+                source_revision: 1,
+                sensitivity: Sensitivity::Normal,
+            })?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let decide_long = |object: &str| {
+        let spec = DecisionSpec {
+            domain_id: long_domain.clone(),
+            ..Seed::scoped("placeholder", OTHER, "PROJECT_RULES", 1, "Refused.", "").spec()
+        };
+        let spec = DecisionSpec {
+            decision_id: format!("{object}-decision"),
+            object_id: object.to_string(),
+            source_id: format!("{object}-lineage"),
+            ..spec
+        };
+        corpus
+            .kernel
+            .commit(intent(&format!("decide:{object}")), |envelope| {
+                envelope.insert_decision(spec.clone())?;
+                envelope.record_admission(admission(object))?;
+                Ok(String::new())
+            })
+            .unwrap();
+    };
+    decide_long("long-before");
+    corpus.decide(memory("kept-before", "Kept before."));
+    let mut progress = ClaimProgress::default();
+    corpus.slice(&mut progress, slice_bounds(8));
+    decide_long("long-after");
+    corpus.decide(memory("kept-after", "Kept after."));
+
+    let reports = corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    let refused: BTreeSet<String> = reports
+        .iter()
+        .flat_map(|report| report.exclusions.iter())
+        .filter(|(_, exclusion)| {
+            *exclusion == ClaimExclusion::PublicationRefused(Representation::DecisionSummary)
+        })
+        .map(|(object, _)| object.clone())
+        .collect();
+    assert_eq!(
+        refused,
+        BTreeSet::from(["long-after".to_string(), "long-before".to_string()])
+    );
+    assert_eq!(
+        corpus.inventory(),
+        ledger(&[
+            memory("kept-after", "Kept after."),
+            memory("kept-before", "Kept before.")
+        ])
+    );
+    assert_eq!(corpus.checkpoint(), Some(corpus.kernel.tip().unwrap()));
+}
+
+#[test]
+fn a_released_consumer_catches_up_first_and_the_next_start_rebuilds_from_the_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    let seeds = [memory("s1", "One."), memory("s2", "Two.")];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let mut progress = ClaimProgress::default();
+    let mut materializer = corpus.materializer();
+    assert!(
+        !materializer
+            .release(
+                &mut progress,
+                slice_bounds(8),
+                &EvalBudget::unbounded(),
+                NOW
+            )
+            .unwrap(),
+        "an unregistered runner has nothing to release"
+    );
+    corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    corpus.decide(memory("s3", "Three."));
+
+    // Release applies the backlog before removing the consumer.
+    assert!(
+        materializer
+            .release(
+                &mut progress,
+                slice_bounds(8),
+                &EvalBudget::unbounded(),
+                NOW
+            )
+            .unwrap()
+    );
+    assert_eq!(progress, ClaimProgress::Unregistered);
+    assert_eq!(corpus.checkpoint(), None);
+    assert!(corpus.live_objects().contains("s3"));
+
+    corpus.retire("s1");
+    corpus.decide(memory("s4", "Four."));
+    corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    assert_eq!(
+        corpus.inventory(),
+        ledger(&[seeds[1], memory("s3", "Three."), memory("s4", "Four.")])
     );
 }

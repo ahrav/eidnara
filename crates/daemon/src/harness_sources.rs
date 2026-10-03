@@ -433,6 +433,31 @@ pub enum PublishError {
     },
 }
 
+impl PublishError {
+    /// Whether the refusal is decided by the unit and the store's identity records alone, so retrying the same unit returns it again. Capacity, storage, kernel, missing-admission, and revision-lead refusals depend on state that can change and report `false`.
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Self::Artifact(kind) => matches!(
+                kind,
+                ArtifactErrorKind::PayloadTooLarge
+                    | ArtifactErrorKind::ReAdmissionBlocked
+                    | ArtifactErrorKind::UnredactableSecret
+                    | ArtifactErrorKind::ScanIncomplete
+                    | ArtifactErrorKind::DetectionLimit
+                    | ArtifactErrorKind::TextFieldTooLong
+                    | ArtifactErrorKind::InvalidInput
+                    | ArtifactErrorKind::ExactBytesRewritten
+                    | ArtifactErrorKind::UnsupportedShape
+                    | ArtifactErrorKind::DigestCollision
+            ),
+            Self::IdentityReused | Self::Descriptor { .. } => true,
+            Self::UnadmittedSource { .. } | Self::RevisionAhead { .. } | Self::Kernel { .. } => {
+                false
+            }
+        }
+    }
+}
+
 const PRODUCER: &str = "eidnara-daemon/harness-sources";
 const CAUSE: &str = "source publication";
 /// Leads every request-digest input. The digest is persisted in the descriptor receipt under a key that does not change with it, so a layout change is a new tag, made deliberately, and never a silent reinterpretation of stored receipts.
