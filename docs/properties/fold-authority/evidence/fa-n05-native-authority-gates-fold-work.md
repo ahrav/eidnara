@@ -16,7 +16,7 @@ wrapup refusal's snapshot and boundary work are not counted.
 All references are verified at HEAD `0ff62b29a`.
 
 - The gate is the first statement of `Handler::prepare_history_summarizer`
-  (`crates/daemon/src/lib.rs:9423-9434`): when
+  (`crates/daemon/src/lib.rs:9428-9439`): when
   `pass.result.fold_authority.eidnara_folds` is false it returns
   `PreparedHistorySummarizerAction::Complete(HistorySummarizerDiagnostics::disabled(NATIVE_AUTHORITY))`.
   `NATIVE_AUTHORITY` is `"native_authority"` (`:26`). `disabled` sets
@@ -28,16 +28,16 @@ All references are verified at HEAD `0ff62b29a`.
   stored value (`fold_authority.rs:131-138`).
 - The fold work behind the gate is `prepare_history_summarizer_fire`
   (`lib.rs:5299`): its own `store.load` (`:5318`), the trigger evaluation, the
-  `no_models` check against the live `effective_config` (`:5406`, `:5578`),
+  `no_models` check against the live `effective_config` (`:5428`, `:5600`),
   `record_no_fire` (`:5895`), and firing assembly.
-- The two callers are the first unit (`lib.rs:8976`, after the subagent arm)
+- The two callers are the first unit (`lib.rs:9011`, after the subagent arm)
   and the emergency rerun (`lib.rs:9077`). Both call the gated function.
 - `session.wrapup` (`handle_session_wrapup_value`, `lib.rs:7183`) refuses at
-  `:7325-7344` with `ok: false`, `disposition: "failed"`,
+  `:7360-7379` with `ok: false`, `disposition: "failed"`,
   `reason: "native_authority"`, and zero rounds. The refusal follows the
   wrapup latch claim and an entry `store.load` (`:7264`), and precedes the
-  snapshot read (`:7358`) and boundary work. An unadopted session uses
-  the binding's intent (`:7334`).
+  snapshot read (`:7393`) and boundary work. An unadopted session uses
+  the binding's intent (`:7369`).
 - No error variant is added; the refusal and the diagnostics reuse existing
   shapes.
 
@@ -81,7 +81,7 @@ and boundary reads.
 ### Q: Does any test reach the emergency rerun caller under native authority?
 
 - Sources examined: the handler tests; `request` defaults
-  (`crates/daemon/src/lib.rs:24440-24442`, 45,000 of 50,000 tokens);
+  (`crates/daemon/src/lib.rs:24445-24447`, 45,000 of 50,000 tokens);
   `an_emergency_rerun_after_publication_keeps_the_change_pending`
   (`crates/daemon/src/fold_authority_handler_tests.rs:656`).
 - Findings: No. The default request is 90 percent, below the emergency
@@ -104,12 +104,12 @@ and boundary reads.
 ### Q: Can high usage construct the second caller under native authority?
 
 - Sources examined: `crates/daemon/src/lib.rs:8918-8942`, `:8957-8974`,
-  `:9077`, `:9428-9432` at `0ff62b29a`; the handler tests in
+  `:9082`, `:9433-9437` at `0ff62b29a`; the handler tests in
   `fold_authority_handler_tests.rs` and `lib.rs`; portfolio evaluation H2.
 - Findings: No. Native preparation returns `Complete`, which settles in the
   first unit at any pressure; the rerun follows only a completed `Busy`
   wait. The one native handler witness (`fold_authority_handler_tests.rs:46`)
-  runs at 90 percent (`lib.rs:24496-24498`); no native test runs at or
+  runs at 90 percent (`lib.rs:24531-24533`); no native test runs at or
   above 95 percent. The second caller is covered structurally by the shared
   gate.
 - Missing evidence: A native first-unit pass at or above 95 percent.
@@ -120,7 +120,7 @@ and boundary reads.
 ### Q: Do the window-cap firing and the archive that `main` added stay behind the gate?
 
 - Sources examined: `crates/daemon/src/lib.rs:5299`, `:5367`, `:5500-5530`,
-  `:9423-9433`; `git log 1d2cd55a0..74e347d9e` (the window-cap and archive
+  `:9428-9438`; `git log 1d2cd55a0..74e347d9e` (the window-cap and archive
   commits of #901 and #902).
 - Findings: Yes. `archive_window` and the window-cap cut run inside
   `prepare_history_summarizer_fire`, which only the gated

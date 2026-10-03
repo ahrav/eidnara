@@ -145,7 +145,7 @@ FA-E11, FA-E12, FA-E13, FA-E14).
 
 Type: safety
 Reachability: default-production - the additive path now runs whenever the
-stored authority is native (`crates/daemon/src/transform.rs:3207-3208`), and
+stored authority is native (`crates/daemon/src/transform.rs:3217-3218`), and
 an empty chain, the default, selects native; the replaced identity clause is
 unreachable at HEAD because the additive path writes no identity.
 Status: invalidated
@@ -170,9 +170,9 @@ Required faults and enabling state: Native authority; several passes with
 distinct mids; a native slice replacing the history.
 Confidence: high -
 [evidence](evidence/fa-e01-additive-retains-ingress-identities.md). The
-output construction (`transform.rs:3054-3064`), the scalar-only ingress
+output construction (`transform.rs:3064-3074`), the scalar-only ingress
 update on the additive path (`:2904` calls `apply_ingress_scalars`,
-`:5583-5598`), and the folding-only `apply_ingress_identities` (`:5602`)
+`:5593-5608`), and the folding-only `apply_ingress_identities` (`:5612`)
 were read at `0ff62b29a`. Correction: the spec's existing check
 `compaction_mode_projection_cache_reclassifies_synthetic_prefix` (D`lib.rs:42489`
 at `265df096`) was deleted on `main` by `252d9e179` and does not exist at
@@ -251,9 +251,9 @@ Open questions:
 Type: safety
 Reachability: default-production - every transform commit serializes
 `ModuleMeta` and scans it through `json_content`
-(`crates/memory-store/src/lib.rs:11034-11041`, `:3028-3038`), whose
+(`crates/memory-store/src/lib.rs:11069-11076`, `:3050-3060`), whose
 single-pass preparation applies `ensure_durable_text_bound` first (`:4303`,
-`:4577-4583`, 512 KiB at `:429`).
+`:4599-4605`, 512 KiB at `:429`).
 Status: active
 Exercised: partial - #905's `a_refused_commit_writes_no_identity_row`
 commits an oversized `meta` over an existing row and asserts `InputLimit`,
@@ -283,26 +283,26 @@ past the bound.
 Confidence: high -
 [evidence](evidence/fa-e03-whole-meta-refuses-oversize.md). The guard chain
 and the refusal test were read at `0ff62b29a`. The `meta` guard runs in
-preparation (`crates/memory-store/src/lib.rs:11034-11041`) before
+preparation (`crates/memory-store/src/lib.rs:11069-11076`) before
 `write.execute` opens the transaction (`:11102`); the covered-system row scan
-(`prepare_document`, `:4832-4856`; `apply_covered_system_message_delta`,
-`:5025-5127`) runs inside that transaction after the `cache_state` write
-(`:11172-11179`), so its refusal rolls the transaction back and the durable
+(`prepare_document`, `:4854-4878`; `apply_covered_system_message_delta`,
+`:5047-5149`) runs inside that transaction after the `cache_state` write
+(`:11207-11214`), so its refusal rolls the transaction back and the durable
 rows stay as they were. Cross-reference:
 [WP-E10](../window-protocol/catalog.md#wp-e10-durable-meta-bound-refuses-the-cliff)
 catalogs the same guard for the window protocol and records that the refusal
 half had no witness; #905's store test now supplies one for a later commit.
 Corrections to the spec's citations (at `265df096`): the constant moved from
-S`:427` to `:429` and the guard from `:3998-4004` to `:4577-4583`; the
+S`:427` to `:429` and the guard from `:4020-4026` to `:4599-4605`; the
 existing check D`transform_meta_bound.rs:20-99` was deleted by #833
 (`7a8fb84b`); the growing fields S`:1668`, `:1876`, `:2014` left the record
 (identity map by #905, fingerprints and baseline parts by #906).
-Existing check: `crates/memory-store/src/lib.rs:33757`
-`a_refused_commit_writes_no_identity_row`; `:32079`
+Existing check: `crates/memory-store/src/lib.rs:33881`
+`a_refused_commit_writes_no_identity_row`; `:32203`
 `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused`
-(exact boundary on prepared content); `:31906`
+(exact boundary on prepared content); `:32030`
 `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (oversized
-stored meta refused inside a state sync); `:34279`
+stored meta refused inside a state sync); `:34403`
 `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt`
 (covered rows split across scan documents, #859 PR C);
 `crates/daemon/src/transform_meta_bound.rs:1273` (guard not reached, `:1265-1268`).
@@ -330,7 +330,7 @@ selected range now shrinks to fit; FA-N13 replaces the "no separate byte
 budget" clause. The other clauses survive: the selection equals the
 identities of every non-synthetic message in the chunk's range, and a
 missing identity is a no-fire.
-Exercised: yes - for the surviving clauses, #859 PR C's recorded run at
+Exercised: partial - for the surviving clauses, #859 PR C's recorded run at
 `0ff62b29a` (6,156 passed) ran
 `a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget`,
 64 generated histories of user, assistant, tool-exchange, system, and
@@ -370,9 +370,9 @@ Existing check: `crates/daemon/src/history_summarizer_chunk.rs:2169`
 `a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget`
 (#859 PR C, mixed roles); `:1960`, `:1981`, `:1995` (exact selection through
 the oracle, `:1910-1914`);
-`crates/daemon/src/lib.rs:18613`
+`crates/daemon/src/lib.rs:18618`
 `history_summarizer_boundary_construction_matches_owned_reference` (missing
-identity at `:18831-18836`); `crates/daemon/src/history_summarizer_chunk.rs:2814`
+identity at `:18836-18841`); `crates/daemon/src/history_summarizer_chunk.rs:2814`
 `budget_stop_and_tool_only_ranges_are_recorded` (range, not identities).
 Impact: High at `265df096`: a rendered-token budget did not bound durable
 identity bytes. At HEAD a selection that skipped a message in range would
@@ -392,7 +392,7 @@ Eidnara authority with an empty live chain (`cfg` from `effective_config`,
 adoption; the default empty chain adopts native and stops at the gate.
 Status: invalidated
 Invalidated: PR #903 (#855) replaces it with the early `native_authority`
-gate of FA-N05 (`crates/daemon/src/lib.rs:9423-9434`). The trigger-then-
+gate of FA-N05 (`crates/daemon/src/lib.rs:9428-9439`). The trigger-then-
 `no_models` order, the change-gated `record_no_fire`, and the ignored commit
 error survive only as defense for a stored Eidnara authority whose live chain
 is empty (a stall that `session.status` reports since #904).
@@ -417,13 +417,13 @@ Required faults and enabling state: A stored Eidnara authority; an empty live
 chain; both trigger outcomes; a repeated reason; a forced commit failure.
 Confidence: high -
 [evidence](evidence/fa-e05-empty-chain-refusal-is-late-and-change-gated.md).
-Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:8976`,
-`:9077`; the entry `:9451-9468` is `:9475-9486`;
+Read at HEAD. Corrections: callers `lib.rs:9014`, `:9150` are now `:9011`,
+`:9077`; the entry `:9451-9468` is `:9510-9521`;
 `history_summarizer_chunk.rs:619-623` is `:908-912`;
 `history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
-Existing check: `crates/daemon/src/lib.rs:41167`
-`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37569`
+Existing check: `crates/daemon/src/lib.rs:41214`
+`no_fire_reason_is_durable_change_gated_and_cleared_by_fire`; `:37597`
 `session_wrapup_no_models_is_terminal_and_retains_command`;
 `crates/daemon/src/fold_authority_handler_tests.rs:1037`
 `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`.
@@ -467,10 +467,10 @@ Confidence: high -
 Read at HEAD. The durable authority (FA-N02, FA-N03) decides which path runs;
 it does not unify captured configurations, and one firing still reads the
 live chain beside the captured `memory_enabled` (`lib.rs:5640`).
-Corrections: `lib.rs:211-251` is now `:227-263`; `:5722` is `:5406`;
+Corrections: `lib.rs:211-251` is now `:227-263`; `:5722` is `:5428`;
 `:5924-5925` is `:5640`; `config.rs:2158` is `:2350`.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:245`,
-`:778`; `crates/daemon/src/lib.rs:41167`;
+`:778`; `crates/daemon/src/lib.rs:41214`;
 `crates/daemon/src/config.rs:2350`
 `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`.
 Impact: High. Route mode alone is not a session-wide authority fact, which
@@ -485,7 +485,7 @@ Type: safety
 Reachability: explicit-config-only - corrected from `default-production`.
 At `265df096` the folding path ran whenever `compaction_enabled` held
 (default true). Since `8b1e04944` (#903) it runs only when the stored
-authority folds (`crates/daemon/src/transform.rs:3207-3208`), which needs a
+authority folds (`crates/daemon/src/transform.rs:3217-3218`), which needs a
 non-empty user-tier chain (`crates/daemon/src/config.rs:181-185`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs
@@ -516,7 +516,7 @@ to the spec (at `265df096`, `tail_hygiene.rs:983-1043`): the helper takes
 `BaselineParts` and compares an excluded-prefix digest that `e15a09a6` added
 after `265df096`, so "matches every current sequence" now holds for every
 sequence whose excluded prefix matches. The spec's
-`transform.rs:4881-4893` is `crates/daemon/src/transform.rs:4953-4976`; a
+`transform.rs:4881-4893` is `crates/daemon/src/transform.rs:4963-4986`; a
 non-bust pass with no durable baseline still leaves it absent rather than
 calling refresh with `None`.
 Existing check: `crates/daemon/src/tail_hygiene.rs:2278`
@@ -533,7 +533,7 @@ Open questions: None.
 Type: safety
 Reachability: explicit-config-only - corrected from `default-production`
 for the same reason as FA-E07: hint admission and divergence run only past
-the native gate (`crates/daemon/src/transform.rs:3207-3208`). The label
+the native gate (`crates/daemon/src/transform.rs:3217-3218`). The label
 rests on that gate, not on a constructed state: whether a production folding
 pass can retain a known-empty served history is unresolved (see Open
 questions).
@@ -544,7 +544,7 @@ Exercised: yes - #906's recorded workspace gate runs
 `first_divergence_classifies_each_boundary_kind_and_ignores_appends` (an
 empty old sequence reports nothing). This is verified exercise of the
 helper state only: both tests supply the empty vector directly
-(`crates/daemon/src/transform.rs:13347`,
+(`crates/daemon/src/transform.rs:13357`,
 `crates/daemon/src/divergence.rs:164-165`), and no Handler test promotes an
 empty served history, so production reachability of the state is
 unresolved.
@@ -565,15 +565,15 @@ control.
 Confidence: high -
 [evidence](evidence/fa-e08-empty-served-history-means-unserved-and-cold.md).
 Read `first_divergence` (`crates/daemon/src/divergence.rs:42-48`),
-`user_hint_deferred` (`crates/daemon/src/transform.rs:7906-7924`), and the
-admission call (`:4212-4217`) at `0ff62b29a`. Correction to the spec (at
-`265df096`): `user_hint_target_was_served` (`transform.rs:8072-8079`) read
+`user_hint_deferred` (`crates/daemon/src/transform.rs:7916-7934`), and the
+admission call (`:4222-4227`) at `0ff62b29a`. Correction to the spec (at
+`265df096`): `user_hint_target_was_served` (`transform.rs:8082-8089`) read
 `meta.served_output_fingerprint`; #906 replaced it with `user_hint_deferred`
 over the retained history, and the admission at `:4150-4156` is now
-`:4212-4217`.
+`:4222-4227`.
 Existing check: `crates/daemon/src/divergence.rs:124`
 `first_divergence_classifies_each_boundary_kind_and_ignores_appends` (empty
-old row at `:164-165`); `crates/daemon/src/transform.rs:13329`
+old row at `:164-165`); `crates/daemon/src/transform.rs:13339`
 `a_new_hint_defers_only_when_its_target_may_have_been_served_outside_a_bust`
 (#906).
 Impact: Medium. A known-empty history that established prior service would
@@ -587,7 +587,7 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - transform enforcement runs on the
-folding path (`crates/daemon/src/transform.rs:3684`, past `:3207-3208`);
+folding path (`crates/daemon/src/transform.rs:3694`, past `:3217-3218`);
 publication needs an admitted firing, which needs a configured chain.
 Status: active
 Exercised: partial - #905's recorded workspace gate runs
@@ -606,13 +606,13 @@ unrelated tail). No test constructs a firing with an empty selected set.
 Guarantee: Transform identity enforcement skips a missing entry; publication
 rejects a missing or changed selected identity and a mismatched epoch.
 Check: `always` - in `enforce_block_identity` a mid with no stored row
-continues (`crates/daemon/src/transform.rs:5485-5487`) and produces no
+continues (`crates/daemon/src/transform.rs:5495-5497`) and produces no
 re-adoption and no `FrozenTargetDrift`; publication refuses an empty selected
-set (`crates/memory-store/src/lib.rs:14138-14143`), then a firing whose
-`withdrawn_selected_mid` is set (`:14144-14148`), then any selected mid whose
-stored vector is absent or differs (`:14149-14172`), then a revert-epoch
-mismatch as `CasConflict` (`history_publication_fence_tx`, `:6645-6650`,
-called at `:14174-14183`). `always` because each consumer
+set (`crates/memory-store/src/lib.rs:14173-14178`), then a firing whose
+`withdrawn_selected_mid` is set (`:14179-14183`), then any selected mid whose
+stored vector is absent or differs (`:14184-14207`), then a revert-epoch
+mismatch as `CasConflict` (`history_publication_fence_tx`, `:6680-6685`,
+called at `:14209-14218`). `always` because each consumer
 applies its policy on every evaluation.
 Fault/timing angle: Identity removal or edit during a firing's producer
 await, or a reset during a firing.
@@ -624,25 +624,25 @@ Confidence: high -
 Read both consumers at `0ff62b29a`; the `lib.rs` line references were
 refreshed after `44f3159`, the base merge, and the abandon-path cut moved
 the publish transaction down by 40 lines. Corrections to the spec (at `265df096`):
-S`:11825-11859` is now `crates/memory-store/src/lib.rs:14124-14183`, and the
+S`:11825-11859` is now `crates/memory-store/src/lib.rs:14159-14218`, and the
 fence reads `lookup_block_identity_rows` in the publish transaction instead
 of the hydrated `meta.block_identity_by_mid` (#905); D`transform.rs:5364-5370`
-is now `:5485-5487`; the `IdentityDrift` error and
+is now `:5495-5497`; the `IdentityDrift` error and
 `identity_drift_requires_reject` (spec `:5437-5444`) were deleted by
 `6477c9f27` (window-protocol #833, D25), so a stored-versus-new mismatch now
 re-adopts or refuses with `FrozenTargetDrift`.
-Existing check: `crates/memory-store/src/lib.rs:25938`
+Existing check: `crates/memory-store/src/lib.rs:26001`
 `publish_rejects_a_selected_message_whose_identity_row_is_gone` (#905);
-`crates/daemon/src/history_summarizer.rs:4073`
+`crates/daemon/src/history_summarizer.rs:4077`
 `selected_range_identity_drift_during_await_rejects_without_cooldown` (spec
-`:3037`); `:4127` `tail_identity_extension_during_await_still_publishes`;
-`crates/memory-store/src/lib.rs:30032`
+`:3037`); `:4131` `tail_identity_extension_during_await_still_publishes`;
+`crates/memory-store/src/lib.rs:30156`
 `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict`;
-`crates/daemon/src/transform.rs:14628`
+`crates/daemon/src/transform.rs:14638`
 `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`
-(#905); `:20444`
+(#905); `:20472`
 `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`
-(#905); `crates/memory-store/src/lib.rs:25993`
+(#905); `crates/memory-store/src/lib.rs:26056`
 `publish_rejects_a_firing_whose_selected_message_left_the_window` (#905).
 Impact: High. Removing identity rows weakens transform validation while
 blocking publication; a fence that accepts a missing row publishes stale
@@ -818,11 +818,12 @@ under FA-N08. Surviving clauses: `OPENCODE_DISABLE_AUTOCOMPACT` forces `auto`
 false in the file-based arm (`shared/conflict-detector.ts:361`), and a
 supplied resolved configuration bypasses it (`:106`); the flag is now also
 reported unresolved by source (`:197-204`).
-Exercised: yes - the file-based arm (`shared/conflict-detector.test.ts:1043`,
+Exercised: partial - the file-based arm (`shared/conflict-detector.test.ts:1043`,
 rows `:1064`, `:1079`), the resolved-arm bypass (`:743`), the `warn` boot
 (`src/index.entry.test.ts:203`), and target-value repair
 (`shared/conflict-fixer.test.ts:659`, `:689`) ran green in PR #899's and PR
-#904's `bun run check:repo` gates.
+#904's `bun run check:repo` gates; the TUI startup branch has no runtime
+witness.
 Guarantee: Any detected conflict disables server participation and stops TUI
 initialization; compaction repair writes only `false`; the environment flag
 forces `auto` false in the file-based fallback, which a supplied resolved
@@ -983,10 +984,10 @@ Open questions:
 
 Type: safety
 Reachability: default-production - every transform pass plans its authority
-from the store (`load_fold_authority`, `crates/memory-store/src/lib.rs:13237`;
+from the store (`load_fold_authority`, `crates/memory-store/src/lib.rs:13272`;
 `fold_authority::plan`, `crates/daemon/src/fold_authority.rs:95`) and stamps
 the adoption into its commit (`stamp_fold_authority`,
-`crates/daemon/src/transform.rs:2154`, called at `:2746` and `:3390`); a fresh
+`crates/daemon/src/transform.rs:2154`, called at `:2756` and `:3400`); a fresh
 session under any admitted configuration adopts on its first committing pass.
 Status: active
 Exercised: yes - PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5` (6,124
@@ -1017,8 +1018,8 @@ one session; a forced CAS loss after the plan; a row created by state sync;
 an unresolved admission; keyless rows with and without fold artifacts; a
 non-boolean stored value.
 Confidence: high - [evidence](evidence/fa-n02-first-commit-adopts-authority.md).
-The field's serde default and skip (`crates/memory-store/src/lib.rs:2460-2465`),
-the SQL read and Serde error (`:13237-13280`), the planner's adopt arms
+The field's serde default and skip (`crates/memory-store/src/lib.rs:2482-2487`),
+the SQL read and Serde error (`:13272-13315`), the planner's adopt arms
 (`fold_authority.rs:105-112`), the admission-aware intent
 (`crates/daemon/src/config.rs:181-185`), and the row-version fence
 (`transform.rs:2158-2163`) were read at HEAD; the witnesses were run in the
@@ -1032,7 +1033,7 @@ Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:135`
 `legacy_rows_adopt_by_their_fold_artifacts`;
 `crates/daemon/src/fold_authority.rs:200`
 `the_transition_table_follows_the_session_authority_rules`;
-`crates/memory-store/src/lib.rs:29612`
+`crates/memory-store/src/lib.rs:29736`
 `a_non_boolean_fold_authority_is_a_serde_error_on_every_read`.
 Impact: High. Routes that read different authorities for one session mix
 fold coordinates.
@@ -1067,8 +1068,8 @@ transaction.
 Check: `always-or-unreached` - whenever `eidnara_folds` changes from
 `Some(a)` to `Some(b)`, the same transaction advanced `revert_epoch`, emptied
 core and metadata, deleted identity rows, and observed summarizer Idle and no
-pending publication row (`crates/memory-store/src/lib.rs:13309-13320`, `:13338`,
-`:13365`), and the change ran under the bindings mutex with no participating
+pending publication row (`crates/memory-store/src/lib.rs:13344-13355`, `:13373`,
+`:13400`), and the change ran under the bindings mutex with no participating
 sibling (`crates/daemon/src/lib.rs:301-313`). `always-or-unreached` because
 most sessions never change authority. Falsifier: authority changes without
 the epoch-fenced reset; a blocked change alters the serving mode; an ordinary
@@ -1082,7 +1083,7 @@ Confidence: high -
 [evidence](evidence/fa-n03-authority-change-requires-quiescent-bind.md). The
 planner's change and pending arms, the fence, the in-transaction re-check,
 the replacement write beside the epoch advance, and recomp's preservation
-(`reset_session_for_recomp`, `crates/memory-store/src/lib.rs:13213`) were read
+(`reset_session_for_recomp`, `crates/memory-store/src/lib.rs:13248`) were read
 at HEAD. The "restart" in the busy-summarizer witness clears the binding
 table in place rather than reopening the handler.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:219`
@@ -1092,9 +1093,9 @@ Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:219`
 `a_busy_summarizer_keeps_the_change_pending_across_a_restart`; `:656`
 `an_emergency_rerun_after_publication_keeps_the_change_pending`; `:314`
 `an_ordinary_recomp_reset_preserves_the_adopted_authority`;
-`crates/memory-store/src/lib.rs:29658`
+`crates/memory-store/src/lib.rs:29782`
 `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority`;
-`:29691` `a_busy_summarizer_refuses_the_authority_reset`; `:29718`
+`:29815` `a_busy_summarizer_refuses_the_authority_reset`; `:29842`
 `a_pending_publication_refuses_the_authority_reset_of_an_idle_session`.
 Impact: High. A change under a live firing publishes old coordinates into a
 session that claims the new authority.
@@ -1146,7 +1147,7 @@ before the invocation; for (b), a test-only kill point after
 `reset_session_for_authority` commits, then a reopen.
 Confidence: medium - [evidence](evidence/fa-n04-quiescent-change-completes.md).
 The attempt loop, the reset's full clearing
-(`crates/memory-store/src/lib.rs:13322-13392`),
+(`crates/memory-store/src/lib.rs:13357-13427`),
 and the empty binding table after reopen were read at HEAD. The restart
 witnesses fall between transform calls, so the kill window inside one call
 is argued from the reset leaving no coverage, not tested.
@@ -1168,7 +1169,7 @@ Type: safety
 Reachability: default-production - an empty chain is the default, so a fresh
 session adopts native (`DaemonConfig::eidnara_folds`,
 `crates/daemon/src/config.rs:181-185`) and every non-subagent pass reaches the
-gate (`crates/daemon/src/lib.rs:9423-9434`).
+gate (`crates/daemon/src/lib.rs:9428-9439`).
 Status: active
 Exercised: partial - PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5`:
 `native_authority_skips_every_fold_step_even_with_a_live_chain` (first-unit
@@ -1176,13 +1177,13 @@ caller, live chain non-empty, preparation full-load count unchanged, trigger
 timings zero, no producer start or connect, no `last_no_fire`, a repeat
 writes no row) and `wrapup_is_refused_under_native_authority`. That
 first-unit witness runs at 45,000 of 50,000 tokens, 90 percent
-(`crates/daemon/src/lib.rs:24440-24442`), below `Emergency95`; no handler
+(`crates/daemon/src/lib.rs:24445-24447`), below `Emergency95`; no handler
 test under native authority runs at or above 95 percent. The second caller
 (`lib.rs:9077`) is not a reachable native state: native preparation returns
-`Complete` (`:9428-9432`), which settles in the first unit whatever the
-pressure (`:8970-8994`), and the rerun follows only a completed `Busy` wait
-(`:9009-9026`), which native authority never produces. Both callers call
-the one gated function (`:8976`, `:9077`), so the second caller is covered
+`Complete` (`:9463-9467`), which settles in the first unit whatever the
+pressure (`:9005-9029`), and the rerun follows only a completed `Busy` wait
+(`:9044-9061`), which native authority never produces. Both callers call
+the one gated function (`:9011`, `:9077`), so the second caller is covered
 structurally by the shared gate, not by a witness. Wrapup's snapshot and
 boundary work are not counted.
 Guarantee: Under native authority the shared preparation entry returns
@@ -1191,7 +1192,7 @@ before its store load, trigger evaluation, or firing, from both callers, and
 Check: `unreachable` - under an applied native authority,
 `prepare_history_summarizer_fire` (`crates/daemon/src/lib.rs:5299`) and
 `record_no_fire` (`:5895`) never execute from either caller (`:8924`,
-`:9077`), and the wrapup handler returns `reason = "native_authority"` before
+`:9082`), and the wrapup handler returns `reason = "native_authority"` before
 the transform snapshot read (`:7306`). `unreachable` because these are named
 code points that must not run. Falsifier: live configuration bypasses stored
 authority; any `record_no_fire` commit.
@@ -1228,7 +1229,7 @@ Open questions:
 Type: safety
 Reachability: default-production - native is the default authority, and
 every native non-subagent pass takes the additive path
-(`crates/daemon/src/transform.rs:3207-3209`).
+(`crates/daemon/src/transform.rs:3217-3219`).
 Status: active
 Exercised: partial - PR #903 (#855) gate and #859 PR A's run at `fd0b52aa5`:
 `assert_native_state` (no identity rows, no `tail_hygiene_baseline`, no
@@ -1259,17 +1260,17 @@ a legal native transition; then additive passes, a seeded state sync, and a
 descent edge.
 Confidence: high - [evidence](evidence/fa-n06-native-state-stays-additive.md).
 The additive path calls only `apply_ingress_scalars` (`transform.rs:2904`,
-`:5583`); `apply_ingress_identities` (`:5602`) is called only on the folding
-path (`:4159`); native state sync empties the segment batch
-(`crates/memory-store/src/lib.rs:11486-11491`). Served fingerprints and
+`:5593`); `apply_ingress_identities` (`:5612`) is called only on the folding
+path (`:4169`); native state sync empties the segment batch
+(`crates/memory-store/src/lib.rs:11521-11526`). Served fingerprints and
 baseline parts are not `ModuleMeta` fields after #905 and #906.
 Existing check: `crates/daemon/src/fold_authority_handler_tests.rs:46`,
 `:219`, `:840`, `:555`, `:645`, `:1030` (through `assert_native_state`,
-`:19`); `crates/memory-store/src/lib.rs:25162`
+`:19`); `crates/memory-store/src/lib.rs:25225`
 `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`;
-`crates/daemon/src/transform_read_bound.rs:756`
+`crates/daemon/src/transform_read_bound.rs:764`
 `native_pass_reads_are_bounded_independent_of_stored_rows`; folding-path
-counterpart `crates/daemon/src/transform.rs:14628`
+counterpart `crates/daemon/src/transform.rs:14638`
 `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`.
 Impact: High. Native sessions would keep message-proportional state that no
 reader uses.
@@ -1419,7 +1420,7 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only - only the Eidnara folding path proposes
 derived state. `apply_once` returns through `apply_additive_only` unless the
-session's stored authority folds (`crates/daemon/src/transform.rs:3207-3208`),
+session's stored authority folds (`crates/daemon/src/transform.rs:3217-3218`),
 the additive result carries `derived: None` (`:3162`), and a session adopts
 Eidnara folds only from a configuration with a non-empty user-tier chain
 (`DaemonConfig::eidnara_folds`, `crates/daemon/src/config.rs:181-185`).
@@ -1450,13 +1451,13 @@ re-read as still current at acceptance
 generation is still InFlight or Ready; ordering, the installed
 `(revert_epoch, accepted_row_version)` is not below the retained one. After
 a rejected promotion the retained state is unchanged (an unknown,
-superseded, or removed generation, or an older pair, `lib.rs:2153-2160`) or
-absent (a state over the retained-byte limit, `:2171-2176`). An unaccepted
+superseded, or removed generation, or an older pair, `lib.rs:2175-2182`) or
+absent (a state over the retained-byte limit, `:2193-2198`). An unaccepted
 transform promotes nothing: an error returns before promotion (`:9242`),
 and a no-write proposal whose read version is no longer current is not
 accepted. An accepted commit whose later response construction fails still
 promotes: the post-commit boundary read failure is carried in the output
-and becomes the error only at `finished()`, after promotion (`:9243-9244`,
+and becomes the error only at `finished()`, after promotion (`:9278-9279`,
 `crates/daemon/src/transform.rs:1742-1747`). `always-or-unreached` because
 promotion runs only on the folding path, which a default configuration
 never enters.
@@ -1479,20 +1480,20 @@ Read at `0ff62b29a`: `ProposedDerivedState::accept`
 (`crates/daemon/src/lib.rs:2141-2186`), the generation check (`:2241-2249`),
 `remove` clearing derived state (`:2251-2257`), the lease taken before `begin`
 in `first_unit` (`:8899-8900`), and promotion before `finished()`
-(`:9242-9244`; `promote_derived_state` `:9247-9276`). The verification
+(`:9247-9249`; `promote_derived_state` `:9252-9281`). The verification
 strategy's reference model `(epoch, accepted_version, derived_payload,
 lease)` is not built; the tests assert outcomes directly.
-Existing check: `crates/daemon/src/lib.rs:35175`
+Existing check: `crates/daemon/src/lib.rs:35180`
 `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets`;
-`:35399` `a_pass_that_loses_every_compare_and_swap_publishes_nothing`;
-`:35437` `a_committed_pass_whose_boundary_read_fails_still_promotes`; `:35501`
+`:35404` `a_pass_that_loses_every_compare_and_swap_publishes_nothing`;
+`:35442` `a_committed_pass_whose_boundary_read_fails_still_promotes`; `:35506`
 `a_sibling_route_waits_for_promotion_and_a_delete_revokes_the_paused_incarnation`;
-`:35603` `a_session_purged_while_its_pass_awaits_promotion_stays_absent`;
-`:35623`
+`:35608` `a_session_purged_while_its_pass_awaits_promotion_stays_absent`;
+`:35628`
 `a_worker_lost_between_commit_and_promotion_leaves_the_commit_and_no_derived_state`;
-`:35651`
+`:35656`
 `a_caller_cancelled_after_the_commit_still_promotes_once_the_worker_finishes`;
-`:21722`
+`:21727`
 `derived_state_keeps_the_newest_acceptance_of_a_live_generation_under_the_shared_budget`
 (cache unit: older epochs and versions ignored, unknown, superseded, and
 removed generations refused, exact lease charge, shared eviction);
@@ -1511,9 +1512,9 @@ Open questions:
   since `96aad0baf` (#906 on `main`) promotion keeps the retained parts of
   the same revert epoch instead of replacing them with absence
   (`:2161-2170`). Witnesses:
-  `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` (`:35255`) and
+  `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` (`:35260`) and
   `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only`
-  (`:35288`).
+  (`:35293`).
 - Is the direct-assertion test family accepted in place of the reference
   model the verification strategy names? (needs human input)
 
@@ -1521,8 +1522,8 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - hint admission runs inside `apply_once`
-past the native gate (`crates/daemon/src/transform.rs:3207-3208`, admission
-`:4212-4217`); the additive path decides no hint and carries no derived
+past the native gate (`crates/daemon/src/transform.rs:3217-3218`, admission
+`:4222-4227`); the additive path decides no hint and carries no derived
 state (`:3162`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs the predicate table
@@ -1552,17 +1553,17 @@ derived state and an eligible non-empty hint on a non-bust pass; a
 known-empty control; a bust control.
 Confidence: high -
 [evidence](evidence/fa-n10-unknown-served-history-defers-hints.md). Read
-`user_hint_deferred` (`crates/daemon/src/transform.rs:7906-7924`),
-`prior_served` (`:7926-7931`), `DerivedState::served_for`
+`user_hint_deferred` (`crates/daemon/src/transform.rs:7916-7934`),
+`prior_served` (`:7936-7941`), `DerivedState::served_for`
 (`crates/daemon/src/derived_state.rs:14-16`), the admission call and the
-deferral cap (`crates/daemon/src/transform.rs:4212-4227`,
+deferral cap (`crates/daemon/src/transform.rs:4222-4237`,
 `MAX_PENDING_USER_HINT_BLOCK_IDS` `:148`), and the divergence call sites
-(`:3543-3544`, `:3621-3622`, `:5125-5126`) at `0ff62b29a`.
-Existing check: `crates/daemon/src/transform.rs:13329`
+(`:3553-3554`, `:3631-3632`, `:5135-5136`) at `0ff62b29a`.
+Existing check: `crates/daemon/src/transform.rs:13339`
 `a_new_hint_defers_only_when_its_target_may_have_been_served_outside_a_bust`
 (#906); `crates/daemon/tests/eval_surface_ledger.rs:442`
 `a_new_hint_defers_after_a_restart_forgets_what_was_served` (#906);
-`crates/daemon/src/transform.rs:13384`
+`crates/daemon/src/transform.rs:13394`
 `divergence_reports_nothing_against_an_unknown_served_history` (#906);
 `crates/daemon/tests/eval_surface_ledger.rs:533`
 `a_new_hint_is_skipped_while_every_deferral_slot_is_taken` (#859 PR A).
@@ -1574,11 +1575,11 @@ Open questions: None.
 
 Type: safety
 Reachability: explicit-config-only - tail-hygiene refresh runs inside
-`apply_once` past the native gate (`crates/daemon/src/transform.rs:3207-3208`,
-join `:4953-4976`); `session.status` reports a tail-hygiene object only when
+`apply_once` past the native gate (`crates/daemon/src/transform.rs:3217-3218`,
+join `:4963-4986`); `session.status` reports a tail-hygiene object only when
 the durable row holds a baseline, which only a folding pass writes
 (`crates/daemon/src/lib.rs:6881-6899`, write at
-`crates/daemon/src/transform.rs:4963`).
+`crates/daemon/src/transform.rs:4973`).
 Status: active
 Exercised: yes - #906's recorded workspace gate runs the join table
 `durable_scalars_join_retained_parts_by_generation` (no baseline gives a
@@ -1635,19 +1636,19 @@ Read `refresh_tail_hygiene_baseline`
 (`crates/daemon/src/tail_hygiene.rs:1080-1165`, the parts filter
 `:1136-1140` ahead of `same_measured_prefix` `:1141`), `parts_for`
 (`crates/daemon/src/derived_state.rs:18-28`), `prior_baseline_parts` and
-`carried_derived_state` (`crates/daemon/src/transform.rs:7933-7956`), and the
+`carried_derived_state` (`crates/daemon/src/transform.rs:7943-7966`), and the
 status join (`crates/daemon/src/lib.rs:6881-6899`) at `0ff62b29a`. A
 non-bust pass does not write its joined result durably: it evaluates it for
-that pass's decisions (`crates/daemon/src/transform.rs:4966-4976`), so
+that pass's decisions (`crates/daemon/src/transform.rs:4976-4986`), so
 "invalidated until a bust" holds because parts appear only from a bust or a
 first refresh.
 Existing check: `crates/daemon/src/tail_hygiene.rs:2278`
 `durable_scalars_join_retained_parts_by_generation` (#906);
-`crates/daemon/src/lib.rs:35724`
+`crates/daemon/src/lib.rs:35729`
 `status_reads_hygiene_validity_joined_with_the_retained_parts` (#906);
 `crates/daemon/src/derived_state.rs:122`
 `newer_epochs_and_versions_supersede_and_keys_select_by_epoch_and_generation`
-(#906); `crates/daemon/src/lib.rs:35175`
+(#906); `crates/daemon/src/lib.rs:35180`
 `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets`
 (restart then non-bust stays invalid; a render-config `HARD` restores it;
 #906); `crates/daemon/tests/derived_state_crash_cut.rs:76` (#906).
@@ -1662,8 +1663,8 @@ Open questions:
 
 Type: safety
 Reachability: explicit-config-only - identity reads and writes belong to the
-folding path (`enforce_block_identity` `crates/daemon/src/transform.rs:3684`,
-`apply_ingress_identities` `:4159`, both past the native gate `:3207-3208`);
+folding path (`enforce_block_identity` `crates/daemon/src/transform.rs:3694`,
+`apply_ingress_identities` `:4169`, both past the native gate `:3217-3218`);
 the additive path writes no identity rows. Publication needs a configured
 firing.
 Status: active
@@ -1690,14 +1691,14 @@ identity mutation, and a later scan, serialization, or write failure rolls
 back the transaction, preserving the previous durable state.
 Check: `always-or-unreached` - at `commit_transform` the delta is applied
 after both checks that return `Replay` (row-version CAS and history-segment
-sequence, `crates/memory-store/src/lib.rs:11111-11141`) and after the
-`cache_state` write, inside the same transaction (`:11169-11171`); the only
-per-mid delete is the delta's `deletes` set (`:4951-4956`), which the
+sequence, `crates/memory-store/src/lib.rs:11146-11176`) and after the
+`cache_state` write, inside the same transaction (`:11204-11206`); the only
+per-mid delete is the delta's `deletes` set (`:4973-4978`), which the
 transform fills only for the provisional tail
-(`crates/daemon/src/transform.rs:5610-5612`); requested-mid reads run inside
-the snapshot read (`crates/memory-store/src/lib.rs:8824`); publication
+(`crates/daemon/src/transform.rs:5620-5622`); requested-mid reads run inside
+the snapshot read (`crates/memory-store/src/lib.rs:8859`); publication
 refuses a selected mid whose row is absent or differs
-(`:14149-14171`). `always-or-unreached` because identity writes happen only
+(`:14184-14206`). `always-or-unreached` because identity writes happen only
 on folding sessions.
 Fault/timing angle: CAS loss; restart; covered edits; missing selected rows;
 a commit between the state read and the identity read; failure injected
@@ -1709,29 +1710,29 @@ writes and deletes one mid; descent and recomp reset.
 Confidence: high -
 [evidence](evidence/fa-n12-identity-observations-survive-window-loss.md).
 Read `lookup_block_identity_rows` and `apply_block_identity_delta`
-(`crates/memory-store/src/lib.rs:4863-4979`), `commit_transform`
-(`:10883`, delta at `:11169-11171`), `load_transform_snapshot_with_hook`
-(`:8779-8824`), descent's copy (`:12998-13007`), reset
-(`delete_block_identities` `:4981-4983`, called at `:13365`), and
-`WindowIdentities` (`crates/daemon/src/transform.rs:5394-5429`) at
+(`crates/memory-store/src/lib.rs:4885-5001`), `commit_transform`
+(`:10918`, delta at `:11204-11206`), `load_transform_snapshot_with_hook`
+(`:8814-8859`), descent's copy (`:13033-13042`), reset
+(`delete_block_identities` `:5003-5005`, called at `:13400`), and
+`WindowIdentities` (`crates/daemon/src/transform.rs:5404-5439`) at
 `0ff62b29a`.
-Existing check: `crates/memory-store/src/lib.rs:23909`
-`requested_identity_reads_do_not_grow_with_the_identity_table`; `:33485`
+Existing check: `crates/memory-store/src/lib.rs:23944`
+`requested_identity_reads_do_not_grow_with_the_identity_table`; `:33609`
 `block_identity_deltas_keep_omitted_rows_and_scan_only_the_rows_they_write`;
-`:33571` `a_rejected_commit_writes_no_identity_row`; `:33757`
-`a_refused_commit_writes_no_identity_row`; `:33603`
+`:33695` `a_rejected_commit_writes_no_identity_row`; `:33881`
+`a_refused_commit_writes_no_identity_row`; `:33727`
 `a_failure_after_each_identity_mutation_rolls_the_whole_commit_back`;
-`:33797` `a_delta_that_writes_and_deletes_one_mid_is_refused`; `:33977`
-`identity_histories_match_a_per_session_reference_map`; `:21896`
+`:33921` `a_delta_that_writes_and_deletes_one_mid_is_refused`; `:34101`
+`identity_histories_match_a_per_session_reference_map`; `:21931`
 `transform_snapshot_resists_commit_between_state_and_overlay_reads`;
-`:34074` `descent_copies_block_identities_and_recomp_reset_clears_them`;
-`:33925` `descent_copies_identity_rows_without_their_scan_owner`; `:33826`
+`:34198` `descent_copies_block_identities_and_recomp_reset_clears_them`;
+`:34049` `descent_copies_identity_rows_without_their_scan_owner`; `:33950`
 `receipt_retirement_reads_at_most_one_row_beyond_the_released_ones`;
-`:25938` `publish_rejects_a_selected_message_whose_identity_row_is_gone`;
-`crates/daemon/src/transform.rs:14628`
+`:26001` `publish_rejects_a_selected_message_whose_identity_row_is_gone`;
+`crates/daemon/src/transform.rs:14638`
 `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`;
-`:14673` `mid_turn_tail_stays_provisional_and_re_adopts_completed_tail`;
-`:20444`
+`:14683` `mid_turn_tail_stays_provisional_and_re_adopts_completed_tail`;
+`:20472`
 `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows`.
 All #905.
 Impact: High. Deleted or loser-written identities weaken publication fencing
@@ -1818,9 +1819,9 @@ Existing check: `crates/daemon/src/history_summarizer_chunk.rs:1960`
 (#859 PR C); all four run through `BudgetCase::assert_matches_oracle`
 (`:1887`), which also asserts the store reserves nothing (`:1875-1883`), and
 compare with the shared `identity_prefix_oracle` (`:1369-1376`);
-`crates/daemon/src/lib.rs:36285`
+`crates/daemon/src/lib.rs:36290`
 `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing`;
-`:36313` `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
+`:36318` `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
 (#859 PR C).
 Impact: High. An over-budget selection pushes the record toward the 512 KiB
 durable-text guard and a repeated refused commit; truncating only the
@@ -1829,14 +1830,14 @@ Open questions:
 - Does any test reserve and publish a shrunk chunk with its exact selection?
   Resolved: yes, since #859 PR C,
   `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix`
-  (`crates/daemon/src/lib.rs:36313`).
+  (`crates/daemon/src/lib.rs:36318`).
 
 ### fa-n14-module-meta-is-message-independent
 
 Type: safety
 Reachability: default-production - every accepted transform commit shapes
 and serializes `ModuleMeta` and passes it through the durable-text guard
-(`crates/memory-store/src/lib.rs:11034-11041`, `:429`), under either
+(`crates/memory-store/src/lib.rs:11069-11076`, `:429`), under either
 authority.
 Status: active
 Exercised: yes - #859 PR C's recorded run at `0ff62b29a` (6,156 passed) ran
@@ -1886,12 +1887,12 @@ negative control that makes it fail with its target broken.
 #859 PR B's run at `b45416ac0` (6,131 passed) ran
 `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed`. In the
 matrix, active-firing cells seed summarizer state and then load the
-selection from the first 100 window mids' identity rows (`:1195-1221`); the
+selection from the first 100 window mids' identity rows (`:1216-1242`); the
 final assertion requires the Eidnara cell to retain 100 selected identities
 and the native cell zero, since native passes write no identity rows
-(`:1239-1251`). The native active-firing cell is also a synthetic stress
+(`:1260-1272`). The native active-firing cell is also a synthetic stress
 state: an active summarizer under native authority is a state native passes
-do not produce (`:1284-1285`).
+do not produce (`:1305-1306`).
 Guarantee: Admitted metadata has a fixed serialized bound independent of N
 and W, below the 512 KiB guard; every field is scalar or independently
 byte-capped.
@@ -1932,7 +1933,7 @@ inventory of `HistorySummarizerAbandon` (`:477-481`); both sums
 summarizer (`:485-595`); the composite witness (`worst_case_module_meta`
 `:822-975`, test `:978-1072`). Store-owned shaping: `commit_transform`
 passes the record through `shape_stored_meta` before serializing it
-(`crates/memory-store/src/lib.rs:11034`; `:6094-6167`), which scans
+(`crates/memory-store/src/lib.rs:11069`; `:6131-6204`), which scans
 `last_failure`, `last_no_fire`, every `NoFire` detail,
 `pending_rewrite_last_failure`, and `last_recut` with `write.content` when a value is over its bound or a
 redactor would change it, so the field's receipt records any detection, and
@@ -1948,49 +1949,49 @@ redactor. The daemon's `bounded_detail`
 the 512-byte bound reaches the store's scan whole and is redacted before the
 cut (`a_credential_that_crosses_the_detail_bound_is_redacted_whole`).
 `NoFire::new` (`crates/memory-store/src/summarizer_timeline.rs:94-95`) and
-`pending_rewrite_detail` (`crates/daemon/src/transform.rs:6831-6848`) keep a
+`pending_rewrite_detail` (`crates/daemon/src/transform.rs:6841-6858`) keep a
 raw prefix; `record_no_fire` compares the stored form
 (`crates/daemon/src/lib.rs:5903-5907`).
 `MAX_PENDING_REWRITE_DETAIL_BYTES` and `MAX_LAST_RECUT_BYTES` (1,024 each)
-live in the store (`crates/memory-store/src/lib.rs:6067`, `:6069`), and the
+live in the store (`crates/memory-store/src/lib.rs:6104`, `:6106`), and the
 descent, reset, and revert-truncation writers cut `last_recut` to the stable
-prefix (`:12743-12749`, `:13325-13336`, `:13542-13547`).
-`MAX_SUMMARIZER_DETAIL_BYTES` is at `:6009-6011`, re-exported by the daemon.
+prefix (`:12778-12784`, `:13360-13371`, `:13577-13582`).
+`MAX_SUMMARIZER_DETAIL_BYTES` is at `:6046-6048`, re-exported by the daemon.
 The task-list setter and bust capture accept a state only when its raw and
 its redacted form both meet both task-list bounds (`todo_state_within_bounds`;
-`set_todo_state` `:10361-10363`; `crates/daemon/src/injection.rs:223-231`);
+`set_todo_state` `:10396-10398`; `crates/daemon/src/injection.rs:223-231`);
 the synthetic pair is frozen only when `SyntheticTodo::admitted` holds: its
 stored form fits 24 KiB under the longest serialized anchor, and
 `injection_pending_after_capture` applies the same decision, so a refused
 pair leaves no injection pending (`synthetic_todo_pair_within_bounds`,
-`crates/memory-store/src/lib.rs:6175-6180`, measured by `stored_json_len`,
-the longer of the durable and transaction scans, `:6183-6188`;
-`crates/daemon/src/transform.rs:6976-6979`). State sync checks the seeded
+`crates/memory-store/src/lib.rs:6212-6217`, measured by `stored_json_len`,
+the longer of the durable and transaction scans, `:6220-6225`;
+`crates/daemon/src/transform.rs:6986-6989`). State sync checks the seeded
 pair and acknowledged watermarks with `stored_json_len`
-(`crates/memory-store/src/lib.rs:6347-6351`, `:6431-6435`), beside the
-caps (`:5976-5980`, `:6169-6171`, `:6192`) and their check after redaction
-(`:6450`, `:6454-6500`); the legacy count refusal (`:11559-11571`). The
+(`crates/memory-store/src/lib.rs:6385-6389`, `:6466-6470`), beside the
+caps (`:5998-6002`, `:6206-6208`, `:6229`) and their check after redaction
+(`:6485`, `:6489-6535`); the legacy count refusal (`:11594-11606`). The
 summarizer state stores a SHA-256 chunk fingerprint and model-chain digest
 (`crates/daemon/src/history_summarizer.rs:166-179`) and refuses a harness or
 run id over 128 serialized bytes and keeps a 48-byte session slug
 (`:1617-1625`, `:1630-1633`, `:1843-1852`, `:1905-1915`); the reservation
 identity refusal (`crates/memory-store/src/lib.rs:668-690`,
-`:13848-13854`); the covered-system rows
+`:13883-13889`); the covered-system rows
 (`crates/memory-store/baseline.sql:40-58`, delta applied in the commit at
-`crates/memory-store/src/lib.rs:11172-11179`, read with the snapshot at
-`:8825`, removed by reset at `:13366`, and absent from a descent target at
-`:12999-13001`); the request-identity bound
+`crates/memory-store/src/lib.rs:11207-11214`, read with the snapshot at
+`:8860`, removed by reset at `:13401`, and absent from a descent target at
+`:13034-13036`); the request-identity bound
 (`crates/daemon/src/transform.rs:149`, `:2236-2241`), the hint deferral cap
-(`:148`, `:4218-4222`), and the mid bound (`crates/daemon/src/wire.rs:215`,
+(`:148`, `:4228-4232`), and the mid bound (`crates/daemon/src/wire.rs:213`,
 `:285-290`). The store's
 `abandon_history_summarizer_run_if_matching_with_publish_failure`
-(`crates/memory-store/src/lib.rs:13701`) redacts its caller's detail and
+(`crates/memory-store/src/lib.rs:13736`) redacts its caller's detail and
 keeps the stable prefix within `MAX_SUMMARIZER_DETAIL_BYTES`
-(`:13715-13722`, stored at `:13768-13770`). Its daemon callers pass uncut
+(`:13750-13757`, stored at `:13803-13805`). Its daemon callers pass uncut
 `publish rejected: {reason}` and `memory_reviewer handoff failed: {error}`
 details (`crates/daemon/src/history_summarizer.rs:737-743`, `:756-762`,
 `:773-779`, `:794-806`, `:2607-2614`), and a fence reason can quote a
-128-byte control-character mid (`crates/memory-store/src/lib.rs:14165-14169`),
+128-byte control-character mid (`crates/memory-store/src/lib.rs:14200-14204`),
 so the store-side cut keeps that path within the 514 bytes the inventory
 charges.
 Existing check: `crates/daemon/src/transform_meta_bound.rs:1273`
@@ -2003,49 +2004,49 @@ Existing check: `crates/daemon/src/transform_meta_bound.rs:1273`
 `every_history_summarizer_field_has_an_enforced_bound`; `:1371`
 `request_identity_strings_over_their_bound_are_refused_before_any_read`;
 `:91` `a_hundred_thousand_message_session_commits_a_three_hundred_message_window`;
-`crates/daemon/src/transform.rs:26370`
+`crates/daemon/src/transform.rs:26398`
 `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed` (#859 PR B);
-`:21623` `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair`
-and `:21659` `a_replacement_pair_near_its_bound_persists_and_reloads_within_it`
+`:21651` `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair`
+and `:21687` `a_replacement_pair_near_its_bound_persists_and_reloads_within_it`
 (#859 PR C);
 `crates/memory-store/tests/production_redaction.rs:968`
 `a_secret_bearing_summarizer_detail_is_stored_within_its_bound_with_its_detection_recorded`
 (#859 PR C);
-`crates/memory-store/src/lib.rs:24390`
+`crates/memory-store/src/lib.rs:24425`
 `state_sync_refuses_anchors_and_watermarks_over_their_bounds` (with the todo
-serialized-length cap, #859 PR C); `:24632`
+serialized-length cap, #859 PR C); `:24695`
 `state_sync_refuses_values_whose_redacted_form_passes_their_bound` and
-`:25037` `state_sync_refuses_a_result_over_the_legacy_segment_cap` (#859 PR
-B); `:24756` `a_redacted_detail_cut_keeps_its_length_through_another_redaction`,
-`:24789` `a_committed_last_recut_is_stored_within_its_bound`, `:24809`
+`:25100` `state_sync_refuses_a_result_over_the_legacy_segment_cap` (#859 PR
+B); `:24819` `a_redacted_detail_cut_keeps_its_length_through_another_redaction`,
+`:24852` `a_committed_last_recut_is_stored_within_its_bound`, `:24872`
 `a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long`,
-`:24849` `state_sync_refuses_values_whose_stored_form_passes_their_bound`,
-`:24944`
+`:24912` `state_sync_refuses_values_whose_stored_form_passes_their_bound`,
+`:25007`
 `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction`,
-`:24984` `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound`,
-and `:25787` `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
-(#859 PR C); `:26716`
+`:25047` `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound`,
+and `:25850` `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
+(#859 PR C); `:26840`
 `a_reservation_identity_over_its_serialized_bound_is_refused_before_any_write`
-(#859 PR C); `:34174`
+(#859 PR C); `:34298`
 `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts`,
-`:34349` `covered_system_content_is_stored_as_the_meta_scan_redacts_it`,
-`:34385` `reset_and_delete_remove_covered_system_rows_and_their_receipts`,
-and `:34415` `descent_leaves_the_target_without_covered_system_rows` (#859
-PR B); `crates/daemon/src/history_summarizer.rs:4261`
-`a_producer_start_failure_records_a_bounded_detail`, `:4293`
-`a_secret_bearing_start_failure_stays_within_its_bound_once_stored`, `:4415`
-`a_run_id_over_the_producer_identity_bound_is_a_start_failure`, `:4451`
-`a_harness_over_the_producer_identity_bound_writes_nothing`, `:6391`
-`a_producer_session_id_keeps_a_bounded_slug`, `:6352`
+`:34473` `covered_system_content_is_stored_as_the_meta_scan_redacts_it`,
+`:34509` `reset_and_delete_remove_covered_system_rows_and_their_receipts`,
+and `:34539` `descent_leaves_the_target_without_covered_system_rows` (#859
+PR B); `crates/daemon/src/history_summarizer.rs:4265`
+`a_producer_start_failure_records_a_bounded_detail`, `:4297`
+`a_secret_bearing_start_failure_stays_within_its_bound_once_stored`, `:4419`
+`a_run_id_over_the_producer_identity_bound_is_a_start_failure`, `:4455`
+`a_harness_over_the_producer_identity_bound_writes_nothing`, `:6395`
+`a_producer_session_id_keeps_a_bounded_slug`, `:6356`
 `chunk_fingerprint_uses_id_kind_and_byte_length`, and `:2730`
 `chunk_failures_count_per_chunk_and_ignore_provider_errors` (#859 PR C);
 `crates/memory-store/src/summarizer_timeline.rs:490`
 `a_detail_is_cut_by_its_serialized_length` (#859 PR C);
-`crates/daemon/src/injection.rs:785`
+`crates/daemon/src/injection.rs:807`
 `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list`
-and `:820` `a_synthetic_pair_over_its_bound_after_redaction_is_refused`
+and `:842` `a_synthetic_pair_over_its_bound_after_redaction_is_refused`
 (#859 PR C);
-`crates/daemon/src/wire.rs:975` `empty_and_reserved_message_ids_are_rejected`
+`crates/daemon/src/wire.rs:967` `empty_and_reserved_message_ids_are_rejected`
 (mid length at `:986-996`);
 `crates/daemon/tests/eval_surface_ledger.rs:533`
 `a_new_hint_is_skipped_while_every_deferral_slot_is_taken`;
@@ -2063,7 +2064,7 @@ Open questions:
   512-byte cut before `6267f66d4`. `6267f66d4` (#859 PR C) cuts it in the store,
   so every caller meets the bound, and
   `an_abandon_keeps_a_failure_detail_within_its_serialized_bound`
-  (`crates/memory-store/src/lib.rs:25787`) witnesses it.
+  (`crates/memory-store/src/lib.rs:25850`) witnesses it.
 - Resolved: a design review found that a value meeting its bound on input
   could pass it once redaction replaced a secret with a longer placeholder,
   for summarizer failure and no-fire details, the task-list setter, and the

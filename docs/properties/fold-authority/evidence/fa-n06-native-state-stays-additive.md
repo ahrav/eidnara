@@ -17,19 +17,19 @@ identifies (see the investigation log).
 All references are verified at HEAD `0ff62b29a`.
 
 - Dispatch: `apply_once` sends every native pass except a subagent lineage
-  switch to `apply_additive_only` (`crates/daemon/src/transform.rs:3207-3209`).
+  switch to `apply_additive_only` (`crates/daemon/src/transform.rs:3217-3219`).
 - The additive path calls only `apply_ingress_scalars` (`:2904`), which sets
   `newest_live_block_id`, `newest_live_ordinal`, and `last_usage`
-  (`:5583-5598`). Identity insertion, provisional-tail removal, tail and basis
+  (`:5593-5608`). Identity insertion, provisional-tail removal, tail and basis
   re-adoption, and their counters live in `apply_ingress_identities`
-  (`:5602`), called only on the folding path (`:4159`).
+  (`:5612`), called only on the folding path (`:4169`).
 - The additive commit carries no identity upserts and no derived state: its
-  `TransformCommit` (`:3114-3133`) sets no identity delta, and its result
+  `TransformCommit` (`:3124-3143`) sets no identity delta, and its result
   sets `derived: None` (`:3162`), so no served fingerprints or baseline parts
   are promoted into the daemon cache. Since `ccab18208` (#903 on `main`) the
-  commit that adopts native authority sets `clear_identities` (`:3129`),
+  commit that adopts native authority sets `clear_identities` (`:3139`),
   which deletes the session's identity rows inside that transaction
-  (`crates/memory-store/src/lib.rs:11166-11168`), so a legacy
+  (`crates/memory-store/src/lib.rs:11201-11203`), so a legacy
   compaction-off row that recorded identities leaves none behind.
 - After #905 and #906, `ModuleMeta` holds no identity map, served
   fingerprints, or baseline parts; identities are `block_identities` rows and
@@ -37,10 +37,10 @@ All references are verified at HEAD `0ff62b29a`.
   and `coverage_ordinal` remain in metadata
   (`crates/memory-store/src/lib.rs:2121`, fields in that struct).
 - State sync on a `Some(false)` session treats the history-segment batch as
-  empty (`crates/memory-store/src/lib.rs:11486-11491`), so it writes no seed
+  empty (`crates/memory-store/src/lib.rs:11521-11526`), so it writes no seed
   boundary, segments, or drop and strip seeds.
 - The authority reset that makes a session native deletes identity rows and
-  segments and empties core and metadata (`lib.rs:13322-13392`).
+  segments and empties core and metadata (`lib.rs:13357-13427`).
 
 Witnesses (#903 unless noted):
 
@@ -58,13 +58,13 @@ Witnesses (#903 unless noted):
   and after every native transform in
   `bounded_operation_histories_follow_the_authority_model` (`:1030`).
 - Store: `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates`
-  (`crates/memory-store/src/lib.rs:25162`), with an unadopted positive
+  (`crates/memory-store/src/lib.rs:25225`), with an unadopted positive
   control that does write three segments and coverage.
 - Read inventory: `native_pass_reads_are_bounded_independent_of_stored_rows`
-  (`crates/daemon/src/transform_read_bound.rs:756`).
+  (`crates/daemon/src/transform_read_bound.rs:764`).
 - Folding-path counterpart:
   `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly`
-  (`crates/daemon/src/transform.rs:14628`).
+  (`crates/daemon/src/transform.rs:14638`).
 
 ## Failure scenario
 
@@ -103,7 +103,7 @@ empty and the ingress scalars updated.
 
 ### Q: Does a native session receive served fingerprints in the daemon cache?
 
-- Sources examined: `transform.rs:3149-3163`; `derived_state.rs`.
+- Sources examined: `transform.rs:3159-3173`; `derived_state.rs`.
 - Findings: No. The additive result proposes no derived state, so nothing is
   promoted.
 - Missing evidence: None.
@@ -112,8 +112,8 @@ empty and the ingress scalars updated.
 ### Q: Does `main`'s native-adoption clear change this record?
 
 - Sources examined: `git show ccab18208`;
-  `crates/daemon/src/transform.rs:3114-3133`;
-  `crates/memory-store/src/lib.rs:2588-2592`, `:11166-11168`;
+  `crates/daemon/src/transform.rs:3124-3143`;
+  `crates/memory-store/src/lib.rs:2610-2614`, `:11201-11203`;
   `crates/daemon/src/fold_authority_handler_tests.rs:399-422`.
 - Findings: It strengthens it. A legacy compaction-off row could hold
   identity rows and no fold coordinates; adopting native authority through

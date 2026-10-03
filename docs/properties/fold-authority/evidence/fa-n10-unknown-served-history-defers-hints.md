@@ -18,27 +18,27 @@ and in the #859 PR A run at `fd0b52aa5`.
 Code references are verified at `0ff62b29a`.
 
 - Predicate: `user_hint_deferred(hint_text, served, block_id, is_bust_pass)`
-  (`crates/daemon/src/transform.rs:7906-7924`) returns false for an empty
+  (`crates/daemon/src/transform.rs:7916-7934`) returns false for an empty
   hint or a bust, true when `served` is `None`, and otherwise true only when
   a served entry equals the block id or, for block 0, the bare mid.
-- Retained history: `prior_served` (`:7926-7931`) reads
+- Retained history: `prior_served` (`:7936-7941`) reads
   `ctx.derived?.served_for(meta.revert_epoch)`; `served_for`
   (`crates/daemon/src/derived_state.rs:14-16`) returns `None` for another
   revert epoch, so a reset also reads unknown.
 - Admission: `apply_once` calls the predicate with the loaded meta and
-  `is_bust_pass` (`crates/daemon/src/transform.rs:4212-4217`). A deferred
+  `is_bust_pass` (`crates/daemon/src/transform.rs:4222-4227`). A deferred
   hint when `pending_user_hint_block_ids` already holds
   `MAX_PENDING_USER_HINT_BLOCK_IDS` (16, `:148`) is skipped as
-  `UserHintSkip::DeferralsFull` (`:4218-4222`); otherwise it is recorded and
-  pushed with `deferred` set (`:4223-4242`). #859 PR A added the cap.
+  `UserHintSkip::DeferralsFull` (`:4228-4232`); otherwise it is recorded and
+  pushed with `deferred` set (`:4233-4252`). #859 PR A added the cap.
 - Divergence: every call site uses
   `prior_served(ctx, &loaded.meta).and_then(|prior| first_divergence(...))`
-  (`:3543-3544`, `:3621-3622`, `:5125-5126`), so unknown history reports no
+  (`:3553-3554`, `:3631-3632`, `:5135-5136`), so unknown history reports no
   divergence.
 - Native folds: the additive path neither decides hints nor carries derived
-  state (`:3162`, gate `:3207-3208`).
+  state (`:3162`, gate `:3217-3218`).
 - At `265df096`, `user_hint_target_was_served` read
-  `meta.served_output_fingerprint` (`transform.rs:8072-8079`), and a missing
+  `meta.served_output_fingerprint` (`transform.rs:8082-8089`), and a missing
   field was an empty vector, so a cold session never deferred.
 
 Gate results as recorded in the PR descriptions:
@@ -77,7 +77,7 @@ a later `HARD` that serves the deferred hint once.
 
 ### Q: Does the deferral cap from #859 weaken FA-N10?
 
-- Sources examined: `transform.rs:4212-4227`;
+- Sources examined: `transform.rs:4222-4237`;
   `crates/daemon/tests/eval_surface_ledger.rs:533`
   `a_new_hint_is_skipped_while_every_deferral_slot_is_taken`.
 - Findings: No. At a full deferral set the hint is skipped and nothing is

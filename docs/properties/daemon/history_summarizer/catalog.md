@@ -636,7 +636,7 @@ without escalating a backoff or moving a health counter.
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: partial - `history_summarizer.rs:6417`
+Exercised: partial - `history_summarizer.rs:6421`
 `pure_state_machine_happy_path_and_single_flight` covers the pure `fire`/`Busy`
 transition and `:3011`
 `concurrent_lineages_reattach_and_publish_in_isolated_sessions` covers two
@@ -666,8 +666,8 @@ Verified three independent layers: `fire` refuses non-idle
 (`memory-store:9398-9407`), and the row-version CAS uses the version written by the
 `Publishing` transition rather than a fresh read (`history_summarizer.rs:1707-1719` with
 the reasoning at `:1709-1713`).
-Existing check: `history_summarizer.rs:6417`, `:6488`
-`fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:6666`
+Existing check: `history_summarizer.rs:6421`, `:6492`
+`fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`, `:6670`
 `history_segment_generation_fence_releases_overlapped_publish_to_idle`. Status
 `unaudited`.
 Impact: Two commits at one `firing_seq` would append the same summarized range

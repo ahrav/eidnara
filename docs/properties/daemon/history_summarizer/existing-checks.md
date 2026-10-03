@@ -160,8 +160,8 @@ re-verified at `HEAD`.
 - **The wired happy path and content-drift fences**, 7: `:2272`, `:2323`
   (`selected_range_identity_drift_during_await_rejects_without_cooldown`),
   `:2369` (`tail_identity_extension_during_await_still_publishes`), `:4061`,
-  `:6488` (`fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`),
-  `:4401`, `:6666`
+  `:6492` (`fingerprint_mismatch_at_publish_abandons_and_releases_single_flight`),
+  `:4401`, `:6670`
   (`history_segment_generation_fence_releases_overlapped_publish_to_idle`).
 - **The fallback chain and error classification**, the largest cluster at 14:
   `:2410`-`:2850`, plus `:3895` and `:3938`.

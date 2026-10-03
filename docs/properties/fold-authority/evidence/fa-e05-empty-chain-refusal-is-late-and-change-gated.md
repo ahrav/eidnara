@@ -25,16 +25,16 @@ At HEAD `0ff62b29a`:
 
 - Replaced: `prepare_history_summarizer` returns `native_authority` first
   whenever the pass's applied authority is native
-  (`crates/daemon/src/lib.rs:9423-9434`). An empty binding chain gives
+  (`crates/daemon/src/lib.rs:9428-9439`). An empty binding chain gives
   native intent (`crates/daemon/src/config.rs:181-185`), so a fresh session
   with the default empty chain adopts native and never reaches the late
   check.
 - Surviving: under an applied Eidnara authority, `prepare_history_summarizer_fire`
   (`lib.rs:5299`) still loads the row (`:5318`), evaluates the trigger, and
-  on `!trigger.fire` returns `trigger_false` or `busy` (`:5553-5576`). On a
+  on `!trigger.fire` returns `trigger_false` or `busy` (`:5575-5598`). On a
   firing trigger with an empty live chain (`cfg` from `effective_config` at
-  `:5406`) it records and returns `no_models` (`:5578-5584`).
-- `record_no_fire` (`lib.rs:5895-5912`) returns when the stored reason is
+  `:5428`) it records and returns `no_models` (`:5600-5606`).
+- `record_no_fire` (`lib.rs:5917-5934`) returns when the stored reason is
   equal and otherwise commits with `let _ = store.commit(...)`, ignoring the
   error.
 - Defense guards: the assembler returns `NoModels` for an empty chain
@@ -42,26 +42,26 @@ At HEAD `0ff62b29a`:
   returns `HistorySummarizerDriveError::NoModels`
   (`crates/daemon/src/history_summarizer.rs:1840-1842`).
 - Wrapup keeps its own late check under Eidnara authority
-  (`lib.rs:5797-5802`).
+  (`lib.rs:5819-5824`).
 - `session.status` reports this state as
   `eidnara, summarizer stalled (no models at the last pass)`
-  (`lib.rs:6760-6763`), a #904 change.
+  (`lib.rs:6795-6798`), a #904 change.
 
 Checks at HEAD:
 
 - `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`
-  (`crates/daemon/src/lib.rs:41167`). The binding carries
-  `default_test_config()` with a chain (`binding`, `:19675-19693`), while
+  (`crates/daemon/src/lib.rs:41214`). The binding carries
+  `default_test_config()` with a chain (`binding`, `:19680-19698`), while
   the handler's live configuration has an empty chain. The pass adopts
   Eidnara and then records `no_models`; a repeat leaves `row_version`
   unchanged.
-- `session_wrapup_no_models_is_terminal_and_retains_command` (`:37569`).
+- `session_wrapup_no_models_is_terminal_and_retains_command` (`:37597`).
 - `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix`
   (`crates/daemon/src/fold_authority_handler_tests.rs:1037`).
 
 Citation corrections from `265df096` to HEAD: callers `lib.rs:9014`, `:9150`
-are now `:8976`, `:9077`; `:9503-9520` (the preparation entry) is
-`:9475-9486` and now holds the gate; `history_summarizer_chunk.rs:619-623` is
+are now `:9011`, `:9077`; `:9538-9555` (the preparation entry) is
+`:9510-9521` and now holds the gate; `history_summarizer_chunk.rs:619-623` is
 `:908-912`; `history_summarizer.rs:1655-1657` is `:1840-1842`; the checks at
 `lib.rs:42058` and `:39354` are at `:41167` and `:37569`.
 
@@ -89,7 +89,7 @@ concurrent writer) that leaves the pass result unchanged.
 ### Q: Does the stall reach production at HEAD?
 
 - Sources examined: `fold_authority.rs:95-139`; `config.rs:181-185`;
-  `lib.rs:5406`.
+  `lib.rs:5428`.
 - Findings: Yes, with an explicit edit. A session adopts Eidnara only with an
   admitted non-empty chain; removing the chain later leaves the stored
   authority. A bind after the edit on a quiescent session changes it to
@@ -101,7 +101,7 @@ concurrent writer) that leaves the pass result unchanged.
 
 ### Q: Is the ignored commit error still correct?
 
-- Sources examined: `lib.rs:5895-5912`.
+- Sources examined: `lib.rs:5917-5934`.
 - Findings: A lost race drops the diagnostic write only; the next firing turn
   records it again. No test constructs the failure.
 - Missing evidence: A forced commit failure inside `record_no_fire`.

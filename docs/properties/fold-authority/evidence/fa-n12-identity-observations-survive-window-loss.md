@@ -17,35 +17,35 @@ runs.
 Code references are verified at `0ff62b29a`.
 
 - One lookup: `lookup_block_identity_rows`
-  (`crates/memory-store/src/lib.rs:4863-4880`) selects the requested mids with
+  (`crates/memory-store/src/lib.rs:4885-4902`) selects the requested mids with
   `mid IN (SELECT value FROM json_each(?2))`. It backs the snapshot read
-  (`:8824`, inside `load_transform_snapshot_with_hook` `:8779`), the public
-  `load_block_identities` (`:8603-8611`), and the publication fence
-  (`:14155`).
-- Delta: `BlockIdentityDelta { upserts, deletes }` (`:1890-1893`).
-  `apply_block_identity_delta` (`:4904-4979`) refuses a delta that writes and
-  deletes one mid (`:4913-4923`), skips an unchanged vector (`:4942-4945`),
-  deletes only the listed mids (`:4951-4956`), and upserts the rest.
-- CAS coupling: `commit_transform` (`:10883`) runs the row-version CAS
-  (`:11111-11120`), the new-row identity check (`:11121-11129`), and the
-  history-segment sequence check (`:11130-11141`); the CAS and the sequence
-  check return `Replay`. It then writes `cache_state` (`:11156-11165`) and
-  applies the delta (`:11169-11171`) in the same transaction. No `Replay`
-  return follows the delta in this closure (it ends `Applied` at `:11405`).
+  (`:8859`, inside `load_transform_snapshot_with_hook` `:8814`), the public
+  `load_block_identities` (`:8638-8646`), and the publication fence
+  (`:14190`).
+- Delta: `BlockIdentityDelta { upserts, deletes }` (`:1911-1914`).
+  `apply_block_identity_delta` (`:4926-5001`) refuses a delta that writes and
+  deletes one mid (`:4935-4945`), skips an unchanged vector (`:4964-4967`),
+  deletes only the listed mids (`:4973-4978`), and upserts the rest.
+- CAS coupling: `commit_transform` (`:10918`) runs the row-version CAS
+  (`:11146-11155`), the new-row identity check (`:11156-11164`), and the
+  history-segment sequence check (`:11165-11176`); the CAS and the sequence
+  check return `Replay`. It then writes `cache_state` (`:11191-11200`) and
+  applies the delta (`:11204-11206`) in the same transaction. No `Replay`
+  return follows the delta in this closure (it ends `Applied` at `:11440`).
   Meta and core pass the durable-text scans before `write.execute`
-  (`:11032-11041`, `:11102`).
+  (`:11067-11076`, `:11102`).
 - Transform: the pass requests the projection's mids
-  (`crates/daemon/src/transform.rs:3363-3369`), holds `WindowIdentities`
-  (`:5394-5429`), and sends its delta with the commit (`:5242`). A pass whose
-  only change is the delta still commits (`:5191-5194`). The only
-  `deletes.insert` is `WindowIdentities::remove` (`:5426`), which runs only
-  for the provisional tail (`:5610-5612`).
+  (`crates/daemon/src/transform.rs:3373-3379`), holds `WindowIdentities`
+  (`:5404-5439`), and sends its delta with the commit (`:5252`). A pass whose
+  only change is the delta still commits (`:5201-5204`). The only
+  `deletes.insert` is `WindowIdentities::remove` (`:5436`), which runs only
+  for the provisional tail (`:5620-5622`).
 - Lifetime: reset deletes every row (`delete_block_identities`
-  `crates/memory-store/src/lib.rs:4981-4983`, which delegates to
-  `ScanOwnedRows::delete_session_rows` `:4821-4829`, called in `reset_session`
-  at `:13365`); `delete_session` deletes from every table with a `session_id`
-  column (`:8489-8563`); descent copies the source's rows with NULL
-  `scan_version` (`:12998-13007`).
+  `crates/memory-store/src/lib.rs:5003-5005`, which delegates to
+  `ScanOwnedRows::delete_session_rows` `:4843-4851`, called in `reset_session`
+  at `:13400`); `delete_session` deletes from every table with a `session_id`
+  column (`:8524-8598`); descent copies the source's rows with NULL
+  `scan_version` (`:13033-13042`).
 - Schema: `block_identities` and the partial index
   `block_identities_by_scan_version` (`crates/memory-store/baseline.sql:27-38`).
 
@@ -56,7 +56,7 @@ Gate results as recorded in the PR descriptions:
   test --workspace --all-features --locked --no-fail-fast`, and the marker
   script pass. The run log records 6,064 passed, 0 failed, 66 ignored, with
   each named test `ok`. The ignored driver `record_identity_transaction_timings`
-  (`crates/memory-store/src/lib.rs:33665`) records a 300-mid delta commit at
+  (`crates/memory-store/src/lib.rs:33789`) records a 300-mid delta commit at
   4.00 ms and 4.27 ms and a 300-mid snapshot read at 0.43 ms and 0.49 ms at
   100k and 1M rows (SQLite 3.51.3, WAL, `synchronous=2`); evidence, not a
   gate.
@@ -73,7 +73,7 @@ message is never compared because the transform has no stored identity.
 ## Timing windows and dependencies
 
 - A commit between the snapshot's state read and its identity read; the test
-  hook runs between the two (`:8540`).
+  hook runs between the two (`:8575`).
 - CAS loss or a durable-text refusal after the transform built its delta.
 - An aborting trigger after the delete, between two upserts, or after the
   upserts; the whole commit rolls back.
@@ -90,14 +90,14 @@ reopen.
 
 ### Q: Can any path delete an omitted mid outside reset, deletion, or native adoption?
 
-- Sources examined: `transform.rs:5394-5429`, `:5602-5651`;
-  `crates/memory-store/src/lib.rs:4904-4979`, `:4981-4983`.
+- Sources examined: `transform.rs:5404-5439`, `:5612-5661`;
+  `crates/memory-store/src/lib.rs:4926-5001`, `:5003-5005`.
 - Findings: No. Ordinary folding-window updates retain omitted identity
   rows: the transform's only per-mid delete is the provisional tail, and
   the store deletes a single mid only from `delta.deletes`. Native adoption
   clears legacy identity rows in the adopting transaction (`clear_identities`,
-  `crates/daemon/src/transform.rs:3126-3130`;
-  `crates/memory-store/src/lib.rs:11166-11168`); reset, session deletion,
+  `crates/daemon/src/transform.rs:3136-3140`;
+  `crates/memory-store/src/lib.rs:11201-11203`); reset, session deletion,
   and descent-target replacement clear whole sessions.
 - Missing evidence: None.
 - Conclusion: resolved with answer.
@@ -116,8 +116,8 @@ reopen.
 ### Q: Does #905's final form still keep omitted mids?
 
 - Sources examined: `git show f0e39d04d 64a8bf371 5d9ff4581`;
-  `crates/daemon/src/transform.rs:5431-5469`, `:20444`;
-  `crates/memory-store/src/lib.rs:14144-14148`.
+  `crates/daemon/src/transform.rs:5441-5479`, `:20472`;
+  `crates/memory-store/src/lib.rs:14179-14183`.
 - Findings: Yes. The window still deletes no omitted row. When a window
   drops a selected mid of an in-flight firing, the transform records the
   withdrawal on the firing and the publication is fenced out, while the

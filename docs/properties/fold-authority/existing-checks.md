@@ -15,19 +15,19 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 
 | Check | Location | Records | Recorded run | Status |
 | --- | --- | --- | --- | --- |
-| `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused` | `crates/memory-store/src/lib.rs:32079` | FA-E03 (exact boundary, content) | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `state_sync_metadata_scan_failure_rolls_back_earlier_writes` | `crates/memory-store/src/lib.rs:31906` | FA-E03 | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused` | `crates/memory-store/src/lib.rs:32203` | FA-E03 (exact boundary, content) | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `state_sync_metadata_scan_failure_rolls_back_earlier_writes` | `crates/memory-store/src/lib.rs:32030` | FA-E03 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `budget_stop_and_tool_only_ranges_are_recorded` | `crates/daemon/src/history_summarizer_chunk.rs:2814` | FA-E04 (range only) | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `history_summarizer_boundary_construction_matches_owned_reference` | `crates/daemon/src/lib.rs:18613` | FA-E04 (missing identity) | #859 PR A (run at `fd0b52aa5`); fingerprint assertions changed by #859 PR C | unaudited |
-| `no_fire_reason_is_durable_change_gated_and_cleared_by_fire` | `crates/daemon/src/lib.rs:41167` | FA-E05 (surviving stall clause), FA-E06 (live versus captured chain) | #903 (#855); #859 PR A | unaudited |
-| `session_wrapup_no_models_is_terminal_and_retains_command` | `crates/daemon/src/lib.rs:37569` | FA-E05 (wrapup late check) | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `history_summarizer_boundary_construction_matches_owned_reference` | `crates/daemon/src/lib.rs:18618` | FA-E04 (missing identity) | #859 PR A (run at `fd0b52aa5`); fingerprint assertions changed by #859 PR C | unaudited |
+| `no_fire_reason_is_durable_change_gated_and_cleared_by_fire` | `crates/daemon/src/lib.rs:41214` | FA-E05 (surviving stall clause), FA-E06 (live versus captured chain) | #903 (#855); #859 PR A | unaudited |
+| `session_wrapup_no_models_is_terminal_and_retains_command` | `crates/daemon/src/lib.rs:37597` | FA-E05 (wrapup late check) | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `session_status_names_a_stalled_eidnara_summarizer_in_the_authority_prefix` | `crates/daemon/src/fold_authority_handler_tests.rs:1037` | FA-E05 | #904 (#856); #859 PR A | unaudited |
 | `defer_delta_and_boundary_advance_are_additive` | `crates/daemon/src/tail_hygiene.rs:2148` | FA-E07 | #906 | unaudited |
 | `non_append_mutation_invalidates_until_a_bust` | `crates/daemon/src/tail_hygiene.rs:2210` | FA-E07, FA-N11 | #906 | unaudited |
 | `first_divergence_classifies_each_boundary_kind_and_ignores_appends` | `crates/daemon/src/divergence.rs:124` | FA-E08 | #906 | unaudited |
-| `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:30032` | FA-E09 | #905 | unaudited |
-| `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:4073` | FA-E09 | #905 | unaudited |
-| `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:4127` | FA-E09 | #905 | unaudited |
+| `publish_history_summarizer_chunk_rejects_recut_epoch_mismatch_as_conflict` | `crates/memory-store/src/lib.rs:30156` | FA-E09 | #905 | unaudited |
+| `selected_range_identity_drift_during_await_rejects_without_cooldown` | `crates/daemon/src/history_summarizer.rs:4077` | FA-E09 | #905 | unaudited |
+| `tail_identity_extension_during_await_still_publishes` | `crates/daemon/src/history_summarizer.rs:4131` | FA-E09 | #905 | unaudited |
 | `tier_policy_ignores_project_models_and_rejects_project_lowering` | `crates/daemon/src/config.rs:1509` | FA-E10 | #859 PR A | unaudited |
 | `compaction_enabled_defaults_true_and_is_user_tier_only` | `crates/daemon/src/config.rs:1616` | FA-E10 | #859 PR A | unaudited |
 | `module_model_keys_replace_the_plugin_chain_only_when_the_module_model_is_set` | `crates/daemon/src/config.rs:2237` | FA-E10 | #859 PR A | unaudited |
@@ -48,7 +48,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `legacy_rows_adopt_by_their_fold_artifacts` | `crates/daemon/src/fold_authority_handler_tests.rs:329` | FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `a_fold_artifact_written_after_the_plan_replans_the_adoption` | `crates/daemon/src/fold_authority_handler_tests.rs:742` | FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `the_transition_table_follows_the_session_authority_rules` | `crates/daemon/src/fold_authority.rs:200` | FA-N02, FA-N03 | #903 (#855); #859 PR A | unaudited |
-| `a_non_boolean_fold_authority_is_a_serde_error_on_every_read` | `crates/memory-store/src/lib.rs:29612` | FA-N02 | #903 (#855); #859 PR A | unaudited |
+| `a_non_boolean_fold_authority_is_a_serde_error_on_every_read` | `crates/memory-store/src/lib.rs:29736` | FA-N02 | #903 (#855); #859 PR A | unaudited |
 | `bounded_operation_histories_follow_the_authority_model` | `crates/daemon/src/fold_authority_handler_tests.rs:1030` | FA-N02, FA-N03, FA-N04, FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `a_quiescent_bind_changes_authority_in_both_directions_through_the_reset` | `crates/daemon/src/fold_authority_handler_tests.rs:219` | FA-N03, FA-N04, FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `a_sibling_binding_keeps_the_change_pending_until_a_quiescent_bind` | `crates/daemon/src/fold_authority_handler_tests.rs:245` | FA-N03, FA-N05, FA-E06 | #903 (#855); #859 PR A | unaudited |
@@ -56,103 +56,103 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
 | `an_ordinary_recomp_reset_preserves_the_adopted_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:314` | FA-N03 | #903 (#855); #859 PR A | unaudited |
 | `an_emergency_rerun_after_publication_keeps_the_change_pending` | `crates/daemon/src/fold_authority_handler_tests.rs:656` | FA-N03 | #903 (#855); #859 PR A | unaudited |
 | `a_sibling_bound_during_the_change_keeps_it_pending` | `crates/daemon/src/fold_authority_handler_tests.rs:778` | FA-N03, FA-N05, FA-E06 | #903 (#855); #859 PR A | unaudited |
-| `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority` | `crates/memory-store/src/lib.rs:29658` | FA-N03 | #903 (#855); #859 PR A | unaudited |
-| `a_busy_summarizer_refuses_the_authority_reset` | `crates/memory-store/src/lib.rs:29691` | FA-N03 | #903 (#855); #859 PR A | unaudited |
-| `a_pending_publication_refuses_the_authority_reset_of_an_idle_session` | `crates/memory-store/src/lib.rs:29718` | FA-N03 | #903 (#855); #859 PR A | unaudited |
+| `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority` | `crates/memory-store/src/lib.rs:29782` | FA-N03 | #903 (#855); #859 PR A | unaudited |
+| `a_busy_summarizer_refuses_the_authority_reset` | `crates/memory-store/src/lib.rs:29815` | FA-N03 | #903 (#855); #859 PR A | unaudited |
+| `a_pending_publication_refuses_the_authority_reset_of_an_idle_session` | `crates/memory-store/src/lib.rs:29842` | FA-N03 | #903 (#855); #859 PR A | unaudited |
 | `authority_changes_survive_restarts_and_serve_first_passes` | `crates/daemon/src/fold_authority_handler_tests.rs:840` | FA-N04, FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `a_descended_target_whose_binding_disagrees_resets_to_a_first_pass` | `crates/daemon/src/fold_authority_handler_tests.rs:591` | FA-N04 | #903 (#855); #859 PR A | unaudited |
 | `native_authority_skips_every_fold_step_even_with_a_live_chain` | `crates/daemon/src/fold_authority_handler_tests.rs:46` | FA-N05, FA-N06, FA-E01 (replacement) | #903 (#855); #859 PR A | unaudited |
 | `wrapup_is_refused_under_native_authority` | `crates/daemon/src/fold_authority_handler_tests.rs:107` | FA-N05 | #903 (#855); #859 PR A | unaudited |
 | `a_resent_descent_after_a_change_to_native_is_acknowledged_as_a_replay` | `crates/daemon/src/fold_authority_handler_tests.rs:555` | FA-N06 | #903 (#855); #859 PR A | unaudited |
 | `native_metadata_does_not_grow_with_the_message_count` | `crates/daemon/src/fold_authority_handler_tests.rs:645` | FA-N06, FA-N14, FA-E01 | #903 (#855); #859 PR A | unaudited |
-| `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates` | `crates/memory-store/src/lib.rs:25162` | FA-N06 | #903 (#855); #859 PR A | unaudited |
-| `native_pass_reads_are_bounded_independent_of_stored_rows` | `crates/daemon/src/transform_read_bound.rs:756` | FA-N06 | #903 (#855); #859 PR A | unaudited |
-| `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly` | `crates/daemon/src/transform.rs:14628` | FA-N06 (folding-path counterpart), FA-N12, FA-E09 | #903 (#855); #859 PR A, #905 | unaudited |
-| `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets` | `crates/daemon/src/lib.rs:35175` | FA-N09, FA-N11 | #906 | unaudited |
-| `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` | `crates/daemon/src/lib.rs:35255` | FA-N09, FA-N11 | #906 | unaudited |
-| `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only` | `crates/daemon/src/lib.rs:35288` | FA-N09, FA-N11 | #906 | unaudited |
-| `an_emergency_pass_holds_a_derived_lease_only_inside_each_transform` | `crates/daemon/src/lib.rs:35313` | FA-N09 | #906 | unaudited |
-| `a_pass_that_loses_every_compare_and_swap_publishes_nothing` | `crates/daemon/src/lib.rs:35399` | FA-N09 | #906 | unaudited |
-| `a_committed_pass_whose_boundary_read_fails_still_promotes` | `crates/daemon/src/lib.rs:35437` | FA-N09 | #906 | unaudited |
-| `a_sibling_route_waits_for_promotion_and_a_delete_revokes_the_paused_incarnation` | `crates/daemon/src/lib.rs:35501` | FA-N09 | #906 | unaudited |
-| `a_session_purged_while_its_pass_awaits_promotion_stays_absent` | `crates/daemon/src/lib.rs:35603` | FA-N09 | #906 | unaudited |
-| `a_worker_lost_between_commit_and_promotion_leaves_the_commit_and_no_derived_state` | `crates/daemon/src/lib.rs:35623` | FA-N09 | #906 | unaudited |
-| `a_caller_cancelled_after_the_commit_still_promotes_once_the_worker_finishes` | `crates/daemon/src/lib.rs:35651` | FA-N09 | #906 | unaudited |
-| `derived_state_keeps_the_newest_acceptance_of_a_live_generation_under_the_shared_budget` | `crates/daemon/src/lib.rs:21722` | FA-N09 | #906 | unaudited |
+| `a_native_authority_state_sync_keeps_the_session_free_of_fold_coordinates` | `crates/memory-store/src/lib.rs:25225` | FA-N06 | #903 (#855); #859 PR A | unaudited |
+| `native_pass_reads_are_bounded_independent_of_stored_rows` | `crates/daemon/src/transform_read_bound.rs:764` | FA-N06 | #903 (#855); #859 PR A | unaudited |
+| `a_completed_tail_that_turns_provisional_is_removed_and_re_adopted_exactly` | `crates/daemon/src/transform.rs:14638` | FA-N06 (folding-path counterpart), FA-N12, FA-E09 | #903 (#855); #859 PR A, #905 | unaudited |
+| `committing_and_no_write_passes_promote_under_a_charged_lease_and_a_restart_forgets` | `crates/daemon/src/lib.rs:35180` | FA-N09, FA-N11 | #906 | unaudited |
+| `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` | `crates/daemon/src/lib.rs:35260` | FA-N09, FA-N11 | #906 | unaudited |
+| `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only` | `crates/daemon/src/lib.rs:35293` | FA-N09, FA-N11 | #906 | unaudited |
+| `an_emergency_pass_holds_a_derived_lease_only_inside_each_transform` | `crates/daemon/src/lib.rs:35318` | FA-N09 | #906 | unaudited |
+| `a_pass_that_loses_every_compare_and_swap_publishes_nothing` | `crates/daemon/src/lib.rs:35404` | FA-N09 | #906 | unaudited |
+| `a_committed_pass_whose_boundary_read_fails_still_promotes` | `crates/daemon/src/lib.rs:35442` | FA-N09 | #906 | unaudited |
+| `a_sibling_route_waits_for_promotion_and_a_delete_revokes_the_paused_incarnation` | `crates/daemon/src/lib.rs:35506` | FA-N09 | #906 | unaudited |
+| `a_session_purged_while_its_pass_awaits_promotion_stays_absent` | `crates/daemon/src/lib.rs:35608` | FA-N09 | #906 | unaudited |
+| `a_worker_lost_between_commit_and_promotion_leaves_the_commit_and_no_derived_state` | `crates/daemon/src/lib.rs:35628` | FA-N09 | #906 | unaudited |
+| `a_caller_cancelled_after_the_commit_still_promotes_once_the_worker_finishes` | `crates/daemon/src/lib.rs:35656` | FA-N09 | #906 | unaudited |
+| `derived_state_keeps_the_newest_acceptance_of_a_live_generation_under_the_shared_budget` | `crates/daemon/src/lib.rs:21727` | FA-N09 | #906 | unaudited |
 | `newer_epochs_and_versions_supersede_and_keys_select_by_epoch_and_generation` | `crates/daemon/src/derived_state.rs:122` | FA-N09, FA-N10, FA-N11 | #906 | unaudited |
 | `a_no_write_proposal_is_accepted_only_while_its_read_version_is_current` | `crates/daemon/src/derived_state.rs:148` | FA-N09 | #906 | unaudited |
 | `a_process_killed_between_commit_and_promotion_keeps_the_commit_and_forgets_the_derived_state` | `crates/daemon/tests/derived_state_crash_cut.rs:76` | FA-N09, FA-N11 | #906 | unaudited |
-| `a_new_hint_defers_only_when_its_target_may_have_been_served_outside_a_bust` | `crates/daemon/src/transform.rs:13329` | FA-N10, FA-E08 | #906 | unaudited |
-| `divergence_reports_nothing_against_an_unknown_served_history` | `crates/daemon/src/transform.rs:13384` | FA-N10 | #906 | unaudited |
+| `a_new_hint_defers_only_when_its_target_may_have_been_served_outside_a_bust` | `crates/daemon/src/transform.rs:13339` | FA-N10, FA-E08 | #906 | unaudited |
+| `divergence_reports_nothing_against_an_unknown_served_history` | `crates/daemon/src/transform.rs:13394` | FA-N10 | #906 | unaudited |
 | `a_new_hint_defers_after_a_restart_forgets_what_was_served` | `crates/daemon/tests/eval_surface_ledger.rs:442` | FA-N10 | #906 | unaudited |
 | `a_new_hint_is_skipped_while_every_deferral_slot_is_taken` | `crates/daemon/tests/eval_surface_ledger.rs:533` | FA-N10, FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `status_reads_hygiene_validity_joined_with_the_retained_parts` | `crates/daemon/src/lib.rs:35724` | FA-N11 | #906 | unaudited |
+| `status_reads_hygiene_validity_joined_with_the_retained_parts` | `crates/daemon/src/lib.rs:35729` | FA-N11 | #906 | unaudited |
 | `durable_scalars_join_retained_parts_by_generation` | `crates/daemon/src/tail_hygiene.rs:2278` | FA-N11, FA-E07 | #906 | unaudited |
-| `derived_output_state_is_absent_from_serialized_meta_and_legacy_rows_still_load` | `crates/memory-store/src/lib.rs:29797` | FA-N11 | #906 | unaudited |
-| `requested_identity_reads_do_not_grow_with_the_identity_table` | `crates/memory-store/src/lib.rs:23909` | FA-N12 | #905 | unaudited |
-| `block_identity_deltas_keep_omitted_rows_and_scan_only_the_rows_they_write` | `crates/memory-store/src/lib.rs:33485` | FA-N12 | #905 | unaudited |
-| `a_rejected_commit_writes_no_identity_row` | `crates/memory-store/src/lib.rs:33571` | FA-N12 | #905 | unaudited |
-| `a_failure_after_each_identity_mutation_rolls_the_whole_commit_back` | `crates/memory-store/src/lib.rs:33603` | FA-N12 | #905 | unaudited |
-| `a_refused_commit_writes_no_identity_row` | `crates/memory-store/src/lib.rs:33757` | FA-N12, FA-E03 | #905 (#857), #859 PR A | unaudited |
-| `a_delta_that_writes_and_deletes_one_mid_is_refused` | `crates/memory-store/src/lib.rs:33797` | FA-N12 | #905 | unaudited |
-| `receipt_retirement_reads_at_most_one_row_beyond_the_released_ones` | `crates/memory-store/src/lib.rs:33826` | FA-N12 | #905 | unaudited |
-| `descent_copies_identity_rows_without_their_scan_owner` | `crates/memory-store/src/lib.rs:33925` | FA-N12 | #905 | unaudited |
-| `identity_histories_match_a_per_session_reference_map` | `crates/memory-store/src/lib.rs:33977` | FA-N12 | #905 | unaudited |
-| `descent_copies_block_identities_and_recomp_reset_clears_them` | `crates/memory-store/src/lib.rs:34074` | FA-N12 | #905 | unaudited |
-| `transform_snapshot_resists_commit_between_state_and_overlay_reads` | `crates/memory-store/src/lib.rs:21896` | FA-N12 | #905 | unaudited |
-| `publish_rejects_a_selected_message_whose_identity_row_is_gone` | `crates/memory-store/src/lib.rs:25938` | FA-N12, FA-E09 | #905 | unaudited |
-| `mid_turn_tail_stays_provisional_and_re_adopts_completed_tail` | `crates/daemon/src/transform.rs:14673` | FA-N12 | #905 | unaudited |
-| `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows` | `crates/daemon/src/transform.rs:20444` | FA-N12, FA-E09 | #905 (renamed from `a_window_that_omits_the_selected_message_keeps_its_identity_for_the_publication` by #905's review commits) | unaudited |
-| `publish_rejects_a_firing_whose_selected_message_left_the_window` | `crates/memory-store/src/lib.rs:25993` | FA-E09 | #905 | unaudited |
+| `derived_output_state_is_absent_from_serialized_meta_and_legacy_rows_still_load` | `crates/memory-store/src/lib.rs:29921` | FA-N11 | #906 | unaudited |
+| `requested_identity_reads_do_not_grow_with_the_identity_table` | `crates/memory-store/src/lib.rs:23944` | FA-N12 | #905 | unaudited |
+| `block_identity_deltas_keep_omitted_rows_and_scan_only_the_rows_they_write` | `crates/memory-store/src/lib.rs:33609` | FA-N12 | #905 | unaudited |
+| `a_rejected_commit_writes_no_identity_row` | `crates/memory-store/src/lib.rs:33695` | FA-N12 | #905 | unaudited |
+| `a_failure_after_each_identity_mutation_rolls_the_whole_commit_back` | `crates/memory-store/src/lib.rs:33727` | FA-N12 | #905 | unaudited |
+| `a_refused_commit_writes_no_identity_row` | `crates/memory-store/src/lib.rs:33881` | FA-N12, FA-E03 | #905 (#857), #859 PR A | unaudited |
+| `a_delta_that_writes_and_deletes_one_mid_is_refused` | `crates/memory-store/src/lib.rs:33921` | FA-N12 | #905 | unaudited |
+| `receipt_retirement_reads_at_most_one_row_beyond_the_released_ones` | `crates/memory-store/src/lib.rs:33950` | FA-N12 | #905 | unaudited |
+| `descent_copies_identity_rows_without_their_scan_owner` | `crates/memory-store/src/lib.rs:34049` | FA-N12 | #905 | unaudited |
+| `identity_histories_match_a_per_session_reference_map` | `crates/memory-store/src/lib.rs:34101` | FA-N12 | #905 | unaudited |
+| `descent_copies_block_identities_and_recomp_reset_clears_them` | `crates/memory-store/src/lib.rs:34198` | FA-N12 | #905 | unaudited |
+| `transform_snapshot_resists_commit_between_state_and_overlay_reads` | `crates/memory-store/src/lib.rs:21931` | FA-N12 | #905 | unaudited |
+| `publish_rejects_a_selected_message_whose_identity_row_is_gone` | `crates/memory-store/src/lib.rs:26001` | FA-N12, FA-E09 | #905 | unaudited |
+| `mid_turn_tail_stays_provisional_and_re_adopts_completed_tail` | `crates/daemon/src/transform.rs:14683` | FA-N12 | #905 | unaudited |
+| `a_window_that_drops_a_selected_message_fences_the_publication_out_and_keeps_its_rows` | `crates/daemon/src/transform.rs:20472` | FA-N12, FA-E09 | #905 (renamed from `a_window_that_omits_the_selected_message_keeps_its_identity_for_the_publication` by #905's review commits) | unaudited |
+| `publish_rejects_a_firing_whose_selected_message_left_the_window` | `crates/memory-store/src/lib.rs:26056` | FA-E09 | #905 | unaudited |
 | `an_over_budget_selection_stops_at_the_longest_prefix_of_whole_blocks` | `crates/daemon/src/history_summarizer_chunk.rs:1960` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `an_indivisible_first_block_over_the_identity_budget_no_fires` | `crates/daemon/src/history_summarizer_chunk.rs:1981` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `escaped_and_unicode_mids_are_charged_as_they_serialize` | `crates/daemon/src/history_summarizer_chunk.rs:1995` | FA-N13, FA-E04 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing` | `crates/daemon/src/lib.rs:36285` | FA-N13 | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `an_indivisible_block_over_the_identity_budget_no_fires_and_reserves_nothing` | `crates/daemon/src/lib.rs:36290` | FA-N13 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `module_meta_size_is_independent_of_message_count_and_window_size` | `crates/daemon/src/transform_meta_bound.rs:1273` | FA-N14, FA-E03 (guard not reached) | #859 PR A (run at `fd0b52aa5`); escaping negative control added by #859 PR C | unaudited |
 | `every_metadata_field_has_a_recorded_bound_within_the_headroom` | `crates/daemon/src/transform_meta_bound.rs:732` | FA-N14 | #859 PR A; `Unbounded` entries removed by #859 PR B; summarizer inventory and selection sum by #859 PR C, the table built with `inventory!` by `6fc85742f`, and `last_recut`, `pending_rewrite`, and the table's reuse as `recorded_metadata_bounds` by `186f3c076` and `e02b22383`, and the five-input `last_render_config` bound by `78fc312db` (run at `0ff62b29a`) | unaudited |
 | `request_identity_strings_over_their_bound_are_refused_before_any_read` | `crates/daemon/src/transform_meta_bound.rs:1371` | FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
 | `a_hundred_thousand_message_session_commits_a_three_hundred_message_window` | `crates/daemon/src/transform_meta_bound.rs:91` | FA-N14 | #859 PR A (run at `fd0b52aa5`); earlier #833 | unaudited |
-| `state_sync_refuses_anchors_and_watermarks_over_their_bounds` | `crates/memory-store/src/lib.rs:24390` | FA-N14 | #859 PR A (run at `fd0b52aa5`); todo serialized-length cap added by #859 PR C | unaudited |
-| `empty_and_reserved_message_ids_are_rejected` (mid length at `:986-996`) | `crates/daemon/src/wire.rs:975` | FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
-| `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix` | `crates/daemon/src/lib.rs:36313` | FA-N13, FA-E04 (range) | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `state_sync_refuses_anchors_and_watermarks_over_their_bounds` | `crates/memory-store/src/lib.rs:24425` | FA-N14 | #859 PR A (run at `fd0b52aa5`); todo serialized-length cap added by #859 PR C | unaudited |
+| `empty_and_reserved_message_ids_are_rejected` (mid length at `:1005-1015`) | `crates/daemon/src/wire.rs:967` | FA-N14 | #859 PR A (run at `fd0b52aa5`) | unaudited |
+| `an_over_budget_history_reserves_and_publishes_the_longest_fitting_prefix` | `crates/daemon/src/lib.rs:36318` | FA-N13, FA-E04 (range) | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_generated_history_fires_the_longest_whole_block_prefix_within_the_identity_budget` (64-case proptest) | `crates/daemon/src/history_summarizer_chunk.rs:2169` | FA-N13, FA-E04 (mixed system and noise roles) | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed` | `crates/daemon/src/transform.rs:26370` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
-| `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts` | `crates/memory-store/src/lib.rs:34174` | FA-N14, FA-E03 (lost CAS and write-and-delete refusal) | #859 PR B (run at `b45416ac0`) | unaudited |
-| `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt` | `crates/memory-store/src/lib.rs:34279` | FA-E03 (rows past one scan document), FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `covered_system_content_is_stored_as_the_meta_scan_redacts_it` | `crates/memory-store/src/lib.rs:34349` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
-| `reset_and_delete_remove_covered_system_rows_and_their_receipts` | `crates/memory-store/src/lib.rs:34385` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
-| `descent_leaves_the_target_without_covered_system_rows` | `crates/memory-store/src/lib.rs:34415` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
-| `state_sync_refuses_values_whose_redacted_form_passes_their_bound` | `crates/memory-store/src/lib.rs:24632` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
-| `state_sync_refuses_a_result_over_the_legacy_segment_cap` | `crates/memory-store/src/lib.rs:25037` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
+| `covered_systems_grow_in_m0_while_the_stored_meta_stays_fixed` | `crates/daemon/src/transform.rs:26398` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
+| `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts` | `crates/memory-store/src/lib.rs:34298` | FA-N14, FA-E03 (lost CAS and write-and-delete refusal) | #859 PR B (run at `b45416ac0`) | unaudited |
+| `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt` | `crates/memory-store/src/lib.rs:34403` | FA-E03 (rows past one scan document), FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `covered_system_content_is_stored_as_the_meta_scan_redacts_it` | `crates/memory-store/src/lib.rs:34473` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
+| `reset_and_delete_remove_covered_system_rows_and_their_receipts` | `crates/memory-store/src/lib.rs:34509` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
+| `descent_leaves_the_target_without_covered_system_rows` | `crates/memory-store/src/lib.rs:34539` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
+| `state_sync_refuses_values_whose_redacted_form_passes_their_bound` | `crates/memory-store/src/lib.rs:24695` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
+| `state_sync_refuses_a_result_over_the_legacy_segment_cap` | `crates/memory-store/src/lib.rs:25100` | FA-N14 | #859 PR B (run at `b45416ac0`) | unaudited |
 | `every_history_summarizer_field_has_an_enforced_bound` | `crates/daemon/src/transform_meta_bound.rs:588` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `an_abandon_keeps_a_failure_detail_within_its_serialized_bound` | `crates/memory-store/src/lib.rs:25787` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_redacted_detail_cut_keeps_its_length_through_another_redaction` | `crates/memory-store/src/lib.rs:24756` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction` | `crates/memory-store/src/lib.rs:24944` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound` | `crates/memory-store/src/lib.rs:24984` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_secret_bearing_start_failure_stays_within_its_bound_once_stored` | `crates/daemon/src/history_summarizer.rs:4293` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list` | `crates/daemon/src/injection.rs:785` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_synthetic_pair_over_its_bound_after_redaction_is_refused` | `crates/daemon/src/injection.rs:820` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `an_abandon_keeps_a_failure_detail_within_its_serialized_bound` | `crates/memory-store/src/lib.rs:25850` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_redacted_detail_cut_keeps_its_length_through_another_redaction` | `crates/memory-store/src/lib.rs:24819` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `an_abandon_keeps_a_secret_bearing_detail_within_its_bound_after_redaction` | `crates/memory-store/src/lib.rs:25007` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `set_todo_state_refuses_a_state_whose_redacted_form_passes_its_bound` | `crates/memory-store/src/lib.rs:25047` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_secret_bearing_start_failure_stays_within_its_bound_once_stored` | `crates/daemon/src/history_summarizer.rs:4297` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_captured_state_whose_redacted_form_passes_its_bound_reads_as_an_empty_list` | `crates/daemon/src/injection.rs:807` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_synthetic_pair_over_its_bound_after_redaction_is_refused` | `crates/daemon/src/injection.rs:842` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `composition_witness_a_meta_with_every_field_near_its_bound_commits_and_reloads_within_the_total` | `crates/daemon/src/transform_meta_bound.rs:978` | FA-N14 (composite commit; synthetic stress state) | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_render_identity_from_five_escaped_inputs_at_their_bound_fits_its_allowance` | `crates/daemon/src/transform_meta_bound.rs:1342` | FA-N14 (render identity bound) | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_secret_bearing_summarizer_detail_is_stored_within_its_bound_with_its_detection_recorded` | `crates/memory-store/tests/production_redaction.rs:968` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_committed_last_recut_is_stored_within_its_bound` | `crates/memory-store/src/lib.rs:24789` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long` | `crates/memory-store/src/lib.rs:24809` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `state_sync_refuses_values_whose_stored_form_passes_their_bound` | `crates/memory-store/src/lib.rs:24849` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair` | `crates/daemon/src/transform.rs:21623` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_replacement_pair_near_its_bound_persists_and_reloads_within_it` | `crates/daemon/src/transform.rs:21659` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_reservation_identity_over_its_serialized_bound_is_refused_before_any_write` | `crates/memory-store/src/lib.rs:26716` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_producer_start_failure_records_a_bounded_detail` | `crates/daemon/src/history_summarizer.rs:4261` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_run_id_over_the_producer_identity_bound_is_a_start_failure` | `crates/daemon/src/history_summarizer.rs:4415` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_harness_over_the_producer_identity_bound_writes_nothing` | `crates/daemon/src/history_summarizer.rs:4451` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `a_producer_session_id_keeps_a_bounded_slug` | `crates/daemon/src/history_summarizer.rs:6391` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
-| `chunk_fingerprint_uses_id_kind_and_byte_length` (now a SHA-256 digest of the join) | `crates/daemon/src/history_summarizer.rs:6352` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_committed_last_recut_is_stored_within_its_bound` | `crates/memory-store/src/lib.rs:24852` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_revert_keeps_last_recut_within_its_bound_when_a_surviving_id_is_long` | `crates/memory-store/src/lib.rs:24872` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `state_sync_refuses_values_whose_stored_form_passes_their_bound` | `crates/memory-store/src/lib.rs:24912` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_replacement_pair_over_its_bound_after_redaction_clears_the_persisted_pair` | `crates/daemon/src/transform.rs:21651` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_replacement_pair_near_its_bound_persists_and_reloads_within_it` | `crates/daemon/src/transform.rs:21687` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_reservation_identity_over_its_serialized_bound_is_refused_before_any_write` | `crates/memory-store/src/lib.rs:26840` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_producer_start_failure_records_a_bounded_detail` | `crates/daemon/src/history_summarizer.rs:4265` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_run_id_over_the_producer_identity_bound_is_a_start_failure` | `crates/daemon/src/history_summarizer.rs:4419` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_harness_over_the_producer_identity_bound_writes_nothing` | `crates/daemon/src/history_summarizer.rs:4455` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `a_producer_session_id_keeps_a_bounded_slug` | `crates/daemon/src/history_summarizer.rs:6395` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
+| `chunk_fingerprint_uses_id_kind_and_byte_length` (now a SHA-256 digest of the join) | `crates/daemon/src/history_summarizer.rs:6356` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `chunk_failures_count_per_chunk_and_ignore_provider_errors` (model-chain digest, older chain form, 1,000-model chain) | `crates/daemon/src/history_summarizer.rs:2730` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 | `a_recorded_failure_detail_is_cut_at_a_character_boundary_within_its_raw_bound` | `crates/daemon/src/history_summarizer.rs:3191` | FA-N14 | #859 PR A; #859 PR C | unaudited |
-| `a_credential_that_crosses_the_detail_bound_is_redacted_whole` | `crates/daemon/src/history_summarizer.rs:4376` | FA-N14 | #859 PR C | unaudited |
-| `a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans` | `crates/memory-store/src/lib.rs:24723` | FA-N14 | #859 PR C | unaudited |
-| `todo_state_bounds_hold_for_the_raw_and_the_redacted_form` | `crates/memory-store/src/lib.rs:24744` | FA-N14 | #859 PR C | unaudited |
-| `a_captured_state_over_its_raw_bound_reads_as_an_empty_list_whatever_its_redacted_form` | `crates/daemon/src/injection.rs:805` | FA-N14 | #859 PR C | unaudited |
-| `a_state_whose_pair_is_refused_leaves_no_injection_pending` | `crates/daemon/src/injection.rs:840` | FA-N14 | #859 PR C | unaudited |
+| `a_credential_that_crosses_the_detail_bound_is_redacted_whole` | `crates/daemon/src/history_summarizer.rs:4380` | FA-N14 | #859 PR C | unaudited |
+| `a_cut_that_exposes_a_finding_backs_off_in_a_bounded_number_of_scans` | `crates/memory-store/src/lib.rs:24786` | FA-N14 | #859 PR C | unaudited |
+| `todo_state_bounds_hold_for_the_raw_and_the_redacted_form` | `crates/memory-store/src/lib.rs:24807` | FA-N14 | #859 PR C | unaudited |
+| `a_captured_state_over_its_raw_bound_reads_as_an_empty_list_whatever_its_redacted_form` | `crates/daemon/src/injection.rs:827` | FA-N14 | #859 PR C | unaudited |
+| `a_state_whose_pair_is_refused_leaves_no_injection_pending` | `crates/daemon/src/injection.rs:862` | FA-N14 | #859 PR C | unaudited |
 | `a_detail_is_cut_by_its_serialized_length` | `crates/memory-store/src/summarizer_timeline.rs:490` | FA-N14 | #859 PR C (run at `0ff62b29a`) | unaudited |
 
 ## Plugin, Pi, and CLI
@@ -233,7 +233,7 @@ B, or PR C ran in that slice's recorded run, and every Rust row ran again in
   limit (FA-N05). The emergency rerun caller is not reachable under native
   authority: it follows only a completed `Busy` wait, which native
   preparation never returns (`crates/daemon/src/lib.rs:8957-8974`,
-  `:9428-9432`), so the shared gate covers it structurally.
+  `:9433-9437`), so the shared gate covers it structurally.
 - The FA-E04 mixed-range witness is a proptest that does not count the
   mixed ranges it generates; the fixed budget-edge fixtures are synthetic
   stress states (FA-E04, FA-N13).

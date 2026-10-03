@@ -10,9 +10,12 @@ that FA-E04 is replaced by FA-N13; #857 (PR #905) preserved it while moving
 identities to rows and listed "an exact multi-message selected-vector
 assertion for FA-E04" as a follow-up.
 
-Exercised status: yes - for the surviving clauses, through #859 PR C's
+Exercised status: partial - for the surviving clauses, through #859 PR C's
 generated-history proptest, the fixed oracle tests, and the missing-identity
-corpus test, all green in #859 PR C's run at `0ff62b29a` (6,156 passed).
+corpus test, all green in #859 PR C's run at `0ff62b29a` (6,156 passed). The
+proptest places a system or noise message inside the selected range only
+probabilistically and counts no such case, so that range clause rests on
+the oracle's expectation rather than a constructed witness.
 
 ## Evidence trail
 
@@ -56,8 +59,8 @@ References are verified at `0ff62b29a` unless another tree is named.
   that span; `assert_matches_oracle` compares it with the firing's selection
   exactly.
   `history_summarizer_boundary_construction_matches_owned_reference`
-  (`crates/daemon/src/lib.rs:18613`) asserts `MissingBlockIdentity` for the
-  `synthetic-call` message at budget 32,000 (`:18831-18836`).
+  (`crates/daemon/src/lib.rs:18618`) asserts `MissingBlockIdentity` for the
+  `synthetic-call` message at budget 32,000 (`:18836-18841`).
 - `budget_stop_and_tool_only_ranges_are_recorded`
   (`history_summarizer_chunk.rs:2814`), the spec's cited check
   (D`:1744` at `265df096`), still checks tool-only ranges and the budget

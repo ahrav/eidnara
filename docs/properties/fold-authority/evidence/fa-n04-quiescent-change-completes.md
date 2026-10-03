@@ -25,12 +25,12 @@ All references are verified at HEAD `0ff62b29a`.
   (`transform.rs:2061-2064`). A change requested with no attempts left fails
   the pass with `CasConflict` (`:2027-2032`).
 - The reset empties core and metadata and deletes identity rows and history
-  segments (`crates/memory-store/src/lib.rs:13322-13392`), so the next attempt
+  segments (`crates/memory-store/src/lib.rs:13357-13427`), so the next attempt
   resolves the submitted window with no coverage: a first pass. For Eidnara
   intent, `apply_once` then runs the folding path; for native intent, the
-  additive path (`transform.rs:3207-3209`).
+  additive path (`transform.rs:3217-3219`).
 - The reset keeps the consumed descent edge
-  (`crates/memory-store/src/lib.rs:13342-13348`), so a
+  (`crates/memory-store/src/lib.rs:13377-13383`), so a
   descended target replays its descent rather than copying the source again.
 - A restart builds a new `Handler` over the reopened store, so the binding
   table is empty and the first bind is a first pass

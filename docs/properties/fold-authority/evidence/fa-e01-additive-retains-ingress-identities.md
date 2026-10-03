@@ -19,7 +19,7 @@ authority) is witnessed by #903's handler test, green again in #859 PR A's run a
 References are verified at `0ff62b29a` unless another tree is named.
 
 - Path selection: `apply_once` sends a pass whose stored authority is native
-  to `apply_additive_only` (`crates/daemon/src/transform.rs:3207-3208`),
+  to `apply_additive_only` (`crates/daemon/src/transform.rs:3217-3218`),
   except a native subagent lineage switch, which reaches the protocol
   passthrough. Native is what an empty chain selects
   (`crates/daemon/src/config.rs:181-185`, default chain `:142`), so the path
@@ -27,11 +27,11 @@ References are verified at `0ff62b29a` unless another tree is named.
   `compaction.enabled: false`, hence the record's explicit-config label.
 - Output: `apply_additive_only` (`transform.rs:2700`) builds the served list
   as the m0 unit, the m1 unit, then every ingress message cloned in order
-  (`:3054-3064`). This is the surviving clause.
+  (`:3064-3074`). This is the surviving clause.
 - Ingress update: the additive path calls only `apply_ingress_scalars`
-  (`:2904`; body `:5583-5598`: newest-live block and ordinal, last usage).
+  (`:2904`; body `:5593-5608`: newest-live block and ordinal, last usage).
   Identity insertion, provisional-tail removal, tail and basis re-adoption,
-  and the re-adoption counter live in `apply_ingress_identities` (`:5602`),
+  and the re-adoption counter live in `apply_ingress_identities` (`:5612`),
   called only on the folding path.
 - #855 (PR #903, `8b1e04944`) made that split. #857 (PR #905, `871ebfb08`)
   removed `ModuleMeta.block_identity_by_mid`; identities are rows written as
@@ -51,8 +51,8 @@ References are verified at `0ff62b29a` unless another tree is named.
   (D`lib.rs:42489` at `265df096`) was deleted on `main` by `252d9e179`
   ("Project every request from its full input and delete the projection
   cache"), which is after `265df096` and an ancestor of HEAD. The spec's
-  other citations (D`transform.rs:2562-3036`, `:2757-2764`, `:2895-2917`,
-  `:5478-5509`, `:3050-3052`) describe `265df096`; their HEAD counterparts
+  other citations (D`transform.rs:2562-3036`, `:2767-2774`, `:2905-2927`,
+  `:5488-5519`, `:3060-3062`) describe `265df096`; their HEAD counterparts
   are the lines above.
 
 ## Failure scenario
@@ -78,8 +78,8 @@ messages in order, and that no identity row exists.
 ### Q: Does a test assert the additive output is m0, m1, then ingress?
 
 - Sources examined: `git grep` over `crates/daemon` for additive and native
-  test names; `transform.rs` tests at `:15330`, `:15439`, `:15558`,
-  `:15624`; the handler tests in `fold_authority_handler_tests.rs`.
+  test names; `transform.rs` tests at `:15358`, `:15467`, `:15586`,
+  `:15652`; the handler tests in `fold_authority_handler_tests.rs`.
 - Findings: These tests check recorded reasons, history retention, retries,
   and native state. None asserts the served list's shape.
 - Missing evidence: An output-shape assertion on a native pass.

@@ -30,17 +30,17 @@ Code references are verified at `0ff62b29a` (branch `fold-authority/m2-exit`).
   turns Ready into InFlight (`crates/daemon/src/lib.rs:8899-8900`). Since
   `96aad0baf` (#906 on `main`) the first transform's lease lives in
   `PassStart` (`:3393-3397`) and drops when that transform returns
-  (`:9374-9376`); a rerun (`PassState::Reload`) leases for its own
-  transform only and drops it after (`:9300-9308`). `lease_derived`
+  (`:9379-9381`); a rerun (`PassState::Reload`) leases for its own
+  transform only and drops it after (`:9305-9313`). `lease_derived`
   charges the active-lease budget through `LeaseCharge` (`:2141-2150`,
   `:1944-1971`). The lease reaches the transform as `ProducerContext.derived`
-  (`:9233`).
+  (`:9238`).
 - Promotion: `run_transform` calls `transform_with_projection_cached`, then
-  `promote_derived_state`, then `finished()` (`:9242-9244`), so a failed
+  `promote_derived_state`, then `finished()` (`:9247-9249`), so a failed
   transform returns before promotion and a post-commit boundary-read error
-  is returned after it. `promote_derived_state` (`:9247-9276`) accepts the
+  is returned after it. `promote_derived_state` (`:9252-9281`) accepts the
   proposal and calls `promote_derived` with the pass's snapshot generation.
-  The fixture halt point is at `:9265-9270` under the `direct-host-fixture`
+  The fixture halt point is at `:9270-9275` under the `direct-host-fixture`
   feature.
 - Fence: `promote_derived` (`:2152-2188`) refuses unless
   `generation_present_in_flight_or_ready` holds (`:2241-2250`) and refuses a
@@ -53,7 +53,7 @@ Code references are verified at `0ff62b29a` (branch `fold-authority/m2-exit`).
   derived entries (`:2123-2139`).
 - Native folds: `apply_additive_only` sets `derived: None`
   (`crates/daemon/src/transform.rs:3162`), and `apply_once` enters it unless
-  the stored authority folds (`:3207-3208`).
+  the stored authority folds (`:3217-3218`).
 
 Gate results as recorded in the PR descriptions:
 
@@ -107,18 +107,18 @@ the lease budget count and bytes, and the reopened store's row version.
 
 ### Q: What does a lease-budget refusal do to retained parts?
 
-- Sources examined: `lib.rs:2141-2150`, `:8899`; `transform.rs:7941-7956`.
+- Sources examined: `lib.rs:2141-2150`, `:8899`; `transform.rs:7951-7966`.
 - Findings: `lease_derived` returns `None`; `carried_derived_state` then
   carries no parts. Before `96aad0baf` the accepted proposal replaced the
   retained state, so the parts became absent and FA-N11 read the baseline
   invalid until a bust. Since `96aad0baf` (#906 on `main`), `promote_derived`
   keeps the replaced state's parts when the new state carries none and both
   share a revert epoch (`crates/daemon/src/lib.rs:2161-2170`);
-  `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` (`:35255`) and
+  `a_pass_refused_a_lease_keeps_the_retained_baseline_parts` (`:35260`) and
   `a_promotion_without_parts_keeps_the_retained_parts_of_its_epoch_only`
-  (`:35288`) witness it, and
+  (`:35293`) witness it, and
   `an_emergency_pass_holds_a_derived_lease_only_inside_each_transform`
-  (`:35313`) witnesses the lease scope. `parts_for` still checks the
+  (`:35318`) witnesses the lease scope. `parts_for` still checks the
   baseline generation on read.
 - Missing evidence: None.
 - Conclusion: resolved with answer: the owner's fix keeps same-epoch parts.
@@ -134,7 +134,7 @@ the lease budget count and bytes, and the reopened store's row version.
 
 ### Q: Does the invariant hold at every `promote_derived` call?
 
-- Sources examined: `crates/daemon/src/lib.rs:2152-2188`, `:9242-9276`;
+- Sources examined: `crates/daemon/src/lib.rs:2152-2188`, `:9247-9281`;
   `crates/daemon/src/transform.rs:1742-1747` at `0ff62b29a`; portfolio
   evaluation I1.
 - Findings: No, only on successful installation. Correct code also calls it

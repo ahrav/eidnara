@@ -21,20 +21,20 @@ Code references are verified at `0ff62b29a` unless another tree is named.
 
 - Divergence: `first_divergence` returns `None` for an empty old sequence
   (`crates/daemon/src/divergence.rs:42-48`), unchanged since `265df096`.
-- Hint deferral: `user_hint_deferred` (`crates/daemon/src/transform.rs:7906-7924`)
+- Hint deferral: `user_hint_deferred` (`crates/daemon/src/transform.rs:7916-7934`)
   returns false for `Some(&[])` because no served entry matches; it returns
   true for `None` on a non-bust pass with non-empty text.
 - At `265df096`, `user_hint_target_was_served(meta, block_id)`
-  (`transform.rs:8072-8079` there) scanned `meta.served_output_fingerprint`,
+  (`transform.rs:8082-8089` there) scanned `meta.served_output_fingerprint`,
   and admission deferred iff the text was non-empty, the target was served,
-  and the pass was not a bust (`:4150-4156` there). At HEAD the admission is
-  `crates/daemon/src/transform.rs:4212-4217`.
+  and the pass was not a bust (`:4160-4166` there). At HEAD the admission is
+  `crates/daemon/src/transform.rs:4222-4227`.
 - Absence versus empty: the retained history is
-  `Option<&[ServedBlockFingerprint]>` from `prior_served` (`:7926-7931`);
+  `Option<&[ServedBlockFingerprint]>` from `prior_served` (`:7936-7941`);
   `None` is absence (no cache entry, another revert epoch, or no lease) and
   `Some(&[])` is a known-empty history.
 - Reachability: hint admission and divergence run only past the native gate
-  (`:3207-3208`), which needs a stored Eidnara authority and so a non-empty
+  (`:3217-3218`), which needs a stored Eidnara authority and so a non-empty
   chain (`crates/daemon/src/config.rs:181-185`); at `265df096` they ran by
   default.
 
@@ -67,8 +67,8 @@ empty old sequence against a non-empty new one.
 
 ### Q: Is FA-E08 preserved or replaced by #906?
 
-- Sources examined: #858 ticket; `transform.rs:7906-7924`;
-  `divergence.rs:42-48`; the table at `transform.rs:13329`.
+- Sources examined: #858 ticket; `transform.rs:7916-7934`;
+  `divergence.rs:42-48`; the table at `transform.rs:13339`.
 - Findings: Preserved for the empty vector: the "known empty" row expects no
   deferral and the empty-old divergence row expects `None`. The absent state
   is new and carries FA-N10's opposite answer for hints.
@@ -78,8 +78,8 @@ empty old sequence against a non-empty new one.
 ### Q: Is a known-empty served history reachable in production?
 
 - Sources examined: `served_output_fingerprints` callers
-  (`transform.rs:3542`, `:3620`, `:5124`); `carried_derived_state`
-  (`:7941-7956`).
+  (`transform.rs:3552`, `:3630`, `:5134`); `carried_derived_state`
+  (`:7951-7966`).
 - Findings: A promoted state carries the served fingerprints of the pass's
   output. No witness shows a folding pass whose served output has no blocks,
   and every Handler test observed serves at least one block.
@@ -89,7 +89,7 @@ empty old sequence against a non-empty new one.
 
 ### Q: Does the reachability label rest on a constructed known-empty state?
 
-- Sources examined: `crates/daemon/src/transform.rs:3207-3208`, `:13347`;
+- Sources examined: `crates/daemon/src/transform.rs:3217-3218`, `:13357`;
   `crates/daemon/src/divergence.rs:164-165` at `0ff62b29a`; portfolio
   evaluation I4.
 - Findings: No. The label rests on the folding gate; the helper tests supply

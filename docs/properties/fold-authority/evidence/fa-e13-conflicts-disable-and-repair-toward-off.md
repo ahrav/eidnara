@@ -8,8 +8,9 @@ disposition and target-value repair (PR #899, #853); D2b replaces doctor's
 repair direction (PR #900, #854). FA-N07 and FA-N08 are the replacing
 obligations. Surfaces: plugin, cli.
 
-Exercised status: yes - the surviving clauses and the replacements have
-named tests that ran in #899's and #904's `bun run check:repo` gates (pass).
+Exercised status: partial - the surviving clauses and the replacements have
+named tests that ran in #899's and #904's `bun run check:repo` gates (pass);
+the TUI startup branch has no runtime witness (see the question below).
 
 ## Evidence trail
 

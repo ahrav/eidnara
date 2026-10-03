@@ -199,7 +199,7 @@ Check: `always-or-unreached` - When an old raw row is supplied, assert recovery 
 Fault/timing angle: Upgrade silently skips a no-longer-decodable row or changes a length used by a durable in-flight fingerprint.
 Required faults and enabling state: Baseline-produced serialized arrays, valid stored ordinal bounds, old false-default fields, a plugin tool pair, and a synthetic todo pair present beside real eligible blocks; test-only manually included synthetic items are labeled separately.
 Confidence: high - [evidence](evidence/historical-chunks-retain-readable-identity.md). Recovery's silent skip and production synthetic exclusion are source-verified; upgrade execution is missing.
-Existing check: `crates/daemon/src/history_summarizer.rs:6352-6388` pins fingerprint format (at `0ff62b29a`, `chunk_fingerprint_uses_id_kind_and_byte_length` at `:6352` pins the SHA-256 digest of the joined string, since `bdf564e3a`); `history_summarizer_chunk.rs:1076-1103,1773-1858` pins assembly; `lib.rs:18182` compares boundary construction; all unaudited.
+Existing check: `crates/daemon/src/history_summarizer.rs:6356-6392` pins fingerprint format (at `0ff62b29a`, `chunk_fingerprint_uses_id_kind_and_byte_length` at `:6232` pins the SHA-256 digest of the joined string, since `bdf564e3a`); `history_summarizer_chunk.rs:1076-1103,1773-1858` pins assembly; `lib.rs:18182` compares boundary construction; all unaudited.
 Impact: Historical messages disappear from expansion or a valid pending history_summarizer firing fails its fingerprint check.
 Open questions:
 

@@ -47,7 +47,7 @@ Checks at HEAD:
 - `a_sibling_bound_during_the_change_keeps_it_pending` (`:778`): a sibling
   inserted between the plan and the reset.
 - `no_fire_reason_is_durable_change_gated_and_cleared_by_fire`
-  (`crates/daemon/src/lib.rs:41167`): the captured binding configuration has a
+  (`crates/daemon/src/lib.rs:41214`): the captured binding configuration has a
   chain while the handler's live configuration has none, so preparation
   reads the live one.
 - `mtime_cache_reuses_unchanged_reads_and_invalidates_on_mtime_change`
@@ -55,7 +55,7 @@ Checks at HEAD:
   live read after an mtime change.
 
 Citation corrections from `265df096` to HEAD: `lib.rs:211-251` (binding and
-route table) is now `:227-263`; the live read at `:5722` is `:5406`; the
+route table) is now `:227-263`; the live read at `:5722` is `:5428`; the
 firing's memory gate from the captured configuration at `:5924-5925` is
 `:5640`; `config.rs:2158` is `:2350`.
 
@@ -84,7 +84,7 @@ afterwards. This is enabling state, not publication success.
 
 - Sources examined: tests calling `unbind_route` in `crates/daemon/src/lib.rs`
   (`:19977`, `:27997`, `:32531`); `route_teardown_keeps_an_admitted_checkpoint_alive`
-  (`:22934`); `transform_unit/host_tests.rs:365`.
+  (`:22939`); `transform_unit/host_tests.rs:365`.
 - Findings: No. The teardown tests cover memory-capture checkpoints, note
   evaluator registrations, observational bindings, and transform scratch
   state. None blocks a history-summarizer producer and then unbinds.
@@ -94,7 +94,7 @@ afterwards. This is enabling state, not publication success.
 
 ### Q: Is the record still true at HEAD, or does the durable authority remove it?
 
-- Sources examined: PR #903 description; `lib.rs:338-357`, `:5406`.
+- Sources examined: PR #903 description; `lib.rs:338-357`, `:5428`.
 - Findings: Still true. Routes still capture configurations and preparation
   still reads the live one. The durable authority decides which path runs;
   it does not unify the captured configurations.

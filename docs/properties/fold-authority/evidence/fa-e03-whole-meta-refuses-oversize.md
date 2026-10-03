@@ -24,24 +24,24 @@ References are verified at `0ff62b29a` unless another tree is named.
 
 - Guard: `MAX_DURABLE_TEXT_BYTES = 512 * 1024`
   (`crates/memory-store/src/lib.rs:429`); `ensure_durable_text_bound`
-  returns `Redaction(InputLimit)` above it (`:4577-4583`).
+  returns `Redaction(InputLimit)` above it (`:4599-4605`).
 - Chain on the transform commit: `shape_stored_meta`, then
   `serde_json::to_string(meta)`, then `write.json_content("meta", ..)`
-  (`:11034-11041`) ->
-  `prepare_json_content_collecting` (`:3028-3038`, `:4282-4292`) ->
+  (`:11069-11076`) ->
+  `prepare_json_content_collecting` (`:3050-3060`, `:4304-4314`) ->
   `prepare_json_content_single_pass`, whose first statement is the guard
   (`:4303`). This runs while the commit is prepared, before `write.execute`
   opens the transaction (`:11102`); the row write runs inside it
-  (`:11156-11165`).
-- Refusal witness: `a_refused_commit_writes_no_identity_row` (`:33757`),
+  (`:11191-11200`).
+- Refusal witness: `a_refused_commit_writes_no_identity_row` (`:33881`),
   added by #905 (`871ebfb08`), commits a `meta` whose `last_render_config`
   is one byte over the bound on top of an existing row with an identity
   delta, and asserts `InputLimit`, unchanged identity rows, and an unchanged
   row version. It ran in #905's workspace gate and in #859 PR A's run.
 - Related: `a_prepared_content_field_that_grows_past_the_durable_bound_on_redaction_is_refused`
-  (`:32079`) pins the exact boundary for prepared content (input at exactly
+  (`:32203`) pins the exact boundary for prepared content (input at exactly
   the bound, output over it after redaction);
-  `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (`:31906`)
+  `state_sync_metadata_scan_failure_rolls_back_earlier_writes` (`:32030`)
   shows a stored oversized `meta` refused inside a state sync with earlier
   writes rolled back.
 - Not reached: `matrix_meta` asserts every matrix cell's stored `meta` is
@@ -50,20 +50,20 @@ References are verified at `0ff62b29a` unless another tree is named.
   (`:1273`), green in #859 PR A's run.
 - Covered-system rows (#859 PR B, `b45416ac0`): the commit applies a
   `CoveredSystemMessageDelta` inside the transaction, after the
-  `cache_state` write (`crates/memory-store/src/lib.rs:11172-11179`).
-  `apply_covered_system_message_delta` (`:5025-5127`) groups the written
+  `cache_state` write (`crates/memory-store/src/lib.rs:11207-11214`).
+  `apply_covered_system_message_delta` (`:5047-5149`) groups the written
   rows toward the 256 KiB `SCAN_DOCUMENT_CHUNK_BYTES` batching threshold
-  (`:4713`; `scan_documents`, `:4717-4737`): a row that would carry a
+  (`:4735`; `scan_documents`, `:4739-4759`): a row that would carry a
   non-empty document past the threshold starts a new one, and a single row
   larger than the threshold stays whole in its own document. Each completed
-  document passes through `json_content` (`prepare_document`, `:4832-4856`)
+  document passes through `json_content` (`prepare_document`, `:4854-4878`)
   and so meets the 512 KiB durable-text guard. A refusal there rolls the
   transaction back, and the durable rows stay as they were.
   `covered_system_rows_round_trip_in_ordinal_order_and_retire_their_receipts`
-  (`:34174`) shows a lost CAS and a write-and-delete refusal leave the rows
+  (`:34298`) shows a lost CAS and a write-and-delete refusal leave the rows
   unchanged.
   `covered_system_rows_past_one_scan_document_split_and_retire_every_receipt`
-  (`:34279`, #859 PR C, `e02b22383`) writes four individually sub-threshold
+  (`:34403`, #859 PR C, `e02b22383`) writes four individually sub-threshold
   rows whose combined serialized length exceeds 256 KiB and stays below
   512 KiB; the one
   write holds more than one document receipt, and the receipts stay until
@@ -73,8 +73,8 @@ References are verified at `0ff62b29a` unless another tree is named.
   because ordinary growth no longer crosses the bound at about 2,000
   messages; it now uses a secret-bearing session id.
 - Corrections to the spec's citations at `265df096`: S`:427` (constant) is
-  `:429`; S`:3998-4004` (guard) is `:4577-4583`; the growing fields
-  S`:1668` (`baseline_parts`), `:1876` (`block_identity_by_mid`), and `:2014`
+  `:429`; S`:3998-4004` (guard) is `:4599-4605`; the growing fields
+  S`:1668` (`baseline_parts`), `:1876` (`block_identity_by_mid`), and `:2035`
   (`served_output_fingerprint`), read at `265df096`, are removed by #905 and
   #906; S`:1929` (`tail_hygiene_baseline`) remains as scalars only. The
   existing check D`transform_meta_bound.rs:20-99`
@@ -126,8 +126,8 @@ covered-system document, leaves the covered rows as they were.
 ### Q: Does a refused commit leave the covered-system rows unchanged?
 
 - Sources examined: `git show b45416ac0 -- crates/memory-store`; the
-  covered-system store tests (`crates/memory-store/src/lib.rs:34174`,
-  `:34349`, `:34385`, `:34415`).
+  covered-system store tests (`crates/memory-store/src/lib.rs:34298`,
+  `:34473`, `:34509`, `:34539`).
 - Findings: The rows are written inside the commit transaction after the
   `meta` guard, and each row document passes the same guard, so a refusal
   writes no row. The tests cover a lost CAS and a write-and-delete refusal,

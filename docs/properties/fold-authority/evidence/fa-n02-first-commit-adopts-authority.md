@@ -16,20 +16,20 @@ All references are verified at HEAD `0ff62b29a`.
 
 - The stored fact is `ModuleMeta.eidnara_folds: Option<bool>` with
   `#[serde(default, skip_serializing_if = "Option::is_none")]`
-  (`crates/memory-store/src/lib.rs:2460-2465`). An absent key reads as `None`,
+  (`crates/memory-store/src/lib.rs:2482-2487`). An absent key reads as `None`,
   so a default never supplies `false`.
-- `load_fold_authority` (`crates/memory-store/src/lib.rs:13237`) reads the key
-  with `json_type` through `FOLD_AUTHORITY_SELECT` (`:6787-6791`) and does not
+- `load_fold_authority` (`crates/memory-store/src/lib.rs:13272`) reads the key
+  with `json_type` through `FOLD_AUTHORITY_SELECT` (`:6822-6826`) and does not
   decode the row. A non-boolean JSON type is `MemoryStoreError::Serde`
-  (`:13263-13272`). `applied` is the stored value, or `Some(true)` for a row
+  (`:13298-13307`). `applied` is the stored value, or `Some(true)` for a row
   without the key that carries a fold artifact (`fold_artifacts_present`,
-  `:6779-6785`): coverage, a folded history-segment sequence, or a
+  `:6814-6820`): coverage, a folded history-segment sequence, or a
   non-Idle summarizer. Since `a694bdffa` (#903 on `main`) a stored block
   identity is not an artifact, because compaction-off passes also record
   identities, so a legacy row that holds only identities adopts its
   binding's intent; the adopting commit then clears those rows when the
   intent is native (`clear_identities`,
-  `crates/daemon/src/transform.rs:3129`, since `ccab18208`).
+  `crates/daemon/src/transform.rs:3139`, since `ccab18208`).
 - The pure planner `fold_authority::plan` (`crates/daemon/src/fold_authority.rs:95-139`)
   adopts the binding's intent for an unadopted, artifact-free row only when the
   configuration is admitted (`:105-111`), and adopts `applied` for a legacy
@@ -42,12 +42,12 @@ All references are verified at HEAD `0ff62b29a`.
   (`crates/daemon/src/transform.rs:2022-2023`). `stamp_fold_authority`
   (`:2154-2168`) requires the pass's own load to be at the planned
   `row_version` and writes `adopt` into the metadata that the pass commits.
-  Both paths call it: the additive path (`:2746`) and the folding path
-  (`:3390`). A version mismatch is a `CasConflict`, which the attempt loop
+  Both paths call it: the additive path (`:2756`) and the folding path
+  (`:3400`). A version mismatch is a `CasConflict`, which the attempt loop
   retries under a fresh plan (`:2110-2116`), bounded by `MAX_CAS_RETRIES = 8`
   (`:81`).
 - A state-sync row carries no key: native state sync reads the field only to
-  skip seeds (`crates/memory-store/src/lib.rs:11486-11491`).
+  skip seeds (`crates/memory-store/src/lib.rs:11521-11526`).
 
 Witnesses in `crates/daemon/src/fold_authority_handler_tests.rs` (#903):
 
@@ -69,7 +69,7 @@ Witnesses in `crates/daemon/src/fold_authority_handler_tests.rs` (#903):
 - Pure table: `the_transition_table_follows_the_session_authority_rules`
   (`crates/daemon/src/fold_authority.rs:200`), 128 combinations.
 - Store: `a_non_boolean_fold_authority_is_a_serde_error_on_every_read`
-  (`crates/memory-store/src/lib.rs:29612`).
+  (`crates/memory-store/src/lib.rs:29736`).
 
 ## Failure scenario
 
@@ -119,8 +119,8 @@ row without the key, with and without artifacts; a non-boolean key.
 ### Q: Do #903's later commits on `main` change the adoption rule?
 
 - Sources examined: `git show a694bdffa ccab18208`;
-  `crates/memory-store/src/lib.rs:6779-6791`;
-  `crates/daemon/src/transform.rs:3114-3133`;
+  `crates/memory-store/src/lib.rs:6814-6826`;
+  `crates/daemon/src/transform.rs:3124-3143`;
   `crates/daemon/src/fold_authority_handler_tests.rs:329`.
 - Findings: The guarantee holds. `a694bdffa` drops the `block_identities`
   probe from the fold-authority read, so stored identities alone no longer

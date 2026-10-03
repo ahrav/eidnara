@@ -23,7 +23,7 @@ All references are verified at HEAD `0ff62b29a`.
   (`:116-138`). A blocked change never alters the serving mode.
 - The durable half comes from `load_fold_authority`: `quiescent` is
   summarizer Idle and no pending publication row
-  (`crates/memory-store/src/lib.rs:13273-13279`).
+  (`crates/memory-store/src/lib.rs:13308-13314`).
 - The change runs inside the attempt loop
   (`crates/daemon/src/transform.rs:2026-2067`). The reset call is wrapped by
   `ctx.sibling_fence.without_sibling` (`:2035-2037`).
@@ -32,21 +32,21 @@ All references are verified at HEAD `0ff62b29a`.
   pass's bind sequence is present with no participating sibling
   (`RouteBindings::has_sibling`, `:351-357`). A sibling bind therefore lands
   before the reset (the change stays pending) or after it.
-- `reset_session_for_authority` (`crates/memory-store/src/lib.rs:13226`) calls
+- `reset_session_for_authority` (`crates/memory-store/src/lib.rs:13261`) calls
   `reset_session` (`:13283`). Inside the fenced transaction it checks the
   row-version CAS, then re-checks summarizer Idle and the pending-publication
-  row (`:13309-13320`) and returns `Ok(None)` without writing when either
+  row (`:13344-13355`) and returns `Ok(None)` without writing when either
   blocks. The same transaction writes the replacement
-  (`eidnara_folds: replacement_authority.or(prior)`, `:13338`), advances
-  `revert_epoch`, empties core and metadata, deletes identity rows (`:13365`),
+  (`eidnara_folds: replacement_authority.or(prior)`, `:13373`), advances
+  `revert_epoch`, empties core and metadata, deletes identity rows (`:13400`),
   retires scan owners, and deletes segments, transcripts, candidates, and the
   pending publication.
-- `reset_session_for_recomp` (`:13213`) passes no replacement, so the adopted
+- `reset_session_for_recomp` (`:13248`) passes no replacement, so the adopted
   authority survives an ordinary reset. `reset_no_survivor` uses it
   (`crates/daemon/src/transform.rs:2192`).
-- A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9294`, which
-  runs with `PassState::Reload` at `:9306`) plans with `first_pass: false`
-  (`:9207-9210`), so an emergency rerun never changes authority.
+- A rerun transform (`rerun_transform`, `crates/daemon/src/lib.rs:9299`, which
+  runs with `PassState::Reload` at `:9311`) plans with `first_pass: false`
+  (`:9212-9215`), so an emergency rerun never changes authority.
 
 Witnesses:
 
@@ -62,7 +62,7 @@ Witnesses:
 - Store: `the_authority_reset_writes_its_replacement_and_ordinary_resets_keep_the_authority`,
   `a_busy_summarizer_refuses_the_authority_reset`, and
   `a_pending_publication_refuses_the_authority_reset_of_an_idle_session`
-  (`crates/memory-store/src/lib.rs:29658`, `:29691`, `:29718`).
+  (`crates/memory-store/src/lib.rs:29782`, `:29815`, `:29842`).
 
 ## Failure scenario
 

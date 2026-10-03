@@ -24,8 +24,8 @@ Code references are verified at `0ff62b29a`.
   `parts.baseline_generation == baseline.baseline_generation`. The cache
   holds one entry per session id (`crates/daemon/src/lib.rs:2017`), which is
   the session-identity key.
-- Evaluation: `prior_baseline_parts` (`crates/daemon/src/transform.rs:7933-7939`)
-  feeds `refresh_tail_hygiene_baseline` on both branches (`:4953-4976`). The
+- Evaluation: `prior_baseline_parts` (`crates/daemon/src/transform.rs:7943-7949`)
+  feeds `refresh_tail_hygiene_baseline` on both branches (`:4963-4986`). The
   helper (`crates/daemon/src/tail_hygiene.rs:1080-1165`) keeps an
   already-invalidated baseline invalid outside a bust (`:1097-1104`), builds
   generation `previous + 1` on a bust or with no previous baseline
@@ -37,11 +37,11 @@ Code references are verified at `0ff62b29a`.
   not join, and `evaluable` to the durable flag and not invalidated
   (`crates/daemon/src/lib.rs:6881-6899`).
 - Carry: a pass carries prior parts forward only when its revert epoch
-  equals the loaded one (`crates/daemon/src/transform.rs:7941-7956`), and a
-  bust pass replaces them with its measured parts (`:5131-5134`).
+  equals the loaded one (`crates/daemon/src/transform.rs:7951-7966`), and a
+  bust pass replaces them with its measured parts (`:5141-5144`).
 - Durable effect: only a bust writes the refreshed baseline to meta
-  (`:4963`); the non-bust branch evaluates the join for this pass's nudge and
-  directive decisions (`:4966-4976`, used at `:4994` and `:5146`). The
+  (`:4973`); the non-bust branch evaluates the join for this pass's nudge and
+  directive decisions (`:4976-4986`, used at `:5004` and `:5156`). The
   durable scalars therefore can read `evaluable: true` while the join says
   invalid; every consumer rejoins.
 
@@ -82,8 +82,8 @@ followed by a non-bust pass and then a bust.
 
 ### Q: Does "invalidated until an accepted bust" hold without a durable flag?
 
-- Sources examined: `transform.rs:4953-4976`, `:7941-7956`;
-  `tail_hygiene.rs:1105-1133`; `lib.rs:2152-2188`.
+- Sources examined: `transform.rs:4963-4986`, `:7951-7966`;
+  `tail_hygiene.rs:1105-1133`; `lib.rs:2174-2210`.
 - Findings: Yes. Parts are produced only by a bust refresh or a refresh with
   no durable baseline; a non-bust pass carries only parts it leased, and
   promotion never installs an older state. Once parts are absent under a
@@ -125,7 +125,7 @@ followed by a non-bust pass and then a bust.
 ### Q: Does `main`'s `96aad0baf` change the join?
 
 - Sources examined: `git show 96aad0baf`; `crates/daemon/src/lib.rs:2152-2188`,
-  `:35255`, `:35288`; `crates/memory-store/src/lib.rs:2075-2079`, `:29753`.
+  `:35260`, `:35293`; `crates/memory-store/src/lib.rs:2096-2100`, `:29877`.
 - Findings: The join rule is unchanged; `parts_for` still checks the
   baseline generation on read. A promotion without parts now keeps the
   replaced state's parts of the same revert epoch, so a lease-refused pass

@@ -36,13 +36,13 @@ Code references are verified at `0ff62b29a` unless another tree is named.
   evaluable, not invalidated, with parts at that generation (`:1105-1133`).
   With a durable baseline and absent or wrong-generation parts it returns
   invalidated before `same_measured_prefix` (`:1136-1140`).
-- Caller: `crates/daemon/src/transform.rs:4953-4976` (spec
+- Caller: `crates/daemon/src/transform.rs:4963-4986` (spec
   `transform.rs:4881-4893` at `265df096`). A non-bust pass with no durable
   baseline still leaves it absent; the no-previous refresh runs on a bust.
 - Reachability: at `265df096` `apply_once` entered the folding path whenever
-  `ctx.compaction_enabled` held (`transform.rs:3050-3052` there; default
+  `ctx.compaction_enabled` held (`transform.rs:3060-3062` there; default
   true, `config.rs:125` there). Since `8b1e04944` (#903) it enters only when
-  the stored authority folds (`crates/daemon/src/transform.rs:3207-3208`),
+  the stored authority folds (`crates/daemon/src/transform.rs:3217-3218`),
   which needs a non-empty chain (`crates/daemon/src/config.rs:181-185`).
 
 Gate results as recorded in the PR descriptions:
