@@ -21,6 +21,15 @@ pub struct DecisionRow {
     pub sensitivity: Sensitivity,
 }
 
+/// One keyset page of decisions with their registry rows, from [`KernelStore::decision_page_within_budget`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionPage {
+    /// Live decisions in object-id order.
+    pub decisions: Vec<(crate::ObjectRow, DecisionRow)>,
+    /// The cursor after which the next page starts; `None` when the page reached the last decision.
+    pub next: Option<String>,
+}
+
 /// Observation visible at a requested commit sequence.
 ///
 /// `observed_at` is the stored observation timestamp. `created_commit_seq` orders the row in the
@@ -87,6 +96,86 @@ impl KernelStore {
         let row = load_observation_for_object(&tx, requested, object_id)?;
         tx.commit().map_err(|_| KernelError::Io)?;
         Ok(row)
+    }
+
+    /// One keyset page of the decisions created at or before `requested`, in object-id order after `after`.
+    ///
+    /// The page examines at most `max_rows` decision rows, live or invalidated, so its work is bounded whatever the share of invalidated decisions. It returns the live ones with their registry rows and stops before a live decision whose payload would take the page past `max_payload_bytes`; a single decision larger than the bound is returned alone. `next` is the last examined object id while decisions remain after it. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::Deadline`] when no reader frees before the budget runs out, [`KernelError::InvalidInput`] for a negative sequence, [`KernelError::FutureSnapshot`] when `requested` exceeds the tip, and [`KernelError::CorruptCanonicalRow`] for a decision without its registry row or with an invalid stored payload.
+    pub fn decision_page_within_budget(
+        &self,
+        requested: i64,
+        after: Option<&str>,
+        max_rows: std::num::NonZeroUsize,
+        max_payload_bytes: std::num::NonZeroU64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<DecisionPage, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        let tx = reader
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(crate::map_sqlite)?;
+        snapshot_tip(&tx, requested)?;
+        let limit = i64::try_from(max_rows.get()).unwrap_or(i64::MAX);
+        let keys: Vec<(String, u64, bool)> = tx
+            .prepare_cached(
+                "SELECT object_id, length(decision_payload),
+                        invalidated_commit_seq IS NULL OR ?1<invalidated_commit_seq
+                 FROM decisions
+                 WHERE created_commit_seq<=?1 AND object_id>?2
+                 ORDER BY object_id
+                 LIMIT ?3",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map(
+                        rusqlite::params![requested, after.unwrap_or(""), limit.saturating_add(1)],
+                        |row| {
+                            let size: i64 = row.get(1)?;
+                            Ok((row.get(0)?, u64::try_from(size).unwrap_or(0), row.get(2)?))
+                        },
+                    )?
+                    .collect()
+            })
+            .map_err(crate::map_sqlite)?;
+        let mut examined = 0;
+        let mut bytes = 0_u64;
+        let mut live = Vec::new();
+        for (object_id, size, is_live) in keys.iter().take(max_rows.get()) {
+            if *is_live {
+                if !live.is_empty() && bytes.saturating_add(*size) > max_payload_bytes.get() {
+                    break;
+                }
+                bytes = bytes.saturating_add(*size);
+                live.push(object_id.clone());
+            }
+            examined += 1;
+        }
+        let next = (examined < keys.len()).then(|| keys[examined - 1].0.clone());
+        let decisions = load_decisions_for_objects(&tx, requested, &live)?;
+        let ids = serde_json::to_string(&live).map_err(|_| KernelError::Io)?;
+        let mut objects = crate::envelope::load_object_states(&tx, &ids)?;
+        let mut page = decisions
+            .into_iter()
+            .map(|decision| {
+                let object = objects
+                    .remove(&decision.object_id)
+                    .ok_or(KernelError::CorruptCanonicalRow)?
+                    .object;
+                Ok((object, decision))
+            })
+            .collect::<Result<Vec<_>, KernelError>>()?;
+        if page.len() != live.len() {
+            return Err(KernelError::CorruptCanonicalRow);
+        }
+        page.sort_by(|a, b| a.0.object_id.cmp(&b.0.object_id));
+        tx.commit().map_err(crate::map_sqlite)?;
+        Ok(DecisionPage {
+            decisions: page,
+            next,
+        })
     }
 
     /// Query work scales with `object_ids`, not the store's total decision count.

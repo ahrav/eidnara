@@ -1595,3 +1595,73 @@ fn a_decision_serves_no_lower_than_its_cited_evidence_reads_today() {
         "a decision citing now-secret evidence kept serving"
     );
 }
+
+#[test]
+fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
+    use std::num::{NonZeroU64, NonZeroUsize};
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let inserted = store
+        .commit(intent("decisions", '1'), |envelope| {
+            for index in 1..=5 {
+                envelope.insert_decision(decision(index))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("retire", '2'), |envelope| {
+            envelope.retire_decision("decision-object-2")?;
+            envelope.retire_decision("decision-object-3")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    let rows = |n| NonZeroUsize::new(n).unwrap();
+    let bytes = NonZeroU64::new(1 << 20).unwrap();
+    let live = |page: &kernel::DecisionPage| -> Vec<String> {
+        page.decisions
+            .iter()
+            .map(|(object, decision)| {
+                assert_eq!(object.object_id, decision.object_id);
+                object.object_id.clone()
+            })
+            .collect()
+    };
+
+    // Three rows are examined, two of them invalidated, so the page returns one live decision and continues.
+    let first = store
+        .decision_page_within_budget(tip, None, rows(3), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&first), ["decision-object-1"]);
+    assert_eq!(first.next.as_deref(), Some("decision-object-3"));
+    let second = store
+        .decision_page_within_budget(tip, first.next.as_deref(), rows(3), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&second), ["decision-object-4", "decision-object-5"]);
+    assert_eq!(second.next, None);
+
+    // Read at the insert commit, every decision is live.
+    let earlier = store
+        .decision_page_within_budget(inserted.commit_seq, None, rows(8), bytes, &budget)
+        .unwrap();
+    assert_eq!(earlier.decisions.len(), 5);
+
+    // A byte bound smaller than two payloads cuts the page after one live decision; one larger payload is still returned alone.
+    let one = NonZeroU64::new(1).unwrap();
+    let cut = store
+        .decision_page_within_budget(tip, None, rows(8), one, &budget)
+        .unwrap();
+    assert_eq!(live(&cut), ["decision-object-1"]);
+    assert_eq!(cut.next.as_deref(), Some("decision-object-3"));
+
+    let cancelled = kernel::applicability::EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        store.decision_page_within_budget(tip, None, rows(3), bytes, &cancelled),
+        Err(KernelError::Deadline)
+    );
+}

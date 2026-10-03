@@ -4328,3 +4328,155 @@ async fn shutdown_and_disable_join_the_running_supervisor() {
     ));
     assert!(owner.maintenance().is_none());
 }
+
+fn seed_decision(object: &str, scope: &str) -> kernel::DecisionSpec {
+    kernel::DecisionSpec {
+        decision_id: format!("{object}-decision"),
+        object_id: object.to_string(),
+        domain_id: "memory".to_string(),
+        proposition_id: None,
+        scope_id: Some(scope.to_string()),
+        anchor_id: None,
+        evidence_id: None,
+        decision_kind: "PROJECT_RULES".to_string(),
+        payload: kernel::DecisionPayload {
+            summary: format!("Remember {object}."),
+            rationale: String::new(),
+        },
+        source_kind: "assistant".to_string(),
+        source_id: format!("{object}-lineage"),
+        source_revision: 1,
+        sensitivity: kernel::Sensitivity::Normal,
+    }
+}
+
+fn admitted(envelope: &mut kernel::Envelope<'_>, object: &str) -> Result<(), kernel::KernelError> {
+    envelope.record_admission(kernel::AdmissionRequest {
+        candidate_id: None,
+        subject_object_id: Some(object.to_string()),
+        source_class: Some(kernel::SourceClass::ExplicitUser),
+        taint_class: Some(kernel::TaintClass::UserExplicit),
+        event: kernel::AdmissionEvent {
+            kind: kernel::EventKind::Other,
+            trigger_object_id: None,
+            approval_object_id: None,
+            evidence_id: None,
+            reason: "fixture".to_string(),
+        },
+    })?;
+    Ok(())
+}
+
+fn claim_descriptor_count(store: &KernelStore) -> usize {
+    let tip = store.tip().unwrap();
+    store
+        .live_source_descriptors(
+            OccurrenceClass::CanonicalClaims,
+            tip,
+            None,
+            NonZeroUsize::new(256).unwrap(),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap()
+        .rows
+        .len()
+}
+
+/// Memories committed before the daemon first starts, and memories committed while it runs, reach the canonical-claim source descriptors through the daemon's scheduled maintenance alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_running_daemon_publishes_memories_from_before_and_after_it_started() {
+    let data = tempfile::tempdir().unwrap();
+    let kernel_root = data.path().join("eidnara").join("context").join("kernel");
+    const SCOPE: &str = "project:seeded";
+    {
+        let seed = KernelStore::open(&kernel_root).unwrap();
+        seed.commit(
+            kernel::CommitIntent {
+                producer: "test".to_string(),
+                operation_key: "seed".to_string(),
+                request_digest: "a".repeat(64),
+                actor: "test".to_string(),
+                cause: "seed".to_string(),
+            },
+            |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "memory".to_string(),
+                    object_id: "domain:memory".to_string(),
+                    name: "memory".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_id: "domain:memory".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                envelope.insert_scope(kernel::ScopeSpec {
+                    scope_id: SCOPE.to_string(),
+                    object_id: SCOPE.to_string(),
+                    source_id: SCOPE.to_string(),
+                    domain_id: "memory".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                    terms: vec![kernel::ScopeTermSpec {
+                        dimension: kernel::Dimension::Project.as_str().to_string(),
+                        operator: "exact".to_string(),
+                        exact_value: Some("b".repeat(64)),
+                        ..kernel::ScopeTermSpec::default()
+                    }],
+                })?;
+                for object in ["before-1", "before-2", "before-3"] {
+                    envelope.insert_decision(seed_decision(object, SCOPE))?;
+                    admitted(envelope, object)?;
+                }
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    }
+
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let store = daemon.store();
+    let started = Instant::now();
+    while claim_descriptor_count(&store) < 3 {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "maintenance did not publish the memories that predate it"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    store
+        .commit(
+            kernel::CommitIntent {
+                producer: "test".to_string(),
+                operation_key: "later".to_string(),
+                request_digest: "b".repeat(64),
+                actor: "test".to_string(),
+                cause: "later".to_string(),
+            },
+            |envelope| {
+                envelope.insert_decision(seed_decision("after-1", SCOPE))?;
+                admitted(envelope, "after-1")?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    let started = Instant::now();
+    while claim_descriptor_count(&store) < 4 {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "maintenance did not publish a memory committed while it ran"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    assert_eq!(
+        owner.claim_progress(),
+        daemon::claim_sources::ClaimProgress::Changes
+    );
+    daemon.shutdown().await;
+}

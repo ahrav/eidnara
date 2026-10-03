@@ -2308,7 +2308,9 @@ pub fn liveness(
                     let report = materializer.run_episode(page, now).unwrap();
                     let blocked = match &report.end {
                         MaterializationEnd::Blocked(b) => Some(format!("{b:?}")),
-                        MaterializationEnd::ReachedTarget => None,
+                        MaterializationEnd::ReachedTarget
+                        | MaterializationEnd::Continues
+                        | MaterializationEnd::Exhausted => None,
                     };
                     let materialized =
                         newest_claims_live(stores.root(), (step - 1) / DECISION_PERIOD);

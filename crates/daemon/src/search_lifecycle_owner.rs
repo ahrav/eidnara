@@ -19,6 +19,9 @@ use retrieval::dispatch::EpisodeGrant;
 use retrieval::{PersistBounds, ProjectionIdentity};
 use tokio_util::sync::CancellationToken;
 
+use crate::claim_sources::{
+    ClaimMaterializer, ClaimProgress, ClaimSliceBounds, MaterializationEnd, MaterializationReport,
+};
 use crate::coverage::ProjectionCoverage;
 use crate::embedding_dispatch::{DispatchBounds, InputEnvelope, LaneIdentity};
 use crate::embedding_supervisor::{DrainReport, Maintained, SliceBounds, Unresolved};
@@ -60,6 +63,16 @@ const REPORT_REPEAT_INTERVAL: Duration = Duration::from_secs(60);
 const LOCK_POLL: Duration = Duration::from_millis(1);
 /// Owner slices one project's supervisor runs before the next bound project takes over.
 pub const MAINTENANCE_TENURE_SLICES: u32 = 4;
+/// One claim-source slice examines at most 64 decisions or one commit page of at most 64 commits, 65,536 rows, and 64 MiB of payload, and ends within `SLICE_IDLE`. The row and byte bounds admit any commit the daemon's own routes and producers write, so no ordinary commit blocks the runner as oversized.
+pub const CLAIM_SLICE_BOUNDS: ClaimSliceBounds = ClaimSliceBounds {
+    decisions: NonZeroUsize::new(64).expect("nonzero"),
+    decision_bytes: NonZeroU64::new(1024 * 1024).expect("nonzero"),
+    commits: CommitPageBounds {
+        max_commits: NonZeroUsize::new(64).expect("nonzero"),
+        max_rows: NonZeroUsize::new(65_536).expect("nonzero"),
+        max_payload_bytes: NonZeroU64::new(64 * 1024 * 1024).expect("nonzero"),
+    },
+};
 /// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
 const MAINTENANCE_DESTINATION: ArtifactDestination = ArtifactDestination::Local;
 
@@ -144,6 +157,10 @@ pub struct SearchLifecycleOwner {
     /// The drain grace the last readable manifest approved, kept for a stop whose records are gone.
     /// The `physical_drain_ms` last read from records that named the identity they were read under, with that identity.
     last_grace: Mutex<Option<(ProjectionIdentity, Duration)>>,
+    /// Where the canonical-claim source runner stands; a restart begins its bootstrap again.
+    claims: Mutex<ClaimProgress>,
+    /// Set by a test that drives the materializer itself; no slice runs while it holds.
+    claims_paused: Arc<std::sync::atomic::AtomicBool>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
@@ -223,6 +240,8 @@ impl SearchLifecycleOwner {
             #[cfg(feature = "test-support")]
             slice_tap: Mutex::new(None),
             last_grace: Mutex::new(None),
+            claims: Mutex::new(ClaimProgress::default()),
+            claims_paused: Arc::default(),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -464,6 +483,50 @@ impl SearchLifecycleOwner {
             *managed = Managed::Selection(Box::new(self.new_selection(identity.clone(), bounds)));
         }
         Ok((inputs, identity, budget))
+    }
+
+    /// Runs one bounded claim-source slice, or nothing while paused, so memories present before startup and every later decision change reach the search projection's source descriptors. The slice ends within `SLICE_IDLE` and within `budget`; publication runs with local-only egress and grants no search admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns the kernel's error when a read or commit fails without a durable fact to reconcile against.
+    pub fn run_claim_slice(
+        &self,
+        budget: &EvalBudget,
+        now: i64,
+    ) -> Result<Option<MaterializationReport>, kernel::KernelError> {
+        let budget = budget.bounded_by(Instant::now() + SLICE_IDLE);
+        let mut progress = self.claims.lock().unwrap_or_else(|p| p.into_inner());
+        if self
+            .claims_paused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(None);
+        }
+        ClaimMaterializer::new(&self.kernel, kernel::ProviderEgress::LocalOnly)
+            .run_slice(&mut progress, CLAIM_SLICE_BOUNDS, &budget, now)
+            .map(Some)
+    }
+
+    /// Shares `paused` as the claim-source runner's pause flag.
+    pub fn with_claims_paused(mut self, paused: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.claims_paused = paused;
+        self
+    }
+
+    /// Stops the claim-source runner once any slice in flight returns, so a test can drive the materializer itself.
+    pub fn pause_claim_sources(&self) {
+        let _progress = self.claims.lock().unwrap_or_else(|p| p.into_inner());
+        self.claims_paused
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Where the claim-source runner stands.
+    pub fn claim_progress(&self) -> ClaimProgress {
+        self.claims
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Refreshes admission from the records and the daemon's current observation, then advances the lifecycle record one step. The slice ends within the manifest's `supervisor_slice_ms`, within `budget`, and, for an active record, within that record's own deadline.
@@ -1498,7 +1561,55 @@ fn replacement_spec(
 /// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
+    let mut claim_report = None;
     loop {
+        // One claim-source slice runs before each lifecycle slice, so a large source backlog advances a bounded page at a time and every lifecycle slice still runs.
+        let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let claim_owner = Arc::clone(&owner);
+        let claim_budget = budget.clone();
+        let mut claims = tokio::task::spawn_blocking(move || {
+            claim_owner.run_claim_slice(&claim_budget, crate::now_ms())
+        });
+        let claimed = tokio::select! {
+            biased;
+            outcome = &mut claims => outcome,
+            () = cancel.cancelled() => {
+                budget.cancel();
+                claims.await
+            }
+        };
+        let claims_continue = match claimed {
+            Ok(Ok(None)) => false,
+            Ok(Ok(Some(report))) => {
+                let continues = matches!(report.end, MaterializationEnd::Continues);
+                let detail = match &report.end {
+                    MaterializationEnd::Blocked(blocked) => Some(format!("blocked: {blocked:?}")),
+                    _ => None,
+                };
+                if detail != claim_report {
+                    if let Some(detail) = &detail {
+                        eprintln!("daemon: claim sources {detail}");
+                    }
+                    claim_report = detail;
+                }
+                continues
+            }
+            Ok(Err(error)) => {
+                let detail = Some(format!("failed: {error}"));
+                if detail != claim_report {
+                    eprintln!("daemon: claim sources failed: {error}");
+                    claim_report = detail;
+                }
+                false
+            }
+            Err(join) => {
+                eprintln!("daemon: claim source slice ended abnormally: {join}");
+                false
+            }
+        };
+        if cancel.is_cancelled() {
+            return;
+        }
         let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let slice_owner = Arc::clone(&owner);
         let slice_budget = budget.clone();
@@ -1539,11 +1650,12 @@ pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if cancel.is_cancelled() {
             return;
         }
-        let advanced = match &outcome {
-            SliceOutcome::Advanced(_) => true,
-            SliceOutcome::CaughtUp(report) => report.batches_applied > 0,
-            _ => false,
-        };
+        let advanced = claims_continue
+            || match &outcome {
+                SliceOutcome::Advanced(_) => true,
+                SliceOutcome::CaughtUp(report) => report.batches_applied > 0,
+                _ => false,
+            };
         if advanced {
             continue;
         }

@@ -41,6 +41,7 @@ Every slug the specification and its three implementation tickets assign. The
 | `claim-cancellation-preserves-durable-work` | #460 | yes |
 | `claim-capacity-failure-is-atomic` | #458 | yes |
 | `claim-consumer-replay-includes-published-history` | #460 | yes |
+| `claim-sources-bootstrap-closes-the-registration-race` | #891 | yes |
 | `claim-disable-preserves-consumer-contract` | #460 | yes |
 | `claim-enablement-requires-approved-evidence` | #458 | yes |
 | `claim-export-predecode-bounds` | #458 | yes |
@@ -609,6 +610,21 @@ Required faults and enabling state: the `EpisodeFault` variants of the materiali
 Confidence: medium - [evidence](evidence/claim-consumer-replay-includes-published-history.md).
 Existing check: `crates/daemon/tests/claim_sources.rs` - `lost_and_skipped_acknowledgements_replay_from_receipts`, `unresolved_acknowledgement_blocks_and_the_next_episode_recovers`; `crates/daemon/tests/search_catchup.rs` - `lost_ack_with_cancelled_reconciliation_keeps_unknown_outcome_and_local_prefix`; status unaudited.
 Impact: a replay that skips already-published history leaves a projection missing rows it acknowledged.
+Open questions: None.
+
+### claim-sources-bootstrap-closes-the-registration-race
+
+Type: safety and liveness
+Reachability: default-production
+Status: active
+Exercised: yes - the daemon's search maintenance loop runs one bounded claim-source slice before each lifecycle slice (`crates/daemon/src/search_lifecycle_owner.rs`, `run_slices`).
+Guarantee: The claim consumer is registered before the bootstrap scan reads any decision, and the scan publishes only decisions created at or before the durable checkpoint, so every decision present before registration is published by the scan, every later change is applied by replay in commit order, an invalidated predecessor is retired before its successor is published, and catch-up is reported only once the scan is complete and the checkpoint reaches the captured tip. A restart repeats the bounded, idempotent scan; receipts make the repeat publish nothing new. Each slice examines one bounded decision page or one commit page, waits within its budget, and stops between decisions or commits when the budget is exhausted.
+Check: `always` - memories committed before registration and after it reach the inventory through slices alone; corrections, a retirement, and a recreation racing the scan converge to the admissible decisions with no slice leaving a predecessor live beside its successor; a restart mid-scan and a page published without acknowledgement replay from receipts; a cancelled budget moves nothing; deleted retained history blocks with `MissingHistory`.
+Fault/timing angle: a correction whose successor sorts ahead of the scan cursor; a restart before acknowledgement; a deleted outbox row.
+Required faults and enabling state: `EpisodeFault::SkipAcknowledgement` through `run_slice_with_fault_for_test`; a cancelled `EvalBudget`; an outbox row removed under a registered consumer.
+Confidence: medium - the race check fails when the checkpoint guard on the scan is removed.
+Existing check: `crates/daemon/tests/claim_sources.rs` - `bootstrap_and_replay_publish_memories_from_before_and_after_registration`, `changes_racing_the_bootstrap_converge_without_serving_two_revisions`, `restarts_during_bootstrap_and_before_acknowledgement_replay_idempotently`, `cancellation_exclusions_and_missing_history_are_reported_not_completed`; `crates/daemon/tests/search_lifecycle_owner.rs` - `the_running_daemon_publishes_memories_from_before_and_after_it_started`; `crates/kernel/tests/kernel_slice.rs` - `decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound`; status unaudited.
+Impact: a scan that publishes a successor before replay retires its predecessor serves two revisions; a registration that acknowledged past unpublished memories hides them from search.
 Open questions: None.
 
 ### claim-export-retention-fence
