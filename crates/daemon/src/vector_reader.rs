@@ -23,8 +23,8 @@ use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
     CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, Layer,
     LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, OracleRefusal,
-    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, WinnerRow,
-    rank_layers, rescore_pool, select_candidates,
+    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, Window,
+    WinnerRow, rank_layers, rescore_pool, select_candidates_observed,
 };
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
@@ -299,16 +299,18 @@ fn window_rows(width: usize, declared: usize) -> usize {
     (CODE_WINDOW_BYTES / width.max(1)).max(1).min(declared)
 }
 
-/// Scan scratch: one block of decoded codes per layer, held through the scan, and every layer's window of raw codes.
+/// Scan scratch: per layer, one block of decoded codes and the query encoded under the layer's scales, held through the scan, and every layer's window of raw codes.
 fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
     let dimension = u64::from(view.layout.dimension);
+    let layers = view.layers.len() as u64;
     let windows: u64 = view
         .layers
         .iter()
         .map(|layer| window_rows(layer.dimension(), layer.occurrence_ids.len()) as u64)
         .sum();
     (retrieval::dense::BLOCK_ROWS as u64)
-        .saturating_mul(view.layers.len() as u64)
+        .saturating_add(1)
+        .saturating_mul(layers)
         .saturating_add(windows)
         .saturating_mul(dimension)
 }
@@ -793,6 +795,8 @@ enum ReadStop {
 /// Where a compressed ranking stands; a test may hold or mutate the store here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RescoreEvent<'a> {
+    /// A point inside the candidate scan.
+    Scan(Window<'a>),
     /// The pool is selected; no original row has been read.
     AfterSelection,
     /// The original row `row` of member `member` is about to be read.
@@ -874,7 +878,10 @@ pub fn rank_compressed(
         codes: &codes,
         max_entries: request.max_entries,
     };
-    let pool = select_candidates(conn, kernel, &query, budget).map_err(|refusal| {
+    let pool = select_candidates_observed(conn, kernel, &query, budget, |window| {
+        observe(RescoreEvent::Scan(window));
+    })
+    .map_err(|refusal| {
         if let CandidateRefusal::Layered(layered) = &refusal
             && walk_corruption(layered)
         {
@@ -882,6 +889,8 @@ pub fn rank_compressed(
         }
         CompressedRefusal::Candidates(refusal)
     })?;
+    // A scan the budget ended returns a discarded pool, so the request refuses before a selection is reported.
+    budget.check().map_err(|_| CompressedRefusal::Budget)?;
     observe(RescoreEvent::AfterSelection);
     let mut bytes = Vec::new();
     let rescored = rescore_pool(
@@ -898,6 +907,10 @@ pub fn rank_compressed(
                 member: &layer.digest,
                 row: winner.row,
             });
+            // The budget check after `observe` stops the request on a cancellation delivered at `ReadOriginal`, before `row_into` reads the row's bytes.
+            if budget.check().is_err() {
+                return Err(ReadStop::Budget);
+            }
             layer
                 .row_into(winner.row, &mut bytes, row)
                 .map_err(ReadStop::Fault)

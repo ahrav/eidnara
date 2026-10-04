@@ -2739,6 +2739,8 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    /// The verified composition the dense lane ranks through; absent, the lane runs the exhaustive producer.
+    dense_vectors: Mutex<Option<query_route::DenseVectors>>,
     edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
     capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -3498,6 +3500,22 @@ impl Handler {
         (outcome, units.load(Ordering::SeqCst))
     }
 
+    /// `run_unit` counts submissions in `submitted`; each submitted unit waits in its own task for a permit from `gate` before it runs, and a closed gate refuses it.
+    pub async fn dispatch_value_for_test_gated(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        gate: Arc<tokio::sync::Semaphore>,
+        submitted: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> PreparedOutcome {
+        let runner = transform_unit::DetachedRunner {
+            units: submitted,
+            gate: Some(gate),
+            ..Default::default()
+        };
+        self.dispatch_value_on(route, request, runner).await
+    }
+
     async fn dispatch_value_on(
         &self,
         route: RouteHandle,
@@ -3685,6 +3703,7 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            dense_vectors: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
@@ -4188,6 +4207,7 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            dense_vectors: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]

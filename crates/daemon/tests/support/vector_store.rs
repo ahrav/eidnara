@@ -119,21 +119,26 @@ impl Fixture {
     }
 
     fn build(dimension: u32, model: Option<&str>) -> Self {
-        let root = tempfile::tempdir().unwrap();
-        let store = GenerationStore::open(Some(root.path())).unwrap();
-        let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
         let mut identity = identity(KERNEL, dimension);
         if let Some(model) = model {
             identity.embedding_model = model.to_owned();
         }
+        let mut generation = generation_of(dimension);
+        generation.embedding_model = identity.embedding_model.clone();
+        Self::for_projection(identity, generation)
+    }
+
+    /// A lifecycle store whose gate, ledger, and layers all carry `identity` and `generation`, so its compositions serve a projection built under them.
+    pub fn for_projection(identity: ProjectionIdentity, generation: VectorGeneration) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let store = GenerationStore::open(Some(root.path())).unwrap();
+        let tx = LifecycleTransactionLock::acquire_exclusive(Some(root.path())).unwrap();
         let gate = Arc::new(HookGate::closed());
         gate.install(passing_evaluator(&identity, 0, &ProjectionHook::ALL));
         let admission = gate
             .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Explicit)
             .unwrap();
         let ledger = Ledger::new(Arc::clone(&gate), InvalidationIdentity::from(&identity));
-        let mut generation = generation_of(dimension);
-        generation.embedding_model = identity.embedding_model.clone();
         Self {
             root,
             store,

@@ -269,9 +269,8 @@ pub fn select_candidates<'a>(
     select_inner(conn, kernel, request, budget, |_| {})
 }
 
-/// `hook` runs before each visited row is read further, after every page, and after every judgment batch, so a test can change the kernel or the budget in those windows.
-#[cfg(feature = "test-support")]
-pub fn select_candidates_with_hook_for_test<'a>(
+/// [`select_candidates`] with `observe` run before each visited row is read further, after every page, and after every judgment batch, so a caller can watch the scan's progress or act inside its windows.
+pub fn select_candidates_observed<'a>(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     request: &CandidateQuery<'a>,

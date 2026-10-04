@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
-use retrieval::dense::candidates::select_candidates_with_hook_for_test;
+use retrieval::dense::candidates::select_candidates_observed;
 use retrieval::dense::oracle::{HELD_SLOT_BYTES, held_bytes, selected_bytes};
 use retrieval::dense::scalar::{QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::{
@@ -127,7 +127,7 @@ fn select<'a>(
     fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -769,7 +769,7 @@ fn an_ended_budget_returns_no_candidate() {
     let pool = fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -900,7 +900,7 @@ fn an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush() {
     let pool = fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,

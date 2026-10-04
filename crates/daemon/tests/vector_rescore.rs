@@ -109,6 +109,7 @@ fn run(
                     RescoreEvent::ReadOriginal { member, row } => {
                         reads.push((member.to_owned(), row));
                     }
+                    RescoreEvent::Scan(_) => {}
                 },
             ))
         })
@@ -996,13 +997,13 @@ fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     );
     // A resident limit the view's tables already fill leaves no room for the pool's row buffers.
     let tables = fixture.ledger.census().resident;
-    // One block of decoded codes and one window per layer; a window this narrow holds every row of its layer.
+    // One block of decoded codes, one encoded query, and one window per layer; a window this narrow holds every row of its layer.
     let windows: usize = view
         .layers()
         .iter()
         .map(|layer| layer.occurrence_ids().len())
         .sum();
-    let code_scratch = (BLOCK_ROWS * view.layers().len() + windows) as u64 * 8;
+    let code_scratch = ((BLOCK_ROWS + 1) * view.layers().len() + windows) as u64 * 8;
     fixture.set_limit(RESIDENT_LIMIT, tables + code_scratch);
     let (refused, _) = run(
         &fixture,
@@ -1162,4 +1163,174 @@ fn the_alpha_sweep_keeps_candidate_coverage_and_rescored_recall_as_separate_stag
     );
     // The stage helper gives an empty baseline no value rather than a perfect score.
     assert_eq!(fraction(&[], &[]), None);
+}
+
+/// The budget is read after the read observer runs, so a cancellation delivered at an original read ends the request before that row's bytes are read.
+#[test]
+fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let budget = EvalBudget::unbounded();
+    let expected = fixture.expected();
+    let request = CompressedRequest {
+        expected: &expected,
+        query: &axis(0),
+        authority: projection.authority(),
+        capacity: capacity(2, 3),
+        bounds: scan_bounds(),
+        max_entries: NonZeroUsize::new(4096).unwrap(),
+        max_layers: NonZeroUsize::new(ROOMY.max_layers).unwrap(),
+        max_pinned_bytes: ROOMY.max_pinned_bytes,
+        max_read_bytes: ROOMY.max_read_bytes,
+    };
+    // A row rewritten to NaN fails its decode, so a read that happens after the cancellation shows as corruption and a quarantine.
+    let mut poison = rewrite_rows(&fixture, &base.digest, |row| {
+        row[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    });
+    let mut reads = 0usize;
+    let outcome = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank_compressed(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &budget,
+                &fixture.admission,
+                &mut |event| {
+                    if matches!(event, RescoreEvent::ReadOriginal { .. }) {
+                        reads += 1;
+                        budget.cancel();
+                        poison();
+                    }
+                },
+            ))
+        })
+        .unwrap();
+    assert_eq!(outcome.unwrap_err(), CompressedRefusal::Budget);
+    assert_eq!(
+        reads, 1,
+        "the first original read is observed, then the request ends"
+    );
+    assert!(!view.is_quarantined(), "the poisoned row was never read");
+    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+}
+
+/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's code window, and the query encoded under that layer's scales.
+#[test]
+fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let first = fixture.layer_from(&export(&[("gamma", axis(7))], &[], 12));
+    let second = fixture.layer_from(&export(&[("gamma", axis(1))], &["beta"], 14));
+    fixture
+        .publish(&fixture.compose(1, &base, &[first, second]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let layers = view.layers().len();
+    assert_eq!(layers, 3);
+    let dimension = 8u64;
+    let windows: u64 = view
+        .layers()
+        .iter()
+        .map(|layer| layer.occurrence_ids().len() as u64)
+        .sum();
+    let expected = (BLOCK_ROWS as u64 * layers as u64 + windows + layers as u64) * dimension;
+    let at_selection = std::cell::Cell::new(None);
+    let (outcome, _) = run(
+        &fixture,
+        &projection,
+        &view,
+        &axis(0),
+        capacity(2, 3),
+        &ROOMY,
+        &EvalBudget::unbounded(),
+        || at_selection.set(Some(held(&fixture.ledger, ResourceClass::Scratch))),
+    );
+    outcome.unwrap();
+    assert_eq!(
+        at_selection.get(),
+        Some(expected),
+        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the window, and the encoded query per layer"
+    );
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+}
+
+/// A cancellation delivered at the walk's final `AfterPage` ends the scan before any code window is read for scoring.
+#[test]
+fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let budget = EvalBudget::unbounded();
+    let expected = fixture.expected();
+    // One page holds the whole population, so its `AfterPage` is the final one.
+    let mut bounds = scan_bounds();
+    bounds.page_rows = NonZeroUsize::new(64).unwrap();
+    let request = CompressedRequest {
+        expected: &expected,
+        query: &axis(0),
+        authority: projection.authority(),
+        capacity: capacity(2, 3),
+        bounds,
+        max_entries: NonZeroUsize::new(4096).unwrap(),
+        max_layers: NonZeroUsize::new(ROOMY.max_layers).unwrap(),
+        max_pinned_bytes: ROOMY.max_pinned_bytes,
+        max_read_bytes: ROOMY.max_read_bytes,
+    };
+    // A codes file cut to nothing makes any scoring read visible as a missing-codes refusal and a quarantine.
+    let codes = fixture
+        .generation_dir(&base.digest)
+        .join(daemon::vector_generation::CODES_FILE);
+    let mut pages = 0usize;
+    let outcome = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank_compressed(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &budget,
+                &fixture.admission,
+                &mut |event| {
+                    if let RescoreEvent::Scan(retrieval::dense::Window::AfterPage(_)) = event {
+                        pages += 1;
+                        budget.cancel();
+                        std::fs::write(&codes, []).unwrap();
+                    }
+                },
+            ))
+        })
+        .unwrap();
+    assert_eq!(pages, 1, "the population fits one page");
+    assert!(
+        matches!(
+            outcome,
+            Err(CompressedRefusal::Budget | CompressedRefusal::Candidates(_))
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            Err(CompressedRefusal::Candidates(CandidateRefusal::Layered(
+                LayeredRefusal::Oracle(OracleRefusal::Unreadable { .. })
+            )))
+        ),
+        "the cut codes were never read: {outcome:?}"
+    );
+    assert!(!view.is_quarantined(), "the cancelled scan read no codes");
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
 }

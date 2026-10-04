@@ -225,6 +225,18 @@ impl KernelDaemon {
             .await
     }
 
+    /// [`Handler::dispatch_value_for_test_gated`] on this daemon's route.
+    pub async fn outcome_gated(
+        &self,
+        request: Value,
+        gate: Arc<tokio::sync::Semaphore>,
+        submitted: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> PreparedOutcome {
+        self.handler
+            .dispatch_value_for_test_gated(self.route, request, gate, submitted)
+            .await
+    }
+
     pub async fn call(&self, request: Value) -> Value {
         self.call_on(self.route, request).await
     }
