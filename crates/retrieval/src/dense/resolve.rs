@@ -13,6 +13,10 @@ use crate::batch::ProjectionCheckpoint;
 pub enum RowFault {
     #[error("the row is not a member of the generation: {0}")]
     Rejected(#[from] RowRejection),
+    /// The row is not where its layer declares it, or its codes are outside the recipe: the index is past the rows, the file ends before the row does, or a code is malformed.
+    #[error("the row is missing: {0}")]
+    Missing(String),
+    /// The read itself failed; the row's bytes may be intact.
     #[error("the row could not be read: {0}")]
     Unavailable(String),
 }
@@ -37,7 +41,7 @@ impl RowAccess for Vec<Vec<f32>> {
 
     fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
         self.get(index).cloned().ok_or_else(|| {
-            RowFault::Unavailable(format!(
+            RowFault::Missing(format!(
                 "row {index} is past the {} resident rows",
                 self.len()
             ))

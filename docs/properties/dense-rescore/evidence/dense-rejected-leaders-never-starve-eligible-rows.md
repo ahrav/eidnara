@@ -7,7 +7,7 @@ stop discovery of lower eligible rows.
 
 ## Evidence trail
 
-- `Progress::judge_batch` (`crates/retrieval/src/dense/oracle.rs:908`) offers
+- `Progress::judge_batch` (`crates/retrieval/src/dense/oracle.rs:951`) offers
   only rows the kernel judged eligible.
 - The walk continues until its pages run out or a bound stops it; a full set
   only raises the score a row needs to be selected.

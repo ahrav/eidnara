@@ -7,9 +7,11 @@ use kernel::source_identity::OccurrenceClass;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::dense::codec::{self, Metric, RowLayout};
-use retrieval::dense::scalar::{Scales, encode, weighted_dot};
+use retrieval::dense::scalar::{QuantizedQuery, Scales, encode, weighted_dot};
 use retrieval::dense::score::TopK;
-use retrieval::dense::{BLOCK_ROWS, Ranked, inner_product, inner_product_block};
+use retrieval::dense::{
+    BLOCK_ROWS, Ranked, inner_product, inner_product_block, inner_product_with_squares,
+};
 
 const SEED: [u8; 32] = *b"dense-ranking-laws-seed-00000001";
 
@@ -190,6 +192,92 @@ fn weighted_dot_matches_the_in_order_model_over_the_full_code_range() {
         .unwrap();
 }
 
+/// Full-mantissa scales, whose squared weights times a code round, mixed with scales from the smallest subnormal to `f32::MAX`, so the weights span from about `2e-90` to `1.2e77`.
+fn extreme_scales() -> impl Strategy<Value = Vec<f32>> {
+    prop::collection::vec(
+        prop_oneof![
+            1.0e-3f32..2.0,
+            prop::sample::select(vec![
+                1.0f32,
+                1.0 / 127.0,
+                1.0e-6,
+                1.0e30,
+                f32::MAX,
+                f32::MIN_POSITIVE,
+                f32::from_bits(1),
+            ]),
+        ],
+        1..=40,
+    )
+}
+
+/// Each lane of a quantized block equals `QuantizedQuery::score` and the in-order model bit for bit, over every tail length, extreme weights, and the full code range, so any lane crossing, reassociation, or fusion in the block fails here.
+#[test]
+fn a_quantized_block_scores_each_lane_as_the_single_row_score_does() {
+    runner()
+        .run(
+            &extreme_scales().prop_flat_map(|scales| {
+                let n = scales.len();
+                (
+                    Just(scales),
+                    prop::collection::vec(-127i8..=127, n),
+                    prop::collection::vec(prop::collection::vec(-127i8..=127, n), BLOCK_ROWS),
+                )
+            }),
+            |(scales, targets, docs)| {
+                let dimension = scales.len() as u32;
+                let layout = RowLayout {
+                    dimension,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: f64::MAX,
+                };
+                // Each coordinate aims at its target code; one past the f32 range aims at the target's sign instead.
+                let query: Vec<f32> = targets
+                    .iter()
+                    .zip(&scales)
+                    .map(|(target, scale)| {
+                        let value = f64::from(*target) * f64::from(*scale);
+                        if value.abs() <= f64::from(f32::MAX) {
+                            value as f32
+                        } else {
+                            scale * f32::from(target.signum())
+                        }
+                    })
+                    .collect();
+                let scales = Scales::from_values(scales, dimension).unwrap();
+                let Ok(quantized) = QuantizedQuery::new(&layout, &scales, &query) else {
+                    // Every target code was zero, so the query has no nonzero code to score with.
+                    prop_assert!(targets.iter().all(|target| *target == 0));
+                    return Ok(());
+                };
+                let lanes: [&[i8]; BLOCK_ROWS] = std::array::from_fn(|lane| docs[lane].as_slice());
+                let sums = quantized.score_block(&lanes);
+                for (lane, doc) in docs.iter().enumerate() {
+                    let mut model = 0.0f64;
+                    for (j, code) in doc.iter().enumerate() {
+                        let s = f64::from(scales.as_slice()[j]);
+                        let product = i32::from(quantized.codes()[j]) * i32::from(*code);
+                        model += (s * s) * f64::from(product);
+                    }
+                    prop_assert_eq!(
+                        sums[lane].to_bits(),
+                        quantized.score(doc).to_bits(),
+                        "lane {}",
+                        lane
+                    );
+                    prop_assert_eq!(
+                        sums[lane].to_bits(),
+                        model.to_bits(),
+                        "model, lane {}",
+                        lane
+                    );
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
 /// Codes stay in `[-127, 127]`, `clipped` counts exactly the quotients outside that range, and an in-range quotient rounds ties to even.
 #[test]
 fn encoding_codes_are_clamped_counted_and_rounded_to_even() {
@@ -278,6 +366,44 @@ fn inner_product_block_matches_the_single_row_functions_bit_for_bit() {
             }
             Ok(())
         })
+        .unwrap();
+}
+
+/// The one-pass score and sum of squares equal the single-purpose loops bit for bit, over every f32 exponent, both signed zeros, and non-finite coordinates, so validating from the pass's sum decides as the scalar validator does.
+#[test]
+fn inner_product_with_squares_matches_the_single_purpose_loops_bit_for_bit() {
+    runner()
+        .run(
+            &(block_rows(), any::<usize>(), 0u8..4, 0.0f64..2.0),
+            |((query, rows), seed, poison, tolerance)| {
+                let dimension = query.len();
+                let mut row = rows[0].clone();
+                match poison {
+                    1 => row[seed % dimension] = f32::NAN,
+                    2 => row[seed % dimension] = f32::INFINITY,
+                    3 => row.iter_mut().for_each(|value| *value = 0.0),
+                    _ => {}
+                }
+                let sums = inner_product_with_squares(&query, &row);
+                prop_assert_eq!(sums.score.to_bits(), inner_product(&query, &row).to_bits());
+                let mut squares = 0.0f64;
+                for value in &row {
+                    let widened = f64::from(*value);
+                    squares += widened * widened;
+                }
+                prop_assert_eq!(sums.sum_of_squares.to_bits(), squares.to_bits());
+                let layout = RowLayout {
+                    dimension: dimension as u32,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: tolerance,
+                };
+                prop_assert_eq!(
+                    codec::validate_from_sum(&row, &layout, sums.sum_of_squares),
+                    codec::validate(&row, &layout)
+                );
+                Ok(())
+            },
+        )
         .unwrap();
 }
 
