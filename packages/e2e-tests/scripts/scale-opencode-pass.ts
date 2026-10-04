@@ -23,7 +23,7 @@ const { values: flags } = parseArgs({
         "daemon-build": { type: "string" },
         commit: { type: "string" },
         tiers: { type: "string", default: "10k,s3_100k,s4_1m" },
-        samples: { type: "string", default: "300" },
+        samples: { type: "string", default: "330" },
         window: { type: "string", default: "300" },
         seed: { type: "string", default: "847" },
     },
@@ -158,9 +158,20 @@ function hostManifest(): Record<string, unknown> {
 
 interface PassObservation {
     status?: unknown;
+    action?: unknown;
     totalMs?: number;
-    bytes: number;
+    exchanged: unknown[];
     error?: unknown;
+}
+
+function exchangedBytes(exchanged: readonly unknown[]): number {
+    let bytes = 0;
+    for (const value of exchanged) bytes += Buffer.byteLength(JSON.stringify(value) ?? "");
+    return bytes;
+}
+
+function isDeadline(error: unknown): boolean {
+    return error instanceof Error && /deadline/i.test(error.message);
 }
 
 const plugin = await loadPlugin();
@@ -171,11 +182,7 @@ const writer = new PassRowWriter(rowsPath);
 const incomplete: string[] = [];
 process.env.XDG_DATA_HOME = mkdtempSync(join(os.tmpdir(), "eidnara-scale-xdg-"));
 
-for (const tier of tiers) {
-    if (performance.now() >= deadline) {
-        incomplete.push(tier);
-        continue;
-    }
+async function measureTier(tier: ScaleTier): Promise<number> {
     const covered = TIER_MESSAGES[tier] - windowSize;
     const sessionId = `scale-opencode-${tier}`;
     const dataDir = mkdtempSync(join(os.tmpdir(), `eidnara-scale-${tier}-`));
@@ -183,23 +190,24 @@ for (const tier of tiers) {
     seed(dataDir, sessionId, covered / 2);
     const stack = await HermeticHostStack.start({ dataDir, fixtureBin, startTimeoutMs: 120_000 });
     const client = plugin.createHostModuleClient(stack.connectionFile);
-    let pass: PassObservation = { bytes: 0 };
+    let pass: PassObservation = { exchanged: [] };
     const measured = {
         call: async (args: Record<string, unknown>) => {
-            const sent = Buffer.byteLength(JSON.stringify(args.body));
+            pass.exchanged.push(args.body);
             try {
                 const response = await client.call(args);
-                pass.bytes += sent;
+                pass.exchanged.push(response);
                 if (args.method === "transform") {
                     const record = response as Record<string, unknown>;
                     const value = (record.result ?? record) as {
                         status?: unknown;
+                        action?: unknown;
                         timings?: { total?: unknown };
                     };
                     pass.status = value.status;
+                    pass.action = value.action;
                     if (typeof value.timings?.total === "number")
                         pass.totalMs = value.timings.total;
-                    pass.bytes += Buffer.byteLength(JSON.stringify(response));
                 }
                 return response;
             } catch (error) {
@@ -230,36 +238,47 @@ for (const tier of tiers) {
         for (let turn = 0; turn < samples; turn += 1) {
             if (performance.now() >= deadline) break;
             const host = hostArray(sessionId, covered, windowSize);
-            const output = { messages: turn === 0 ? host.slice(covered - 2) : host };
+            // The first pass submits only the window, which declares nothing, so it anchors on
+            // the seeded coverage instead of uploading every covered slot.
+            const messages = turn === 0 ? host.slice(covered - 2) : host;
+            const head = messages[turn === 0 ? 0 : covered];
+            const output = { messages };
             const failuresBefore = transform.getState(sessionId).failureCount;
             Bun.gc(true);
-            pass = { bytes: 0 };
+            pass = { exchanged: [] };
             const startedAt = performance.now();
             await transform.run(sessionId, output);
             const responseUs = Math.round((performance.now() - startedAt) * 1_000);
             const state = transform.getState(sessionId);
             const boundary = JSON.stringify(state.boundary ?? null);
-            const ok = pass.status === "ok" && state.failureCount === failuresBefore;
-            const refusal: PassRow["refusal"] = ok
-                ? null
-                : pass.error !== undefined
-                  ? "transport_error"
-                  : pass.status === undefined
-                    ? "declined"
-                    : "daemon_error";
+            const published = output.messages[turn === 0 ? 0 : covered] !== head;
+            const ok = pass.status === "ok" && state.failureCount === failuresBefore && published;
+            const censored = !ok && isDeadline(pass.error);
+            const refusal: PassRow["refusal"] =
+                ok || censored
+                    ? null
+                    : pass.error !== undefined
+                      ? "transport_error"
+                      : pass.status === undefined || pass.status === "ok"
+                        ? "declined"
+                        : "daemon_error";
             writer.write({
                 harness: "opencode",
                 tier,
                 session: sessionId,
                 turn,
                 boundary_state:
-                    turn === 0 ? "cold" : boundary === previousBoundary ? "steady" : "warming",
-                outcome: ok ? "completed" : "refused",
+                    turn === 0
+                        ? "cold"
+                        : boundary === previousBoundary && pass.action !== "HARD"
+                          ? "replay"
+                          : "warming",
+                outcome: ok ? "completed" : censored ? "censored" : "refused",
                 refusal,
                 response_us: responseUs,
                 service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
                 rss_bytes: process.memoryUsage.rss(),
-                ipc_bytes: pass.bytes,
+                ipc_bytes: exchangedBytes(pass.exchanged),
             });
             previousBoundary = boundary;
             completed += 1;
@@ -268,8 +287,22 @@ for (const tier of tiers) {
         client.disconnect();
         await stack.stop();
     }
-    if (completed < samples) incomplete.push(tier);
-    console.log(`${tier}: ${completed} of ${samples} passes`);
+    return completed;
+}
+
+for (const tier of tiers) {
+    if (performance.now() >= deadline) {
+        incomplete.push(tier);
+        continue;
+    }
+    try {
+        const completed = await measureTier(tier);
+        if (completed < samples) incomplete.push(tier);
+        console.log(`${tier}: ${completed} of ${samples} passes`);
+    } catch (error) {
+        incomplete.push(tier);
+        console.error(`${tier}: inconclusive:`, error);
+    }
 }
 writer.close();
 

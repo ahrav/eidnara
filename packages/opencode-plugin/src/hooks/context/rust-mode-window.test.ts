@@ -11,6 +11,7 @@ import * as eventResolvers from "./event-resolvers";
 import { chargeInvocation } from "./invocation-budget";
 import {
     createRustModeTransform,
+    openCodeHostView,
     type RustModeModuleClient,
     type RustModeTransformDeps,
 } from "./opencode-transform-adapter";
@@ -20,10 +21,21 @@ import {
     defaultTransformCaptureAdmission,
     filterMayHold,
     fnv1a32,
-    messageIdFilter,
-    scanMessageIds,
     TransformCaptureAdmission,
 } from "./transform-capture";
+import { hostIdFilter, scanHostIds } from "./transform-session-client";
+
+/** The OpenCode adapter's discovery view, read through the client's id scan and filter. */
+function scanMessageIds(host: unknown[], stop: (id: string, index: number) => boolean): number {
+    return scanHostIds(openCodeHostView(host), stop);
+}
+
+function messageIdFilter(
+    host: unknown[],
+    reserve: (bytes: number) => boolean,
+): Uint32Array | undefined {
+    return hostIdFilter(openCodeHostView(host), reserve);
+}
 
 function makeDeps(): RustModeTransformDeps {
     return {

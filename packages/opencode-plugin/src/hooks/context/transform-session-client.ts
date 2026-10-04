@@ -17,7 +17,7 @@ import {
     parseRecipe,
     type RecipeSourceBase,
 } from "./edit-recipe";
-import { validateInvocation } from "./invocation-budget";
+import { type HarnessProfileIdentity, validateInvocation } from "./invocation-budget";
 import {
     isModuleTransportGenerationChangedResult,
     TRANSFORM_SEND_TIMEOUT_MS,
@@ -429,12 +429,16 @@ export interface TransformRequestCore {
     nativeMessages: readonly unknown[];
 }
 
-/** A native-serving revision 3 transform body: the protocol fields, then `fields`, then the window. */
+/**
+ * A native-serving revision 3 transform body: the adapter's `fields`, then the protocol fields
+ * and the window, so no pass input can replace a protocol field.
+ */
 export function buildTransformRequest(
     core: TransformRequestCore,
     fields: Record<string, unknown>,
 ): Record<string, unknown> {
     return {
+        ...fields,
         method: "transform",
         kind: "transform",
         v: 3,
@@ -446,7 +450,6 @@ export function buildTransformRequest(
         ...(core.previousOutputRevision
             ? { previous_output_revision: core.previousOutputRevision }
             : {}),
-        ...fields,
         messages: core.input,
         native_messages: core.nativeMessages,
     };
@@ -501,6 +504,7 @@ interface DeliveryPlan {
     projectRoot: string;
     attempted: Set<string>;
     applied: Set<string>;
+    outcome: TransformPassOutcome;
 }
 
 async function deliverTransformNotes(
@@ -551,9 +555,16 @@ export interface TransformPassPreparation {
 /**
  * One pass's view of its harness. Every method reads the host or the adapter's own state except
  * `publish`, the one host write, which runs after every check the pass makes.
+ *
+ * Each attempt calls, in order: `preflight`, `readWindow`, `idOf` on the window, `contextLimit`,
+ * `prepare`, `liveWindow` for every recheck, `validateOutput`, `publicationRejection`, and
+ * `publish`. A `boundary_unknown` answer starts one more attempt from `preflight`. A failed pass
+ * may call `liveWindow`, `publicationRejection`, and `publish` after `contextLimit` to fail open.
  */
 export interface TransformPassSource {
     readonly serializerProfile: string;
+    /** The heuristic the invocation gate charges the candidate output under. */
+    readonly invocationProfile: HarnessProfileIdentity;
     readonly host: TransformHostView;
     /**
      * Classifies the session and names the route root; a decline throws {@link PassDeclined}.
@@ -604,12 +615,29 @@ export interface TransformSessionClientOptions {
     unpagedTransformMaxBytes?: number;
 }
 
+/** How one pass ended. */
+export type TransformPassOutcome =
+    | {
+          /** The daemon's output was published, and `boundary` is the rendered boundary it acknowledged. */
+          readonly kind: "applied";
+          readonly boundary: TransformBoundary | null | undefined;
+      }
+    | {
+          /** The pass declined or failed; `servedLastApplied` names a fail-open publication. */
+          readonly kind: "declined";
+          readonly servedLastApplied: boolean;
+      };
+
 export interface TransformSessionClient {
     /**
-     * Runs one pass under `lease` and returns once its outcome is published or declined; note
-     * delivery runs after `lease` is released.
+     * Runs one pass under `lease` and resolves with its outcome once that is published or
+     * declined; note delivery runs after `lease` is released.
      */
-    run(sessionId: string, lease: CaptureLease, source: TransformPassSource): Promise<void>;
+    run(
+        sessionId: string,
+        lease: CaptureLease,
+        source: TransformPassSource,
+    ): Promise<TransformPassOutcome>;
     /** Forgets the session's pass state and retained output; returns the root it last routed by. */
     clear(sessionId: string): string | null;
     state(sessionId: string): Readonly<TransformSessionState>;
@@ -636,7 +664,7 @@ function ensureState(
 }
 
 /** Scans host ids from the end until `stop` accepts one and returns its index, or -1. */
-function scanHostIds(
+export function scanHostIds(
     host: TransformHostView,
     stop: (id: string, index: number) => boolean,
 ): number {
@@ -647,8 +675,11 @@ function scanHostIds(
     return -1;
 }
 
-/** The sorted id hashes of `host`, retaining no id string; `undefined` when `reserve` refuses the four bytes per slot. */
-function hostIdFilter(
+/**
+ * The sorted id hashes of `host`, retaining no id string; `undefined` when `reserve` refuses the
+ * four bytes per slot. A hit may be a collision, so the caller verifies it with an id scan.
+ */
+export function hostIdFilter(
     host: TransformHostView,
     reserve: (bytes: number) => boolean,
 ): Uint32Array | undefined {
@@ -729,6 +760,7 @@ export function createTransformSessionClient(
             projectRoot: "",
             attempted: new Set(),
             applied: new Set(),
+            outcome: { kind: "declined", servedLastApplied: false },
         };
         const host = source.host;
         const state = ensureState(states, sessionId);
@@ -904,7 +936,7 @@ export function createTransformSessionClient(
                         {
                             maxTokens: failOpen.contextLimit,
                             headroomPermille: INVOCATION_HEADROOM_PERMILLE,
-                            profile: "opencode-heuristic",
+                            profile: source.invocationProfile,
                         },
                     );
                     if (!invocation.ok) {
@@ -1370,7 +1402,7 @@ export function createTransformSessionClient(
                 const invocation = validateInvocation(application.lengths, inputLengths, {
                     maxTokens: reportedContextLimit,
                     headroomPermille: INVOCATION_HEADROOM_PERMILLE,
-                    profile: "opencode-heuristic",
+                    profile: source.invocationProfile,
                 });
                 if (!invocation.ok) {
                     throw new PassDeclined(
@@ -1408,6 +1440,7 @@ export function createTransformSessionClient(
                 state.initialized = true;
                 state.consecutiveFailures = 0;
                 deliveries.applied = appliedDeliveryPassIds;
+                deliveries.outcome = { kind: "applied", boundary: nextBoundary };
                 logStage(sessionId, "apply", applyReplaceStartedAt, timings);
             } catch (error) {
                 logStage(sessionId, "apply", applyStartedAt, timings, "failed=true");
@@ -1440,6 +1473,10 @@ export function createTransformSessionClient(
                 if (servedLastApplied) servedFrom = "last_applied";
                 markFailure(sessionId, state, error, servedLastApplied);
             }
+            deliveries.outcome = {
+                kind: "declined",
+                servedLastApplied: servedFrom === "last_applied",
+            };
             finishPass(false);
         }
         return deliveries;
@@ -1450,7 +1487,10 @@ export function createTransformSessionClient(
             // execute settles before admission is released; only route metadata reaches delivery.
             return execute(sessionId, source, lease)
                 .finally(lease.release.bind(lease))
-                .then(deliverTransformNotes.bind(undefined, options.moduleClient));
+                .then(async (plan) => {
+                    await deliverTransformNotes(options.moduleClient, plan);
+                    return plan.outcome;
+                });
         },
         clear(sessionId) {
             const routeRoot = states.get(sessionId)?.routeRoot ?? null;

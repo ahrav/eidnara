@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 import { TransformCaptureAdmission } from "./transform-capture";
 import {
     createTransformSessionClient,
     type RustModeModuleClient,
+    type TransformPassOutcome,
     type TransformPassSource,
 } from "./transform-session-client";
 
@@ -13,6 +14,7 @@ import {
 interface PlainHost {
     values: { id: string; text: string }[];
     published: unknown[][];
+    windows: [number, number][];
 }
 
 function plainHost(count: number, from = 1): PlainHost {
@@ -22,12 +24,14 @@ function plainHost(count: number, from = 1): PlainHost {
             text: `message ${index + from}`,
         })),
         published: [],
+        windows: [],
     };
 }
 
 function source(host: PlainHost): TransformPassSource {
     return {
         serializerProfile: "pi",
+        invocationProfile: "pi-heuristic",
         host: {
             get length() {
                 return host.values.length;
@@ -35,7 +39,10 @@ function source(host: PlainHost): TransformPassSource {
             idAt: (index) => host.values[index]?.id,
         },
         preflight: async () => "/project",
-        readWindow: (start, end) => host.values.slice(start, end),
+        readWindow: (start, end) => {
+            host.windows.push([start, end]);
+            return host.values.slice(start, end);
+        },
         idOf: (value) => (value as { id?: string }).id,
         liveWindow: (start, end) => host.values.slice(start, end),
         contextLimit: () => undefined,
@@ -98,11 +105,13 @@ async function pass(
     client: ReturnType<typeof createTransformSessionClient>,
     admission: TransformCaptureAdmission,
     host: PlainHost,
-): Promise<void> {
+): Promise<TransformPassOutcome> {
     const admitted = admission.admit("ses");
     if (!("lease" in admitted)) throw new Error("admission declined");
-    await client.run("ses", admitted.lease, source(host));
+    return client.run("ses", admitted.lease, source(host));
 }
+
+const ids = (values: unknown) => (values as { id: string }[]).map((value) => value.id);
 
 describe("transform session client over plain data", () => {
     it("discovers an anchor through the id reader and reaches a steady state", async () => {
@@ -117,7 +126,11 @@ describe("transform session client over plain data", () => {
         const client = createTransformSessionClient({ moduleClient: transport.client });
         const admission = new TransformCaptureAdmission();
 
-        await pass(client, admission, host);
+        expect(await pass(client, admission, host)).toEqual({
+            kind: "applied",
+            boundary: { mid: "m7", sequence: 3 },
+        });
+        expect(host.windows).toEqual([[6, 10]]);
         const first = transport.calls.find((call) => call.method === "transform")?.body ?? {};
         expect(first.boundary).toEqual({ mid: "m7", sequence: 3 });
         expect(first.serializer_profile).toBe("pi");
@@ -141,9 +154,14 @@ describe("transform session client over plain data", () => {
         await pass(client, admission, host);
         const calls = transport.calls.map((call) => call.method);
         expect(calls).toEqual(["transform.boundary", "transform", "transform"]);
-        const second = transport.calls.at(-1)?.body;
-        expect(second?.boundary).toEqual({ mid: "m7", sequence: 3 });
-        expect(second?.previous_output_revision).toBe(`out-${outputCounter - 1}`);
+        expect(host.windows).toEqual([
+            [6, 10],
+            [6, 11],
+        ]);
+        const second = transport.calls.at(-1)?.body ?? {};
+        expect(second.boundary).toEqual({ mid: "m7", sequence: 3 });
+        expect(ids(second.native_messages)).toEqual(["m7", "m8", "m9", "m10", "m11"]);
+        expect(second.previous_output_revision).toBe(`out-${outputCounter - 1}`);
         expect(host.published).toHaveLength(2);
         expect(client.state("ses")).toMatchObject({
             initialized: true,
@@ -152,6 +170,55 @@ describe("transform session client over plain data", () => {
         });
         expect(admission.activePasses).toBe(0);
         expect(admission.chargedBytes).toBe(0);
+    });
+
+    it("walks to a later anchor page through the id filter", async () => {
+        const host = plainHost(8);
+        const transport = fakeTransport({
+            "transform.boundary": [
+                () => ({
+                    anchors: [
+                        { mid: "gone-1", sequence: 9 },
+                        { mid: "gone-2", sequence: 8 },
+                    ],
+                }),
+                (body) => {
+                    expect(body.before_sequence).toBe(8);
+                    return { anchors: [{ mid: "m5", sequence: 4 }] };
+                },
+            ],
+            transform: [foldReply({ mid: "m5", sequence: 4 })],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        await pass(client, new TransformCaptureAdmission(), host);
+        expect(host.windows).toEqual([[4, 8]]);
+        expect(transport.calls.at(-1)?.body.boundary).toEqual({ mid: "m5", sequence: 4 });
+    });
+
+    it("keeps the boundary and fails open when the daemon answers a busy session", async () => {
+        const host = plainHost(6);
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
+            transform: [
+                foldReply({ mid: "m3", sequence: 1 }),
+                () => ({ status: "session_busy", action: "SESSION_BUSY" }),
+            ],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admission = new TransformCaptureAdmission();
+        await pass(client, admission, host);
+        const applied = host.published[0] ?? [];
+        host.values.push({ id: "m7", text: "message 7" });
+        expect(await pass(client, admission, host)).toEqual({
+            kind: "declined",
+            servedLastApplied: true,
+        });
+        expect(host.published[1]).toEqual([...applied, host.values[6]]);
+        expect(client.state("ses")).toMatchObject({
+            boundary: { mid: "m3", sequence: 1 },
+            failureCount: 0,
+            consecutiveFailures: 0,
+        });
     });
 
     it("declines a busy session without publishing or moving the boundary", async () => {
@@ -189,47 +256,105 @@ describe("transform session client over plain data", () => {
         expect(applied).toBeDefined();
 
         host.values.push({ id: "m7", text: "message 7" });
-        await pass(client, admission, host);
+        expect(await pass(client, admission, host)).toEqual({
+            kind: "declined",
+            servedLastApplied: true,
+        });
         expect(host.published).toHaveLength(2);
         expect(host.published[1]).toEqual([...(applied ?? []), host.values[6]]);
         expect(client.state("ses")).toMatchObject({ consecutiveFailures: 1, failureCount: 1 });
     });
 });
 
-/** Relative imports of one module's source, value imports only. */
-function valueImports(path: string): string[] {
+/** What one module's source loads at runtime: static specifiers (value imports, re-exports, side-effect imports) and the argument text of each dynamic import. */
+function runtimeSpecifiers(path: string): { static: string[]; dynamic: string[] } {
     const text = readFileSync(path, "utf8");
-    const imports: string[] = [];
-    for (const match of text.matchAll(/^import\s+(type\s+)?[^;]*?from\s+"([^"]+)";/gms)) {
-        if (match[1] || !match[2]) continue;
-        imports.push(match[2]);
-    }
-    return imports;
+    const found = { static: [] as string[], dynamic: [] as string[] };
+    for (const match of text.matchAll(/^(import|export)\s+(type\s+)?[^;]*?from\s+"([^"]+)";/gms))
+        if (!match[2] && match[3]) found.static.push(match[3]);
+    for (const match of text.matchAll(/^import\s+"([^"]+)";/gm))
+        if (match[1]) found.static.push(match[1]);
+    for (const match of text.matchAll(/\bimport\(\s*([^)]*?)\s*\)/g))
+        found.dynamic.push(match[1] ?? "");
+    return found;
 }
 
+/** Every module the client reaches at runtime, relative to `src/`; a new edge fails until reviewed. */
+const CLIENT_MODULES = [
+    "hooks/context/edit-recipe.ts",
+    "hooks/context/invocation-budget.ts",
+    "hooks/context/module-transport.ts",
+    "hooks/context/module-wire.ts",
+    "hooks/context/transform-capture.ts",
+    "hooks/context/transform-session-client.ts",
+    "hooks/context/transform-stage-logger.ts",
+    "shared/atomic-file.ts",
+    "shared/data-path.ts",
+    "shared/harness.ts",
+    "shared/host-client/bytes.ts",
+    "shared/host-client/client.ts",
+    "shared/host-client/connection-file.ts",
+    "shared/host-client/connection.ts",
+    "shared/host-client/credential-fingerprint.ts",
+    "shared/host-client/deadline.ts",
+    "shared/host-client/errors.ts",
+    "shared/host-client/exact-json.ts",
+    "shared/host-client/frame-channel.ts",
+    "shared/host-client/index.ts",
+    "shared/host-client/owner.ts",
+    "shared/host-client/protocol.ts",
+    "shared/host-client/route-handle.ts",
+    "shared/host-client/serialized-json-body.ts",
+    "shared/host-client/shm-frame-channel.ts",
+    "shared/host-client/types.ts",
+    "shared/host-lifecycle/bootstrap.ts",
+    "shared/host-lifecycle/compatibility.ts",
+    "shared/host-lifecycle/contract.ts",
+    "shared/host-lifecycle/index.ts",
+    "shared/host-lifecycle/managed-policy.ts",
+    "shared/host-lifecycle/native-launcher.ts",
+    "shared/host-lifecycle/owner.ts",
+    "shared/host-lifecycle/ownership.ts",
+    "shared/host-lifecycle/paths.ts",
+    "shared/host-lifecycle/policy.ts",
+    "shared/host-release-layout.ts",
+    "shared/logger.ts",
+    "shared/record-type-guard.ts",
+    "shared/stable-json.ts",
+    "shared/write-all.ts",
+];
+
+/** The packages the client reaches; none reads a database. */
+const CLIENT_PACKAGES = [
+    "@eidnara/shm-native",
+    "node:buffer",
+    "node:child_process",
+    "node:crypto",
+    "node:fs",
+    "node:fs/promises",
+    "node:os",
+    "node:path",
+    "node:url",
+    "node:util",
+];
+
 describe("transform session client import rule", () => {
-    it("reaches no OpenCode database reader and no host-array writer", () => {
-        const root = resolve(import.meta.dir, "transform-session-client.ts");
-        const forbidden = new Set(
-            [
-                "read-session-db.ts",
-                "read-session-raw.ts",
-                "eidnara-reduce-availability.ts",
-                "transform-publication.ts",
-                "opencode-transform-adapter.ts",
-            ].map((name) => resolve(import.meta.dir, name)),
-        );
+    it("reaches only reviewed modules, none of them a database reader or host-array writer", () => {
+        const src = resolve(import.meta.dir, "../..");
         const seen = new Set<string>();
-        const pending = [root];
-        const external: string[] = [];
+        const pending = [resolve(import.meta.dir, "transform-session-client.ts")];
+        const external = new Set<string>();
+        const dynamic: string[] = [];
         while (pending.length > 0) {
             const path = pending.pop() as string;
             if (seen.has(path)) continue;
             seen.add(path);
-            expect(forbidden.has(path), `${path} is reachable from the client`).toBe(false);
-            for (const specifier of valueImports(path)) {
+            const specifiers = runtimeSpecifiers(path);
+            for (const argument of specifiers.dynamic)
+                dynamic.push(`${relative(src, path)}: import(${argument})`);
+            for (const specifier of specifiers.static) {
                 if (!specifier.startsWith(".")) {
-                    external.push(specifier);
+                    external.add(specifier);
                     continue;
                 }
                 const resolved = resolve(dirname(path), specifier);
@@ -238,7 +363,8 @@ describe("transform session client import rule", () => {
                 pending.push(existsSync(file) ? file : resolve(resolved, "index.ts"));
             }
         }
-        expect(seen.size).toBeGreaterThan(1);
-        expect(external.filter((specifier) => /sqlite/.test(specifier))).toEqual([]);
+        expect([...seen].map((path) => relative(src, path)).sort()).toEqual(CLIENT_MODULES);
+        expect([...external].sort()).toEqual(CLIENT_PACKAGES);
+        expect(dynamic).toEqual([]);
     });
 });

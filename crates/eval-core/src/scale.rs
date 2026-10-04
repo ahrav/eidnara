@@ -11,7 +11,9 @@ use context_core::canonical_json::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::censoring::{BoundMethod, P99_MIN_RUNS, Percentile, censored_percentile, failure_bound};
+use crate::censoring::{
+    BoundMethod, P99_MIN_RUNS, Percentile, PercentileBound, censored_percentile, failure_bound,
+};
 use crate::statistics::{MAX_BOOTSTRAP_DRAWS, Ratio, StatisticsError, bootstrap_draw};
 
 pub const SCALE_REPORT_SCHEMA: &str = "eval-scale-report/v1";
@@ -56,8 +58,9 @@ pub enum ScaleHarness {
     Pi,
 }
 
-/// Where a pass sits in its session's boundary history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a pass sits in its session's boundary history. Summaries pool passes of one state
+/// only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundaryState {
     /// No rendered boundary yet.
@@ -67,7 +70,10 @@ pub enum BoundaryState {
     /// After the window reached its fold size and the boundary moved three times, confirmed
     /// by the driver's drift check.
     Steady,
-    /// The first pass after a daemon or plugin restart; never pooled with steady passes.
+    /// A replay of the previous pass's window at the same declared boundary with no fold in
+    /// between: #824's fresh-host-array pass measurement.
+    Replay,
+    /// The first pass after a daemon or plugin restart.
     AfterRestart,
 }
 
@@ -242,6 +248,19 @@ pub struct Flatness {
     pub passes: bool,
 }
 
+/// The passes of one boundary state, refused passes excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateSummary {
+    pub state: BoundaryState,
+    pub passes: u32,
+    pub uncensored: u32,
+    pub response_us: Histogram,
+    pub service_us: Histogram,
+    pub response_percentiles: Vec<Percentile>,
+    pub service_percentiles: Vec<Percentile>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSummary {
@@ -249,12 +268,10 @@ pub struct SessionSummary {
     pub tier: ScaleTier,
     pub session: String,
     pub passes: u32,
-    pub steady_passes: u32,
-    pub steady_uncensored: u32,
     pub refused: u32,
-    pub response_us: Histogram,
-    pub service_us: Histogram,
-    pub response_percentiles: Vec<Percentile>,
+    /// One summary per boundary state the session's passes reached, in state order.
+    pub states: Vec<StateSummary>,
+    /// RSS drift over the steady passes.
     pub flatness: Option<Flatness>,
 }
 
@@ -306,6 +323,12 @@ pub enum RatioWithheld {
         control_sessions: u32,
         min_steady_uncensored: u32,
     },
+    /// A pooled p99, of the whole sample or of some replicate, falls on a censored pass, so it
+    /// is only a lower bound and the ratio would bound nothing.
+    CensoredP99 {
+        sessions: u32,
+        control_sessions: u32,
+    },
 }
 
 /// The upper 95% bound of p99(tier) / p99(control) from a session-level block bootstrap.
@@ -338,11 +361,10 @@ pub struct TierSummary {
     pub harness: ScaleHarness,
     pub tier: ScaleTier,
     pub sessions: Vec<String>,
-    pub steady_passes: u32,
-    /// Percentiles of every steady pass of every session, pooled; never a mean of session
-    /// percentiles.
-    pub response_percentiles: Vec<Percentile>,
-    pub service_percentiles: Vec<Percentile>,
+    /// Per boundary state, the passes of every session pooled; a tier percentile is never a
+    /// mean of session percentiles.
+    pub states: Vec<StateSummary>,
+    /// Refused passes over every pass of every state.
     pub refusals: RefusalRate,
     pub ratio: TierRatio,
 }
@@ -401,7 +423,7 @@ pub enum ScaleReportError {
     SessionReused {
         session: String,
     },
-    /// A tier's pooled percentiles are not the percentiles of its pooled steady passes.
+    /// A tier's pooled percentiles are not the percentiles of its pooled passes of each state.
     PercentileNotPooled {
         harness: ScaleHarness,
         tier: ScaleTier,
@@ -436,18 +458,41 @@ impl From<StatisticsError> for ScaleReportError {
 
 type SessionKey = (ScaleHarness, ScaleTier, String);
 
-fn steady_observations(rows: &[&PassRow]) -> Vec<(u64, bool)> {
+/// `(response_us, censored)` of the unrefused passes in `state`.
+fn observations(rows: &[&PassRow], state: BoundaryState) -> Vec<(u64, bool)> {
     rows.iter()
-        .filter(|row| row.boundary_state == BoundaryState::Steady)
-        .filter(|row| row.outcome != PassOutcome::Refused)
+        .filter(|row| row.boundary_state == state && row.outcome != PassOutcome::Refused)
         .map(|row| (row.response_us, row.outcome == PassOutcome::Censored))
         .collect()
 }
 
-fn steady_service(rows: &[&PassRow]) -> Vec<(u64, bool)> {
+fn service_observations(rows: &[&PassRow], state: BoundaryState) -> Vec<(u64, bool)> {
     rows.iter()
-        .filter(|row| row.boundary_state == BoundaryState::Steady)
+        .filter(|row| row.boundary_state == state)
         .filter_map(|row| row.service_us.map(|service| (service, false)))
+        .collect()
+}
+
+/// One summary per state any of `rows` is in, in state order.
+fn state_summaries(rows: &[&PassRow]) -> Vec<StateSummary> {
+    let mut states: Vec<BoundaryState> = rows.iter().map(|row| row.boundary_state).collect();
+    states.sort();
+    states.dedup();
+    states
+        .into_iter()
+        .map(|state| {
+            let response = observations(rows, state);
+            let service = service_observations(rows, state);
+            StateSummary {
+                state,
+                passes: response.len() as u32,
+                uncensored: uncensored(&response),
+                response_us: Histogram::of(&response),
+                service_us: Histogram::of(&service),
+                response_percentiles: percentiles(&response),
+                service_percentiles: percentiles(&service),
+            }
+        })
         .collect()
 }
 
@@ -466,93 +511,115 @@ fn percentiles(observations: &[(u64, bool)]) -> Vec<Percentile> {
     out
 }
 
-fn flatness(rows: &[&PassRow]) -> Option<Flatness> {
+fn flatness(rows: &[&PassRow]) -> Result<Option<Flatness>, ScaleReportError> {
     let steady: Vec<&&PassRow> = rows
         .iter()
         .filter(|row| row.boundary_state == BoundaryState::Steady)
         .collect();
+    let (Some(first), Some(last)) = (steady.first(), steady.last()) else {
+        return Ok(None);
+    };
     if steady.len() < 2 {
-        return None;
+        return Ok(None);
     }
+    let overflow = || ScaleReportError::Shape("flatness sums overflow".to_string());
+    let product = |a: i128, b: i128| a.checked_mul(b).ok_or_else(overflow);
+    let sum = |a: i128, b: i128| a.checked_add(b).ok_or_else(overflow);
     let n = steady.len() as i128;
     let (mut sx, mut sy, mut sxy, mut sxx) = (0i128, 0i128, 0i128, 0i128);
     for row in &steady {
         let (x, y) = (i128::from(row.turn), i128::from(row.rss_bytes));
-        sx += x;
-        sy += y;
-        sxy += x * y;
-        sxx += x * x;
+        sx = sum(sx, x)?;
+        sy = sum(sy, y)?;
+        sxy = sum(sxy, product(x, y)?)?;
+        sxx = sum(sxx, product(x, x)?)?;
     }
-    let numerator = n * sxy - sx * sy;
-    let denominator = n * sxx - sx * sx;
-    let first = steady.first()?;
-    let last = steady.last()?;
+    let numerator = product(n, sxy)?
+        .checked_sub(product(sx, sy)?)
+        .ok_or_else(overflow)?;
+    let denominator = product(n, sxx)?
+        .checked_sub(product(sx, sx)?)
+        .ok_or_else(overflow)?;
     let span = last.turn.saturating_sub(first.turn);
-    let drift = if denominator == 0 {
-        0
-    } else {
-        numerator * i128::from(span) / denominator
-    };
     let entry = first.rss_bytes;
-    Some(Flatness {
+    // `denominator` is positive whenever two steady passes have different turns.
+    let (drift, passes) = if denominator <= 0 {
+        (0, true)
+    } else {
+        let growth = product(numerator, i128::from(span))?;
+        // growth / denominator <= entry / 10, compared exactly; falling RSS passes.
+        (
+            growth / denominator,
+            product(growth, 10)? <= product(denominator, i128::from(entry))?,
+        )
+    };
+    Ok(Some(Flatness {
         steady_rows: steady.len() as u32,
         span_turns: span,
         entry_rss_bytes: entry,
         peak_rss_bytes: steady.iter().map(|row| row.rss_bytes).max().unwrap_or(0),
-        drift_bytes: i64::try_from(drift).unwrap_or(i64::MAX),
-        // drift / entry <= 1/10, compared exactly.
-        passes: denominator == 0
-            || numerator.unsigned_abs() * u128::from(span) * 10
-                <= denominator.unsigned_abs() * u128::from(entry),
-    })
+        drift_bytes: i64::try_from(drift).map_err(|_| overflow())?,
+        passes,
+    }))
 }
 
-fn p99(observations: &[(u64, bool)]) -> u64 {
-    censored_percentile(observations, 99).value
+/// The pooled p99, or `None` when it is only a lower bound.
+fn p99(observations: &[(u64, bool)]) -> Option<u64> {
+    let percentile = censored_percentile(observations, 99);
+    (percentile.bound == PercentileBound::Point).then_some(percentile.value)
 }
+
+type Observations = Vec<(u64, bool)>;
 
 /// Session-level block bootstrap of p99(tier) / p99(control): each replicate draws the tier's
 /// sessions and the control's sessions with replacement, pools their steady passes, and takes
 /// the ratio of the pooled p99s. The interval is the `ceil(B/40)`-th and `B - floor(B/40)`-th
-/// smallest of `B` replicate ratios.
+/// smallest of `B` replicate ratios. `None` when some pooled p99 is only a lower bound.
 fn ratio_claim(
     seed: u64,
-    tier: &[Vec<(u64, bool)>],
-    control: &[Vec<(u64, bool)>],
-) -> Result<RatioClaim, ScaleReportError> {
-    let pooled = |sessions: &[&Vec<(u64, bool)>]| -> Vec<(u64, bool)> {
+    tier: &[Observations],
+    control: &[Observations],
+) -> Result<Option<RatioClaim>, ScaleReportError> {
+    let pooled = |sessions: &[&Observations]| -> Observations {
         sessions
             .iter()
             .flat_map(|session| session.iter().copied())
             .collect()
     };
-    let ratio = |tier: &[(u64, bool)], control: &[(u64, bool)]| {
-        Ratio::try_new(i128::from(p99(tier)), i128::from(p99(control)))
+    let ratio = |tier: &[(u64, bool)], control: &[(u64, bool)]| match (p99(tier), p99(control)) {
+        (Some(tier), Some(control)) => {
+            Ratio::try_new(i128::from(tier), i128::from(control)).map(Some)
+        }
+        _ => Ok(None),
     };
     let (kt, kc) = (tier.len() as u32, control.len() as u32);
     let draws = u64::from(RATIO_REPLICATES) * u64::from(kt + kc);
     if draws > MAX_BOOTSTRAP_DRAWS {
         return Err(StatisticsError::TooManyDraws(draws).into());
     }
-    let point = ratio(
-        &pooled(&tier.iter().collect::<Vec<_>>()),
-        &pooled(&control.iter().collect::<Vec<_>>()),
-    )?;
+    let whole_tier: Vec<&Observations> = tier.iter().collect();
+    let whole_control: Vec<&Observations> = control.iter().collect();
+    let Some(point) = ratio(&pooled(&whole_tier), &pooled(&whole_control))? else {
+        return Ok(None);
+    };
     let mut replicates = Vec::with_capacity(RATIO_REPLICATES as usize);
     for replicate in 0..RATIO_REPLICATES {
-        let tier_draw: Vec<&Vec<(u64, bool)>> = (0..kt)
+        let tier_draw: Vec<&Observations> = (0..kt)
             .map(|draw| &tier[bootstrap_draw(seed, replicate, draw, kt)])
             .collect();
-        let control_draw: Vec<&Vec<(u64, bool)>> = (0..kc)
+        let control_draw: Vec<&Observations> = (0..kc)
             .map(|draw| &control[bootstrap_draw(seed, replicate, kt + draw, kc)])
             .collect();
-        replicates.push(ratio(&pooled(&tier_draw), &pooled(&control_draw))?);
+        let Some(value) = ratio(&pooled(&tier_draw), &pooled(&control_draw))? else {
+            return Ok(None);
+        };
+        replicates.push(value);
     }
     replicates.sort();
     let b = RATIO_REPLICATES as usize;
     let gate = Ratio::try_new(i128::from(RATIO_GATE.0), i128::from(RATIO_GATE.1))?;
     let upper = replicates[b - b / 40 - 1];
-    Ok(RatioClaim {
+    Ok(Some(RatioClaim {
         sessions: kt,
         control_sessions: kc,
         min_steady_uncensored: tier
@@ -567,7 +634,7 @@ fn ratio_claim(
         upper,
         gate,
         passes: upper <= gate,
-    })
+    }))
 }
 
 fn uncensored(observations: &[(u64, bool)]) -> u32 {
@@ -643,28 +710,23 @@ impl ScaleReport {
         for rows in by_session.values_mut() {
             rows.sort_by_key(|row| row.turn);
         }
-        let sessions: Vec<SessionSummary> = by_session
+        let sessions = by_session
             .iter()
             .map(|((harness, tier, session), rows)| {
-                let steady = steady_observations(rows);
-                SessionSummary {
+                Ok(SessionSummary {
                     harness: *harness,
                     tier: *tier,
                     session: session.clone(),
                     passes: rows.len() as u32,
-                    steady_passes: steady.len() as u32,
-                    steady_uncensored: uncensored(&steady),
                     refused: rows
                         .iter()
                         .filter(|row| row.outcome == PassOutcome::Refused)
                         .count() as u32,
-                    response_us: Histogram::of(&steady),
-                    service_us: Histogram::of(&steady_service(rows)),
-                    response_percentiles: percentiles(&steady),
-                    flatness: flatness(rows),
-                }
+                    states: state_summaries(rows),
+                    flatness: flatness(rows)?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ScaleReportError>>()?;
 
         let mut by_tier: BTreeMap<(ScaleHarness, ScaleTier), Vec<&Vec<&PassRow>>> = BTreeMap::new();
         for ((harness, tier, _), rows) in &by_session {
@@ -676,7 +738,7 @@ impl ScaleReport {
                 .map(|sessions| {
                     sessions
                         .iter()
-                        .map(|rows| steady_observations(rows))
+                        .map(|rows| observations(rows, BoundaryState::Steady))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
@@ -687,7 +749,6 @@ impl ScaleReport {
                 .iter()
                 .flat_map(|rows| rows.iter().copied())
                 .collect();
-            let steady = steady_observations(&all);
             let refused = all
                 .iter()
                 .filter(|row| row.outcome == PassOutcome::Refused)
@@ -714,7 +775,13 @@ impl ScaleReport {
                         min_steady_uncensored,
                     })
                 } else {
-                    TierRatio::Computed(ratio_claim(inputs.seed, &observed, &control)?)
+                    match ratio_claim(inputs.seed, &observed, &control)? {
+                        Some(claim) => TierRatio::Computed(claim),
+                        None => TierRatio::Withheld(RatioWithheld::CensoredP99 {
+                            sessions: observed.len() as u32,
+                            control_sessions: control.len() as u32,
+                        }),
+                    }
                 }
             };
             tiers.push(TierSummary {
@@ -725,9 +792,7 @@ impl ScaleReport {
                     .filter(|(h, t, _)| h == harness && t == tier)
                     .map(|(_, _, session)| session.clone())
                     .collect(),
-                steady_passes: steady.len() as u32,
-                response_percentiles: percentiles(&steady),
-                service_percentiles: percentiles(&steady_service(&all)),
+                states: state_summaries(&all),
                 refusals,
                 ratio,
             });
@@ -795,9 +860,20 @@ impl ScaleReport {
             return Err(ScaleReportError::SummaryMismatch { section: "tiers" });
         }
         for (tier, derived) in self.tiers.iter().zip(&expected.tiers) {
-            if tier.response_percentiles != derived.response_percentiles
-                || tier.service_percentiles != derived.service_percentiles
-            {
+            let pooled = |summary: &TierSummary| {
+                summary
+                    .states
+                    .iter()
+                    .map(|state| {
+                        (
+                            state.state,
+                            state.response_percentiles.clone(),
+                            state.service_percentiles.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if pooled(tier) != pooled(derived) {
                 return Err(ScaleReportError::PercentileNotPooled {
                     harness: tier.harness,
                     tier: tier.tier,
@@ -869,21 +945,44 @@ impl ScaleReport {
 pub fn parse_pass_row(value: &Value) -> Result<PassRow, ScaleReportError> {
     let row = PassRow::deserialize(value).map_err(shape_error)?;
     canonical_json_encode(value).map_err(ScaleReportError::NotCanonical)?;
-    if serde_json::to_value(&row).map_err(shape_error)? != *value {
-        return Err(ScaleReportError::Lossy);
-    }
+    round_trips(value, &serde_json::to_value(&row).map_err(shape_error)?)?;
     Ok(row)
 }
 
 pub fn parse_scale_report(value: &Value) -> Result<ScaleReport, ScaleReportError> {
     let report = ScaleReport::deserialize(value).map_err(shape_error)?;
     canonical_json_encode(value).map_err(ScaleReportError::NotCanonical)?;
-    let again = serde_json::to_value(&report).map_err(shape_error)?;
-    if again != *value {
-        return Err(ScaleReportError::Lossy);
-    }
+    round_trips(value, &serde_json::to_value(&report).map_err(shape_error)?)?;
     report.validate()?;
     Ok(report)
+}
+
+/// `value` equals its re-serialization. An optional field absent from `value` but present in
+/// the re-serialization is named, at any depth; any other difference is lossy.
+fn round_trips(value: &Value, again: &Value) -> Result<(), ScaleReportError> {
+    if value == again {
+        return Ok(());
+    }
+    match absent_field(value, again) {
+        Some(field) => Err(ScaleReportError::MissingField { field }),
+        None => Err(ScaleReportError::Lossy),
+    }
+}
+
+fn absent_field(value: &Value, again: &Value) -> Option<String> {
+    match (value, again) {
+        (Value::Object(value), Value::Object(again)) => {
+            again.iter().find_map(|(key, child)| match value.get(key) {
+                None => Some(key.clone()),
+                Some(original) => absent_field(original, child),
+            })
+        }
+        (Value::Array(value), Value::Array(again)) => value
+            .iter()
+            .zip(again)
+            .find_map(|(original, child)| absent_field(original, child)),
+        _ => None,
+    }
 }
 
 /// `serde`'s missing-field message names the field; every other decode failure keeps its text.
@@ -900,3 +999,44 @@ fn shape_error(error: serde_json::Error) -> ScaleReportError {
 }
 
 debug_display!(ScaleReportError);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sessions whose passes all share one value pool to a p99 equal to the largest value among
+    /// the sessions drawn, so the interval is recomputable from the draws alone.
+    fn constant(values: &[u64]) -> Vec<Observations> {
+        values
+            .iter()
+            .map(|value| vec![(*value, false); 299])
+            .collect()
+    }
+
+    #[test]
+    fn the_ratio_interval_equals_an_independent_replay_of_the_draws() {
+        let (tier_values, control_values) = ([1_100u64, 1_200, 1_300], [900u64, 1_000, 1_100]);
+        let seed = 4_242;
+        let claim = ratio_claim(seed, &constant(&tier_values), &constant(&control_values))
+            .unwrap()
+            .unwrap();
+        let mut replicates: Vec<Ratio> = (0..RATIO_REPLICATES)
+            .map(|replicate| {
+                let tier = (0..3)
+                    .map(|draw| tier_values[bootstrap_draw(seed, replicate, draw, 3)])
+                    .max()
+                    .unwrap();
+                let control = (0..3)
+                    .map(|draw| control_values[bootstrap_draw(seed, replicate, 3 + draw, 3)])
+                    .max()
+                    .unwrap();
+                Ratio::try_new(i128::from(tier), i128::from(control)).unwrap()
+            })
+            .collect();
+        replicates.sort();
+        assert_eq!(claim.lower, replicates[24]);
+        assert_eq!(claim.upper, replicates[974]);
+        assert_eq!(claim.point, Ratio::try_new(1_300, 1_100).unwrap());
+        assert!(claim.lower < claim.upper, "{claim:?}");
+    }
+}

@@ -21,9 +21,9 @@ on:
         type: string
         default: ""
       scale_budget_seconds:
-        description: Wall-clock budget for each arm of the scale driver
+        description: Wall-clock budget for each driver run (one tier of one arm)
         type: string
-        default: "2400"
+        default: "1200"
 
 permissions:
   contents: read
@@ -999,7 +999,7 @@ jobs:
   scale-report:
     name: scale report (dispatched)
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 300
     if: github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
     env:
       EIDNARA_SCALE_BUDGET_SECONDS: ${{ inputs.scale_budget_seconds }}
@@ -1042,28 +1042,43 @@ jobs:
             --features direct-host-fixture --locked
 
       - name: Run the driver
-        # The base arm runs first, then the measured arm, each on its own
-        # fixture build and plugin source and the measured arm's seeding and
-        # report tooling.
+        # Each tier runs on the base arm and then the measured arm before the
+        # next tier starts, so drift on the runner falls on both arms alike.
+        # Each arm runs on its own fixture build and plugin source; seeding and
+        # report building use the measured arm's eval runner. A tier the budget
+        # cuts short is listed in the arm's `incomplete.json`.
+        shell: bash
         run: |
+          set -euo pipefail
+          case "$SCALE_DRIVER" in
+            opencode-pass) ;;
+            *) echo "unknown scale driver: $SCALE_DRIVER" >&2; exit 1 ;;
+          esac
           out="$RUNNER_TEMP/scale"
           runner="$PWD/target/release/examples/eval_runner"
-          arm() {
-            name="$1" root="$2" commit="$3"
-            bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
-              --out-dir "$out/$name" \
-              --plugin-root "$root/packages/opencode-plugin" \
-              --fixture-bin "$root/target/release/examples/direct_host_fixture" \
-              --eval-runner-bin "$runner" \
-              --commit "$commit" --daemon-build "release $commit"
-            "$runner" scale-report --rows "$out/$name/rows.jsonl" \
-              --manifest "$out/$name/manifest.json" \
-              --out "$out/$name/report.json" | tee "$out/$name/summary.json"
-          }
-          if [ -n "$SCALE_BASE" ]; then
-            arm base "$RUNNER_TEMP/base" "$(git -C "$RUNNER_TEMP/base" rev-parse HEAD)"
-          fi
-          arm measured "$PWD" "$(git rev-parse HEAD)"
+          arms=(measured)
+          if [ -n "$SCALE_BASE" ]; then arms=(base measured); fi
+          root_of() { [ "$1" = base ] && echo "$RUNNER_TEMP/base" || echo "$PWD"; }
+          for tier in 10k s3_100k s4_1m; do
+            for arm in "${arms[@]}"; do
+              root="$(root_of "$arm")"
+              commit="$(git -C "$root" rev-parse HEAD)"
+              bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
+                --out-dir "$out/$arm/$tier" --tiers "$tier" --samples 330 \
+                --plugin-root "$root/packages/opencode-plugin" \
+                --fixture-bin "$root/target/release/examples/direct_host_fixture" \
+                --eval-runner-bin "$runner" \
+                --commit "$commit" --daemon-build "release $commit"
+            done
+          done
+          for arm in "${arms[@]}"; do
+            cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl"
+            cp "$out/$arm/s4_1m/manifest.json" "$out/$arm/manifest.json"
+            jq -s add "$out/$arm"/*/incomplete.json > "$out/$arm/incomplete.json"
+            "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
+              --manifest "$out/$arm/manifest.json" \
+              --out "$out/$arm/report.json" | tee "$out/$arm/summary.json"
+          done
 
       # actions/upload-artifact v7.0.1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

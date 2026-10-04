@@ -61,6 +61,7 @@ import {
     RetainedOutputs,
     type RustModeModuleClient,
     type TransformBoundary,
+    type TransformHostView,
     type TransformPassSource,
     type TransformSessionState,
 } from "./transform-session-client";
@@ -333,13 +334,8 @@ function transformGeometryForWire(
     };
 }
 
-function buildTransformBody(args: {
-    sessionId: string;
-    boundary: TransformBoundary | null;
-    baseRevision: string;
-    previousOutputRevision?: string;
-    input: unknown[];
-    nativeMessages: readonly unknown[];
+/** The pass inputs an OpenCode request carries, as the adapter computes them. */
+interface OpenCodePassInputs {
     passInputs: Record<string, unknown>;
     usage?: Record<string, number | boolean>;
     prevResponseCacheUsage?: { cache_read_tokens: number; cache_write_tokens: number };
@@ -350,7 +346,18 @@ function buildTransformBody(args: {
     midTurn: boolean;
     prevResponseCompletedAtMs?: number;
     requestObservedAtMs?: number;
-}): Record<string, unknown> {
+}
+
+function buildTransformBody(
+    args: OpenCodePassInputs & {
+        sessionId: string;
+        boundary: TransformBoundary | null;
+        baseRevision: string;
+        previousOutputRevision?: string;
+        input: unknown[];
+        nativeMessages: readonly unknown[];
+    },
+): Record<string, unknown> {
     return buildTransformRequest(
         {
             sessionId: args.sessionId,
@@ -366,9 +373,7 @@ function buildTransformBody(args: {
 }
 
 /** The pass inputs an OpenCode transform request carries after its protocol fields. */
-function openCodePassFields(
-    args: Parameters<typeof buildTransformBody>[0],
-): Record<string, unknown> {
+function openCodePassFields(args: OpenCodePassInputs): Record<string, unknown> {
     return {
         // Model, provider, and system-prompt changes evict provider caches; send the native module the identity inputs used by the TypeScript materializer rather than leaving the native identity blank.
         render_config: [
@@ -416,6 +421,19 @@ function openCodePassFields(
     };
 }
 
+/**
+ * OpenCode's message array as discovery reads it. Each hop is an own data read, so a planted
+ * proxy, revoked proxy, or accessor reads as no id and none of its traps or getters runs.
+ */
+export function openCodeHostView(target: readonly unknown[]): TransformHostView {
+    return {
+        get length() {
+            return target.length;
+        },
+        idAt: (index) => messageId(readOwnDataProperty(target, index)),
+    };
+}
+
 export function createRustModeTransform(
     deps: RustModeTransformDeps,
     options: RustModeTransformOptions,
@@ -457,12 +475,8 @@ export function createRustModeTransform(
         let resolvedWindowGeometry: WindowGeometryResult | undefined;
         return {
             serializerProfile: "opencode-aisdk",
-            host: {
-                get length() {
-                    return target.length;
-                },
-                idAt: (index) => messageId(readOwnDataProperty(target, index)),
-            },
+            invocationProfile: "opencode-heuristic",
+            host: openCodeHostView(target),
             async preflight() {
                 // The root's own `then` and the built-in prototypes are refused before any await.
                 const rootRejection = rootArrayRejection(target);
@@ -618,11 +632,6 @@ export function createRustModeTransform(
                         return encodeOpenCodeMessagesToCk(kept, positions);
                     },
                     fields: openCodePassFields({
-                        sessionId,
-                        boundary: null,
-                        baseRevision: "",
-                        input: [],
-                        nativeMessages: [],
                         passInputs,
                         // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
                         usage: usage ? passUsage(usage, contextLimit) : undefined,
@@ -670,7 +679,7 @@ export function createRustModeTransform(
             lease.release();
             return Promise.resolve();
         }
-        return client.run(sessionId, lease, passSource(sessionId, output, target));
+        return client.run(sessionId, lease, passSource(sessionId, output, target)).then(() => {});
     };
 
     return {

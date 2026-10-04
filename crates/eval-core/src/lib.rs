@@ -174,8 +174,9 @@ pub use scale::{
     ArtifactIdentity, BoundaryState, DriverIdentity, Flatness, Histogram, HistogramBucket,
     HostManifest, MIN_RATIO_SESSIONS, OpenLoopCounts, PassOutcome, PassRow, RATIO_GATE,
     RATIO_REPLICATES, RatioClaim, RatioWithheld, RefusalRate, RefusalReason, SCALE_REPORT_SCHEMA,
-    ScaleHarness, ScaleInputs, ScaleReport, ScaleReportError, ScaleTier, SessionSummary, TierRatio,
-    TierSummary, bucket_index, bucket_upper_bound, parse_pass_row, parse_scale_report,
+    ScaleHarness, ScaleInputs, ScaleReport, ScaleReportError, ScaleTier, SessionSummary,
+    StateSummary, TierRatio, TierSummary, bucket_index, bucket_upper_bound, parse_pass_row,
+    parse_scale_report,
 };
 pub use shrink::{
     CandidateRecord, CandidateVerdict, Element, FailurePredicate, History,

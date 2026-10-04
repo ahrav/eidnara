@@ -1,7 +1,7 @@
 use eval_core::{
     ArtifactIdentity, BoundaryState, DriverIdentity, Histogram, HostManifest, OpenLoopCounts,
     PassOutcome, PassRow, PercentileBound, Ratio, RefusalRate, RefusalReason, ScaleHarness,
-    ScaleInputs, ScaleReport, ScaleReportError, ScaleTier, TierRatio, bucket_index,
+    ScaleInputs, ScaleReport, ScaleReportError, ScaleTier, StateSummary, TierRatio, bucket_index,
     bucket_upper_bound, parse_pass_row, parse_scale_report,
 };
 use serde_json::{Value, json};
@@ -86,11 +86,42 @@ fn tier(report: &ScaleReport, tier: ScaleTier) -> &eval_core::TierSummary {
         .unwrap()
 }
 
+fn state(report: &ScaleReport, at: ScaleTier, state: BoundaryState) -> &StateSummary {
+    tier(report, at)
+        .states
+        .iter()
+        .find(|summary| summary.state == state)
+        .unwrap()
+}
+
+/// A report of every shape the schema has: computed and withheld ratios, observed and bounded
+/// refusals, censored passes, every boundary state, flatness present and absent, and open-loop
+/// counts present and absent.
+fn varied_reports() -> Vec<ScaleReport> {
+    let mut mixed = constant_sessions(ScaleTier::S3_100k, &[1_000], 12);
+    mixed[0].boundary_state = BoundaryState::Cold;
+    mixed[1].boundary_state = BoundaryState::Warming;
+    mixed[2].boundary_state = BoundaryState::Replay;
+    mixed[3].boundary_state = BoundaryState::AfterRestart;
+    mixed[4].outcome = PassOutcome::Censored;
+    mixed[4].service_us = None;
+    mixed[5].outcome = PassOutcome::Refused;
+    mixed[5].refusal = Some(RefusalReason::TransportError);
+    let mut no_loop = inputs(constant_sessions(ScaleTier::Control10k, &[1_000], 1));
+    no_loop.open_loop = None;
+    vec![
+        powered_report(),
+        ScaleReport::build(inputs(mixed)).unwrap(),
+        ScaleReport::build(no_loop).unwrap(),
+    ]
+}
+
 #[test]
 fn a_report_round_trips_losslessly() {
-    let report = powered_report();
-    let value = report.serialize().unwrap();
-    assert_eq!(parse_scale_report(&value).unwrap(), report);
+    for report in varied_reports() {
+        let value = report.serialize().unwrap();
+        assert_eq!(parse_scale_report(&value).unwrap(), report);
+    }
 }
 
 #[test]
@@ -133,7 +164,7 @@ fn censored_percentiles_match_the_hand_computed_fixture() {
     cut.outcome = PassOutcome::Censored;
     rows.push(cut);
     let report = ScaleReport::build(inputs(rows)).unwrap();
-    let pooled = &tier(&report, ScaleTier::Control10k).response_percentiles;
+    let pooled = &state(&report, ScaleTier::Control10k, BoundaryState::Steady).response_percentiles;
     // p50: rank 5 of 10 is 5, with five completions at or below it.
     assert_eq!((pooled[0].p, pooled[0].value), (50, 5));
     assert_eq!(pooled[0].bound, PercentileBound::Point);
@@ -143,6 +174,50 @@ fn censored_percentiles_match_the_hand_computed_fixture() {
     assert_eq!((pooled[1].n, pooled[1].censored), (10, 1));
     // No p99 below 299 passes.
     assert_eq!(pooled.len(), 2);
+
+    // A censored pass below the rank pushes every completed value above it up one rank: p50
+    // is then the fifth completed value, 6, and only a lower bound, because the censored pass
+    // could have run longer than any of them.
+    let mut rows: Vec<PassRow> = (1..=10)
+        .map(|value| row(ScaleTier::Control10k, "c", value, u64::from(value)))
+        .collect();
+    rows[2].outcome = PassOutcome::Censored;
+    let report = ScaleReport::build(inputs(rows)).unwrap();
+    let pooled = &state(&report, ScaleTier::Control10k, BoundaryState::Steady).response_percentiles;
+    assert_eq!((pooled[0].p, pooled[0].value), (50, 5));
+    assert_eq!(pooled[0].bound, PercentileBound::Lower);
+}
+
+#[test]
+fn each_boundary_state_is_summarized_apart() {
+    let mut rows = constant_sessions(ScaleTier::Control10k, &[1_000], 6);
+    rows[0].boundary_state = BoundaryState::Cold;
+    rows[0].response_us = 50_000;
+    for replay in &mut rows[1..3] {
+        replay.boundary_state = BoundaryState::Replay;
+        replay.response_us = 2_000;
+    }
+    let report = ScaleReport::build(inputs(rows)).unwrap();
+    let states: Vec<(BoundaryState, u32, u64)> = tier(&report, ScaleTier::Control10k)
+        .states
+        .iter()
+        .map(|summary| {
+            (
+                summary.state,
+                summary.passes,
+                summary.response_percentiles[0].value,
+            )
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (BoundaryState::Cold, 1, 50_000),
+            (BoundaryState::Steady, 3, 1_000),
+            (BoundaryState::Replay, 2, 2_000),
+        ]
+    );
+    assert_eq!(report.sessions[0].states.len(), 3);
 }
 
 #[test]
@@ -209,11 +284,33 @@ fn parse_names_a_missing_field_and_refuses_lossy_and_out_of_range_values() {
             field: "glibc".to_string()
         })
     );
-    // An absent optional reads as `null` and would not round-trip byte for byte.
-    let lossy = mutate(&report, |value| {
+    // An absent optional field reads as `null`; parse names it rather than accepting it.
+    let optional = mutate(&report, |value| {
         value["rows"][0].as_object_mut().unwrap().remove("refusal");
     });
-    assert_eq!(parse_scale_report(&lossy), Err(ScaleReportError::Lossy));
+    assert_eq!(
+        parse_scale_report(&optional),
+        Err(ScaleReportError::MissingField {
+            field: "refusal".to_string()
+        })
+    );
+    let row_value = serde_json::to_value(&report.rows[0]).unwrap();
+    let mut no_service = row_value.clone();
+    no_service.as_object_mut().unwrap().remove("service_us");
+    assert_eq!(
+        parse_pass_row(&no_service),
+        Err(ScaleReportError::MissingField {
+            field: "service_us".to_string()
+        })
+    );
+    // An equal value spelled differently does not round-trip byte for byte.
+    let lossy = mutate(&report, |value| {
+        value["seed"] = json!(825.0);
+    });
+    assert!(matches!(
+        parse_scale_report(&lossy),
+        Err(ScaleReportError::Lossy | ScaleReportError::Shape(_))
+    ));
     let fraction = mutate(&report, |value| {
         value["rows"][0]["response_us"] = json!(1.5);
     });
@@ -237,13 +334,13 @@ fn parse_refuses_a_percentile_averaged_across_sessions() {
     let report = ScaleReport::build(inputs(rows)).unwrap();
     // The pooled p50 of 1000 and 3000 sessions is 1000; the mean of their p50s is 2000.
     assert_eq!(
-        tier(&report, ScaleTier::Control10k).response_percentiles[0].value,
+        state(&report, ScaleTier::Control10k, BoundaryState::Steady).response_percentiles[0].value,
         1_000
     );
     let averaged = mutate(&report, |value| {
         let tiers = value["tiers"].as_array_mut().unwrap();
         let control = tiers.iter_mut().find(|tier| tier["tier"] == "10k").unwrap();
-        control["response_percentiles"][0]["value"] = json!(2_000);
+        control["states"][0]["response_percentiles"][0]["value"] = json!(2_000);
     });
     assert_eq!(
         parse_scale_report(&averaged),
@@ -313,6 +410,26 @@ fn parse_refuses_an_underpowered_ratio_claim() {
             Err(ScaleReportError::RatioUnderpowered { .. })
         ));
     }
+}
+
+#[test]
+fn a_ratio_resting_on_a_censored_p99_is_withheld() {
+    let mut rows = constant_sessions(ScaleTier::Control10k, &[1_000, 1_000, 1_000], 299);
+    let mut large = constant_sessions(ScaleTier::S4_1m, &[1_100, 1_200, 1_300], 309);
+    // Ten censored passes per large session at their 2 ms budget fill the pooled top percent.
+    for pass in large.iter_mut().filter(|pass| pass.turn >= 299) {
+        pass.outcome = PassOutcome::Censored;
+        pass.response_us = 2_000;
+    }
+    rows.extend(large);
+    let report = ScaleReport::build(inputs(rows)).unwrap();
+    assert_eq!(
+        tier(&report, ScaleTier::S4_1m).ratio,
+        TierRatio::Withheld(eval_core::RatioWithheld::CensoredP99 {
+            sessions: 3,
+            control_sessions: 3,
+        })
+    );
 }
 
 #[test]
@@ -401,6 +518,17 @@ fn flatness_reports_the_exact_rss_drift_over_the_steady_span() {
         .collect();
     let report = ScaleReport::build(inputs(growing)).unwrap();
     assert!(!report.sessions[0].flatness.as_ref().unwrap().passes);
+
+    let shrinking: Vec<PassRow> = (0..10)
+        .map(|turn| {
+            let mut pass = row(ScaleTier::S3_100k, "shrink", turn, 1_000);
+            pass.rss_bytes = 10_000 - 900 * u64::from(turn);
+            pass
+        })
+        .collect();
+    let report = ScaleReport::build(inputs(shrinking)).unwrap();
+    let flatness = report.sessions[0].flatness.as_ref().unwrap();
+    assert!(flatness.drift_bytes < 0 && flatness.passes, "{flatness:?}");
 }
 
 #[test]
@@ -450,7 +578,28 @@ fn rows_the_typescript_writer_emits_parse_losslessly() {
         assert_eq!(serde_json::to_string(row).unwrap(), line);
     }
     assert!(rows.iter().any(|row| row.outcome == PassOutcome::Censored));
-    assert!(rows.iter().any(|row| row.refusal.is_some()));
+    for reason in [
+        RefusalReason::Declined,
+        RefusalReason::DaemonError,
+        RefusalReason::TransportError,
+    ] {
+        assert!(
+            rows.iter().any(|row| row.refusal == Some(reason)),
+            "{reason:?}"
+        );
+    }
+    for boundary in [
+        BoundaryState::Cold,
+        BoundaryState::Warming,
+        BoundaryState::Steady,
+        BoundaryState::Replay,
+        BoundaryState::AfterRestart,
+    ] {
+        assert!(
+            rows.iter().any(|row| row.boundary_state == boundary),
+            "{boundary:?}"
+        );
+    }
     assert!(rows.iter().any(|row| row.service_us.is_none()));
     assert!(rows.iter().any(|row| row.harness == ScaleHarness::Pi));
     ScaleReport::build(inputs(rows)).unwrap();

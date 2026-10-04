@@ -6,7 +6,15 @@
 
 import { types } from "node:util";
 
-import { defineSlot } from "./transform-capture";
+// Object.defineProperty bypasses inherited numeric setters on the host array.
+function defineSlot<T>(array: T[], index: number, value: T): void {
+    Object.defineProperty(array, index, {
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+    });
+}
 
 type HostArrayRejectionReason =
     | "proxy"

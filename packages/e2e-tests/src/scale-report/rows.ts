@@ -8,7 +8,7 @@ import { closeSync, openSync, writeSync } from "node:fs";
 
 export type ScaleTier = "10k" | "s3_100k" | "s4_1m";
 export type ScaleHarness = "opencode" | "pi";
-export type BoundaryState = "cold" | "warming" | "steady" | "after_restart";
+export type BoundaryState = "cold" | "warming" | "steady" | "replay" | "after_restart";
 export type PassOutcome = "completed" | "censored" | "refused";
 export type RefusalReason = "declined" | "daemon_error" | "transport_error";
 
@@ -28,7 +28,13 @@ export interface PassRow {
 
 const TIERS: readonly ScaleTier[] = ["10k", "s3_100k", "s4_1m"];
 const HARNESSES: readonly ScaleHarness[] = ["opencode", "pi"];
-const BOUNDARY_STATES: readonly BoundaryState[] = ["cold", "warming", "steady", "after_restart"];
+const BOUNDARY_STATES: readonly BoundaryState[] = [
+    "cold",
+    "warming",
+    "steady",
+    "replay",
+    "after_restart",
+];
 const OUTCOMES: readonly PassOutcome[] = ["completed", "censored", "refused"];
 const REFUSALS: readonly RefusalReason[] = ["declined", "daemon_error", "transport_error"];
 

@@ -73,7 +73,7 @@ export class CaptureBudgetExceeded extends Error {
 }
 
 // Object.defineProperty bypasses inherited numeric setters on membership and output arrays.
-export function defineSlot<T>(array: T[], index: number, value: T): void {
+function defineSlot<T>(array: T[], index: number, value: T): void {
     Object.defineProperty(array, index, {
         value,
         writable: true,
@@ -97,39 +97,12 @@ export function messageId(message: unknown): string | undefined {
     return typeof top === "string" ? top : undefined;
 }
 
-/** Scans host ids from the end until `stop` accepts one and returns its index, or -1. The caller has rejected a proxied `host`. */
-export function scanMessageIds(
-    host: readonly unknown[],
-    stop: (id: string, index: number) => boolean,
-): number {
-    for (let index = host.length - 1; index >= 0; index -= 1) {
-        const id = messageId(readOwnDataProperty(host, index));
-        if (id !== undefined && stop(id, index)) return index;
-    }
-    return -1;
-}
-
 /** 32-bit FNV-1a over UTF-16 code units. */
 export function fnv1a32(text: string): number {
     let hash = 0x811c9dc5;
     for (let index = 0; index < text.length; index += 1)
         hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
     return hash >>> 0;
-}
-
-/** The sorted id hashes of `host`, retaining no id string. A hit may be a collision, so the caller verifies it with an id scan. `undefined` when `reserve` refuses the four bytes per slot. */
-export function messageIdFilter(
-    host: readonly unknown[],
-    reserve: (bytes: number) => boolean,
-): Uint32Array | undefined {
-    if (!reserve(host.length * 4)) return undefined;
-    const hashes = new Uint32Array(host.length);
-    let count = 0;
-    scanMessageIds(host, (id) => {
-        hashes[count++] = fnv1a32(id);
-        return false;
-    });
-    return hashes.subarray(0, count).sort();
 }
 
 export function filterMayHold(filter: Uint32Array, id: string): boolean {
