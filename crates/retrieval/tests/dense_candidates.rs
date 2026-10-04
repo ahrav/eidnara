@@ -13,8 +13,8 @@ use retrieval::dense::oracle::{HELD_SLOT_BYTES, held_bytes, selected_bytes};
 use retrieval::dense::scalar::{QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::{
     CandidateCapacity, CandidatePolicy, CandidatePool, CandidateQuery, CandidateRefusal,
-    Completion, IncompleteReason, Layer, LayerCodes, LayeredRefusal, Metric, OracleRefusal,
-    ScanBounds, StorageBounds, Window,
+    Completion, DenseCoverage, IncompleteReason, Layer, LayerCodes, LayeredRefusal, Metric,
+    OracleRefusal, ScanBounds, StorageBounds, Window,
 };
 use retrieval::eligibility::OccurrenceCandidate;
 
@@ -813,6 +813,39 @@ fn a_coverage_shortfall_keeps_the_pool_and_says_so() {
         Completion::Incomplete(IncompleteReason::RowBound)
     );
     assert_discarded(&bounded);
+}
+
+#[test]
+fn a_shortfall_counts_open_work_for_each_row_no_layer_holds() {
+    let fixture = Fixture::all_admitted();
+    let mut base = full_base(&fixture);
+    for object in ["beta", "gamma"] {
+        let id = fixture.id(object);
+        let row = base.layer.ids.iter().position(|held| *held == id).unwrap();
+        base.layer.ids.remove(row);
+        base.layer.rows.remove(row);
+        base.codes.remove(row);
+    }
+    // `alpha` is held, so its open job leaves its coverage alone; `beta` and `gamma` are missing, with and without open work.
+    fixture.job_state("alpha", "pending");
+    fixture.job_state("beta", "pending");
+    let coded = [base];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let pool = select(&fixture, &layers, &codes, &axis(0), 3, roomy(2), |_| {}).unwrap();
+    assert_eq!(
+        pool.ranking.coverage,
+        DenseCoverage {
+            required: 8,
+            with_vector: 6,
+            missing_pending: 1,
+            missing_without_pending: 1,
+        }
+    );
+    assert_eq!(
+        pool.ranking.completion,
+        Completion::Incomplete(IncompleteReason::DenseCoverageShortfall)
+    );
 }
 
 #[test]

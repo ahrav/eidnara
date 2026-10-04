@@ -18,7 +18,6 @@ use super::oracle::{
 };
 use super::resolve::{self, Layer, ResolveRefusal, RowFault, Winner};
 use crate::batch::VectorGeneration;
-use crate::coverage::CURRENT_PENDING;
 use crate::eligibility::Authority;
 
 /// Not `Debug`: the query row is embedding content.
@@ -62,11 +61,10 @@ pub enum LayeredRefusal {
     Oracle(#[from] OracleRefusal),
 }
 
-/// The oracle's page over live required rows without the stored vector; the walk takes vectors or codes from the resolved layers instead.
+/// The oracle's page over live required rows, leaving the vector and pending columns `NULL`: the walk takes vectors or codes from the resolved layers and reads pending work only for a row no layer holds.
 pub(super) static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,NULL,
-                {CURRENT_PENDING}
+        "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,NULL,NULL
          FROM occurrences o
          LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
          WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
