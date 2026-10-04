@@ -382,7 +382,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:791`) has no production caller at this
+(`crates/daemon/src/vector_reader.rs:800`) has no production caller at this
 base; #620 puts it behind the dense lane.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
