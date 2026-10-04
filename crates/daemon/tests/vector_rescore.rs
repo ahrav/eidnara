@@ -1002,7 +1002,7 @@ fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
         .iter()
         .map(|layer| layer.occurrence_ids().len())
         .sum();
-    let code_scratch = (BLOCK_ROWS + windows) as u64 * 8;
+    let code_scratch = (BLOCK_ROWS * view.layers().len() + windows) as u64 * 8;
     fixture.set_limit(RESIDENT_LIMIT, tables + code_scratch);
     let (refused, _) = run(
         &fixture,
