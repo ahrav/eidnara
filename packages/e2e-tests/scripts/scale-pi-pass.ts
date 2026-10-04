@@ -106,6 +106,8 @@ interface CallMarks {
     beforePlugin?: number;
     afterPlugin?: number;
     contextEnd?: number;
+    gcStart?: number;
+    gcEnd?: number;
     lengthIn?: number;
     lengthOut?: number;
     seen?: unknown;
@@ -155,9 +157,14 @@ function bracket(position: "before" | "after") {
     return (pi: ExtensionApi) => {
         pi.on("context", (event) => {
             const messages = event.messages as unknown[];
-            // The timed span starts on a collected heap, as the OpenCode driver's does; Pi's
-            // clone of the array leaves the previous call's copy for this collection.
-            if (position === "before") Bun.gc(true);
+            // The timed span starts on a collected heap, as the OpenCode driver's does. The
+            // collection frees the previous call's garbage, Pi's clone and the plugin's alike,
+            // and its time is recorded apart from Pi's and the plugin's.
+            if (position === "before") {
+                marks.gcStart = performance.now();
+                Bun.gc(true);
+                marks.gcEnd = performance.now();
+            }
             const now = performance.now();
             if (position === "before") {
                 marks.beforePlugin = now;
@@ -211,6 +218,8 @@ process.stdout.write("<output><history_segments>" + segments +
 mkdirSync(outDir, { recursive: true });
 const us = (from: number | undefined, to: number | undefined) =>
     from === undefined || to === undefined ? null : Math.max(0, Math.round((to - from) * 1_000));
+const minus = (whole: number | null, part: number | null) =>
+    whole === null ? null : Math.max(0, whole - (part ?? 0));
 
 const rowsPath = join(outDir, "rows.jsonl");
 const callsPath = join(outDir, "calls.jsonl");
@@ -331,8 +340,12 @@ async function measureSession(
                 tier,
                 session: sessionId,
                 turn,
-                context_event_us: us(marks.contextStart, marks.contextEnd),
-                pi_clone_us: us(marks.contextStart, marks.beforePlugin),
+                context_event_us: minus(
+                    us(marks.contextStart, marks.contextEnd),
+                    us(marks.gcStart, marks.gcEnd),
+                ),
+                pi_clone_us: us(marks.contextStart, marks.gcStart),
+                forced_gc_us: us(marks.gcStart, marks.gcEnd),
                 plugin_context_us: us(marks.beforePlugin, marks.afterPlugin),
                 agent_end_us: us(marks.agentEndStart, marks.agentEndEnd),
                 length_in: marks.lengthIn ?? null,
@@ -430,6 +443,7 @@ function baseline(): Json {
             calls: rows.length,
             context_event_us: figure("context_event_us"),
             pi_clone_us: figure("pi_clone_us"),
+            forced_gc_us: figure("forced_gc_us"),
             plugin_context_us: figure("plugin_context_us"),
             agent_end_us: figure("agent_end_us"),
             length_in: figure("length_in"),
