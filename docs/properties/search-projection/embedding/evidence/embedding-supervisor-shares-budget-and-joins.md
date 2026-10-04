@@ -86,7 +86,7 @@ instead of interpreting an arbitrary harness timeout as a successful join.
 ### Q: Does a query keep one budget and its ownership through native work?
 
 The fused route awaits the in-process embedding under its request budget and
-submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1711-1713`).
+submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1711-1735`).
 `LocalEmbeddingsComponent::embed_query` ends its wait at the request deadline and
 leaves the queue (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`); a
 started native call keeps its grant, admission permit, and input charge in the
