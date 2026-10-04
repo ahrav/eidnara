@@ -1296,21 +1296,32 @@ assistant entry before its retry inside the window. Covered messages are
 minimal and the last 300 carry the 5 KiB shape. One seed writes identical bytes,
 and no tier file is committed. `scripts/scale-pi-pass.ts` loads each tier into
 Pi through `createAgentSession` with in-memory settings, credentials, and model
-registry, pi-ai's faux provider, and the plugin under test dialing a fresh
-direct-host fixture, and prompts once per sample with a 5 KiB message. Two
-extensions loaded before and after the plugin time its `context` and
-`agent_end` handlers, and a wrapper around Pi's `context` emitter times the
-whole event, including Pi's clone of the array. Every call goes to
+registry, pi-ai's faux provider over a 700,000-token window, and the plugin
+under test dialing a fresh direct-host fixture whose summarizer command answers
+with one short segment per five messages. Each sample prompts with a 20 KiB
+message, so the window crosses the execute threshold and folds within the
+first hundred turns. Two extensions loaded before and after the plugin time its
+`context` and `agent_end` handlers, and a wrapper around Pi's `context` emitter
+times the whole event, including Pi's clone of the array. Every call goes to
 `calls.jsonl` (the `context` event, Pi's clone, the plugin's `context` handler,
 its `agent_end` handler, the array length in and out, and RSS), and
 `baseline.json` holds their per-tier percentiles and each tier's load
 evidence, so an arm without a Pi transform, such as the base of #850, records
-the baseline the transform arm is compared with. A pass the plugin sent to the
-daemon is also a pass row: `response_us` is the plugin's `context` handler,
-the first pass is `cold`, a pass is `steady` once a HARD has folded and the
-boundary has moved three times, and a pass before that is `replay` at an
-unchanged boundary and `warming` otherwise. The driver runs three sessions per
-tier.
+the baseline the transform arm is compared with. When the plugin under test has
+the Pi transform, every call is also a pass row: `response_us` is the plugin's
+`context` handler, the pass is `completed` when the daemon answered `ok` and the
+plugin returned a replacement array, which it returns only for a pass it
+applied, the first pass is `cold`, a pass is `steady` once a HARD has folded and
+the boundary a published pass acknowledged has moved three times, and a pass
+before that is `replay` when it published at an unchanged boundary without a
+HARD and `warming` otherwise. `--steady` ends a session once it has that many
+completed steady passes, within `--samples` calls. The job runs every tier in
+one driver call per arm, the session loop outside the tier loop, so each tier's
+sessions interleave with the 10k control: three sessions per tier of up to 700
+calls until 310 completed steady passes on the measured arm, and one session of
+330 calls on the Pi base arm, whose baseline needs no ratio claim. No drift
+check confirms steady-state entry, and `rss_bytes` is the whole process, Pi's
+session included.
 
 ## Paired worlds
 

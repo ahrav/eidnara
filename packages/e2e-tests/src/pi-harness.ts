@@ -18,8 +18,6 @@ export interface PiTestHarnessOptions {
     mockDefault?: MockResponse;
     /** An isolated environment the caller owns and removes; a fresh one when unset. */
     env?: PiIsolatedEnv;
-    cwd?: string;
-    sessionPath?: string;
 }
 
 export function finalAssistantText(agentEnd: PiRpcEvent): string | null {
@@ -63,8 +61,6 @@ export class PiTestHarness {
             eidnaraConfig: options.eidnaraConfig,
             piSettingsExtra: options.piSettingsExtra,
             modelContextLimit: options.modelContextLimit,
-            cwd: options.cwd,
-            sessionPath: options.sessionPath,
         });
         const ownsEnv = options.env === undefined;
 

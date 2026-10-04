@@ -65,12 +65,14 @@ describe("Pi id alignment", () => {
         expect(idsOf(agentMessages(manager), manager)).toEqual([first, retry, next]);
     });
 
-    it("gives the latest compaction, a branch summary, and a custom message stable reserved ids", () => {
+    it("gives the latest compaction, a branch summary, and custom messages stable reserved ids", () => {
         const manager = SessionManager.inMemory("/project");
         const old = manager.appendMessage(user("old"));
+        const first = manager.appendCompaction("first summary", old, 100);
         const kept = manager.appendMessage(assistant("kept"));
-        const compaction = manager.appendCompaction("summary", kept, 100);
-        const custom = manager.appendCustomMessageEntry("note", "custom text", true);
+        const latest = manager.appendCompaction("latest summary", kept, 100);
+        const note = manager.appendCustomMessageEntry("note", "custom text", true);
+        const other = manager.appendCustomMessageEntry("note", "other text", true);
         const after = manager.appendMessage(user("after"));
         manager.branchWithSummary(after, "left a branch");
         const summary = manager.getLeafId() as string;
@@ -80,21 +82,37 @@ describe("Pi id alignment", () => {
             "compactionSummary",
             "assistant",
             "custom",
+            "custom",
             "user",
             "branchSummary",
             "user",
         ]);
         const expected = [
-            reservedPiId("compactionSummary", compaction),
+            `eidnara:compactionSummary:${latest}`,
             kept,
-            reservedPiId("custom", custom),
+            `eidnara:custom:${note}`,
+            `eidnara:custom:${other}`,
             after,
-            reservedPiId("branchSummary", summary),
+            `eidnara:branchSummary:${summary}`,
             last,
         ];
         expect(idsOf(messages, manager)).toEqual(expected);
-        expect(idsOf(messages, manager)).toEqual(expected);
-        expect(expected).not.toContain(old);
+        expect(idsOf(structuredClone(messages), manager)).toEqual(expected);
+        expect(expected).not.toContain(`eidnara:compactionSummary:${first}`);
+    });
+
+    it("matches a live custom message stamped before its entry was written", () => {
+        const manager = SessionManager.inMemory("/project");
+        const question = manager.appendMessage(user("question"));
+        const note = manager.appendCustomMessageEntry(
+            "note",
+            [{ type: "text", text: "hint" }],
+            false,
+        );
+        const messages = agentMessages(manager);
+        // Pi stamps a live custom message when it is created, before the entry is appended.
+        messages[1] = { ...messages[1], timestamp: (messages[1]?.timestamp as number) - 5 };
+        expect(idsOf(messages, manager)).toEqual([question, `eidnara:custom:${note}`]);
     });
 
     it("leaves every slot before a mismatch unnamed", () => {
@@ -147,10 +165,10 @@ describe("Pi per-turn work", () => {
     ])("is bounded by the new entries and the window at %i entries", (count) => {
         const { reader, messages, append } = syntheticBranch(count);
         const branch = new PiBranchIndex();
-        expect(branch.sync(reader)).toEqual({ visited: count, rebuilt: true });
+        expect(branch.sync(reader)).toBe(count);
         for (let index = 0; index < 3; index += 1) append();
         reader.reads = 0;
-        expect(branch.sync(reader)).toEqual({ visited: 3, rebuilt: false });
+        expect(branch.sync(reader)).toBe(3);
         expect(reader.reads).toBe(3);
         reader.reads = 0;
         const alignment = new PiAlignment(messages, branch, reader);
@@ -166,10 +184,10 @@ describe("Pi per-turn work", () => {
         const branch = new PiBranchIndex();
         branch.sync(manager);
         manager.branch(ids[2] as string);
-        expect(branch.sync(manager)).toEqual({ visited: 0, rebuilt: false });
+        expect(branch.sync(manager)).toBe(0);
         expect(branch.length).toBe(3);
         const fresh = manager.appendMessage(user("fresh"));
-        expect(branch.sync(manager)).toEqual({ visited: 1, rebuilt: false });
+        expect(branch.sync(manager)).toBe(1);
         expect(idsOf(agentMessages(manager), manager, branch)).toEqual([...ids.slice(0, 3), fresh]);
     });
 });
@@ -210,6 +228,30 @@ function foldReply(boundary: { mid: string; sequence: number }): Reply {
     });
 }
 
+function passOver(
+    manager: PiBranchReader,
+    messages: readonly Json[],
+    branch = new PiBranchIndex(),
+) {
+    return {
+        sessionId: "ses",
+        messages,
+        reader: manager,
+        projectRoot: "/project",
+        contextLimit: undefined,
+        fields: () => ({ model_key: "faux/faux-model" }),
+        branch,
+    };
+}
+
+function transformOver(client: RustModeModuleClient, branch: PiBranchIndex) {
+    return createPiTransform({
+        moduleClient: client,
+        branchOf: () => branch,
+        captureAdmission: new TransformCaptureAdmission(),
+    });
+}
+
 describe("Pi publication by return", () => {
     function session() {
         const manager = SessionManager.inMemory("/project");
@@ -229,18 +271,8 @@ describe("Pi publication by return", () => {
             "transform.boundary": [() => ({ anchors: [{ mid: head, sequence: 2 }] })],
             transform: [foldReply({ mid: head, sequence: 2 })],
         });
-        const transform = createPiTransform({
-            moduleClient: transport.client,
-            captureAdmission: new TransformCaptureAdmission(),
-        });
-        const result = await transform.run({
-            sessionId: "ses",
-            messages,
-            reader: manager,
-            projectRoot: "/project",
-            contextLimit: undefined,
-            fields: () => ({ model_key: "faux/faux-model" }),
-        });
+        const pass = passOver(manager, messages);
+        const result = await transformOver(transport.client, pass.branch).run(pass);
         expect(result.outcome).toEqual({ kind: "applied", boundary: { mid: head, sequence: 2 } });
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
         expect(sent.serializer_profile).toBe("pi");
@@ -258,19 +290,51 @@ describe("Pi publication by return", () => {
                 },
             ],
         });
-        const transform = createPiTransform({
-            moduleClient: transport.client,
-            captureAdmission: new TransformCaptureAdmission(),
-        });
-        const result = await transform.run({
-            sessionId: "ses",
-            messages: agentMessages(manager),
-            reader: manager,
-            projectRoot: "/project",
-            contextLimit: undefined,
-            fields: () => ({}),
-        });
+        const pass = passOver(manager, agentMessages(manager));
+        const result = await transformOver(transport.client, pass.branch).run(pass);
         expect(result.outcome?.kind).toBe("declined");
         expect(result.messages).toBeUndefined();
     });
+
+    it("returns nothing when a pass after an applied one declines and fails open", async () => {
+        const { manager, head } = session();
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [{ mid: head, sequence: 2 }] })],
+            transform: [
+                foldReply({ mid: head, sequence: 2 }),
+                () => ({ status: "error", code: "session_busy", message: "busy" }),
+            ],
+        });
+        const branch = new PiBranchIndex();
+        const transform = transformOver(transport.client, branch);
+        const first = await transform.run(passOver(manager, agentMessages(manager), branch));
+        expect(first.outcome?.kind).toBe("applied");
+        manager.appendMessage(assistant("more"));
+        const second = await transform.run(passOver(manager, agentMessages(manager), branch));
+        expect(second.outcome).toEqual({ kind: "declined", servedLastApplied: true });
+        expect(second.messages).toBeUndefined();
+    });
+
+    it.each([
+        10_000, 1_000_000,
+    ])("reads only new entries and the window at %i entries", async (count) => {
+        const { reader, messages, append } = syntheticBranch(count);
+        const window = 300;
+        const anchor = { mid: `e${count - window + 1}`, sequence: 7 };
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [anchor] })],
+            transform: [foldReply(anchor), foldReply(anchor)],
+        });
+        const branch = new PiBranchIndex();
+        const transform = transformOver(transport.client, branch);
+        await transform.run(passOver(reader, messages, branch));
+        append();
+        append();
+        const steady = await transform.run(passOver(reader, messages, branch));
+        expect(steady.outcome?.kind).toBe("applied");
+        expect(steady.branchEntriesVisited).toBe(2);
+        expect(steady.entriesAligned).toBe(window + 2);
+        const sent = transport.calls.filter((call) => call.method === "transform").at(-1)?.body;
+        expect((sent?.native_messages as unknown[]).length).toBe(window + 2);
+    }, 60_000);
 });

@@ -9,7 +9,7 @@ import {
     type TransformPassOutcome,
 } from "@eidnara/opencode/hooks/context/transform-session-client";
 
-import { PiBranchIndex, type PiBranchReader } from "./pi-branch";
+import type { PiBranchIndex, PiBranchReader } from "./pi-branch";
 import { encodePiRowsToCk, isPiRole, PI_RESERVED_ID_PREFIX, type PiRow } from "./pi-ck";
 
 type Json = Record<string, unknown>;
@@ -18,35 +18,35 @@ export function reservedPiId(role: string, entryId: string): string {
     return `${PI_RESERVED_ID_PREFIX}${role}:${entryId}`;
 }
 
-interface Produced {
-    role: string;
-    timestamp: unknown;
-    id: string;
-}
-
-function produced(entry: SessionEntry): Produced | undefined {
+/**
+ * The id of the message `entry` contributes to Pi's context when `message` is that message,
+ * `null` when it is another, and `undefined` when the entry contributes none. A live custom
+ * message is stamped before its entry is written, so custom and branch summary messages match
+ * by content rather than by timestamp.
+ */
+function entryIdFor(entry: SessionEntry, message: Json): string | null | undefined {
     const record = entry as unknown as Json;
     switch (entry.type) {
         case "message": {
-            const message = record.message as Json | undefined;
-            return message
-                ? { role: String(message.role), timestamp: message.timestamp, id: entry.id }
-                : undefined;
+            const own = record.message as Json | undefined;
+            if (!own) return undefined;
+            return own.role === message.role && own.timestamp === message.timestamp
+                ? entry.id
+                : null;
         }
         case "custom_message":
-            return {
-                role: "custom",
-                timestamp: Date.parse(String(record.timestamp)),
-                id: reservedPiId("custom", entry.id),
-            };
+            return message.role === "custom" &&
+                message.customType === record.customType &&
+                JSON.stringify(message.content) === JSON.stringify(record.content)
+                ? reservedPiId("custom", entry.id)
+                : null;
         case "branch_summary":
-            return record.summary
-                ? {
-                      role: "branchSummary",
-                      timestamp: Date.parse(String(record.timestamp)),
-                      id: reservedPiId("branchSummary", entry.id),
-                  }
-                : undefined;
+            if (!record.summary) return undefined;
+            return message.role === "branchSummary" &&
+                message.summary === record.summary &&
+                message.fromId === record.fromId
+                ? reservedPiId("branchSummary", entry.id)
+                : null;
         default:
             return undefined;
     }
@@ -92,15 +92,15 @@ export class PiAlignment {
             return;
         }
         while (this.cursor >= 0) {
-            const id = this.branch.idAt(this.cursor) as string;
+            const id = this.branch.idAt(this.cursor);
             this.cursor -= 1;
             this.entriesRead += 1;
-            const entry = this.reader.getEntry(id);
+            const entry = id === undefined ? undefined : this.reader.getEntry(id);
             if (!entry) break;
-            const candidate = produced(entry);
-            if (!candidate) continue;
-            if (candidate.role === message.role && candidate.timestamp === message.timestamp) {
-                this.fromEnd.push(candidate.id);
+            const matched = entryIdFor(entry, message);
+            if (matched === undefined) continue;
+            if (matched !== null) {
+                this.fromEnd.push(matched);
                 return;
             }
             if (failedAssistant(entry)) continue;
@@ -120,46 +120,31 @@ export interface PiPassInputs {
 }
 
 export interface PiPassResult {
+    /** Pi's replacement array; present only when this pass applied the daemon's output. */
     messages?: Json[];
     outcome?: TransformPassOutcome;
+    /** Work counters: branch entries the index sync and the alignment read. */
     branchEntriesVisited: number;
     entriesAligned: number;
 }
 
 export interface PiTransformOptions {
     moduleClient: RustModeModuleClient;
-    branchOf?: (sessionId: string) => PiBranchIndex;
+    branchOf: (sessionId: string) => PiBranchIndex;
     captureAdmission?: TransformCaptureAdmission;
-    retainedOutputBudgetBytes?: number;
-    unpagedTransformMaxBytes?: number;
 }
 
 export function createPiTransform(options: PiTransformOptions) {
-    const client = createTransformSessionClient({
-        moduleClient: options.moduleClient,
-        retainedOutputBudgetBytes: options.retainedOutputBudgetBytes,
-        unpagedTransformMaxBytes: options.unpagedTransformMaxBytes,
-    });
+    const client = createTransformSessionClient({ moduleClient: options.moduleClient });
     const admission = options.captureAdmission ?? defaultTransformCaptureAdmission;
-    const branches = new Map<string, PiBranchIndex>();
-    const branchOf =
-        options.branchOf ??
-        ((sessionId: string): PiBranchIndex => {
-            let branch = branches.get(sessionId);
-            if (!branch) {
-                branch = new PiBranchIndex();
-                branches.set(sessionId, branch);
-            }
-            return branch;
-        });
 
     async function run(inputs: PiPassInputs): Promise<PiPassResult> {
-        const branch = branchOf(inputs.sessionId);
-        const sync = branch.sync(inputs.reader);
+        const branch = options.branchOf(inputs.sessionId);
+        const branchEntriesVisited = branch.sync(inputs.reader);
         const admitted = admission.admit(inputs.sessionId);
-        if ("declined" in admitted)
-            return { branchEntriesVisited: sync.visited, entriesAligned: 0 };
+        if ("declined" in admitted) return { branchEntriesVisited, entriesAligned: 0 };
         const alignment = new PiAlignment(inputs.messages, branch, inputs.reader);
+        // The client's capture rechecks compare slot references, so a slot keeps one row.
         const slotRows = new Map<number, PiRow>();
         const rows = (start: number, end: number): PiRow[] | undefined => {
             const window: PiRow[] = [];
@@ -177,6 +162,8 @@ export function createPiTransform(options: PiTransformOptions) {
             return window.reverse();
         };
         let replacement: Json[] | undefined;
+        // Pi hands each handler its own clone of the array, so no other code can change or
+        // resize it while the pass awaits, and a publication cannot be refused.
         const outcome = await client.run(inputs.sessionId, admitted.lease, {
             serializerProfile: "pi",
             invocationProfile: "pi-heuristic",
@@ -199,24 +186,21 @@ export function createPiTransform(options: PiTransformOptions) {
                 return undefined;
             },
         });
+        // A declined pass returns nothing, so Pi keeps its own array, even when the client
+        // failed open to the last applied output.
         return {
-            ...(replacement ? { messages: replacement } : {}),
+            ...(replacement && outcome.kind === "applied" ? { messages: replacement } : {}),
             outcome,
-            branchEntriesVisited: sync.visited,
+            branchEntriesVisited,
             entriesAligned: alignment.entriesRead,
         };
     }
 
     return {
         run,
-        branch: branchOf,
-        state: (sessionId: string) => client.state(sessionId),
-        clearSession(sessionId: string): string | null {
-            branches.delete(sessionId);
+        clearSession(sessionId: string): void {
             admission.requestCancel(sessionId, `pi session ${sessionId} cleared`);
-            return client.clear(sessionId);
+            client.clear(sessionId);
         },
     };
 }
-
-export type PiTransform = ReturnType<typeof createPiTransform>;

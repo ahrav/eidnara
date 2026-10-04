@@ -1,16 +1,21 @@
 #!/usr/bin/env bun
 
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { HermeticHostStack } from "../src/rust-runner/hermetic-host";
+import {
+    command,
+    exchangedBytes,
+    hostManifest,
+    passOutcome,
+    seedCoverage,
+} from "../src/scale-report/driver-common";
 import { retryPosition, writePiTier } from "../src/scale-report/pi-tier";
 import {
     type BoundaryState,
-    type PassRow,
     PassRowWriter,
     type ScaleTier,
     TIER_MESSAGES,
@@ -27,8 +32,9 @@ const { values: flags } = parseArgs({
         tiers: { type: "string", default: "10k,s3_100k,s4_1m" },
         sessions: { type: "string", default: "3" },
         samples: { type: "string", default: "330" },
+        steady: { type: "string", default: "0" },
         window: { type: "string", default: "300" },
-        "context-window": { type: "string", default: "600000" },
+        "context-window": { type: "string", default: "700000" },
         "prompt-kib": { type: "string", default: "20" },
         seed: { type: "string", default: "850" },
     },
@@ -50,6 +56,7 @@ const fixtureBin = resolve(need("fixture-bin"));
 const evalRunnerBin = resolve(need("eval-runner-bin"));
 const sessions = Number(flags.sessions);
 const samples = Number(flags.samples);
+const minSteady = Number(flags.steady);
 const windowSize = Number(flags.window);
 const contextWindow = Number(flags["context-window"]);
 const promptBytes = Number(flags["prompt-kib"]) * 1024;
@@ -58,6 +65,8 @@ const tiers = (flags.tiers as string).split(",") as ScaleTier[];
 for (const tier of tiers) if (!(tier in TIER_MESSAGES)) throw new Error(`unknown tier ${tier}`);
 if (!Number.isSafeInteger(sessions) || sessions < 1) throw new Error("--sessions must be positive");
 if (!Number.isSafeInteger(samples) || samples < 2) throw new Error("--samples must be at least 2");
+if (!Number.isSafeInteger(minSteady) || minSteady < 0 || minSteady > samples)
+    throw new Error("--steady must be a count of at most --samples");
 if (!Number.isSafeInteger(windowSize) || windowSize % 2 !== 0)
     throw new Error("--window must be an even count");
 if (!Number.isSafeInteger(contextWindow) || contextWindow < 16_000)
@@ -77,16 +86,20 @@ interface ExtensionApi {
 
 async function loadRuntime() {
     const resolveFrom = (specifier: string) => Bun.resolveSync(specifier, pluginRoot);
+    const shared = join(pluginRoot, "../opencode-plugin/src");
     const [pi, ai, plugin, transport] = await Promise.all([
         import(resolveFrom("@earendil-works/pi-coding-agent")),
         import(resolveFrom("@earendil-works/pi-ai/compat")),
         import(join(pluginRoot, "src/index.ts")),
-        import(join(pluginRoot, "../opencode-plugin/src/hooks/context/module-transport.ts")),
+        import(join(shared, "hooks/context/module-transport.ts")),
     ]);
     return { pi, ai, plugin, transport };
 }
 
 const runtime = await loadRuntime();
+// The plugin returns a replacement array only for a pass it applied, so an arm whose plugin has a
+// transform writes a pass row for every call.
+const transformArm = runtime.plugin.PI_TRANSFORM_AVAILABLE === true;
 
 interface CallMarks {
     contextStart?: number;
@@ -132,7 +145,7 @@ runtime.transport.HostModuleTransport.prototype.call = async function measured(
         }
         return response;
     } catch (error) {
-        if (args.method === "transform") pass.error = error;
+        if (measuring) pass.error = error;
         throw error;
     }
 };
@@ -192,64 +205,10 @@ process.stdout.write("<output><history_segments>" + segments +
     "</history_segments><meta><unprocessed_from>" + next + "</unprocessed_from></meta></output>");
 `;
 
-function seedCoverage(dataDir: string, sessionId: string, segments: number): void {
-    const result = spawnSync(
-        evalRunnerBin,
-        [
-            "scale-seed",
-            "--state-root",
-            dataDir,
-            "--session",
-            sessionId,
-            "--segments",
-            String(segments),
-        ],
-        { encoding: "utf8" },
-    );
-    if (result.status !== 0) throw new Error(`scale-seed failed: ${result.stderr}`);
-}
-
-function command(cmd: string, args: string[]): string {
-    const result = spawnSync(cmd, args, { encoding: "utf8" });
-    return result.status === 0 ? result.stdout.trim() : "";
-}
-
-function hostManifest(): Json {
-    const cpuModel =
-        /model name\s*:\s*(.+)/.exec(readFileSync("/proc/cpuinfo", "utf8"))?.[1]?.trim() ??
-        os.cpus()[0]?.model ??
-        "unknown";
-    const device = command("df", ["--output=source", os.tmpdir()]).split("\n").at(-1) ?? "";
-    const rotational = command("lsblk", ["-ndo", "ROTA", device]);
-    return {
-        cpu_model: cpuModel,
-        core_count: os.availableParallelism(),
-        memory_bytes: os.totalmem(),
-        kernel: os.release(),
-        glibc: command("getconf", ["GNU_LIBC_VERSION"]) || "unknown",
-        disk: rotational === "0" ? "ssd" : rotational === "1" ? "hdd" : "unknown",
-    };
-}
-
-function exchangedBytes(exchanged: readonly unknown[]): number {
-    let bytes = 0;
-    for (const value of exchanged) bytes += Buffer.byteLength(JSON.stringify(value) ?? "");
-    return bytes;
-}
-
-function isDeadline(error: unknown): boolean {
-    if (!(error instanceof Error)) return false;
-    const code = (error as { code?: unknown }).code;
-    return (
-        (code === "ETIMEDOUT" && !/while queued/.test(error.message)) ||
-        /request deadline expired after a possible send/.test(error.message)
-    );
-}
-
+mkdirSync(outDir, { recursive: true });
 const us = (from: number | undefined, to: number | undefined) =>
     from === undefined || to === undefined ? null : Math.max(0, Math.round((to - from) * 1_000));
 
-mkdirSync(outDir, { recursive: true });
 const rowsPath = join(outDir, "rows.jsonl");
 const callsPath = join(outDir, "calls.jsonl");
 writeFileSync(rowsPath, "");
@@ -258,7 +217,11 @@ const writer = new PassRowWriter(rowsPath);
 const incomplete: string[] = [];
 const loads: Json[] = [];
 
-async function measureSession(tier: ScaleTier, index: number): Promise<number> {
+/** Runs one session and returns its call count and its completed steady passes. */
+async function measureSession(
+    tier: ScaleTier,
+    index: number,
+): Promise<{ calls: number; steady: number }> {
     const messages = TIER_MESSAGES[tier];
     const root = mkdtempSync(join(os.tmpdir(), `eidnara-scale-pi-${tier}-`));
     const dataDir = join(root, "data");
@@ -269,7 +232,7 @@ async function measureSession(tier: ScaleTier, index: number): Promise<number> {
     const seed = baseSeed + index * 7 + tiers.indexOf(tier);
     const file = join(root, "session.jsonl");
     const sessionId = writePiTier(file, { messages, window: windowSize, seed, cwd: project });
-    seedCoverage(dataDir, sessionId, (messages - windowSize) / 2);
+    seedCoverage(evalRunnerBin, dataDir, sessionId, (messages - windowSize) / 2);
     const summarizer = join(root, "summarizer.ts");
     writeFileSync(summarizer, SUMMARIZER, { mode: 0o700 });
     const stack = await HermeticHostStack.start({
@@ -346,18 +309,20 @@ async function measureSession(tier: ScaleTier, index: number): Promise<number> {
             marks.contextEnd = performance.now();
         }
     };
-    let previousBoundary = "";
+    // The boundary a published pass acknowledged; a declined pass leaves it.
+    let boundary: string | undefined;
     let boundaryMoves = 0;
     let folded = false;
+    let steadyPasses = 0;
     let completed = 0;
     try {
         for (let turn = 0; turn < samples; turn += 1) {
             if (performance.now() >= deadline) break;
+            if (minSteady > 0 && steadyPasses >= minSteady) break;
             Bun.gc(true);
             marks = {};
             pass = { exchanged: [] };
             await session.prompt(`scale turn ${turn} ${PROMPT_TEXT}`);
-            const boundary = JSON.stringify(pass.boundary ?? null);
             const rss = process.memoryUsage.rss();
             const call = {
                 tier,
@@ -372,44 +337,43 @@ async function measureSession(tier: ScaleTier, index: number): Promise<number> {
                 rss_bytes: rss,
             };
             writeFileSync(callsPath, `${JSON.stringify(call)}\n`, { flag: "a" });
-            if (pass.exchanged.length > 0) {
-                if (turn > 0 && boundary !== previousBoundary) boundaryMoves += 1;
-                if (pass.action === "HARD") folded = true;
-                const ok = pass.status === "ok" && marks.replaced === true;
-                const censored = !ok && isDeadline(pass.error);
-                const state: BoundaryState =
-                    turn === 0
-                        ? "cold"
-                        : folded && boundaryMoves >= 3
-                          ? "steady"
-                          : boundary === previousBoundary && pass.action !== "HARD"
-                            ? "replay"
-                            : "warming";
-                const row: PassRow = {
-                    harness: "pi",
-                    tier,
-                    session: sessionId,
-                    turn,
-                    boundary_state: state,
-                    outcome: ok ? "completed" : censored ? "censored" : "refused",
-                    refusal:
-                        ok || censored
-                            ? null
-                            : pass.error !== undefined
-                              ? "transport_error"
-                              : pass.status === undefined || pass.status === "ok"
-                                ? "declined"
-                                : "daemon_error",
-                    response_us: us(marks.beforePlugin, marks.afterPlugin) ?? 0,
-                    service_us:
-                        pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
-                    rss_bytes: rss,
-                    ipc_bytes: exchangedBytes(pass.exchanged),
-                };
-                writer.write(row);
-            }
-            previousBoundary = boundary;
             completed += 1;
+            if (!transformArm) continue;
+            const published = pass.status === "ok" && marks.replaced === true;
+            const acknowledged = JSON.stringify(pass.boundary ?? null);
+            const moved = published && boundary !== undefined && acknowledged !== boundary;
+            if (published) {
+                if (moved) boundaryMoves += 1;
+                if (pass.action === "HARD") folded = true;
+            }
+            const state: BoundaryState =
+                turn === 0
+                    ? "cold"
+                    : folded && boundaryMoves >= 3
+                      ? "steady"
+                      : published && !moved && pass.action !== "HARD"
+                        ? "replay"
+                        : "warming";
+            const { outcome, refusal } = passOutcome({
+                published,
+                status: pass.status,
+                error: pass.error,
+            });
+            if (state === "steady" && outcome === "completed") steadyPasses += 1;
+            if (published) boundary = acknowledged;
+            writer.write({
+                harness: "pi",
+                tier,
+                session: sessionId,
+                turn,
+                boundary_state: state,
+                outcome,
+                refusal,
+                response_us: us(marks.beforePlugin, marks.afterPlugin) ?? 0,
+                service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
+                rss_bytes: rss,
+                ipc_bytes: exchangedBytes(pass.exchanged),
+            });
         }
     } finally {
         await runner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => undefined);
@@ -418,7 +382,7 @@ async function measureSession(tier: ScaleTier, index: number): Promise<number> {
         await stack.stop();
         rmSync(root, { recursive: true, force: true });
     }
-    return completed;
+    return { calls: completed, steady: steadyPasses };
 }
 
 process.env.XDG_DATA_HOME = mkdtempSync(join(os.tmpdir(), "eidnara-scale-xdg-"));
@@ -430,9 +394,9 @@ for (let index = 0; index < sessions; index += 1) {
             continue;
         }
         try {
-            const completed = await measureSession(tier, index);
-            if (completed < samples) incomplete.push(label);
-            console.log(`${label}: ${completed} of ${samples} calls`);
+            const { calls, steady } = await measureSession(tier, index);
+            if (minSteady > 0 ? steady < minSteady : calls < samples) incomplete.push(label);
+            console.log(`${label}: ${calls} calls, ${steady} completed steady passes`);
         } catch (error) {
             incomplete.push(label);
             console.error(`${label}: inconclusive:`, error);

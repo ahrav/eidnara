@@ -35,13 +35,6 @@ export const PI_ROLES = [
 ] as const;
 export type PiRole = (typeof PI_ROLES)[number];
 
-/** Roles built from a non-message session entry; their rows carry reserved ids. */
-export const PI_SYNTHETIC_ENTRY_ROLES: ReadonlySet<string> = new Set([
-    "custom",
-    "branchSummary",
-    "compactionSummary",
-]);
-
 const COMPACTION_SUMMARY_PREFIX =
     "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
 const COMPACTION_SUMMARY_SUFFIX = "\n</summary>";
@@ -62,7 +55,7 @@ function stringField(value: Json, key: string): string | undefined {
 }
 
 /** Pi 0.80.2 `bashExecutionToText`. */
-export function bashExecutionText(message: Json): string {
+function bashExecutionText(message: Json): string {
     let text = `Ran \`${stringField(message, "command") ?? ""}\`\n`;
     const output = stringField(message, "output");
     text += output ? `\`\`\`\n${output}\n\`\`\`` : "(no output)";

@@ -12,27 +12,25 @@ const lastRenderedBySession = new Map<string, string>();
 /**
  * Context tokens the latest assistant response reported, by session. Pi's `getContextUsage`
  * reads the whole branch, so the footer reads it only for a session with no response observed
- * since it started or compacted.
+ * since it started, compacted, or navigated. The reported count omits Pi's estimate for the
+ * messages after that response, such as the tool results of the running turn.
  */
 const reportedTokensBySession = new Map<string, number>();
 
+/** Pi's `calculateContextTokens`, for a response whose usage reports a count. */
 function reportedTokens(message: unknown): number | undefined {
     const record = message as
         | { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> }
         | undefined;
-    if (record?.role !== "assistant" || record.stopReason === "error") return undefined;
-    if (record.stopReason === "aborted") return undefined;
-    const usage = record.usage;
+    const usage = record?.usage;
+    if (record?.role !== "assistant" || !usage) return undefined;
+    if (record.stopReason === "error" || record.stopReason === "aborted") return undefined;
     const count = (value: unknown) =>
-        typeof value === "number" && Number.isFinite(value) ? value : 0;
-    if (!usage) return undefined;
-    const total = count(usage.totalTokens);
-    return total > 0
-        ? total
-        : count(usage.input) +
-              count(usage.output) +
-              count(usage.cacheRead) +
-              count(usage.cacheWrite);
+        typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+    const tokens =
+        count(usage.totalTokens) ||
+        count(usage.input) + count(usage.output) + count(usage.cacheRead) + count(usage.cacheWrite);
+    return tokens > 0 ? tokens : undefined;
 }
 
 /**
@@ -55,11 +53,14 @@ export function registerStatusLine(pi: ExtensionAPI, deps: StatusLineDeps): void
 
     pi.on("session_start", async (_event, ctx) => updateStatusLine(ctx, deps, true));
     pi.on("agent_end", async (_event, ctx) => updateStatusLine(ctx, deps));
-    pi.on("session_compact", async (_event, ctx) => {
+    // Compaction and tree navigation change the context the last response measured.
+    const remeasure = async (_event: unknown, ctx: ExtensionContext) => {
         const sessionId = resolveSessionId(ctx);
         if (sessionId) reportedTokensBySession.delete(sessionId);
         updateStatusLine(ctx, deps, true);
-    });
+    };
+    pi.on("session_compact", remeasure);
+    pi.on("session_tree", remeasure);
     pi.on("tool_execution_end", async (_event, ctx) => updateStatusLine(ctx, deps));
     pi.on("message_end", async (event, ctx) => {
         const role = (event.message as { role?: unknown } | undefined)?.role;

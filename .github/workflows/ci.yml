@@ -1042,24 +1042,26 @@ jobs:
             --features direct-host-fixture --locked
 
       - name: Run the driver
-        # Each tier runs on the base arm and then the measured arm before the
-        # next tier starts, so drift on the runner falls on both arms alike.
+        # Each tier run goes to the base arm and then the measured arm before
+        # the next run starts, so drift on the runner falls on both arms alike.
         # Each arm runs on its own fixture build and plugin source; seeding and
         # report building use the measured arm's eval runner. A tier the budget
         # cuts short is listed in the arm's `incomplete.json`.
         shell: bash
         run: |
           set -euo pipefail
-          # The Pi base arm has no transform pass; it records the per-call
-          # baseline, which needs no ratio claim, so it runs one session.
+          # The Pi driver runs every tier in one call per arm, its sessions
+          # interleaved with the 10k control. The Pi base arm has no transform
+          # pass; it records the per-call baseline, which needs no ratio claim,
+          # so it runs one session.
           case "$SCALE_DRIVER" in
             opencode-pass)
-              plugin=opencode-plugin
+              plugin=opencode-plugin; tier_runs=(10k s3_100k s4_1m)
               measured_flags=(--samples 330); base_flags=(--samples 330) ;;
             pi-pass)
-              plugin=pi-plugin
-              measured_flags=(--sessions 3 --samples 400)
-              base_flags=(--sessions 1 --samples 100) ;;
+              plugin=pi-plugin; tier_runs=(10k,s3_100k,s4_1m)
+              measured_flags=(--sessions 3 --samples 700 --steady 310)
+              base_flags=(--sessions 1 --samples 330) ;;
             *) echo "unknown scale driver: $SCALE_DRIVER" >&2; exit 1 ;;
           esac
           out="$RUNNER_TEMP/scale"
@@ -1067,20 +1069,21 @@ jobs:
           arms=(measured)
           if [ -n "$SCALE_BASE" ]; then arms=(base measured); fi
           root_of() { [ "$1" = base ] && echo "$RUNNER_TEMP/base" || echo "$PWD"; }
-          for tier in 10k s3_100k s4_1m; do
+          for tiers in "${tier_runs[@]}"; do
+            run="${tiers//,/-}"
             for arm in "${arms[@]}"; do
               root="$(root_of "$arm")"
               if [ "$arm" = base ]; then driver_flags=("${base_flags[@]}")
               else driver_flags=("${measured_flags[@]}"); fi
               commit="$(git -C "$root" rev-parse HEAD)"
               if ! bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
-                --out-dir "$out/$arm/$tier" --tiers "$tier" "${driver_flags[@]}" \
+                --out-dir "$out/$arm/$run" --tiers "$tiers" "${driver_flags[@]}" \
                 --plugin-root "$root/packages/$plugin" \
                 --fixture-bin "$root/target/release/examples/direct_host_fixture" \
                 --eval-runner-bin "$runner" \
                 --commit "$commit" --daemon-build "release $commit"; then
-                mkdir -p "$out/$arm/$tier"
-                echo "[\"$tier\"]" > "$out/$arm/$tier/incomplete.json"
+                mkdir -p "$out/$arm/$run"
+                echo "[\"$tiers\"]" > "$out/$arm/$run/incomplete.json"
               fi
             done
           done
@@ -1088,13 +1091,14 @@ jobs:
             cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl" || true
             cp "$(ls "$out/$arm"/*/manifest.json | tail -n 1)" "$out/$arm/manifest.json"
             jq -s add "$out/$arm"/*/incomplete.json > "$out/$arm/incomplete.json"
-            # An arm without a transform pass, such as Pi before its context handler,
-            # writes no pass rows; its per-call figures are in each tier's baseline.json.
-            if [ -s "$out/$arm/rows.jsonl" ]; then
-              "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
-                --manifest "$out/$arm/manifest.json" \
-                --out "$out/$arm/report.json" | tee "$out/$arm/summary.json"
+            # The Pi base arm writes no pass rows; its per-call figures are in
+            # baseline.json. Any other arm without rows fails the job.
+            if [ "$SCALE_DRIVER/$arm" = pi-pass/base ] && [ ! -s "$out/$arm/rows.jsonl" ]; then
+              continue
             fi
+            "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
+              --manifest "$out/$arm/manifest.json" \
+              --out "$out/$arm/report.json" | tee "$out/$arm/summary.json"
           done
 
       # actions/upload-artifact v7.0.1

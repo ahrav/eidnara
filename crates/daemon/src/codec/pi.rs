@@ -1542,6 +1542,7 @@ mod tests {
                 format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap()),
             )
             .unwrap();
+            return;
         }
         assert_eq!(Value::Array(derived), fixture["expected"]);
     }

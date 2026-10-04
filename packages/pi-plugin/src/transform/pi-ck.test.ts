@@ -13,7 +13,7 @@ describe("Pi CK encoder", () => {
         const encoded = encodePiRowsToCk(fixture.rows);
         expect(encoded).toHaveLength(fixture.expected.length);
         for (const [index, message] of encoded.entries())
-            expect(message, fixture.rows[index]?.id).toEqual(fixture.expected[index] as never);
+            expect(message, fixture.rows[index]?.id).toStrictEqual(fixture.expected[index] as never);
     });
 
     it("covers every role of the closed set", () => {

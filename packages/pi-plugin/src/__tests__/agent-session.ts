@@ -31,6 +31,7 @@ export async function createTestAgentSession(args: {
     extensionFactories: ExtensionFactory[];
     sessionManager?: SessionManager;
     contextWindow?: number;
+    settings?: Record<string, unknown>;
 }): Promise<TestAgentSession> {
     const faux = registerFauxProvider({
         provider: "faux",
@@ -48,7 +49,10 @@ export async function createTestAgentSession(args: {
         return next ?? fauxAssistantMessage("ok");
     };
     faux.setResponses(Array.from({ length: 256 }, () => answer));
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
+    const settingsManager = SettingsManager.inMemory({
+        compaction: { enabled: false },
+        ...args.settings,
+    });
     const authStorage = AuthStorage.inMemory();
     authStorage.setRuntimeApiKey("faux", "test-key");
     const sessionManager = args.sessionManager ?? SessionManager.inMemory(args.cwd);

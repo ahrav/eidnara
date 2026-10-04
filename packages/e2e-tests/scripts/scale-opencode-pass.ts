@@ -1,18 +1,18 @@
 #!/usr/bin/env bun
-
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { HermeticHostStack } from "../src/rust-runner/hermetic-host";
 import {
-    type PassRow,
-    PassRowWriter,
-    type ScaleTier,
-    TIER_MESSAGES,
-} from "../src/scale-report/rows";
+    command,
+    exchangedBytes,
+    hostManifest,
+    passOutcome,
+    seedCoverage,
+} from "../src/scale-report/driver-common";
+import { PassRowWriter, type ScaleTier, TIER_MESSAGES } from "../src/scale-report/rows";
 
 const { values: flags } = parseArgs({
     options: {
@@ -117,67 +117,12 @@ function hostArray(sessionId: string, covered: number, window: number): unknown[
     return messages;
 }
 
-function seed(dataDir: string, sessionId: string, segments: number): void {
-    const result = spawnSync(
-        evalRunnerBin,
-        [
-            "scale-seed",
-            "--state-root",
-            dataDir,
-            "--session",
-            sessionId,
-            "--segments",
-            String(segments),
-        ],
-        { encoding: "utf8" },
-    );
-    if (result.status !== 0) throw new Error(`scale-seed failed: ${result.stderr}`);
-}
-
-function command(cmd: string, args: string[]): string {
-    const result = spawnSync(cmd, args, { encoding: "utf8" });
-    return result.status === 0 ? result.stdout.trim() : "";
-}
-
-function hostManifest(): Record<string, unknown> {
-    const cpuModel =
-        /model name\s*:\s*(.+)/.exec(readFileSync("/proc/cpuinfo", "utf8"))?.[1]?.trim() ??
-        os.cpus()[0]?.model ??
-        "unknown";
-    const device = command("df", ["--output=source", os.tmpdir()]).split("\n").at(-1) ?? "";
-    const rotational = command("lsblk", ["-ndo", "ROTA", device]);
-    return {
-        cpu_model: cpuModel,
-        core_count: os.availableParallelism(),
-        memory_bytes: os.totalmem(),
-        kernel: os.release(),
-        glibc: command("getconf", ["GNU_LIBC_VERSION"]) || "unknown",
-        disk: rotational === "0" ? "ssd" : rotational === "1" ? "hdd" : "unknown",
-    };
-}
-
 interface PassObservation {
     status?: unknown;
     action?: unknown;
     totalMs?: number;
     exchanged: unknown[];
     error?: unknown;
-}
-
-function exchangedBytes(exchanged: readonly unknown[]): number {
-    let bytes = 0;
-    for (const value of exchanged) bytes += Buffer.byteLength(JSON.stringify(value) ?? "");
-    return bytes;
-}
-
-/** The transform call itself ran out of time, after its request may have been sent. */
-function isDeadline(error: unknown): boolean {
-    if (!(error instanceof Error)) return false;
-    const code = (error as { code?: unknown }).code;
-    return (
-        (code === "ETIMEDOUT" && !/while queued/.test(error.message)) ||
-        /request deadline expired after a possible send/.test(error.message)
-    );
 }
 
 const plugin = await loadPlugin();
@@ -193,7 +138,7 @@ async function measureTier(tier: ScaleTier): Promise<number> {
     const sessionId = `scale-opencode-${tier}`;
     const dataDir = mkdtempSync(join(os.tmpdir(), `eidnara-scale-${tier}-`));
     const projectRoot = mkdtempSync(join(os.tmpdir(), "eidnara-scale-project-"));
-    seed(dataDir, sessionId, covered / 2);
+    seedCoverage(evalRunnerBin, dataDir, sessionId, covered / 2);
     const stack = await HermeticHostStack.start({ dataDir, fixtureBin, startTimeoutMs: 120_000 });
     const client = plugin.createHostModuleClient(stack.connectionFile);
     let pass: PassObservation = { exchanged: [] };
@@ -259,15 +204,6 @@ async function measureTier(tier: ScaleTier): Promise<number> {
             const boundary = JSON.stringify(state.boundary ?? null);
             const published = output.messages[turn === 0 ? 0 : covered] !== head;
             const ok = pass.status === "ok" && state.failureCount === failuresBefore && published;
-            const censored = !ok && isDeadline(pass.error);
-            const refusal: PassRow["refusal"] =
-                ok || censored
-                    ? null
-                    : pass.error !== undefined
-                      ? "transport_error"
-                      : pass.status === undefined || pass.status === "ok"
-                        ? "declined"
-                        : "daemon_error";
             writer.write({
                 harness: "opencode",
                 tier,
@@ -279,8 +215,7 @@ async function measureTier(tier: ScaleTier): Promise<number> {
                         : boundary === previousBoundary && pass.action !== "HARD"
                           ? "replay"
                           : "warming",
-                outcome: ok ? "completed" : censored ? "censored" : "refused",
-                refusal,
+                ...passOutcome({ published: ok, status: pass.status, error: pass.error }),
                 response_us: responseUs,
                 service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
                 rss_bytes: process.memoryUsage.rss(),

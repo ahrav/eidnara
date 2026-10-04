@@ -100,6 +100,27 @@ describe("Pi footer per-turn work", () => {
         await agentEnd({}, counted);
         expect(statuses.at(-1)).toBe("eidnara: 30K (38%) · idle");
         expect(usageReads).toBe(0);
+
+        // A response reporting no count leaves the last reported one.
+        await messageEnd(
+            {
+                message: {
+                    role: "assistant",
+                    stopReason: "stop",
+                    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+                },
+            },
+            counted,
+        );
+        expect(statuses.at(-1)).toBe("eidnara: 30K (38%) · idle");
+        // Navigation measures again from Pi's estimate.
+        const tree = counting.handlers.get("session_tree") as (
+            event: unknown,
+            context: unknown,
+        ) => Promise<void>;
+        await tree({}, counted);
+        expect(usageReads).toBe(1);
+        expect(statuses.at(-1)).toBe("eidnara: 50K (63%) · idle");
     });
 });
 

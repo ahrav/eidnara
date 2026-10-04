@@ -278,13 +278,8 @@ export class PiRpcClient {
                 "anthropic/claude-haiku-4-5",
                 "--api-key",
                 "test-key-not-real",
-                ...(this.options.sessionPath ? ["--session", this.options.sessionPath] : []),
             ],
-            {
-                cwd: this.options.cwd ?? this.env.workdir,
-                env: childEnv(this.env),
-                stdio: ["pipe", "pipe", "pipe"],
-            },
+            { cwd: this.env.workdir, env: childEnv(this.env), stdio: ["pipe", "pipe", "pipe"] },
         );
         this.process = child;
 

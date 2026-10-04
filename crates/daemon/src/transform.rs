@@ -6237,21 +6237,22 @@ fn frozen_units_matched_to_tail(
 
 /// A revert serves every window message after the declared anchor: until the HARD that
 /// truncates the reverted rows commits, `coverage_ordinal` still counts messages the branch no
-/// longer holds, and the ordinals after the anchor reuse those numbers (spec D10, D11).
+/// longer holds, and the ordinals after the anchor reuse those numbers (spec D10, D11). A revert
+/// whose truncate committed before its fold resolves against the surviving row instead, and the
+/// HARD that `reconcile_pending` forces there recomputes the coverage.
 fn revert_output_coverage(coverage: Option<u64>, req: &TransformIngress<'_>) -> Option<u64> {
-    let anchor_end = req.coverage.as_deref().and_then(|window| {
-        matches!(
-            window.resolved.resolution,
-            crate::window_coverage::Resolution::Revert { .. }
-        )
-        .then(|| window.resolved.anchor.as_ref())
-        .flatten()
-        .and_then(|anchor| u64::try_from(anchor.end_message).ok())
-    });
-    match (coverage, anchor_end) {
-        (Some(coverage), Some(anchor_end)) => Some(coverage.min(anchor_end)),
-        (coverage, _) => coverage,
-    }
+    let anchor_end = req
+        .coverage
+        .as_deref()
+        .filter(|window| {
+            matches!(
+                window.resolved.resolution,
+                crate::window_coverage::Resolution::Revert { .. }
+            )
+        })
+        .and_then(|window| window.resolved.anchor.as_ref())
+        .and_then(|anchor| u64::try_from(anchor.end_message).ok());
+    coverage.map(|coverage| anchor_end.map_or(coverage, |end| coverage.min(end)))
 }
 
 fn is_tail(ordinal: u64, coverage: Option<u64>) -> bool {

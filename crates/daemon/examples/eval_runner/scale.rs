@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn scale_seed_writes_history_and_the_continuation_base_the_anchor_needs() {
+    fn scale_seed_writes_history_the_continuation_base_and_the_rendered_boundary() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().to_str().unwrap();
         run_seed(args(&[
@@ -171,10 +171,12 @@ mod tests {
         let store =
             MemoryStore::open(&daemon::managed_store_descriptor(root.path()).unwrap()).unwrap();
         assert_eq!(store.max_history_segment_end_ordinal("ses").unwrap(), 6);
-        assert_eq!(
-            store.load("ses").unwrap().meta.ordinal_continuation_base,
-            Some(4)
-        );
+        let loaded = store.load("ses").unwrap();
+        assert_eq!(loaded.meta.ordinal_continuation_base, Some(4));
+        assert_eq!(loaded.core.boundary_id, "m6#0");
+        assert_eq!(loaded.meta.coverage_ordinal, Some(6));
+        let anchors: Vec<(i64, String)> = store.coverage_anchor_page("ses", 0..=10, 8).unwrap();
+        assert_eq!(anchors.first(), Some(&(3, "m6#0".to_string())));
         assert!(run_seed(args(&["--state-root", path, "--session", "ses"])).is_err());
     }
 

@@ -332,6 +332,8 @@ describe.skipIf(!active)("pi folding against the direct-host fixture", () => {
             await harness.session.navigateTree("m30");
             await harness.session.prompt("before the boundary");
             const reconciling = (harness.requests.at(-1)?.messages ?? []).map(textOf);
+            // The deferring pass keeps the rendered m0 until the next pass truncates and refolds.
+            expect(segmentRanges(reconciling[0] as string)).toEqual(allRanges);
             expect(reconciling.slice(2).map(untagged)).toEqual(["before the boundary"]);
             await harness.session.prompt("again");
             const refolded = (harness.requests.at(-1)?.messages ?? []).map(textOf);
@@ -391,7 +393,11 @@ describe.skipIf(!active)("pi folding against the direct-host fixture", () => {
         try {
             await first.harness.session.prompt("in project a");
             await first.harness.dispose();
+            // Lineage formed on the session's own cwd, not the process's boot directory.
+            expect(await noteCall(client, "pi-cd", rootA)).toBeDefined();
             await expect(noteCall(client, "pi-cd", rootB)).rejects.toThrow(CROSS_ROOT);
+
+            // Pi continues a session in another directory through a runtime built for that cwd.
 
             extension.__test.clearPiEidnaraActive();
             const moved = await agent.createTestAgentSession({

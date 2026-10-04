@@ -13,21 +13,16 @@ export interface PiBranchReader {
     getEntry(id: string): SessionEntry | undefined;
 }
 
-export interface PiBranchSync {
-    visited: number;
-    /** `true` when `sync` replaced the entire index. */
-    rebuilt: boolean;
-}
-
 export class PiBranchIndex {
     private ids: string[] = [];
     private readonly positions = new Map<string, number>();
     /** Indexes of compaction entries in `ids`, ascending. */
     private compactions: number[] = [];
 
-    sync(reader: PiBranchReader): PiBranchSync {
+    /** Returns the count of entries the walk read. */
+    sync(reader: PiBranchReader): number {
         const leaf = reader.getLeafId() ?? undefined;
-        if (leaf !== undefined && this.ids.at(-1) === leaf) return { visited: 0, rebuilt: false };
+        if (leaf !== undefined && this.ids.at(-1) === leaf) return 0;
         const fresh: SessionEntry[] = [];
         let cursor = leaf;
         while (cursor !== undefined && !this.positions.has(cursor)) {
@@ -44,7 +39,7 @@ export class PiBranchIndex {
             if (entry.type === "compaction") this.compactions.push(this.ids.length);
             this.ids.push(entry.id);
         }
-        return { visited: fresh.length, rebuilt: meet < 0 };
+        return fresh.length;
     }
 
     get length(): number {
@@ -61,12 +56,6 @@ export class PiBranchIndex {
 
     latestCompaction(): number | undefined {
         return this.compactions.at(-1);
-    }
-
-    /** Ids after `id`, oldest first; every id when `id` is absent. */
-    idsAfter(id: string | undefined): string[] {
-        const index = id === undefined ? undefined : this.positions.get(id);
-        return this.ids.slice(index === undefined ? 0 : index + 1);
     }
 
     private truncate(length: number): void {
