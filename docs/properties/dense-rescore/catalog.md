@@ -166,7 +166,7 @@ Reachability: test-only - `CandidateCapacity::new`
 (`crates/retrieval/src/dense/capacity.rs:38`) has no production caller at this
 base.
 Status: active
-Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
+Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
 `the_capacity_is_ceil_alpha_times_k_and_never_below_k`,
 `the_capacity_takes_the_ceiling_of_the_exact_binary_product`,
 `a_malformed_alpha_refuses_before_zero_k_is_considered`,
@@ -174,7 +174,11 @@ Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `an_unrepresentable_product_refuses_before_the_cap_is_consulted`, and
 `a_pool_over_the_cap_refuses_and_the_cap_itself_is_admitted`,
 `a_large_alpha_shifts_exactly_or_refuses`, and the seeded property
-`the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas`.
+`the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas`
+exercise the arithmetic and the refusal precedence over three scalars;
+`CandidateCapacity::new` has no production caller at this base, so the clause
+that a pool is sized from the checked capacity before any R-sized state exists
+waits for #610's scan witness.
 Guarantee: `R = ceil(alpha * K)` is computed exactly; alpha that is not finite
 or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.

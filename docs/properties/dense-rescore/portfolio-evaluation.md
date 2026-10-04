@@ -97,11 +97,11 @@ a wildcard pass that questioned the framing itself.
 1. **The capacity slug claims an ordering nothing here observes.**
    `dense-candidate-capacity-is-checked-before-allocation` tests arithmetic
    and refusal precedence over three scalars (`capacity.rs:38-61`); the
-   allocation half is deferred to "#610's scan witness". Either rename to a
-   slug the U1 tests discharge, for example
-   `dense-candidate-capacity-is-exact-and-refuses-in-order`, or keep the slug
-   and mark `Exercised: partial - arithmetic and precedence; allocation
-   witness pending #610`.
+   allocation half is deferred to "#610's scan witness". The record now
+   carries `Exercised: partial` naming the covered clauses and the pending
+   witness. Whether to also rename the slug to one the U1 tests discharge,
+   for example `dense-candidate-capacity-is-exact-and-refuses-in-order`, or
+   keep the specification's framing until #610 lands, is the human decision.
 2. **The scope sentence outruns the portfolio.** The catalog says the part
    owns "their resource and cancellation obligations", yet every record is
    `always` over a pure function: the semantics distribution is `always` 5,
