@@ -1365,7 +1365,13 @@ export function createTransformSessionClient(
                         ),
                 );
                 const candidate = application.values;
-                const reserved = captureReserved(candidate, lease);
+                // The previous-output check above ran with no source code since, so values kept
+                // from the previous output reuse its snapshots.
+                const reserved = captureReserved(
+                    candidate,
+                    lease,
+                    response.previous_output_revision !== undefined ? previousApplied : undefined,
+                );
                 const applied: AppliedOutput | undefined = reserved && {
                     revision: application.outputRevision,
                     values: candidate,

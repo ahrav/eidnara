@@ -28,6 +28,8 @@ const ARRAY_SYMBOLS = Object.getOwnPropertySymbols(Array.prototype).concat(
 
 export interface MessageContentSnapshot {
     fields: SnapshotField[];
+    /** The walk's spend on a captured member. */
+    bytes?: number;
 }
 
 /**
@@ -522,13 +524,23 @@ export function snapshotFieldsEqual(
     return true;
 }
 
-/**
- * Pending text is flushed once it reaches this many UTF-16 units, and a longer string is hashed
- * in slices of this size, so one large member never builds a whole-member hash input.
- */
+/** Long strings are hashed in slices of this many UTF-16 units. */
 const HASH_CHUNK_UNITS = 1 << 16;
-/** Below this length a string stays in the pending text, which saves a hash update per key. */
+/** Below this length a string stays in the pending units, which saves a hash update per key. */
 const UTF8_HASH_MIN_UNITS = 256;
+/** Pending token units are flushed to the hash once this many are buffered. */
+const PENDING_HASH_UNITS = 1 << 12;
+
+interface Sha256 {
+    update(data: string | Uint8Array, encoding?: "utf8" | "utf16le"): void;
+    copy(): Sha256;
+    digest(encoding: "base64"): string;
+}
+const BunCryptoHasher = (
+    globalThis as { Bun?: { CryptoHasher?: new (algorithm: "sha256") => Sha256 } }
+).Bun?.CryptoHasher;
+const sha256 = (): Sha256 =>
+    BunCryptoHasher ? new BunCryptoHasher("sha256") : createHash("sha256");
 
 /**
  * Streams member tapes into one SHA-256 chain. Every token is self-delimiting: a string carries
@@ -539,58 +551,77 @@ const UTF8_HASH_MIN_UNITS = 256;
  * ends it. Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
  */
 class TapeHasher {
-    private readonly hash = createHash("sha256");
-    private text = "";
+    private readonly hash = sha256();
+    private readonly pending = new Uint16Array(PENDING_HASH_UNITS);
+    private pendingUnits = 0;
     private readonly symbols: symbol[] = Object.setPrototypeOf([], null);
     private count = 0;
     private bytes = 0;
 
     readonly push = (value: SnapshotField): void => {
         if (typeof value === "string") {
-            if (
-                value.length >= UTF8_HASH_MIN_UNITS &&
-                value.length < HASH_CHUNK_UNITS &&
+            const length = value.length;
+            if (length < UTF8_HASH_MIN_UNITS) {
+                this.token(0x73, length, 0x3a);
+                this.append(value);
+            } else if (
+                length < HASH_CHUNK_UNITS &&
                 (value as string & { isWellFormed(): boolean }).isWellFormed()
             ) {
-                this.text += `u${value.length}:`;
+                this.token(0x75, length, 0x3a);
                 this.flush();
                 this.hash.update(value, "utf8");
-            } else if (value.length < HASH_CHUNK_UNITS) this.text += `s${value.length}:${value}`;
-            else {
-                this.text += `s${value.length}:`;
+            } else {
+                this.token(0x73, length, 0x3a);
                 this.flush();
-                for (let start = 0; start < value.length; start += HASH_CHUNK_UNITS)
+                for (let start = 0; start < length; start += HASH_CHUNK_UNITS)
                     this.hash.update(value.slice(start, start + HASH_CHUNK_UNITS), "utf16le");
             }
-        } else if (typeof value === "number")
-            this.text += Object.is(value, -0) ? "-" : `n${value};`;
-        else if (typeof value === "boolean") this.text += value ? "t" : "f";
-        else if (value === null) this.text += "z";
-        else if (value === ARRAY) this.text += "[";
-        else if (value === END_ARRAY) this.text += "]";
-        else if (value === OBJECT) this.text += "{";
-        else if (value === END_OBJECT) this.text += "}";
-        else if (value === EXTRA_KEY) this.text += "+";
+        } else if (typeof value === "number") {
+            if (Object.is(value, -0)) this.unit(0x2d);
+            else this.token(0x6e, value, 0x3b);
+        } else if (typeof value === "boolean") this.unit(value ? 0x74 : 0x66);
+        else if (value === null) this.unit(0x7a);
+        else if (value === ARRAY) this.unit(0x5b);
+        else if (value === END_ARRAY) this.unit(0x5d);
+        else if (value === OBJECT) this.unit(0x7b);
+        else if (value === END_OBJECT) this.unit(0x7d);
+        else if (value === EXTRA_KEY) this.unit(0x2b);
         else {
-            this.text += "y";
+            this.unit(0x79);
             this.symbols[this.symbols.length] = value;
         }
-        // A dense run of scalars is bounded here; a member boundary alone could buffer megabytes.
-        if (this.text.length >= HASH_CHUNK_UNITS) this.flush();
     };
 
     /** Closes one member whose walk spent `bytes`. */
     end(bytes: number): void {
-        this.text += "|";
+        this.unit(0x7c);
         this.count += 1;
         this.bytes += bytes;
-        if (this.text.length >= HASH_CHUNK_UNITS) this.flush();
+    }
+
+    private unit(code: number): void {
+        if (this.pendingUnits === PENDING_HASH_UNITS) this.flush();
+        this.pending[this.pendingUnits++] = code;
+    }
+
+    /** The `tag` unit, the decimal text of `value`, then the `close` unit. */
+    private token(tag: number, value: number, close: number): void {
+        this.unit(tag);
+        this.append(String(value));
+        this.unit(close);
+    }
+
+    private append(text: string): void {
+        if (this.pendingUnits + text.length > PENDING_HASH_UNITS) this.flush();
+        for (let index = 0; index < text.length; index += 1)
+            this.pending[this.pendingUnits++] = text.charCodeAt(index);
     }
 
     private flush(): void {
-        if (this.text.length === 0) return;
-        this.hash.update(this.text, "utf16le");
-        this.text = "";
+        if (this.pendingUnits === 0) return;
+        this.hash.update(new Uint8Array(this.pending.buffer, 0, this.pendingUnits * 2));
+        this.pendingUnits = 0;
     }
 
     add(snapshot: TapedMember): void {
@@ -686,20 +717,25 @@ const PREFIX_CHANGED = Symbol("prefix_changed");
  * the charge an inspection without wire estimates reports. The walk and the reservation form one
  * synchronous section, so no other reservation runs while the capture is unreserved. `undefined`
  * when the lease is cancelled, a value is not referenceable, or the headroom is short; nothing is
- * then reserved.
+ * then reserved. `unchanged` is a capture `capturedMessagesUnchanged` confirmed for its values
+ * with no source code run since; a member among those values takes its snapshot and spend.
  */
 export function captureReserved(
     messages: unknown,
     lease: CaptureLease,
+    unchanged?: { values: readonly unknown[]; capture: CapturedMessages },
 ): { capture: CapturedMessages; bytes: number } | undefined {
     if (lease.signal.aborted) return undefined;
     const walker = new ReferenceableWalk(
         Math.min(lease.remainingBytes, TRANSFORM_CAPTURE_MAX_BYTES),
         false,
     );
+    const reuse = new Map<unknown, MessageContentSnapshot | undefined>();
+    for (let index = 0; unchanged && index < unchanged.values.length; index += 1)
+        reuse.set(unchanged.values[index], unchanged.capture.snapshots[index]);
     let capture: CapturedMessages;
     try {
-        capture = walkMembers(walker, messages);
+        capture = walkMembers(walker, messages, undefined, reuse);
     } catch (error) {
         if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
             return undefined;
@@ -771,6 +807,7 @@ function walkMembers(
     walker: ReferenceableWalk,
     messages: unknown,
     digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
+    reuse?: ReadonlyMap<unknown, MessageContentSnapshot | undefined>,
 ): CapturedMessages {
     const verifier = digest?.verifier;
     const verifiedCount = verifier?.expected.count ?? 0;
@@ -790,13 +827,18 @@ function walkMembers(
             } else {
                 if (index === verifiedCount && verifier && !verifier.matches())
                     throw PREFIX_CHANGED;
-                const before = walker.bytes;
-                const snapshot = walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`));
+                let snapshot = reuse?.get(slot.value);
+                if (snapshot?.bytes !== undefined) walker.spend(snapshot.bytes);
+                else {
+                    const before = walker.bytes;
+                    snapshot = walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`));
+                    snapshot.bytes = walker.bytes - before;
+                }
                 defineSlot(snapshots, index, snapshot);
                 if (digest)
                     defineSlot(digest.taped, digest.taped.length, {
                         fields: snapshot.fields,
-                        bytes: walker.bytes - before,
+                        bytes: snapshot.bytes,
                     });
             }
             defineSlot(members, index, slot.value);
