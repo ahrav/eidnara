@@ -716,9 +716,18 @@ and `a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete`;
 `the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`,
 `a_selector_only_request_is_never_embedded_and_leaves_the_dense_lane_undeclared`,
 and
-`an_artifact_fault_during_inference_is_embedding_failed_and_the_lane_is_disabled_after`.
-Guarantee: An embedding lane that is busy, starting, disabled, or failing, or
-that refuses the input, degrades the request to the exact and lexical fusion
+`an_artifact_fault_during_inference_is_embedding_failed_and_the_lane_is_disabled_after`;
+`crates/host-runtime/src/local_embeddings/mod.rs`
+`queries_and_batch_texts_share_one_native_call_at_a_time` (a full query queue
+is `LaneBusy`) and
+`a_timed_out_query_keeps_its_grant_and_permit_until_the_native_call_returns`
+(the component reports `LaneBusy` when the wait reaches the deadline it was
+given; the route passes its own request deadline, so the request then ends as
+`deadline`, as `the_query_is_embedded_by_the_lane_before_the_scan_and_the_lane_degrades_typed`
+asserts).
+Guarantee: An embedding lane that is busy (its query queue is full when the
+query asks to wait), starting, disabled, or failing, or that refuses the input,
+degrades the request to the exact and lexical fusion
 with the dense lane reported `unavailable` and a closed reason taken from the
 lane's typed refusal, within the original deadline and never as `deadline` or
 as dense completion; a request without prose outside its selector mentions is

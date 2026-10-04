@@ -708,6 +708,12 @@ async fn production_bundle_from_environment_certifies_offline() {
     assert_eq!(lane.model, "gte-modernbert-base-f32");
     assert_eq!(lane.dims, 768);
     assert_eq!(lane.table_epoch, 1);
+    // Certification built the serving session, so both ran with the process-fixed thread count.
+    assert_eq!(
+        host_runtime::local_embeddings::inference::CAPTURED_INTRA_THREADS
+            .load(std::sync::atomic::Ordering::Relaxed),
+        host_runtime::local_embeddings::inference::inference_threads()
+    );
 
     let corpus: serde_json::Value = serde_json::from_slice(
         &std::fs::read(bundle_dir.join("corpus.json")).expect("production corpus"),

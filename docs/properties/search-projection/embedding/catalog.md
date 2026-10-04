@@ -129,7 +129,7 @@ cannot report the bounded-liveness or resource checks as passed.
 | [embedding-completion-is-identity-fenced](#embedding-completion-is-identity-fenced) | safety | test-only | always | active | high |
 | [embedding-complete-requires-durable-vector](#embedding-complete-requires-durable-vector) | safety | test-only | always | active | high |
 | [embedding-restart-retries-durable-pending](#embedding-restart-retries-durable-pending) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
-| [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
+| [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | default-production | always (per admitted episode; RP2.9-blocked) | active | medium |
 | [embedding-identity-gc-preserves-live-work](#embedding-identity-gc-preserves-live-work) | safety | test-only | always | active | medium |
 | [embedding-supervisor-shares-budget-and-joins](#embedding-supervisor-shares-budget-and-joins) | safety | test-only | always | active | medium |
 | [embedding-dispatch-scan-makes-bounded-progress](#embedding-dispatch-scan-makes-bounded-progress) | liveness | test-only | always | active | high |
@@ -364,12 +364,18 @@ Open questions:
 ### embedding-backfill-preserves-query-admission
 
 Type: liveness
-Reachability: test-only - no production RP2.1 priority admission exists. Current
-query and batch workers share FIFO CPU acquisition at
-`crates/host-runtime/src/local_embeddings/mod.rs:682-691`, `:843-851`.
+Reachability: default-production - every native call takes a grant from one
+scheduler that serves queries first and a background text after eight query
+grants (`crates/host-runtime/src/local_embeddings/scheduler.rs:50-59`,
+`:126-172`, `:188-200`). Routed and in-process queries wait as `Query`
+(`mod.rs:1117-1173`, `:511-543`); batch texts wait one text at a time as
+`Background` (`mod.rs:907-940`).
 Status: active
-Exercised: not yet - a saturated product backfill workload and approved query
-service bound are missing.
+Exercised: partial - the scheduler queues, priority, the ninth grant, and the
+fifth-waiter refusal behind a background holder are constructed
+(`scheduler.rs:271-315`, `mod.rs:1798-1850`,
+`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). A saturated
+product backfill workload and the approved service bound are missing.
 Guarantee: Backfill saturation preserves the declared query admission capacity
 and bounded service opportunity under the approved workload contract.
 Check: `always` - with a healthy lane, query occupancy below L.query_capacity,
@@ -384,9 +390,14 @@ Required faults and enabling state: Bounded saturated backfill, a query slot
 available, an independently observed query arrival, and native calls completing
 within the declared service bound; stop pressure for the recovery observation.
 Confidence: medium - [evidence](evidence/embedding-backfill-preserves-query-admission.md).
-P1 line 149 requires admission preservation; FIFO source does not establish it.
-Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:186-233` asserts
-mixed FIFO order, unaudited. No product query-priority check exists.
+P1 line 149 requires admission preservation; the query-first scheduler with its
+fairness grant is source-verified, and the saturated-workload service bound is
+not yet measured.
+Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237` asserts a
+waiting query takes the slot ahead of a waiting batch text;
+`crates/host-runtime/src/local_embeddings/scheduler.rs:271-315` asserts query-first
+FIFO order, the ninth grant to background, and the fifth-waiter refusal. No
+saturated-workload service-bound check exists.
 Impact: Offline backfill consumes the useful lifetime of interactive retrieval.
 Open questions:
 
@@ -430,9 +441,13 @@ Open questions:
 ### embedding-supervisor-shares-budget-and-joins
 
 Type: safety
-Reachability: test-only - no production RP2.1 embedding supervisor slice or
-LocalEmbeddings EvalBudget bridge exists. The existing scheduler and kernel budget are
-separate paths (`crates/daemon/src/memory_classifier_scheduler.rs:163-220`;
+Reachability: test-only - no production RP2.1 embedding supervisor slice exists.
+The fused route now awaits in-process query embedding under its request budget
+before any scan unit (`crates/daemon/src/query_route.rs:1650-1652`, `:581-602`), and a
+started native call keeps its grant and admission permit after its caller's
+deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1117-1173`). The
+existing scheduler and kernel budget are separate paths
+(`crates/daemon/src/memory_classifier_scheduler.rs:163-220`;
 `crates/kernel/src/applicability/checkout.rs:146-203`).
 Status: active
 Exercised: not yet - shared-budget stage observation and embedding supervisor
@@ -455,9 +470,13 @@ observed cancellation/deadline crossing before the gate is released.
 Confidence: medium - [evidence](evidence/embedding-supervisor-shares-budget-and-joins.md).
 P2 line 53 and P7 line 81 require composition; existing ownership paths are
 source-verified but not composed for RP2.1.
-Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:236-309` and
+Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:240-313` and
 `crates/daemon/src/memory_classifier_scheduler.rs:1180-1254` are unaudited cancellation
-checks. No shared embedding/SQLite/dense budget check exists.
+checks. `crates/host-runtime/src/local_embeddings/mod.rs:1853-1889` asserts a timed-out
+query keeps its grant and permit until the native call returns;
+`crates/host-runtime/src/local_embeddings/scheduler.rs:318-375` and `scheduler.rs:427-458` asserts cancelled,
+handed-but-untaken, and closed waiters release exactly once. No shared
+embedding/SQLite/dense budget check exists.
 Impact: Deadline renewal, orphaned inference, early capacity reuse, or maintenance
 that monopolizes the daemon.
 Open questions:

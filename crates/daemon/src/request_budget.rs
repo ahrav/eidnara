@@ -74,6 +74,18 @@ impl SharedBudget {
         }
     }
 
+    /// `race` drops `work` at cancellation and answers `None`, for work whose physical execution is owned elsewhere and survives its future.
+    pub async fn race<T>(&self, work: impl Future<Output = T>) -> Option<T> {
+        tokio::select! {
+            biased;
+            output = work => Some(output),
+            () = self.cancel.cancelled() => {
+                self.exhaustion();
+                None
+            }
+        }
+    }
+
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -181,6 +193,31 @@ mod tests {
     fn signal() -> (CancellationToken, CancelSignal) {
         let token = CancellationToken::new();
         (token.clone(), CancelSignal::observing(token))
+    }
+
+    /// `race` drops its work at cancellation, so a queued wait the work holds is released, and the budget reports the cancellation.
+    #[tokio::test]
+    async fn race_drops_its_work_at_cancellation() {
+        struct Dropped(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let (token, cancel) = signal();
+        let budget =
+            RequestBudget::derive(cancel, Some(60_000), Some(Duration::from_secs(60))).unwrap();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = Dropped(std::sync::Arc::clone(&dropped));
+        let work = async move {
+            let _held = held;
+            std::future::pending::<()>().await
+        };
+        let raced = budget.shared().race(work);
+        token.cancel();
+        assert_eq!(raced.await, None);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(budget.exhaustion(), Some(Exhaustion::Cancelled));
     }
 
     #[test]

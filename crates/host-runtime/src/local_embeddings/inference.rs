@@ -207,7 +207,24 @@ fn verify_ort_library(identity: &OrtIdentity) -> Result<VerifiedOrtLibrary, Infe
     Ok(VerifiedOrtLibrary { file })
 }
 
-/// The model mutex serializes `TextEmbedding::embed` because it requires `&mut`; the CPU permit prevents callers from queueing on that mutex.
+/// Intra-op threads for every native session in this process, fixed at first use, so the lane that certifies a bundle and the lane that serves it run with the same count.
+pub fn inference_threads() -> usize {
+    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THREADS.get_or_init(|| {
+        threads_for(std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+    })
+}
+
+/// Half the host's parallelism, at least one thread and at most four.
+fn threads_for(parallelism: usize) -> usize {
+    (parallelism / 2).clamp(1, 4)
+}
+
+/// The intra-op thread count the last native session was built with; zero before any was built.
+#[cfg(any(test, feature = "test-support"))]
+pub static CAPTURED_INTRA_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Shortens `text` to at most `max_bytes` without splitting a character.
 fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) {
     let mut end = text.len().min(max_bytes);
@@ -312,10 +329,12 @@ impl Backend {
         }
         model.output_key = Some(output_key);
 
+        let threads = inference_threads();
+        #[cfg(any(test, feature = "test-support"))]
+        CAPTURED_INTRA_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
         let options = InitOptionsUserDefined::new()
             .with_max_length(manifest.max_tokens as usize)
-            // One intra-op thread matches the single CPU inference permit.
-            .with_intra_threads(1);
+            .with_intra_threads(threads);
         let embedder = TextEmbedding::try_new_from_user_defined(model, options)
             .map_err(|e| InferenceError::Artifact(format!("model construction failed: {e}")))?;
 
@@ -620,6 +639,29 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_thread_count_is_half_the_parallelism_within_one_to_four() {
+        let table = [
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 2),
+            (7, 3),
+            (8, 4),
+            (9, 4),
+            (64, 4),
+        ];
+        for (parallelism, threads) in table {
+            assert_eq!(
+                threads_for(parallelism),
+                threads,
+                "parallelism {parallelism}"
+            );
+        }
+        assert_eq!(inference_threads(), inference_threads());
+        assert!((1..=4).contains(&inference_threads()));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

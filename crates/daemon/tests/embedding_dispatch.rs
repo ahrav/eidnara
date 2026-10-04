@@ -31,8 +31,8 @@ use retrieval::vectors::encode;
 use rusqlite::{Connection, OptionalExtension};
 use support::embedding_fixtures::{
     Corpus, DAY_MS, DIMS, FINGERPRINT, GENERATION, GateGuard, MODEL, NOW, PROJECT, PROJECT_B,
-    SCOPE, SCOPE_B, TestEngine, bounds, budget, component, eligibility, generation, grant, inspect,
-    lane, occurrence_of, search_path,
+    SCOPE, SCOPE_B, TestEngine, bounds, budget, component, component_with_lane, eligibility,
+    generation, grant, inspect, lane, occurrence_of, search_path,
 };
 
 const CHILD_ROOT: &str = "EIDNARA_EMBEDDING_DISPATCH_CHILD_ROOT";
@@ -1275,6 +1275,62 @@ async fn input_outside_the_manifest_envelope_stops_without_inference() {
     );
     assert_eq!(ledger.state, "failed");
     assert_eq!(ledger.attempts, 0);
+}
+
+/// The product cap holds at 512 exact tokens even when the lane's window is wider: 511 and 512 embed, 513 stops as `input_over_limit` with no inference and keeps its lexical occurrence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backfill_inputs_past_512_exact_tokens_stop_as_over_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed();
+    let words = |count: usize| vec!["word"; count].join(" ");
+    let under = corpus.publish("m0", &words(511));
+    let at = corpus.publish("m1", &words(512));
+    let over = corpus.publish("m2", &words(513));
+    let (projection, rows) = corpus.bootstrap(dir.path());
+    let engine = TestEngine::new();
+    let mut wide = lane(FINGERPRINT);
+    wide.max_tokens = 8192;
+    let local_embeddings = component_with_lane(&engine, LocalEmbeddingsLimits::default(), wide);
+
+    let (end, events) = pass(&corpus, &projection, &local_embeddings, &bounds(), NOW);
+    assert_eq!(end, None);
+    let over_ledger = ledger(dir.path(), occurrence_of(&rows, &over));
+    assert_eq!(
+        stopped(&events),
+        vec![(over_ledger.job_id.clone(), "input_over_limit".to_string())]
+    );
+    assert_eq!(over_ledger.attempts, 0, "a refused input is never charged");
+    for embedded in [&under, &at] {
+        assert_eq!(
+            ledger(dir.path(), occurrence_of(&rows, embedded)).state,
+            "embedded"
+        );
+    }
+    assert_eq!(engine.calls(), 2, "one native call per admitted text");
+    let lexical: i64 = inspect(dir.path())
+        .query_row(
+            "SELECT COUNT(*) FROM occurrences WHERE occurrence_id=?1",
+            [occurrence_of(&rows, &over)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        lexical, 1,
+        "the lexical occurrence survives the dense refusal"
+    );
+    let over_limit: i64 = inspect(dir.path())
+        .query_row(
+            "SELECT COUNT(*) FROM embedding_jobs WHERE stop_reason='input_over_limit'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        over_limit, 1,
+        "the over-limit disposition is counted on its own"
+    );
+    drop(projection);
 }
 
 /// AC3: input the lane cannot embed makes zero inference calls, stops with a reason that names no content, and leaves the lexical occurrence in place; reopening does not resume it.

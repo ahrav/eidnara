@@ -10,14 +10,17 @@ Reachability is test-only because no production RP2.1 priority driver exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/local_embeddings/mod.rs:206-225` has separate query admission
-  capacity and batch JobTable bounds but one shared FIFO CPU semaphore.
-- `mod.rs:634-668` computes the query deadline before nonblocking admission.
-- `mod.rs:678-722` waits for CPU within the tracked query worker and checks the
-  deadline again before native work.
-- `mod.rs:843-871` registers batch workers on the same CPU semaphore.
-- `crates/host-runtime/tests/local_embeddings_protocol.rs:186-233` constructs mixed
-  query/batch order and asserts query, query, batch, query. It tests FIFO.
+- `crates/host-runtime/src/local_embeddings/mod.rs:229-247` keeps separate query
+  admission capacity and batch JobTable bounds, and one inference scheduler for
+  every native call. (Corrected: the earlier `:206-225` FIFO semaphore is gone.)
+- `mod.rs:1176-1210` computes the query deadline before nonblocking admission.
+- `mod.rs:1117-1173` waits for a query grant within the tracked query worker and
+  checks the deadline again before native work.
+- `mod.rs:1344-1386` and `:907-940` give batch workers one background grant per
+  text.
+- `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237` constructs mixed
+  query/batch order and asserts query, query, query, batch: waiting queries go
+  ahead of a waiting batch text.
 - `crates/host-runtime/src/local_embeddings/bundle.rs:582-604` checks coexistence of
   query memory, queue metadata, and scratch. It does not impose query priority.
 - Existing admission and request records are reused for these local gates.
@@ -84,3 +87,20 @@ bounds block acceptance; optional/unreached inference cannot satisfy the
   weighted scheduling, a reserve size, or a starvation timeout.
   The shared RP2.7 query-lane prerequisite and RP2.1.U3 priority integration
   must both remain explicit in the implementation handoff.
+
+### Q: What does the inference scheduler change for this property?
+
+The shared FIFO CPU semaphore is replaced by one scheduler with FIFO query and
+background queues (`crates/host-runtime/src/local_embeddings/scheduler.rs:39-59`).
+A free slot goes to the oldest query; after eight query grants made while
+background work waits, the next grant goes to the oldest background waiter
+(`scheduler.rs:50-59`). At most `max_waiting_queries` queries wait, and the holder
+is not a waiter (`scheduler.rs:139-141`). Batch workers take one grant per text
+(`mod.rs:907-940`), so a query behind `n` earlier queries waits behind the text
+the slot already serves and at most `n / 8 + 1` background texts. With the four
+waiters the default scratch headroom allows (`docs/host-wire-protocol.md` §7.5.1),
+that is one fairness grant. The mixed-order
+test now asserts query, query, query, batch
+(`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The saturated
+product workload and the RP2.9 service bound are still missing, so the record
+stays `partial`.

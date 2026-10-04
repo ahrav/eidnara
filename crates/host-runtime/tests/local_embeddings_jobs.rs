@@ -340,9 +340,13 @@ async fn jobs_survive_route_loss_and_serve_a_fresh_route() {
 async fn cancelled_query_before_cpu_admission_runs_no_inference() {
     let engine = DeterministicEngine::new();
     engine.set_delay(Duration::from_millis(400));
+    // One query may wait behind the running batch text; the holder is not a waiter.
     let host = LocalEmbeddingsHost::start(ready_component(
         engine.clone(),
-        LocalEmbeddingsLimits::default(),
+        LocalEmbeddingsLimits {
+            max_waiting_queries: 1,
+            ..LocalEmbeddingsLimits::default()
+        },
     ))
     .await;
     let mut client = host.client().await;
