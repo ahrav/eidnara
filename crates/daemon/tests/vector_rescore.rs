@@ -1164,3 +1164,60 @@ fn the_alpha_sweep_keeps_candidate_coverage_and_rescored_recall_as_separate_stag
     // The stage helper gives an empty baseline no value rather than a perfect score.
     assert_eq!(fraction(&[], &[]), None);
 }
+
+/// The budget is read after the read observer runs, so a cancellation delivered at an original read ends the request before that row's bytes are read.
+#[test]
+fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let budget = EvalBudget::unbounded();
+    let expected = fixture.expected();
+    let request = CompressedRequest {
+        expected: &expected,
+        query: &axis(0),
+        authority: projection.authority(),
+        capacity: capacity(2, 3),
+        bounds: scan_bounds(),
+        max_entries: NonZeroUsize::new(4096).unwrap(),
+        max_layers: NonZeroUsize::new(ROOMY.max_layers).unwrap(),
+        max_pinned_bytes: ROOMY.max_pinned_bytes,
+        max_read_bytes: ROOMY.max_read_bytes,
+    };
+    // A row rewritten to NaN fails its decode, so a read that happens after the cancellation shows as corruption and a quarantine.
+    let mut poison = rewrite_rows(&fixture, &base.digest, |row| {
+        row[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    });
+    let mut reads = 0usize;
+    let outcome = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank_compressed(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &budget,
+                &fixture.admission,
+                &mut |event| {
+                    if matches!(event, RescoreEvent::ReadOriginal { .. }) {
+                        reads += 1;
+                        budget.cancel();
+                        poison();
+                    }
+                },
+            ))
+        })
+        .unwrap();
+    assert_eq!(outcome.unwrap_err(), CompressedRefusal::Budget);
+    assert_eq!(
+        reads, 1,
+        "the first original read is observed, then the request ends"
+    );
+    assert!(!view.is_quarantined(), "the poisoned row was never read");
+    assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+}

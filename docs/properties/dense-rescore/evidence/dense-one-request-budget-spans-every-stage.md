@@ -13,7 +13,10 @@ compressed scan, and the original reads.
   unit.
 - The unit runs `execute`, whose projection read is `read_under` with the
   budget's stop predicate; the walk checks the budget at every row and batch;
-  `rank_compressed` checks it before every original read.
+  `rank_compressed` checks it before every original read, on both sides of
+  the read's observer (`crates/daemon/src/vector_reader.rs:900`, `:909`), so a
+  cancellation delivered at `ReadOriginal` ends the request before the row's
+  bytes are read.
 - The kernel judges each batch with `judge_eligibility_within_budget`.
 
 ## Failure scenario

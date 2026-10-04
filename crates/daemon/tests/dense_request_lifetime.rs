@@ -707,3 +707,68 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
         .expect("the host released the daemon");
     daemon.shutdown().await;
 }
+
+/// A request that embeds no prose ranks no dense lane, so its unit holds no clone of the installed view: uninstalling the view while that unit is pending leaves the test's `Arc` as the last one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_that_ranks_no_dense_lane_holds_no_view() {
+    let (daemon, ids) = served_daemon().await;
+    let incarnation = daemon
+        .store()
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+        .unwrap();
+    let (store, view) = composition(&incarnation, &ids);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(route_limits()))
+        .unwrap();
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::new(FixedEmbedder)));
+    daemon
+        .handler()
+        .set_dense_vectors(Some(DenseVectors::new(
+            Arc::clone(&view),
+            store.admission.clone(),
+            compressed_limits(),
+        )))
+        .unwrap();
+    let project = daemon.project().to_owned();
+    let daemon = Arc::new(daemon);
+
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let submitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pending = {
+        let daemon = Arc::clone(&daemon);
+        let gate = Arc::clone(&gate);
+        let submitted = Arc::clone(&submitted);
+        let mut body: Value = serde_json::from_slice(&request(&project)).unwrap();
+        body["query"] = json!("id:rule");
+        tokio::spawn(async move { daemon.outcome_gated(body, gate, submitted).await })
+    };
+    let started = Instant::now();
+    while submitted.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the unit is submitted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    daemon.handler().set_dense_vectors(None).unwrap();
+    assert_eq!(
+        Arc::strong_count(&view),
+        1,
+        "a request that ranks no dense lane holds no clone of the view"
+    );
+    gate.add_permits(1);
+    let daemon::dispatch::PreparedOutcome::Response(output) = watchdog(pending).await.unwrap()
+    else {
+        panic!("the selector-only request answers");
+    };
+    let answer = output.json_for_test().unwrap().clone();
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert_eq!(answer["lanes"]["dense"]["status"], "undeclared", "{answer}");
+    let daemon = Arc::try_unwrap(daemon)
+        .ok()
+        .expect("the request released the daemon");
+    daemon.shutdown().await;
+}

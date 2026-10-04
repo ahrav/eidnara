@@ -3500,6 +3500,22 @@ impl Handler {
         (outcome, units.load(Ordering::SeqCst))
     }
 
+    /// `run_unit` counts submissions in `submitted` and retains `work` and its captured state while waiting for `gate` to grant a permit or close.
+    pub async fn dispatch_value_for_test_gated(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        gate: Arc<tokio::sync::Semaphore>,
+        submitted: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> PreparedOutcome {
+        let runner = transform_unit::DetachedRunner {
+            units: submitted,
+            gate: Some(gate),
+            ..Default::default()
+        };
+        self.dispatch_value_on(route, request, runner).await
+    }
+
     async fn dispatch_value_on(
         &self,
         route: RouteHandle,

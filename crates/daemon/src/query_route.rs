@@ -1962,12 +1962,15 @@ impl HandlerCore {
             drop(budget);
             return terminal_response(terminal);
         }
-        // Cloned once the embedding settled and moved into the unit, so the view's pins and charges stay with the physical work.
-        let dense_vectors = self
-            .dense_vectors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        // For `Embedded::Vector`, the unit retains the cloned view, keeping its pins and charges held until the unit exits.
+        let dense_vectors = match &embedded {
+            Embedded::Vector(_) => self
+                .dense_vectors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            Embedded::Undeclared | Embedded::Unavailable(_) => None,
+        };
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {
                 Ok(reader) => reader,

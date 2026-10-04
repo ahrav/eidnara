@@ -619,7 +619,8 @@ Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
 and `a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline`;
 `crates/daemon/tests/dense_request_lifetime.rs`
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
-through a real host, client, and `RequestCtx`.
+through a real host, client, and `RequestCtx`; `vector_rescore.rs`
+`cancellation_at_an_original_read_ends_the_request_before_the_row_is_read`.
 Guarantee: The request's one `EvalBudget`, derived with its absolute
 deadline before the dense unit is submitted, stops the compressed scan, the
 canonical eligibility batches, and the original reads; a cancellation at any
@@ -647,7 +648,8 @@ ignores its cancellation.
 Open questions:
 - Parent Q5 approval of the bridge and the cancellation checkpoints, which are
   the ranked walk's check every sixteen visited rows (`BUDGET_STRIDE`), its
-  batch checks, and one check per original read (needs human input).
+  batch checks, and the checks around each original read's observer
+  (`vector_reader.rs:900`, `:909`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.
@@ -658,14 +660,19 @@ Type: safety
 Reachability: test-only - as above.
 Status: active
 Exercised: yes - `crates/daemon/tests/dense_request_lifetime.rs`
-`client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`;
+`client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
+and `a_request_that_ranks_no_dense_lane_holds_no_view`;
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`.
-Guarantee: The dense unit owns a clone of the view's `Arc`, taken before the
-unit is submitted (`query_route.rs:1962`), so the view's pins and the
-ranking's `Scratch` and `RowBuffers` reservations stay charged until the
-blocking work returns; a cancelled request settles only after that work ends,
-and every charge is released when it does.
+Guarantee: The dense unit of a request whose embedding settled as a vector
+owns a clone of the view's `Arc`, taken before the unit is submitted
+(`query_route.rs:1966`), so the view's pins and the ranking's `Scratch` and
+`RowBuffers` reservations stay charged until the blocking work returns; a
+cancelled request settles only after that work ends, and every charge is
+released when it does. A request whose embedding is undeclared or unavailable
+holds no clone, so an uninstall while its unit is pending leaves the retired
+view's teardown to the clones that rank. Corrected from `query_route.rs:1962`,
+the clone's line before the match on `embedded`.
 Check: `always` - with the ranking thread held at each stage after the client
 cancelled, no error frame is published for 200 ms; on release the ledger
 still holds `Scratch`, `RowBuffers`, and the pinned bytes; the error frame is

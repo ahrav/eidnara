@@ -905,6 +905,10 @@ pub fn rank_compressed(
                 member: &layer.digest,
                 row: winner.row,
             });
+            // The budget check after `observe` stops the request on a cancellation delivered at `ReadOriginal`, before `row_into` reads the row's bytes.
+            if budget.check().is_err() {
+                return Err(ReadStop::Budget);
+            }
             layer
                 .row_into(winner.row, &mut bytes, row)
                 .map_err(ReadStop::Fault)

@@ -56,6 +56,17 @@ pub(crate) struct DetachedRunner {
     pub(crate) cancel: CancellationToken,
     pub(crate) cancel_before_step: bool,
     pub(crate) units: Arc<std::sync::atomic::AtomicUsize>,
+    /// `run_unit` retains `work` and its captured state while waiting for this to grant a permit.
+    pub(crate) gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+enum Submitted {
+    Spawned(tokio::task::JoinHandle<UnitOutcome>),
+    Gated(
+        Box<dyn FnOnce() -> UnitOutcome + Send>,
+        Arc<tokio::sync::Semaphore>,
+    ),
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -66,8 +77,18 @@ impl UnitRunner for DetachedRunner {
     ) -> Pin<Box<dyn Future<Output = Result<UnitOutcome, BlockingWorkFailed>> + Send + 'static>>
     {
         self.units.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let joined = tokio::task::spawn_blocking(work);
+        let submitted = match &self.gate {
+            None => Submitted::Spawned(tokio::task::spawn_blocking(work)),
+            Some(gate) => Submitted::Gated(work, Arc::clone(gate)),
+        };
         Box::pin(async move {
+            let joined = match submitted {
+                Submitted::Spawned(joined) => joined,
+                Submitted::Gated(work, gate) => {
+                    let _permit = gate.acquire().await;
+                    tokio::task::spawn_blocking(work)
+                }
+            };
             match joined.await {
                 Ok(outcome) => Ok(outcome),
                 Err(join) if join.is_panic() => Err(BlockingWorkFailed::Panicked),
