@@ -2,7 +2,7 @@
 //!
 //! A row is `{"id": <plugin-assigned id>, "message": <AgentMessage>}`. The id is the persisted Pi
 //! entry id for a host message and a reserved id for a synthetic entry. The role set is closed to
-//! Pi 0.80.2's `AgentMessage` union; a row with any other role makes [`decode_pi_rows`] decline
+//! Pi 0.80.2's `AgentMessage` union; a row with any other role makes `decode_pi_rows` decline
 //! the window. Decoding keeps every row in a sidecar, so encoding replays untouched rows as their
 //! exact retained values, updates edited blocks in place, and removes deleted native parts.
 //! Encoding is a pure function of its inputs, so identical frozen messages re-encode to identical
