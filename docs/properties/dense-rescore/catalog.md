@@ -80,10 +80,13 @@ alignment, and extrema fixtures, which are not measured here.
 
 Type: safety
 Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:448`)
-is built by `select_candidates` (`crates/retrieval/src/dense/candidates.rs:263`),
-whose only caller is `daemon::vector_reader::rank_compressed`; no production
-path calls `rank_compressed` at this HEAD. `TermTable::score_rows`
-(`scalar.rs:565`) is called from `crates/retrieval/tests/` only.
+is built by `select_inner` (`crates/retrieval/src/dense/candidates.rs:312`)
+under `select_candidates_observed`, which `rank_compressed` calls;
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:717`) reaches
+`rank_compressed` only after `set_dense_vectors` (`query_route.rs:1865`)
+installs a composition, and no production caller installs one at this HEAD.
+`TermTable::score_rows` (`scalar.rs:565`) is called from
+`crates/retrieval/tests/` only.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
@@ -194,8 +197,10 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `CandidateCapacity::new`
-(`crates/retrieval/src/dense/capacity.rs:38`) has no production caller at this
-base.
+(`crates/retrieval/src/dense/capacity.rs:38`) is called by
+`CompressedLimits::capacity` (`crates/daemon/src/query_route.rs:616`) at
+`set_dense_vectors` and per compressed request; no production caller installs
+a composition at this HEAD.
 Status: active
 Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
 `the_capacity_is_ceil_alpha_times_k_and_never_below_k`,
@@ -207,9 +212,9 @@ Exercised: partial - `crates/retrieval/tests/dense_numerics.rs`
 `a_large_alpha_shifts_exactly_or_refuses`, and the seeded property
 `the_capacity_equals_the_integer_ceiling_for_integer_and_dyadic_alphas`
 exercise the arithmetic and the refusal precedence over three scalars;
-`CandidateCapacity::new` has no production caller at this base, so the clause
-that a pool is sized from the checked capacity before any R-sized state exists
-waits for #610's scan witness.
+`CandidateCapacity::new` reaches production only behind an installed
+composition, so the clause that a pool is sized from the checked capacity
+before any R-sized state exists waits for #610's scan witness.
 Guarantee: `R = ceil(alpha * K)` is computed exactly; alpha that is not finite
 or is below one refuses first, a zero `K` then yields no capacity, an
 unrepresentable product refuses next, and a pool above the cap refuses last.
@@ -269,8 +274,10 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:263`) has no production caller at
-this base; #613 connects it to pinned generations.
+(`crates/retrieval/src/dense/candidates.rs:263`) has no production caller;
+`select_candidates_observed` (`candidates.rs:273`) runs the same
+`select_inner` from `rank_compressed`, which the route reaches only behind an
+installed composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_stable_scan_returns_exactly_the_top_r_of_the_eligible_resolved_set` (pool
@@ -314,8 +321,10 @@ Open questions:
 Type: liveness
 Reachability: test-only - `select_candidates`
 (`crates/retrieval/src/dense/candidates.rs:263`) is called only from
-`crates/retrieval/tests/dense_candidates.rs` at this base; no producer calls
-it until #613 connects it to pinned generations.
+`crates/retrieval/tests/dense_candidates.rs`; `select_candidates_observed`
+(`candidates.rs:273`) runs the same `select_inner` from `rank_compressed`,
+which the route reaches only behind an installed composition, and no
+production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_eligible_suffix`
@@ -455,8 +464,10 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:808`) has no production caller at this
-base; #620 puts it behind the dense lane.
+(`crates/daemon/src/vector_reader.rs:808`) is called by
+`CompressedProducer::rank` (`crates/daemon/src/query_route.rs:717`), which the
+route builds only after `set_dense_vectors` (`query_route.rs:1865`) installs a
+composition; no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
@@ -663,7 +674,9 @@ Exercised: yes - `crates/daemon/tests/dense_request_lifetime.rs`
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
 and `a_request_that_ranks_no_dense_lane_holds_no_view`;
 `query_route_compressed.rs`
-`cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`.
+`cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`;
+`vector_rescore.rs` `the_scan_scratch_charges_the_encoded_query_of_every_layer`
+for the bytes `Scratch` covers.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken before the unit is submitted
 (`query_route.rs:1977`), so the view's pins and the ranking's `Scratch` and

@@ -299,16 +299,18 @@ fn window_rows(width: usize, declared: usize) -> usize {
     (CODE_WINDOW_BYTES / width.max(1)).max(1).min(declared)
 }
 
-/// Scan scratch: one block of decoded codes per layer, held through the scan, and every layer's window of raw codes.
+/// Scan scratch: per layer, one block of decoded codes and the query encoded under the layer's scales, held through the scan, and every layer's window of raw codes.
 fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
     let dimension = u64::from(view.layout.dimension);
+    let layers = view.layers.len() as u64;
     let windows: u64 = view
         .layers
         .iter()
         .map(|layer| window_rows(layer.dimension(), layer.occurrence_ids.len()) as u64)
         .sum();
     (retrieval::dense::BLOCK_ROWS as u64)
-        .saturating_mul(view.layers.len() as u64)
+        .saturating_add(1)
+        .saturating_mul(layers)
         .saturating_add(windows)
         .saturating_mul(dimension)
 }

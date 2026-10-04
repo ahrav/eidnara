@@ -12,7 +12,10 @@ until blocking work exits and is joined.
   moves it into the unit's closure; an undeclared or unavailable embedding
   takes no clone.
 - `rank_compressed` holds its `Scratch` and `RowBuffers` reservations for the
-  whole call; the view's tables and pins live while any `Arc` does.
+  whole call; the view's tables and pins live while any `Arc` does. `Scratch`
+  is sized by `scan_scratch_bytes` (`crates/daemon/src/vector_reader.rs:303`):
+  per layer one decoded block, the query encoded under the layer's scales, and
+  the layer's code window, which is every byte the scan retains per layer.
 - `SharedBudget::bridge` awaits the unit after cancellation instead of
   dropping it.
 

@@ -997,13 +997,13 @@ fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     );
     // A resident limit the view's tables already fill leaves no room for the pool's row buffers.
     let tables = fixture.ledger.census().resident;
-    // One block of decoded codes and one window per layer; a window this narrow holds every row of its layer.
+    // One block of decoded codes, one encoded query, and one window per layer; a window this narrow holds every row of its layer.
     let windows: usize = view
         .layers()
         .iter()
         .map(|layer| layer.occurrence_ids().len())
         .sum();
-    let code_scratch = (BLOCK_ROWS * view.layers().len() + windows) as u64 * 8;
+    let code_scratch = ((BLOCK_ROWS + 1) * view.layers().len() + windows) as u64 * 8;
     fixture.set_limit(RESIDENT_LIMIT, tables + code_scratch);
     let (refused, _) = run(
         &fixture,
@@ -1220,4 +1220,45 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
     );
     assert!(!view.is_quarantined(), "the poisoned row was never read");
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
+}
+
+/// The scan's `Scratch` reservation covers every byte the scan retains per layer: one block of decoded codes, the layer's code window, and the query encoded under that layer's scales.
+#[test]
+fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    let first = fixture.layer_from(&export(&[("gamma", axis(7))], &[], 12));
+    let second = fixture.layer_from(&export(&[("gamma", axis(1))], &["beta"], 14));
+    fixture
+        .publish(&fixture.compose(1, &base, &[first, second]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let layers = view.layers().len();
+    assert_eq!(layers, 3);
+    let dimension = 8u64;
+    let windows: u64 = view
+        .layers()
+        .iter()
+        .map(|layer| layer.occurrence_ids().len() as u64)
+        .sum();
+    let expected = (BLOCK_ROWS as u64 * layers as u64 + windows + layers as u64) * dimension;
+    let at_selection = std::cell::Cell::new(None);
+    let (outcome, _) = run(
+        &fixture,
+        &projection,
+        &view,
+        &axis(0),
+        capacity(2, 3),
+        &ROOMY,
+        &EvalBudget::unbounded(),
+        || at_selection.set(Some(held(&fixture.ledger, ResourceClass::Scratch))),
+    );
+    outcome.unwrap();
+    assert_eq!(
+        at_selection.get(),
+        Some(expected),
+        "scratch held through the scan: {BLOCK_ROWS} decoded rows, the window, and the encoded query per layer"
+    );
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
 }
