@@ -137,9 +137,10 @@ Reachability: default-production - the query route's `ExhaustiveProducer`
 (`crates/daemon/src/query_route.rs:539`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
-`rescore` (`score.rs:194`), which have no production caller at this base, so
-the label rests on `dense_properties.rs:258` holding `inner_product_block`
-equal to `inner_product` bit for bit.
+`rescore` (`score.rs:228`), which have no production caller at this base, so
+the label rests on `dense_properties.rs:346` holding `inner_product_block`
+equal to `inner_product` bit for bit. Corrected from `score.rs:194` and
+`dense_properties.rs:258`, their lines at main `f6f42ea4a`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`,
@@ -452,7 +453,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:802`) has no production caller at this
+(`crates/daemon/src/vector_reader.rs:808`) has no production caller at this
 base; #620 puts it behind the dense lane.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
@@ -523,16 +524,17 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
 `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
-and `cancellation_after_an_empty_selection_is_a_budget_refusal`;
+`cancellation_after_an_empty_selection_is_a_budget_refusal`, and
+`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
-`only_missing_or_malformed_codes_count_as_code_corruption` in
+`only_missing_or_malformed_rows_count_as_walk_corruption` in
 `crates/daemon/src/vector_reader.rs`.
 Guarantee: An accepted row that is missing (a short read or an index past the
 layer) or fails the codec or the layout refuses the whole request as
 `Corrupt` naming the member and the occurrence and quarantines the view, so
-every later ranking over it refuses; codes the scan finds missing quarantine
-it the same way; a read error other than a short read is `RowFault::Unavailable`
+every later ranking over it refuses; codes the scan finds missing, and rows
+the f32 ranking finds missing or malformed, quarantine it the same way; a read error other than a short read is `RowFault::Unavailable`
 and refuses as `Io`, or as `OracleRefusal::ReadFailed` in the scan, and
 quarantines nothing; cancellation refuses as `Budget`; nothing older,
 quantized, or reconstructed stands in, and no shorter ranking is returned.

@@ -299,7 +299,7 @@ fn window_rows(width: usize, declared: usize) -> usize {
     (CODE_WINDOW_BYTES / width.max(1)).max(1).min(declared)
 }
 
-/// Scan scratch: one block of decoded codes and every layer's window of raw codes.
+/// Scan scratch: one block of decoded codes per layer, held through the scan, and every layer's window of raw codes.
 fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
     let dimension = u64::from(view.layout.dimension);
     let windows: u64 = view
@@ -308,6 +308,7 @@ fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
         .map(|layer| window_rows(layer.dimension(), layer.occurrence_ids.len()) as u64)
         .sum();
     (retrieval::dense::BLOCK_ROWS as u64)
+        .saturating_mul(view.layers.len() as u64)
         .saturating_add(windows)
         .saturating_mul(dimension)
 }
@@ -686,7 +687,12 @@ pub fn rank(
         layers: &layers,
         max_entries: request.max_entries,
     };
-    Ok(rank_layers(conn, kernel, &query, budget)?)
+    rank_layers(conn, kernel, &query, budget).map_err(|refusal| {
+        if walk_corruption(&refusal) {
+            view.quarantine();
+        }
+        RankRefusal::Layered(refusal)
+    })
 }
 
 /// Every layer's sidecar against the request's expectation; the refused field names the mismatch.
@@ -874,7 +880,9 @@ pub fn rank_compressed(
         observe(RescoreEvent::Scan(window));
     })
     .map_err(|refusal| {
-        if code_corruption(&refusal) {
+        if let CandidateRefusal::Layered(layered) = &refusal
+            && walk_corruption(layered)
+        {
             view.quarantine();
         }
         CompressedRefusal::Candidates(refusal)
@@ -942,13 +950,11 @@ fn rescore_refusal(view: &PinnedVectors, refusal: RescoreRefusal<ReadStop>) -> C
     }
 }
 
-/// Codes the scan could not read or that the recipe refuses: the generation's own bytes are bad.
-fn code_corruption(refusal: &CandidateRefusal) -> bool {
+/// Rows or codes a walk could not read or that the recipe refuses: the generation's own bytes are bad.
+fn walk_corruption(refusal: &LayeredRefusal) -> bool {
     matches!(
         refusal,
-        CandidateRefusal::Layered(LayeredRefusal::Oracle(
-            OracleRefusal::Unreadable { .. } | OracleRefusal::StoredRow { .. }
-        ))
+        LayeredRefusal::Oracle(OracleRefusal::Unreadable { .. } | OracleRefusal::StoredRow { .. })
     )
 }
 
@@ -1030,21 +1036,21 @@ mod tests {
         }
     }
 
-    /// A failed code read leaves the view usable; missing or malformed codes quarantine it.
+    /// A failed read leaves the view usable; missing or malformed rows or codes quarantine it.
     #[test]
-    fn only_missing_or_malformed_codes_count_as_code_corruption() {
-        let oracle = |refusal| CandidateRefusal::Layered(LayeredRefusal::Oracle(refusal));
+    fn only_missing_or_malformed_rows_count_as_walk_corruption() {
+        let oracle = LayeredRefusal::Oracle;
         let id = || "occurrence".to_owned();
-        assert!(!code_corruption(&oracle(OracleRefusal::ReadFailed {
+        assert!(!walk_corruption(&oracle(OracleRefusal::ReadFailed {
             occurrence_id: id(),
             detail: "eio".to_owned()
         })));
-        assert!(!code_corruption(&oracle(OracleRefusal::BudgetExhausted)));
-        assert!(code_corruption(&oracle(OracleRefusal::Unreadable {
+        assert!(!walk_corruption(&oracle(OracleRefusal::BudgetExhausted)));
+        assert!(walk_corruption(&oracle(OracleRefusal::Unreadable {
             occurrence_id: id(),
             detail: "short".to_owned()
         })));
-        assert!(code_corruption(&oracle(OracleRefusal::StoredRow {
+        assert!(walk_corruption(&oracle(OracleRefusal::StoredRow {
             occurrence_id: id(),
             rejection: RowRejection::ZeroNorm
         })));
