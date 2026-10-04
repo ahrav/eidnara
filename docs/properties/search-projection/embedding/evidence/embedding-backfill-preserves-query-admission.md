@@ -96,7 +96,10 @@ A free slot goes to the oldest query; after eight query grants made while
 background work waits, the next grant goes to the oldest background waiter
 (`scheduler.rs:50-59`). At most `max_waiting_queries` queries wait, and the holder
 is not a waiter (`scheduler.rs:139-141`). Batch workers take one grant per text
-(`mod.rs:907-940`), so a query waits at most one background text. The mixed-order
+(`mod.rs:907-940`), so a query behind `n` earlier queries waits behind the text
+the slot already serves and at most `n / 8 + 1` background texts. With the four
+waiters the default scratch headroom allows (`docs/host-wire-protocol.md` §7.5.1),
+that is one fairness grant. The mixed-order
 test now asserts query, query, query, batch
 (`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The saturated
 product workload and the RP2.9 service bound are still missing, so the record
