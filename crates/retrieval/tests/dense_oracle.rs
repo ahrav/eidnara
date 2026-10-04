@@ -760,6 +760,53 @@ fn an_earlier_row_that_fails_at_scoring_outranks_a_later_row_that_fails_at_decod
         Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
         "the second row's identity fails before the third row's dimension"
     );
+
+    // Within a scoring block, row visit order determines the reported refusal.
+    let nan = codec::encode(&[f32::NAN; 8]);
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![ids[1]],
+        )
+        .unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![ids[2], nan],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+        Err(OracleRefusal::Kernel(kernel::KernelError::InvalidInput)),
+        "the second row's identity fails before the third row's layout in the same block"
+    );
+
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2 WHERE occurrence_id=?1",
+            rusqlite::params![ids[1], nan],
+        )
+        .unwrap();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET source_object_id='' WHERE occurrence_id=?1",
+            rusqlite::params![ids[2]],
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.rank(&axis(0), one_page_bounds(3), &EvalBudget::unbounded()),
+        Err(OracleRefusal::StoredRow {
+            occurrence_id: ids[1].clone(),
+            rejection: RowRejection::NonFinite { coordinate: 0 }
+        }),
+        "the second row's layout fails before the third row's identity in the same block"
+    );
 }
 
 #[test]

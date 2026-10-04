@@ -7,6 +7,7 @@
 use sha2::{Digest, Sha256};
 
 use super::codec::{self, RowLayout, RowRejection};
+use super::score::BLOCK_ROWS;
 
 /// The recipe every persisted code was produced under; a new recipe is a new variant, never a reinterpretation of old bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,10 +277,17 @@ pub fn check_codes(codes: &[i8], dimension: u32) -> Result<(), ScalarBytesReject
             actual: codes.len(),
         });
     }
-    match codes.iter().position(|code| *code == i8::MIN) {
-        Some(coordinate) => Err(ScalarBytesRejection::ReservedCode { coordinate }),
-        None => Ok(()),
+    if !codes
+        .iter()
+        .fold(false, |reserved, code| reserved | (*code == i8::MIN))
+    {
+        return Ok(());
     }
+    let coordinate = codes
+        .iter()
+        .position(|code| *code == i8::MIN)
+        .expect("the pass found a reserved code");
+    Err(ScalarBytesRejection::ReservedCode { coordinate })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
@@ -336,6 +344,11 @@ impl<'s> QuantizedQuery<'s> {
         &self.codes
     }
 
+    /// [`Self::score`] of eight rows at once; lane `i` holds the score of `docs[i]`, bit for bit.
+    pub fn score_block(&self, docs: &[&[i8]; BLOCK_ROWS]) -> [f64; BLOCK_ROWS] {
+        weighted_dot_block(self.scales, &self.codes, docs)
+    }
+
     /// [`weighted_dot`] of the query's codes with `doc`, a row [`decode_codes`] produced from the same layer, so its length is the dimension and no code is `-128`.
     pub fn score(&self, doc: &[i8]) -> f64 {
         weighted_dot(self.scales, &self.codes, doc)
@@ -370,4 +383,40 @@ pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
         sum += term;
     }
     sum
+}
+
+/// [`weighted_dot`] of `query` with each of eight rows, as eight independent accumulation chains. Each lane accumulates the same terms from `+0.0` in increasing coordinate order, so lane `i` equals `weighted_dot(scales, query, docs[i])` bit for bit.
+///
+/// Panics when the scale weights or any row of `docs` differ in length from `query`, enforcing full-vector scoring.
+pub fn weighted_dot_block(
+    scales: &Scales,
+    query: &[i8],
+    docs: &[&[i8]; BLOCK_ROWS],
+) -> [f64; BLOCK_ROWS] {
+    assert_eq!(
+        scales.weights.len(),
+        query.len(),
+        "codes of one calibration have one length"
+    );
+    for doc in docs {
+        assert_eq!(
+            query.len(),
+            doc.len(),
+            "codes of one calibration have one length"
+        );
+    }
+    let mut sums = [0.0f64; BLOCK_ROWS];
+    for (coordinate, (weight, q)) in scales.weights.iter().zip(query).enumerate() {
+        let q = i32::from(*q);
+        for (sum, doc) in sums.iter_mut().zip(docs) {
+            let d = doc[coordinate];
+            debug_assert!(
+                q != i32::from(i8::MIN) && d != i8::MIN,
+                "the reserved code -128 never reaches scoring"
+            );
+            let product = q * i32::from(d);
+            *sum += *weight * f64::from(product);
+        }
+    }
+    sums
 }

@@ -538,6 +538,57 @@ fn extreme_scales_and_codes_score_finite_and_match_the_reference() {
 }
 
 #[test]
+fn each_block_lane_scores_its_row_like_the_reference() {
+    const LANES: usize = retrieval::dense::score::BLOCK_ROWS;
+    let dimension = 37u32;
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut code = || ((next() % 255) as i32 - 127) as i8;
+    let docs: Vec<Vec<i8>> = (0..LANES)
+        .map(|lane| match lane {
+            0 => vec![127; dimension as usize],
+            1 => vec![-127; dimension as usize],
+            2 => vec![0; dimension as usize],
+            _ => (0..dimension).map(|_| code()).collect(),
+        })
+        .collect();
+    let query: Vec<i8> = (0..dimension).map(|_| code()).collect();
+    let rows: [&[i8]; LANES] = std::array::from_fn(|lane| docs[lane].as_slice());
+    let regular: Vec<f32> = (0..dimension).map(|j| 1.0 / (j + 1) as f32).collect();
+    let mixed: Vec<f32> = (0..dimension)
+        .map(|j| match j % 4 {
+            0 => f32::MAX,
+            1 => f32::from_bits(1),
+            2 => f32::MIN_POSITIVE,
+            _ => 1.0,
+        })
+        .collect();
+    for scale_values in [regular, mixed, vec![f32::MAX; dimension as usize]] {
+        let scales = Scales::from_values(scale_values.clone(), dimension).unwrap();
+        let block = retrieval::dense::scalar::weighted_dot_block(&scales, &query, &rows);
+        for (lane, doc) in rows.iter().enumerate() {
+            let reference = reference_quantized(&scale_values, &query, doc);
+            assert_eq!(block[lane].to_bits(), reference.to_bits(), "lane {lane}");
+            assert_eq!(
+                block[lane].to_bits(),
+                retrieval::dense::scalar::weighted_dot(&scales, &query, doc).to_bits(),
+                "lane {lane}"
+            );
+        }
+        assert_eq!(
+            block[2].to_bits(),
+            0.0f64.to_bits(),
+            "a zero row scores +0.0"
+        );
+    }
+}
+
+#[test]
 fn scales_from_every_constructor_score_like_the_reference() {
     let unit = |raw: [f32; 4]| {
         let norm = raw

@@ -2,8 +2,9 @@ use kernel::source_identity::OccurrenceClass;
 use retrieval::dense::codec::{self, Metric, RowLayout, RowRejection};
 use retrieval::dense::scalar::{
     CODE_MAX, CODE_MIN, CalibrationRejection, ScalarBytesRejection, ScalarRecipe, Scales,
-    calibrate, decode_codes, encode, encode_codes, weighted_dot,
+    calibrate, check_codes, decode_codes, encode, encode_codes, weighted_dot, weighted_dot_block,
 };
+use retrieval::dense::score::BLOCK_ROWS;
 use retrieval::dense::{inner_product, rank_order, rescore};
 
 const DIMENSION: u32 = 8;
@@ -330,6 +331,15 @@ fn weighted_scoring_refuses_unequal_lengths_instead_of_truncating() {
     let _ = weighted_dot(&scales_of([1.0; 8]), &[1; 8], &[1; 7]);
 }
 
+#[test]
+#[should_panic(expected = "codes of one calibration have one length")]
+fn block_scoring_refuses_a_short_row_in_any_lane() {
+    let short = [1i8; 7];
+    let mut rows: [&[i8]; BLOCK_ROWS] = [&[1; 8]; BLOCK_ROWS];
+    rows[BLOCK_ROWS - 1] = &short;
+    let _ = weighted_dot_block(&scales_of([1.0; 8]), &[1; 8], &rows);
+}
+
 // `weighted_dot` guards the reserved code with `debug_assert!`, so these two panics exist only in
 // profiles that keep debug assertions.
 #[test]
@@ -636,6 +646,22 @@ fn scales_and_codes_round_trip_deterministically_and_refuse_malformed_bytes() {
         decode_codes(&reserved, DIMENSION),
         Err(ScalarBytesRejection::ReservedCode { coordinate: 2 })
     );
+    reserved[6] = 0x80;
+    assert_eq!(
+        decode_codes(&reserved, DIMENSION),
+        Err(ScalarBytesRejection::ReservedCode { coordinate: 2 }),
+        "the first reserved coordinate is named"
+    );
+    let wide = vec![1i8; 389];
+    assert_eq!(check_codes(&wide, 389), Ok(()));
+    for coordinate in [0, 15, 16, 383, 388] {
+        let mut row = wide.clone();
+        row[coordinate] = i8::MIN;
+        assert_eq!(
+            check_codes(&row, 389),
+            Err(ScalarBytesRejection::ReservedCode { coordinate })
+        );
+    }
 
     assert_eq!(
         ScalarRecipe::from_id(ScalarRecipe::SymmetricInt8V1.id()),

@@ -132,7 +132,7 @@ pub(super) trait RowSource {
         into: &mut Self::Payload,
     ) -> Result<bool, OracleRefusal>;
 
-    /// Validates the lanes in visit order and writes one score per lane into `scores`; the first lane that fails refuses.
+    /// Validates the lanes in visit order and writes one score per lane into `scores`; the first lane that fails refuses, leaving `scores` with exactly the lanes before it, so the caller checks those lanes' identities ahead of the refusal.
     fn score(
         &self,
         request: &Walk<'_>,
@@ -335,8 +335,8 @@ pub(super) struct PageRow<'r> {
     pub source_artifact_digest: &'r str,
     /// The projection's stored vector bytes, when the page query selects them.
     pub stored: Option<&'r [u8]>,
-    /// Durable work for the row's vector is still open.
-    pub pending: bool,
+    /// `Some(true)` when durable work for the row's vector is still open. A page query that selects `NULL` yields `None`, and the walk reads [`PENDING_SQL`] once the source reports no row.
+    pub pending: Option<bool>,
 }
 
 /// The quoted codes of every class that requires a vector, for an SQL `IN` list.
@@ -351,6 +351,7 @@ pub(super) static DENSE_CLASSES: LazyLock<String> = LazyLock::new(|| {
 
 /// One keyset over the primary key covers every dense class, so no page sorts a class and visit order equals identifier order.
 /// The unary `+` on `o.class` keeps the planner off the class index, which would sort the whole class on every page.
+/// The unary `+` on the limit keeps the plan independent of the bound value, so rebinding it for the next page reuses the prepared statement.
 static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,v.vector,
@@ -360,10 +361,28 @@ static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
          LEFT JOIN occurrence_vectors v ON v.occurrence_id=o.occurrence_id AND v.generation_id=?1
          WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
          ORDER BY o.occurrence_id
-         LIMIT ?3",
+         LIMIT +?3",
         *DENSE_CLASSES
     )
 });
+
+/// [`CURRENT_PENDING`] for one occurrence, bound like a page query: the generation identifier as `?1` and the occurrence identifier as `?2`.
+static PENDING_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!("SELECT {CURRENT_PENDING} FROM occurrences o WHERE o.occurrence_id=?2")
+});
+
+fn pending_of(
+    conn: &GuardedConn<'_>,
+    generation: &VectorGeneration,
+    occurrence_id: &str,
+) -> Result<bool, ScanStop> {
+    let mut statement = conn.prepare_cached(&PENDING_SQL)?;
+    let pending: i64 = statement
+        .query_row(params![&generation.generation_id, occurrence_id], |row| {
+            row.get(0)
+        })?;
+    Ok(pending != 0)
+}
 
 /// # Errors
 ///
@@ -645,7 +664,7 @@ impl<P: Default> Block<P> {
         if filled == 0 {
             return Ok(());
         }
-        source.score(request, &self.lanes[..filled], &mut self.scores)?;
+        let scored = source.score(request, &self.lanes[..filled], &mut self.scores);
         for (lane, score) in self.lanes[..filled].iter().zip(&self.scores) {
             ranking.coverage.with_vector += 1;
             EligibilityCandidate::validate_fields(
@@ -672,7 +691,7 @@ impl<P: Default> Block<P> {
             selected.candidates.push(lane.candidate());
             selected.scores.push(*score);
         }
-        Ok(())
+        scored
     }
 }
 
@@ -776,8 +795,26 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
                         }
                     }
                 }
-                Ok(false) if row.pending => self.ranking.coverage.missing_pending += 1,
-                Ok(false) => self.ranking.coverage.missing_without_pending += 1,
+                Ok(false) => {
+                    let pending = match row.pending {
+                        Some(pending) => Ok(pending),
+                        None => pending_of(conn, request.generation, row.occurrence_id),
+                    };
+                    match pending {
+                        Ok(true) => self.ranking.coverage.missing_pending += 1,
+                        Ok(false) => self.ranking.coverage.missing_without_pending += 1,
+                        // Coverage counts rows whose disposition is known.
+                        Err(ScanStop::Budget) => {
+                            self.ranking.coverage.required -= 1;
+                            return self.flush(request, source, &mut selected).and(Ok(None));
+                        }
+                        Err(ScanStop::Projection(error)) => {
+                            return self
+                                .flush(request, source, &mut selected)
+                                .and(Err(error.into()));
+                        }
+                    }
+                }
                 // The buffered rows were visited before this one, so a rejection among them refuses the request instead of this error.
                 Err(error) => return self.flush(request, source, &mut selected).and(Err(error)),
             }
@@ -984,7 +1021,10 @@ fn borrow_row<'r>(row: &'r rusqlite::Row<'r>) -> Result<PageRow<'r>, OracleRefus
         revision: integer(3)?,
         source_artifact_digest: text(4)?,
         stored,
-        pending: integer(6)? != 0,
+        pending: match column(6)? {
+            rusqlite::types::ValueRef::Null => None,
+            _ => Some(integer(6)? != 0),
+        },
     })
 }
 
@@ -1204,5 +1244,27 @@ mod tests {
             !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
             "{plan:?}"
         );
+    }
+
+    #[test]
+    fn each_page_query_serves_every_page_from_one_preparation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        for sql in [&*PAGE_SQL, &*crate::dense::layered::LIVE_SQL] {
+            for (after, limit) in [("", 3), ("b", 257), ("c", 2)] {
+                let mut statement = conn.prepare_cached(sql).unwrap();
+                {
+                    let mut rows = statement
+                        .query(rusqlite::params!["gen", after, limit])
+                        .unwrap();
+                    assert!(rows.next().unwrap().is_none());
+                }
+                assert_eq!(
+                    statement.get_status(rusqlite::StatementStatus::RePrepare),
+                    0,
+                    "{sql}"
+                );
+            }
+        }
     }
 }
