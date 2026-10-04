@@ -28,7 +28,10 @@ function plainHost(count: number, from = 1): PlainHost {
     };
 }
 
-function source(host: PlainHost): TransformPassSource {
+function source(
+    host: PlainHost,
+    fields: Record<string, unknown> = { model_key: "test/model" },
+): TransformPassSource {
     return {
         serializerProfile: "pi",
         invocationProfile: "pi-heuristic",
@@ -48,7 +51,7 @@ function source(host: PlainHost): TransformPassSource {
         contextLimit: () => undefined,
         prepare: async () => ({
             encodeInput: () => [],
-            fields: { model_key: "test/model" },
+            fields,
         }),
         publicationRejection: () => null,
         publish(values) {
@@ -105,10 +108,11 @@ async function pass(
     client: ReturnType<typeof createTransformSessionClient>,
     admission: TransformCaptureAdmission,
     host: PlainHost,
+    fields?: Record<string, unknown>,
 ): Promise<TransformPassOutcome> {
     const admitted = admission.admit("ses");
     if (!("lease" in admitted)) throw new Error("admission declined");
-    return client.run("ses", admitted.lease, source(host));
+    return client.run("ses", admitted.lease, source(host, fields));
 }
 
 const ids = (values: unknown) => (values as { id: string }[]).map((value) => value.id);
@@ -193,6 +197,37 @@ describe("transform session client over plain data", () => {
         await pass(client, new TransformCaptureAdmission(), host);
         expect(host.windows).toEqual([[4, 8]]);
         expect(transport.calls.at(-1)?.body.boundary).toEqual({ mid: "m5", sequence: 4 });
+    });
+
+    it("sends protocol fields over any pass input of the same name", async () => {
+        const host = plainHost(6);
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
+            transform: [
+                foldReply({ mid: "m3", sequence: 1 }),
+                foldReply({ mid: "m3", sequence: 1 }),
+            ],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admission = new TransformCaptureAdmission();
+        const fields = {
+            model_key: "test/model",
+            method: "adapter",
+            session_id: "adapter",
+            previous_output_revision: "adapter-stale",
+        };
+
+        await pass(client, admission, host, fields);
+        const first = transport.calls.find((call) => call.method === "transform")?.body ?? {};
+        expect(first.method).toBe("transform");
+        expect(first.session_id).toBe("ses");
+        expect(first.model_key).toBe("test/model");
+        expect(Object.hasOwn(first, "previous_output_revision")).toBe(false);
+
+        host.values.push({ id: "m7", text: "message 7" });
+        await pass(client, admission, host, fields);
+        const second = transport.calls.at(-1)?.body ?? {};
+        expect(second.previous_output_revision).toBe(`out-${outputCounter - 1}`);
     });
 
     it("keeps the boundary and fails open when the daemon answers a busy session", async () => {

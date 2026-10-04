@@ -429,16 +429,17 @@ export interface TransformRequestCore {
     nativeMessages: readonly unknown[];
 }
 
-/**
- * A native-serving revision 3 transform body: the adapter's `fields`, then the protocol fields
- * and the window, so no pass input can replace a protocol field.
- */
 export function buildTransformRequest(
     core: TransformRequestCore,
     fields: Record<string, unknown>,
 ): Record<string, unknown> {
+    let passFields = fields;
+    if (Object.hasOwn(fields, "previous_output_revision")) {
+        const { previous_output_revision: _stripped, ...rest } = fields;
+        passFields = rest;
+    }
     return {
-        ...fields,
+        ...passFields,
         method: "transform",
         kind: "transform",
         v: 3,
