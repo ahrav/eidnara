@@ -726,8 +726,8 @@ fn wide_export(fixture: &Fixture, rows: &[(String, Vec<f32>)], checkpoint: i64) 
 
 #[test]
 fn a_layer_spanning_several_code_windows_selects_the_pool_its_own_codes_predict() {
-    // Four rows of 4096 codes fill one window, so the base's eleven rows span three windows and the delta's winners interleave with them.
-    const WIDE: u32 = 4096;
+    // Four rows of 16384 codes fill one window, so the base's eleven rows span three windows and the delta's winners interleave with them.
+    const WIDE: u32 = 16384;
     let names: Vec<String> = (0..11).map(|index| format!("wide-{index:02}")).collect();
     let objects: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut fixture = Fixture::with_dimension(WIDE);

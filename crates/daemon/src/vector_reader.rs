@@ -206,7 +206,7 @@ impl PinnedLayer {
 }
 
 /// The byte budget of one layer's scan window; a window holds one row even when that row is wider.
-const CODE_WINDOW_BYTES: usize = 16 * 1024;
+const CODE_WINDOW_BYTES: usize = 64 * 1024;
 
 /// One layer's codes for one candidate scan. A row outside the held window refills the window with the run of declared rows that starts at that row, so later rows inside the run are served without another read.
 struct CodeWindow<'a> {
