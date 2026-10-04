@@ -587,7 +587,9 @@ async fn vectors_install_only_under_the_tolerance_their_layers_carry() {
     let handler = Handler::new();
     let mut looser = with_dense(2);
     looser.dense.as_mut().unwrap().unit_norm_tolerance = 2e-3;
-    handler.set_query_route_limits(Some(looser.clone())).unwrap();
+    handler
+        .set_query_route_limits(Some(looser.clone()))
+        .unwrap();
     assert_eq!(
         handler.set_dense_vectors(Some(composition.vectors())),
         Err(LimitsRefusal::DenseToleranceMismatch {
