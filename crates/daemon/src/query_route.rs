@@ -1852,18 +1852,22 @@ impl HandlerCore {
 
     /// Installs the composition the dense lane ranks through, or removes it so the lane runs the exhaustive producer. The pool the installed limits give is checked against the route's dense limits first, and a later change of route limits is checked against it again.
     pub fn set_dense_vectors(&self, vectors: Option<DenseVectors>) -> Result<(), LimitsRefusal> {
-        let route = self
-            .query_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut installed = self
-            .dense_vectors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(vectors) = &vectors {
-            check_pair(route.as_deref(), vectors)?;
-        }
-        *installed = vectors;
+        let retired = {
+            let route = self
+                .query_route
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut installed = self
+                .dense_vectors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(vectors) = &vectors {
+                check_pair(route.as_deref(), vectors)?;
+            }
+            std::mem::replace(&mut *installed, vectors)
+        };
+        // Dropping the retired vectors after both guards release lets requests take the route locks while the old view tears down.
+        drop(retired);
         Ok(())
     }
 

@@ -4,7 +4,6 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use daemon::Handler;
 use daemon::query_route::{
     CompressedLimits, CompressedProducer, DenseLane, DenseLimits, DenseVectors, LaneStatus,
     LimitsRefusal, QueryFailure, QueryOutcome, QueryRouteLimits, Terminal, execute,
@@ -13,6 +12,7 @@ use daemon::request_budget::{Exhaustion, RequestBudget};
 use daemon::vector_admission::ResourceClass;
 use daemon::vector_generation::ROWS_FILE;
 use daemon::vector_reader::{PinnedVectors, RescoreEvent};
+use daemon::{Handler, HandlerCore};
 use kernel::ArtifactDestination;
 use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::codec::ARTIFACT_HEADER_BYTES;
@@ -575,5 +575,48 @@ async fn vectors_install_only_under_declared_dense_limits() {
     ));
     handler.set_dense_vectors(None).unwrap();
     handler.set_query_route_limits(Some(limits())).unwrap();
+    fixture.daemon.shutdown().await;
+}
+
+/// Records whether a concurrent route-limit update completes while the vectors that own this probe drop.
+struct TeardownProbe {
+    core: Arc<HandlerCore>,
+    answered: Arc<Mutex<Option<bool>>>,
+}
+
+impl Drop for TeardownProbe {
+    fn drop(&mut self) {
+        let core = Arc::clone(&self.core);
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = core.set_query_route_limits(Some(with_dense(2)));
+            let _ = sent.send(result.is_ok());
+        });
+        let answered = received.recv_timeout(Duration::from_secs(5)).ok();
+        *self.answered.lock().unwrap() = Some(answered == Some(true));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_vectors_tear_down_with_the_route_locks_free() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let handler = Handler::new();
+    handler.set_query_route_limits(Some(with_dense(2))).unwrap();
+    let answered = Arc::new(Mutex::new(None));
+    let probe = TeardownProbe {
+        core: handler.core_for_test(),
+        answered: Arc::clone(&answered),
+    };
+    let vectors = composition.observed(move |_| {
+        let _ = &probe;
+    });
+    handler.set_dense_vectors(Some(vectors)).unwrap();
+    handler.set_dense_vectors(None).unwrap();
+    assert_eq!(
+        answered.lock().unwrap().take(),
+        Some(true),
+        "the route locks are free while the retired vectors drop"
+    );
     fixture.daemon.shutdown().await;
 }

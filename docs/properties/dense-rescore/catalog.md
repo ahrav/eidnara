@@ -349,12 +349,14 @@ Open questions: None.
 ### dense-pool-never-mixes-authority-states
 
 Type: safety
-Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:263`) and
-`select_candidates_with_hook_for_test` (`candidates.rs:274`, behind the
-`test-support` feature) are called only from
-`crates/retrieval/tests/dense_candidates.rs` at this base; no producer calls
-either until #613 connects the scan to pinned generations.
+Reachability: test-only - `select_candidates_observed`
+(`crates/retrieval/src/dense/candidates.rs:273`) is called from
+`crates/retrieval/tests/dense_candidates.rs` and from `rank_compressed`
+(`crates/daemon/src/vector_reader.rs:879`); `select_candidates`
+(`candidates.rs:263`) has no caller in the workspace. The route reaches
+`rank_compressed` only through `CompressedProducer`, which it builds only after
+`set_dense_vectors` (`crates/daemon/src/query_route.rs:1854`) installs a
+composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_kernel_change_between_batches_discards_the_pool`,
@@ -392,12 +394,12 @@ Open questions:
 ### dense-scan-bounds-end-with-no-candidate
 
 Type: safety
-Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:263`) and
-`select_candidates_with_hook_for_test` (`candidates.rs:274`) are called only
-from `crates/retrieval/tests/dense_candidates.rs` at this base; the slot
-reservation test runs inside `crates/retrieval/src/dense/oracle.rs`. No
-producer calls the scan until #613 connects it to pinned generations.
+Reachability: test-only - as for `dense-pool-never-mixes-authority-states`:
+the scan runs in production only through `select_candidates_observed`
+(`crates/retrieval/src/dense/candidates.rs:273`) inside `rank_compressed`
+behind an installed composition, and no production caller installs one at
+this HEAD. The slot reservation test runs inside
+`crates/retrieval/src/dense/oracle.rs`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `each_storage_and_row_bound_saturates_alone_and_returns_no_candidate`,
