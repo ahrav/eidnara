@@ -170,8 +170,14 @@ function exchangedBytes(exchanged: readonly unknown[]): number {
     return bytes;
 }
 
+/** The transform call itself ran out of time, after its request may have been sent. */
 function isDeadline(error: unknown): boolean {
-    return error instanceof Error && /deadline/i.test(error.message);
+    if (!(error instanceof Error)) return false;
+    const code = (error as { code?: unknown }).code;
+    return (
+        (code === "ETIMEDOUT" && !/while queued/.test(error.message)) ||
+        /request deadline expired after a possible send/.test(error.message)
+    );
 }
 
 const plugin = await loadPlugin();

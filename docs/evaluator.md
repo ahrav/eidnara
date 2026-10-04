@@ -1220,10 +1220,11 @@ and pass^k case in the golden.
 (`10k`, the control, `s3_100k`, or `s4_1m`), `session`, `turn`,
 `boundary_state` (`cold`, `warming`, `steady`, `replay`, `after_restart`), `outcome`
 (`completed`, `censored`, `refused`), `refusal` (`declined`, `daemon_error`,
-`transport_error`, present exactly on a refused pass), `response_us` (from the
-plugin handing the request to IPC until the transformed array is back in the
-plugin; a censored pass carries its censoring point), `service_us` (the
-daemon's own `total`), `rss_bytes`, and `ipc_bytes`. `steady` passes follow the
+`transport_error`, present exactly on a refused pass), `response_us` (the
+plugin's pass from handing its input to the client until the transformed array
+is published, which a driver may bound from above by timing the whole hook; a
+censored pass carries its censoring point), `service_us` (the daemon's own
+`total`), `rss_bytes` (the measured plugin process), and `ipc_bytes`. `steady` passes follow the
 contract's steady state: after the first HARD, once the window reached its fold
 size and the boundary moved three times, confirmed by a drift check. `replay`
 passes resend the previous pass's window at the same declared boundary with no
@@ -1280,8 +1281,10 @@ and uploads rows, manifests, reports, and the tiers each arm could not finish as
 run artifacts. `scripts/scale-opencode-pass.ts` drives the OpenCode transform
 hook: every sample builds a fresh N-slot host array outside the timer (covered
 slots minimal, a 300-message window of the 5 KiB shape) and collects the
-garbage of the previous array before the timer starts; its passes are `cold`
-and then `replay`.
+garbage of the previous array before the timer starts. It times the whole
+`run` call of the transform hook: preflight, discovery, capture, IPC, recipe
+application, publication, and note delivery. Its first pass is `cold`, later
+passes are `replay`, and a pass after a fold is `warming`.
 
 ## Paired worlds
 

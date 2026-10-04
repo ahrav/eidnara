@@ -468,7 +468,7 @@ fn observations(rows: &[&PassRow], state: BoundaryState) -> Vec<(u64, bool)> {
 
 fn service_observations(rows: &[&PassRow], state: BoundaryState) -> Vec<(u64, bool)> {
     rows.iter()
-        .filter(|row| row.boundary_state == state)
+        .filter(|row| row.boundary_state == state && row.outcome != PassOutcome::Refused)
         .filter_map(|row| row.service_us.map(|service| (service, false)))
         .collect()
 }

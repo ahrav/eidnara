@@ -303,14 +303,12 @@ fn parse_names_a_missing_field_and_refuses_lossy_and_out_of_range_values() {
             field: "service_us".to_string()
         })
     );
-    // An equal value spelled differently does not round-trip byte for byte.
+    // An unreduced ratio reads as its reduced value and would not round-trip byte for byte.
     let lossy = mutate(&report, |value| {
-        value["seed"] = json!(825.0);
+        value["tiers"][0]["refusals"]["upper_bound_95"] =
+            json!({ "numerator": 6, "denominator": 1794 });
     });
-    assert!(matches!(
-        parse_scale_report(&lossy),
-        Err(ScaleReportError::Lossy | ScaleReportError::Shape(_))
-    ));
+    assert_eq!(parse_scale_report(&lossy), Err(ScaleReportError::Lossy));
     let fraction = mutate(&report, |value| {
         value["rows"][0]["response_us"] = json!(1.5);
     });

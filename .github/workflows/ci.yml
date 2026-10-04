@@ -1063,17 +1063,20 @@ jobs:
             for arm in "${arms[@]}"; do
               root="$(root_of "$arm")"
               commit="$(git -C "$root" rev-parse HEAD)"
-              bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
+              if ! bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
                 --out-dir "$out/$arm/$tier" --tiers "$tier" --samples 330 \
                 --plugin-root "$root/packages/opencode-plugin" \
                 --fixture-bin "$root/target/release/examples/direct_host_fixture" \
                 --eval-runner-bin "$runner" \
-                --commit "$commit" --daemon-build "release $commit"
+                --commit "$commit" --daemon-build "release $commit"; then
+                mkdir -p "$out/$arm/$tier"
+                echo "[\"$tier\"]" > "$out/$arm/$tier/incomplete.json"
+              fi
             done
           done
           for arm in "${arms[@]}"; do
-            cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl"
-            cp "$out/$arm/s4_1m/manifest.json" "$out/$arm/manifest.json"
+            cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl" || true
+            cp "$(ls "$out/$arm"/*/manifest.json | tail -n 1)" "$out/$arm/manifest.json"
             jq -s add "$out/$arm"/*/incomplete.json > "$out/$arm/incomplete.json"
             "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
               --manifest "$out/$arm/manifest.json" \
