@@ -277,10 +277,17 @@ pub fn check_codes(codes: &[i8], dimension: u32) -> Result<(), ScalarBytesReject
             actual: codes.len(),
         });
     }
-    match codes.iter().position(|code| *code == i8::MIN) {
-        Some(coordinate) => Err(ScalarBytesRejection::ReservedCode { coordinate }),
-        None => Ok(()),
+    if !codes
+        .iter()
+        .fold(false, |reserved, code| reserved | (*code == i8::MIN))
+    {
+        return Ok(());
     }
+    let coordinate = codes
+        .iter()
+        .position(|code| *code == i8::MIN)
+        .expect("the pass found a reserved code");
+    Err(ScalarBytesRejection::ReservedCode { coordinate })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
