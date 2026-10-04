@@ -456,6 +456,32 @@ describe("eidnara_search through the fused route", () => {
         expect(execution.text).toContain("Previously rejected: Use Redis.");
     });
 
+    it("names every bound a degraded lane stopped at", async () => {
+        const { kernel, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "DECISION",
+            summary: "offline store",
+        });
+        kernel.routeReply = () =>
+            fused([{ object: id(1) }], {
+                degraded: true,
+                lanes: {
+                    exact: { status: "complete" },
+                    lexical: {
+                        status: "incomplete",
+                        reason: "common_terms",
+                        also: ["rank_budget"],
+                    },
+                    dense: { status: "complete" },
+                },
+            });
+        const execution = await run({ query: "offline" });
+        expect(execution.text).toContain(
+            "Memory: the fused ranking is degraded: lexical incomplete (common_terms, rank_budget).",
+        );
+    });
+
     it("refuses a ranking whose daemon connection changed before hydration", async () => {
         class MovingTransport extends FakeKernelTransport {
             identity = "first";

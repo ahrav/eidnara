@@ -30,6 +30,8 @@ fn limits() -> QueryRouteLimits {
         probes: NonZeroUsize::new(16).unwrap(),
         lexical_scan_rows: NonZeroUsize::new(256).unwrap(),
         lexical_accepted: NonZeroUsize::new(64).unwrap(),
+        lexical_qualifying_matches: NonZeroUsize::new(20_000).unwrap(),
+        lexical_rank_budget: NonZeroUsize::new(30_000).unwrap(),
         validation_batch: NonZeroUsize::new(16).unwrap(),
         exact_page_rows: NonZeroUsize::new(16).unwrap(),
         exact_pages: NonZeroUsize::new(4).unwrap(),

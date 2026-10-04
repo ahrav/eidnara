@@ -72,6 +72,7 @@ export {
     type DispositionPreview,
     type DispositionResult,
     isMemoryDecisionRow,
+    type LaneStatus,
     MAX_COMMIT_OPERATIONS,
     MAX_COMMIT_TOKENS,
     MAX_READ_OBJECT_IDS,

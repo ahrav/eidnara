@@ -100,6 +100,10 @@ pub struct QueryRouteLimits {
     pub probes: NonZeroUsize,
     pub lexical_scan_rows: NonZeroUsize,
     pub lexical_accepted: NonZeroUsize,
+    /// A lexical probe matching at most this many rows qualifies to be ranked.
+    pub lexical_qualifying_matches: NonZeroUsize,
+    /// The match counts of the lexical probes one request ranks sum to at most this many.
+    pub lexical_rank_budget: NonZeroUsize,
     pub validation_batch: NonZeroUsize,
     pub exact_page_rows: NonZeroUsize,
     pub exact_pages: NonZeroUsize,
@@ -120,6 +124,8 @@ impl QueryRouteLimits {
             probes: n(16),
             lexical_scan_rows: n(4096),
             lexical_accepted: n(128),
+            lexical_qualifying_matches: n(20_000),
+            lexical_rank_budget: n(30_000),
             validation_batch: n(128),
             exact_page_rows: n(32),
             exact_pages: n(4),
@@ -142,6 +148,18 @@ impl QueryRouteLimits {
                 max_rows: n(1_500_000),
                 unit_norm_tolerance: 1e-3,
             }),
+        }
+    }
+
+    /// The lexical lane's retrieval bounds, drawn from these limits.
+    pub fn lexical_retrieval_bounds(&self) -> RetrievalBounds {
+        RetrievalBounds {
+            max_probes: self.probes,
+            scan_rows: self.lexical_scan_rows,
+            max_accepted: self.lexical_accepted,
+            batch_rows: self.validation_batch,
+            qualifying_matches: self.lexical_qualifying_matches,
+            rank_budget: self.lexical_rank_budget,
         }
     }
 
@@ -258,23 +276,39 @@ impl From<Terminal> for QueryFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaneStatus {
     Complete,
-    Incomplete(&'static str),
+    /// `reason` names the deciding bound and `also` the lane's other bounds; `also` is serialized only when it is not empty.
+    Incomplete {
+        reason: &'static str,
+        also: Vec<&'static str>,
+    },
     Unavailable(&'static str),
     Undeclared,
 }
 
 impl LaneStatus {
+    pub fn incomplete(reason: &'static str) -> Self {
+        Self::Incomplete {
+            reason,
+            also: Vec::new(),
+        }
+    }
+
     fn json(&self) -> Value {
         match self {
             Self::Complete => json!({ "status": "complete" }),
-            Self::Incomplete(reason) => json!({ "status": "incomplete", "reason": reason }),
+            Self::Incomplete { reason, also } if also.is_empty() => {
+                json!({ "status": "incomplete", "reason": reason })
+            }
+            Self::Incomplete { reason, also } => {
+                json!({ "status": "incomplete", "reason": reason, "also": also })
+            }
             Self::Unavailable(reason) => json!({ "status": "unavailable", "reason": reason }),
             Self::Undeclared => json!({ "status": "undeclared" }),
         }
     }
 
     fn degrades(&self) -> bool {
-        matches!(self, Self::Incomplete(_) | Self::Unavailable(_))
+        matches!(self, Self::Incomplete { .. } | Self::Unavailable(_))
     }
 }
 
@@ -512,10 +546,10 @@ impl DenseProducer for ExhaustiveProducer {
                 return Err(DenseRefusal::Budget);
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::DenseCoverageShortfall) => {
-                LaneStatus::Incomplete("coverage_shortfall")
+                LaneStatus::incomplete("coverage_shortfall")
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::RowBound) => {
-                LaneStatus::Incomplete("row_bound")
+                LaneStatus::incomplete("row_bound")
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::KernelIncarnationChanged) => {
                 return Err(DenseRefusal::Unavailable("kernel_incarnation_changed"));
@@ -822,7 +856,7 @@ fn exact_read(
             }
         }
         if cursor.is_some() {
-            status = LaneStatus::Incomplete("page_bound");
+            status = LaneStatus::incomplete("page_bound");
         }
     }
     Ok(LaneRead::Pending(ExactHits { hits, status }))
@@ -851,13 +885,12 @@ fn lexical_read(
         return Ok(LaneRead::Ended(LaneStatus::Undeclared));
     }
     let probes = compile(&analysis);
-    let bounds = RetrievalBounds {
-        max_probes: limits.probes,
-        scan_rows: limits.lexical_scan_rows,
-        max_accepted: limits.lexical_accepted,
-        batch_rows: limits.validation_batch,
-    };
-    match scan(conn, &probes, bounds, budget.eval()) {
+    match scan(
+        conn,
+        &probes,
+        limits.lexical_retrieval_bounds(),
+        budget.eval(),
+    ) {
         Ok(scanned) => Ok(LaneRead::Pending(scanned)),
         Err(refusal) => match retrieval_refusal(&refusal) {
             LaneRefusal::Budget => Err(exhaustion(budget).into()),
@@ -1026,10 +1059,12 @@ fn admit_lexical(
         Completion::Incomplete(IncompleteReason::BudgetExhausted) => {
             return Err(exhaustion(budget).into());
         }
-        Completion::Incomplete(IncompleteReason::ScanBound) => LaneStatus::Incomplete("scan_bound"),
-        Completion::Incomplete(IncompleteReason::AcceptedBound) => {
-            LaneStatus::Incomplete("accepted_bound")
-        }
+        Completion::Incomplete(
+            reason @ (IncompleteReason::ScanBound
+            | IncompleteReason::CommonTerms
+            | IncompleteReason::RankBudget
+            | IncompleteReason::AcceptedBound),
+        ) => lexical_incomplete(reason, &retrieval.reasons),
         Completion::Incomplete(IncompleteReason::KernelIncarnationChanged) => {
             return Ok(LaneOutput::unavailable("kernel_incarnation_changed"));
         }
@@ -1335,6 +1370,32 @@ fn lane_slot(lane: Lane) -> usize {
         .iter()
         .position(|candidate| *candidate == lane)
         .expect("every lane has a slot in Lane::ORDER")
+}
+
+/// The lexical lane's status when `deciding` is a bound; `recorded` adds every other bound the scan or admission stopped at.
+fn lexical_incomplete(deciding: IncompleteReason, recorded: &[IncompleteReason]) -> LaneStatus {
+    let reason = lexical_bound_reason(deciding).unwrap_or("not_a_bound");
+    LaneStatus::Incomplete {
+        reason,
+        also: recorded
+            .iter()
+            .filter(|&&recorded| recorded != deciding)
+            .filter_map(|&recorded| lexical_bound_reason(recorded))
+            .collect(),
+    }
+}
+
+/// The lexical lane's `incomplete` code for a bound the scan or admission stopped at; `None` for any other reason.
+fn lexical_bound_reason(reason: IncompleteReason) -> Option<&'static str> {
+    match reason {
+        IncompleteReason::ScanBound => Some("scan_bound"),
+        IncompleteReason::CommonTerms => Some("common_terms"),
+        IncompleteReason::RankBudget => Some("rank_budget"),
+        IncompleteReason::AcceptedBound => Some("accepted_bound"),
+        IncompleteReason::BudgetExhausted
+        | IncompleteReason::KernelIncarnationChanged
+        | IncompleteReason::SnapshotChanged => None,
+    }
 }
 
 fn lanes_json(statuses: &[LaneStatus; Lane::ORDER.len()]) -> Value {
@@ -1813,10 +1874,42 @@ mod tests {
     }
 
     #[test]
+    fn lexical_bounds_report_their_own_incomplete_reasons() {
+        for (reason, code) in [
+            (IncompleteReason::ScanBound, "scan_bound"),
+            (IncompleteReason::CommonTerms, "common_terms"),
+            (IncompleteReason::RankBudget, "rank_budget"),
+            (IncompleteReason::AcceptedBound, "accepted_bound"),
+        ] {
+            assert_eq!(
+                lexical_incomplete(reason, &[reason]).json(),
+                json!({"status": "incomplete", "reason": code})
+            );
+        }
+        assert_eq!(
+            lexical_incomplete(
+                IncompleteReason::CommonTerms,
+                &[
+                    IncompleteReason::CommonTerms,
+                    IncompleteReason::RankBudget,
+                    IncompleteReason::ScanBound,
+                    IncompleteReason::AcceptedBound,
+                ],
+            )
+            .json(),
+            json!({
+                "status": "incomplete",
+                "reason": "common_terms",
+                "also": ["rank_budget", "scan_bound", "accepted_bound"],
+            })
+        );
+    }
+
+    #[test]
     fn lane_statuses_serialize_their_reason_and_only_incomplete_or_unavailable_degrade() {
         assert_eq!(LaneStatus::Complete.json(), json!({"status": "complete"}));
         assert_eq!(
-            LaneStatus::Incomplete("scan_bound").json(),
+            LaneStatus::incomplete("scan_bound").json(),
             json!({"status": "incomplete", "reason": "scan_bound"})
         );
         assert_eq!(
@@ -1829,7 +1922,7 @@ mod tests {
         );
         assert!(!LaneStatus::Complete.degrades());
         assert!(!LaneStatus::Undeclared.degrades());
-        assert!(LaneStatus::Incomplete("page_bound").degrades());
+        assert!(LaneStatus::incomplete("page_bound").degrades());
         assert!(LaneStatus::Unavailable("engine").degrades());
     }
 
@@ -1853,6 +1946,8 @@ mod tests {
             probes: NonZeroUsize::new(4).unwrap(),
             lexical_scan_rows: NonZeroUsize::new(16).unwrap(),
             lexical_accepted: NonZeroUsize::new(8).unwrap(),
+            lexical_qualifying_matches: NonZeroUsize::new(64).unwrap(),
+            lexical_rank_budget: NonZeroUsize::new(96).unwrap(),
             validation_batch: NonZeroUsize::new(8).unwrap(),
             exact_page_rows: NonZeroUsize::new(4).unwrap(),
             exact_pages: NonZeroUsize::new(2).unwrap(),

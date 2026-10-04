@@ -30,7 +30,7 @@ use retrieval::exact::{
 use retrieval::fusion::{
     FusionParameters, Lane, LaneHit, LaneRanking, LaneWeights, OccurrenceId, RawScore,
 };
-use retrieval::lexical::{LexicalBounds, RetrievalBounds, analyze_segments, compile, retrieve};
+use retrieval::lexical::{LexicalBounds, analyze_segments, compile, retrieve};
 use retrieval::{PersistBounds, ProjectionIdentity, install_identity};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -131,6 +131,8 @@ pub fn limits() -> QueryRouteLimits {
         probes: NonZeroUsize::new(16).unwrap(),
         lexical_scan_rows: NonZeroUsize::new(256).unwrap(),
         lexical_accepted: NonZeroUsize::new(64).unwrap(),
+        lexical_qualifying_matches: NonZeroUsize::new(20_000).unwrap(),
+        lexical_rank_budget: NonZeroUsize::new(30_000).unwrap(),
         validation_batch: NonZeroUsize::new(16).unwrap(),
         exact_page_rows: NonZeroUsize::new(16).unwrap(),
         exact_pages: NonZeroUsize::new(4).unwrap(),
@@ -483,12 +485,7 @@ impl Fixture {
                         project: &self.project,
                         destination: ArtifactDestination::Local,
                     },
-                    RetrievalBounds {
-                        max_probes: limits.probes,
-                        scan_rows: limits.lexical_scan_rows,
-                        max_accepted: limits.lexical_accepted,
-                        batch_rows: limits.validation_batch,
-                    },
+                    limits.lexical_retrieval_bounds(),
                     shared.eval(),
                 )
                 .unwrap();

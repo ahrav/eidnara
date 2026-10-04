@@ -422,6 +422,21 @@ describe("parseQueryResponse", () => {
         expect(parsed.payload.entries.map((entry) => entry.position)).toEqual([2, 4, 5]);
     });
 
+    test("keeps every further bound a lane names beside its deciding reason", () => {
+        const lexical = { status: "incomplete", reason: "common_terms", also: ["rank_budget"] };
+        const parsed = parseQueryResponse({ ...ranking([1]), lanes: { ...lanes, lexical } });
+        if (parsed.payload?.kind !== "fused") throw new Error("expected a fused ranking");
+        expect(parsed.payload.lanes.lexical).toEqual(lexical);
+        expect(parsed.payload.lanes.exact).toEqual({ status: "complete", reason: null, also: [] });
+        for (const also of ["rank_budget", [1], ["rank_budget", null]]) {
+            const lanes = { ...ranking([1]).lanes, lexical: { ...lexical, also } };
+            expect(parseQueryResponse({ ...ranking([1]), lanes })).toEqual({
+                state: UNRECOGNIZED,
+                payload: null,
+            });
+        }
+    });
+
     test("refuses positions that repeat, go backwards, or start below one", () => {
         for (const positions of [[1, 1], [3, 2], [0]]) {
             expect(parseQueryResponse(ranking(positions))).toEqual({
