@@ -145,36 +145,76 @@ pub fn calibrate<'a>(
     layout: &RowLayout,
     rows: impl IntoIterator<Item = &'a [f32]>,
 ) -> Result<Calibration, CalibrationRejection> {
-    layout.check().map_err(CalibrationRejection::Layout)?;
-    let dimension = layout.dimension as usize;
-    let mut max_abs = vec![0.0f32; dimension];
-    let mut count = 0u64;
-    for (index, row) in rows.into_iter().enumerate() {
-        codec::validate(row, layout)
+    let mut calibrator = Calibrator::new(layout)?;
+    for row in rows {
+        calibrator.push(row)?;
+    }
+    calibrator.finish()
+}
+
+/// [`calibrate`] one row at a time, so a caller streaming rows from a file holds one row, not all of them.
+pub struct Calibrator {
+    layout: RowLayout,
+    max_abs: Vec<f32>,
+    count: u64,
+}
+
+impl Calibrator {
+    /// # Errors
+    ///
+    /// A layout that is not a generation predicate.
+    pub fn new(layout: &RowLayout) -> Result<Self, CalibrationRejection> {
+        layout.check().map_err(CalibrationRejection::Layout)?;
+        Ok(Self {
+            layout: *layout,
+            max_abs: vec![0.0f32; layout.dimension as usize],
+            count: 0,
+        })
+    }
+
+    /// # Errors
+    ///
+    /// A row outside the layout, reported at its index among the rows pushed.
+    pub fn push(&mut self, row: &[f32]) -> Result<(), CalibrationRejection> {
+        let index = usize::try_from(self.count).unwrap_or(usize::MAX);
+        codec::validate(row, &self.layout)
             .map_err(|rejection| CalibrationRejection::Row { index, rejection })?;
-        for (max, value) in max_abs.iter_mut().zip(row) {
+        self.push_validated(row);
+        Ok(())
+    }
+
+    /// [`Self::push`] for a `row` that [`codec::validate`] has accepted under this layout.
+    pub fn push_validated(&mut self, row: &[f32]) {
+        debug_assert_eq!(row.len(), self.max_abs.len());
+        for (max, value) in self.max_abs.iter_mut().zip(row) {
             *max = max.max(value.abs());
         }
-        count += 1;
+        self.count += 1;
     }
-    if count == 0 {
-        return Err(CalibrationRejection::NoRows);
-    }
-    let mut scales = Vec::with_capacity(dimension);
-    for (coordinate, max) in max_abs.into_iter().enumerate() {
-        let scale = if max == 0.0 { 1.0 } else { max / 127.0 };
-        if scale == 0.0 {
-            return Err(CalibrationRejection::ScaleUnderflow { coordinate });
+
+    /// # Errors
+    ///
+    /// No rows pushed, or a nonzero coordinate whose scale rounds to zero.
+    pub fn finish(self) -> Result<Calibration, CalibrationRejection> {
+        if self.count == 0 {
+            return Err(CalibrationRejection::NoRows);
         }
-        scales.push(scale);
+        let mut scales = Vec::with_capacity(self.max_abs.len());
+        for (coordinate, max) in self.max_abs.into_iter().enumerate() {
+            let scale = if max == 0.0 { 1.0 } else { max / 127.0 };
+            if scale == 0.0 {
+                return Err(CalibrationRejection::ScaleUnderflow { coordinate });
+            }
+            scales.push(scale);
+        }
+        let scales = Scales { scales };
+        let identity = CalibrationIdentity {
+            recipe: ScalarRecipe::SymmetricInt8V1,
+            calibrated_rows: self.count,
+            scales_digest: scales.digest(),
+        };
+        Ok(Calibration { scales, identity })
     }
-    let scales = Scales { scales };
-    let identity = CalibrationIdentity {
-        recipe: ScalarRecipe::SymmetricInt8V1,
-        calibrated_rows: count,
-        scales_digest: scales.digest(),
-    };
-    Ok(Calibration { scales, identity })
 }
 
 /// The codes of one row and how many coordinates were clamped into range.
@@ -191,25 +231,160 @@ pub struct Encoded {
 ///
 /// A layout that is not a generation predicate, or a row outside it.
 pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encoded, RowRejection> {
+    let mut codes = Vec::new();
+    let clipped = encode_into(layout, scales, row, &mut codes)?;
+    Ok(Encoded { codes, clipped })
+}
+
+/// [`encode`] that refills `codes` with one code per coordinate, for buffer reuse across rows, and returns the number of clamped coordinates.
+///
+/// # Errors
+///
+/// The same as [`encode`].
+pub fn encode_into(
+    layout: &RowLayout,
+    scales: &Scales,
+    row: &[f32],
+    codes: &mut Vec<i8>,
+) -> Result<u32, RowRejection> {
     layout.check()?;
     codec::validate(row, layout)?;
+    Ok(encode_validated_into(layout, scales, row, codes))
+}
+
+/// [`encode_into`] for a `row` that [`codec::validate`] has accepted under `layout`.
+pub fn encode_validated_into(
+    layout: &RowLayout,
+    scales: &Scales,
+    row: &[f32],
+    codes: &mut Vec<i8>,
+) -> u32 {
+    debug_assert_eq!(row.len(), layout.dimension as usize);
     assert_eq!(
         scales.scales.len(),
         layout.dimension as usize,
         "scales of one calibration match the layout"
     );
-    let mut codes = Vec::with_capacity(row.len());
+    codes.clear();
+    codes.resize(row.len(), 0);
+    quotient_codes(row, &scales.scales, codes)
+}
+
+fn quotient_codes(row: &[f32], scales: &[f32], codes: &mut [i8]) -> u32 {
     let mut clipped = 0u32;
-    for (value, scale) in row.iter().zip(&scales.scales) {
+    for ((code, value), scale) in codes.iter_mut().zip(row).zip(scales) {
         let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
-        let code = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
-        if code != rounded {
-            clipped += 1;
-        }
+        let clamped = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
+        clipped += u32::from(clamped != rounded);
         // A finite value over a positive finite scale is a finite quotient, and the clamp bounds it to i8, so the cast is exact.
-        codes.push(code as i8);
+        *code = clamped as i8;
     }
-    Ok(Encoded { codes, clipped })
+    clipped
+}
+
+/// Coordinates [`Encoder`] codes together; a block whose products are all clear of every rounding midpoint stays on the product path.
+const ENCODE_BLOCK: usize = 32;
+
+/// A product farther than this from its nearest integer lies within `2^-14` of a midpoint between two integers, where the product may round otherwise than the quotient.
+const NEAR_HALF: f32 = 0.5 - 1.0 / 16384.0;
+
+/// Adding and subtracting `1.5 * 2^23` rounds an f32 of magnitude at most `2^22` to an integer, ties to even, in the default rounding mode.
+const ROUNDING_BIAS: f32 = 12_582_912.0;
+
+/// Checks stored codes against [`encode_validated_into`] for many rows under one set of scales.
+///
+/// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`, or below `2^-126` with `v / s` when the product leaves the normal range, where both round to zero.
+/// The exact quotient of two f32 values is a midpoint between two integers or at least `2^-26` from every such midpoint, so the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
+/// Up to 128 in magnitude the product lies within `2^-15.9` of the quotient, so a product farther than `2^-14` from every midpoint rounds as the quotient does, and a product past 128 clamps to the code the quotient clamps to; a block holding a product near a midpoint takes the f64 quotient.
+pub struct Encoder<'a> {
+    scales: &'a Scales,
+    /// Empty when some reciprocal is not a normal f32; every coordinate then takes the f64 quotient.
+    reciprocals: Vec<f32>,
+}
+
+impl<'a> Encoder<'a> {
+    pub fn new(scales: &'a Scales) -> Self {
+        let reciprocals: Vec<f32> = scales.scales.iter().map(|scale| 1.0 / scale).collect();
+        let reciprocals = if reciprocals.iter().all(|reciprocal| reciprocal.is_normal()) {
+            reciprocals
+        } else {
+            Vec::new()
+        };
+        Self {
+            scales,
+            reciprocals,
+        }
+    }
+
+    /// Whether `stored` holds, byte for byte, the codes [`encode_validated_into`] writes for a `row` that [`codec::validate`] has accepted under `layout`.
+    pub fn matches(&self, layout: &RowLayout, row: &[f32], stored: &[u8]) -> bool {
+        debug_assert_eq!(row.len(), layout.dimension as usize);
+        assert_eq!(
+            self.scales.scales.len(),
+            row.len(),
+            "scales of one calibration match the layout"
+        );
+        if stored.len() != row.len() {
+            return false;
+        }
+        let quotient_differ = |start: usize, stored: &[u8]| {
+            let mut codes = [0i8; ENCODE_BLOCK];
+            let codes = &mut codes[..stored.len()];
+            let end = start + stored.len();
+            quotient_codes(&row[start..end], &self.scales.scales[start..end], codes);
+            differ_bits(codes, stored)
+        };
+        if self.reciprocals.is_empty() {
+            return (0..row.len())
+                .step_by(ENCODE_BLOCK)
+                .zip(stored.chunks(ENCODE_BLOCK))
+                .fold(0, |differ, (start, stored)| {
+                    differ | quotient_differ(start, stored)
+                })
+                == 0;
+        }
+        let (values, _) = row.as_chunks::<ENCODE_BLOCK>();
+        let (reciprocals, _) = self.reciprocals.as_chunks::<ENCODE_BLOCK>();
+        let (blocks, tail) = stored.as_chunks::<ENCODE_BLOCK>();
+        let mut differ = 0u8;
+        for (index, ((values, reciprocals), stored)) in
+            values.iter().zip(reciprocals).zip(blocks).enumerate()
+        {
+            differ |= match product_differ(values, reciprocals, stored) {
+                Some(block) => block,
+                None => quotient_differ(index * ENCODE_BLOCK, stored),
+            };
+        }
+        differ |= quotient_differ(row.len() - tail.len(), tail);
+        differ == 0
+    }
+}
+
+/// Nonzero when some code differs from its stored byte; the fold reads every byte, so it vectorizes.
+fn differ_bits(codes: &[i8], stored: &[u8]) -> u8 {
+    codes
+        .iter()
+        .zip(stored)
+        .fold(0, |differ, (code, byte)| differ | (*code as u8 ^ byte))
+}
+
+/// The bits [`differ_bits`] folds for the codes of `values` from their products; `None` when some product lies within `2^-14` of a midpoint between two integers.
+fn product_differ(
+    values: &[f32; ENCODE_BLOCK],
+    reciprocals: &[f32; ENCODE_BLOCK],
+    stored: &[u8; ENCODE_BLOCK],
+) -> Option<u8> {
+    let mut near = false;
+    let mut differ = 0u8;
+    for ((value, reciprocal), byte) in values.iter().zip(reciprocals).zip(stored) {
+        // A finite value times a normal reciprocal is never NaN. Up to `2^22` in magnitude the bias rounds the product exactly and its distance to the rounded integer is exact; past that, the product and the quotient both code as 127 or -127 whichever path the block takes.
+        let product = value * reciprocal;
+        let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
+        near |= (product - rounded).abs() > NEAR_HALF;
+        let code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
+        differ |= code as u8 ^ byte;
+    }
+    (!near).then_some(differ)
 }
 
 /// One byte per code, two's complement.

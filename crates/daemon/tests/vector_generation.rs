@@ -12,8 +12,8 @@ use daemon::projection_gates::{
 use daemon::vector_admission::Ledger;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
-    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VectorRefusal, VectorSidecar, build,
-    stage, verify,
+    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VERIFY_CHUNK_BYTES, VectorRefusal,
+    VectorSidecar, build, resident_bytes, stage, verification_bytes, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationManifest, GenerationStore,
@@ -379,20 +379,16 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
     };
     assert!(verify(&fixture.store, &digest, &with_checkpoint, u64::MAX).is_ok());
 
-    // The bound is the manifest's payload total, including the sidecar; one byte under it refuses before any payload is read.
-    let total: u64 = first
-        .sidecar
-        .stage_manifest()
-        .files
-        .iter()
-        .map(|file| file.size)
-        .sum();
-    assert!(verify(&fixture.store, &digest, &fixture.expected(), total).is_ok());
+    // The bound is what verification holds at once; one byte under it refuses before any table or payload is read.
+    let manifest = fixture.store.manifest(&digest).unwrap();
+    let held = verification_bytes(&manifest, &first.sidecar);
+    assert!(held > resident_bytes(&manifest));
+    assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
     assert_eq!(
-        verify(&fixture.store, &digest, &fixture.expected(), total - 1).map(|v| v.digest),
+        verify(&fixture.store, &digest, &fixture.expected(), held - 1).map(|v| v.digest),
         Err(VectorRefusal::OverBound {
-            bytes: total,
-            max: total - 1
+            bytes: held,
+            max: held - 1
         })
     );
 }
@@ -1150,5 +1146,81 @@ impl Fixture {
         fs::write(dir.join("manifest.json"), &manifest[..manifest.len() / 2]).unwrap();
         fs::set_permissions(dir.join("manifest.json"), fs::Permissions::from_mode(0o600)).unwrap();
         torn_digest
+    }
+}
+
+/// A generation larger than one verification chunk streams through several chunks and verifies under its verification bound.
+#[test]
+fn streaming_verification_reads_rows_and_codes_across_chunks() {
+    let fixture = Fixture::new();
+    let mut many = export();
+    let template = many.rows[0].vector.clone();
+    let chunk_rows = (VERIFY_CHUNK_BYTES / (4 * u64::from(DIMENSION))) as usize;
+    // Each row differs, so a chunk read out of step with its codes cannot reproduce them.
+    many.rows = (0..2 * chunk_rows as u32 + 7)
+        .map(|n| {
+            let mut raw = template.clone();
+            raw.rotate_left((n % 8) as usize);
+            raw[(n as usize / 8) % 8] += n as f32 * 1e-4;
+            let norm = raw.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let vector = raw.iter().map(|value| value / norm).collect();
+            ExportedRow {
+                occurrence_id: format!("{n:064x}"),
+                vector,
+            }
+        })
+        .collect();
+    let built = build(&fixture.expected(), &many, &fixture.work_dir()).unwrap();
+    let rows_bytes = std::fs::metadata(built.dir.join(ROWS_FILE)).unwrap().len();
+    assert!(
+        rows_bytes > 2 * VERIFY_CHUNK_BYTES,
+        "the rows span three chunks"
+    );
+    let digest = fixture.stage(&built).unwrap();
+    let manifest = fixture.store.manifest(&digest).unwrap();
+    let held = verification_bytes(&manifest, &built.sidecar);
+    assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
+
+    // A code changed in the last row of the first chunk, the first row of the second or third, or the last row refuses as a code mismatch.
+    for row in [
+        chunk_rows - 1,
+        chunk_rows,
+        2 * chunk_rows,
+        many.rows.len() - 1,
+    ] {
+        let tampered = fixture.restaged(&digest, |dir| {
+            let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
+            let code = row * DIMENSION as usize;
+            codes[code] = codes[code].wrapping_add(1);
+            rehash_file(dir, CODES_FILE, &codes);
+        });
+        assert_eq!(
+            fixture.verify(&tampered).unwrap_err(),
+            VectorRefusal::File {
+                path: CODES_FILE,
+                fault: FileFault::Codes
+            },
+            "tampered row: {row}"
+        );
+    }
+    // One row of codes more or fewer than the rows refuses as a code mismatch before any code is compared.
+    for extra in [true, false] {
+        let resized = fixture.restaged(&digest, |dir| {
+            let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
+            if extra {
+                codes.extend(std::iter::repeat_n(0u8, DIMENSION as usize));
+            } else {
+                codes.truncate(codes.len() - DIMENSION as usize);
+            }
+            rehash_file(dir, CODES_FILE, &codes);
+        });
+        assert_eq!(
+            fixture.verify(&resized).unwrap_err(),
+            VectorRefusal::File {
+                path: CODES_FILE,
+                fault: FileFault::Codes
+            },
+            "extra row: {extra}"
+        );
     }
 }

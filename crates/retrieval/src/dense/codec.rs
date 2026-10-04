@@ -147,10 +147,44 @@ pub fn validate_length(row: &[f32], dimension: u32) -> Result<(), RowRejection> 
     check_dimension(row.len(), dimension)
 }
 
+/// A non-finite coordinate makes the sum of squares non-finite.
 pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
-    layout.check()?;
-    validate_shape(row, layout.dimension)?;
-    check_norm(row, layout.unit_norm_tolerance)
+    if layout.check().is_ok()
+        && row.len() == layout.dimension as usize
+        && surely_unit(row, layout.unit_norm_tolerance)
+    {
+        return Ok(());
+    }
+    validate_from_sum(row, layout, sum_of_squares(row))
+}
+
+/// Lanes [`surely_unit`] accumulates squares in.
+const SUM_LANES: usize = 16;
+
+/// Whether the in-order sum of squares of `row` passes the norm check, decided from an f32 sum over [`SUM_LANES`] lanes; `false` leaves the decision to the in-order sum.
+///
+/// With `u = 2^-24`, each f32 square is within `u` of the exact square plus `2^-150` where it underflows, and every summation order of the `n` squares adds relative `γ = (n - 1)u / (1 - (n - 1)u)`. Once the lane sum is at least `2^-60`, underflow is below `2^-57` of it, so the lane sum lies within relative `γ + 2u` of the exact sum, and the in-order f64 sum within `(n - 1)2^-53` of it.
+/// The margin `3(n + 2)u` covers both and the rounding of the interval's ends while it stays below `1/4`. The rounded square root and the subtraction are monotone, so the sums the norm check admits form an interval; when both ends of the lane sum's interval pass, the in-order sum passes too.
+fn surely_unit(row: &[f32], tolerance: f64) -> bool {
+    let mut lanes = [0.0f32; SUM_LANES];
+    let (blocks, tail) = row.as_chunks::<SUM_LANES>();
+    for block in blocks {
+        for (lane, value) in lanes.iter_mut().zip(block) {
+            *lane += value * value;
+        }
+    }
+    let mut sum = lanes.iter().sum::<f32>();
+    for value in tail {
+        sum += value * value;
+    }
+    let sum = f64::from(sum);
+    let margin = 1.5 * (row.len() + 2) as f64 * f64::from(f32::EPSILON);
+    sum.is_finite()
+        && sum >= 2.0f64.powi(-60)
+        && margin < 0.25
+        && [sum * (1.0 - margin), sum * (1.0 + margin)]
+            .into_iter()
+            .all(|end| check_norm_sum(end, tolerance).is_ok())
 }
 
 /// Validates a row whose sum of squares was accumulated as [`validate`] accumulates it: from `+0.0`, in increasing coordinate order.
@@ -188,12 +222,17 @@ fn check_finite(row: &[f32]) -> Result<(), RowRejection> {
 
 /// The accumulator starts at `+0.0` and each square is added in coordinate order; `Iterator::sum` is not used because its initial value is not part of the contract.
 fn check_norm(row: &[f32], tolerance: f64) -> Result<(), RowRejection> {
+    check_norm_sum(sum_of_squares(row), tolerance)
+}
+
+/// `sum_of_squares` guarantees accumulation from `+0.0` in coordinate order.
+fn sum_of_squares(row: &[f32]) -> f64 {
     let mut sum_of_squares = 0.0f64;
     for value in row {
         let widened = f64::from(*value);
         sum_of_squares += widened * widened;
     }
-    check_norm_sum(sum_of_squares, tolerance)
+    sum_of_squares
 }
 
 /// The admission test is written as the contract's inclusive bound so a NaN sum is refused rather than admitted by a false `>` comparison.
@@ -288,16 +327,21 @@ pub fn encode_rows<'a>(
     Ok(bytes)
 }
 
-/// The header, metric, dimension, and byte count are checked before any row is read.
-pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, ArtifactRejection> {
+/// The row count an artifact header declares, after the magic, version, metric, reserved byte, and dimension are checked against `layout`; `header` is the artifact's first [`ARTIFACT_HEADER_BYTES`] bytes or fewer.
+///
+/// # Errors
+///
+/// The same header rejections [`decode_rows`] makes.
+pub fn decode_header(header: &[u8], layout: &RowLayout) -> Result<u64, ArtifactRejection> {
     if layout.dimension == 0 {
         return Err(ArtifactRejection::ZeroDimension);
     }
     layout.check().map_err(ArtifactRejection::Layout)?;
-    if bytes.len() < ARTIFACT_HEADER_BYTES {
-        return Err(ArtifactRejection::ShortHeader { bytes: bytes.len() });
+    if header.len() < ARTIFACT_HEADER_BYTES {
+        return Err(ArtifactRejection::ShortHeader {
+            bytes: header.len(),
+        });
     }
-    let (header, body) = bytes.split_at(ARTIFACT_HEADER_BYTES);
     if header[..8] != ARTIFACT_MAGIC {
         return Err(ArtifactRejection::Magic);
     }
@@ -323,21 +367,77 @@ pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, Art
             expected: layout.dimension,
         });
     }
-    let row_count = u64::from_le_bytes(header[16..24].try_into().expect("eight header bytes"));
-    let row_bytes = u64::from(layout.dimension) * 4;
-    let mismatch = ArtifactRejection::RowBytes {
-        declared: row_count,
-        bytes: body.len(),
-    };
-    if row_count.checked_mul(row_bytes) != u64::try_from(body.len()).ok() {
-        return Err(mismatch);
-    }
-    let rows = body
-        .chunks_exact(usize::try_from(row_bytes).map_err(|_| mismatch)?)
-        .enumerate()
-        .map(|(index, chunk)| {
-            decode(chunk, layout).map_err(|rejection| ArtifactRejection::Row { index, rejection })
+    Ok(u64::from_le_bytes(
+        header[16..24].try_into().expect("eight header bytes"),
+    ))
+}
+
+pub const fn row_bytes(dimension: u32) -> u64 {
+    dimension as u64 * 4
+}
+
+/// Rows follow the header with no padding, so row `index` starts `index` whole rows past it.
+pub const fn row_offset(index: u64, dimension: u32) -> u64 {
+    ARTIFACT_HEADER_BYTES as u64 + index * row_bytes(dimension)
+}
+
+/// Checks that the `body_bytes` after the header hold exactly the `declared` rows of `layout`.
+///
+/// # Errors
+///
+/// [`ArtifactRejection::RowBytes`] when they hold more or fewer bytes.
+pub fn check_body(
+    declared: u64,
+    body_bytes: u64,
+    layout: &RowLayout,
+) -> Result<(), ArtifactRejection> {
+    if declared.checked_mul(row_bytes(layout.dimension)) == Some(body_bytes) {
+        Ok(())
+    } else {
+        Err(ArtifactRejection::RowBytes {
+            declared,
+            bytes: usize::try_from(body_bytes).unwrap_or(usize::MAX),
         })
+    }
+}
+
+/// Decodes and validates artifact rows one at a time into one reused buffer, so a walk over every row allocates once.
+pub struct RowDecoder {
+    layout: RowLayout,
+    row: Vec<f32>,
+}
+
+impl RowDecoder {
+    pub fn new(layout: &RowLayout) -> Self {
+        Self {
+            layout: *layout,
+            row: Vec::with_capacity(layout.dimension as usize),
+        }
+    }
+
+    /// The coordinates of artifact row `index`, decoded from its `bytes` and validated under the layout.
+    ///
+    /// # Errors
+    ///
+    /// [`ArtifactRejection::Row`] at `index` for a row outside the layout.
+    pub fn decode(&mut self, index: usize, bytes: &[u8]) -> Result<&[f32], ArtifactRejection> {
+        decode_length_into(bytes, self.layout.dimension, &mut self.row)
+            .and_then(|()| validate(&self.row, &self.layout))
+            .map_err(|rejection| ArtifactRejection::Row { index, rejection })?;
+        Ok(&self.row)
+    }
+}
+
+/// The header, metric, dimension, and byte count are checked before any row is read.
+pub fn decode_rows(bytes: &[u8], layout: &RowLayout) -> Result<OriginalRows, ArtifactRejection> {
+    let row_count = decode_header(bytes, layout)?;
+    let body = &bytes[ARTIFACT_HEADER_BYTES..];
+    check_body(row_count, body.len() as u64, layout)?;
+    let mut decoder = RowDecoder::new(layout);
+    let rows = body
+        .chunks_exact(row_bytes(layout.dimension) as usize)
+        .enumerate()
+        .map(|(index, chunk)| decoder.decode(index, chunk).map(<[f32]>::to_vec))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(OriginalRows {
         layout: *layout,

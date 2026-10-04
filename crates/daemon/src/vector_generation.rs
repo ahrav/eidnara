@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use host_runtime::generation::{
-    GenerationError, GenerationManifest, GenerationStore, ManifestFile, StageMeta,
-    ValidatedGeneration,
+    FILE_HASH_BUFFER_BYTES, GenerationError, GenerationManifest, GenerationStore, ManifestFile,
+    RETAINED_FILE_BYTES, StageMeta, StreamedFile, ValidatedGeneration,
 };
-use host_runtime::lifecycle::LifecycleTransactionLock;
+use host_runtime::lifecycle::{LifecycleTransactionLock, PAYLOAD_MANIFEST_DIGEST_LEN};
 use retrieval::ProjectionIdentity;
 use retrieval::batch::{ProjectionCheckpoint, VectorGeneration};
 use retrieval::dense::codec::{self, Metric, RowLayout};
@@ -117,10 +117,23 @@ impl VectorSidecar {
 
     /// The compatibility identity's digest fills the contract slot, the sidecar's hash the inputs slot, and the row artifact's hash the payload slot; no release contract or inputs lock exists for a vector generation.
     pub fn stage_meta(&self) -> StageMeta {
+        self.meta_with(self.sha256())
+    }
+
+    /// [`Self::stage_meta`] with the sidecar's hash already taken, so the sidecar is not serialized for it.
+    fn meta_with(&self, sidecar_sha256: String) -> StageMeta {
         StageMeta {
             target: VECTOR_TARGET.to_owned(),
-            release_contract_sha256: VectorIdentity::from_sidecar(self).compatibility_sha256(),
-            inputs_lock_sha256: self.sha256(),
+            release_contract_sha256: compatibility_sha256(&(
+                self.embedding_model.as_str(),
+                self.tokenizer_fingerprint.as_str(),
+                self.vector_dimension,
+                self.metric.as_str(),
+                self.unit_norm_tolerance.to_bits(),
+                self.quantizer_recipe.as_str(),
+                self.generation_epoch,
+            )),
+            inputs_lock_sha256: sidecar_sha256,
             source_payload_manifest_sha256: self
                 .files
                 .iter()
@@ -131,28 +144,29 @@ impl VectorSidecar {
     }
 
     pub fn stage_manifest(&self) -> GenerationManifest {
-        let mut files: Vec<ManifestFile> = self
-            .files
-            .iter()
-            .map(|file| ManifestFile {
-                path: file.path.clone(),
-                mode: 0o600,
-                size: file.size,
-                sha256: file.sha256.clone(),
-            })
-            .collect();
-        // One serialization at a time: `stage_meta` serializes the sidecar again for its hash.
         let (size, sha256) = {
             let sidecar = self.canonical_bytes();
             (sidecar.len() as u64, sha256_hex(&sidecar))
         };
+        self.manifest_with(size, sha256)
+    }
+
+    /// [`Self::stage_manifest`] from the size and hash of the sidecar's canonical bytes, so a caller that holds or has hashed them serializes nothing.
+    fn manifest_with(&self, size: u64, sha256: String) -> GenerationManifest {
+        let mut files = Vec::with_capacity(self.files.len() + 1);
+        files.extend(self.files.iter().map(|file| ManifestFile {
+            path: file.path.clone(),
+            mode: 0o600,
+            size: file.size,
+            sha256: file.sha256.clone(),
+        }));
         files.push(ManifestFile {
             path: SIDECAR_FILE.to_owned(),
             mode: 0o600,
             size,
-            sha256,
+            sha256: sha256.clone(),
         });
-        GenerationManifest::from_files(&self.stage_meta(), files)
+        GenerationManifest::from_files(&self.meta_with(sha256), files)
     }
 }
 
@@ -237,18 +251,25 @@ impl VectorIdentity {
 
     /// The digest of the fields that decide compatibility, for a manifest's contract slot; the kernel incarnation is provenance, not compatibility, and stays out.
     pub fn compatibility_sha256(&self) -> String {
-        let fields = serde_json::to_vec(&[
-            serde_json::Value::from(self.embedding_model.as_str()),
-            serde_json::Value::from(self.tokenizer_fingerprint.as_str()),
-            serde_json::Value::from(self.vector_dimension),
-            serde_json::Value::from(self.metric.as_str()),
-            serde_json::Value::from(self.unit_norm_tolerance_bits),
-            serde_json::Value::from(self.quantizer_recipe.as_str()),
-            serde_json::Value::from(self.generation_epoch),
-        ])
-        .expect("identity serialization cannot fail");
-        sha256_hex(&fields)
+        compatibility_sha256(&(
+            self.embedding_model.as_str(),
+            self.tokenizer_fingerprint.as_str(),
+            self.vector_dimension,
+            self.metric.as_str(),
+            self.unit_norm_tolerance_bits,
+            self.quantizer_recipe.as_str(),
+            self.generation_epoch,
+        ))
     }
+}
+
+/// Tuple order defines the hashed JSON array and forms part of the compatibility contract.
+type CompatibilityFields<'a> = (&'a str, &'a str, u32, &'a str, u64, &'a str, u64);
+
+fn compatibility_sha256(fields: &CompatibilityFields<'_>) -> String {
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, fields).expect("identity serialization cannot fail");
+    format!("{:x}", hasher.finalize())
 }
 
 /// What a caller expects a generation to carry, compared with the sidecar field by field.
@@ -274,8 +295,6 @@ pub enum FileFault {
     Identifiers,
     /// The codes are not the rows encoded under the scales.
     Codes,
-    /// The file holds more bytes than its manifest declares.
-    Size,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -557,6 +576,36 @@ fn exact_json<T: serde::Serialize + ?Sized>(value: &T) -> Vec<u8> {
     bytes
 }
 
+/// Checks serialized output incrementally against an existing encoding, keeping comparison state constant-sized.
+struct Matching<'a> {
+    rest: &'a [u8],
+    matches: bool,
+}
+
+impl Write for Matching<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.rest.strip_prefix(bytes) {
+            Some(rest) if self.matches => self.rest = rest,
+            _ => self.matches = false,
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Whether `value`'s JSON is exactly `bytes`, the encoding [`exact_json`] writes.
+fn is_exact_json<T: serde::Serialize + ?Sized>(value: &T, bytes: &[u8]) -> bool {
+    let mut matching = Matching {
+        rest: bytes,
+        matches: true,
+    };
+    serde_json::to_writer(&mut matching, value).expect("JSON serialization cannot fail");
+    matching.matches && matching.rest.is_empty()
+}
+
 fn json_list_bytes<'a>(items: impl IntoIterator<Item = &'a str>) -> (u64, u64) {
     let mut count = 0u64;
     let mut bytes = Counting(1);
@@ -709,7 +758,7 @@ pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
-/// Verification holds every payload in memory, so a manifest whose files total more than `max_bytes` is refused before any payload is held; the store's validation has already streamed each file through a fixed buffer to check its hash, so the bound limits memory, not I/O. The caller bounds its own memory as `live_rows` bounds the export.
+/// Verification streams the row and code artifacts one chunk of rows at a time in one pass that calibrates the rows and compares the stored codes with the rows encoded under the stored scales, then requires the stored scales to be the calibration, and keeps only the resident tables. [`verification_bytes`] bounds the heap it holds at once; a generation over `max_bytes` is refused before the sidecar is read on the manifest's share of the bound, and before any table or payload is read on the whole of it. The store checks each file's inventory entry, mode, and size, and verification reads each file once through a stream that hashes the bytes it returns; the store finishes every hash before any refusal about meaning is returned, so a file whose bytes diverge from the manifest refuses as the store refuses it, and the bound limits memory, not I/O.
 ///
 /// # Errors
 ///
@@ -720,35 +769,96 @@ pub fn verify(
     expected: &ExpectedVectors<'_>,
     max_bytes: u64,
 ) -> Result<VerifiedVectors, VectorRefusal> {
-    let generation = store.validate(digest)?;
-    let manifest = &generation.manifest;
+    let mut pending = store.validate_streaming(digest, &VERIFIED_FILES)?;
+    let mut streams = VERIFIED_FILES.map(|path| pending.stream(path));
+    let meaning = check_meaning(pending.manifest(), &mut streams, expected, max_bytes);
+    // Bytes that diverge from the manifest refuse as the store refuses them, ahead of any refusal about their meaning.
+    let mut generation = pending.finish(streams.into_iter().flatten())?;
+    let tables = meaning?;
+    Ok(VerifiedVectors {
+        digest: digest.to_owned(),
+        sidecar: tables.sidecar,
+        rows: File::from(generation.take_verified_file(ROWS_FILE)?),
+        codes: File::from(generation.take_verified_file(CODES_FILE)?),
+        generation,
+        scales: tables.scales,
+        occurrence_ids: tables.occurrence_ids,
+        tombstones: tables.tombstones,
+    })
+}
+
+/// The files [`verify`] reads, each through the stream that hashes it as it is read, so the bytes checked are the bytes hashed.
+const VERIFIED_FILES: [&str; 6] = [
+    SIDECAR_FILE,
+    ROWS_FILE,
+    CODES_FILE,
+    SCALES_FILE,
+    ROW_IDS_FILE,
+    TOMBSTONES_FILE,
+];
+
+/// What [`check_meaning`] decodes and [`VerifiedVectors`] keeps.
+struct Tables {
+    sidecar: VectorSidecar,
+    scales: Scales,
+    occurrence_ids: Vec<String>,
+    tombstones: Vec<String>,
+}
+
+/// A file's stream, or the store's refusal when the manifest names no such file.
+fn opened(
+    stream: &mut Result<StreamedFile, GenerationError>,
+) -> Result<&mut StreamedFile, VectorRefusal> {
+    stream
+        .as_mut()
+        .map_err(|error| VectorRefusal::Store(error.to_string()))
+}
+
+/// The checks of [`verify`] past the store's, reading [`VERIFIED_FILES`] through `streams` in that order.
+fn check_meaning(
+    manifest: &GenerationManifest,
+    streams: &mut [Result<StreamedFile, GenerationError>; 6],
+    expected: &ExpectedVectors<'_>,
+    max_bytes: u64,
+) -> Result<Tables, VectorRefusal> {
+    let [
+        sidecar_file,
+        rows_file,
+        codes_file,
+        scales_file,
+        ids_file,
+        tombstones_file,
+    ] = streams.each_mut();
     if manifest.target != VECTOR_TARGET {
         return Err(VectorRefusal::NotVectors("manifest target"));
     }
-    let bytes = manifest
-        .files
-        .iter()
-        .try_fold(0u64, |sum, file| sum.checked_add(file.size))
-        .unwrap_or(u64::MAX);
-    if bytes > max_bytes {
-        return Err(VectorRefusal::OverBound {
-            bytes,
-            max: max_bytes,
-        });
-    }
-    let sidecar_bytes = generation.read_verified_file(SIDECAR_FILE)?;
+    let within = |bytes: u64| {
+        if bytes > max_bytes {
+            Err(VectorRefusal::OverBound {
+                bytes,
+                max: max_bytes,
+            })
+        } else {
+            Ok(())
+        }
+    };
+    within(manifest_verification_bytes(manifest))?;
+    let sidecar_bytes = opened(sidecar_file)?.read_rest()?;
     let sidecar: VectorSidecar =
         serde_json::from_slice(&sidecar_bytes).map_err(|_| VectorRefusal::NotVectors("sidecar"))?;
     if sidecar.schema != SIDECAR_SCHEMA {
         return Err(VectorRefusal::NotVectors("sidecar schema"));
     }
-    if sidecar.canonical_bytes() != sidecar_bytes {
+    if !is_exact_json(&sidecar, &sidecar_bytes) {
         return Err(VectorRefusal::NotVectors("sidecar not canonical"));
     }
+    // The binding needs only the canonical bytes' size and hash, so the bytes go before the bound manifest is built.
+    let (sidecar_size, sidecar_sha256) = (sidecar_bytes.len() as u64, sha256_hex(&sidecar_bytes));
+    drop(sidecar_bytes);
     if !sidecar.inventories_exactly() {
         return Err(VectorRefusal::NotVectors("inventory"));
     }
-    if sidecar.stage_manifest() != *manifest {
+    if sidecar.manifest_with(sidecar_size, sidecar_sha256) != *manifest {
         return Err(VectorRefusal::NotVectors("manifest binding"));
     }
     // The projection schema holds no checkpoint without these, so a sidecar naming one came from no export.
@@ -764,92 +874,269 @@ pub fn verify(
         metric: expected.metric,
         unit_norm_tolerance: sidecar.unit_norm_tolerance,
     };
-    let rows_file = File::from(generation.open_verified_file(ROWS_FILE)?);
-    // The raw artifact is a temporary: only the decoded rows stay while the codes are computed.
-    let rows = codec::decode_rows(
-        &read_all(&rows_file, ROWS_FILE, declared_size(&generation, ROWS_FILE))?,
-        &layout,
-    )
-    .map_err(VectorRefusal::Rows)?;
+    within(verification_bytes(manifest, &sidecar))?;
     let fault = |path, fault| VectorRefusal::File { path, fault };
-    if rows.rows.len() as u64 != sidecar.rows {
+    let rows_file = opened(rows_file)?;
+    let row_count = open_rows(rows_file, &layout)?;
+    if row_count != sidecar.rows {
         return Err(fault(ROWS_FILE, FileFault::RowCount));
     }
-    let vectors = rows.rows.iter().map(Vec::as_slice);
-    let calibration =
-        scalar::calibrate(&layout, vectors.clone()).map_err(VectorRefusal::Calibration)?;
-    let scales_bytes = generation.read_verified_file(SCALES_FILE)?;
+    let dimension = layout.dimension as usize;
+    // Codes encoded under the stored scales are the codes encoded under the calibration whenever the two scales are equal, which is checked before any code refusal, so one pass over the rows both calibrates and compares the codes.
+    // Each refusal about the scales or codes files is held until every check that precedes it in refusal order has passed.
+    let scales_bytes = opened(scales_file).and_then(|file| Ok(file.read_rest()?));
+    let stored_scales = scales_bytes
+        .as_ref()
+        .ok()
+        .and_then(|bytes| Scales::decode(bytes, layout.dimension).ok());
+    let codes_file = opened(codes_file)?;
+    let mut codes_verdict = if row_count.checked_mul(dimension as u64) == Some(codes_file.size()) {
+        Ok(())
+    } else {
+        Err(fault(CODES_FILE, FileFault::Codes))
+    };
+    let encoder = stored_scales.as_ref().map(scalar::Encoder::new);
+    let chunk_rows =
+        (row_chunk_bytes(layout.dimension) / codec::row_bytes(layout.dimension)) as usize;
+    let mut stored = vec![0u8; chunk_rows * dimension];
+    let mut calibrator = scalar::Calibrator::new(&layout).map_err(VectorRefusal::Calibration)?;
+    // The decoder validates each row under the layout before it reaches the calibrator or the encoder; the stored codes of each row chunk are read as the chunk starts.
+    for_each_row(rows_file, &layout, row_count, |index, row| {
+        calibrator.push_validated(row);
+        let (Some(encoder), Ok(())) = (&encoder, &codes_verdict) else {
+            return Ok(());
+        };
+        let slot = index % chunk_rows;
+        if slot == 0 {
+            let chunk = (row_count - index as u64).min(chunk_rows as u64) as usize;
+            if let Err(error) = codes_file.read_exact(&mut stored[..chunk * dimension]) {
+                codes_verdict = Err(io_refusal(error));
+                return Ok(());
+            }
+        }
+        if !encoder.matches(
+            &layout,
+            row,
+            &stored[slot * dimension..(slot + 1) * dimension],
+        ) {
+            codes_verdict = Err(fault(CODES_FILE, FileFault::Codes));
+        }
+        Ok(())
+    })?;
+    drop((stored, encoder));
+    drop(stored_scales);
+    let calibration = calibrator.finish().map_err(VectorRefusal::Calibration)?;
+    let scales_bytes = scales_bytes?;
     if calibration.scales.encode() != scales_bytes
         || calibration.identity.calibrated_rows != sidecar.calibrated_rows
         || sha256_hex(&scales_bytes) != sidecar.scales_sha256
     {
         return Err(fault(SCALES_FILE, FileFault::Calibration));
     }
-    let ids: Vec<String> = serde_json::from_slice(&generation.read_verified_file(ROW_IDS_FILE)?)
-        .map_err(|_| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
-    if ids.len() != rows.rows.len() || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+    drop(scales_bytes);
+    let ids = decode_list(&opened(ids_file)?.read_rest()?, row_count)
+        .ok_or_else(|| fault(ROW_IDS_FILE, FileFault::Identifiers))?;
+    if ids.len() as u64 != row_count || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(fault(ROW_IDS_FILE, FileFault::Identifiers));
     }
-    let tombstones: Vec<String> =
-        serde_json::from_slice(&generation.read_verified_file(TOMBSTONES_FILE)?)
-            .map_err(|_| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
+    let tombstones = decode_list(&opened(tombstones_file)?.read_rest()?, sidecar.tombstones)
+        .ok_or_else(|| fault(TOMBSTONES_FILE, FileFault::Identifiers))?;
     if tombstones.len() as u64 != sidecar.tombstones
         || tombstones.windows(2).any(|pair| pair[0] >= pair[1])
-        || ids.iter().any(|id| tombstones.binary_search(id).is_ok())
+        || share_an_entry(&ids, &tombstones)
     {
         return Err(fault(TOMBSTONES_FILE, FileFault::Identifiers));
     }
-    let codes = encode_all(&layout, &calibration.scales, vectors)
-        .map_err(|_| fault(CODES_FILE, FileFault::Codes))?;
-    let codes_file = File::from(generation.open_verified_file(CODES_FILE)?);
-    if read_all(
-        &codes_file,
-        CODES_FILE,
-        declared_size(&generation, CODES_FILE),
-    )? != codes
-    {
-        return Err(fault(CODES_FILE, FileFault::Codes));
-    }
-    Ok(VerifiedVectors {
-        digest: digest.to_owned(),
+    codes_verdict?;
+    Ok(Tables {
         sidecar,
-        generation,
-        rows: rows_file,
-        codes: codes_file,
         scales: calibration.scales,
         occurrence_ids: ids,
         tombstones,
     })
 }
 
-/// The whole of a verified file, read from its start whatever the descriptor's position and no further than the `size` its manifest declares; more bytes than that refuse as [`FileFault::Size`], as [`ValidatedGeneration::read_verified_file`] refuses them.
-fn read_all(file: &File, path: &'static str, size: u64) -> Result<Vec<u8>, VectorRefusal> {
-    use std::io::Read;
-    let io = |error: io::Error| VectorRefusal::Io(error.kind().to_string());
-    let mut reader = file.try_clone().map_err(io)?;
-    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0)).map_err(io)?;
-    let mut bytes = Vec::new();
-    reader
-        .take(size.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(io)?;
-    if bytes.len() as u64 > size {
-        return Err(VectorRefusal::File {
-            path,
-            fault: FileFault::Size,
-        });
-    }
-    Ok(bytes)
+/// Bytes of one streamed row chunk: whole rows of `dimension` f32 coordinates filling [`VERIFY_CHUNK_BYTES`], at least one row.
+fn row_chunk_bytes(dimension: u32) -> u64 {
+    let row = codec::row_bytes(dimension);
+    (VERIFY_CHUNK_BYTES / row.max(1)).max(1) * row
 }
 
-/// The manifest-declared size of `path`, which [`ValidatedGeneration::open_verified_file`] checked the file against.
-fn declared_size(generation: &ValidatedGeneration, path: &str) -> u64 {
-    generation
-        .manifest
-        .files
-        .iter()
-        .find(|file| file.path == path)
-        .map_or(0, |file| file.size)
+fn manifest_heap(manifest: &GenerationManifest) -> u64 {
+    let strings = [
+        &manifest.target,
+        &manifest.release_contract_sha256,
+        &manifest.inputs_lock_sha256,
+    ]
+    .into_iter()
+    .chain(&manifest.source_payload_manifest_sha256)
+    .chain(
+        manifest
+            .files
+            .iter()
+            .flat_map(|file| [&file.path, &file.sha256]),
+    )
+    .map(String::capacity)
+    .sum::<usize>();
+    (strings + manifest.files.capacity() * size_of::<ManifestFile>()) as u64
+}
+
+/// Verification retains the resident tables, the validated manifest, one descriptor slot per manifest file, and two manifest digests: one in the validated generation and one in the result.
+fn kept_bytes(manifest: &GenerationManifest) -> u64 {
+    let slots = manifest.files.len() * RETAINED_FILE_BYTES;
+    resident_bytes(manifest)
+        .saturating_add(manifest_heap(manifest))
+        .saturating_add(slots as u64)
+        .saturating_add(2 * PAYLOAD_MANIFEST_DIGEST_LEN as u64)
+}
+
+/// While reading the tables, verification holds one of these beside what it retains: the sidecar's bytes beside the decoded sidecar, the bound manifest beside the stage metadata it copies, the store's hash buffer, or one identifier list's JSON beside its strings.
+fn table_scratch_bytes(manifest: &GenerationManifest) -> u64 {
+    let size = |path: &str| {
+        manifest
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .map_or(0, |file| file.size)
+    };
+    [
+        size(SIDECAR_FILE),
+        manifest_heap(manifest).saturating_mul(2),
+        FILE_HASH_BUFFER_BYTES as u64,
+        size(ROW_IDS_FILE),
+        size(TOMBSTONES_FILE),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0)
+}
+
+/// The share of [`verification_bytes`] the manifest alone decides, judged before the sidecar is read.
+fn manifest_verification_bytes(manifest: &GenerationManifest) -> u64 {
+    kept_bytes(manifest).saturating_add(table_scratch_bytes(manifest))
+}
+
+/// Heap bytes verification holds at once under `manifest` and its decoded `sidecar`.
+/// It retains the resident tables, the manifest, and one string slot per declared row and tombstone, and beside them holds the larger of the table scratch and one row pass: a row chunk, the stored codes of its rows, the artifact header, and per coordinate the decoded row, the running maxima, the stored scales decoded, their reciprocals, and the scales file (four bytes each); after the pass the calibrated scales and their encoding take the place of the row, the maxima, and the stored scales.
+pub fn verification_bytes(manifest: &GenerationManifest, sidecar: &VectorSidecar) -> u64 {
+    let chunk = row_chunk_bytes(sidecar.vector_dimension);
+    let row_pass = chunk
+        .saturating_add(chunk / 4)
+        .saturating_add(codec::ARTIFACT_HEADER_BYTES as u64)
+        .saturating_add(u64::from(sidecar.vector_dimension).saturating_mul(20));
+    let slots = sidecar
+        .rows
+        .saturating_add(sidecar.tombstones)
+        .saturating_mul(size_of::<String>() as u64);
+    kept_bytes(manifest)
+        .saturating_add(slots)
+        .saturating_add(table_scratch_bytes(manifest).max(row_pass))
+}
+
+/// Verification reads the row artifact in chunks of about this many bytes, and the codes of the same rows beside them.
+pub const VERIFY_CHUNK_BYTES: u64 = 1 << 18;
+
+/// Whether two strictly increasing lists share an entry, decided in one merge walk.
+fn share_an_entry(left: &[String], right: &[String]) -> bool {
+    let (mut l, mut r) = (0, 0);
+    while let (Some(a), Some(b)) = (left.get(l), right.get(r)) {
+        match a.cmp(b) {
+            std::cmp::Ordering::Less => l += 1,
+            std::cmp::Ordering::Greater => r += 1,
+            std::cmp::Ordering::Equal => return true,
+        }
+    }
+    false
+}
+
+/// Decodes a JSON string list into a vector sized to the sidecar's declared count and refuses a longer list at the first extra entry.
+struct DeclaredList(usize);
+
+impl<'de> serde::de::DeserializeSeed<'de> for DeclaredList {
+    type Value = Vec<String>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DeclaredList {
+    type Value = Vec<String>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a list of at most {} strings", self.0)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut list = Vec::with_capacity(self.0);
+        while list.len() < self.0 {
+            match seq.next_element()? {
+                Some(item) => list.push(item),
+                None => return Ok(list),
+            }
+        }
+        match seq.next_element::<serde::de::IgnoredAny>()? {
+            None => Ok(list),
+            Some(_) => Err(serde::de::Error::invalid_length(self.0 + 1, &self)),
+        }
+    }
+}
+
+/// `None` for malformed JSON or a list longer than `declared`.
+fn decode_list(bytes: &[u8], declared: u64) -> Option<Vec<String>> {
+    use serde::de::DeserializeSeed;
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let list = DeclaredList(usize::try_from(declared).ok()?)
+        .deserialize(&mut deserializer)
+        .ok()?;
+    deserializer.end().ok()?;
+    Some(list)
+}
+
+fn io_refusal(error: io::Error) -> VectorRefusal {
+    VectorRefusal::Io(error.kind().to_string())
+}
+
+/// Checks the original-row artifact's header and that the file holds exactly the rows it declares, and returns their count.
+fn open_rows(file: &mut StreamedFile, layout: &RowLayout) -> Result<u64, VectorRefusal> {
+    let size = file.size();
+    let mut header =
+        vec![0u8; codec::ARTIFACT_HEADER_BYTES.min(usize::try_from(size).unwrap_or(0))];
+    file.read_exact(&mut header).map_err(io_refusal)?;
+    let count = codec::decode_header(&header, layout).map_err(VectorRefusal::Rows)?;
+    codec::check_body(count, size - codec::ARTIFACT_HEADER_BYTES as u64, layout)
+        .map_err(VectorRefusal::Rows)?;
+    Ok(count)
+}
+
+/// Calls `each` with the index and decoded coordinates of each of the `count` rows that follow the header, in file order, read one chunk at a time; a row outside the layout refuses at its index.
+fn for_each_row(
+    file: &mut StreamedFile,
+    layout: &RowLayout,
+    count: u64,
+    mut each: impl FnMut(usize, &[f32]) -> Result<(), VectorRefusal>,
+) -> Result<(), VectorRefusal> {
+    let row_bytes = codec::row_bytes(layout.dimension) as usize;
+    let mut chunk = vec![0u8; row_chunk_bytes(layout.dimension) as usize];
+    let mut decoder = codec::RowDecoder::new(layout);
+    let count = count as usize;
+    let mut index = 0;
+    while index < count {
+        let bytes = &mut chunk
+            [..((count - index) * row_bytes).min(row_chunk_bytes(layout.dimension) as usize)];
+        file.read_exact(bytes).map_err(io_refusal)?;
+        for raw in bytes.chunks_exact(row_bytes) {
+            each(
+                index,
+                decoder.decode(index, raw).map_err(VectorRefusal::Rows)?,
+            )?;
+            index += 1;
+        }
+    }
+    Ok(())
 }
 
 fn check_export(export: &LiveRows, expected: &ExpectedVectors<'_>) -> Result<(), VectorRefusal> {
@@ -1003,23 +1290,72 @@ mod tests {
     }
 
     #[test]
-    fn a_verified_file_is_read_no_further_than_its_manifest_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(ROWS_FILE);
-        fs::write(&path, b"0123456789").unwrap();
-        let file = File::open(&path).unwrap();
-        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
-        // The descriptor's position after one read does not change the next.
-        assert_eq!(read_all(&file, ROWS_FILE, 10).unwrap(), b"0123456789");
+    fn the_compatibility_digest_hashes_the_fields_as_one_json_array() {
+        let identity = VectorIdentity {
+            embedding_model: "model \"quoted\"".to_owned(),
+            tokenizer_fingerprint: "tok".to_owned(),
+            vector_dimension: 384,
+            metric: "inner_product".to_owned(),
+            unit_norm_tolerance_bits: 1e-3f64.to_bits(),
+            quantizer_recipe: "scalar-int8-symmetric.v1".to_owned(),
+            generation_epoch: 7,
+            kernel_incarnation_id: "kernel".to_owned(),
+        };
+        let array = serde_json::to_vec(&serde_json::json!([
+            identity.embedding_model,
+            identity.tokenizer_fingerprint,
+            identity.vector_dimension,
+            identity.metric,
+            identity.unit_norm_tolerance_bits,
+            identity.quantizer_recipe,
+            identity.generation_epoch,
+        ]))
+        .unwrap();
+        assert_eq!(identity.compatibility_sha256(), sha256_hex(&array));
+    }
 
-        // Bytes appended after the hash was taken are refused rather than read to the end.
-        fs::write(&path, b"0123456789ab").unwrap();
+    #[test]
+    fn exact_json_matches_only_the_whole_encoding() {
+        let value = ["alpha", "beta"];
+        let bytes = exact_json(&value);
+        assert!(is_exact_json(&value, &bytes));
+        assert!(!is_exact_json(&value, &bytes[..bytes.len() - 1]));
+        assert!(!is_exact_json(&value, &[bytes.as_slice(), b" "].concat()));
+        assert!(!is_exact_json(&value, br#"["alpha","beta "]"#));
+    }
+
+    #[test]
+    fn sorted_lists_share_an_entry_wherever_it_falls() {
+        let list = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let ids = list(&["b", "d", "f", "h"]);
+        for shared in ["b", "f", "h"] {
+            let mut other = list(&["a", "c", "g"]);
+            other.push(shared.to_owned());
+            other.sort();
+            assert!(share_an_entry(&ids, &other), "{shared}");
+            assert!(share_an_entry(&other, &ids), "{shared}");
+        }
+        assert!(!share_an_entry(&ids, &list(&["a", "c", "e", "g", "i"])));
+        assert!(!share_an_entry(&ids, &[]));
+        assert!(!share_an_entry(&[], &ids));
+    }
+
+    #[test]
+    fn a_list_decodes_up_to_its_declared_count_and_refuses_more() {
+        let list = br#"["a","b","c"]"#;
         assert_eq!(
-            read_all(&file, ROWS_FILE, 10).unwrap_err(),
-            VectorRefusal::File {
-                path: ROWS_FILE,
-                fault: FileFault::Size
-            }
+            decode_list(list, 3),
+            Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
         );
+        assert_eq!(decode_list(list, 4).map(|list| list.len()), Some(3));
+        assert_eq!(decode_list(list, 2), None);
+        assert_eq!(decode_list(br#"["a","b"] []"#, 2), None);
+        assert_eq!(decode_list(br#"["a",1]"#, 2), None);
+        assert_eq!(decode_list(b"[]", 0), Some(Vec::new()));
     }
 }
