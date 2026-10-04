@@ -176,7 +176,7 @@ impl std::fmt::Debug for Endpoint {
 
 impl Endpoint {
     /// The production endpoint: the fixed Anthropic host over the webpki roots.
-    pub fn anthropic() -> Self {
+    fn anthropic() -> Self {
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(ANTHROPIC_HOST, ANTHROPIC_PORT, roots)
@@ -208,6 +208,128 @@ impl Endpoint {
             server_name,
             tls: Arc::new(tls),
         })
+    }
+}
+
+/// The provider a sender speaks to: its endpoint identity, the one startup credential its
+/// protocol carries, the body and headers it accepts, and the model it reports answering with.
+/// The variants are this module's own; code elsewhere holds the providers this module's
+/// constructors return and reads what they name, and only this module builds or matches one:
+///
+/// ```compile_fail,E0603
+/// use daemon::memory_reviewer::model_request::Provider;
+/// fn variant(provider: &Provider) {
+///     let Provider(_) = provider;
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct Provider(ProviderKind);
+
+#[derive(Debug, Clone)]
+enum ProviderKind {
+    /// Anthropic Messages on the fixed production host, or a test peer standing in for it.
+    Anthropic(Endpoint),
+}
+
+impl Provider {
+    /// Anthropic Messages on the production host over the webpki roots.
+    pub fn anthropic() -> Self {
+        Self(ProviderKind::Anthropic(Endpoint::anthropic()))
+    }
+
+    /// Anthropic Messages on a local peer for the sender proof. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn anthropic_at(endpoint: Endpoint) -> Self {
+        Self(ProviderKind::Anthropic(endpoint))
+    }
+
+    fn endpoint(&self) -> &Endpoint {
+        match &self.0 {
+            ProviderKind::Anthropic(endpoint) => endpoint,
+        }
+    }
+
+    /// The provider identity a disclosure marker and an approval record: the host this provider
+    /// dials, the API surface, and the API version it speaks.
+    pub fn identity(&self) -> String {
+        match &self.0 {
+            ProviderKind::Anthropic(endpoint) => {
+                format!("{}{MESSAGES_PATH}@{ANTHROPIC_VERSION}", endpoint.host)
+            }
+        }
+    }
+
+    /// The one startup-envelope credential this provider's protocol carries; another
+    /// provider's secret never reaches its host.
+    pub fn credential_name(&self) -> &'static str {
+        match &self.0 {
+            ProviderKind::Anthropic(_) => CREDENTIAL_NAME,
+        }
+    }
+
+    /// The model a response must report for its text to be released when `requested` was asked
+    /// for. Anthropic reports the requested model id itself.
+    pub fn expected_model<'a>(&self, requested: &'a str) -> &'a str {
+        match &self.0 {
+            ProviderKind::Anthropic(_) => requested,
+        }
+    }
+
+    /// The serialized body this provider accepts for `request`, refused when it asks for more
+    /// output than [`MAX_OUTPUT_TOKENS`], exceeds [`MAX_REQUEST_BYTES`], or carries a temperature
+    /// JSON cannot represent exactly (non-finite) or the provider does not accept (outside
+    /// `0.0..=1.0`).
+    fn body(&self, request: &MessagesRequest) -> Result<RequestBody, SendError> {
+        if request.max_tokens == 0 || request.max_tokens > MAX_OUTPUT_TOKENS {
+            return Err(SendError::OutputTokens);
+        }
+        if request
+            .temperature
+            .is_some_and(|temperature| !(0.0..=1.0).contains(&temperature))
+        {
+            return Err(SendError::Temperature);
+        }
+        let body = match &self.0 {
+            ProviderKind::Anthropic(_) => serde_json::to_vec(&WireRequest {
+                model: &request.model,
+                system: request.system.as_deref(),
+                messages: &request.messages,
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+                stream: false,
+            }),
+        }
+        .map_err(|_| SendError::RequestTooLarge)?;
+        if body.len() > MAX_REQUEST_BYTES {
+            return Err(SendError::RequestTooLarge);
+        }
+        Ok(RequestBody {
+            bytes: body,
+            max_tokens: request.max_tokens,
+        })
+    }
+
+    /// The one request carrying `body`, with this provider's host, authentication, and version
+    /// headers; the credential is written into its authentication header and nowhere else.
+    fn request(
+        &self,
+        body: RequestBody,
+        credential: &Credential,
+    ) -> Result<Request<Body>, SendError> {
+        let builder = Request::post(MESSAGES_PATH)
+            .header(header::HOST, self.endpoint().host.as_str())
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .header(header::CONNECTION, "close");
+        let builder = match &self.0 {
+            ProviderKind::Anthropic(_) => builder
+                .header("x-api-key", credential.header())
+                .header("anthropic-version", ANTHROPIC_VERSION),
+        };
+        builder
+            .body(Full::new(Bytes::from(body.bytes)))
+            .map_err(|_| SendError::RequestTooLarge)
     }
 }
 
@@ -246,7 +368,7 @@ struct WireRequest<'a> {
     stream: bool,
 }
 
-/// Serialized request bytes that passed [`MessagesRequest::body`]'s shape, token, and size bounds, with the `max_tokens` the bytes ask for, which sizes the completion budget. Only that constructor produces one, so a handoff cannot carry bytes the bounds never saw.
+/// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with the `max_tokens` the bytes ask for, which sizes the completion budget. Only [`Sender::body`] produces one, so a handoff cannot carry bytes the bounds never saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestBody {
     bytes: Vec<u8>,
@@ -264,37 +386,6 @@ impl RequestBody {
 
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
-    }
-}
-
-impl MessagesRequest {
-    /// The serialized body, refused when it asks for more output than [`MAX_OUTPUT_TOKENS`], exceeds [`MAX_REQUEST_BYTES`], or carries a temperature JSON cannot represent exactly (non-finite) or the provider does not accept (outside `0.0..=1.0`).
-    pub fn body(&self) -> Result<RequestBody, SendError> {
-        if self.max_tokens == 0 || self.max_tokens > MAX_OUTPUT_TOKENS {
-            return Err(SendError::OutputTokens);
-        }
-        if self
-            .temperature
-            .is_some_and(|temperature| !(0.0..=1.0).contains(&temperature))
-        {
-            return Err(SendError::Temperature);
-        }
-        let body = serde_json::to_vec(&WireRequest {
-            model: &self.model,
-            system: self.system.as_deref(),
-            messages: &self.messages,
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            stream: false,
-        })
-        .map_err(|_| SendError::RequestTooLarge)?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err(SendError::RequestTooLarge);
-        }
-        Ok(RequestBody {
-            bytes: body,
-            max_tokens: self.max_tokens,
-        })
     }
 }
 
@@ -329,7 +420,7 @@ const _: () = assert!(
 
 #[derive(Debug, Clone)]
 pub struct Sender {
-    endpoint: Endpoint,
+    provider: Provider,
     credential: Credential,
     timing: Timing,
 }
@@ -337,7 +428,11 @@ pub struct Sender {
 impl Sender {
     /// The provider identity a disclosure marker records: the host this sender actually dials, the API surface, and the API version it speaks.
     pub fn provider_identity(&self) -> String {
-        format!("{}{MESSAGES_PATH}@{ANTHROPIC_VERSION}", self.endpoint.host)
+        self.provider.identity()
+    }
+
+    pub fn provider(&self) -> &Provider {
+        &self.provider
     }
 
     /// The identifier of the credential this sender writes into the authentication header.
@@ -345,18 +440,24 @@ impl Sender {
         self.credential.id()
     }
 
-    pub fn new(endpoint: Endpoint, credential: Credential) -> Self {
+    /// The body this sender's provider accepts for `request`; the bytes a marker hashes are the
+    /// bytes the handoff sends.
+    pub fn body(&self, request: &MessagesRequest) -> Result<RequestBody, SendError> {
+        self.provider.body(request)
+    }
+
+    pub fn new(provider: Provider, credential: Credential) -> Self {
         Self {
-            endpoint,
+            provider,
             credential,
             timing: Timing::PRODUCTION,
         }
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_timing(endpoint: Endpoint, credential: Credential, timing: Timing) -> Self {
+    pub fn with_timing(provider: Provider, credential: Credential, timing: Timing) -> Self {
         Self {
-            endpoint,
+            provider,
             credential,
             timing,
         }
@@ -364,13 +465,14 @@ impl Sender {
 
     /// Opens a fresh connection and completes the TCP, TLS, and HTTP/1 handshakes by `deadline`, clamped to [`Timing::connect`]. No request byte is written.
     pub async fn connect(&self, deadline: Instant) -> Result<Connected, SendError> {
+        let endpoint = self.provider.endpoint();
         let handshakes = async {
-            let tcp = TcpStream::connect((self.endpoint.host.as_str(), self.endpoint.port))
+            let tcp = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
                 .await
                 .map_err(|_| SendError::Connect)?;
             tcp.set_nodelay(true).map_err(|_| SendError::Connect)?;
-            let tls = TlsConnector::from(self.endpoint.tls.clone())
-                .connect(self.endpoint.server_name.clone(), tcp)
+            let tls = TlsConnector::from(endpoint.tls.clone())
+                .connect(endpoint.server_name.clone(), tcp)
                 .await
                 .map_err(|_| SendError::Tls)?;
             let (send, connection) = hyper::client::conn::http1::Builder::new()
@@ -382,7 +484,7 @@ impl Sender {
             Ok(Connected {
                 send,
                 connection,
-                host: self.endpoint.host.clone(),
+                provider: self.provider.clone(),
                 credential: self.credential.clone(),
                 timing: self.timing,
             })
@@ -401,37 +503,29 @@ fn clamp(deadline: Instant, budget: Duration) -> Instant {
 pub struct Connected {
     send: SendRequest<Body>,
     connection: Connection<Transport, Body>,
-    host: String,
+    provider: Provider,
     credential: Credential,
     timing: Timing,
 }
 
 impl std::fmt::Debug for Connected {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "Connected({})", self.host)
+        write!(formatter, "Connected({})", self.provider.endpoint().host)
     }
 }
 
 impl Connected {
-    /// The one-shot handoff: synchronously moves the already serialized `body` into the connection's dispatch queue and returns the in-flight send. The caller serializes and bounds the body beforehand ([`MessagesRequest::body`]), so the bytes it hashed are the bytes sent and nothing is encoded here. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
+    /// The one-shot handoff: synchronously moves the already serialized `body` into the connection's dispatch queue and returns the in-flight send. The caller serializes and bounds the body beforehand ([`Sender::body`]), so the bytes it hashed are the bytes sent and nothing is encoded here. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
     pub fn handoff(mut self, body: RequestBody) -> Result<InFlight, SendError> {
-        let wire = Request::post(MESSAGES_PATH)
-            .header(header::HOST, self.host.as_str())
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .header(header::CONNECTION, "close")
-            .header("x-api-key", self.credential.header())
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .body(Full::new(Bytes::from(body.bytes)))
-            .map_err(|_| SendError::RequestTooLarge)?;
+        let max_tokens = body.max_tokens;
+        let wire = self.provider.request(body, &self.credential)?;
         // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
         let response = Box::pin(self.send.try_send_request(wire));
         Ok(InFlight {
             connection: self.connection,
             response,
             timing: self.timing,
-            max_tokens: body.max_tokens,
+            max_tokens,
         })
     }
 }

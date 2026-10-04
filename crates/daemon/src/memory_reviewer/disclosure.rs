@@ -141,12 +141,20 @@ pub enum DisclosureRefusal {
         error: SendError,
         sent: bool,
     },
-    /// The provider answered under another model than the one requested, or none; the text is withheld.
+    /// The provider reported a model other than `expected`, the model [`super::model_request::Provider::expected_model`] names for the requested one, or none; the text is withheld. `reported` is the provider's model id, kept for the operator's log.
     #[error("model_mismatch")]
-    ModelMismatch { attempt_index: u32 },
-    /// The ledger did not record the attempt's terminal, so the attempt is unknown: nothing durable says whether it completed, failed, or was cancelled. Any text is withheld, and the cause that would have ended the attempt is logged rather than returned, because an unknown attempt outranks its provider outcome (Q20).
+    ModelMismatch {
+        attempt_index: u32,
+        reported: Option<String>,
+        expected: String,
+    },
+    /// The ledger did not record the attempt's terminal, so the attempt is unknown: nothing durable says whether it completed, failed, or was cancelled. Any text is withheld, and the attempt is reported unknown, because an unknown attempt outranks its provider outcome (Q20). `cause` carries the refusal that would have ended it, which the caller reads only to latch a provider rejection.
     #[error("terminal_not_recorded {error}")]
-    TerminalNotRecorded { attempt_index: u32, error: String },
+    TerminalNotRecorded {
+        attempt_index: u32,
+        error: String,
+        cause: Option<Box<DisclosureRefusal>>,
+    },
 }
 
 /// One accepted disclosure.
@@ -173,6 +181,7 @@ pub struct Disclosure<'a> {
 /// Assembles the body from `system` (which must be host-authored, or the body is refused) and the `turn` buffers, in order, recording each buffer's range in the prompt text. Every buffer keeps the tag the broker gave it; the union is the broker's complete disclosed-input union, encoded canonically. Buffers are consumed: a rendered buffer enters one body once, so the assembled evidence bytes are the bytes the broker charged.
 pub fn prepare_body(
     broker: &EvidenceBroker,
+    sender: &Sender,
     profile: &ModelProfile,
     system: RenderedBuffer,
     turn: Vec<RenderedBuffer>,
@@ -219,11 +228,13 @@ pub fn prepare_body(
         max_tokens: profile.max_tokens,
         temperature: profile.temperature,
     };
-    let body = request.body().map_err(|error| DisclosureRefusal::Send {
-        attempt_index: None,
-        error,
-        sent: false,
-    })?;
+    let body = sender
+        .body(&request)
+        .map_err(|error| DisclosureRefusal::Send {
+            attempt_index: None,
+            error,
+            sent: false,
+        })?;
     let union = broker
         .ledger
         .union()
@@ -407,12 +418,17 @@ impl Disclosure<'_> {
                 ));
             }
         };
-        if text.model.as_deref() != Some(prepared.model()) {
+        let expected = self.sender.provider().expected_model(prepared.model());
+        if text.model.as_deref() != Some(expected) {
             return Err(self.end(
                 attempt_index,
                 MemoryReviewerAttemptTerminal::Failed,
                 usage,
-                DisclosureRefusal::ModelMismatch { attempt_index },
+                DisclosureRefusal::ModelMismatch {
+                    attempt_index,
+                    reported: text.model,
+                    expected: expected.to_string(),
+                },
             ));
         }
         self.finish(
@@ -423,6 +439,7 @@ impl Disclosure<'_> {
         .map_err(|error| DisclosureRefusal::TerminalNotRecorded {
             attempt_index,
             error,
+            cause: None,
         })?;
         Ok(Disclosed {
             attempt_index,
@@ -519,6 +536,7 @@ impl Disclosure<'_> {
                 DisclosureRefusal::TerminalNotRecorded {
                     attempt_index,
                     error,
+                    cause: Some(Box::new(refusal)),
                 }
             }
         }

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use daemon::memory_reviewer::model_request::{Credential, Endpoint, Sender};
+use daemon::memory_reviewer::model_request::{Credential, Endpoint, Provider, Sender};
 use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -138,7 +138,9 @@ impl Peer {
     /// A sender whose credential is identified as `credential_id`; the secret it presents is `sk-<credential_id>`.
     pub fn sender_with_credential(&self, credential_id: &str) -> Sender {
         Sender::new(
-            Endpoint::for_test("localhost", self.port, self.roots.clone()).unwrap(),
+            Provider::anthropic_at(
+                Endpoint::for_test("localhost", self.port, self.roots.clone()).unwrap(),
+            ),
             Credential::new(credential_id.to_string(), format!("sk-{credential_id}")).unwrap(),
         )
     }

@@ -371,7 +371,7 @@ async fn send(sender: &Sender, request: &MessagesRequest) -> Result<String, Send
     sender
         .connect(deadline)
         .await?
-        .handoff(request.body()?)?
+        .handoff(sender.body(request)?)?
         .complete(
             deadline,
             ResponseAllowance::FULL,
@@ -397,7 +397,10 @@ fn memory_reviewer_replays_through_the_keyed_peer_scenario(coverage: &mut Covera
         assert_eq!(key.model, prompt.model);
         assert_eq!(
             key.body_digest,
-            format!("{:x}", Sha256::digest(prompt.body().unwrap().as_bytes()))
+            format!(
+                "{:x}",
+                Sha256::digest(sender.body(&prompt).unwrap().as_bytes())
+            )
         );
 
         // Replay: the same body hits once; each entry answers one request, so

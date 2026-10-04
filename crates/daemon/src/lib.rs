@@ -3912,7 +3912,8 @@ impl HandlerCore {
                                     }),
                                     status: Arc::clone(&memory_reviewer_status),
                                     permits: memory_reviewer_permits,
-                                    endpoint: memory_reviewer::model_request::Endpoint::anthropic(),
+                                    provider: memory_reviewer::model_request::Provider::anthropic(),
+                                    rejection: Default::default(),
                                 }),
                                 cancel.clone(),
                             ));
