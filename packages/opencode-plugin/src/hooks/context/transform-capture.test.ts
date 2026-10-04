@@ -8,7 +8,6 @@ import {
     capturedMessagesUnchanged,
     captureHistory as captureHistoryWithLease,
     captureReserved,
-    captureMessages as captureWithLease,
     defaultTransformCaptureAdmission,
     type HistoryDigest,
     historyDigestsEqual,
@@ -40,6 +39,17 @@ function reserveCapture(messages: unknown): CaptureLease {
     if (!captureLease.reserve(inspection.estimatedBytes))
         throw new CaptureBudgetExceeded("fixture");
     return captureLease;
+}
+
+function captureWithLease(messages: unknown, lease: CaptureLease): CapturedMessages {
+    const {
+        verified: _verified,
+        history: _history,
+        terminal: _terminal,
+        boundary: _boundary,
+        ...captured
+    } = captureHistoryWithLease(messages, lease);
+    return captured;
 }
 
 function captureMessages(messages: unknown): CapturedMessages {

@@ -681,11 +681,6 @@ export interface CapturedHistory extends CapturedMessages {
 
 const PREFIX_CHANGED = Symbol("prefix_changed");
 
-/** The caller reserves the inspection charge before allocating retained capture state. */
-export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages {
-    return walkCapture(messages, lease);
-}
-
 /**
  * Captures `messages` within the lease's headroom, then reserves the walk's spend, which equals
  * the charge an inspection without wire estimates reports. The walk and the reservation form one
@@ -761,7 +756,7 @@ export function captureHistory(
 function walkCapture(
     messages: unknown,
     lease: CaptureLease,
-    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
+    digest: { taped: TapedMember[]; verifier?: PrefixVerifier },
 ): CapturedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
