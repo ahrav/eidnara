@@ -190,11 +190,17 @@ impl Calibrator {
         let index = usize::try_from(self.count).unwrap_or(usize::MAX);
         codec::validate(row, &self.layout)
             .map_err(|rejection| CalibrationRejection::Row { index, rejection })?;
+        self.push_validated(row);
+        Ok(())
+    }
+
+    /// [`Self::push`] for a `row` that [`codec::validate`] has accepted under this layout.
+    pub fn push_validated(&mut self, row: &[f32]) {
+        debug_assert_eq!(row.len(), self.max_abs.len());
         for (max, value) in self.max_abs.iter_mut().zip(row) {
             *max = max.max(value.abs());
         }
         self.count += 1;
-        Ok(())
     }
 
     /// # Errors
@@ -236,25 +242,160 @@ pub struct Encoded {
 ///
 /// A layout that is not a generation predicate, or a row outside it.
 pub fn encode(layout: &RowLayout, scales: &Scales, row: &[f32]) -> Result<Encoded, RowRejection> {
+    let mut codes = Vec::new();
+    let clipped = encode_into(layout, scales, row, &mut codes)?;
+    Ok(Encoded { codes, clipped })
+}
+
+/// [`encode`] that refills `codes` with one code per coordinate, for buffer reuse across rows, and returns the number of clamped coordinates.
+///
+/// # Errors
+///
+/// The same as [`encode`].
+pub fn encode_into(
+    layout: &RowLayout,
+    scales: &Scales,
+    row: &[f32],
+    codes: &mut Vec<i8>,
+) -> Result<u32, RowRejection> {
     layout.check()?;
     codec::validate(row, layout)?;
+    Ok(encode_validated_into(layout, scales, row, codes))
+}
+
+/// [`encode_into`] for a `row` that [`codec::validate`] has accepted under `layout`.
+pub fn encode_validated_into(
+    layout: &RowLayout,
+    scales: &Scales,
+    row: &[f32],
+    codes: &mut Vec<i8>,
+) -> u32 {
+    debug_assert_eq!(row.len(), layout.dimension as usize);
     assert_eq!(
         scales.scales.len(),
         layout.dimension as usize,
         "scales of one calibration match the layout"
     );
-    let mut codes = Vec::with_capacity(row.len());
+    codes.clear();
+    codes.resize(row.len(), 0);
+    quotient_codes(row, &scales.scales, codes)
+}
+
+fn quotient_codes(row: &[f32], scales: &[f32], codes: &mut [i8]) -> u32 {
     let mut clipped = 0u32;
-    for (value, scale) in row.iter().zip(&scales.scales) {
+    for ((code, value), scale) in codes.iter_mut().zip(row).zip(scales) {
         let rounded = (f64::from(*value) / f64::from(*scale)).round_ties_even();
-        let code = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
-        if code != rounded {
-            clipped += 1;
-        }
+        let clamped = rounded.clamp(f64::from(CODE_MIN), f64::from(CODE_MAX));
+        clipped += u32::from(clamped != rounded);
         // A finite value over a positive finite scale is a finite quotient, and the clamp bounds it to i8, so the cast is exact.
-        codes.push(code as i8);
+        *code = clamped as i8;
     }
-    Ok(Encoded { codes, clipped })
+    clipped
+}
+
+/// Coordinates [`Encoder`] codes together; a block whose products are all clear of every rounding midpoint stays on the product path.
+const ENCODE_BLOCK: usize = 32;
+
+/// A product farther than this from its nearest integer lies within `2^-14` of a midpoint between two integers, where the product may round otherwise than the quotient.
+const NEAR_HALF: f32 = 0.5 - 1.0 / 16384.0;
+
+/// Adding and subtracting `1.5 * 2^23` rounds an f32 of magnitude at most `2^22` to an integer, ties to even, in the default rounding mode.
+const ROUNDING_BIAS: f32 = 12_582_912.0;
+
+/// Checks stored codes against [`encode_validated_into`] for many rows under one set of scales.
+///
+/// Each coordinate is multiplied by `r = 1 / s` rounded to f32 once per encoder. With `r` normal, `p = v * r` in f32 lies within `2^-22.9 * |v / s|` of `v / s`, or below `2^-126` with `v / s` when the product leaves the normal range, where both round to zero.
+/// The exact quotient of two f32 values is a midpoint between two integers or at least `2^-26` from every such midpoint, so the f64 quotient of [`encode_validated_into`] rounds as the exact one does.
+/// Up to 128 in magnitude the product lies within `2^-15.9` of the quotient, so a product farther than `2^-14` from every midpoint rounds as the quotient does, and a product past 128 clamps to the code the quotient clamps to; a block holding a product near a midpoint takes the f64 quotient.
+pub struct Encoder<'a> {
+    scales: &'a Scales,
+    /// Empty when some reciprocal is not a normal f32; every coordinate then takes the f64 quotient.
+    reciprocals: Vec<f32>,
+}
+
+impl<'a> Encoder<'a> {
+    pub fn new(scales: &'a Scales) -> Self {
+        let reciprocals: Vec<f32> = scales.scales.iter().map(|scale| 1.0 / scale).collect();
+        let reciprocals = if reciprocals.iter().all(|reciprocal| reciprocal.is_normal()) {
+            reciprocals
+        } else {
+            Vec::new()
+        };
+        Self {
+            scales,
+            reciprocals,
+        }
+    }
+
+    /// Whether `stored` holds, byte for byte, the codes [`encode_validated_into`] writes for a `row` that [`codec::validate`] has accepted under `layout`.
+    pub fn matches(&self, layout: &RowLayout, row: &[f32], stored: &[u8]) -> bool {
+        debug_assert_eq!(row.len(), layout.dimension as usize);
+        assert_eq!(
+            self.scales.scales.len(),
+            row.len(),
+            "scales of one calibration match the layout"
+        );
+        if stored.len() != row.len() {
+            return false;
+        }
+        let quotient_differ = |start: usize, stored: &[u8]| {
+            let mut codes = [0i8; ENCODE_BLOCK];
+            let codes = &mut codes[..stored.len()];
+            let end = start + stored.len();
+            quotient_codes(&row[start..end], &self.scales.scales[start..end], codes);
+            differ_bits(codes, stored)
+        };
+        if self.reciprocals.is_empty() {
+            return (0..row.len())
+                .step_by(ENCODE_BLOCK)
+                .zip(stored.chunks(ENCODE_BLOCK))
+                .fold(0, |differ, (start, stored)| {
+                    differ | quotient_differ(start, stored)
+                })
+                == 0;
+        }
+        let (values, _) = row.as_chunks::<ENCODE_BLOCK>();
+        let (reciprocals, _) = self.reciprocals.as_chunks::<ENCODE_BLOCK>();
+        let (blocks, tail) = stored.as_chunks::<ENCODE_BLOCK>();
+        let mut differ = 0u8;
+        for (index, ((values, reciprocals), stored)) in
+            values.iter().zip(reciprocals).zip(blocks).enumerate()
+        {
+            differ |= match product_differ(values, reciprocals, stored) {
+                Some(block) => block,
+                None => quotient_differ(index * ENCODE_BLOCK, stored),
+            };
+        }
+        differ |= quotient_differ(row.len() - tail.len(), tail);
+        differ == 0
+    }
+}
+
+/// Nonzero when some code differs from its stored byte; the fold reads every byte, so it vectorizes.
+fn differ_bits(codes: &[i8], stored: &[u8]) -> u8 {
+    codes
+        .iter()
+        .zip(stored)
+        .fold(0, |differ, (code, byte)| differ | (*code as u8 ^ byte))
+}
+
+/// The bits [`differ_bits`] folds for the codes of `values` from their products; `None` when some product lies within `2^-14` of a midpoint between two integers.
+fn product_differ(
+    values: &[f32; ENCODE_BLOCK],
+    reciprocals: &[f32; ENCODE_BLOCK],
+    stored: &[u8; ENCODE_BLOCK],
+) -> Option<u8> {
+    let mut near = false;
+    let mut differ = 0u8;
+    for ((value, reciprocal), byte) in values.iter().zip(reciprocals).zip(stored) {
+        // A finite value times a normal reciprocal is never NaN. Up to `2^22` in magnitude the bias rounds the product exactly and its distance to the rounded integer is exact; past that, the product and the quotient both code as 127 or -127 whichever path the block takes.
+        let product = value * reciprocal;
+        let rounded = (product + ROUNDING_BIAS) - ROUNDING_BIAS;
+        near |= (product - rounded).abs() > NEAR_HALF;
+        let code = rounded.max(f32::from(CODE_MIN)).min(f32::from(CODE_MAX)) as i32 as i8;
+        differ |= code as u8 ^ byte;
+    }
+    (!near).then_some(differ)
 }
 
 /// One byte per code, two's complement.
@@ -352,6 +493,129 @@ impl<'s> QuantizedQuery<'s> {
     /// [`weighted_dot`] of the query's codes with `doc`, a row [`decode_codes`] produced from the same layer, so its length is the dimension and no code is `-128`.
     pub fn score(&self, doc: &[i8]) -> f64 {
         weighted_dot(self.scales, &self.codes, doc)
+    }
+
+    /// Every term [`Self::score`] can add, tabulated once so a scan over many rows looks each term up.
+    ///
+    /// The table holds `2048 * dimension` bytes. Building it forms `256 * dimension` terms, as many as scoring 256 rows with [`Self::score`] forms.
+    pub fn term_table(&self) -> TermTable {
+        let mut terms = vec![0.0f64; self.codes.len() * CODE_VALUES];
+        for ((weight, q), entries) in self
+            .scales
+            .weights
+            .iter()
+            .zip(&self.codes)
+            .zip(terms.as_chunks_mut::<CODE_VALUES>().0)
+        {
+            let q = f64::from(*q);
+            for (entry, code) in entries.iter_mut().zip(&CODE_AS_F64) {
+                // `q * code` is the integer product, exact in f64; adding `+0.0` turns a `-0.0` product into the `+0.0` that widening the zero i32 product gives.
+                let product = q * *code + 0.0;
+                *entry = *weight * product;
+            }
+        }
+        TermTable {
+            dimension: self.codes.len(),
+            terms,
+        }
+    }
+}
+
+/// Entries per coordinate in a [`TermTable`], one for each byte a code can occupy.
+const CODE_VALUES: usize = 256;
+
+const CODE_AS_F64: [f64; CODE_VALUES] = {
+    let mut values = [0.0f64; CODE_VALUES];
+    let mut byte = 0;
+    while byte < CODE_VALUES {
+        values[byte] = byte as u8 as i8 as f64;
+        byte += 1;
+    }
+    values
+};
+
+/// Coordinates a [`TermTable`] scan adds per pass over its rows; their terms occupy 32 KiB, sized for the L1 data cache.
+const TABLE_CHUNK: usize = 16;
+
+/// Rows a [`TermTable`] scan carries through every chunk before it moves on, so each chunk's terms are loaded once per this many rows.
+const TABLE_ROWS: usize = 512;
+
+pub struct TermTable {
+    dimension: usize,
+    terms: Vec<f64>,
+}
+
+impl std::fmt::Debug for TermTable {
+    /// Terms derive from the query embedding, so diagnostics show only the dimension.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TermTable")
+            .field("dimension", &self.dimension)
+            .finish()
+    }
+}
+
+impl TermTable {
+    /// Scores `out.len()` rows stored back to back in `codes`, writing [`QuantizedQuery::score`] of row `i` to `out[i]`.
+    ///
+    /// Each row sums its terms from `+0.0` in increasing coordinate order. Rows advance together one chunk of coordinates at a time, which keeps that chunk's terms cached; the order within each row is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// When `codes` is not `out.len()` rows of the table's dimension.
+    pub fn score_rows(&self, codes: &[i8], out: &mut [f64]) {
+        let dimension = self.dimension;
+        assert_eq!(
+            Some(codes.len()),
+            out.len().checked_mul(dimension),
+            "codes of one calibration have one length"
+        );
+        debug_assert!(
+            !codes.contains(&i8::MIN),
+            "the reserved code -128 never reaches scoring"
+        );
+        let chunked = dimension / TABLE_CHUNK * TABLE_CHUNK;
+        let (chunks, tail) = self.terms.split_at(chunked * CODE_VALUES);
+        let rows_per_tile = TABLE_ROWS * dimension;
+        for (tile, sums) in codes.chunks(rows_per_tile).zip(out.chunks_mut(TABLE_ROWS)) {
+            sums.fill(0.0);
+            for (index, chunk) in chunks
+                .as_chunks::<{ TABLE_CHUNK * CODE_VALUES }>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let start = index * TABLE_CHUNK;
+                for (row, sum) in tile.chunks_exact(dimension).zip(sums.iter_mut()) {
+                    let bytes: &[i8; TABLE_CHUNK] = row[start..start + TABLE_CHUNK]
+                        .try_into()
+                        .expect("a chunk lies inside the row");
+                    let mut acc = *sum;
+                    for quad in 0..TABLE_CHUNK / 4 {
+                        let word =
+                            u32::from_le_bytes(std::array::from_fn(|i| bytes[4 * quad + i] as u8));
+                        let (low, high) = (word as u16, (word >> 16) as u16);
+                        let terms = 4 * quad * CODE_VALUES;
+                        acc += chunk[terms + usize::from(low as u8)];
+                        acc += chunk[terms + CODE_VALUES + usize::from(low >> 8)];
+                        acc += chunk[terms + 2 * CODE_VALUES + usize::from(high as u8)];
+                        acc += chunk[terms + 3 * CODE_VALUES + usize::from(high >> 8)];
+                    }
+                    *sum = acc;
+                }
+            }
+            for (row, sum) in tile.chunks_exact(dimension).zip(sums.iter_mut()) {
+                let mut acc = *sum;
+                for (terms, code) in tail
+                    .as_chunks::<CODE_VALUES>()
+                    .0
+                    .iter()
+                    .zip(&row[chunked..])
+                {
+                    acc += terms[usize::from(*code as u8)];
+                }
+                *sum = acc;
+            }
+        }
     }
 }
 

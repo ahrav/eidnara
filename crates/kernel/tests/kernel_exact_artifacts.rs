@@ -413,3 +413,303 @@ fn cas_only_objects_stay_outside_the_source_inventory_and_get_swept() {
     assert!(object_path(root.path(), &held.digest).exists());
     assert_eq!(store.read_artifact(&held).unwrap(), b"held text");
 }
+
+fn reservation_count(root: &Path) -> i64 {
+    rusqlite::Connection::open_with_flags(
+        root.join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT COUNT(*) FROM artifact_ingestion_reservations",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// A batch stores each distinct payload once, records every request's evidence and receipt in the commit that also runs its operation, and each request ingested alone afterward replays that receipt without writing.
+#[test]
+fn a_batch_retains_each_payload_once_and_every_request_replays_alone() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let texts = [FIXTURES[1].1, FIXTURES[2].1, FIXTURES[1].1];
+    let requests = || {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| request(&format!("batch-{index}"), text.as_bytes().to_vec()))
+            .collect::<Vec<_>>()
+    };
+    let staged = store.staged_artifacts_for_test();
+    let tip = store.tip().unwrap();
+    let mut seen = Vec::new();
+    let receipt = store
+        .ingest_exact_artifacts_with(intent("batch", b"batch"), requests(), None, |_, handles| {
+            seen = handles.to_vec();
+            Ok("batched".to_string())
+        })
+        .unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.result, "batched");
+    assert_eq!(
+        store.tip().unwrap(),
+        tip + 1,
+        "one commit for the whole batch"
+    );
+    assert_eq!(
+        store.staged_artifacts_for_test(),
+        staged + 2,
+        "equal bytes stage once"
+    );
+    assert_eq!(object_count(root.path()), 2);
+    assert_eq!(evidence_count(root.path()), 3);
+    assert_eq!(
+        (tmp_count(root.path()), reservation_count(root.path())),
+        (0, 0)
+    );
+    for (handle, text) in seen.iter().zip(texts) {
+        assert_eq!(
+            handle.digest,
+            format!("{:x}", Sha256::digest(text.as_bytes()))
+        );
+        assert_eq!(store.read_artifact(handle).unwrap(), text.as_bytes());
+    }
+    for (request, handle) in requests().into_iter().zip(&seen) {
+        assert_eq!(&store.ingest_exact_artifact(request).unwrap(), handle);
+    }
+    // The batch's own key replays too, before any byte is staged: no operation, no reference, no temporary file.
+    let staged = store.staged_artifacts_for_test();
+    let replayed = store
+        .ingest_exact_artifacts_with(intent("batch", b"batch"), requests(), None, |_, _| {
+            panic!("a replayed batch runs no operation")
+        })
+        .unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(store.staged_artifacts_for_test(), staged);
+    assert_eq!(store.tip().unwrap(), tip + 1);
+    assert_eq!(object_count(root.path()), 2);
+    assert_eq!(evidence_count(root.path()), 3);
+    assert_eq!(
+        (tmp_count(root.path()), reservation_count(root.path())),
+        (0, 0)
+    );
+}
+
+/// A refused batch commits nothing: a failing operation, a request whose key another commit already recorded, and an inadmissible payload each leave no evidence, reservation, temporary file, or new object, while an object an earlier reference holds stays.
+#[test]
+fn a_refused_batch_commits_nothing_and_removes_only_the_bytes_it_added() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let tip = store.tip().unwrap();
+    // Two requests share the first payload's object; the refusal removes it once both reservations are released.
+    let refused = store.ingest_exact_artifacts_with(
+        intent("refused", b"refused"),
+        vec![
+            request("fresh", FIXTURES[1].1.as_bytes().to_vec()),
+            request("other", FIXTURES[3].1.as_bytes().to_vec()),
+            request("fresh-again", FIXTURES[1].1.as_bytes().to_vec()),
+        ],
+        None,
+        |_, _| Err(kernel::KernelError::Conflict),
+    );
+    assert_eq!(refused.unwrap_err(), kernel::KernelError::Conflict);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(
+        (object_count(root.path()), evidence_count(root.path())),
+        (0, 0)
+    );
+    assert_eq!(
+        (tmp_count(root.path()), reservation_count(root.path())),
+        (0, 0)
+    );
+
+    let held = store
+        .ingest_exact_artifact(request("held", FIXTURES[2].1.as_bytes().to_vec()))
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let reused = store.ingest_exact_artifacts_with(
+        intent("reused", b"reused"),
+        vec![
+            request("new", FIXTURES[3].1.as_bytes().to_vec()),
+            request("held", FIXTURES[2].1.as_bytes().to_vec()),
+        ],
+        None,
+        |_, _| Ok(String::new()),
+    );
+    assert_eq!(reused.unwrap_err(), kernel::KernelError::Conflict);
+    assert_eq!(store.tip().unwrap(), tip);
+    assert_eq!(
+        (object_count(root.path()), evidence_count(root.path())),
+        (1, 1)
+    );
+    assert_eq!(
+        (tmp_count(root.path()), reservation_count(root.path())),
+        (0, 0)
+    );
+    assert_eq!(
+        store.read_artifact(&held).unwrap(),
+        FIXTURES[2].1.as_bytes()
+    );
+
+    let staged = store.staged_artifacts_for_test();
+    let secret = store.ingest_exact_artifacts_with(
+        intent("secret", b"secret"),
+        vec![
+            request("clean", FIXTURES[1].1.as_bytes().to_vec()),
+            request("secret", format!("token {SECRET}").into_bytes()),
+        ],
+        None,
+        |_, _| Ok(String::new()),
+    );
+    assert_eq!(secret.unwrap_err(), kernel::KernelError::InvalidInput);
+    assert_eq!(
+        store.staged_artifacts_for_test(),
+        staged,
+        "refused before staging"
+    );
+    assert!(!residue_has(root.path(), SECRET.as_bytes()));
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+/// A batch with no requests is one commit of its operation, which may record receipts for other keys; each recorded key then replays its result instead of running a later operation, and recording a key twice refuses the commit.
+#[test]
+fn an_empty_batch_commits_its_operation_and_recorded_receipts_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let tip = store.tip().unwrap();
+    let receipt = store
+        .ingest_exact_artifacts_with(
+            intent("empty", b"empty"),
+            Vec::new(),
+            None,
+            |envelope, handles| {
+                assert!(handles.is_empty());
+                envelope.record_receipt(intent("recorded", b"recorded"), "recorded result")?;
+                Ok("main".to_string())
+            },
+        )
+        .unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(store.tip().unwrap(), tip + 1);
+    let replay = store
+        .commit(intent("recorded", b"recorded"), |_| {
+            panic!("a recorded key runs no operation")
+        })
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(
+        (replay.commit_seq, replay.result.as_str()),
+        (tip + 1, "recorded result")
+    );
+    // The same key under another request digest is the conflict the digest exists to catch.
+    assert_eq!(
+        store
+            .commit(intent("recorded", b"other"), |_| Ok(String::new()))
+            .unwrap_err(),
+        kernel::KernelError::Conflict
+    );
+    let twice = store.commit(intent("twice", b"twice"), |envelope| {
+        envelope.record_receipt(intent("recorded", b"recorded"), "again")?;
+        Ok(String::new())
+    });
+    assert_eq!(twice.unwrap_err(), kernel::KernelError::Conflict);
+    assert_eq!(store.tip().unwrap(), tip + 1);
+}
+
+#[test]
+fn a_refused_receipt_poisons_the_envelope_and_a_poisoned_envelope_records_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("first", b"first"), |envelope| {
+            envelope
+                .record_receipt(intent("recorded", b"recorded"), "recorded result")
+                .map(|()| String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+
+    let discarded = store.commit(intent("discarded", b"discarded"), |envelope| {
+        let refused = envelope.record_receipt(intent("recorded", b"recorded"), "again");
+        assert_eq!(refused, Err(kernel::KernelError::Conflict));
+        Ok(String::new())
+    });
+    assert_eq!(
+        discarded.unwrap_err(),
+        kernel::KernelError::Conflict,
+        "a discarded receipt refusal committed"
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+
+    let poisoned = store.commit(intent("poisoned", b"poisoned"), |envelope| {
+        let missing = envelope.retire_decision("decision-object-missing");
+        assert_eq!(missing, Err(kernel::KernelError::NotFound));
+        envelope
+            .record_receipt(intent("after-poison", b"after-poison"), "written")
+            .map(|()| String::new())
+    });
+    assert_eq!(
+        poisoned.unwrap_err(),
+        kernel::KernelError::NotFound,
+        "a poisoned envelope recorded a receipt"
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
+/// A batch larger than one staging chunk retains every payload, and a refusal after staging several chunks leaves no temporary file, reservation, or object behind.
+#[test]
+fn a_batch_of_many_payloads_stages_in_chunks_and_a_refusal_leaves_a_clean_store() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    let requests = |prefix: &str| {
+        (0..40)
+            .map(|index| {
+                request(
+                    &format!("{prefix}-{index}"),
+                    format!("payload {index}").into_bytes(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let refused = store.ingest_exact_artifacts_with(
+        intent("many-refused", b"many-refused"),
+        requests("refused"),
+        None,
+        |_, _| Err(kernel::KernelError::Conflict),
+    );
+    assert_eq!(refused.unwrap_err(), kernel::KernelError::Conflict);
+    assert_eq!(
+        (object_count(root.path()), evidence_count(root.path())),
+        (0, 0)
+    );
+    assert_eq!(
+        (tmp_count(root.path()), reservation_count(root.path())),
+        (0, 0)
+    );
+    let receipt = store
+        .ingest_exact_artifacts_with(
+            intent("many", b"many"),
+            requests("kept"),
+            None,
+            |_, handles| {
+                assert_eq!(handles.len(), 40);
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(
+        (object_count(root.path()), evidence_count(root.path())),
+        (40, 40)
+    );
+    assert_eq!(
+        (tmp_count(root.path()), reservation_count(root.path())),
+        (0, 0)
+    );
+}

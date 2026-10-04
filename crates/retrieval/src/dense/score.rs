@@ -210,11 +210,6 @@ impl<T> TopK<T> {
         self.heap.len() == self.k.get()
     }
 
-    /// The payload of the worst-ranked member, the one a full set displaces next.
-    pub fn worst(&self) -> Option<&T> {
-        self.heap.peek().map(|worst| &worst.1)
-    }
-
     /// Best first.
     pub fn into_ranked(self) -> Vec<(Ranked, T)> {
         self.heap

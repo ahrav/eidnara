@@ -330,11 +330,23 @@ pub(crate) fn hash_copy(
     destination: Option<&OwnedFd>,
     cap: u64,
 ) -> io::Result<(u64, String)> {
-    let mut hasher = sha2::Sha256::new();
-    let mut total = 0u64;
+    hash_copy_from(source, destination, cap, sha2::Sha256::new(), 0)
+}
+
+/// [`hash_copy`] from `source`'s current offset, continuing a `hasher` that has already taken the `total` bytes before it.
+pub(crate) fn hash_copy_from(
+    source: &OwnedFd,
+    destination: Option<&OwnedFd>,
+    cap: u64,
+    mut hasher: sha2::Sha256,
+    mut total: u64,
+) -> io::Result<(u64, String)> {
     let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
     loop {
-        let count = rustix::io::read(source, &mut buffer)?;
+        let count = match rustix::io::read(source, &mut buffer) {
+            Err(rustix::io::Errno::INTR) => continue,
+            result => result?,
+        };
         if count == 0 {
             break;
         }

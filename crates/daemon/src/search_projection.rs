@@ -23,6 +23,10 @@ use crate::search_writer::{Quarantine, QuarantineKind};
 
 /// The page cache the projection connection is allowed, in KiB.
 pub const CACHE_KIB: u32 = 8 * 1024;
+/// The bytes of the database file the projection connection may memory-map (`PRAGMA mmap_size`).
+/// A one-million-occurrence projection exceeds the bundled library's default 0x7fff0000-byte cap, so the connection's memory-mapping limit is 16 GiB.
+/// `.cargo/config.toml` sets the library's compile-time memory-mapping cap to 16 GiB.
+pub const MMAP_BYTES: i64 = 0x4_0000_0000;
 /// Pages SQLite may hold in memory for one transient index or sort.
 const TEMP_STORE_MEMORY: &str = "MEMORY";
 /// The suffixes SQLite appends to a database's whole file name for its write-ahead log, shared-memory index, and rollback journal.
@@ -45,6 +49,8 @@ pub struct ConnectionFacts {
     /// Negative: KiB of page cache.
     pub cache_size: i64,
     pub temp_store: i64,
+    /// `PRAGMA mmap_size` in bytes.
+    pub mmap_size: i64,
     /// The engine that answered the FTS5 probe; a build without FTS5 or without the lexical tokenizer never reaches this.
     pub engine: retrieval::lexical::EngineIdentity,
 }
@@ -226,6 +232,7 @@ impl SearchProjection {
         self.store.with_conn_unfenced(|conn| {
             conn.pragma_update(None, "cache_size", -i64::from(CACHE_KIB))?;
             conn.pragma_update(None, "temp_store", TEMP_STORE_MEMORY)?;
+            conn.pragma_update(None, "mmap_size", MMAP_BYTES)?;
             Ok(())
         })?;
         Ok(())
@@ -275,11 +282,12 @@ impl SearchProjection {
                 foreign_keys: conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?,
                 cache_size: conn.query_row("PRAGMA cache_size", [], |row| row.get(0))?,
                 temp_store: conn.query_row("PRAGMA temp_store", [], |row| row.get(0))?,
+                mmap_size: conn.query_row("PRAGMA mmap_size", [], |row| row.get(0))?,
                 engine,
             })
         })?;
         // 2 is FULL for synchronous and MEMORY for temp_store.
-        let expectations: [(&str, bool, String); 5] = [
+        let expectations: [(&str, bool, String); 6] = [
             (
                 "journal_mode",
                 facts.journal_mode.eq_ignore_ascii_case("wal"),
@@ -304,6 +312,11 @@ impl SearchProjection {
                 "temp_store",
                 facts.temp_store == 2,
                 facts.temp_store.to_string(),
+            ),
+            (
+                "mmap_size",
+                facts.mmap_size == MMAP_BYTES,
+                facts.mmap_size.to_string(),
             ),
         ];
         if let Some((name, _, actual)) = expectations.iter().find(|(_, holds, _)| !holds) {

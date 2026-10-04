@@ -572,7 +572,7 @@ async fn a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete() 
     .unwrap();
     assert_eq!(
         outcome.statuses[2],
-        LaneStatus::Incomplete("coverage_shortfall"),
+        LaneStatus::incomplete("coverage_shortfall"),
         "{}",
         outcome.body
     );
@@ -606,7 +606,7 @@ async fn a_coverage_shortfall_and_a_row_bound_leave_the_dense_lane_incomplete() 
     .unwrap();
     assert_eq!(
         outcome.statuses[2],
-        LaneStatus::Incomplete("row_bound"),
+        LaneStatus::incomplete("row_bound"),
         "{}",
         outcome.body
     );

@@ -507,12 +507,14 @@ fn a_hanging_summarizer_command_is_killed_by_shutdown() {
     let pid_file = dir.path().join("child.pid");
     let hanging = dir.path().join("hang.sh");
     // The script hangs in a grandchild, as a command that shells out to a
-    // CLI does; the recorded pid is the grandchild's.
+    // CLI does; the recorded pid is the grandchild's. The pid lands through a
+    // rename, so `pid_file.exists()` implies its content is complete.
     std::fs::write(
         &hanging,
         format!(
-            "#!/bin/sh\ncat > /dev/null\nsleep 600 &\necho $! > '{}'\nwait\n",
-            pid_file.display()
+            "#!/bin/sh\ncat > /dev/null\nsleep 600 &\necho $! > '{tmp}'\nmv '{tmp}' '{pid}'\nwait\n",
+            tmp = dir.path().join("child.pid.tmp").display(),
+            pid = pid_file.display()
         ),
     )
     .unwrap();

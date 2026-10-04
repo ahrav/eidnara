@@ -1091,8 +1091,19 @@ fn local_embeddings_from_manifest(
         ort_library: descriptor_root.join(ORT_LIBRARY),
         bundle_manifest_sha256: Some(bundle_manifest.sha256.clone()),
         ort_library_sha256: ort.sha256.clone(),
-        limits: LocalEmbeddingsLimits::default(),
+        limits: lane_limits(),
     }))
+}
+
+/// The daemon embeds one text per inference call: backfill admits single-item jobs and queries
+/// carry one text. One row keeps certification and every admitted batch at the single window the
+/// bundle certifies, instead of `[64, max_tokens]` tensors no supported host can hold.
+#[cfg(not(target_os = "macos"))]
+fn lane_limits() -> LocalEmbeddingsLimits {
+    LocalEmbeddingsLimits {
+        max_batch_items: 1,
+        ..LocalEmbeddingsLimits::default()
+    }
 }
 
 /// Revalidates startup state and runs the fixed host profile until shutdown.
@@ -1228,6 +1239,33 @@ pub fn run() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Startup certification runs `[max_batch_items, max_tokens]` token tensors through the f32
+    /// graph, and serving admits the same shape. A 512-token single-row window certifies in
+    /// seconds under 1.5 GB of RSS; one 8192-token row alone exceeds the 90 s hard
+    /// certification budget at one intra-op thread, and 64 such rows exceed 150 GB.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_shipped_lane_certifies_and_serves_one_window_within_the_startup_envelope() {
+        use host_runtime::local_embeddings::bundle::BundleManifest;
+        const QUALIFIED_TOKENS_PER_CALL: u64 = 512;
+        let path = format!(
+            "{}/../../release/local-embeddings/gte-modernbert-base-f32/manifest.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let manifest: BundleManifest =
+            serde_json::from_slice(&std::fs::read(path).expect("committed bundle manifest"))
+                .expect("bundle manifest parses");
+        let limits = lane_limits();
+        let rows = u64::try_from(limits.max_batch_items).expect("row count fits u64");
+        assert!(
+            rows * manifest.max_tokens <= QUALIFIED_TOKENS_PER_CALL,
+            "the largest certified call is [{rows}, {}]",
+            manifest.max_tokens
+        );
+        assert!(u64::from(manifest.recommended_batch.rows) <= rows);
+        assert!(u64::from(manifest.recommended_batch.token_budget) <= rows * manifest.max_tokens);
+    }
 
     /// A Linux generation without ORT or without the bundle manifest is degraded, never
     /// `unsupported`, so a packaging regression surfaces in status and doctor.

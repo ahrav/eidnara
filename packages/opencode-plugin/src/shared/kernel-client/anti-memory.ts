@@ -46,11 +46,13 @@ export interface StoredAntiMemoryPayload {
     nonApplicableWhen: string | null;
 }
 
+const COLLAPSIBLE_WHITESPACE = /[^\S ]|\s\s/;
+
 function requiredText(value: unknown, field: string): string {
     if (typeof value !== "string" || value.trim().length === 0) {
         throw new MemoryInputError(`anti-memory ${field} must be non-empty`);
     }
-    return value.replace(/\s+/g, " ").trim();
+    return (COLLAPSIBLE_WHITESPACE.test(value) ? value.replace(/\s+/g, " ") : value).trim();
 }
 
 function optionalText(value: unknown, field: string): string | null {
@@ -159,9 +161,9 @@ export function parseAntiMemoryContent(content: string): AntiMemoryPayload {
               );
     return {
         ...normalizeAntiMemoryPayload({
-            trigger: requiredText(fields.get("Trigger"), "trigger"),
-            rejectedStrategy: requiredText(fields.get("Rejected strategy"), "rejectedStrategy"),
-            rejectionReason: requiredText(fields.get("Rejection reason"), "rejectionReason"),
+            trigger: fields.get("Trigger") ?? "",
+            rejectedStrategy: fields.get("Rejected strategy") ?? "",
+            rejectionReason: fields.get("Rejection reason") ?? "",
             saferAlternative: fields.get("Safer alternative"),
             preconditions: fields.get("Preconditions"),
             attemptedApproach: fields.get("Attempted approach"),

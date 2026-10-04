@@ -215,6 +215,49 @@ const MODEL_INFERENCE_TAINTS: ReadonlySet<string> = new Set([
     "unclassifiable",
 ]);
 
+/** Keys the daemon strips from a `kernel.*`-routed body before parsing it with `deny_unknown_fields`. */
+const ENVELOPE_KEYS: ReadonlySet<string> = new Set([
+    "method",
+    "kind",
+    "v",
+    "session_id",
+    "project_root",
+]);
+
+/** The daemon's `retrieval.query` request fields. `remaining_ms` decodes as `Option<u64>`, so a fractional or negative value fails to decode. */
+const QUERY_REQUEST_FIELDS: ReadonlySet<string> = new Set([
+    "query",
+    "remaining_ms",
+    "destination",
+    "harness",
+]);
+
+/** The daemon decodes the request before it consults the route's limit set, so a body that fails to decode answers `invalid_params` even while the route is disabled. */
+function checkQueryRequest(body: Record<string, unknown>): void {
+    for (const key of Object.keys(body)) {
+        if (!ENVELOPE_KEYS.has(key) && !QUERY_REQUEST_FIELDS.has(key)) {
+            throw invalidParams(`invalid retrieval.query: unknown field \`${key}\``);
+        }
+    }
+    if (typeof body.query !== "string") {
+        throw invalidParams("invalid retrieval.query: `query` must be a string");
+    }
+    const remaining = body.remaining_ms;
+    if (
+        remaining !== undefined &&
+        remaining !== null &&
+        !(typeof remaining === "number" && Number.isSafeInteger(remaining) && remaining >= 0)
+    ) {
+        throw invalidParams(`invalid retrieval.query: \`remaining_ms\` ${remaining} is not a u64`);
+    }
+    if (body.destination !== "local" && body.destination !== "remote") {
+        throw invalidParams("invalid retrieval.query: `destination` must be local or remote");
+    }
+    if (body.harness !== undefined && body.harness !== null && typeof body.harness !== "string") {
+        throw invalidParams("invalid retrieval.query: `harness` must be a string");
+    }
+}
+
 /** An assertion above the derived class is refused rather than clamped so the caller learns its claim was not accepted. */
 function resolveClasses(
     body: Record<string, unknown>,
@@ -880,6 +923,7 @@ export class FakeKernel {
             case "kernel.read":
                 return this.readReply(body, projectRoot);
             case "retrieval.query":
+                checkQueryRequest(body);
                 return this.routeReply(body);
             case "kernel.commit":
                 return body.preview === true

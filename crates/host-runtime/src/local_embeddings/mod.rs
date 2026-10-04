@@ -630,6 +630,11 @@ impl LocalEmbeddingsComponent {
         self.inner.jobs.status(job_id)
     }
 
+    /// `wait_for_job` blocks the calling thread until `job_id` is ready or failed, `until` passes, or the job leaves the table, whichever comes first. Call `wait_for_job` only from a thread that may block.
+    pub fn wait_for_job(&self, job_id: &str, until: std::time::Instant) {
+        self.inner.jobs.wait_settled(job_id, until);
+    }
+
     /// Whether a result page served for `job_id` is still alive. The job's own retained result does not count; only a page a caller still holds does.
     pub fn holds_result_page(&self, job_id: &str) -> bool {
         self.inner.jobs.result_in_use(job_id)

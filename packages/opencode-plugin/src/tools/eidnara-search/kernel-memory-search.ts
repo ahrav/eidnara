@@ -174,24 +174,27 @@ function rowText(row: ReadRow): string {
     return decision ? `${decision.payload.summary}\n${decision.payload.rationale}` : "";
 }
 
-/** `null` when the summary is not the field-labeled anti-memory text form. */
-function antiMemoryPayloadFromSummary(summary: string): AntiMemoryPayload | null {
+/** The parsed payload of a rejected-approach row: `null` when its summary is not the field-labeled anti-memory text form, and `undefined` for every other row. */
+export function antiMemoryPayloadOfRow(row: ReadRow): AntiMemoryPayload | null | undefined {
+    const decision = row.decision;
+    if (decision?.decision_kind !== ANTI_MEMORY_CATEGORY) return undefined;
     try {
-        return parseAntiMemoryContent(summary);
+        return parseAntiMemoryContent(decision.payload.summary);
     } catch {
         return null;
     }
 }
 
-/** A rejected-approach row emits `anti_memory`, not `memory`: an unparseable stored summary becomes a conservative warning carrying the raw summary as the rejected strategy, so a legacy or malformed anti-memory cannot resurface as ordinary guidance. */
+/** A rejected-approach row emits `anti_memory`. An unparseable stored summary becomes a warning carrying the raw summary as the rejected strategy. Callers pass a previously parsed `antiMemory` value to reuse the parse result. */
 export function memoryResultFromRow(
     row: ReadRow,
     score: number,
     matchType: KernelMemoryMatchType,
+    antiMemory = antiMemoryPayloadOfRow(row),
 ): KernelMemorySearchResult {
     const decision = row.decision;
     if (decision?.decision_kind === ANTI_MEMORY_CATEGORY) {
-        const payload = antiMemoryPayloadFromSummary(decision.payload.summary);
+        const payload = antiMemory ?? null;
         // The digest of the served summary stands in for both content hashes.
         const digest = createHash("sha256").update(decision.payload.summary, "utf8").digest("hex");
         return {
@@ -237,11 +240,9 @@ export interface KernelMemorySearchArgs {
 }
 
 /** An anti-memory past its rendered expiry never surfaces as a search hit; an unparseable summary never counts as expired. */
-export function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
-    const decision = row.decision;
-    if (decision?.decision_kind !== ANTI_MEMORY_CATEGORY) return false;
-    const payload = antiMemoryPayloadFromSummary(decision.payload.summary);
-    return payload !== null && antiMemoryExpired(payload, nowMs);
+function isExpiredAntiMemoryRow(row: ReadRow, nowMs: number): boolean {
+    const payload = antiMemoryPayloadOfRow(row);
+    return payload != null && antiMemoryExpired(payload, nowMs);
 }
 
 /** An object-id query resolves exactly (in id order); text ranks rows by the share of query terms their summary and rationale contain, ties broken by newest first. `excludeObjectIds` applies only to lexical searches; object-id queries ignore `excludeObjectIds` because an explicit id names one object and resolves even when the injected baseline already renders it. Either path returns `null` when nothing matches so the caller can fall through to the other sources. */

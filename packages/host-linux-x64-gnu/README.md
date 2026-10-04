@@ -37,7 +37,8 @@ Each download is bounded by its locked size and published only after its size
 and sha256 match; the ORT library is the one locked member of the locked
 release archive. `bun run payload:dev` (debug launcher, `mode: "development"`)
 and `bun run payload:release` (release launcher, `mode: "production"`) stage
-the same verified inputs at their locked paths. The daemon stages either
+the same verified inputs at their locked paths. Each builder refuses a launcher
+whose `eidnara-host build-profile` disagrees with its mode. The daemon stages either
 manifest through its trusted path and accepts a development manifest only in a
 debug build. A validated payload whose embedding component fails to initialize
 or certify reports `degraded`.

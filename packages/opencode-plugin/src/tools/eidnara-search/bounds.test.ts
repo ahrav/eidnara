@@ -157,7 +157,79 @@ describe("truncateUtf8Bytes", () => {
         expect(cut).toBe("🎉");
         expect(isValidUnicode(cut)).toBe(true);
     });
+
+    it("keeps every code point that fits at each 1-, 2-, 3-, and 4-byte boundary", () => {
+        const text = "aé漢🎉";
+        const expected = ["", "a", "a", "aé", "aé", "aé", "aé漢", "aé漢", "aé漢", "aé漢", text];
+        expect(expected.map((_, bytes) => truncateUtf8Bytes(text, bytes))).toEqual(expected);
+    });
+
+    it("counts a lone surrogate as its 3-byte replacement encoding", () => {
+        expect(truncateUtf8Bytes("\uD800x", 3)).toBe("\uD800");
+        expect(truncateUtf8Bytes("\uD800x", 2)).toBe("");
+    });
+
+    it("cuts long text before a 2-, 3-, or 4-byte code point that straddles the budget", () => {
+        for (const wide of ["é", "漢", "🎉"]) {
+            for (let lead = 1016; lead <= 1024; lead += 1) {
+                const text = `${"a".repeat(lead)}${wide.repeat(8)}`;
+                expect(truncateUtf8Bytes(text, 1024)).toBe(codePointCut(text, 1024));
+            }
+        }
+        for (const text of ["🎉".repeat(10), `a${"🎉".repeat(10)}`, `漢${"🎉".repeat(10)}`]) {
+            for (let budget = 0; budget <= 12; budget += 1) {
+                expect(truncateUtf8Bytes(text, budget)).toBe(codePointCut(text, budget));
+            }
+        }
+    });
+
+    it("matches a code-point walk on long text, with and without lone surrogates", () => {
+        const units = [
+            "a",
+            " ",
+            "é",
+            "ß",
+            "߿",
+            "ࠀ",
+            "漢",
+            "\uFFFF",
+            "🎉",
+            "\u{10FFFF}",
+            "\uD800",
+            "\uDC00",
+        ];
+        let seed = 894;
+        const next = () => {
+            seed = (seed * 1103515245 + 12345) >>> 0;
+            return seed / 2 ** 32;
+        };
+        for (let round = 0; round < 400; round += 1) {
+            const pool = round % 2 === 0 ? units.slice(0, 10) : units;
+            let text = "";
+            const length = 300 + Math.floor(next() * 1500);
+            while (text.length < length) text += pool[Math.floor(next() * pool.length)];
+            const budget = round % 3 === 0 ? 1024 : 1 + Math.floor(next() * 400);
+            if (text.length <= budget) continue;
+            expect(truncateUtf8Bytes(text, budget)).toBe(codePointCut(text, budget));
+        }
+    });
 });
+
+/** The longest prefix of whole code points within `maxBytes`, with a surrogate pair as 4 bytes and a lone surrogate as 3. */
+function codePointCut(text: string, maxBytes: number): string {
+    let bytes = 0;
+    let end = 0;
+    while (end < text.length) {
+        const unit = text.charCodeAt(end);
+        const pair =
+            unit >= 0xd800 && unit <= 0xdbff && (text.charCodeAt(end + 1) & 0xfc00) === 0xdc00;
+        const size = pair ? 4 : unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+        if (bytes + size > maxBytes) break;
+        bytes += size;
+        end += pair ? 2 : 1;
+    }
+    return text.slice(0, end);
+}
 
 describe("QueryBoundsError", () => {
     it("carries the violation detail and shared message", () => {

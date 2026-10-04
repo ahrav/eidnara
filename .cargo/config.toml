@@ -2,5 +2,8 @@
 # Parallel daemon tests contend on it and miss their wall-clock deadlines, and no
 # production code reads the statistics, so the bundled library is built without
 # them. `crates/memory-store/tests/sorter_spill.rs` turns them on for its own process.
+# The bundled library caps `PRAGMA mmap_size` at 0x7fff0000 bytes by default, below the
+# size of a one-million-occurrence search projection. The cap here matches
+# `daemon::search_projection::MMAP_BYTES`, the projection connection's 16 GiB memory-mapping limit.
 [env]
-LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0"
+LIBSQLITE3_FLAGS = "-DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_MAX_MMAP_SIZE=0x400000000"
