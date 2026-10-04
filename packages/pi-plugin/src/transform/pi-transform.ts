@@ -81,6 +81,28 @@ export class PiAlignment {
         return this.fromEnd[k];
     }
 
+    holds(id: string): boolean {
+        let entryId = id;
+        let role: string | undefined;
+        if (id.startsWith(PI_RESERVED_ID_PREFIX)) {
+            const rest = id.slice(PI_RESERVED_ID_PREFIX.length);
+            const separator = rest.indexOf(":");
+            if (separator < 0) return false;
+            role = rest.slice(0, separator);
+            entryId = rest.slice(separator + 1);
+        }
+        const position = this.branch.indexOf(entryId);
+        if (position === undefined) return false;
+        const compaction = this.branch.latestCompaction();
+        if (role === "compactionSummary") return position === compaction;
+        if (compaction === undefined || position >= compaction) return true;
+        const compactionId = this.branch.idAt(compaction);
+        const entry = compactionId === undefined ? undefined : this.reader.getEntry(compactionId);
+        const firstKept = (entry as { firstKeptEntryId?: unknown } | undefined)?.firstKeptEntryId;
+        const keptFrom = typeof firstKept === "string" ? this.branch.indexOf(firstKept) : undefined;
+        return keptFrom === undefined || position >= keptFrom;
+    }
+
     private step(): void {
         const next = this.messages.length - 1 - this.fromEnd.length;
         const message = this.messages[next] as Json;
@@ -116,7 +138,11 @@ export interface PiPassInputs {
     reader: PiBranchReader;
     projectRoot: string;
     contextLimit: number | undefined;
-    fields(messages: readonly Json[]): Record<string, unknown>;
+    /** `completedAtMs(index)` returns the session-write timestamp for the message at `index`. */
+    fields(
+        messages: readonly Json[],
+        completedAtMs: (index: number) => number | undefined,
+    ): Record<string, unknown>;
 }
 
 export interface PiPassResult {
@@ -137,12 +163,15 @@ export interface PiTransformOptions {
 export function createPiTransform(options: PiTransformOptions) {
     const client = createTransformSessionClient({ moduleClient: options.moduleClient });
     const admission = options.captureAdmission ?? defaultTransformCaptureAdmission;
+    /** Sessions whose latest admitted pass returned no replacement array. */
+    const declined = new Set<string>();
 
     async function run(inputs: PiPassInputs): Promise<PiPassResult> {
         const branch = options.branchOf(inputs.sessionId);
         const branchEntriesVisited = branch.sync(inputs.reader);
         const admitted = admission.admit(inputs.sessionId);
         if ("declined" in admitted) return { branchEntriesVisited, entriesAligned: 0 };
+        declined.add(inputs.sessionId);
         const alignment = new PiAlignment(inputs.messages, branch, inputs.reader);
         // The client's capture rechecks compare slot references, so a slot keeps one row.
         const slotRows = new Map<number, PiRow>();
@@ -167,7 +196,11 @@ export function createPiTransform(options: PiTransformOptions) {
         const outcome = await client.run(inputs.sessionId, admitted.lease, {
             serializerProfile: "pi",
             invocationProfile: "pi-heuristic",
-            host: { length: inputs.messages.length, idAt: (index) => alignment.idAt(index) },
+            host: {
+                length: inputs.messages.length,
+                idAt: (index) => alignment.idAt(index),
+                holds: (id) => alignment.holds(id),
+            },
             preflight: async () => inputs.projectRoot,
             readWindow: rows,
             idOf: (value) => (value as PiRow).id,
@@ -176,9 +209,17 @@ export function createPiTransform(options: PiTransformOptions) {
             contextLimit: () => inputs.contextLimit,
             prepare: async (members) => {
                 const window = members as PiRow[];
+                const writtenAt = (index: number): number | undefined => {
+                    const id = window[index]?.id;
+                    const entry = id === undefined ? undefined : inputs.reader.getEntry(id);
+                    return entry ? Date.parse(entry.timestamp) : undefined;
+                };
                 return {
                     encodeInput: () => encodePiRowsToCk(window),
-                    fields: inputs.fields(window.map((row) => row.message)),
+                    fields: inputs.fields(
+                        window.map((row) => row.message),
+                        writtenAt,
+                    ),
                 };
             },
             publicationRejection: () => null,
@@ -189,6 +230,7 @@ export function createPiTransform(options: PiTransformOptions) {
             },
         });
         // A declined pass returns nothing, so Pi keeps its own array.
+        if (replacement) declined.delete(inputs.sessionId);
         return {
             ...(replacement ? { messages: replacement } : {}),
             outcome,
@@ -199,7 +241,15 @@ export function createPiTransform(options: PiTransformOptions) {
 
     return {
         run,
+        /**
+         * `folds` returns `false` after a declined pass until a pass supplies replacement
+         * messages or `clearSession` clears the session.
+         */
+        folds(sessionId: string): boolean {
+            return !declined.has(sessionId);
+        },
         clearSession(sessionId: string): void {
+            declined.delete(sessionId);
             admission.requestCancel(sessionId, `pi session ${sessionId} cleared`);
             client.clear(sessionId);
         },

@@ -553,7 +553,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                     reader: ctx.sessionManager,
                     projectRoot: deps.projectDir,
                     contextLimit: geometry?.usableSoft,
-                    fields: (messages) =>
+                    fields: (messages, completedAtMs) =>
                         piPassFields({
                             config: deps.config,
                             promptSurfaceRuntime,
@@ -565,6 +565,7 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
                             reduceRegistered: true,
                             todowriteRegistered: todowriteEnabled,
                             messages,
+                            completedAtMs,
                             now: Date.now(),
                         }),
                 });
@@ -830,10 +831,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     pi.on("session_before_compact", async (_event, ctx) => {
         await checkpointAndDrainMemory(ctx);
-        // Pi's compaction proceeds wherever the context handler leaves folding to Pi.
+        const sessionId = sessionIdFromContext(ctx);
         return handlePiSessionBeforeCompact({
             compactionOff:
-                compactionOff || !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config),
+                compactionOff ||
+                !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config) ||
+                (sessionId !== undefined && piTransform?.folds(sessionId) === false),
             ctx,
         });
     });

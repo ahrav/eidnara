@@ -29,6 +29,8 @@ export interface PiPassFieldsArgs {
     todowriteRegistered: boolean;
     /** The captured window rows' messages, oldest first. */
     messages: readonly Json[];
+    /** When the response at `index` in `messages` finished streaming, or `undefined` when unknown. */
+    completedAtMs(index: number): number | undefined;
     now: number;
 }
 
@@ -36,15 +38,32 @@ function count(value: unknown): number {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function lastAssistantUsage(
-    messages: readonly Json[],
-): { usage: Json; timestamp: unknown } | undefined {
+function lastAssistantUsage(messages: readonly Json[]): Json | undefined {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
-        if (message?.role !== "assistant" || message.stopReason === "error") continue;
+        if (message?.role !== "assistant") continue;
+        if (message.stopReason === "error" || message.stopReason === "aborted") continue;
         const usage = message.usage;
-        if (usage !== null && typeof usage === "object")
-            return { usage: usage as Json, timestamp: message.timestamp };
+        if (usage === null || typeof usage !== "object") continue;
+        const counts = usage as Json;
+        const tokens =
+            count(counts.totalTokens) ||
+            count(counts.input) +
+                count(counts.output) +
+                count(counts.cacheRead) +
+                count(counts.cacheWrite);
+        if (tokens > 0) return counts;
+    }
+    return undefined;
+}
+
+function lastResponseCompletedAt(args: PiPassFieldsArgs): number | undefined {
+    for (let index = args.messages.length - 1; index >= 0; index -= 1) {
+        if (args.messages[index]?.role !== "assistant") continue;
+        const completed = args.completedAtMs(index);
+        return completed !== undefined && Number.isFinite(completed) && completed > 0
+            ? completed
+            : undefined;
     }
     return undefined;
 }
@@ -53,9 +72,9 @@ export function piPassFields(args: PiPassFieldsArgs): Record<string, unknown> {
     const { config, geometry, modelKey } = args;
     const contextLimit = geometry?.usableSoft;
     const latest = lastAssistantUsage(args.messages);
-    const cacheRead = count(latest?.usage.cacheRead);
-    const cacheWrite = count(latest?.usage.cacheWrite);
-    const inputTokens = count(latest?.usage.input) + cacheRead + cacheWrite;
+    const cacheRead = count(latest?.cacheRead);
+    const cacheWrite = count(latest?.cacheWrite);
+    const inputTokens = count(latest?.input) + cacheRead + cacheWrite;
     const usage =
         latest && contextLimit
             ? {
@@ -104,10 +123,7 @@ export function piPassFields(args: PiPassFieldsArgs): Record<string, unknown> {
         providerId: args.providerId,
         systemPromptHash: args.systemPromptHash,
         midTurn: args.messages.at(-1)?.role === "toolResult",
-        prevResponseCompletedAtMs:
-            typeof latest?.timestamp === "number" && latest.timestamp > 0
-                ? latest.timestamp
-                : undefined,
+        prevResponseCompletedAtMs: lastResponseCompletedAt(args),
         requestObservedAtMs: args.now,
     });
 }

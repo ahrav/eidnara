@@ -158,6 +158,7 @@ function syntheticBranch(count: number): {
     reader: PiBranchReader & { reads: number };
     messages: Json[];
     append(): void;
+    navigate(n: number): void;
 } {
     const entries = new Map<string, SessionEntry>();
     const messages: Json[] = [];
@@ -185,7 +186,11 @@ function syntheticBranch(count: number): {
             return entries.get(id);
         },
     };
-    return { reader, messages, append };
+    const navigate = (n: number) => {
+        leaf = `e${n}`;
+        messages.length = n;
+    };
+    return { reader, messages, append, navigate };
 }
 
 describe("Pi per-turn work", () => {
@@ -365,5 +370,32 @@ describe("Pi publication by return", () => {
         expect(steady.entriesAligned).toBe(window + 2);
         const sent = transport.calls.filter((call) => call.method === "transform").at(-1)?.body;
         expect((sent?.native_messages as unknown[]).length).toBe(window + 2);
+    }, 60_000);
+
+    it.each([
+        10_000, 1_000_000,
+    ])("aligns only the window after a navigation drops the boundary at %i entries", async (count) => {
+        const { reader, messages, navigate } = syntheticBranch(count);
+        const window = 300;
+        const newer = { mid: `e${count - window + 1}`, sequence: 8 };
+        const older = { mid: `e${count - 2 * window + 1}`, sequence: 7 };
+        const transport = fakeTransport({
+            "transform.boundary": [
+                () => ({ anchors: [newer, older] }),
+                () => ({ anchors: [newer, older] }),
+            ],
+            transform: [foldReply(newer), foldReply(older)],
+        });
+        const branch = new PiBranchIndex();
+        const transform = transformOver(transport.client, branch);
+        expect((await transform.run(passOver(reader, messages, branch))).outcome?.kind).toBe(
+            "applied",
+        );
+        navigate(count - window);
+        const navigated = await transform.run(passOver(reader, messages, branch));
+        expect(navigated.outcome).toEqual({ kind: "applied", boundary: older });
+        expect(navigated.entriesAligned).toBe(window);
+        const sent = transport.calls.filter((call) => call.method === "transform").at(-1)?.body;
+        expect((sent?.native_messages as { id: string }[])[0]?.id).toBe(older.mid);
     }, 60_000);
 });

@@ -195,6 +195,55 @@ describe("Pi context handler under createAgentSession", () => {
         }
     });
 
+    it("leaves compaction to Pi while every pass declines", async () => {
+        const { call, transforms } = daemon(() => {
+            throw new Error("daemon unavailable");
+        });
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+                settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+            });
+            for (const turn of [1, 2, 3])
+                await harness.session.prompt(`turn ${turn} ${"x".repeat(400)}`);
+            expect(transforms.length).toBeGreaterThan(0);
+            const outcome = await harness.session.compact().then(
+                () => "compacted",
+                (error: Error) => error.message,
+            );
+            expect(outcome).toBe("compacted");
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("cancels Pi's compaction again once a pass applies", async () => {
+        let available = false;
+        const { call } = daemon((body) => {
+            if (!available) throw new Error("daemon unavailable");
+            return keepWindow(body);
+        });
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+                settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+            });
+            await harness.session.prompt(`turn 1 ${"x".repeat(400)}`);
+            available = true;
+            for (const turn of [2, 3])
+                await harness.session.prompt(`turn ${turn} ${"x".repeat(400)}`);
+            const outcome = await harness.session.compact().then(
+                () => "compacted",
+                (error: Error) => error.message,
+            );
+            expect(outcome).toBe("Compaction cancelled");
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("leaves folding and compaction to Pi in a project whose configuration is unresolved", async () => {
         const { call, transforms } = daemon(keepWindow);
         try {
@@ -214,6 +263,31 @@ describe("Pi context handler under createAgentSession", () => {
                 (error: Error) => error.message,
             );
             expect(outcome).toBe("compacted");
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("sends the previous response's completion time, not the time its stream started", async () => {
+        const { call, transforms } = daemon(keepWindow);
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+            });
+            const streamStartedAt = Date.now() - 10 * 60_000;
+            harness.respond([fauxAssistantMessage("long answer", { timestamp: streamStartedAt })]);
+            await harness.session.prompt("first");
+            await harness.session.prompt("second");
+            const entry = harness.sessionManager
+                .getEntries()
+                .find(
+                    (candidate) =>
+                        candidate.type === "message" && candidate.message.role === "assistant",
+                );
+            const completedAt = Date.parse(entry?.timestamp ?? "");
+            expect(completedAt).toBeGreaterThan(streamStartedAt);
+            expect(transforms.at(-1)?.prev_response_completed_at_ms).toBe(completedAt);
         } finally {
             call.mockRestore();
         }

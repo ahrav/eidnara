@@ -542,6 +542,11 @@ export interface TransformHostView {
     readonly length: number;
     /** The id at `index`, or `undefined` for a slot without one. */
     idAt(index: number): string | undefined;
+    /**
+     * `false` when no slot's `idAt` can return `id`, so a lookup skips the backward scan; `true`
+     * when a slot may return `id`. Lookups scan hosts that omit `holds`.
+     */
+    holds?(id: string): boolean;
 }
 
 /** What the adapter computed for one pass after the window was captured. */
@@ -1036,19 +1041,24 @@ export function createTransformSessionClient(
                     // D17: one backward id scan against the first page stops at the first hit.
                     const anchors = new Map<string, TransformBoundary>();
                     for (const anchor of page)
-                        if (!anchors.has(anchor.mid)) anchors.set(anchor.mid, anchor);
+                        if (!anchors.has(anchor.mid) && host.holds?.(anchor.mid) !== false)
+                            anchors.set(anchor.mid, anchor);
                     let hit: TransformBoundary | undefined;
-                    const index = scan((id) => {
-                        hit = anchors.get(id);
-                        return hit !== undefined;
-                    });
+                    const index =
+                        anchors.size === 0
+                            ? -1
+                            : scan((id) => {
+                                  hit = anchors.get(id);
+                                  return hit !== undefined;
+                              });
                     // `hit` is set by the last callback, so it is defined only when the scan stopped on one.
                     if (hit) return { boundary: hit, index };
+                    before = last.sequence;
+                    if (host.holds) continue;
                     // The whole host holds none of this page; later pages probe the filter.
                     timings.scannedItems += host.length;
                     filter = hostIdFilter(host, (bytes) => lease.reserve(bytes));
                     if (!filter) throw new CaptureBudgetExceeded("membership filter");
-                    before = last.sequence;
                     continue;
                 }
                 const wanted = new Set<string>();
@@ -1076,7 +1086,11 @@ export function createTransformSessionClient(
             // An unknown boundary, or one the scan cannot find, needs a discovery walk.
             const known = state.boundary;
             let boundary = known ?? null;
-            let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
+            let boundaryIndex = !known
+                ? 0
+                : host.holds?.(known.mid) === false
+                  ? -1
+                  : scan((id) => id === known.mid);
             if (known === undefined || boundaryIndex < 0) {
                 const discovered = await discover(options.projectRoot ?? directory);
                 boundary = discovered.boundary;
