@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { COMPACTION_ENABLED_PATH } from "@eidnara/opencode/config/agent-disable";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
-import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
 import { createFakePi, fakeContext, fakeKernelResolver } from "../__tests__/test-utils";
 import { COMPACTION_OFF_COMMAND_UNAVAILABLE } from "./daemon-session-routes";
 import { registerCtxFlushCommand } from "./eidnara-flush";

@@ -9,12 +9,12 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { canonicalJsonLength } from "./edit-recipe";
 import * as eventResolvers from "./event-resolvers";
 import { chargeInvocation } from "./invocation-budget";
-import { closeReadOnlySessionDb } from "./read-session-db";
 import {
     createRustModeTransform,
     type RustModeModuleClient,
     type RustModeTransformDeps,
-} from "./rust-mode-transform";
+} from "./opencode-transform-adapter";
+import { closeReadOnlySessionDb } from "./read-session-db";
 import type { MessageLike } from "./tag-content-primitives";
 import {
     defaultTransformCaptureAdmission,

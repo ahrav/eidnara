@@ -123,7 +123,7 @@ the Rust variants that the source-linked regression scenarios back;
 ## Mutation drills
 
 `mutations/*.json` record text mutations of
-`packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts` and of
+`packages/opencode-plugin/src/hooks/context/transform-session-client.ts` and of
 `crates/daemon/testdata/differential-golden.json`, with the test that must
 turn red under each. The `mutation:*` scripts apply a mutation, run its test,
 record the outcome, and revert. A drill refuses to record evidence from a

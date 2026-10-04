@@ -10,8 +10,8 @@ import {
 } from "../../shared/rpc-notifications";
 import { createEidnaraCommandHandler } from "./command-handler";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
-import type { RustModeModuleClient } from "./rust-mode-transform";
 import { __ignoredNotificationTest, TUI_TOAST_MAX_CHARS } from "./send-session-notification";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 interface RecordedCall {
     method: string;

@@ -13,13 +13,12 @@ import {
     historyDigestsEqual,
     inspectReferenceableMessages,
     type MessageContentSnapshot,
-    publicationRejection,
-    publishInPlace,
     readOwnDataProperty,
     rootArrayRejection,
     snapshotFieldsEqual,
     TransformCaptureAdmission,
 } from "./transform-capture";
+import { publicationRejection, publishInPlace } from "./transform-publication";
 
 let captureLease: CaptureLease | undefined;
 afterEach(() => {

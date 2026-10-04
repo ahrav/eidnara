@@ -1,54 +1,28 @@
+/**
+ * The revision 3 transform pass core, shared by every harness adapter. One client owns, per
+ * session, the declared boundary, the retained output a later pass may keep from or fail open to,
+ * and the capture basis that lets a later window skip re-taping its verified prefix. A pass reads
+ * plain data through a {@link TransformPassSource}: the host's length and ids for discovery, the
+ * window's native values, and the pass inputs the adapter computes. The client builds and pages the
+ * request, walks discovery, applies the recipe, and hands the applied values to the source's
+ * `publish`; the source alone writes the host's array.
+ */
+
 import { randomUUID } from "node:crypto";
 
-import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
-import type { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
-import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
-import {
-    type PromptSurfaceRuntime,
-    promptSurfaceWireFields,
-} from "../../shared/prompt-surface-runtime";
-import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     applyRecipe,
     canonicalJsonLength,
     parseRecipe,
     type RecipeSourceBase,
 } from "./edit-recipe";
-import {
-    resolveEidnaraReduceAvailability,
-    resolveTodowriteAvailability,
-    type ToolAvailabilityVerdict,
-    todowritePermissionDenied,
-} from "./eidnara-reduce-availability";
-import type { ContextUsageEntry } from "./event-handler";
-import type { ContextUsage } from "./event-payloads";
-import {
-    resolveCacheTtl,
-    resolveContextWindowGeometry,
-    resolveExecuteThreshold,
-    resolveModelKey,
-    resolveTrustedContextLimit,
-} from "./event-resolvers";
 import { validateInvocation } from "./invocation-budget";
 import {
     isModuleTransportGenerationChangedResult,
     TRANSFORM_SEND_TIMEOUT_MS,
 } from "./module-transport";
-import {
-    buildPagedModuleTransformPayloads,
-    encodeOpenCodeMessagesToCk,
-    type ModuleMethod,
-} from "./module-wire";
-import { findLastAssistantModelFromOpenCodeDb, isMidTurn } from "./read-session-db";
-import { isRawCompactionSummaryInfo } from "./read-session-raw";
-import {
-    knownSessionDirectory,
-    resolveSessionDirectory,
-    type SessionDirectoryDeps,
-} from "./session-directory";
-import type { MessageLike } from "./tag-content-primitives";
+import { buildPagedModuleTransformPayloads, type ModuleMethod } from "./module-wire";
 import {
     CaptureBudgetExceeded,
     type CapturedHistory,
@@ -57,78 +31,13 @@ import {
     capturedMessagesUnchanged,
     captureHistory,
     captureMessages,
-    copyWindow,
-    defaultTransformCaptureAdmission,
     filterMayHold,
+    fnv1a32,
     type HistoryDigest,
     historyDigestsEqual,
     inspectReferenceableMessages,
-    messageId,
-    messageIdFilter,
-    publicationRejection,
-    publishInPlace,
-    readOwnDataProperty,
-    rootArrayRejection,
-    scanMessageIds,
-    type TransformCaptureAdmission,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
-
-export interface RustModeTransformDeps extends SessionDirectoryDeps {
-    contextUsageMap: BoundedSessionMap<ContextUsageEntry>;
-    protectedTags?: number;
-    clearReasoningAge: number;
-    executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
-    executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
-    historyBudgetPercentage?: number;
-    promptSurface?: PromptSurfaceConfig;
-    promptSurfaceRuntime?: PromptSurfaceRuntime;
-    terse_text_compressionTextCompression?: { enabled: boolean; minChars: number };
-    autoSearch?: { enabled: boolean; scoreThreshold: number; minPromptChars: number };
-    cacheTtl: string | Record<string, string>;
-    compactionOff?: boolean;
-    isSubagentSession: (sessionId: string) => boolean;
-    systemPromptHashFor: (sessionId: string) => string;
-    /** A session deleted while its directory resolved declines without dispatch. */
-    isSessionDeleted?: (sessionId: string) => boolean;
-    onSessionDeletedDuringPreflight?: (sessionId: string) => void;
-    /** Hidden `eidnara-` children run Eidnara's own prompts and receive no transform. */
-    isInternalChildSession?: (sessionId: string) => boolean;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-    return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function activeAgentFromMessages(messages: readonly MessageLike[]): string | undefined | null {
-    let assistantAgent: string | undefined;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const info = messages[index]?.info as
-            | { role?: unknown; agent?: unknown; mode?: unknown }
-            | undefined;
-        if (info?.role === "user") return nonEmptyString(info.agent);
-        if (info?.role === "assistant")
-            assistantAgent ??= nonEmptyString(info.agent) ?? nonEmptyString(info.mode);
-    }
-    return assistantAgent ?? null;
-}
-
-async function resolveCombinedTodowriteVerdict(
-    deps: RustModeTransformDeps,
-    sessionId: string,
-    activeAgent: string | undefined | null,
-    availability: ToolAvailabilityVerdict,
-): Promise<boolean> {
-    if (
-        activeAgent === null ||
-        !availability.frozen ||
-        !availability.callable ||
-        deps.compactionOff === true
-    )
-        return false;
-
-    return !(await todowritePermissionDenied(deps.client, sessionId, activeAgent));
-}
 
 export interface RustModeModuleClient {
     call(args: {
@@ -146,14 +55,24 @@ export interface RustModeModuleClient {
     hasSessionRoute?(sessionId: string): boolean;
 }
 
-/** Retained outputs are bounded to the sessions one OpenCode process keeps active. An evicted session captures its next pass in full and has no `previous` source. */
-const RETAINED_OUTPUT_SESSION_CAPACITY = 64;
+/** Retained outputs are bounded to the sessions one process keeps active. An evicted session captures its next pass in full and has no `previous` source. */
+export const RETAINED_OUTPUT_SESSION_CAPACITY = 64;
 /** Retained outputs are optional reuse state, budgeted apart from the frame and reconstruction caps. */
-const RETAINED_OUTPUT_BUDGET_BYTES = 64 * 1024 * 1024;
+export const RETAINED_OUTPUT_BUDGET_BYTES = 64 * 1024 * 1024;
 /** Each retained canonical length occupies one number slot. */
 const LENGTH_SLOT_BYTES = 8;
 /** Each retained message keeps an input length and a wire bound; the history digest is fixed size. */
 const HISTORY_ENTRY_RETAINED_BYTES = 2 * LENGTH_SLOT_BYTES;
+const CANDIDATE_SLOT_BYTES = 8;
+/** Discovery walks from the pass start within the transform deadline less a reserve for the transform itself. */
+const DISCOVERY_BUDGET_MS = TRANSFORM_SEND_TIMEOUT_MS - 4_000;
+if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no discovery budget");
+/** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
+const INVOCATION_HEADROOM_PERMILLE = 250;
+/** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
+const WIRE_PROJECTION_FACTOR = 4;
+/** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
+const MAX_ANCHOR_PAGE = 4096;
 
 /** One successfully applied output, eligible as the `previous` source of the next recipe. */
 interface AppliedOutput {
@@ -203,7 +122,7 @@ type OwnedRetainedOutput = { applied?: AppliedOutput; disowned?: boolean; charge
  * A failed pass reads its record too, so it refreshes its session. Eviction never releases a
  * capture lease.
  */
-class RetainedOutputs {
+export class RetainedOutputs {
     private readonly records = new Map<string, RetainedOutput>();
     private used = 0;
 
@@ -294,16 +213,13 @@ function sameBoundary(left: TransformBoundary | null, right: TransformBoundary |
 }
 
 /** `undefined` when `value` is neither `null` nor a well-formed anchor. */
-function parseBoundary(value: unknown): TransformBoundary | null | undefined {
+export function parseBoundary(value: unknown): TransformBoundary | null | undefined {
     if (value === null) return null;
     if (!isRecord(value) || !value.mid || typeof value.mid !== "string") return undefined;
     return Number.isSafeInteger(value.sequence)
         ? { mid: value.mid, sequence: value.sequence as number }
         : undefined;
 }
-
-/** `transform.boundary` lists at most this many anchors per page (docs/host-wire-protocol.md). */
-const MAX_ANCHOR_PAGE = 4096;
 
 /** One `transform.boundary` page, newest first and strictly below `before`; `undefined` when malformed or over the page cap. */
 function parseAnchorPage(
@@ -323,39 +239,19 @@ function parseAnchorPage(
     return page;
 }
 
-export interface RustSessionState {
+/** The client's per-session pass state. */
+export interface TransformSessionState {
     initialized: boolean;
     consecutiveFailures: number;
     passCount: number;
     /** The declared anchor: `null` sends the whole array, `undefined` is not yet discovered. */
     boundary: TransformBoundary | null | undefined;
     failureCount: number;
-    /** Consecutive passes whose newest user message is synthetic. A real user message resets it. */
-    syntheticTurnCount: number;
-    lastObservedUserMessageId: string | null;
-    /** One cascade log per run of synthetic turns; the reset that clears `syntheticTurnCount` re-arms it. */
-    syntheticCascadeLogged: boolean;
     routeRoot: string | null;
-}
-
-export interface RustModeTransformOptions {
-    moduleClient: RustModeModuleClient;
-    projectRoot?: string;
-    /** Shared admission owner; tests inject one with smaller limits. */
-    captureAdmission?: TransformCaptureAdmission;
-    /** Retained-output budget across sessions; tests inject a smaller one. */
-    retainedOutputBudgetBytes?: number;
-    /** Largest transform body sent unpaged; tests inject the page limit to exercise paging. */
-    unpagedTransformMaxBytes?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object";
-}
-
-function messageInfo(value: unknown): Record<string, unknown> {
-    if (!isRecord(value)) return {};
-    return isRecord(value.info) ? value.info : value;
 }
 
 /**
@@ -387,14 +283,7 @@ function measureInputLengths(
     return lengths;
 }
 
-function newestUserMessage(messages: MessageLike[]): MessageLike | undefined {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        if (messageInfo(messages[index]).role === "user") return messages[index];
-    }
-    return undefined;
-}
-
-interface RustPassTimings {
+export interface RustPassTimings {
     prefixGuard: number;
     clone: number;
     wireBuild: number;
@@ -426,7 +315,7 @@ function emptyRustPassTimings(): RustPassTimings {
     };
 }
 
-function formatRustPassLog(args: {
+export function formatRustPassLog(args: {
     decision: string;
     reason: string;
     servedFrom: string;
@@ -448,59 +337,6 @@ function formatRustPassLog(args: {
     return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
 }
 
-function isSyntheticUserMessage(message: MessageLike | undefined): boolean {
-    if (!message || messageInfo(message).role !== "user" || !Array.isArray(message.parts)) {
-        return false;
-    }
-    return (
-        message.parts.length > 0 &&
-        message.parts.every(
-            (part) => isRecord(part) && (part.synthetic === true || part.ignored === true),
-        )
-    );
-}
-
-function observeSyntheticTurn(state: RustSessionState, messages: MessageLike[]): boolean {
-    const newest = newestUserMessage(messages);
-    const info = messageInfo(newest);
-    const messageId = typeof info.id === "string" ? info.id : null;
-    const synthetic = isSyntheticUserMessage(newest);
-    const isNewMessage = messageId === null || messageId !== state.lastObservedUserMessageId;
-
-    if (!synthetic) {
-        state.syntheticTurnCount = 0;
-        state.syntheticCascadeLogged = false;
-    } else if (isNewMessage) {
-        state.syntheticTurnCount += 1;
-    }
-    state.lastObservedUserMessageId = messageId;
-    return synthetic;
-}
-
-function assertNativeBoundary(output: unknown[], sessionId: string, boundaryId: string): void {
-    const first = output.find((message) => messageInfo(message).role !== "system");
-    const info = messageInfo(first);
-    const parts = isRecord(first) && Array.isArray(first.parts) ? first.parts : [];
-    const synthetic =
-        parts.length > 0 && parts.every((part) => isRecord(part) && part.synthetic === true);
-    if (info.role === "user" && info.sessionID === sessionId && synthetic) return;
-    // The failure arm logs the failed clause and actual head so violations are distinguishable.
-    const headSummary = output.slice(0, 3).map((message) => {
-        const mi = messageInfo(message);
-        const mParts = isRecord(message) && Array.isArray(message.parts) ? message.parts : [];
-        const partDesc = mParts
-            .slice(0, 5)
-            .map((part) =>
-                isRecord(part) ? `${String(part.type)}${part.synthetic === true ? "" : "!"}` : "?",
-            )
-            .join(",");
-        return `role=${String(mi.role)} sid=${mi.sessionID === sessionId ? "ok" : String(mi.sessionID ?? "absent")} id=${String(mi.id ?? "-").slice(0, 24)} parts=[${partDesc}]`;
-    });
-    throw new Error(
-        `rust transform wire invariant failed: boundary=${boundaryId} expected a synthetic m0 user message scoped to session ${sessionId}; head: ${headSummary.join(" | ")}`,
-    );
-}
-
 function responseValue(response: unknown): Record<string, unknown> {
     if (isRecord(response) && isRecord(response.result)) return response.result;
     if (isRecord(response)) return response;
@@ -516,7 +352,7 @@ function errorHasCode(error: unknown, code: string): boolean {
     return false;
 }
 
-function isTransformPageAttemptMismatch(error: unknown): boolean {
+export function isTransformPageAttemptMismatch(error: unknown): boolean {
     let current = error;
     const seen = new Set<unknown>();
     while (isRecord(current) && !seen.has(current)) {
@@ -546,137 +382,6 @@ function noteDeliveryPassIds(response: Record<string, unknown>): string[] {
             }),
         ),
     ];
-}
-
-function modelFromMessages(
-    messages: MessageLike[],
-): { providerID: string; modelID: string } | undefined {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const info = messages[index]?.info as Record<string, unknown> | undefined;
-        const model = isRecord(info?.model) ? info.model : undefined;
-        if (typeof model?.providerID === "string" && typeof model.modelID === "string") {
-            return { providerID: model.providerID, modelID: model.modelID };
-        }
-        if (
-            typeof info?.providerID === "string" &&
-            typeof info.modelID === "string" &&
-            info.role === "assistant"
-        ) {
-            return { providerID: info.providerID, modelID: info.modelID };
-        }
-    }
-    return undefined;
-}
-
-function ensureState(states: Map<string, RustSessionState>, sessionId: string): RustSessionState {
-    let state = states.get(sessionId);
-    if (!state) {
-        state = {
-            initialized: false,
-            consecutiveFailures: 0,
-            passCount: 0,
-            boundary: undefined,
-            failureCount: 0,
-            syntheticTurnCount: 0,
-            lastObservedUserMessageId: null,
-            syntheticCascadeLogged: false,
-            routeRoot: null,
-        };
-        states.set(sessionId, state);
-    }
-    return state;
-}
-
-function loadContextUsage(
-    deps: RustModeTransformDeps,
-    sessionId: string,
-): ContextUsage | undefined {
-    return deps.contextUsageMap.get(sessionId)?.usage;
-}
-
-function resolveHistoryBudgetTokens(
-    historyBudgetPercentage: number | undefined,
-    contextUsage: ContextUsage,
-    executeThresholdPercentage:
-        | number
-        | { default: number; [modelKey: string]: number }
-        | undefined,
-    modelKey: string | undefined,
-    executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined },
-    resolvedContextLimit?: number,
-): number | undefined {
-    if (!historyBudgetPercentage) {
-        return undefined;
-    }
-
-    let contextLimit = resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : 0;
-    if (contextLimit <= 0) {
-        if (contextUsage.percentage <= 0) {
-            return undefined;
-        }
-        contextLimit = contextUsage.inputTokens / (contextUsage.percentage / 100);
-    }
-    if (!Number.isFinite(contextLimit) || contextLimit <= 0) {
-        return undefined;
-    }
-
-    return Math.floor(
-        contextLimit *
-            (resolveExecuteThreshold(executeThresholdPercentage ?? 65, modelKey, 65, {
-                tokensConfig: executeThresholdTokens,
-                contextLimit,
-            }) /
-                100) *
-            historyBudgetPercentage,
-    );
-}
-
-function passUsage(usage: ContextUsage, limit: number): Record<string, number> {
-    return {
-        current_total_input_tokens: usage.inputTokens,
-        context_limit_tokens: limit,
-    };
-}
-
-/** The previous response's reported cache counts, from the same snapshot as its pressure usage; absent until a response reports them. */
-function prevResponseCacheUsage(
-    usage: ContextUsage | undefined,
-): { cache_read_tokens: number; cache_write_tokens: number } | undefined {
-    const cache = usage?.cache;
-    if (!cache || !isCount(cache.readTokens) || !isCount(cache.writeTokens)) return undefined;
-    return { cache_read_tokens: cache.readTokens, cache_write_tokens: cache.writeTokens };
-}
-
-function isCount(value: number): boolean {
-    return Number.isSafeInteger(value) && value >= 0;
-}
-
-interface TransformGeometryWire {
-    usable_soft: number;
-    usable_hard: number;
-    derivation: string;
-}
-
-function transformGeometryForWire(
-    geometry: WindowGeometryResult | undefined,
-): TransformGeometryWire | undefined {
-    if (!geometry) return undefined;
-    const { window, reserve } = geometry.derivation;
-    let derivation: string;
-    if (geometry.geometry === "separate" && geometry.usableSoft < geometry.usableHard) {
-        derivation = `s1-pre-carve/input=${geometry.usableSoft}`;
-    } else if (geometry.geometry === "separate") {
-        derivation = `s1-separate/context=${window}`;
-    } else {
-        derivation =
-            `s1-shared/context-output/context=${window}/output=${reserve}` +
-            `/mode=${geometry.geometry}/usable-hard=${geometry.usableHard}`;
-    }
-    return {
-        usable_soft: geometry.usableSoft,
-        usable_hard: geometry.usableHard,
-        derivation,
-    };
 }
 
 /**
@@ -713,94 +418,41 @@ export function applyTransformRecipe(
     return { ...applied, outputRevision: parsed.recipe.outputRevision };
 }
 
-function buildTransformBody(args: {
+/** The protocol fields of one revision 3 transform request, ahead of the adapter's pass inputs. */
+export interface TransformRequestCore {
     sessionId: string;
     boundary: TransformBoundary | null;
     baseRevision: string;
     previousOutputRevision?: string;
+    serializerProfile: string;
     input: unknown[];
-    nativeMessages: unknown[];
-    passInputs: Record<string, unknown>;
-    usage?: Record<string, number | boolean>;
-    prevResponseCacheUsage?: { cache_read_tokens: number; cache_write_tokens: number };
-    geometry?: TransformGeometryWire;
-    modelKey: string | null;
-    providerId: string | null;
-    systemPromptHash: string;
-    midTurn: boolean;
-    prevResponseCompletedAtMs?: number;
-    requestObservedAtMs?: number;
-}): Record<string, unknown> {
+    nativeMessages: readonly unknown[];
+}
+
+/** A native-serving revision 3 transform body: the protocol fields, then `fields`, then the window. */
+export function buildTransformRequest(
+    core: TransformRequestCore,
+    fields: Record<string, unknown>,
+): Record<string, unknown> {
     return {
         method: "transform",
         kind: "transform",
         v: 3,
-        boundary: args.boundary,
-        serializer_profile: "opencode-aisdk",
+        boundary: core.boundary,
+        serializer_profile: core.serializerProfile,
         serve_native: true,
-        session_id: args.sessionId,
-        base_revision: args.baseRevision,
-        ...(args.previousOutputRevision
-            ? { previous_output_revision: args.previousOutputRevision }
+        session_id: core.sessionId,
+        base_revision: core.baseRevision,
+        ...(core.previousOutputRevision
+            ? { previous_output_revision: core.previousOutputRevision }
             : {}),
-        // Model, provider, and system-prompt changes evict provider caches; send the native module the identity inputs used by the TypeScript materializer rather than leaving the native identity blank.
-        render_config: [
-            args.providerId ? `provider:${args.providerId}` : "",
-            args.modelKey ? `model:${args.modelKey}` : "",
-            args.systemPromptHash ? `system:${args.systemPromptHash}` : "",
-        ]
-            .filter(Boolean)
-            .join("|"),
-        system_prompt_hash: args.systemPromptHash,
-        upgrade_state: "",
-        is_subagent: args.passInputs.is_subagent === true,
-        protected_tags: args.passInputs.protected_tags ?? DEFAULT_PROTECTED_TAGS,
-        messages: args.input,
-        native_messages: args.nativeMessages,
-        ...(args.usage ? { usage: args.usage } : {}),
-        ...(args.prevResponseCacheUsage
-            ? { prev_response_cache_usage: args.prevResponseCacheUsage }
-            : {}),
-        ...(args.geometry ? { geometry: args.geometry } : {}),
-        mid_turn: args.midTurn,
-        prev_response_completed_at_ms: args.prevResponseCompletedAtMs,
-        request_observed_at_ms: args.requestObservedAtMs,
-        channel2_nudge_state: "",
-        emergency_recovery_armed: false,
-        emergency_recovery_no_head_escape: false,
-        model_key: args.modelKey,
-        provider_id: args.providerId,
-        tool_present: args.passInputs.tool_present === true,
-        ...(typeof args.passInputs.todo_tool_present === "boolean"
-            ? { todo_tool_present: args.passInputs.todo_tool_present }
-            : {}),
-        prompt_surface_preset: args.passInputs.prompt_surface_preset ?? "full",
-        prompt_surface_model_key: args.passInputs.prompt_surface_model_key,
-        prompt_surface_config_identity: args.passInputs.prompt_surface_config_identity,
-        prompt_surface_tool_descriptions: args.passInputs.prompt_surface_tool_descriptions ?? {},
-        prompt_surface_guidance_override: args.passInputs.prompt_surface_guidance_override,
-        effective_execute_threshold: args.passInputs.effective_execute_threshold,
-        auto_search_enabled: args.passInputs.auto_search_enabled === true,
-        auto_search_score_threshold: args.passInputs.auto_search_score_threshold,
-        auto_search_min_prompt_chars: args.passInputs.auto_search_min_prompt_chars,
-        history_budget_tokens: args.passInputs.history_budget_tokens,
-        clear_reasoning_age: args.passInputs.clear_reasoning_age,
-        terse_text_compression_enabled: args.passInputs.terse_text_compression_enabled === true,
-        terse_text_compression_min_chars: args.passInputs.terse_text_compression_min_chars ?? 500,
-        cache_ttl: args.passInputs.cache_ttl,
+        ...fields,
+        messages: core.input,
+        native_messages: core.nativeMessages,
     };
 }
 
-const CANDIDATE_SLOT_BYTES = 8;
-/** Discovery walks from the pass start within the transform deadline less a reserve for the transform itself. */
-const DISCOVERY_BUDGET_MS = TRANSFORM_SEND_TIMEOUT_MS - 4_000;
-if (DISCOVERY_BUDGET_MS <= 0) throw new Error("the transform deadline leaves no discovery budget");
-/** Charged on top of the heuristic estimate because the estimator undercounts relative to the provider's tokenizer. */
-const INVOCATION_HEADROOM_PERMILLE = 250;
-/** WIRE_PROJECTION_FACTOR accounts for the CK text, the native text, the paging parse copy, and the page texts. */
-const WIRE_PROJECTION_FACTOR = 4;
-
-type PassDeclineReason =
+export type PassDeclineReason =
     | "cleared"
     | "superseded"
     | "capture_bytes"
@@ -831,7 +483,7 @@ const LAST_APPLIED_DECLINES: ReadonlySet<PassDeclineReason> = new Set([
  * A local refusal prevents publication without counting a daemon failure. Byte pressure and a
  * polluted built-in prototype recur on every call for the affected session, so they log at warn.
  */
-class PassDeclined extends Error {
+export class PassDeclined extends Error {
     readonly logLevel: "debug" | "warn";
     constructor(
         sessionId: string,
@@ -881,15 +533,139 @@ async function deliverTransformNotes(
     }
 }
 
-export function createRustModeTransform(
-    deps: RustModeTransformDeps,
-    options: RustModeTransformOptions,
-): {
-    run: (sessionId: string, output: { messages: unknown[] }) => Promise<void>;
-    clearSession: (sessionId: string) => void;
-    getState: (sessionId: string) => Readonly<RustSessionState>;
-} {
-    const states = new Map<string, RustSessionState>();
+/** The host's message array as discovery reads it: its length and the id at each slot. */
+export interface TransformHostView {
+    readonly length: number;
+    /** The id at `index`, or `undefined` for a slot without one. */
+    idAt(index: number): string | undefined;
+}
+
+/** What the adapter computed for one pass after the window was captured. */
+export interface TransformPassPreparation {
+    /** The CK window, encoded from the captured members when the request is built. */
+    encodeInput(): unknown[];
+    /** Pass inputs the request carries after its protocol fields. */
+    fields: Record<string, unknown>;
+}
+
+/**
+ * One pass's view of its harness. Every method reads the host or the adapter's own state except
+ * `publish`, the one host write, which runs after every check the pass makes.
+ */
+export interface TransformPassSource {
+    readonly serializerProfile: string;
+    readonly host: TransformHostView;
+    /**
+     * Classifies the session and names the route root; a decline throws {@link PassDeclined}.
+     * Runs once per attempt, before discovery.
+     */
+    preflight(): Promise<string>;
+    /** Copies host slots `[start, end)`; `undefined` when a slot cannot be read as plain data. */
+    readWindow(start: number, end: number): unknown[] | undefined;
+    /** The message id of one window value. */
+    idOf(value: unknown): string | undefined;
+    /**
+     * Copies the same window from the live host for a recheck; `undefined` when the host's
+     * container, its length, or its readability changed.
+     */
+    liveWindow(start: number, end: number): unknown[] | undefined;
+    /**
+     * The trusted context limit the invocation gate reads, resolved from the captured members
+     * before the pass can decline into fail-open.
+     */
+    contextLimit(members: readonly unknown[]): number | undefined;
+    /**
+     * Computes the pass inputs from the captured members. `assertCurrent` throws when the pass
+     * was cleared or superseded during an await.
+     */
+    prepare(
+        members: readonly unknown[],
+        assertCurrent: () => void,
+    ): Promise<TransformPassPreparation>;
+    /** Throws when an applied output breaks a harness rule the daemon's boundary promises. */
+    validateOutput?(values: readonly unknown[], boundaryId: string): void;
+    /** Why publishing `slots` values would be refused, or `null`. */
+    publicationRejection(slots: number): string | null;
+    /** Publishes `values` over the captured `window` at `boundaryIndex`; a failure names its cause. */
+    publish(
+        values: readonly unknown[],
+        window: readonly unknown[],
+        boundaryIndex: number,
+    ): { detail: string } | undefined;
+}
+
+export interface TransformSessionClientOptions {
+    moduleClient: RustModeModuleClient;
+    /** A fixed route root for every session; otherwise each pass routes by its preflight root. */
+    projectRoot?: string;
+    /** Retained-output budget across sessions; tests inject a smaller one. */
+    retainedOutputBudgetBytes?: number;
+    /** Largest transform body sent unpaged; tests inject the page limit to exercise paging. */
+    unpagedTransformMaxBytes?: number;
+}
+
+export interface TransformSessionClient {
+    /**
+     * Runs one pass under `lease` and returns once its outcome is published or declined; note
+     * delivery runs after `lease` is released.
+     */
+    run(sessionId: string, lease: CaptureLease, source: TransformPassSource): Promise<void>;
+    /** Forgets the session's pass state and retained output; returns the root it last routed by. */
+    clear(sessionId: string): string | null;
+    state(sessionId: string): Readonly<TransformSessionState>;
+    readonly retainedOutputs: RetainedOutputs;
+}
+
+function ensureState(
+    states: Map<string, TransformSessionState>,
+    sessionId: string,
+): TransformSessionState {
+    let state = states.get(sessionId);
+    if (!state) {
+        state = {
+            initialized: false,
+            consecutiveFailures: 0,
+            passCount: 0,
+            boundary: undefined,
+            failureCount: 0,
+            routeRoot: null,
+        };
+        states.set(sessionId, state);
+    }
+    return state;
+}
+
+/** Scans host ids from the end until `stop` accepts one and returns its index, or -1. */
+function scanHostIds(
+    host: TransformHostView,
+    stop: (id: string, index: number) => boolean,
+): number {
+    for (let index = host.length - 1; index >= 0; index -= 1) {
+        const id = host.idAt(index);
+        if (id !== undefined && stop(id, index)) return index;
+    }
+    return -1;
+}
+
+/** The sorted id hashes of `host`, retaining no id string; `undefined` when `reserve` refuses the four bytes per slot. */
+function hostIdFilter(
+    host: TransformHostView,
+    reserve: (bytes: number) => boolean,
+): Uint32Array | undefined {
+    if (!reserve(host.length * 4)) return undefined;
+    const hashes = new Uint32Array(host.length);
+    let count = 0;
+    scanHostIds(host, (id) => {
+        hashes[count++] = fnv1a32(id);
+        return false;
+    });
+    return hashes.subarray(0, count).sort();
+}
+
+export function createTransformSessionClient(
+    options: TransformSessionClientOptions,
+): TransformSessionClient {
+    const states = new Map<string, TransformSessionState>();
     const retainedOutputs = new RetainedOutputs(
         RETAINED_OUTPUT_SESSION_CAPACITY,
         options.retainedOutputBudgetBytes ?? RETAINED_OUTPUT_BUDGET_BYTES,
@@ -901,7 +677,6 @@ export function createRustModeTransform(
             bytes += CANDIDATE_SLOT_BYTES + (symbol.description?.length ?? 0) * 2;
         return bytes;
     };
-    const captureAdmission = options.captureAdmission ?? defaultTransformCaptureAdmission;
 
     const logStage = (
         sessionId: string,
@@ -922,7 +697,7 @@ export function createRustModeTransform(
 
     const markFailure = (
         sessionId: string,
-        state: RustSessionState,
+        state: TransformSessionState,
         error: unknown,
         servedLastApplied: boolean,
     ): void => {
@@ -940,13 +715,12 @@ export function createRustModeTransform(
     /** `rerun` resumes a pass on its validated root after its anchor drew `boundary_unknown`. */
     const execute = async (
         sessionId: string,
-        output: { messages: unknown[] },
+        source: TransformPassSource,
         lease: CaptureLease,
         rerun?: {
             deliveries: DeliveryPlan;
             timings: RustPassTimings;
             startedAt: number;
-            target: unknown[];
         },
     ): Promise<DeliveryPlan> => {
         const passStartedAt = rerun?.startedAt ?? performance.now();
@@ -956,15 +730,7 @@ export function createRustModeTransform(
             attempted: new Set(),
             applied: new Set(),
         };
-        const target = rerun?.target ?? (readOwnDataProperty(output, "messages") as unknown[]);
-        const hostRejection = rerun ? null : publicationRejection(target, 0);
-        if (hostRejection !== null) {
-            sessionLog.debug(
-                sessionId,
-                `rust transform declined before dispatch: host_container ${hostRejection}`,
-            );
-            return deliveries;
-        }
+        const host = source.host;
         const state = ensureState(states, sessionId);
         const timings = rerun?.timings ?? emptyRustPassTimings();
         let inputCount = 0;
@@ -986,7 +752,7 @@ export function createRustModeTransform(
                     reason: materializeReason,
                     servedFrom,
                     inputCount,
-                    outputCount: target.length,
+                    outputCount: host.length,
                     applied,
                     elapsedMs,
                     moduleElapsedMs,
@@ -1099,26 +865,26 @@ export function createRustModeTransform(
          * its call and result together. No basis is promoted; any doubt serves the input unchanged.
          */
         const serveLastApplied = (): boolean => {
-            const source = failOpenSource;
-            const applied = source?.previous.applied;
-            if (!source || !applied) return false;
+            const failOpen = failOpenSource;
+            const applied = failOpen?.previous.applied;
+            if (!failOpen || !applied) return false;
             try {
-                source.recheck("fail-open");
+                failOpen.recheck("fail-open");
                 if (
-                    retainedOutputs.peek(sessionId) !== source.previous ||
-                    !isAppendOnlyExtension(source.previous, source.captured)
+                    retainedOutputs.peek(sessionId) !== failOpen.previous ||
+                    !isAppendOnlyExtension(failOpen.previous, failOpen.captured)
                 )
                     return false;
                 if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
-                    retainedOutputs.dropApplied(sessionId, source.previous);
+                    retainedOutputs.dropApplied(sessionId, failOpen.previous);
                     return false;
                 }
-                const { members } = source.captured;
-                const rawCount = source.previous.rawCount;
+                const { members } = failOpen.captured;
+                const rawCount = failOpen.previous.rawCount;
                 const served = [...applied.values, ...members.slice(rawCount)];
-                const gated = source.contextLimit !== undefined;
+                const gated = failOpen.contextLimit !== undefined;
                 if (
-                    publicationRejection(target, served.length) !== null ||
+                    source.publicationRejection(served.length) !== null ||
                     !lease.reserve(
                         served.length * CANDIDATE_SLOT_BYTES +
                             (gated ? members.length * LENGTH_SLOT_BYTES : 0),
@@ -1129,14 +895,14 @@ export function createRustModeTransform(
                 if (gated) {
                     const incoming = measureInputLengths(
                         members,
-                        source.previous,
-                        source.captured.verified?.count ?? 0,
+                        failOpen.previous,
+                        failOpen.captured.verified?.count ?? 0,
                     );
                     const invocation = validateInvocation(
                         [...applied.lengths, ...incoming.slice(rawCount)],
                         incoming,
                         {
-                            maxTokens: source.contextLimit,
+                            maxTokens: failOpen.contextLimit,
                             headroomPermille: INVOCATION_HEADROOM_PERMILLE,
                             profile: "opencode-heuristic",
                         },
@@ -1149,7 +915,7 @@ export function createRustModeTransform(
                         return false;
                     }
                 }
-                const failure = publishInPlace(target, served, members, source.boundaryIndex);
+                const failure = source.publish(served, members, failOpen.boundaryIndex);
                 if (failure) {
                     sessionLog.warn(
                         sessionId,
@@ -1164,8 +930,8 @@ export function createRustModeTransform(
             }
         };
         const scan = (stop: (id: string, index: number) => boolean): number => {
-            const index = scanMessageIds(target, stop);
-            timings.scannedItems += target.length - Math.max(index, 0);
+            const index = scanHostIds(host, stop);
+            timings.scannedItems += host.length - Math.max(index, 0);
             return index;
         };
         /**
@@ -1232,8 +998,8 @@ export function createRustModeTransform(
                     // `hit` is set by the last callback, so it is defined only when the scan stopped on one.
                     if (hit) return { boundary: hit, index };
                     // The whole host holds none of this page; later pages probe the filter.
-                    timings.scannedItems += target.length;
-                    filter = messageIdFilter(target, (bytes) => lease.reserve(bytes));
+                    timings.scannedItems += host.length;
+                    filter = hostIdFilter(host, (bytes) => lease.reserve(bytes));
                     if (!filter) throw new CaptureBudgetExceeded("membership filter");
                     before = last.sequence;
                     continue;
@@ -1258,43 +1024,28 @@ export function createRustModeTransform(
             }
         };
         try {
-            // The root's own `then` and the built-in prototypes are refused before any await.
-            const rootRejection = rootArrayRejection(target);
-            if (rootRejection)
-                throw new PassDeclined(
-                    sessionId,
-                    "unsupported_source",
-                    `${rootRejection.reason} at ${rootRejection.path}`,
-                    rootRejection.reason === "prototype_accessor" ? "warn" : "debug",
-                );
-            // The directory names the discovery route, reads no source, and records a host-reported `parentID` the subagent classification reads.
-            const directory = await resolveSessionDirectory(deps, sessionId);
-            if (deps.isSessionDeleted?.(sessionId)) {
-                deps.onSessionDeletedDuringPreflight?.(sessionId);
-                throw new PassDeclined(sessionId, "deleted");
-            }
-            if (deps.isInternalChildSession?.(sessionId))
-                throw new PassDeclined(sessionId, "internal_child");
+            const directory = await source.preflight();
             assertCurrentPass();
             // An unknown boundary, or one the scan cannot find, needs a discovery walk.
             const known = state.boundary;
             let boundary = known ?? null;
             let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
-            if (known === undefined || boundaryIndex < 0)
-                ({ boundary, index: boundaryIndex } = await discover(
-                    options.projectRoot ?? directory,
-                ));
+            if (known === undefined || boundaryIndex < 0) {
+                const discovered = await discover(options.projectRoot ?? directory);
+                boundary = discovered.boundary;
+                boundaryIndex = discovered.index;
+            }
             // The window is copied, inspected, and taped in one synchronous section.
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
-            const capturedLength = target.length;
+            const capturedLength = host.length;
             // The copy holds one slot reference per tail message, charged like a served or candidate array.
             charge((capturedLength - boundaryIndex) * CANDIDATE_SLOT_BYTES, "window slots");
-            const window = copyWindow(target, boundaryIndex, capturedLength);
+            const window = source.readWindow(boundaryIndex, capturedLength);
             if (!window)
                 throw new PassDeclined(sessionId, "unsupported_source", "window slot accessor");
             // Discovery fixed `boundaryIndex` before an await, so the host may have moved the anchor.
-            const head = messageId(window[0]);
+            const head = source.idOf(window[0]);
             if (boundary && head !== boundary.mid)
                 throw new PassDeclined(sessionId, "source_changed", "boundary moved");
             // A full fallback inspection walks a superset of the partial one, so it pays only the difference.
@@ -1341,10 +1092,10 @@ export function createRustModeTransform(
             const captured = verified ?? captureHistory(window, lease);
             inputCount = messageWireBytes.length;
             // Later reads use the captured window; the live array is only rechecked against it.
-            const messages = captured.members as MessageLike[];
+            const messages = captured.members;
             const ids = new Set<unknown>();
             for (const message of messages) {
-                const id = messageId(message);
+                const id = source.idOf(message);
                 if (id !== undefined && ids.has(id))
                     throw new PassDeclined(sessionId, "unsupported_source", `duplicate id ${id}`);
                 ids.add(id);
@@ -1360,47 +1111,13 @@ export function createRustModeTransform(
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();
                 const startedAt = performance.now();
-                const live =
-                    readOwnDataProperty(output, "messages") === target &&
-                    rootArrayRejection(target) === undefined &&
-                    target.length === capturedLength
-                        ? copyWindow(target, boundaryIndex, capturedLength)
-                        : undefined;
+                const live = source.liveWindow(boundaryIndex, capturedLength);
                 const unchanged = live !== undefined && capturedMessagesUnchanged(live, captured);
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
             // The trusted limit is resolved before the first decline a failed pass can fail open from.
-            let preflightError: unknown;
-            let model = modelFromMessages(messages);
-            if (!model) {
-                try {
-                    model = findLastAssistantModelFromOpenCodeDb(sessionId) ?? undefined;
-                } catch (error) {
-                    preflightError = error;
-                }
-            }
-            const modelKey = model
-                ? piModelRefToCanonical(resolveModelKey(model.providerID, model.modelID) ?? "")
-                : null;
-            let resolvedContextLimit: number | undefined;
-            let resolvedWindowGeometry: WindowGeometryResult | undefined;
-            if (model) {
-                try {
-                    resolvedContextLimit = resolveTrustedContextLimit(
-                        model.providerID,
-                        model.modelID,
-                    );
-                    resolvedWindowGeometry = resolveContextWindowGeometry(
-                        model.providerID,
-                        model.modelID,
-                    );
-                } catch (error) {
-                    preflightError ??= error;
-                }
-            }
-            const reportedContextLimit =
-                resolvedContextLimit && resolvedContextLimit > 0 ? resolvedContextLimit : undefined;
+            const reportedContextLimit = source.contextLimit(messages);
             // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
             // A disowned record, which every rerun reads, never fails open.
             if (previous && verified && !previous.disowned)
@@ -1416,87 +1133,13 @@ export function createRustModeTransform(
             for (let index = 0; index < messageWireBytes.length; index += 1)
                 wireBytes += WIRE_PROJECTION_FACTOR * (messageWireBytes[index] ?? 0);
             charge(wireBytes, "wire projection");
-            const syntheticTurn = observeSyntheticTurn(state, messages);
-            if (syntheticTurn && state.syntheticTurnCount >= 3 && !state.syntheticCascadeLogged) {
-                state.syntheticCascadeLogged = true;
-                sessionLog.warn(
-                    sessionId,
-                    `rust synthetic-turn cascade: ${state.syntheticTurnCount} consecutive synthetic user turns with no real user message`,
-                );
-            }
-            const passUsageSnapshot = loadContextUsage(deps, sessionId);
-            // Both verdicts come from the session's earliest persisted user row, never the window's first user; a missing database freezes fail-open, and an unpersisted row or a read error stays provisional and fails closed.
-            const reduceAvailability = resolveEidnaraReduceAvailability(sessionId);
-            const todoAvailability = resolveTodowriteAvailability(sessionId);
-            const toolPresent = reduceAvailability.frozen && reduceAvailability.callable;
-            const activeAgent = activeAgentFromMessages(messages);
-            // Every message read above is synchronous; the awaits below read nothing from the source, so a recheck precedes encoding.
-            const isSubagent = deps.isSubagentSession(sessionId);
-            const systemPromptHash = deps.systemPromptHashFor(sessionId);
-            const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
-            assertCurrentPass();
-            // Pass the module one bool combining the frozen map verdict and OpenCode's live permission decision.
-            // Synthesis fails closed when host evidence is provisional or missing.
-            const todoToolPresent = await resolveCombinedTodowriteVerdict(
-                deps,
-                sessionId,
-                activeAgent,
-                todoAvailability,
-            );
-            assertCurrentPass();
-            if (preflightError) throw preflightError;
-            const usage = passUsageSnapshot;
-            // The usage sample's percentage was computed against `resolveContextLimit`, which substitutes the 128k default for a model models.dev cannot name, so inverting it recovers that default rather than a host report.
-            const contextLimit =
-                reportedContextLimit ??
-                (usage && usage.percentage > 0
-                    ? Math.round(usage.inputTokens / (usage.percentage / 100))
-                    : 128_000);
-            const threshold = resolveExecuteThreshold(
-                deps.executeThresholdPercentage ?? 65,
-                modelKey ?? undefined,
-                65,
-                { tokensConfig: deps.executeThresholdTokens, contextLimit },
-            );
-            const historyBudgetTokens = resolveHistoryBudgetTokens(
-                deps.historyBudgetPercentage,
-                usage ?? { percentage: 0, inputTokens: 0 },
-                deps.executeThresholdPercentage,
-                modelKey ?? undefined,
-                deps.executeThresholdTokens,
-                resolvedContextLimit,
-            );
-            const midTurn = isMidTurn(deps, sessionId);
-            const requestObservedAtMs = Date.now();
-            const passInputs: Record<string, unknown> = {
-                effective_execute_threshold: threshold,
-                auto_search_enabled: deps.autoSearch?.enabled ?? true,
-                auto_search_score_threshold: deps.autoSearch?.scoreThreshold ?? 0.6,
-                auto_search_min_prompt_chars: deps.autoSearch?.minPromptChars ?? 20,
-                history_budget_tokens: historyBudgetTokens,
-                clear_reasoning_age: deps.clearReasoningAge,
-                terse_text_compression_enabled:
-                    !isSubagent && deps.terse_text_compressionTextCompression?.enabled === true,
-                terse_text_compression_min_chars:
-                    deps.terse_text_compressionTextCompression?.minChars ?? 500,
-                cache_ttl: resolveCacheTtl(deps.cacheTtl, modelKey ?? undefined),
-                is_subagent: isSubagent,
-                tool_present: toolPresent,
-                todo_tool_present: todoToolPresent,
-                ...promptSurfaceWireFields(deps.promptSurfaceRuntime, deps.promptSurface, modelKey),
-                protected_tags: deps.protectedTags ?? DEFAULT_PROTECTED_TAGS,
-            };
+            const preparation = await source.prepare(messages, assertCurrentPass);
             recheckCapture("wire-build");
             const projectRoot = options.projectRoot ?? directory;
             state.routeRoot = projectRoot;
             deliveries.projectRoot = projectRoot;
             const wireBuildStartedAt = performance.now();
-            // Compaction summaries stay out of the CK window, as the daemon's CK decoder expects; kept messages carry unfiltered window positions (push returns a truthy length).
-            const positions: number[] = [];
-            const kept = messages.filter(
-                (message, i) => !isRawCompactionSummaryInfo(message.info) && positions.push(i + 1),
-            );
-            const encodedInput = encodeOpenCodeMessagesToCk(kept, positions);
+            const encodedInput = preparation.encodeInput();
             timings.wireMessages = messages.length;
             charge(messages.length * LENGTH_SLOT_BYTES, "input lengths");
             const inputLengths = measureInputLengths(
@@ -1515,29 +1158,18 @@ export function createRustModeTransform(
                 retainedOutputs.dropApplied(sessionId, previous);
             }
             const baseRevision = nextBaseRevision();
-            const usageEntry = deps.contextUsageMap.get(sessionId);
-            const body = buildTransformBody({
-                sessionId,
-                boundary,
-                passInputs,
-                // The daemon keeps its persisted usage when the request carries none; a zero sample with a nonzero limit would replace it.
-                usage: usage ? passUsage(usage, contextLimit) : undefined,
-                prevResponseCacheUsage: prevResponseCacheUsage(usage),
-                geometry: transformGeometry,
-                modelKey: modelKey ?? null,
-                providerId: model?.providerID ?? null,
-                systemPromptHash,
-                midTurn,
-                prevResponseCompletedAtMs:
-                    usageEntry?.lastResponseTime !== undefined && usageEntry.lastResponseTime > 0
-                        ? usageEntry.lastResponseTime
-                        : undefined,
-                requestObservedAtMs,
-                baseRevision,
-                previousOutputRevision: previousApplied?.revision,
-                input: encodedInput,
-                nativeMessages: messages,
-            });
+            const body = buildTransformRequest(
+                {
+                    sessionId,
+                    boundary,
+                    baseRevision,
+                    previousOutputRevision: previousApplied?.revision,
+                    serializerProfile: source.serializerProfile,
+                    input: encodedInput,
+                    nativeMessages: messages,
+                },
+                preparation.fields,
+            );
             logStage(sessionId, "wireBuild", wireBuildStartedAt, timings);
             type TransformSeriesRestart = {
                 reason: "attempt_mismatch" | "reconnect";
@@ -1665,11 +1297,10 @@ export function createRustModeTransform(
                 // Nothing of this attempt is kept, so the rerun pays only for its own capture. The
                 // `return` is not awaited: this frame, its window, and its capture are gone before the rerun captures.
                 lease.refund();
-                return execute(sessionId, output, lease, {
+                return execute(sessionId, source, lease, {
                     deliveries,
                     timings,
                     startedAt: passStartedAt,
-                    target,
                 });
             }
             // A missing or malformed boundary leaves the next pass to rediscover it.
@@ -1727,11 +1358,11 @@ export function createRustModeTransform(
                 }
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
-                    assertNativeBoundary(candidate, sessionId, boundaryId);
+                    source.validateOutput?.(candidate, boundaryId);
                 }
                 // Final synchronous guards: ownership, source membership and content, and the host container contract.
                 recheckCapture("publish");
-                const publishRejection = publicationRejection(target, candidate.length);
+                const publishRejection = source.publicationRejection(candidate.length);
                 if (publishRejection !== null) {
                     throw new PassDeclined(sessionId, "host_container", publishRejection);
                 }
@@ -1752,7 +1383,7 @@ export function createRustModeTransform(
                 logStage(sessionId, "apply", applyStartedAt, timings);
                 const applyReplaceStartedAt = performance.now();
                 // Publication and state promotion are synchronous from here to the lease release.
-                const failure = publishInPlace(target, candidate, messages, boundaryIndex);
+                const failure = source.publish(candidate, messages, boundaryIndex);
                 if (failure)
                     throw new PassDeclined(sessionId, "publication_failed", failure.detail, "warn");
                 const record: RetainedOutput = {
@@ -1814,59 +1445,22 @@ export function createRustModeTransform(
         return deliveries;
     };
 
-    const run = (sessionId: string, output: { messages: unknown[] }): Promise<void> => {
-        const admission = captureAdmission.admit(sessionId);
-        if ("declined" in admission) {
-            // Global count exhaustion is a saturation signal; a same-session supersession is routine.
-            sessionLog[admission.declined === "pass_count" ? "warn" : "debug"](
-                sessionId,
-                `rust transform declined before dispatch: ${admission.declined}`,
-            );
-            return Promise.resolve();
-        }
-        const lease = admission.lease;
-        // execute settles before admission is released; only route metadata reaches delivery.
-        return execute(sessionId, output, lease)
-            .finally(lease.release.bind(lease))
-            .then(deliverTransformNotes.bind(undefined, options.moduleClient));
-    };
-
     return {
-        run,
-        clearSession(sessionId: string): void {
-            // Without a `routeRoot`, the fallback is the root `run` would have used, so the daemon's durable state is still addressed.
-            const projectRoot =
-                states.get(sessionId)?.routeRoot ??
-                options.projectRoot ??
-                knownSessionDirectory(deps, sessionId);
+        run(sessionId, lease, source) {
+            // execute settles before admission is released; only route metadata reaches delivery.
+            return execute(sessionId, source, lease)
+                .finally(lease.release.bind(lease))
+                .then(deliverTransformNotes.bind(undefined, options.moduleClient));
+        },
+        clear(sessionId) {
+            const routeRoot = states.get(sessionId)?.routeRoot ?? null;
             states.delete(sessionId);
             retainedOutputs.release(sessionId);
-            captureAdmission.requestCancel(sessionId, `rust session ${sessionId} cleared`);
-            // Route close asks the host to settle active work within its close budget before deletion acquires the lane; cleanup closes the replacement route.
-            options.moduleClient.closeSession?.(sessionId);
-            if (options.moduleClient.deleteSession) {
-                void options.moduleClient
-                    .deleteSession(sessionId, projectRoot)
-                    .catch((error) => {
-                        sessionLog.warn(sessionId, "rust module session deletion failed:", error);
-                    })
-                    .finally(() => options.moduleClient.closeSession?.(sessionId));
-            }
+            return routeRoot;
         },
-        getState(sessionId: string): Readonly<RustSessionState> {
+        state(sessionId) {
             return { ...ensureState(states, sessionId) };
         },
+        retainedOutputs,
     };
 }
-
-export const __rustModeTransformTest = {
-    RETAINED_OUTPUT_SESSION_CAPACITY,
-    RETAINED_OUTPUT_BUDGET_BYTES,
-    RetainedOutputs,
-    applyTransformRecipe,
-    buildTransformBody,
-    transformGeometryForWire,
-    formatRustPassLog,
-    isTransformPageAttemptMismatch,
-    createRustModeTransform,
-};

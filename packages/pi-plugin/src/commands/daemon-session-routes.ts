@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { COMPACTION_ENABLED_PATH } from "@eidnara/opencode/config/agent-disable";
 import { resolveProjectRootDirectory } from "@eidnara/opencode/features/context/project-identity";
-import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
 import type { CtxStatusLevel } from "./pi-command-utils";
 
 export const COMPACTION_OFF_COMMAND_UNAVAILABLE = `Unavailable: eidnara is in compaction-off mode (${COMPACTION_ENABLED_PATH}=false).`;

@@ -22,7 +22,7 @@ type CommandResult = {
 const e2eRoot = resolve(import.meta.dir, "..");
 const repoRoot = resolve(e2eRoot, "../..");
 const pluginRoot = resolve(e2eRoot, "../opencode-plugin");
-const pluginTransform = resolve(pluginRoot, "src/hooks/context/rust-mode-transform.ts");
+const pluginTransform = resolve(pluginRoot, "src/hooks/context/transform-session-client.ts");
 const commandFor = (drill: string) =>
     `bun run build (packages/opencode-plugin) && bun test --timeout 600000 --max-concurrency=1 tests/rust-fm-oc-${drill}.test.ts`;
 

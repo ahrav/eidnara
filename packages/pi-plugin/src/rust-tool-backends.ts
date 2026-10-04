@@ -1,4 +1,4 @@
-import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
 import type { RustNoteToolRequest } from "@eidnara/opencode/plugin/rust-tool-backends";
 
 /** Pi's daemon tool backends take the project root per invocation because a Pi process has no live-session map: `/cd` and multi-root sessions move the root between calls, and the daemon keys routes and lineage by `(session, root)`, where OpenCode pins the root by session instead. */

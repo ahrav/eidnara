@@ -18,15 +18,15 @@ import {
 } from "./event-resolvers";
 import { chargeInvocation } from "./invocation-budget";
 import { MODULE_PAGE_MAX_BYTES } from "./module-wire";
-import { setRawMessageProvider } from "./read-session-chunk";
-import { closeReadOnlySessionDb } from "./read-session-db";
-import type { RawMessage } from "./read-session-raw";
 import {
     __rustModeTransformTest,
     createRustModeTransform,
     type RustModeModuleClient,
     type RustModeTransformDeps,
-} from "./rust-mode-transform";
+} from "./opencode-transform-adapter";
+import { setRawMessageProvider } from "./read-session-chunk";
+import { closeReadOnlySessionDb } from "./read-session-db";
+import type { RawMessage } from "./read-session-raw";
 import type { MessageLike } from "./tag-content-primitives";
 import {
     defaultTransformCaptureAdmission,

@@ -31,9 +31,9 @@ import { isModuleCallBodyValid } from "./module-transport";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { RawMessage } from "./read-session-raw";
-import type { RustModeModuleClient } from "./rust-mode-transform";
 import type { MessageLike } from "./tag-content-primitives";
 import { defaultTransformCaptureAdmission } from "./transform-capture";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 type RecordedCall = {
     sessionId: string;
