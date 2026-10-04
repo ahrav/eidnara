@@ -116,9 +116,10 @@ pub(crate) enum PiDecline {
     UnknownRole { index: usize, role: String },
     /// A host-message row carries a reserved id, or a synthetic-entry row carries a host id.
     IdSpace { index: usize, role: PiRole },
-    /// The row's id is not the `mid` of the CK message at its position, or the two windows
-    /// differ in length.
+    /// The row's id is not the `mid` of the CK message at its position.
     IdMismatch { index: usize },
+    /// The native window and the CK window hold different message counts.
+    LengthMismatch { rows: usize, messages: usize },
 }
 
 impl std::error::Error for PiDecline {}
@@ -149,6 +150,10 @@ impl fmt::Display for PiDecline {
             Self::IdMismatch { index } => write!(
                 f,
                 "pi native message {index} does not carry the mid of messages[{index}]"
+            ),
+            Self::LengthMismatch { rows, messages } => write!(
+                f,
+                "native_messages holds {rows} pi rows for {messages} messages"
             ),
         }
     }
@@ -258,8 +263,9 @@ pub(crate) fn check_pi_rows<'a>(
     mids: impl ExactSizeIterator<Item = &'a str>,
 ) -> Result<(), PiDecline> {
     if rows.len() != mids.len() {
-        return Err(PiDecline::IdMismatch {
-            index: rows.len().min(mids.len()),
+        return Err(PiDecline::LengthMismatch {
+            rows: rows.len(),
+            messages: mids.len(),
         });
     }
     rows.iter()
@@ -1309,7 +1315,10 @@ mod tests {
         );
         assert_eq!(
             check_pi_rows(&window[..1], std::iter::empty()),
-            Err(PiDecline::IdMismatch { index: 0 })
+            Err(PiDecline::LengthMismatch {
+                rows: 1,
+                messages: 0
+            })
         );
         for malformed in [
             json!({ "message": { "role": "user", "content": "x" } }),

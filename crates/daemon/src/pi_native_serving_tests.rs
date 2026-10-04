@@ -179,6 +179,12 @@ async fn a_pi_window_folds_to_the_m0_m1_and_tail_an_opencode_window_gets() {
         again["base_revision"] = json!("test-base-again");
         let response = call_transform_request(&handler, again).await;
         assert_eq!(response["status"], "ok", "{profile}: {response}");
+        assert!(
+            response["timings"]["native_cache_encoded_messages"]
+                .as_u64()
+                .is_some_and(|encoded| encoded > 0),
+            "the second pass encodes its output again: {response}"
+        );
         replayed.insert(profile, response["native_messages"].clone());
     }
 
@@ -335,10 +341,13 @@ async fn every_closed_role_serves_through_the_handler_and_replays_its_row() {
     });
     let response = call_transform_request(&handler, request).await;
     assert_eq!(response["status"], "ok", "{response}");
-    let applied = response["native_messages"].as_array().unwrap();
-    for row in &rows {
-        assert!(applied.contains(row), "{row} is replayed: {response}");
-    }
+    let replayed: Vec<&Value> = response["native_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| rows.iter().any(|input| input["id"] == row["id"]))
+        .collect();
+    assert_eq!(replayed, rows.iter().collect::<Vec<_>>(), "{response}");
 }
 
 #[tokio::test(flavor = "current_thread")]

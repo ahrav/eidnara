@@ -4703,8 +4703,8 @@ impl HandlerCore {
     }
 
     /// Whether transform lineage for `session_id` exists under a root other than `project_root`:
-    /// an in-process root, a live transform route, or durable cache state whose recorded root is
-    /// not this one.
+    /// an in-process root, a live transform route, or durable cache state with no record of this
+    /// root.
     fn session_lineage_on_another_root(&self, session_id: &str, project_root: &Path) -> bool {
         let canonical_project_root = canonical_root(project_root);
         let other = |root: &PathBuf| canonical_root(root) != canonical_project_root;
@@ -29484,6 +29484,68 @@ mod tests {
             Some("git:notes-eval"),
             "a facade write naming another project must not re-point the route"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn durable_lineage_under_another_root_is_refused_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let root_a = dir.path().join("project-a");
+        let root_b = dir.path().join("project-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        {
+            let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+            let handler = Handler::with_producer_factory_config_resolver(
+                Arc::new(TestProducerFactory {
+                    state: Arc::new(ProducerState::default()),
+                }),
+                default_test_config(),
+                Arc::new(MissingSessionResolver),
+            );
+            handler.install_store_for_test(Arc::clone(&store));
+            handler.bind_route(
+                test_route(7),
+                binding_with_harness(root_a.to_str().unwrap(), PI_HARNESS, "ses"),
+            );
+            let transformed =
+                call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")]))
+                    .await;
+            assert_eq!(transformed["action"], "HARD");
+        }
+
+        // Only the durable cache state remains: no in-process root and no live route.
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+        let handler = Handler::with_producer_factory_config_resolver(
+            Arc::new(TestProducerFactory {
+                state: Arc::new(ProducerState::default()),
+            }),
+            default_test_config(),
+            resolver.clone(),
+        );
+        handler.install_store_for_test(Arc::clone(&store));
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_b.to_str().unwrap(), PI_HARNESS, "ses"),
+        );
+        let refused = call_facade_on_channel(
+            &handler,
+            8,
+            "eidnara_note",
+            json!({ "action": "write", "content": "must not cross roots" }),
+        )
+        .await;
+        assert_eq!(
+            error_frame(refused),
+            (
+                "session_unresolved".to_string(),
+                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+            )
+        );
+        assert!(resolver.calls().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
