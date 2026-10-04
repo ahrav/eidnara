@@ -636,6 +636,54 @@ mod tests {
     use super::*;
     use crate::wire::BlockKind;
 
+    #[test]
+    fn same_decoded_content_is_fingerprint_equality() {
+        let call = |input: Value, provider_executed| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                input,
+                provider_executed,
+            })
+        };
+        let mut stamped = text_block("a");
+        stamp_block_identity(&mut stamped, 0, 0, "fingerprint");
+        let mut extras = text_block("a");
+        extras
+            .provider_extras
+            .entry("pi".into())
+            .or_default()
+            .insert("textSignature".into(), Value::from("s"));
+        let mut empty_namespace = text_block("a");
+        empty_namespace
+            .provider_extras
+            .entry("pi".into())
+            .or_default();
+        let blocks = [
+            text_block("a"),
+            text_block("b"),
+            stamped,
+            extras,
+            empty_namespace,
+            call(serde_json::json!({ "n": 1 }), false),
+            call(serde_json::json!({ "n": 1.0 }), false),
+            call(serde_json::json!({ "n": 0.0 }), false),
+            call(serde_json::json!({ "n": -0.0 }), false),
+            call(serde_json::json!({ "n": 1 }), true),
+            call(serde_json::json!([1, 2]), false),
+            call(serde_json::json!([2, 1]), false),
+        ];
+        for block in &blocks {
+            for other in &blocks {
+                assert_eq!(
+                    same_decoded_content(block, other),
+                    decoded_block_fingerprint(block) == decoded_block_fingerprint(other),
+                    "{block:?} vs {other:?}"
+                );
+            }
+        }
+    }
+
     fn text_block(text: &str) -> WireBlock {
         WireBlock::bare(BlockKind::Text {
             text: text.to_string(),

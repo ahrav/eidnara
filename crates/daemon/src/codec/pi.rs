@@ -2021,6 +2021,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_reads_back_every_closed_role_and_nothing_else() {
+        for role in PiRole::ALL {
+            assert_eq!(PiRole::parse(role.wire_id()), Some(role));
+        }
+        for other in ["system", "User", "tool", "", "toolresult"] {
+            assert_eq!(PiRole::parse(other), None, "{other}");
+        }
+    }
+
+    #[test]
     fn every_closed_role_decodes_to_its_canonical_role_and_round_trips() {
         let table = closed_role_table();
         assert_eq!(
@@ -2778,5 +2788,277 @@ mod tests {
         message.content_mut().clear();
 
         assert!(encode(&[message], &decoded).is_empty());
+    }
+
+    /// Single edits of a served block: each changes a field the decoder writes or adds extras the
+    /// decoder never emits.
+    fn block_edits(block: &WireBlock) -> Vec<WireBlock> {
+        let mut edits = Vec::new();
+        let mut edit = |change: &dyn Fn(&mut WireBlock)| {
+            let mut edited = block.clone();
+            change(&mut edited);
+            edits.push(edited);
+        };
+        edit(&|block| {
+            block.provider_extras.entry("pi".into()).or_default();
+        });
+        edit(&|block| {
+            block
+                .provider_extras
+                .entry("pi".into())
+                .or_default()
+                .insert("textSignature".into(), json!("other"));
+        });
+        edit(&|block| {
+            block
+                .provider_extras
+                .entry("other".into())
+                .or_default()
+                .insert("k".into(), json!(1));
+        });
+        edit(&|block| block.provider_extras.clear());
+        edit(&|block| match block.kind_mut() {
+            BlockKind::Text { text } | BlockKind::Reasoning { text, .. } => text.insert(0, '§'),
+            BlockKind::RedactedReasoning { data } => data.push('x'),
+            BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } => id.push('x'),
+            BlockKind::Media(media) => media.filename = Some("other.png".into()),
+            BlockKind::Opaque(opaque) => opaque.raw = json!({ "type": "other" }),
+        });
+        edit(&|block| match block.kind_mut() {
+            BlockKind::Reasoning { signature, .. } => *signature = None,
+            BlockKind::ToolCall {
+                provider_executed, ..
+            }
+            | BlockKind::ToolResult {
+                provider_executed, ..
+            } => *provider_executed = true,
+            BlockKind::Media(media) => media.media_type = "image/gif".into(),
+            other => {
+                *other = BlockKind::Text {
+                    text: "kind".into(),
+                }
+            }
+        });
+        edit(&|block| {
+            if let BlockKind::ToolResult { output, .. } = block.kind_mut() {
+                match &mut output.kind {
+                    OutputKind::Content { blocks } | OutputKind::ErrorContent { blocks } => {
+                        for result in blocks.iter_mut() {
+                            result.provider_extras.clear();
+                        }
+                    }
+                    other => *other = OutputKind::ErrorText { text: "e".into() },
+                }
+            }
+        });
+        edits
+    }
+
+    fn golden_rows() -> Vec<Arc<Value>> {
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/pi-golden.json")).unwrap();
+        let mut rows: Vec<Arc<Value>> = golden["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|case| case["rows"].as_array().unwrap().iter().cloned())
+            .chain(closed_role_table().into_iter().map(|(row, _, _)| row))
+            .map(Arc::new)
+            .collect();
+        rows.push(Arc::new(json!({ "id": "3d4e5f60", "message": {
+            "role": "toolResult", "toolCallId": "call-1|item-1", "toolName": "read",
+            "content": [
+                { "type": "text", "text": "a" },
+                { "type": "image", "mimeType": "image/png", "data": "AAAA" },
+                { "type": "resource", "uri": "file:///x" }
+            ],
+            "isError": true, "timestamp": 1
+        } })));
+        rows
+    }
+
+    #[test]
+    fn the_replay_check_answers_as_decoding_and_comparing_would() {
+        for (index, row) in golden_rows().iter().enumerate() {
+            let classified = classify_row(index, row).unwrap();
+            let (decoded, metas) = decode_content(classified.1, classified.2, 1);
+            let exact = native_decodes_to(classified.1, classified.2, &decoded);
+            // The check compares every role and part kind but these in place.
+            let compared = !matches!(
+                classified.2,
+                PiRole::BashExecution | PiRole::BranchSummary | PiRole::CompactionSummary
+            ) && !decoded
+                .iter()
+                .any(|block| matches!(block.kind(), BlockKind::Opaque(_)));
+            if compared {
+                assert!(exact, "row {index} replays its own decoded content: {row}");
+            }
+            for (block_index, block) in decoded.iter().enumerate() {
+                for edited in block_edits(block) {
+                    let mut blocks = decoded.clone();
+                    blocks[block_index] = edited;
+                    let message = WireMessage::from_parts(
+                        "user",
+                        blocks,
+                        None,
+                        ProviderExtras::new(),
+                        HarnessMeta::default(),
+                    );
+                    let replays = replays_retained_row(&message, &metas, &decoded);
+                    let checked = native_decodes_to(classified.1, classified.2, message.content());
+                    assert!(
+                        !checked || replays,
+                        "row {index} block {block_index} replays an edit: {:?}",
+                        message.content()[block_index]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The encoding through the row's decoded blocks and the alignment, which every direct rewrite
+    /// must reproduce.
+    fn aligned(message: &WireMessage, row: &Arc<Value>) -> Option<Value> {
+        let (_, native, role) = classify_row(0, row).unwrap();
+        let (decoded, metas) = decode_content(native, role, 1);
+        encode_with_meta(message, role, row, &metas, &decoded).map(|row| row.as_ref().clone())
+    }
+
+    #[test]
+    fn direct_rewrites_match_the_aligned_encoding() {
+        let rows = [
+            json!({ "id": "00000001", "message": {
+                "role": "toolResult", "toolCallId": "call-1|item-1", "toolName": "bash",
+                "content": [{ "type": "text", "text": "out" }], "details": { "n": 1 },
+                "isError": false, "timestamp": 1
+            } }),
+            json!({ "id": "00000002", "message": {
+                "role": "user", "content": "question", "timestamp": 2
+            } }),
+            json!({ "id": "00000003", "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "answer", "textSignature": "sig" }],
+                "stopReason": "stop", "timestamp": 3
+            } }),
+            json!({ "id": "00000004", "message": {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "plan", "thinkingSignature": "ts" },
+                    { "type": "text", "text": "doing it" },
+                    { "type": "toolCall", "id": "call-2", "name": "read",
+                      "arguments": { "path": "a" }, "thoughtSignature": "th" }
+                ],
+                "stopReason": "toolUse", "timestamp": 4
+            } }),
+            json!({ "id": "00000005", "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "same" },
+                    { "type": "text", "text": "same" }
+                ],
+                "timestamp": 5
+            } }),
+            json!({ "id": "eidnara:custom:00000006", "message": {
+                "role": "custom", "customType": "note",
+                "content": [{ "type": "image", "mimeType": "image/png", "data": "AAAA" }],
+                "timestamp": 6
+            } }),
+        ]
+        .map(Arc::new);
+        let mut checked = 0;
+        for row in &rows {
+            let (_, native, role) = classify_row(0, row).unwrap();
+            let (decoded, _) = decode_content(native, role, 1);
+            let mut variants = Vec::new();
+            for (index, block) in decoded.iter().enumerate() {
+                for edited in block_edits(block) {
+                    let mut blocks = decoded.clone();
+                    blocks[index] = edited;
+                    variants.push(blocks);
+                }
+                let mut tagged = decoded.clone();
+                if let BlockKind::Text { text } = tagged[index].kind_mut() {
+                    text.insert_str(0, "§1§ ");
+                    variants.push(tagged);
+                }
+                // A block of another kind than its native part's decoded block.
+                let mut reshaped = decoded.clone();
+                reshaped[index] = match reshaped[index].kind() {
+                    BlockKind::Reasoning { .. } => WireBlock::bare(BlockKind::Text {
+                        text: "now text".into(),
+                    }),
+                    _ => WireBlock::bare(BlockKind::Reasoning {
+                        text: "now reasoning".into(),
+                        signature: None,
+                    }),
+                };
+                variants.push(reshaped);
+                // A call id the served block no longer shares with its native part, with no
+                // native id in its extras, so the rewrite takes the served id.
+                let mut renamed = decoded.clone();
+                if let BlockKind::ToolCall { id, .. } | BlockKind::ToolResult { id, .. } =
+                    renamed[index].kind_mut()
+                {
+                    id.push_str("-renamed");
+                    renamed[index].provider_extras.clear();
+                    variants.push(renamed);
+                }
+            }
+            if decoded.len() > 1 {
+                let mut swapped = decoded.clone();
+                swapped.swap(0, 1);
+                variants.push(swapped);
+                let mut both = decoded.clone();
+                for block in &mut both {
+                    if let BlockKind::Text { text } = block.kind_mut() {
+                        text.push('!');
+                    }
+                }
+                variants.push(both);
+            }
+            for blocks in variants {
+                let message = WireMessage::from_parts(
+                    "user",
+                    blocks,
+                    None,
+                    ProviderExtras::new(),
+                    HarnessMeta {
+                        harness_id: row_id(row).map(str::to_owned),
+                        ..HarnessMeta::default()
+                    },
+                );
+                let encoded = encode_pi_rows([&message], std::slice::from_ref(row), &[]);
+                assert_eq!(
+                    encoded.first().map(|row| row.as_ref().clone()),
+                    aligned(&message, row),
+                    "{row} with {:?}",
+                    message.content()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 40, "{checked}");
+    }
+
+    #[test]
+    fn an_empty_pi_extras_namespace_is_an_edit_the_decoder_never_emits() {
+        let row = Arc::new(json!({ "id": "00000001", "message": {
+            "role": "user", "content": [{ "type": "text", "text": "hi" }], "timestamp": 1
+        } }));
+        let mut block = WireBlock::bare(BlockKind::Text { text: "hi".into() });
+        block.provider_extras.entry("pi".into()).or_default();
+        let message = WireMessage::from_parts(
+            "user",
+            vec![block],
+            None,
+            ProviderExtras::new(),
+            HarnessMeta {
+                harness_id: Some("00000001".into()),
+                ..HarnessMeta::default()
+            },
+        );
+        let encoded = encode_pi_rows([&message], std::slice::from_ref(&row), &[]);
+        assert!(!Arc::ptr_eq(&encoded[0], &row));
+        assert_eq!(Some(encoded[0].as_ref().clone()), aligned(&message, &row));
     }
 }
