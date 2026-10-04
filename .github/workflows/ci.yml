@@ -29,9 +29,12 @@ permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
-# `main` keeps every run.
+# `main` preserves in-progress runs; newer pending runs replace older pending
+# runs. Scale-driver dispatches run independently of other runs on their ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:

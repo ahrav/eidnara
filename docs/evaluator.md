@@ -1278,7 +1278,9 @@ report from a driver's rows and manifest. The `scale-report` job in
 builds release binaries and runs the driver once per tier for the `scale_base`
 commit and then the dispatched commit, each run under `scale_budget_seconds`,
 and uploads rows, manifests, reports, and the tiers each arm could not finish as
-run artifacts. `scripts/scale-opencode-pass.ts` drives the OpenCode transform
+run artifacts. Such a dispatch runs in a concurrency group of its own, so the
+runs of its ref neither wait on it nor cancel it.
+`scripts/scale-opencode-pass.ts` drives the OpenCode transform
 hook: every sample builds a fresh N-slot host array outside the timer (covered
 slots minimal, a 300-message window of the 5 KiB shape) and collects the
 garbage of the previous array before the timer starts. It times the whole
