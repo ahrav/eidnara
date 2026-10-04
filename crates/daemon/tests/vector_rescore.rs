@@ -1262,3 +1262,75 @@ fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     );
     assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
 }
+
+/// A cancellation delivered at the walk's final `AfterPage` ends the scan before any code window is read for scoring.
+#[test]
+fn cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let budget = EvalBudget::unbounded();
+    let expected = fixture.expected();
+    // One page holds the whole population, so its `AfterPage` is the final one.
+    let mut bounds = scan_bounds();
+    bounds.page_rows = NonZeroUsize::new(64).unwrap();
+    let request = CompressedRequest {
+        expected: &expected,
+        query: &axis(0),
+        authority: projection.authority(),
+        capacity: capacity(2, 3),
+        bounds,
+        max_entries: NonZeroUsize::new(4096).unwrap(),
+        max_layers: NonZeroUsize::new(ROOMY.max_layers).unwrap(),
+        max_pinned_bytes: ROOMY.max_pinned_bytes,
+        max_read_bytes: ROOMY.max_read_bytes,
+    };
+    // A codes file cut to nothing makes any scoring read visible as a missing-codes refusal and a quarantine.
+    let codes = fixture
+        .generation_dir(&base.digest)
+        .join(daemon::vector_generation::CODES_FILE);
+    let mut pages = 0usize;
+    let outcome = projection
+        .store
+        .with_conn(|conn| {
+            Ok(rank_compressed(
+                &view,
+                conn,
+                &projection.kernel,
+                &request,
+                &budget,
+                &fixture.admission,
+                &mut |event| {
+                    if let RescoreEvent::Scan(retrieval::dense::Window::AfterPage(_)) = event {
+                        pages += 1;
+                        budget.cancel();
+                        std::fs::write(&codes, []).unwrap();
+                    }
+                },
+            ))
+        })
+        .unwrap();
+    assert_eq!(pages, 1, "the population fits one page");
+    assert!(
+        matches!(
+            outcome,
+            Err(CompressedRefusal::Budget | CompressedRefusal::Candidates(_))
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        !matches!(
+            outcome,
+            Err(CompressedRefusal::Candidates(CandidateRefusal::Layered(
+                LayeredRefusal::Oracle(OracleRefusal::Unreadable { .. })
+            )))
+        ),
+        "the cut codes were never read: {outcome:?}"
+    );
+    assert!(!view.is_quarantined(), "the cancelled scan read no codes");
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+}

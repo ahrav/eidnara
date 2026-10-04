@@ -12,7 +12,9 @@ compressed scan, and the original reads.
   cancel signal before the embedding wait and passes `shared.eval()` to the
   unit.
 - The unit runs `execute`, whose projection read is `read_under` with the
-  budget's stop predicate; the walk checks the budget at every row and batch;
+  budget's stop predicate; the walk checks the budget at every row and batch
+  and again between its final page and scoring
+  (`crates/retrieval/src/dense/oracle.rs:591`);
   `rank_compressed` checks it before every original read, on both sides of
   the read's observer (`crates/daemon/src/vector_reader.rs:902`, `:911`), so a
   cancellation delivered at `ReadOriginal` ends the request before the row's

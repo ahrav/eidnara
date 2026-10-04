@@ -47,7 +47,8 @@ a wildcard pass that questioned the framing itself.
    function production does not call.** `rescore` (`score.rs:190`) has no
    caller outside tests; the oracle walk scores through `score_block`
    (`oracle.rs:508`). The Reachability line now names the producer
-   (`crates/daemon/src/query_route.rs:471`), the block scorer, and the bridge
+   (`ExhaustiveProducer::rank`, `crates/daemon/src/query_route.rs:525`,
+   calling `exhaustive` at `:543`), the block scorer, and the bridge
    the label rests on, `dense_properties.rs:255` holding `inner_product_block`
    equal to `inner_product` bit for bit; the rationale now reads "the row
    scorer is the contract the block scorer is held to".
@@ -78,8 +79,9 @@ a wildcard pass that questioned the framing itself.
    overflow saturation (`vector_generation.rs:1249`) and a census equality
    that calls the same function on both sides (`existing-checks.md`, resource
    accounting). Queue a record `dense-resident-charge-covers-decoded-scales`
-   (default-production through the ledger at `vector_generation.rs:948` and
-   `crates/daemon/src/vector_reader.rs:318`; `always`): for a manifest whose
+   (default-production through the ledger at `vector_generation.rs:752` and
+   `crates/daemon/src/vector_reader.rs:466`, reserved at `:474`; `always`):
+   for a manifest whose
    scales file is `n` bytes, `resident_bytes` equals the other resident sizes
    plus `3n`, and `3n / 4` equals `n / 4` coordinates times
    `size_of::<f32>() + size_of::<f64>()`. A unit test beside

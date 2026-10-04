@@ -621,7 +621,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:684`) only when `set_dense_vectors`
+(`crates/daemon/src/query_route.rs:2011`) only when `set_dense_vectors`
 (`query_route.rs:1865`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
@@ -631,7 +631,8 @@ and `a_deadline_that_lapses_inside_the_rescore_is_the_original_deadline`;
 `crates/daemon/tests/dense_request_lifetime.rs`
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
 through a real host, client, and `RequestCtx`; `vector_rescore.rs`
-`cancellation_at_an_original_read_ends_the_request_before_the_row_is_read`.
+`cancellation_at_an_original_read_ends_the_request_before_the_row_is_read` and
+`cancellation_at_the_final_page_ends_the_scan_before_the_codes_are_scored`.
 Guarantee: The request's one `EvalBudget`, derived with its absolute
 deadline before the dense unit is submitted, stops the compressed scan, the
 canonical eligibility batches, and the original reads; a cancellation at any
@@ -659,7 +660,9 @@ ignores its cancellation.
 Open questions:
 - Parent Q5 approval of the bridge and the cancellation checkpoints, which are
   the ranked walk's check every sixteen visited rows (`BUDGET_STRIDE`), its
-  batch checks, and the checks around each original read's observer
+  check between the final page and scoring
+  (`crates/retrieval/src/dense/oracle.rs:591`), its batch checks, and the
+  checks around each original read's observer
   (`vector_reader.rs:902`, `:911`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
