@@ -68,7 +68,7 @@ pub const REGISTERED_CONSUMER: &str = "search-projection";
 /// Episodes a registration rebuild may consume before its record must be renewed.
 const REGISTRATION_ALLOWANCE: u32 = 3;
 
-/// One claim-source slice examines at most 64 decisions or one commit page of at most 64 commits, 65,536 rows, and 64 MiB of payload, and ends within `SLICE_IDLE`. The row and byte bounds admit any commit the daemon's own routes and producers write, so no ordinary commit blocks the runner as oversized.
+/// One claim-source slice examines at most 64 decisions or one commit page of at most 64 commits, 65,536 rows, and 64 MiB of payload, and ends within `SLICE_IDLE`. The row and byte bounds admit any commit the daemon's own routes and producers write, so no ordinary commit blocks the runner as oversized. A page applies in batches of up to 64 items, fewer after a slice runs out of budget before completing one.
 pub const CLAIM_SLICE_BOUNDS: ClaimSliceBounds = ClaimSliceBounds {
     decisions: NonZeroUsize::new(64).expect("nonzero"),
     decision_bytes: NonZeroU64::new(1024 * 1024).expect("nonzero"),
@@ -77,7 +77,18 @@ pub const CLAIM_SLICE_BOUNDS: ClaimSliceBounds = ClaimSliceBounds {
         max_rows: NonZeroUsize::new(65_536).expect("nonzero"),
         max_payload_bytes: NonZeroU64::new(64 * 1024 * 1024).expect("nonzero"),
     },
+    batch: NonZeroUsize::new(64).expect("nonzero"),
 };
+/// A slice that exhausted its budget before completing any decision or commit halves the next slice's batch, down to one item, so a store too slow for a whole batch within `SLICE_IDLE` still advances; a slice that advanced doubles it back toward `CLAIM_SLICE_BOUNDS.batch`.
+fn next_claim_batch(batch: NonZeroUsize, report: &MaterializationReport) -> NonZeroUsize {
+    let next = match report.end {
+        MaterializationEnd::Exhausted if !report.advanced() => batch.get() / 2,
+        _ if report.advanced() => batch.get().saturating_mul(2),
+        _ => batch.get(),
+    };
+    NonZeroUsize::new(next.min(CLAIM_SLICE_BOUNDS.batch.get())).unwrap_or(NonZeroUsize::MIN)
+}
+
 /// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
 const MAINTENANCE_DESTINATION: ArtifactDestination = ArtifactDestination::Local;
 
@@ -166,6 +177,8 @@ pub struct SearchLifecycleOwner {
     claims: Mutex<ClaimProgress>,
     /// Set by a test that drives the materializer itself; no slice runs while it holds.
     claims_paused: Arc<std::sync::atomic::AtomicBool>,
+    /// The batch size of the next claim-source slice, at most `CLAIM_SLICE_BOUNDS.batch`.
+    claim_batch: std::sync::atomic::AtomicUsize,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
@@ -247,6 +260,7 @@ impl SearchLifecycleOwner {
             last_grace: Mutex::new(None),
             claims: Mutex::new(ClaimProgress::default()),
             claims_paused: Arc::default(),
+            claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -508,9 +522,49 @@ impl SearchLifecycleOwner {
         {
             return Ok(None);
         }
-        ClaimMaterializer::new(&self.kernel, kernel::ProviderEgress::LocalOnly)
-            .run_slice(&mut progress, CLAIM_SLICE_BOUNDS, &budget, now)
-            .map(Some)
+        let batch = NonZeroUsize::new(self.claim_batch.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(NonZeroUsize::MIN);
+        let bounds = ClaimSliceBounds {
+            batch,
+            ..CLAIM_SLICE_BOUNDS
+        };
+        let report = ClaimMaterializer::new(&self.kernel, kernel::ProviderEgress::LocalOnly)
+            .run_slice(&mut progress, bounds, &budget, now)?;
+        self.claim_batch.store(
+            next_claim_batch(batch, &report).get(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Ok(Some(report))
+    }
+
+    /// The first call permanently pauses the claim-source runner and attempts to release the claim consumer within `SLICE_IDLE`; a consumer behind the tip stays registered at shutdown.
+    pub fn release_claim_sources(&self, now: i64) {
+        let mut progress = self.claims.lock().unwrap_or_else(|p| p.into_inner());
+        if self
+            .claims_paused
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let budget = EvalBudget::new(Some(Instant::now() + SLICE_IDLE), Arc::default());
+        let bounds = ClaimSliceBounds {
+            batch: NonZeroUsize::new(self.claim_batch.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(NonZeroUsize::MIN),
+            ..CLAIM_SLICE_BOUNDS
+        };
+        match ClaimMaterializer::new(&self.kernel, kernel::ProviderEgress::LocalOnly).release(
+            &mut progress,
+            bounds,
+            &budget,
+            now,
+        ) {
+            Ok(true) => {}
+            Ok(false) if *progress == ClaimProgress::Unregistered => {}
+            Ok(false) => eprintln!(
+                "daemon: claim sources stay registered: the consumer trails the tip at shutdown"
+            ),
+            Err(error) => eprintln!("daemon: claim sources stay registered: {error}"),
+        }
     }
 
     /// Shares `paused` as the claim-source runner's pause flag.
@@ -557,18 +611,32 @@ impl SearchLifecycleOwner {
             .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
         let bound = limit(inputs.manifest(), Transition::Rebuilding.duration_limit())
             .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+        let generation_id = format!("gen-{}", identity.generation_epoch);
+        let allowance = (1..=REGISTRATION_ALLOWANCE)
+            .rev()
+            .find(|allowance| {
+                replacement_spec(
+                    inputs.manifest(),
+                    identity.clone(),
+                    Transition::Rebuilding,
+                    *allowance,
+                    &generation_id,
+                )
+                .is_ok()
+            })
+            .unwrap_or(1);
         let request = LifecycleRequest {
             transition: Transition::Rebuilding,
             selected_generation: "unregistered".to_owned(),
             kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
             consumer: ConsumerBinding {
                 consumer_id: REGISTERED_CONSUMER.to_owned(),
-                generation_id: format!("gen-{}", identity.generation_epoch),
+                generation_id,
             },
             cause: Cause::Registration,
             attempt_id: format!("registration-{}", identity.kernel_incarnation_id),
             recovery_target: None,
-            allowance: REGISTRATION_ALLOWANCE,
+            allowance,
             deadline: now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
             authorization_ref: None,
         };
@@ -1606,6 +1674,16 @@ fn replacement_spec(
 
 /// Runs one slice after another until `cancel` fires. A slice runs on the blocking pool because it holds SQLite and filesystem work; cancellation cancels the slice's budget and waits for the slice to return, so no slice is left running detached. A slice that advanced the record or applied commits runs the next one without waiting; every other outcome idles first, and a request recorded during the idle wait ends it. A supervisor a slice hands back is drained here unless `cancel` fires first, in which case the drain is left to [`SearchLifecycleOwner::shutdown`] so one grace covers it. A panicking slice closes admission and ends the loop, since its state is no longer known.
 pub async fn run_slices(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
+    run_slice_loop(Arc::clone(&owner), cancel).await;
+    let releasing = Arc::clone(&owner);
+    if let Err(join) =
+        tokio::task::spawn_blocking(move || releasing.release_claim_sources(crate::now_ms())).await
+    {
+        eprintln!("daemon: claim source release ended abnormally: {join}");
+    }
+}
+
+async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationToken) {
     let mut reporter = SliceReporter::default();
     let mut registration_reporter = SliceReporter::default();
     let mut claim_report = None;
@@ -1811,6 +1889,47 @@ impl SliceReporter {
 mod tests {
     use super::*;
     use crate::projection_gates::REQUIRED_LIMITS;
+
+    fn claim_report(end: MaterializationEnd, scanned: usize) -> MaterializationReport {
+        MaterializationReport {
+            target: 0,
+            bootstrapped: 0,
+            scanned,
+            acknowledged_through: 0,
+            commits_consumed: 0,
+            published: 0,
+            replayed: 0,
+            retired: 0,
+            exclusions: Vec::new(),
+            end,
+        }
+    }
+
+    #[test]
+    fn a_claim_batch_halves_after_an_empty_exhausted_slice_and_regrows_after_progress() {
+        let full = CLAIM_SLICE_BOUNDS.batch;
+        let mut batch = full;
+        let mut sizes = Vec::new();
+        for _ in 0..8 {
+            batch = next_claim_batch(batch, &claim_report(MaterializationEnd::Exhausted, 0));
+            sizes.push(batch.get());
+        }
+        assert_eq!(sizes, [32, 16, 8, 4, 2, 1, 1, 1]);
+        batch = next_claim_batch(batch, &claim_report(MaterializationEnd::Exhausted, 1));
+        assert_eq!(
+            batch.get(),
+            2,
+            "an exhausted slice that completed work regrows"
+        );
+        batch = next_claim_batch(batch, &claim_report(MaterializationEnd::Continues, 0));
+        assert_eq!(batch.get(), 4);
+        for _ in 0..8 {
+            batch = next_claim_batch(batch, &claim_report(MaterializationEnd::Continues, 0));
+        }
+        assert_eq!(batch, full, "growth stops at the slice bound");
+        let reached = next_claim_batch(batch, &claim_report(MaterializationEnd::ReachedTarget, 0));
+        assert_eq!(reached, full, "an idle slice keeps the batch");
+    }
 
     const LIMIT: u64 = 1_000_000;
 

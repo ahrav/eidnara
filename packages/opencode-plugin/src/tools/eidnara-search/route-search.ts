@@ -10,8 +10,9 @@ import {
     renderToolStateText,
     unavailable,
 } from "../../shared/kernel-client";
+import { antiMemoryExpired } from "../../shared/kernel-client/anti-memory";
 import {
-    isExpiredAntiMemoryRow,
+    antiMemoryPayloadOfRow,
     type KernelMemorySearchResult,
     memoryResultFromRow,
     parseObjectIdQuery,
@@ -147,8 +148,9 @@ export async function searchThroughRoute(args: {
             stale.push(decision.objectId);
             continue;
         }
-        if (isExpiredAntiMemoryRow(row, nowMs)) continue;
-        const result = memoryResultFromRow(row, 1 / (results.length + 1), "fused");
+        const antiMemory = antiMemoryPayloadOfRow(row);
+        if (antiMemory && antiMemoryExpired(antiMemory, nowMs)) continue;
+        const result = memoryResultFromRow(row, 1 / (results.length + 1), "fused", antiMemory);
         results.push({
             ...result,
             lanes: ROUTE_LANES.filter((lane) => decision.lanes.has(lane)),

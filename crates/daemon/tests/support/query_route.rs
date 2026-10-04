@@ -166,6 +166,11 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn build() -> Self {
+        Self::build_with(&[]).await
+    }
+
+    /// [`Self::build`] with each `(object, summary)` in `extra` committed beside the three decisions.
+    pub async fn build_with(extra: &[(&str, &str)]) -> Self {
         let daemon = KernelDaemon::start().await;
         let store = daemon.store();
         let kernel_incarnation = store
@@ -183,16 +188,15 @@ impl Fixture {
                 "source_revision": revision,
             })
         };
-        let created = daemon
-            .commit(
-                "create",
-                vec![
-                    json!({"op": "insert_decision", "spec": spec("rule", 1, "Keep the public contract explicit.")}),
-                    json!({"op": "insert_decision", "spec": spec("other", 1, "Name things after the contract.")}),
-                    json!({"op": "insert_decision", "spec": spec("third", 1, "Short names win.")}),
-                ],
-            )
-            .await;
+        let mut decisions = vec![
+            json!({"op": "insert_decision", "spec": spec("rule", 1, "Keep the public contract explicit.")}),
+            json!({"op": "insert_decision", "spec": spec("other", 1, "Name things after the contract.")}),
+            json!({"op": "insert_decision", "spec": spec("third", 1, "Short names win.")}),
+        ];
+        decisions.extend(extra.iter().map(
+            |(object, summary)| json!({"op": "insert_decision", "spec": spec(object, 1, summary)}),
+        ));
+        let created = daemon.commit("create", decisions).await;
         assert_eq!(created["state"]["kind"], "available", "{created}");
         let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
             .as_str()
@@ -348,6 +352,31 @@ impl Fixture {
                      SELECT 1<<40,original,parts,'not-an-occurrence-identifier'
                      FROM lexical WHERE occurrence_id=?1",
                     [occurrence_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The lexical row makes the `messages` copy searchable by the same terms as `occurrence_id`.
+    pub fn non_claim_lexical_copy(&self, occurrence_id: &str, copy_id: &str) {
+        self.projection
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at)
+                     SELECT ?2,tuple,lineage_id,'messages',revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
+                     FROM occurrences WHERE occurrence_id=?1",
+                    [occurrence_id, copy_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO lexical(rowid,original,parts,occurrence_id)
+                     SELECT 1<<41,original,parts,?2
+                     FROM lexical WHERE occurrence_id=?1",
+                    [occurrence_id, copy_id],
                 )?;
                 Ok(())
             })

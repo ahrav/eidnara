@@ -18,9 +18,9 @@ use std::sync::LazyLock;
 use rusqlite::{OptionalExtension, Statement, Transaction, TransactionBehavior, params};
 
 use super::admission::{
-    Disposition, EventKind, Maturity, Outcome, ServedRow, SourceClass, Surface, SurfaceVisibility,
-    TaintClass, VisibilityRow, served_classes, served_lineage_decision_sql,
-    served_own_decision_sql, supporting_approval_valid_sql,
+    Disposition, EventKind, Maturity, Outcome, SourceClass, Surface, SurfaceVisibility, TaintClass,
+    VisibilityRow, served_classes, served_lineage_decision_sql, served_own_decision_sql,
+    supporting_approval_valid_sql,
 };
 use super::applicability::EvalBudget;
 use super::claim_causality::{CausalClass, CausalRecord, causal_class_at, registry_row_at};
@@ -311,9 +311,41 @@ pub(crate) fn load_claims_in_tx(
     bounds: ClaimFactBounds,
     limit: &AcquireLimit,
 ) -> Result<(Vec<ClaimFacts>, Vec<String>), ClaimFactsError> {
+    load_claims_served_in_tx(
+        tx,
+        requested,
+        object_ids,
+        bounds,
+        limit,
+        &HashMap::new(),
+        None,
+    )
+}
+
+/// Serving facts by object id; `None` records an object with no serving admission.
+pub(crate) type KnownServed<'a> = HashMap<&'a str, Option<ServedFacts>>;
+
+/// The occurrences to read for each object, by object id.
+pub(crate) type WantedOccurrences<'a> = HashMap<&'a str, Vec<(OccurrenceClass, &'a str)>>;
+
+/// `known` supplies serving facts from `tx` at `requested`; `None` records an object with no serving admission. `load_claims_served_in_tx` queries the serving view only for objects absent from `known`.
+pub(crate) fn load_claims_served_in_tx(
+    tx: &Transaction<'_>,
+    requested: i64,
+    object_ids: &[String],
+    bounds: ClaimFactBounds,
+    limit: &AcquireLimit,
+    known: &KnownServed<'_>,
+    wanted: Option<&WantedOccurrences<'_>>,
+) -> Result<(Vec<ClaimFacts>, Vec<String>), ClaimFactsError> {
     let mut claims = Vec::with_capacity(object_ids.len());
     let mut missing = Vec::new();
-    let mut served = load_served(tx, requested, object_ids)?;
+    let unknown: Vec<String> = object_ids
+        .iter()
+        .filter(|id| !known.contains_key(id.as_str()))
+        .cloned()
+        .collect();
+    let mut served = load_served(tx, requested, &unknown)?;
     if !object_ids.is_empty() {
         limit.check()?;
         static OWN_SQL: LazyLock<String> = LazyLock::new(|| admission_sql(AdmissionScope::Own));
@@ -329,10 +361,17 @@ pub(crate) fn load_claims_in_tx(
                     tx,
                     requested,
                     object,
-                    served.remove(object_id),
+                    match known.get(object_id.as_str()) {
+                        Some(facts) => facts.clone(),
+                        None => served.remove(object_id),
+                    },
+                    wanted.map(|wanted| {
+                        wanted
+                            .get(object_id.as_str())
+                            .map_or(&[][..], Vec::as_slice)
+                    }),
                     bounds,
-                    &mut own,
-                    &mut lineage,
+                    (&mut own, &mut lineage),
                 )?),
             }
         }
@@ -344,14 +383,22 @@ fn load_served(
     tx: &Transaction<'_>,
     requested: i64,
     object_ids: &[String],
-) -> Result<HashMap<String, ServedRow>, KernelError> {
+) -> Result<HashMap<String, ServedFacts>, KernelError> {
     if object_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let ids = serde_json::to_string(object_ids).map_err(|_| KernelError::InvalidInput)?;
     Ok(served_classes(tx, requested, Some(&ids), None)?
         .into_iter()
-        .map(|row| (row.object.object_id.clone(), row))
+        .map(|row| {
+            let facts = ServedFacts {
+                sensitivity: row.object.sensitivity,
+                auto_inject: row.visibility(Surface::AutoInject),
+                auto_search: row.visibility(Surface::AutoSearch),
+                explicit_search: row.visibility(Surface::ExplicitSearch),
+            };
+            (row.object.object_id, facts)
+        })
         .collect())
 }
 
@@ -359,10 +406,10 @@ fn load_claim(
     tx: &Transaction<'_>,
     requested: i64,
     object: ObjectRow,
-    served: Option<ServedRow>,
+    served: Option<ServedFacts>,
+    wanted: Option<&[(OccurrenceClass, &str)]>,
     bounds: ClaimFactBounds,
-    own: &mut Statement<'_>,
-    lineage: &mut Statement<'_>,
+    (own, lineage): (&mut Statement<'_>, &mut Statement<'_>),
 ) -> Result<ClaimFacts, ClaimFactsError> {
     if object.object_kind != "decision" {
         return Err(ClaimFactsError::NotADecision);
@@ -371,16 +418,11 @@ fn load_claim(
     let own_admission = load_admission(own, requested, &object)?;
     let lineage_admission = load_admission(lineage, requested, &object)?;
     let served = match served {
-        Some(row) => ServedStanding::Served(ServedFacts {
-            sensitivity: row.object.sensitivity,
-            auto_inject: row.visibility(Surface::AutoInject),
-            auto_search: row.visibility(Surface::AutoSearch),
-            explicit_search: row.visibility(Surface::ExplicitSearch),
-        }),
+        Some(facts) => ServedStanding::Served(facts),
         None if object.invalidated_commit_seq.is_some() => ServedStanding::NotLiveAtSnapshot,
         None => ServedStanding::NeverAdmitted,
     };
-    let (occurrences, excluded_representations) = load_occurrences(tx, requested, &object)?;
+    let (occurrences, excluded_representations) = load_occurrences(tx, requested, &object, wanted)?;
     let (causality, causal_record) =
         causal_class_at(tx, requested, &object, bounds.max_causal_payload_bytes)?;
     Ok(ClaimFacts {
@@ -577,10 +619,12 @@ fn claim_identity(class: OccurrenceClass, object_id: &str) -> Option<[(&'static 
     }
 }
 
+/// `wanted`, when given, names the class and representation pairs read; every claim representation is read otherwise.
 fn load_occurrences(
     tx: &Transaction<'_>,
     requested: i64,
     object: &ObjectRow,
+    wanted: Option<&[(OccurrenceClass, &str)]>,
 ) -> Result<(Vec<ClaimOccurrence>, Vec<ExcludedRepresentation>), KernelError> {
     let revision = object.source_revision.to_string();
     let mut occurrences = Vec::new();
@@ -592,6 +636,9 @@ fn load_occurrences(
         let identity = claim_identity(class, &object.object_id)
             .expect("both claim classes have a one-field identity");
         for representation in class.representations() {
+            if wanted.is_some_and(|wanted| !wanted.contains(&(class, *representation))) {
+                continue;
+            }
             let encoded = encode_preserving_span(&Occurrence {
                 class: class.code(),
                 identity: &identity,
