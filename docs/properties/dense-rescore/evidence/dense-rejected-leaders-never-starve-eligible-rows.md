@@ -7,10 +7,11 @@ stop discovery of lower eligible rows.
 
 ## Evidence trail
 
-- `Progress::judge_batch` (`crates/retrieval/src/dense/oracle.rs:908`) offers
-  only rows the kernel judged eligible.
-- The walk continues until its pages run out or a bound stops it; a full set
-  only raises the score a row needs to be selected.
+- `Progress::judge_batch` (`crates/retrieval/src/dense/oracle.rs:1228`)
+  offers only rows the kernel judged eligible.
+- `Progress::judge_ranked` (`oracle.rs:1011`) judges the scored rows best
+  first and stops only once the set holds `R` eligible rows and the best
+  unjudged row ranks below them, or the rows run out.
 
 ## Failure scenario
 
@@ -29,7 +30,9 @@ None.
 
 ### Q: Does the walk stop when the set is full?
 
-- Sources examined: `oracle::walk`.
-- Findings: no; it stops only at the end of the population or at a bound.
+- Sources examined: `oracle::walk_ranked`.
+- Findings: no; the walk stops only at the end of the population or at a
+  bound, and judgment stops only once the rows that rank below the full set
+  are all that remain.
 - Missing evidence: none.
 - Conclusion: resolved with answer - no.

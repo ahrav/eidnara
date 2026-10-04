@@ -8,14 +8,15 @@ non-result.
 
 ## Evidence trail
 
-- `oracle::walk` refuses `HeapOverBound` when the preallocated slots exceed
+- `check_request` refuses `HeapOverBound` when the preallocated slots exceed
   the heap bound and `BatchOverBound` for a pool past the kernel batch, before
   any page is read.
-- `Block::flush` checks batch bytes from the lane's strings before the
-  selected candidate is allocated; `Progress::hold` checks heap bytes, net of
-  the entry a full set displaces, before an eligible row moves in.
-- `selected_bytes` counts each selected row's candidate, its judgment slot,
-  two ordering indices, its score twice, and its strings.
+- `Progress::read_candidate` checks batch bytes from the row's strings before
+  the batch candidate is allocated, and ends the batch at a row that does not
+  fit; `Progress::hold` checks heap bytes before an eligible row moves in.
+  Rows enter best first, so no entry is displaced.
+- `selected_bytes` counts each judged row's candidate, its score, and its
+  strings.
 - `select_candidates` clears the pool for every incomplete reason except a
   coverage shortfall.
 
@@ -26,7 +27,7 @@ bound and labeled complete omits neighbors.
 
 ## Timing windows and dependencies
 
-Cancellation after a page is judged.
+Cancellation after a page is visited.
 
 ## What a test must construct
 

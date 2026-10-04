@@ -10,18 +10,19 @@ mix authority stamps, including decisions that excluded possible winners.
 - `judge_tracked` (`crates/retrieval/src/eligibility.rs:282`) records the
   first batch's snapshot and incarnation and reports a later batch that
   differs.
-- The walk stops at a moved authority and re-judges the held set; the
-  candidate scan then clears the pool (`candidates.rs`).
+- Every judgment batch runs after the walk's last page; a batch whose stamps
+  differ ends judgment, and the candidate scan then clears the pool
+  (`candidates.rs`).
 - A kernel error from judgment propagates as a refusal.
 
 ## Failure scenario
 
-A pool admitted under one snapshot and re-judged under another holds rows
+A pool admitted under one snapshot and completed under another holds rows
 whose exclusions no longer describe the facts.
 
 ## Timing windows and dependencies
 
-Between batches and before the final re-judgment.
+Between batches.
 
 ## What a test must construct
 

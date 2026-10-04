@@ -349,12 +349,12 @@ fn a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_elig
             .sum();
         assert!(excluded >= 4, "rejected leaders were judged: {excluded}");
         if page_rows == 40 {
-            // One page: the first batch is the four best rows, all hidden; it admits nothing, so the rest of the page is one batch; then the re-judgment.
+            // One page: the first batch is the four best rows, all hidden; it admits nothing, so the rest is one batch.
             assert_eq!(
                 pool.ranking.consumed.excluded,
                 vec![(EligibilityVerdict::Hidden, 20)]
             );
-            assert_eq!(pool.ranking.consumed.batches, 3);
+            assert_eq!(pool.ranking.consumed.batches, 2);
         }
     }
 
@@ -431,9 +431,14 @@ fn a_kernel_change_between_batches_discards_the_pool() {
     let layers = [coded[0].layer.layer()];
     let codes = [coded[0].codes()];
     let query = axis(0);
+    // Two-row pages cap each batch at two rows, so the eight rows take four batches after the walk.
+    let mut batches = 0;
     let pool = select(&fixture, &layers, &codes, &query, 8, roomy(2), |window| {
-        if window == Window::AfterPage(1) {
-            fixture.retire("theta");
+        if window == Window::AfterJudgment {
+            batches += 1;
+            if batches == 1 {
+                fixture.retire("theta");
+            }
         }
     })
     .unwrap();
@@ -444,9 +449,13 @@ fn a_kernel_change_between_batches_discards_the_pool() {
     assert_discarded(&pool);
 
     let manifest = fixture.backup();
+    let mut batches = 0;
     let pool = select(&fixture, &layers, &codes, &query, 8, roomy(2), |window| {
-        if window == Window::AfterPage(1) {
-            fixture.kernel.restore(&manifest).unwrap();
+        if window == Window::AfterJudgment {
+            batches += 1;
+            if batches == 1 {
+                fixture.kernel.restore(&manifest).unwrap();
+            }
         }
     })
     .unwrap();
@@ -457,7 +466,7 @@ fn a_kernel_change_between_batches_discards_the_pool() {
     assert_discarded(&pool);
 }
 
-/// Admitting `alpha` after the walk judged it hidden moves the snapshot: the exclusion described facts that no longer hold, so the pool cannot be complete.
+/// Admitting `alpha` after a batch judged it hidden moves the snapshot the next batch sees: the exclusion described facts that no longer hold, so the pool cannot be complete.
 #[test]
 fn a_change_to_an_excluded_row_discards_the_pool_too() {
     let admitted: Vec<&str> = OBJECTS.into_iter().filter(|o| *o != "alpha").collect();
@@ -466,8 +475,9 @@ fn a_change_to_an_excluded_row_discards_the_pool_too() {
     let layers = [coded[0].layer.layer()];
     let codes = [coded[0].codes()];
     let query = axis(0);
+    // Two-row pages cap each batch at two rows: `alpha`, the best row, is judged hidden in the first batch, and the admission lands before the second.
     let mut judged = 0;
-    let pool = select(&fixture, &layers, &codes, &query, 8, roomy(8), |window| {
+    let pool = select(&fixture, &layers, &codes, &query, 8, roomy(2), |window| {
         if window == Window::AfterJudgment {
             judged += 1;
             if judged == 1 {
@@ -562,7 +572,7 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
     .unwrap();
     assert_eq!(exact.ranking.completion, Completion::Complete);
 
-    // Batch bytes. With a pool of eight every row is selected, so a one-row page holds the largest row and no more.
+    // Batch bytes. With a pool of eight every row is judged, and one-row pages cap each batch at one row, so a batch holds the largest row and no more.
     let every = run(8, roomy(8)).unwrap().ranking.candidates;
     assert_eq!(every.len(), 8);
     let largest = every.iter().map(selected_bytes).max().unwrap();
@@ -586,69 +596,15 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
         Completion::Incomplete(IncompleteReason::BatchBytes)
     );
     assert_discarded(&short);
-    // Each page starts its count afresh: two rows per page fit twice the largest row, below the scan's total.
+    // Each batch starts its count afresh: two-row batches fit twice the largest row, below the scan's total.
     assert!(every.iter().map(selected_bytes).sum::<usize>() > 2 * largest);
     assert_eq!(
         batch(2, 2 * largest).ranking.completion,
         Completion::Complete
     );
 
-    // Heap bytes, with one-row pages so later rows displace held ones: the preallocated slots and one byte fit; the first admission's strings do not.
+    // Heap bytes: the preallocated slots and one byte fit; the first admission's strings do not.
     let slots = 3 * HELD_SLOT_BYTES;
-    let heap = run(
-        3,
-        ScanBounds {
-            storage: StorageBounds {
-                heap_bytes: NonZeroUsize::new(slots + 1).unwrap(),
-                ..roomy(1).storage
-            },
-            ..roomy(1)
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        heap.ranking.completion,
-        Completion::Incomplete(IncompleteReason::HeapBytes)
-    );
-    assert_discarded(&heap);
-    // The peak the walk holds: rows visited in identifier order, one per page, each offered while it outranks the worst of three.
-    let eligible = base_positions(&fixture, &coded[0]);
-    let scored = reference_pool(&fixture, &coded, &query, &eligible, usize::MAX);
-    let mut visit: Vec<(String, u64)> = scored.clone();
-    visit.sort();
-    let candidate_of = |id: &str| {
-        let row = fixture
-            .rows
-            .iter()
-            .find(|row| row.occurrence_id() == id)
-            .unwrap();
-        OccurrenceCandidate::new(
-            id.to_owned(),
-            row.class,
-            row.object.clone(),
-            1,
-            DIGEST.to_owned(),
-        )
-    };
-    let rank = |id: &str| scored.iter().position(|(other, _)| other == id).unwrap();
-    let mut held_ids: Vec<String> = Vec::new();
-    let mut peak = 0;
-    for (id, _) in &visit {
-        held_ids.push(id.clone());
-        held_ids.sort_by_key(|id| rank(id));
-        held_ids.truncate(3);
-        peak = peak.max(
-            held_ids
-                .iter()
-                .map(|id| held_bytes(&candidate_of(id)))
-                .sum::<usize>(),
-        );
-    }
-    let final_held: usize = held.iter().map(held_bytes).sum();
-    assert!(
-        peak > final_held,
-        "a displaced entry owned longer strings than its replacement"
-    );
     let heap_at = |bytes: usize| {
         run(
             3,
@@ -662,24 +618,33 @@ fn each_storage_and_row_bound_saturates_alone_and_returns_no_candidate() {
         )
         .unwrap()
     };
-    let fits = heap_at(slots + peak);
+    let heap = heap_at(slots + 1);
+    assert_eq!(
+        heap.ranking.completion,
+        Completion::Incomplete(IncompleteReason::HeapBytes)
+    );
+    assert_discarded(&heap);
+    // Rows are judged and admitted best first, so the held set only grows: its final strings are its peak, and one byte less stops the walk.
+    let paged = run(3, roomy(1)).unwrap();
+    assert_eq!(
+        paged.ranking.consumed.judged, 3,
+        "only the three best rows: {:?}",
+        paged.ranking.consumed
+    );
+    let final_held: usize = held.iter().map(held_bytes).sum();
+    let fits = heap_at(slots + final_held);
     assert_eq!(
         fits.ranking.completion,
         Completion::Complete,
-        "the peak bound holds the walk"
+        "the final set's bound holds the walk"
     );
     assert_eq!(pool_of(&fits), pool_of(&complete));
-    let paged = run(3, roomy(1)).unwrap();
-    assert!(
-        paged.ranking.consumed.judged - 3 > 3,
-        "{:?}",
-        paged.ranking.consumed
-    );
-    let tight = heap_at(slots + peak - 1);
+    let tight = heap_at(slots + final_held - 1);
     assert_eq!(
         tight.ranking.completion,
         Completion::Incomplete(IncompleteReason::HeapBytes)
     );
+    assert_discarded(&tight);
 
     // Slots that do not fit are refused before any page is read.
     let mut visited = 0;
@@ -981,4 +946,146 @@ fn a_reserved_stored_code_refuses_as_unreadable() {
             OracleRefusal::Unreadable { ref occurrence_id, .. }
         ))) if *occurrence_id == alpha
     ));
+}
+
+/// The walk visits rows in table order, so inserting the same corpus in reverse changes the visit order and nothing else: the pool, its score bits, and what judgment cost are the same.
+#[test]
+fn the_pool_does_not_depend_on_the_order_rows_were_stored_in() {
+    let admitted: Vec<&str> = OBJECTS
+        .into_iter()
+        .filter(|object| !matches!(*object, "alpha" | "gamma"))
+        .collect();
+    let forward = Fixture::new(&admitted, corpus());
+    let backward = Fixture::new(&admitted, corpus().into_iter().rev().collect());
+    let mut pools = Vec::new();
+    for fixture in [&forward, &backward] {
+        let coded = [full_base(fixture)];
+        let layers = [coded[0].layer.layer()];
+        let codes = [coded[0].codes()];
+        let mut visited = Vec::new();
+        let pool = select(fixture, &layers, &codes, &axis(0), 3, roomy(2), |window| {
+            if let Window::Visited(id) = window {
+                visited.push(id.to_owned());
+            }
+        })
+        .unwrap();
+        assert_eq!(pool.ranking.completion, Completion::Complete);
+        assert_aligned(&coded, &pool);
+        let mut eligible = base_positions(fixture, &coded[0]);
+        eligible.retain(|object, _| admitted.contains(object));
+        assert_eq!(
+            pool_of(&pool),
+            reference_pool(fixture, &coded, &axis(0), &eligible, 3)
+        );
+        pools.push((pool_of(&pool), pool.ranking.consumed.clone(), visited));
+    }
+    let (forward_pool, forward_consumed, forward_visits) = &pools[0];
+    let (backward_pool, backward_consumed, backward_visits) = &pools[1];
+    assert_eq!(forward_pool, backward_pool);
+    assert_eq!(forward_consumed, backward_consumed);
+    assert_ne!(forward_visits, backward_visits, "the storage order differs");
+    let mut sorted = forward_visits.clone();
+    sorted.sort();
+    let mut other = backward_visits.clone();
+    other.sort();
+    assert_eq!(sorted, other, "both walks visit the same rows once");
+}
+
+/// A winner the projection does not list is never scored: its codes hold the reserved `-128`, and the scan still completes, counting the winner as revoked.
+#[test]
+fn a_revoked_winner_is_never_scored() {
+    let fixture = Fixture::all_admitted();
+    let base = full_base(&fixture);
+    let stray = Row::claim("stray", axis(0));
+    let mut rows: Vec<(String, Vec<f32>)> = base
+        .layer
+        .ids
+        .iter()
+        .cloned()
+        .zip(base.layer.rows.iter().cloned())
+        .collect();
+    rows.push((stray.occurrence_id(), axis(0)));
+    let mut coded = Coded::from_layer(OwnedLayer::new(
+        generation().generation_epoch,
+        0,
+        rows,
+        vec![],
+    ));
+    let row = coded
+        .layer
+        .ids
+        .iter()
+        .position(|id| *id == stray.occurrence_id())
+        .unwrap();
+    coded.codes[row][0] = i8::MIN;
+    let coded = [coded];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let pool = select(&fixture, &layers, &codes, &axis(0), 3, roomy(2), |_| {}).unwrap();
+    assert_eq!(pool.ranking.completion, Completion::Complete);
+    assert_eq!(pool.layers.revoked, 1);
+    assert_eq!(pool.layers.unvisited, 0);
+    assert_eq!(
+        pool.ranking.coverage.with_vector, pool.ranking.coverage.required,
+        "every live row scored once, the stray winner never"
+    );
+    let eligible = base_positions(&fixture, &coded[0]);
+    assert_eq!(
+        pool_of(&pool),
+        reference_pool(&fixture, &coded, &axis(0), &eligible, 3)
+    );
+}
+
+/// With every row eligible the scan judges exactly the pool's rows, best first; nothing else reaches the kernel.
+#[test]
+fn an_all_eligible_scan_judges_only_the_pool() {
+    let fixture = Fixture::all_admitted();
+    let coded = [full_base(&fixture)];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    for (candidates, page_rows, batches) in [(3, 8, 1), (3, 2, 2), (8, 8, 1), (8, 3, 3)] {
+        let pool = select(
+            &fixture,
+            &layers,
+            &codes,
+            &axis(0),
+            candidates,
+            roomy(page_rows),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(pool.ranking.completion, Completion::Complete);
+        assert_eq!(pool.ranking.consumed.judged, candidates);
+        assert_eq!(
+            pool.ranking.consumed.batches, batches,
+            "batches hold at most a page of rows: R {candidates}, page {page_rows}"
+        );
+        assert!(pool.ranking.consumed.excluded.is_empty());
+    }
+}
+
+/// The table walk starts at the smallest rowid SQLite can store, so a row moved to a negative rowid is still visited.
+#[test]
+fn a_row_at_any_rowid_is_visited() {
+    let fixture = Fixture::all_admitted();
+    let changed = fixture
+        .raw()
+        .execute(
+            "UPDATE occurrences SET rowid=?2 WHERE occurrence_id=?1",
+            rusqlite::params![fixture.id("alpha"), i64::MIN],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let coded = [full_base(&fixture)];
+    let layers = [coded[0].layer.layer()];
+    let codes = [coded[0].codes()];
+    let pool = select(&fixture, &layers, &codes, &axis(0), 3, roomy(2), |_| {}).unwrap();
+    assert_eq!(pool.ranking.completion, Completion::Complete);
+    assert_eq!(pool.ranking.coverage.required, 8);
+    assert_eq!(pool.ranking.ranked[0].occurrence_id, fixture.id("alpha"));
+    let eligible = base_positions(&fixture, &coded[0]);
+    assert_eq!(
+        pool_of(&pool),
+        reference_pool(&fixture, &coded, &axis(0), &eligible, 3)
+    );
 }
