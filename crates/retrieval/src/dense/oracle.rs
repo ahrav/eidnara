@@ -345,6 +345,7 @@ pub(super) static DENSE_CLASSES: LazyLock<String> = LazyLock::new(|| {
 
 /// One keyset over the primary key covers every dense class, so no page sorts a class and visit order equals identifier order.
 /// The unary `+` on `o.class` keeps the planner off the class index, which would sort the whole class on every page.
+/// The unary `+` on the limit keeps the plan independent of the bound value, so rebinding it for the next page reuses the prepared statement.
 static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,v.vector,
@@ -354,7 +355,7 @@ static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
          LEFT JOIN occurrence_vectors v ON v.occurrence_id=o.occurrence_id AND v.generation_id=?1
          WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
          ORDER BY o.occurrence_id
-         LIMIT ?3",
+         LIMIT +?3",
         *DENSE_CLASSES
     )
 });
@@ -1237,5 +1238,27 @@ mod tests {
             !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
             "{plan:?}"
         );
+    }
+
+    #[test]
+    fn each_page_query_serves_every_page_from_one_preparation() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        for sql in [&*PAGE_SQL, &*crate::dense::layered::LIVE_SQL] {
+            for (after, limit) in [("", 3), ("b", 257), ("c", 2)] {
+                let mut statement = conn.prepare_cached(sql).unwrap();
+                {
+                    let mut rows = statement
+                        .query(rusqlite::params!["gen", after, limit])
+                        .unwrap();
+                    assert!(rows.next().unwrap().is_none());
+                }
+                assert_eq!(
+                    statement.get_status(rusqlite::StatementStatus::RePrepare),
+                    0,
+                    "{sql}"
+                );
+            }
+        }
     }
 }

@@ -69,7 +69,7 @@ pub(super) static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
          LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
          WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
          ORDER BY o.occurrence_id
-         LIMIT ?3",
+         LIMIT +?3",
         *oracle::DENSE_CLASSES
     )
 });
