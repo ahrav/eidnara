@@ -232,6 +232,7 @@ for (const tier of tiers) {
             const host = hostArray(sessionId, covered, windowSize);
             const output = { messages: turn === 0 ? host.slice(covered - 2) : host };
             const failuresBefore = transform.getState(sessionId).failureCount;
+            Bun.gc(true);
             pass = { bytes: 0 };
             const startedAt = performance.now();
             await transform.run(sessionId, output);
