@@ -2,11 +2,13 @@
 //!
 //! A row is `{"id": <plugin-assigned id>, "message": <AgentMessage>}`. The id is the persisted Pi
 //! entry id for a host message and a reserved id for a synthetic entry. The role set is closed to
-//! Pi 0.80.2's `AgentMessage` union; a row with any other role makes `decode_pi_rows` decline
-//! the window. Decoding keeps every row in a sidecar, so encoding replays untouched rows as their
-//! exact retained values, updates edited blocks in place, and removes deleted native parts.
-//! Encoding is a pure function of its inputs, so identical frozen messages re-encode to identical
-//! rows.
+//! Pi 0.80.2's `AgentMessage` union; a row with any other role makes [`check_pi_rows`] decline
+//! the window. Encoding reads the window's rows directly: a served message equal to its row's
+//! decoded content replays the row's exact value, and an edited message updates the edited native
+//! parts in place and removes deleted ones. The replay check compares served blocks with the
+//! native fields the decoder reads, so only an edited message whose shape needs alignment decodes
+//! its row. Encoding is a pure function of its inputs, so identical frozen messages re-encode to
+//! identical rows.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -17,14 +19,21 @@ use serde_json::{Value, json};
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
 use crate::injection::SYNTHETIC_TIMESTAMP;
 use crate::wire::{
-    BlockKind, HarnessMeta, IngressMessage, MediaBlock, MediaKind, MessageOrigin, OpaqueBlock,
-    OutputKind, ProviderExtras, ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
+    BlockKind, MediaBlock, MediaKind, OpaqueBlock, OutputKind, ProviderExtras, ResultBlock,
+    ResultBlockKind, ToolOutput, WireBlock, WireMessage,
 };
+#[cfg(test)]
+use crate::wire::{HarnessMeta, IngressMessage, MessageOrigin};
 
 use super::sidecar::{
-    BlockMeta, DecodeSidecar, DecodedHarnessMessages, HarnessMessageMeta, MatchedBlockMetas,
-    block_is_unchanged, decoded_block_fingerprint, equals_decoded_block,
-    has_stamped_block_identity, match_block_metas, stable_hash_prefix, stamp_block_identity,
+    BLOCK_IDENTITY_NAMESPACE, BlockMeta, MatchedBlockMetas, MetaContent, block_is_unchanged,
+    equals_decoded_block, has_stamped_block_identity, holds_float_zero, match_block_metas_by,
+    stable_hash_prefix,
+};
+#[cfg(test)]
+use super::sidecar::{
+    DecodeSidecar, DecodedHarnessMessages, HarnessMessageMeta, decoded_block_fingerprint,
+    stamp_block_identity,
 };
 
 const HARNESS: &str = "pi";
@@ -56,6 +65,7 @@ pub(crate) enum PiRole {
 }
 
 impl PiRole {
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 7] = [
         Self::User,
         Self::Assistant,
@@ -67,9 +77,16 @@ impl PiRole {
     ];
 
     pub(crate) fn parse(role: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|candidate| candidate.wire_id() == role)
+        Some(match role {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "toolResult" => Self::ToolResult,
+            "bashExecution" => Self::BashExecution,
+            "custom" => Self::Custom,
+            "branchSummary" => Self::BranchSummary,
+            "compactionSummary" => Self::CompactionSummary,
+            _ => return None,
+        })
     }
 
     pub(crate) const fn wire_id(self) -> &'static str {
@@ -93,6 +110,7 @@ impl PiRole {
     }
 
     /// The canonical role Pi's `convertToLlm` gives the message.
+    #[cfg(test)]
     const fn wire_role(self) -> &'static str {
         match self {
             Self::Assistant => "assistant",
@@ -173,7 +191,8 @@ pub(crate) fn row_id(row: &Value) -> Option<&str> {
 ///
 /// A message's ordinal is its window position, `index + 1`. Each decoded message's mid is its
 /// row id. The sidecar retains each row through an `Arc` clone. Decoded blocks carry no identity
-/// stamp, and [`encode_pi_rows`] fingerprints a message's decoded blocks when it aligns them.
+/// stamp. [`encode_pi_rows`] decodes rows one at a time with the same per-message decoder.
+#[cfg(test)]
 pub(crate) fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiDecline> {
     decode_rows(rows, false)
 }
@@ -187,46 +206,14 @@ pub(crate) fn decode_pi_rows_stamped(
     decode_rows(rows, true)
 }
 
+#[cfg(test)]
 fn decode_rows(rows: &[Arc<Value>], stamp: bool) -> Result<DecodedHarnessMessages, PiDecline> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
     let mut decoded = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
         let (mid, message, role) = classify_row(index, row)?;
         let ordinal = (index as u64).saturating_add(1);
-        let mut content = Vec::new();
-        let mut block_metas = Vec::new();
-        match role {
-            PiRole::User | PiRole::Custom => {
-                decode_user_message(message, &mut content, &mut block_metas);
-            }
-            PiRole::Assistant => {
-                decode_assistant_message(message, ordinal, &mut content, &mut block_metas);
-            }
-            PiRole::ToolResult => {
-                decode_tool_result_message(message, &mut content, &mut block_metas);
-            }
-            PiRole::BashExecution => {
-                if message.get("excludeFromContext").and_then(Value::as_bool) != Some(true) {
-                    push_message_text(&mut content, &mut block_metas, bash_execution_text(message));
-                }
-            }
-            PiRole::BranchSummary => push_message_text(
-                &mut content,
-                &mut block_metas,
-                format!(
-                    "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
-                    string_field(message, "summary").unwrap_or_default()
-                ),
-            ),
-            PiRole::CompactionSummary => push_message_text(
-                &mut content,
-                &mut block_metas,
-                format!(
-                    "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
-                    string_field(message, "summary").unwrap_or_default()
-                ),
-            ),
-        }
+        let (mut content, mut block_metas) = decode_content(message, role, ordinal);
         if stamp {
             for (block, block_meta) in content.iter_mut().zip(&mut block_metas) {
                 let fingerprint = decoded_block_fingerprint(block);
@@ -282,6 +269,45 @@ fn decode_rows(rows: &[Arc<Value>], stamp: bool) -> Result<DecodedHarnessMessage
     })
 }
 
+/// Decodes one message's content blocks and their block metas.
+fn decode_content(message: &Value, role: PiRole, ordinal: u64) -> (Vec<WireBlock>, Vec<BlockMeta>) {
+    let mut content = Vec::new();
+    let mut block_metas = Vec::new();
+    match role {
+        PiRole::User | PiRole::Custom => {
+            decode_user_message(message, &mut content, &mut block_metas);
+        }
+        PiRole::Assistant => {
+            decode_assistant_message(message, ordinal, &mut content, &mut block_metas);
+        }
+        PiRole::ToolResult => {
+            decode_tool_result_message(message, &mut content, &mut block_metas);
+        }
+        PiRole::BashExecution => {
+            if message.get("excludeFromContext").and_then(Value::as_bool) != Some(true) {
+                push_message_text(&mut content, &mut block_metas, bash_execution_text(message));
+            }
+        }
+        PiRole::BranchSummary => push_message_text(
+            &mut content,
+            &mut block_metas,
+            format!(
+                "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
+                string_field(message, "summary").unwrap_or_default()
+            ),
+        ),
+        PiRole::CompactionSummary => push_message_text(
+            &mut content,
+            &mut block_metas,
+            format!(
+                "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
+                string_field(message, "summary").unwrap_or_default()
+            ),
+        ),
+    }
+    (content, block_metas)
+}
+
 /// Validates every row of a window against the CK window's mids, without decoding its blocks.
 pub(crate) fn check_pi_rows<'a>(
     rows: &[Arc<Value>],
@@ -308,15 +334,24 @@ pub(crate) fn check_pi_rows<'a>(
 
 fn classify_row(index: usize, row: &Value) -> Result<(&str, &Value, PiRole), PiDecline> {
     let malformed = || PiDecline::MalformedRow { index };
-    let id = row_id(row)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(malformed)?;
-    let message = row
-        .get("message")
+    // One pass over each object's entries finds its fields without a map search per field.
+    let (mut id, mut message) = (None, None);
+    for (key, value) in row.as_object().into_iter().flatten() {
+        match key.as_str() {
+            "id" => id = value.as_str(),
+            "message" => message = Some(value),
+            _ => {}
+        }
+    }
+    let id = id.filter(|id| !id.is_empty()).ok_or_else(malformed)?;
+    let message = message
         .filter(|message| message.is_object())
         .ok_or_else(malformed)?;
     let role_name = message
-        .get("role")
+        .as_object()
+        .into_iter()
+        .flatten()
+        .find_map(|(key, value)| (key == "role").then_some(value))
         .and_then(Value::as_str)
         .ok_or_else(malformed)?;
     let role = PiRole::parse(role_name).ok_or_else(|| PiDecline::UnknownRole {
@@ -351,7 +386,7 @@ fn bash_execution_text(message: &Value) -> String {
     text
 }
 
-/// Encodes canonical messages as Pi rows, reusing retained rows matched by mid.
+/// Encodes canonical messages as Pi rows, reusing the window's rows matched by mid.
 ///
 /// An untouched retained message replays its retained row `Arc`, as does any retained message named
 /// in `mutation_exempt_mids`. An edited user, custom, or assistant message keeps its native parts and
@@ -360,43 +395,642 @@ fn bash_execution_text(message: &Value) -> String {
 /// build, under the same id. A message without a retained row is built in Pi's current shape; a
 /// synthetic or unidentified one takes a reserved id derived from its encoded message, suffixed
 /// with its occurrence when an equal message earlier in the output took that id. A retained
-/// message whose content is empty after editing is omitted. `decoded` is the [`decode_pi_rows`]
-/// output for the retained rows.
-pub(crate) fn encode_pi_rows(
-    messages: &[WireMessage],
-    decoded: &DecodedHarnessMessages,
+/// message whose content is empty after editing is omitted. `rows` is the window
+/// [`check_pi_rows`] accepts; a repeated id retains its last row, and a window with a malformed
+/// row retains no row. A message equal to its row's decoded content replays the row without
+/// decoding it; an edited message whose blocks pair with its native parts without alignment
+/// rewrites those parts directly, and any other edited message decodes its row and aligns it.
+pub(crate) fn encode_pi_rows<'m>(
+    messages: impl IntoIterator<Item = &'m WireMessage>,
+    rows: &[Arc<Value>],
     mutation_exempt_mids: &[&str],
 ) -> Vec<Arc<Value>> {
+    let retained = retained_rows(rows);
     let mut synthetic_ids = HashMap::<String, usize>::new();
-    messages
-        .iter()
-        .filter_map(|message| {
-            let meta = message
-                .meta
-                .harness_id
-                .as_deref()
-                .and_then(|mid| decoded.sidecar.message_by_mid(mid));
-            match meta {
-                Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
-                    Some(Arc::clone(&meta.raw))
-                }
-                Some(meta) => encode_with_meta(message, meta, decoded_blocks(decoded, meta)),
-                None => Some(Arc::new(encode_new_row(message, &mut synthetic_ids))),
+    let messages = messages.into_iter();
+    let mut encoded = Vec::with_capacity(messages.size_hint().0);
+    encoded.extend(messages.filter_map(|message| {
+        let retained = message
+            .meta
+            .harness_id
+            .as_deref()
+            .and_then(|mid| Some((mid, retained.get(mid)?)));
+        match retained {
+            Some((mid, &(index, _, _))) if mutation_exempt_mids.contains(&mid) => {
+                Some(Arc::clone(&rows[index]))
             }
-        })
+            Some((_, &(index, native, role))) => {
+                if native_decodes_to(native, role, message.content()) {
+                    return Some(Arc::clone(&rows[index]));
+                }
+                if let Some(row) = rewrite_single_block(message, &rows[index], native, role)
+                    .or_else(|| rewrite_parts_in_place(message, &rows[index], native, role))
+                {
+                    return Some(Arc::new(row));
+                }
+                let ordinal = (index as u64).saturating_add(1);
+                let (decoded, block_metas) = decode_content(native, role, ordinal);
+                encode_with_meta(message, role, &rows[index], &block_metas, &decoded)
+            }
+            None => Some(Arc::new(encode_new_row(message, &mut synthetic_ids))),
+        }
+    }));
+    encoded
+}
+
+/// The rows a decoded window retains, in window order.
+#[cfg(test)]
+pub(crate) fn retained_rows_of(decoded: &DecodedHarnessMessages) -> Vec<Arc<Value>> {
+    decoded
+        .sidecar
+        .order
+        .iter()
+        .filter_map(|mid| decoded.sidecar.message_by_mid(mid))
+        .map(|meta| Arc::clone(&meta.raw))
         .collect()
 }
 
-fn decoded_blocks<'a>(
-    decoded: &'a DecodedHarnessMessages,
-    meta: &HarnessMessageMeta,
-) -> &'a [WireBlock] {
-    usize::try_from(meta.ordinal)
-        .ok()
-        .and_then(|ordinal| ordinal.checked_sub(1))
-        .and_then(|index| decoded.messages.get(index))
-        .filter(|message| message.mid == meta.mid)
-        .map_or(&[], |message| message.ck.content())
+/// Rewrites a row whose served message is one unstamped block that differs from the row's
+/// decoded content, for the shapes whose alignment needs no decoded blocks: a tool result, a
+/// message whose native content is a string, and a message with one native part of a kind
+/// [`native_decodes_to`] compares exactly. A tool result block pairs with the row's one decoded
+/// block exactly when its id is the row's canonical call id, a single text block replaces
+/// string content whole, and a lone block pairs with a lone part exactly when their kinds
+/// match, so each rewrite is the one [`encode_with_meta`] makes.
+/// Answers `None` for every other shape. The caller has established that the block differs.
+fn rewrite_single_block(
+    msg: &WireMessage,
+    raw: &Value,
+    native: &Value,
+    role: PiRole,
+) -> Option<Value> {
+    let [block] = msg.content().as_slice() else {
+        return None;
+    };
+    if has_stamped_block_identity(block) {
+        return None;
+    }
+    let message = match (role, block.kind()) {
+        (PiRole::ToolResult, BlockKind::ToolResult { id, .. }) => {
+            let native_id = native
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let mut message = clone_without(native, "content");
+            update_tool_result_message(&mut message, msg, split_tool_id(native_id).0 == id);
+            message
+        }
+        (PiRole::User | PiRole::Custom | PiRole::Assistant, BlockKind::Text { text })
+            if native.get("content").is_some_and(Value::is_string) =>
+        {
+            let mut message = clone_without(native, "content");
+            set_value(&mut message, "content", Value::String(text.clone()));
+            message
+        }
+        (PiRole::User | PiRole::Custom | PiRole::Assistant, _) => {
+            let [part] = native.get("content").and_then(Value::as_array)?.as_slice() else {
+                return None;
+            };
+            let (kind, native_id) = single_part_meta(role, &NativeFields::of(part))?;
+            // The block pairs with the part's meta exactly when their kinds match; a paired
+            // block rewrites the part in place unless it is reasoning, and an unpaired block
+            // replaces the part.
+            let rewritten = if block_matches_meta_of(block, kind, native_id) {
+                if matches!(
+                    block.kind(),
+                    BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
+                ) {
+                    part.clone()
+                } else {
+                    let mut rewritten = part_for_update(part, block);
+                    update_content_part(&mut rewritten, block);
+                    rewritten
+                }
+            } else {
+                render_block_as_content_part(block)
+            };
+            let mut message = clone_without(native, "content");
+            set_value(&mut message, "content", Value::Array(vec![rewritten]));
+            message
+        }
+        _ => return None,
+    };
+    let mut row = clone_without(raw, "message");
+    set_value(&mut row, "message", message);
+    Some(row)
+}
+
+/// Rewrites a user, custom, or assistant row whose served blocks pair one-to-one with its native
+/// parts, when every part is of a kind [`part_decodes_to`] compares exactly, no block is stamped,
+/// and no block equals the decoded content of a part other than its own. Then the alignment
+/// matches each block that equals its own part and nothing else, and pairs each run of differing
+/// blocks between matches with the parts at the same positions when every pair's kinds match,
+/// so this rewrite keeps, rewrites, or replaces each part as [`encode_with_meta`] would. Answers
+/// `None` for every other shape. The caller has established that some block differs.
+fn rewrite_parts_in_place(
+    msg: &WireMessage,
+    raw: &Value,
+    native: &Value,
+    role: PiRole,
+) -> Option<Value> {
+    if !matches!(role, PiRole::User | PiRole::Custom | PiRole::Assistant) {
+        return None;
+    }
+    let blocks = msg.content().as_slice();
+    let parts = native.get("content").and_then(Value::as_array)?.as_slice();
+    if parts.len() != blocks.len()
+        || blocks.len() < 2
+        || blocks.iter().any(has_stamped_block_identity)
+    {
+        return None;
+    }
+    let mut metas = Vec::with_capacity(parts.len());
+    for part in parts {
+        metas.push(single_part_meta(role, &NativeFields::of(part))?);
+    }
+    let mut equal = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        for (other, part) in parts.iter().enumerate() {
+            if other != index && part_decodes_to(role, part, block) {
+                return None;
+            }
+        }
+        let same = part_decodes_to(role, &parts[index], block);
+        // Alignment compares by fingerprint, which tells float zeros of opposite sign apart.
+        if same && holds_float_zero(block) {
+            return None;
+        }
+        equal.push(same);
+    }
+    // A run of differing blocks pairs with its parts only when every pair's kinds match.
+    let mut paired = vec![false; blocks.len()];
+    let mut start = 0;
+    while start < blocks.len() {
+        if equal[start] {
+            start += 1;
+            continue;
+        }
+        let end = (start..blocks.len())
+            .find(|index| equal[*index])
+            .unwrap_or(blocks.len());
+        let run_pairs = (start..end).all(|index| {
+            let (kind, native_id) = metas[index];
+            block_matches_meta_of(&blocks[index], kind, native_id)
+        });
+        paired[start..end].fill(run_pairs);
+        start = end;
+    }
+    let mut content = Vec::with_capacity(parts.len());
+    for ((part, block), (same, paired)) in parts.iter().zip(blocks).zip(equal.iter().zip(&paired)) {
+        if *same {
+            content.push(part.clone());
+        } else if *paired {
+            if matches!(
+                block.kind(),
+                BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
+            ) {
+                content.push(part.clone());
+            } else {
+                let mut rewritten = part_for_update(part, block);
+                update_content_part(&mut rewritten, block);
+                content.push(rewritten);
+            }
+        }
+    }
+    content.extend(
+        blocks
+            .iter()
+            .zip(equal.iter().zip(&paired))
+            .filter(|(_, (same, paired))| !**same && !**paired)
+            .map(|(block, _)| render_block_as_content_part(block)),
+    );
+    let mut message = clone_without(native, "content");
+    set_value(&mut message, "content", Value::Array(content));
+    let mut row = clone_without(raw, "message");
+    set_value(&mut row, "message", message);
+    Some(row)
+}
+
+/// The meta kind and native id the decoder gives a lone native part, for the part kinds
+/// [`native_decodes_to`] compares exactly; `None` for every other part.
+fn single_part_meta<'a>(
+    role: PiRole,
+    fields: &NativeFields<'a>,
+) -> Option<(&'static str, Option<&'a str>)> {
+    match (role, NativeFields::str(fields.kind)?) {
+        (_, "text") => Some(("text", None)),
+        (PiRole::User | PiRole::Custom, "image") => Some(("image", None)),
+        (PiRole::Assistant, "thinking") => Some((
+            if NativeFields::flag(fields.redacted) {
+                "redacted_reasoning"
+            } else {
+                "reasoning"
+            },
+            None,
+        )),
+        (PiRole::Assistant, "toolCall") => Some((
+            "tool_call",
+            Some(NativeFields::str(fields.id).or_else(|| NativeFields::str(fields.call_id))?),
+        )),
+        _ => None,
+    }
+}
+
+/// [`block_matches_meta`] for a meta of `kind` whose native id is `native_id`.
+fn block_matches_meta_of(block: &WireBlock, kind: &str, native_id: Option<&str>) -> bool {
+    match block.kind() {
+        BlockKind::Text { text } => {
+            kind == "text"
+                || (text.is_empty() && matches!(kind, "reasoning" | "redacted_reasoning"))
+        }
+        BlockKind::Reasoning { .. } => kind == "reasoning",
+        BlockKind::RedactedReasoning { .. } => matches!(kind, "reasoning" | "redacted_reasoning"),
+        BlockKind::ToolCall { id, .. } => {
+            kind == "tool_call"
+                && native_id.is_none_or(|native| split_tool_id(native).0 == id.as_str())
+        }
+        BlockKind::ToolResult { id, .. } => {
+            kind == "tool_result"
+                && native_id.is_none_or(|native| split_tool_id(native).0 == id.as_str())
+        }
+        BlockKind::Media(_) => kind == "image",
+        BlockKind::Opaque(opaque) => kind == opaque.kind,
+    }
+}
+
+/// Each row's window index, message, and role by id; empty when any row is malformed.
+fn retained_rows(rows: &[Arc<Value>]) -> HashMap<&str, (usize, &Value, PiRole)> {
+    let mut retained = HashMap::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let Ok((id, message, role)) = classify_row(index, row) else {
+            return HashMap::new();
+        };
+        retained.insert(id, (index, message, role));
+    }
+    retained
+}
+
+/// Whether `blocks` are exactly the unstamped blocks `decode_content` gives `message`, so the
+/// encoder replays the row. Each check reads the native fields the decoder reads and compares
+/// them in place. A role or part shape it does not compare answers `false`, and the caller
+/// decodes the row and aligns it.
+fn native_decodes_to(message: &Value, role: PiRole, blocks: &[WireBlock]) -> bool {
+    if blocks
+        .iter()
+        .any(|block| !block.provider_extras.is_empty() && has_stamped_block_identity(block))
+    {
+        return false;
+    }
+    match role {
+        PiRole::User | PiRole::Custom => match content_of(message) {
+            Some(Value::String(text)) => {
+                matches!(blocks, [block] if is_text_block(block, text, None))
+            }
+            Some(Value::Array(parts)) => {
+                parts.len() == blocks.len()
+                    && parts
+                        .iter()
+                        .zip(blocks)
+                        .all(|(part, block)| part_decodes_to(role, part, block))
+            }
+            _ => blocks.is_empty(),
+        },
+        PiRole::Assistant => match content_of(message).and_then(Value::as_array) {
+            Some(parts) => {
+                parts.len() == blocks.len()
+                    && parts
+                        .iter()
+                        .zip(blocks)
+                        .all(|(part, block)| part_decodes_to(role, part, block))
+            }
+            None => blocks.is_empty(),
+        },
+        PiRole::ToolResult => matches!(blocks, [block] if tool_result_decodes_to(message, block)),
+        PiRole::BashExecution | PiRole::BranchSummary | PiRole::CompactionSummary => false,
+    }
+}
+
+/// A native message's `content`, found by one pass over its entries.
+fn content_of(message: &Value) -> Option<&Value> {
+    message
+        .as_object()?
+        .iter()
+        .find_map(|(key, value)| (key == "content").then_some(value))
+}
+
+/// The native fields the decoder reads, gathered in one pass over an object's entries, so each
+/// is found without a separate map search.
+#[derive(Default)]
+struct NativeFields<'a> {
+    kind: Option<&'a Value>,
+    text: Option<&'a Value>,
+    text_signature: Option<&'a Value>,
+    thinking: Option<&'a Value>,
+    thinking_signature: Option<&'a Value>,
+    redacted: Option<&'a Value>,
+    id: Option<&'a Value>,
+    call_id: Option<&'a Value>,
+    arguments: Option<&'a Value>,
+    thought_signature: Option<&'a Value>,
+    name: Option<&'a Value>,
+    mime_type: Option<&'a Value>,
+    mime: Option<&'a Value>,
+    data: Option<&'a Value>,
+    url: Option<&'a Value>,
+    filename: Option<&'a Value>,
+    tool_call_id: Option<&'a Value>,
+    tool_name: Option<&'a Value>,
+    is_error: Option<&'a Value>,
+    content: Option<&'a Value>,
+    /// The value is an object whose only fields are `type` and `text`.
+    only_type_and_text: bool,
+}
+
+impl<'a> NativeFields<'a> {
+    fn of(value: &'a Value) -> Self {
+        let mut fields = Self {
+            only_type_and_text: value.is_object(),
+            ..Self::default()
+        };
+        for (key, field) in value.as_object().into_iter().flatten() {
+            let slot = match key.as_str() {
+                "type" => &mut fields.kind,
+                "text" => &mut fields.text,
+                "textSignature" => &mut fields.text_signature,
+                "thinking" => &mut fields.thinking,
+                "thinkingSignature" => &mut fields.thinking_signature,
+                "redacted" => &mut fields.redacted,
+                "id" => &mut fields.id,
+                "callId" => &mut fields.call_id,
+                "arguments" => &mut fields.arguments,
+                "thoughtSignature" => &mut fields.thought_signature,
+                "name" => &mut fields.name,
+                "mimeType" => &mut fields.mime_type,
+                "mime" => &mut fields.mime,
+                "data" => &mut fields.data,
+                "url" => &mut fields.url,
+                "filename" => &mut fields.filename,
+                "toolCallId" => &mut fields.tool_call_id,
+                "toolName" => &mut fields.tool_name,
+                "isError" => &mut fields.is_error,
+                "content" => &mut fields.content,
+                _ => {
+                    fields.only_type_and_text = false;
+                    continue;
+                }
+            };
+            if !matches!(key.as_str(), "type" | "text") {
+                fields.only_type_and_text = false;
+            }
+            *slot = Some(field);
+        }
+        fields
+    }
+
+    fn str(field: Option<&'a Value>) -> Option<&'a str> {
+        field.and_then(Value::as_str)
+    }
+
+    fn flag(field: Option<&'a Value>) -> bool {
+        field.and_then(Value::as_bool).unwrap_or(false)
+    }
+}
+
+/// Whether `block` is exactly the block the decoder gives one native content part of a `role`
+/// message; a part kind [`single_part_meta`] does not name answers `false`.
+fn part_decodes_to(role: PiRole, part: &Value, block: &WireBlock) -> bool {
+    match role {
+        PiRole::Assistant => assistant_part_decodes_to(part, block),
+        _ => {
+            let fields = NativeFields::of(part);
+            match NativeFields::str(fields.kind) {
+                Some("text") => text_part_decodes_to(&fields, block),
+                Some("image") => {
+                    pi_extras_are(block, &[])
+                        && matches!(block.kind(), BlockKind::Media(media)
+                            if media_part_decodes_to(part, &fields, media))
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+fn assistant_part_decodes_to(part: &Value, block: &WireBlock) -> bool {
+    let fields = NativeFields::of(part);
+    match NativeFields::str(fields.kind) {
+        Some("text") => text_part_decodes_to(&fields, block),
+        Some("thinking") => {
+            if !pi_extras_are(block, &[]) {
+                return false;
+            }
+            let thinking = NativeFields::str(fields.thinking);
+            let signature = NativeFields::str(fields.thinking_signature);
+            if NativeFields::flag(fields.redacted) {
+                matches!(block.kind(), BlockKind::RedactedReasoning { data }
+                    if data == signature.or(thinking).unwrap_or_default())
+            } else {
+                matches!(block.kind(), BlockKind::Reasoning { text, signature: decoded }
+                    if text == thinking.unwrap_or_default() && decoded.as_deref() == signature)
+            }
+        }
+        Some("toolCall") => tool_call_part_decodes_to(&fields, block),
+        _ => false,
+    }
+}
+
+fn text_part_decodes_to(fields: &NativeFields<'_>, block: &WireBlock) -> bool {
+    is_text_block(
+        block,
+        NativeFields::str(fields.text).unwrap_or_default(),
+        NativeFields::str(fields.text_signature),
+    )
+}
+
+/// Whether `block` is a text block holding `text` whose Pi extras carry exactly
+/// `signature` as `textSignature`.
+fn is_text_block(block: &WireBlock, text: &str, signature: Option<&str>) -> bool {
+    matches!(block.kind(), BlockKind::Text { text: decoded } if decoded == text)
+        && match signature {
+            Some(signature) => pi_extras_are(block, &[("textSignature", signature)]),
+            None => pi_extras_are(block, &[]),
+        }
+}
+
+fn tool_call_part_decodes_to(fields: &NativeFields<'_>, block: &WireBlock) -> bool {
+    let BlockKind::ToolCall {
+        id,
+        name,
+        input,
+        provider_executed,
+    } = block.kind()
+    else {
+        return false;
+    };
+    // A call without an id decodes to a synthesized one; the caller decodes it.
+    let Some(native_id) =
+        NativeFields::str(fields.id).or_else(|| NativeFields::str(fields.call_id))
+    else {
+        return false;
+    };
+    let (canonical_id, item_id) = split_tool_id(native_id);
+    let input_matches = match fields.arguments {
+        Some(arguments) => input == arguments,
+        None => input.as_object().is_some_and(serde_json::Map::is_empty),
+    };
+    let mut extras = Vec::with_capacity(3);
+    if let Some(signature) = NativeFields::str(fields.thought_signature) {
+        extras.push(("thoughtSignature", signature));
+    }
+    if let Some(item_id) = item_id {
+        extras.push(("itemId", item_id));
+    }
+    extras.push(("nativeToolCallId", native_id));
+    !provider_executed
+        && id == canonical_id
+        && name == NativeFields::str(fields.name).unwrap_or("tool")
+        && input_matches
+        && pi_extras_are(block, &extras)
+}
+
+fn tool_result_decodes_to(message: &Value, block: &WireBlock) -> bool {
+    let BlockKind::ToolResult {
+        id,
+        tool_name,
+        output,
+        provider_executed,
+    } = block.kind()
+    else {
+        return false;
+    };
+    let fields = NativeFields::of(message);
+    let native_id = NativeFields::str(fields.tool_call_id).unwrap_or("tool");
+    let (canonical_id, item_id) = split_tool_id(native_id);
+    let extras_match = match item_id {
+        Some(item_id) => pi_extras_are(
+            block,
+            &[("itemId", item_id), ("nativeToolCallId", native_id)],
+        ),
+        None => pi_extras_are(block, &[]),
+    };
+    !provider_executed
+        && id == canonical_id
+        && tool_name == NativeFields::str(fields.tool_name).unwrap_or("tool")
+        && extras_match
+        && output.provider_extras.is_empty()
+        && tool_output_decodes_to(
+            fields.content,
+            NativeFields::flag(fields.is_error),
+            &output.kind,
+        )
+}
+
+/// Mirrors [`pi_tool_result_output`] exactly: equal answers `true` and every difference `false`.
+fn tool_output_decodes_to(content: Option<&Value>, is_error: bool, output: &OutputKind) -> bool {
+    let text_output = |text: &str| match output {
+        OutputKind::Text { text: decoded } => !is_error && decoded == text,
+        OutputKind::ErrorText { text: decoded } => is_error && decoded == text,
+        _ => false,
+    };
+    let Some(parts) = content.and_then(Value::as_array) else {
+        return text_output("");
+    };
+    if let [part] = parts.as_slice() {
+        let fields = NativeFields::of(part);
+        if fields.only_type_and_text && NativeFields::str(fields.kind) == Some("text") {
+            return text_output(NativeFields::str(fields.text).unwrap_or_default());
+        }
+    }
+    let blocks = match output {
+        OutputKind::Content { blocks } if !is_error => blocks,
+        OutputKind::ErrorContent { blocks } if is_error => blocks,
+        _ => return false,
+    };
+    parts.len() == blocks.len()
+        && parts.iter().zip(blocks).all(|(part, block)| {
+            let fields = NativeFields::of(part);
+            let kind_matches = match (NativeFields::str(fields.kind), &block.kind) {
+                (Some("text"), ResultBlockKind::Text { text }) => {
+                    text == NativeFields::str(fields.text).unwrap_or_default()
+                }
+                (Some("image" | "file"), ResultBlockKind::Media { media }) => {
+                    media_part_decodes_to(part, &fields, media)
+                }
+                (Some("text" | "image" | "file"), _) => false,
+                (kind, ResultBlockKind::Opaque { opaque }) => {
+                    opaque.kind == kind.unwrap_or("unknown")
+                        && opaque.raw == *part
+                        && opaque.arc.is_none()
+                        && is_pi_harness_source(&opaque.source)
+                }
+                _ => false,
+            };
+            kind_matches
+                && block.provider_extras.len() == 1
+                && block.provider_extras.get(HARNESS).is_some_and(|namespace| {
+                    namespace.len() == 1 && namespace.get("rawResultPart") == Some(part)
+                })
+        })
+}
+
+/// Whether `source` is the `{"type": "harness", "harness": "pi"}` source of a Pi opaque block.
+fn is_pi_harness_source(source: &Value) -> bool {
+    source.as_object().is_some_and(|source| {
+        source.len() == 2
+            && source.get("type").and_then(Value::as_str) == Some("harness")
+            && source.get("harness").and_then(Value::as_str) == Some(HARNESS)
+    })
+}
+
+/// Mirrors [`pi_media_from_part`].
+fn media_part_decodes_to(part: &Value, fields: &NativeFields<'_>, media: &MediaBlock) -> bool {
+    let media_type = NativeFields::str(fields.mime_type)
+        .or_else(|| NativeFields::str(fields.mime))
+        .unwrap_or("application/octet-stream");
+    let source_matches = |kind: &str, key: &str, value: &Value| {
+        media.source.as_object().is_some_and(|source| {
+            source.len() == 2
+                && source.get("type").and_then(Value::as_str) == Some(kind)
+                && source.get(key) == Some(value)
+        })
+    };
+    let source = if let Some(data) = fields.data.filter(|data| data.is_string()) {
+        source_matches("data_base64", "data", data)
+    } else if let Some(url) = fields.url.filter(|url| url.is_string()) {
+        source_matches("url", "url", url)
+    } else {
+        source_matches("opaque", "raw", part)
+    };
+    media.media_type == media_type
+        && media.kind == media_kind(media_type)
+        && media.filename.as_deref() == NativeFields::str(fields.filename)
+        && source
+}
+
+/// Whether `block`'s extras outside the codec identity namespace are exactly a Pi namespace
+/// holding `fields` as strings, or no namespace when `fields` is empty.
+fn pi_extras_are(block: &WireBlock, fields: &[(&str, &str)]) -> bool {
+    let mut namespaces = block
+        .provider_extras
+        .iter()
+        .filter(|(namespace, _)| namespace.as_str() != BLOCK_IDENTITY_NAMESPACE);
+    let Some((namespace, values)) = namespaces.next() else {
+        return fields.is_empty();
+    };
+    !fields.is_empty()
+        && namespaces.next().is_none()
+        && namespace == HARNESS
+        && values.len() == fields.len()
+        && fields
+            .iter()
+            .all(|(key, expected)| values.get(*key).and_then(Value::as_str) == Some(*expected))
+}
+
+fn split_tool_id(native_id: &str) -> (&str, Option<&str>) {
+    match native_id.split_once('|') {
+        Some((call_id, item_id)) => (call_id, Some(item_id)),
+        None => (native_id, None),
+    }
 }
 
 fn decode_user_message(
@@ -580,40 +1214,35 @@ fn push_block(
 
 fn encode_with_meta(
     msg: &WireMessage,
-    meta: &HarnessMessageMeta,
+    role: PiRole,
+    raw: &Arc<Value>,
+    block_metas: &[BlockMeta],
     decoded: &[WireBlock],
 ) -> Option<Arc<Value>> {
-    if replays_retained_row(msg, meta, decoded) {
-        return Some(Arc::clone(&meta.raw));
+    if replays_retained_row(msg, block_metas, decoded) {
+        return Some(Arc::clone(raw));
     }
-    let fingerprinted;
-    let block_metas = if meta
-        .blocks
-        .iter()
-        .all(|block_meta| block_meta.content_fingerprint.is_some())
-    {
-        &meta.blocks
-    } else {
-        fingerprinted = fingerprint_block_metas(&meta.blocks, decoded);
-        &fingerprinted
-    };
-    let mut matched_metas = match_block_metas(msg.content(), block_metas, block_matches_meta);
+    // Each meta without a fingerprint reads as fingerprinted by its decoded block.
+    let content = MetaContent::Decoded(decoded);
+    let mut matched_metas =
+        match_block_metas_by(msg.content(), block_metas, block_matches_meta, content);
     matched_metas.pair_in_place_edits(msg.content(), block_metas, block_matches_meta);
     let unchanged = msg.content().len() == block_metas.len()
         && msg
             .content()
             .iter()
             .zip(&matched_metas.by_block)
-            .all(|(block, matched)| matched.is_some_and(|meta| block_is_unchanged(block, meta)));
+            .all(|(block, matched)| matched.is_some_and(|meta| content.matches(block, meta)));
     if unchanged {
-        return Some(Arc::clone(&meta.raw));
+        return Some(Arc::clone(raw));
     }
     if msg.content().is_empty() {
         return None;
     }
-    let mut row = meta.raw.as_ref().clone();
-    let message = row.get_mut("message")?;
-    match PiRole::parse(&meta.role)? {
+    let native = raw.get("message")?;
+    // The edited row copies only the native fields it keeps: every branch below writes the
+    // message's `content` afresh.
+    let message = match role {
         PiRole::ToolResult => {
             let matched = msg
                 .content()
@@ -621,48 +1250,70 @@ fn encode_with_meta(
                 .zip(&matched_metas.by_block)
                 .find(|(block, _)| matches!(block.kind(), BlockKind::ToolResult { .. }))
                 .map(|(_, matched)| matched.is_some())?;
-            update_tool_result_message(message, msg, matched);
+            let mut message = clone_without(native, "content");
+            update_tool_result_message(&mut message, msg, matched);
+            message
         }
         PiRole::User | PiRole::Custom | PiRole::Assistant => {
-            update_pi_message_content(message, msg, &matched_metas);
+            let mut message = clone_without(native, "content");
+            update_pi_message_content(
+                &mut message,
+                native.get("content"),
+                msg,
+                &matched_metas,
+                content,
+            );
+            message
         }
         PiRole::BashExecution | PiRole::BranchSummary | PiRole::CompactionSummary => {
-            let timestamp = message.get("timestamp").cloned().unwrap_or(Value::from(0));
-            *message = json!({
+            let timestamp = native.get("timestamp").cloned().unwrap_or(Value::from(0));
+            json!({
                 "role": "user",
                 "content": msg.content().iter().map(render_block_as_content_part).collect::<Vec<_>>(),
                 "timestamp": timestamp,
-            });
+            })
         }
-    }
+    };
+    let mut row = clone_without(raw, "message");
+    set_value(&mut row, "message", message);
     Some(Arc::new(row))
 }
 
-/// Fills each missing fingerprint from the decoded block at the meta's index.
-fn fingerprint_block_metas(block_metas: &[BlockMeta], decoded: &[WireBlock]) -> Vec<BlockMeta> {
-    block_metas
-        .iter()
-        .map(|block_meta| BlockMeta {
-            content_fingerprint: block_meta.content_fingerprint.clone().or_else(|| {
-                decoded
-                    .get(block_meta.block_index)
-                    .map(decoded_block_fingerprint)
-            }),
-            ..block_meta.clone()
-        })
-        .collect()
+/// Clones `value` without its `key` field; a value that is not an object clones whole.
+fn clone_without(value: &Value, key: &str) -> Value {
+    match value.as_object() {
+        Some(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(field, _)| field.as_str() != key)
+                .map(|(field, value)| (field.clone(), value.clone()))
+                .collect(),
+        ),
+        None => value.clone(),
+    }
+}
+
+/// Copies a native part that [`update_content_part`] rewrites with `block`, without the field
+/// the rewrite replaces whole.
+fn part_for_update(part: &Value, block: &WireBlock) -> Value {
+    match block.kind() {
+        BlockKind::Text { .. } => clone_without(part, "text"),
+        BlockKind::ToolCall { .. } => clone_without(part, "arguments"),
+        BlockKind::Media(_) | BlockKind::Opaque(_) | BlockKind::ToolResult { .. } => Value::Null,
+        BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. } => part.clone(),
+    }
 }
 
 fn replays_retained_row(
     msg: &WireMessage,
-    meta: &HarnessMessageMeta,
+    block_metas: &[BlockMeta],
     decoded: &[WireBlock],
 ) -> bool {
-    msg.content().len() == meta.blocks.len()
+    msg.content().len() == block_metas.len()
         && msg
             .content()
             .iter()
-            .zip(&meta.blocks)
+            .zip(block_metas)
             .all(|(block, block_meta)| {
                 !has_stamped_block_identity(block)
                     && block_matches_meta(block, block_meta)
@@ -674,42 +1325,18 @@ fn replays_retained_row(
 }
 
 fn block_matches_meta(block: &WireBlock, meta: &BlockMeta) -> bool {
-    match block.kind() {
-        BlockKind::Text { text } => {
-            meta.kind == "text"
-                || (text.is_empty()
-                    && matches!(meta.kind.as_str(), "reasoning" | "redacted_reasoning"))
-        }
-        BlockKind::Reasoning { .. } => meta.kind == "reasoning",
-        BlockKind::RedactedReasoning { .. } => {
-            matches!(meta.kind.as_str(), "reasoning" | "redacted_reasoning")
-        }
-        BlockKind::ToolCall { id, .. } => {
-            meta.kind == "tool_call"
-                && meta.native_id.as_deref().is_none_or(|native| {
-                    let (canonical, _) = canonical_tool_id(native);
-                    canonical == id.as_str()
-                })
-        }
-        BlockKind::ToolResult { id, .. } => {
-            meta.kind == "tool_result"
-                && meta.native_id.as_deref().is_none_or(|native| {
-                    let (canonical, _) = canonical_tool_id(native);
-                    canonical == id.as_str()
-                })
-        }
-        BlockKind::Media(_) => meta.kind == "image",
-        BlockKind::Opaque(opaque) => meta.kind == opaque.kind,
-    }
+    block_matches_meta_of(block, &meta.kind, meta.native_id.as_deref())
 }
 
 fn update_pi_message_content(
     message: &mut Value,
+    native_content: Option<&Value>,
     msg: &WireMessage,
     matched_metas: &MatchedBlockMetas<'_>,
+    content: MetaContent<'_>,
 ) {
     if msg.content().len() == 1
-        && message.get("content").is_some_and(Value::is_string)
+        && native_content.is_some_and(Value::is_string)
         && let Some(block) = msg.content().first()
         && let BlockKind::Text { text } = block.kind()
     {
@@ -717,30 +1344,81 @@ fn update_pi_message_content(
         return;
     }
 
-    let mut parts = match message.get("content") {
-        Some(Value::Array(parts)) => parts.clone(),
-        Some(Value::String(text)) if !text.is_empty() => {
-            vec![json!({ "type": "text", "text": text })]
-        }
-        _ => Vec::new(),
+    let native_parts: &[Value] = match native_content {
+        Some(Value::Array(parts)) => parts,
+        _ => &[],
     };
-    for (block, block_meta) in msg.content().iter().zip(&matched_metas.by_block) {
-        if let Some(part_index) = block_meta.and_then(|block_meta| block_meta.native_index)
-            && let Some(part) = parts.get_mut(part_index)
-        {
-            if block_meta.is_some_and(|meta| block_is_unchanged(block, meta)) {
+    let string_part;
+    let native_parts = match native_content {
+        Some(Value::String(text)) if !text.is_empty() => {
+            string_part = [json!({ "type": "text", "text": text })];
+            &string_part[..]
+        }
+        _ => native_parts,
+    };
+    if native_parts.is_empty() {
+        // Blocks are placed in output order, so a block whose meta names part 0 rewrites the
+        // part an earlier block pushed.
+        let mut parts = Vec::new();
+        for (block, block_meta) in msg.content().iter().zip(&matched_metas.by_block) {
+            if let Some(part_index) = block_meta.and_then(|block_meta| block_meta.native_index)
+                && let Some(part) = parts.get_mut(part_index)
+            {
+                if block_meta.is_some_and(|meta| content.matches(block, meta)) {
+                    continue;
+                }
+                if !matches!(
+                    block.kind(),
+                    BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
+                ) {
+                    update_content_part(part, block);
+                }
                 continue;
             }
-            if !matches!(
+            parts.push(render_block_as_content_part(block));
+        }
+        parts = matched_metas.remove_unretained_native_parts(parts);
+        set_value(message, "content", Value::Array(parts));
+        return;
+    }
+    // Every meta names a native part, so each rewrite lands in place; a native part a block
+    // rewrites copies only what the rewrite keeps.
+    let mut rewrites: Vec<Option<&WireBlock>> = vec![None; native_parts.len()];
+    let mut placed = Vec::with_capacity(msg.content().len());
+    for (block, block_meta) in msg.content().iter().zip(&matched_metas.by_block) {
+        let part_index = block_meta
+            .and_then(|block_meta| block_meta.native_index)
+            .filter(|part_index| *part_index < native_parts.len());
+        if let Some(part_index) = part_index
+            && !block_meta.is_some_and(|meta| content.matches(block, meta))
+            && !matches!(
                 block.kind(),
                 BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
-            ) {
-                update_content_part(part, block);
-            }
-            continue;
+            )
+        {
+            rewrites[part_index] = Some(block);
         }
-        parts.push(render_block_as_content_part(block));
+        placed.push(part_index.is_some());
     }
+    let mut parts: Vec<Value> = native_parts
+        .iter()
+        .zip(&rewrites)
+        .map(|(part, rewrite)| match rewrite {
+            Some(block) => {
+                let mut part = part_for_update(part, block);
+                update_content_part(&mut part, block);
+                part
+            }
+            None => part.clone(),
+        })
+        .collect();
+    parts.extend(
+        msg.content()
+            .iter()
+            .zip(placed)
+            .filter(|(_, placed)| !placed)
+            .map(|(block, _)| render_block_as_content_part(block)),
+    );
     parts = matched_metas.remove_unretained_native_parts(parts);
     set_value(message, "content", Value::Array(parts));
 }
@@ -957,6 +1635,7 @@ fn render_block_as_content_part(block: &WireBlock) -> Value {
     }
 }
 
+#[cfg(test)]
 fn pi_origin(message: &Value) -> Option<MessageOrigin> {
     Some(MessageOrigin {
         api: string_field(message, "api")?,
@@ -1255,7 +1934,7 @@ mod tests {
 
     /// Encodes and unwraps each row's message.
     fn encode(messages: &[WireMessage], decoded: &DecodedHarnessMessages) -> Vec<Value> {
-        encode_pi_rows(messages, decoded, &[])
+        encode_pi_rows(messages, &retained_rows_of(decoded), &[])
             .into_iter()
             .map(|row| row["message"].clone())
             .collect()
@@ -1368,7 +2047,7 @@ mod tests {
                 assert_eq!(&text_of(&message.ck), texts, "{row}");
             }
         }
-        let encoded = encode_pi_rows(&cks(&decoded), &decoded, &[]);
+        let encoded = encode_pi_rows(&cks(&decoded), &retained_rows_of(&decoded), &[]);
         let expected: Vec<Arc<Value>> =
             table.into_iter().map(|(row, _, _)| Arc::new(row)).collect();
         assert_eq!(encoded, expected);
@@ -1451,8 +2130,8 @@ mod tests {
         let m1 = WireMessage::synthetic_user_text("m1");
         let mut output = vec![m0.clone(), m1.clone()];
         output.extend(cks(&decoded));
-        let first = encode_pi_rows(&output, &decoded, &[]);
-        let again = encode_pi_rows(&output, &decoded, &[]);
+        let first = encode_pi_rows(&output, &retained_rows_of(&decoded), &[]);
+        let again = encode_pi_rows(&output, &retained_rows_of(&decoded), &[]);
         assert_eq!(first, again, "a re-encode yields the same rows and ids");
         let ids: Vec<&str> = first.iter().map(|row| row_id(row).unwrap()).collect();
         assert!(is_reserved_id(ids[0]) && is_reserved_id(ids[1]), "{ids:?}");
@@ -1460,7 +2139,7 @@ mod tests {
         assert_eq!(ids[2], "00000000");
         assert!(!is_reserved_id(ids[2]));
 
-        let twice = encode_pi_rows(&[m1.clone(), m1.clone()], &decoded, &[]);
+        let twice = encode_pi_rows(&[m1.clone(), m1.clone()], &retained_rows_of(&decoded), &[]);
         assert_eq!(row_id(&twice[0]), Some(ids[1]));
         assert_eq!(
             row_id(&twice[1]).map(str::to_owned),
@@ -1471,7 +2150,7 @@ mod tests {
         let mut labelled = m0;
         labelled.meta.harness_id = Some("1a2b3c4d".to_string());
         assert_eq!(
-            row_id(&encode_pi_rows(&[labelled], &decoded, &[])[0]),
+            row_id(&encode_pi_rows(&[labelled], &retained_rows_of(&decoded), &[])[0]),
             Some(ids[0])
         );
     }
@@ -1512,7 +2191,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3]
         );
-        let encoded = encode_pi_rows(&cks(&decoded), &decoded, &[]);
+        let encoded = encode_pi_rows(&cks(&decoded), &retained_rows_of(&decoded), &[]);
         assert_eq!(encoded, window);
     }
 
@@ -1529,7 +2208,7 @@ mod tests {
             text: "§4§ Ran `pwd`\n(no output)".to_string(),
         };
         assert_eq!(
-            encode_pi_rows(&[message], &decoded, &[]),
+            encode_pi_rows(&[message], &retained_rows_of(&decoded), &[]),
             [Arc::new(json!({ "id": "a1b2c3d4", "message": {
                 "role": "user",
                 "content": [{ "type": "text", "text": "§4§ Ran `pwd`\n(no output)" }],
@@ -1546,7 +2225,10 @@ mod tests {
         } }))];
         let decoded = decode_pi_rows_stamped(&window).unwrap();
         assert!(decoded.messages[0].ck.content().is_empty());
-        assert_eq!(encode_pi_rows(&cks(&decoded), &decoded, &[]), window);
+        assert_eq!(
+            encode_pi_rows(&cks(&decoded), &retained_rows_of(&decoded), &[]),
+            window
+        );
     }
 
     #[test]
@@ -1557,11 +2239,15 @@ mod tests {
             text: "edited".to_string(),
         };
         assert_eq!(
-            encode_pi_rows(std::slice::from_ref(&message), &decoded, &["00000000"])[0]["message"]["content"],
+            encode_pi_rows(
+                std::slice::from_ref(&message),
+                &retained_rows_of(&decoded),
+                &["00000000"]
+            )[0]["message"]["content"],
             "original"
         );
         assert_eq!(
-            encode_pi_rows(&[message], &decoded, &[])[0]["message"]["content"],
+            encode_pi_rows(&[message], &retained_rows_of(&decoded), &[])[0]["message"]["content"],
             "edited"
         );
     }
@@ -1584,7 +2270,7 @@ mod tests {
             }
         }))];
         let decoded = decode_pi_rows_stamped(&window).unwrap();
-        let encoded = encode_pi_rows(&cks(&decoded), &decoded, &[]);
+        let encoded = encode_pi_rows(&cks(&decoded), &retained_rows_of(&decoded), &[]);
         assert_eq!(encoded, window);
         assert!(Arc::ptr_eq(&encoded[0], &window[0]));
     }
@@ -1626,7 +2312,7 @@ mod tests {
                 .all(|block_meta| block_meta.content_fingerprint.is_none())
         }));
 
-        let encoded = encode_pi_rows(&messages, &decoded, &[]);
+        let encoded = encode_pi_rows(&messages, &retained_rows_of(&decoded), &[]);
         assert_eq!(encoded, rows);
         assert!(
             encoded
@@ -1667,8 +2353,11 @@ mod tests {
             .unwrap();
         edited[last_multi_block].content_mut().remove(0);
 
-        let encoded = encode_pi_rows(&edited, &decoded, &[]);
-        assert_eq!(encoded, encode_pi_rows(&edited, &stamped, &[]));
+        let encoded = encode_pi_rows(&edited, &retained_rows_of(&decoded), &[]);
+        assert_eq!(
+            encoded,
+            encode_pi_rows(&edited, &retained_rows_of(&stamped), &[])
+        );
         assert_ne!(encoded[multi_block], rows[multi_block]);
         assert!(
             encoded[multi_block]["message"]["content"]

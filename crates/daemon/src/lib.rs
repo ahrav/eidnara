@@ -14097,28 +14097,22 @@ fn attach_native_messages_with_tags(
     }
     let profile = SerializerProfile::parse(&request.serializer_profile);
     let native_input = request.native_messages.as_deref().unwrap_or_default();
-    let served_messages = response
-        .messages()
-        .iter()
-        .map(|message| message.deref().clone())
-        .collect::<Vec<_>>();
     let mutation_exempt_mids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     let native_messages = match profile {
-        Some(SerializerProfile::Pi) => {
-            // Admission already checked every row, so the decode cannot decline here.
-            let decoded = codec::pi::decode_pi_rows(native_input).unwrap_or_else(|_| {
-                codec::DecodedHarnessMessages {
-                    messages: Vec::new(),
-                    boundary: None,
-                    sidecar: codec::DecodeSidecar::new("pi"),
-                }
-            });
-            codec::pi::encode_pi_rows(&served_messages, &decoded, &mutation_exempt_mids)
-        }
+        Some(SerializerProfile::Pi) => codec::pi::encode_pi_rows(
+            response.messages().iter().map(Deref::deref),
+            native_input,
+            &mutation_exempt_mids,
+        ),
         _ => {
+            let served_messages = response
+                .messages()
+                .iter()
+                .map(|message| message.deref().clone())
+                .collect::<Vec<_>>();
             let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
                 &served_messages,
                 &codec::opencode::decode_opencode_shared(native_input).sidecar,
