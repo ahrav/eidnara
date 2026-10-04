@@ -1213,6 +1213,63 @@ it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
 otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
 and pass^k case in the golden.
 
+## Scale report `eval-scale-report/v1`
+
+`scale.rs` holds the report the scale budgets of #825 are measured with. A
+`PassRow` is one transform pass: `harness` (`opencode` or `pi`), `tier`
+(`10k`, the control, `s3_100k`, or `s4_1m`), `session`, `turn`,
+`boundary_state` (`cold`, `warming`, `steady`, `after_restart`), `outcome`
+(`completed`, `censored`, `refused`), `refusal` (`declined`, `daemon_error`,
+`transport_error`, present exactly on a refused pass), `response_us` (from the
+plugin handing the request to IPC until the transformed array is back in the
+plugin; a censored pass carries its censoring point), `service_us` (the
+daemon's own `total`), `rss_bytes`, and `ipc_bytes`. Every field is present on
+the wire, and `parse_pass_row` refuses a row that does not round-trip byte for
+byte.
+
+`ScaleReport::build` derives every summary from the rows, the driver and
+artifact identities (commit, Bun version, daemon build), the host manifest (CPU
+model, core count, memory, kernel, glibc, disk), the optional open-loop counts
+(`completed <= sent <= offered`), and the bootstrap seed. Per session it keeps
+mergeable histograms of steady response and service times (exact below 32 us,
+then 32 buckets per power of two; merge adds counts bucket by bucket), censored
+percentiles through the same nearest-rank rule as `LatencySummary`, and the
+flatness of RSS: the exact least-squares slope of RSS against turn over the
+steady passes times their span, which passes at most a tenth of the RSS at
+steady-state entry. Per tier it pools the steady passes of every session for
+its percentiles, so a tier percentile is never a mean of session percentiles,
+and states refused passes as `RefusalRate` through the `Counter` bound: zero
+refusals is a rule-of-three `bound`.
+
+A non-control tier carries a ratio claim only with at least three sessions in
+the tier and in the 10k control and at least `P99_MIN_RUNS` uncensored steady
+passes in every one of them; otherwise the ratio is `withheld`. A claim's
+interval is a session-level block bootstrap: each of 1,000 replicates draws the
+tier's and the control's sessions with replacement through the keyed bootstrap
+draw, pools their steady passes, and takes p99(tier) / p99(control) exactly; the
+bounds are the `ceil(B/40)`-th and `(B - floor(B/40))`-th smallest replicates,
+and the gate passes when the upper bound is at most `6/5`.
+
+`parse_scale_report` refuses a missing field by name, a value that does not
+round-trip, an integer outside the canonical range, and then rebuilds the
+report from its rows: an underpowered ratio claim, a zero refusal count stated
+other than as a rule-of-three bound, and pooled percentiles that differ from
+the pooled rows each have their own refusal, and any other summary drift is
+`SummaryMismatch`. `result_digest` covers identities, open-loop counts, the
+seed, and each row's place and outcome, and excludes every latency, RSS, and
+byte measurement and every summary derived from them.
+
+`packages/e2e-tests/src/scale-report/rows.ts` is the TypeScript row writer; its
+fixed fixture's output is committed as `testdata/scale/writer-rows.jsonl`,
+which `tests/scale.rs` parses and the writer's own test reproduces byte for
+byte. `eval_runner scale-seed` writes #826's synthetic history into a
+direct-host fixture's store, and `eval_runner scale-report` builds and prints a
+report from a driver's rows and manifest. The `scale-report` job in
+`.github/workflows/ci.yml` runs only when dispatched with `scale_driver`; it
+builds release binaries, runs the driver under `scale_budget_seconds` for the
+`scale_base` commit and the dispatched commit, and uploads rows, manifests, and
+reports as run artifacts.
+
 ## Paired worlds
 
 `pairs.rs` compiles one `Pair` per `Task` over one aged history. A task names
