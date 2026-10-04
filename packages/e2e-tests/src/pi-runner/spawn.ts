@@ -193,6 +193,10 @@ export interface PiRunnerOptions {
     eidnaraConfig?: Record<string, unknown>;
     piSettingsExtra?: Record<string, unknown>;
     modelContextLimit?: number;
+    /** The Pi process's working directory; the isolated work directory when unset. */
+    cwd?: string;
+    /** A session file Pi resumes instead of starting a new session. */
+    sessionPath?: string;
 }
 
 export function createPiIsolatedEnv(): PiIsolatedEnv {

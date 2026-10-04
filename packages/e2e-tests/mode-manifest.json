@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure. An entry whose every test is skipped carries `quarantined` with the reason; `validate-mode-manifest` refuses a fully skipped file without it and a marked file with live tests, and lists the quarantines it validated.",
+    "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure; tier `pi-rust` runs Pi against the rust-mode direct-host fixture, in process under `createAgentSession` and as the Pi RPC process, and skips itself when either tier's prerequisites are unavailable, under the same `EIDNARA_E2E_REQUIRE_PI=1` rule. An entry whose every test is skipped carries `quarantined` with the reason; `validate-mode-manifest` refuses a fully skipped file without it and a marked file with live tests, and lists the quarantines it validated.",
     "entries": [
         {
             "path": "tests/cache-invariants.test.ts",
@@ -30,6 +30,14 @@
             "path": "tests/incident-pool-green.test.ts",
             "tier": "rust-only",
             "rationale": "baseline-green incident variants executed in isolation through the incident-pool runner",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/pi-rust-folding.test.ts",
+            "tier": "pi-rust",
+            "rationale": "Pi context folding against the direct-host fixture: equal m0, m1, and tail to an equivalent OpenCode session; navigation across the rendered boundary keeps every surviving segment; the Pi RPC process folds through the daemon and a cross-root facade call takes the D32 refusal; after a /cd the first pass forms lineage on the new root",
             "contract_refs": [
                 "U5-PORT"
             ]

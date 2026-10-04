@@ -1272,8 +1272,10 @@ byte measurement and every summary derived from them.
 fixed fixture's output is committed as `testdata/scale/writer-rows.jsonl`,
 which `tests/scale.rs` parses and the writer's own test reproduces byte for
 byte. `eval_runner scale-seed` writes #826's synthetic history into a
-direct-host fixture's store, and `eval_runner scale-report` builds and prints a
-report from a driver's rows and manifest. The `scale-report` job in
+direct-host fixture's store, with the newest segment's end as the rendered
+boundary so `transform.boundary` pages anchors before any pass ran, and
+`eval_runner scale-report` builds and prints a report from a driver's rows and
+manifest. The `scale-report` job in
 `.github/workflows/ci.yml` runs only when dispatched with `scale_driver`; it
 builds release binaries and runs the driver once per tier for the `scale_base`
 commit and then the dispatched commit, each run under `scale_budget_seconds`,
@@ -1285,6 +1287,30 @@ garbage of the previous array before the timer starts. It times the whole
 `run` call of the transform hook: preflight, discovery, capture, IPC, recipe
 application, publication, and note delivery. Its first pass is `cold`, later
 passes are `replay`, and a pass after a fold is `warming`.
+
+`src/scale-report/pi-tier.ts` writes the Pi session tiers: a seeded session
+file of N messages named `m1` to `mN` along one `parentId` chain, the ids
+`scale-seed` covers, cycling through user text, an assistant tool call and its
+result, a `bashExecution`, and an assistant reply with thinking, with one failed
+assistant entry before its retry inside the window. Covered messages are
+minimal and the last 300 carry the 5 KiB shape. One seed writes identical bytes,
+and no tier file is committed. `scripts/scale-pi-pass.ts` loads each tier into
+Pi through `createAgentSession` with in-memory settings, credentials, and model
+registry, pi-ai's faux provider, and the plugin under test dialing a fresh
+direct-host fixture, and prompts once per sample with a 5 KiB message. Two
+extensions loaded before and after the plugin time its `context` and
+`agent_end` handlers, and a wrapper around Pi's `context` emitter times the
+whole event, including Pi's clone of the array. Every call goes to
+`calls.jsonl` (the `context` event, Pi's clone, the plugin's `context` handler,
+its `agent_end` handler, the array length in and out, and RSS), and
+`baseline.json` holds their per-tier percentiles and each tier's load
+evidence, so an arm without a Pi transform, such as the base of #850, records
+the baseline the transform arm is compared with. A pass the plugin sent to the
+daemon is also a pass row: `response_us` is the plugin's `context` handler,
+the first pass is `cold`, a pass is `steady` once a HARD has folded and the
+boundary has moved three times, and a pass before that is `replay` at an
+unchanged boundary and `warming` otherwise. The driver runs three sessions per
+tier.
 
 ## Paired worlds
 

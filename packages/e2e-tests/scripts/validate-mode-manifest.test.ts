@@ -22,7 +22,7 @@ const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n'
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(21);
+        expect(validation.files.length).toBe(22);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -32,11 +32,13 @@ describe("mode manifest validator", () => {
         );
     });
 
-    it("selects every entry for rust; only the Pi smoke entry is pi-smoke", () => {
+    it("selects every entry for rust; only the Pi entries are Pi tiers", () => {
         expect(filesForMode(validation, "rust")).toEqual(validation.files);
         const tiers = new Map(validation.manifest.entries.map((entry) => [entry.path, entry.tier]));
         expect(tiers.get("tests/pi-smoke.test.ts")).toBe("pi-smoke");
         tiers.delete("tests/pi-smoke.test.ts");
+        expect(tiers.get("tests/pi-rust-folding.test.ts")).toBe("pi-rust");
+        tiers.delete("tests/pi-rust-folding.test.ts");
         expect([...tiers.values()].every((tier) => tier === "rust-only")).toBe(true);
     });
 

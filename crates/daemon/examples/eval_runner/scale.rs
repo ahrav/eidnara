@@ -24,7 +24,8 @@ const REPORT_USAGE: &str =
 
 /// Seeds `--segments` synthetic history segments of two messages each into `--session` of the
 /// fixture store under `--state-root`, with the ordinal continuation base the newest segment
-/// ends on, and prints the anchor the first pass declares.
+/// ends on and that segment's end as the rendered boundary, so `transform.boundary` pages
+/// anchors before any pass ran, and prints the anchor the first pass declares.
 pub fn run_seed(args: impl Iterator<Item = String>) -> io::Result<()> {
     let values = parse_flags(args, &["state-root", "session", "segments"], SEED_USAGE)
         .map_err(io::Error::other)?;
@@ -43,10 +44,13 @@ pub fn run_seed(args: impl Iterator<Item = String>) -> io::Result<()> {
     history.seed(&store, session);
     let end = history.span * segments as i64;
     let loaded = store.load(session).map_err(io::Error::other)?;
+    let mut core = loaded.core.clone();
+    core.boundary_id = format!("m{end}#0");
     let mut meta = loaded.meta.clone();
     meta.ordinal_continuation_base = Some((end - 2) as u64);
+    meta.coverage_ordinal = Some(end as u64);
     store
-        .commit(session, None, &loaded.core, &meta)
+        .commit(session, None, &core, &meta)
         .map_err(io::Error::other)?;
     println!(
         "{}",
