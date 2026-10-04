@@ -813,6 +813,15 @@ fn a_coverage_shortfall_keeps_the_pool_and_says_so() {
         Completion::Incomplete(IncompleteReason::RowBound)
     );
     assert_discarded(&bounded);
+    let coverage = |pool: &CandidatePool| {
+        let coverage = pool.ranking.coverage;
+        (coverage.missing_pending, coverage.missing_without_pending)
+    };
+    assert_eq!(coverage(&pool), (0, 1));
+    fixture.job_state("beta", "pending");
+    let reopened = select(&fixture, &layers, &codes, &axis(0), 3, roomy(2), |_| {}).unwrap();
+    assert_eq!(coverage(&reopened), (1, 0));
+    assert_eq!(pool_of(&reopened), pool_of(&pool));
 }
 
 #[test]
