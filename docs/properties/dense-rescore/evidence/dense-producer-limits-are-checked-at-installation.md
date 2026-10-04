@@ -10,8 +10,11 @@ capacity configuration is refused.
 - `CompressedLimits::capacity` derives the pool through
   `CandidateCapacity::new` and checks it and the scan page against the
   kernel's batch.
-- `HandlerCore::set_dense_vectors` refuses without dense limits and runs the
-  capacity check; `CompressedProducer::rank` runs it again per request.
+- `HandlerCore::set_dense_vectors` refuses without dense limits, refuses a
+  route `unit_norm_tolerance` that differs from the view's layout, and runs
+  the capacity check; `set_query_route_limits` repeats the pair check against
+  installed vectors; `CompressedProducer::rank` runs the capacity check again
+  per request.
 - Byte, row, layer, pinned-byte, and read bounds are enforced in
   `select_candidates` and `rank_compressed`.
 

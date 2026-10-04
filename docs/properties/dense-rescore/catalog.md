@@ -134,7 +134,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the query route's `ExhaustiveProducer`
-(`crates/daemon/src/query_route.rs:539`) ranks through the oracle walk, which
+(`crates/daemon/src/query_route.rs:543`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
 `rescore` (`score.rs:228`), which have no production caller at this base, so
@@ -355,7 +355,7 @@ Reachability: test-only - `select_candidates_observed`
 (`crates/daemon/src/vector_reader.rs:879`); `select_candidates`
 (`candidates.rs:263`) has no caller in the workspace. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
-`set_dense_vectors` (`crates/daemon/src/query_route.rs:1854`) installs a
+`set_dense_vectors` (`crates/daemon/src/query_route.rs:1865`) installs a
 composition, and no production caller installs one at this HEAD.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
@@ -610,8 +610,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:680`) only when `set_dense_vectors`
-(`query_route.rs:1854`) has installed a composition, and no production caller
+(`crates/daemon/src/query_route.rs:684`) only when `set_dense_vectors`
+(`query_route.rs:1865`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -666,7 +666,7 @@ and `a_request_that_ranks_no_dense_lane_holds_no_view`;
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`.
 Guarantee: The dense unit of a request whose embedding settled as a vector
 owns a clone of the view's `Arc`, taken before the unit is submitted
-(`query_route.rs:1966`), so the view's pins and the ranking's `Scratch` and
+(`query_route.rs:1977`), so the view's pins and the ranking's `Scratch` and
 `RowBuffers` reservations stay charged until the blocking work returns; a
 cancelled request settles only after that work ends, and every charge is
 released when it does. A request whose embedding is undeclared or unavailable
@@ -733,19 +733,26 @@ Type: safety
 Reachability: test-only - as above.
 Status: active
 Exercised: yes - `query_route_compressed.rs`
-`the_pool_the_limits_give_is_checked_before_a_view_is_installed` and
+`the_pool_the_limits_give_is_checked_before_a_view_is_installed`,
 `vectors_install_only_under_declared_dense_limits`, which also refuses a
-later route-limit change that the installed vectors cannot serve.
-Guarantee: A composition installs only under declared dense limits, and only
-when the pool `CompressedLimits::capacity` (`query_route.rs:611`) derives from
-the lane's `k` and the alpha policy passes the capacity checks and fits one
-kernel eligibility batch, with scan pages within the batch as well.
+later route-limit change that the installed vectors cannot serve, and
+`vectors_install_only_under_the_tolerance_their_layers_carry`.
+Guarantee: A composition installs only under declared dense limits whose
+`unit_norm_tolerance` equals the view's layout bit for bit (`check_pair`,
+`query_route.rs:741`), and only when the pool `CompressedLimits::capacity`
+(`query_route.rs:615`) derives from the lane's `k` and the alpha policy passes
+the capacity checks and fits one kernel eligibility batch, with scan pages
+within the batch as well; a later route-limit change is checked against the
+installed vectors the same way.
 Check: `always` - no dense limits refuses `DenseUndeclared`; alpha 0.5
 refuses `DenseCapacity(Alpha)`; a pool of 2048 refuses at `candidates`; pages
 of 2000 refuse at `scan_page_rows`; alpha 4 with `k` 64 yields 256; with
 vectors installed, route limits raising `k` to 1000 refuse `OverCap` and route
-limits without dense limits refuse `DenseUndeclared`. `always` because an
-unapproved pool must never reach a request.
+limits without dense limits refuse `DenseUndeclared`; a tolerance of 2e-3
+against layers carrying 1e-3 refuses `DenseToleranceMismatch` at installation
+and at a later route-limit change. `always` because an unapproved pool, or a
+tolerance every request would refuse as `identity`, must never reach a
+request.
 Fault/timing angle: none.
 Required faults and enabling state: The listed limits.
 Confidence: high - [evidence](evidence/dense-producer-limits-are-checked-at-installation.md).
@@ -770,8 +777,8 @@ original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
 `quarantined`; cancellation and deadlines end the request with their own
-terminals (`compressed_refusal`, `query_route.rs:747`; `lane_status`,
-`query_route.rs:576`).
+terminals (`compressed_refusal`, `query_route.rs:758`; `lane_status`,
+`query_route.rs:580`).
 Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
 degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as

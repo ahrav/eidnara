@@ -47,7 +47,7 @@ a wildcard pass that questioned the framing itself.
    function production does not call.** `rescore` (`score.rs:190`) has no
    caller outside tests; the oracle walk scores through `score_block`
    (`oracle.rs:508`). The Reachability line now names the producer
-   (`crates/daemon/src/query_route.rs:467`), the block scorer, and the bridge
+   (`crates/daemon/src/query_route.rs:471`), the block scorer, and the bridge
    the label rests on, `dense_properties.rs:255` holding `inner_product_block`
    equal to `inner_product` bit for bit; the rationale now reads "the row
    scorer is the contract the block scorer is held to".

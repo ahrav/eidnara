@@ -579,6 +579,41 @@ async fn vectors_install_only_under_declared_dense_limits() {
 }
 
 /// Records whether a concurrent route-limit update completes while the vectors that own this probe drop.
+/// The route's `unit_norm_tolerance` is the identity every compressed request expects of the view's layers, so vectors install, and route limits change, only while the two agree bit for bit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vectors_install_only_under_the_tolerance_their_layers_carry() {
+    let fixture = Fixture::build().await;
+    let composition = Composition::of(&fixture);
+    let handler = Handler::new();
+    let mut looser = with_dense(2);
+    looser.dense.as_mut().unwrap().unit_norm_tolerance = 2e-3;
+    handler.set_query_route_limits(Some(looser.clone())).unwrap();
+    assert_eq!(
+        handler.set_dense_vectors(Some(composition.vectors())),
+        Err(LimitsRefusal::DenseToleranceMismatch {
+            route: 2e-3,
+            view: 1e-3,
+        })
+    );
+    handler.set_query_route_limits(Some(with_dense(2))).unwrap();
+    handler
+        .set_dense_vectors(Some(composition.vectors()))
+        .unwrap();
+    assert_eq!(
+        handler.set_query_route_limits(Some(looser)),
+        Err(LimitsRefusal::DenseToleranceMismatch {
+            route: 2e-3,
+            view: 1e-3,
+        }),
+        "route limits keep the tolerance the installed vectors carry"
+    );
+    let (_token, budget) = request_budget(10_000);
+    let outcome = run(&fixture, 2, composition.vectors(), &budget).unwrap();
+    assert_eq!(outcome.statuses[2], LaneStatus::Complete);
+    handler.set_dense_vectors(None).unwrap();
+    fixture.daemon.shutdown().await;
+}
+
 struct TeardownProbe {
     core: Arc<HandlerCore>,
     answered: Arc<Mutex<Option<bool>>>,

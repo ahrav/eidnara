@@ -90,6 +90,10 @@ pub enum LimitsRefusal {
     Dense { bound: &'static str, value: usize },
     #[error("dense unit_norm_tolerance must be finite and not negative")]
     DenseTolerance,
+    #[error(
+        "dense unit_norm_tolerance {route} differs from the {view} the installed vectors' layers carry"
+    )]
+    DenseToleranceMismatch { route: f64, view: f64 },
     #[error("the dense candidate pool is refused: {0}")]
     DenseCapacity(CapacityRefusal),
     #[error("compressed dense vectors need declared dense limits")]
@@ -733,7 +737,7 @@ impl DenseProducer for CompressedProducer {
     }
 }
 
-/// Installed vectors need declared dense limits whose `k` gives an admissible pool.
+/// Installed vectors need declared dense limits whose `unit_norm_tolerance` matches the view bit for bit and whose `k` gives an admissible pool.
 fn check_pair(
     limits: Option<&QueryRouteLimits>,
     vectors: &DenseVectors,
@@ -741,6 +745,13 @@ fn check_pair(
     let dense = limits
         .and_then(|limits| limits.dense)
         .ok_or(LimitsRefusal::DenseUndeclared)?;
+    let view = vectors.view.layout().unit_norm_tolerance;
+    if dense.unit_norm_tolerance.to_bits() != view.to_bits() {
+        return Err(LimitsRefusal::DenseToleranceMismatch {
+            route: dense.unit_norm_tolerance,
+            view,
+        });
+    }
     vectors.limits.capacity(&dense).map(|_| ())
 }
 
