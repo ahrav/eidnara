@@ -132,7 +132,7 @@ pub(super) trait RowSource {
         into: &mut Self::Payload,
     ) -> Result<bool, OracleRefusal>;
 
-    /// Validates the lanes in visit order and writes one score per lane into `scores`; the first lane that fails refuses.
+    /// Validates the lanes in visit order and writes one score per lane into `scores`; the first lane that fails refuses, leaving `scores` with exactly the lanes before it, so the caller checks those lanes' identities ahead of the refusal.
     fn score(
         &self,
         request: &Walk<'_>,
@@ -639,7 +639,7 @@ impl<P: Default> Block<P> {
         if filled == 0 {
             return Ok(());
         }
-        source.score(request, &self.lanes[..filled], &mut self.scores)?;
+        let scored = source.score(request, &self.lanes[..filled], &mut self.scores);
         for (lane, score) in self.lanes[..filled].iter().zip(&self.scores) {
             ranking.coverage.with_vector += 1;
             EligibilityCandidate::validate_fields(
@@ -666,7 +666,7 @@ impl<P: Default> Block<P> {
             selected.candidates.push(lane.candidate());
             selected.scores.push(*score);
         }
-        Ok(())
+        scored
     }
 }
 
