@@ -452,7 +452,8 @@ Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
 `a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
 `missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
-and `cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`;
+`cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
+and `cancellation_after_an_empty_selection_is_a_budget_refusal`;
 the unit tests
 `a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
 `only_missing_or_malformed_codes_count_as_code_corruption` in
@@ -471,7 +472,8 @@ row buffers; NaN rows and doubled, finite rows refuse with `Rejected` naming
 the member and the pool's best entry; an emptied codes file refuses the scan
 and quarantines the view, while a cancelled scan does not; the read
 classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
-with no read and no quarantine; a
+with no read and no quarantine, and so does one cancelled over a pool with no
+entry to read; a
 re-acquisition re-verifies, recovery takes the prior verified composition, and
 its ranking excludes an occurrence retired in the kernel meanwhile. `always`
 because a corrupt generation must never yield a result.

@@ -847,6 +847,35 @@ fn cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing()
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
 }
 
+/// A pool with no entry reads no original row, so the rescore alone would never consult the budget; the request still ends as `Budget`.
+#[test]
+fn cancellation_after_an_empty_selection_is_a_budget_refusal() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    for object in OBJECTS {
+        projection.retire(object);
+    }
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let budget = EvalBudget::unbounded();
+    let (outcome, reads) = run(
+        &fixture,
+        &projection,
+        &view,
+        &axis(0),
+        capacity(2, 3),
+        &ROOMY,
+        &budget,
+        || budget.cancel(),
+    );
+    assert_eq!(outcome.unwrap_err(), CompressedRefusal::Budget);
+    assert!(reads.is_empty());
+    assert!(!view.is_quarantined());
+}
+
 #[test]
 fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     let mut fixture = Fixture::new();

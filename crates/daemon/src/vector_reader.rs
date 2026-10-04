@@ -758,7 +758,7 @@ pub enum CompressedRefusal {
     Candidates(CandidateRefusal),
     #[error("the query is not a member of the generation: {0}")]
     Query(RowRejection),
-    #[error("the request's budget ended during the rescore")]
+    #[error("the request's budget ended during the scan or the rescore")]
     Budget,
     /// An accepted occurrence's original row is missing or malformed in member `member`; the view is quarantined and nothing older or reconstructed stands in for it.
     #[error("the original row of occurrence {occurrence_id} in member {member}: {fault}")]
@@ -895,9 +895,9 @@ pub fn rank_compressed(
                 .map_err(ReadStop::Fault)
         },
     );
-    rescored
-        .map(|rescored| CompressedRanking { pool, rescored })
-        .map_err(|refusal| rescore_refusal(view, refusal))
+    let rescored = rescored.map_err(|refusal| rescore_refusal(view, refusal))?;
+    budget.check().map_err(|_| CompressedRefusal::Budget)?;
+    Ok(CompressedRanking { pool, rescored })
 }
 
 /// A missing or malformed accepted row quarantines the view; a failed read and an ended budget leave it usable.
