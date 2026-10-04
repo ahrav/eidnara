@@ -636,6 +636,15 @@ struct Stored {
     limits: Option<StorageBounds>,
 }
 
+impl Stored {
+    /// The candidate and score slots a judgment batch of `want` rows reserves: every candidate the batch accepts costs at least [`SELECTED_ROW_BYTES`] of its batch bytes, so the reserved slots fit inside the bound and the batch never grows them.
+    fn batch_slots(&self, want: usize) -> usize {
+        self.limits.map_or(want, |storage| {
+            want.min(storage.batch_bytes.get() / SELECTED_ROW_BYTES)
+        })
+    }
+}
+
 /// The first reason stands, except that an ended budget always wins: whatever was known before, the result was not finished.
 fn incomplete(ranking: &mut ExhaustiveRanking, reason: IncompleteReason) {
     if reason == IncompleteReason::BudgetExhausted || ranking.completion == Completion::Complete {
@@ -1047,8 +1056,9 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
                 .min(cap);
             unjudged.draw(&mut drawn, want);
             self.stored.selected = 0;
-            let mut candidates = Vec::with_capacity(want);
-            let mut scores = Vec::with_capacity(want);
+            let slots = self.stored.batch_slots(want);
+            let mut candidates = Vec::with_capacity(slots);
+            let mut scores = Vec::with_capacity(slots);
             for &(score, key) in &drawn[..want] {
                 match self.read_candidate(conn, source.occurrence_id(key), source.rowid(key)) {
                     Ok(Some(candidate)) => {
@@ -1546,6 +1556,27 @@ mod tests {
             248,
             "no eligible row yet: every remaining row"
         );
+    }
+
+    /// A batch reserves no more slots than its batch bytes can fill, since every candidate it accepts costs at least [`SELECTED_ROW_BYTES`].
+    #[test]
+    fn a_batch_reserves_only_the_slots_its_batch_bytes_can_fill() {
+        let stored = |batch_bytes: usize| Stored {
+            limits: Some(StorageBounds {
+                batch_bytes: NonZeroUsize::new(batch_bytes).unwrap(),
+                heap_bytes: NonZeroUsize::new(1 << 20).unwrap(),
+            }),
+            ..Stored::default()
+        };
+        let one_row = SELECTED_ROW_BYTES + 40;
+        assert_eq!(stored(one_row).batch_slots(1024), 1);
+        assert_eq!(stored(3 * SELECTED_ROW_BYTES).batch_slots(1024), 3);
+        assert_eq!(stored(SELECTED_ROW_BYTES - 1).batch_slots(1024), 0);
+        assert_eq!(stored(1 << 30).batch_slots(1024), 1024, "never past `want`");
+        assert_eq!(Stored::default().batch_slots(16), 16, "an unbounded walk");
+        for batch_bytes in [1, one_row, 7 * SELECTED_ROW_BYTES + 3, 1 << 16] {
+            assert!(stored(batch_bytes).batch_slots(1024) * SELECTED_ROW_BYTES <= batch_bytes);
+        }
     }
 
     /// Drawing `n` rows one at a time costs at most `4 n log n` comparisons, so a scan that judges every row in small batches pays for one ranking of its rows.
