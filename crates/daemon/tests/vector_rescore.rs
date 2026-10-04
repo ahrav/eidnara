@@ -877,6 +877,46 @@ fn cancellation_after_an_empty_selection_is_a_budget_refusal() {
 }
 
 #[test]
+fn a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    rewrite_rows(&fixture, &base.digest, |row| {
+        row[..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    })();
+    let outcome = rank_view(&fixture, &projection, &view, &axis(0), 2);
+    assert!(
+        matches!(
+            outcome,
+            Err(RankRefusal::Layered(LayeredRefusal::Oracle(
+                OracleRefusal::StoredRow { .. }
+            )))
+        ),
+        "{outcome:?}"
+    );
+    assert!(view.is_quarantined());
+    let (compressed, reads) = run(
+        &fixture,
+        &projection,
+        &view,
+        &axis(0),
+        capacity(2, 3),
+        &ROOMY,
+        &EvalBudget::unbounded(),
+        || {},
+    );
+    assert!(matches!(
+        compressed,
+        Err(CompressedRefusal::Quarantined { .. })
+    ));
+    assert!(reads.is_empty());
+}
+
+#[test]
 fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);
