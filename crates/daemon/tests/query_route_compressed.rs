@@ -371,10 +371,7 @@ async fn each_view_and_scan_bound_degrades_the_lane_with_its_own_reason() {
             rows,
         )
         .with_observer_for_test(Arc::new(move |event| {
-            if matches!(
-                event,
-                RescoreEvent::AfterSelection | RescoreEvent::ReadOriginal { .. }
-            ) {
+            if matches!(event, RescoreEvent::ReadOriginal { .. }) {
                 *reads.lock().unwrap() += 1;
             }
         }))

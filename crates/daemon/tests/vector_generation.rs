@@ -12,8 +12,8 @@ use daemon::projection_gates::{
 use daemon::vector_admission::Ledger;
 use daemon::vector_generation::{
     BuiltVectors, CODES_FILE, ExpectedVectors, FileFault, ROW_IDS_FILE, ROWS_FILE, SCALES_FILE,
-    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VectorRefusal, VectorSidecar, build,
-    resident_bytes, stage, verification_bytes, verify,
+    SIDECAR_FILE, Staging, TOMBSTONES_FILE, VECTOR_TARGET, VERIFY_CHUNK_BYTES, VectorRefusal,
+    VectorSidecar, build, resident_bytes, stage, verification_bytes, verify,
 };
 use host_runtime::generation::{
     CurrentProfile, GENERATIONS_DIR_NAME, GenerationError, GenerationManifest, GenerationStore,
@@ -1149,14 +1149,15 @@ impl Fixture {
     }
 }
 
-/// A generation larger than one verification chunk streams through several chunks in both passes and verifies under its verification bound.
+/// A generation larger than one verification chunk streams through several chunks and verifies under its verification bound.
 #[test]
 fn streaming_verification_reads_rows_and_codes_across_chunks() {
     let fixture = Fixture::new();
     let mut many = export();
     let template = many.rows[0].vector.clone();
-    // Each row differs, so a chunk read from the wrong offset cannot reproduce the codes it should.
-    many.rows = (0..3000u32)
+    let chunk_rows = (VERIFY_CHUNK_BYTES / (4 * u64::from(DIMENSION))) as usize;
+    // Each row differs, so a chunk read out of step with its codes cannot reproduce them.
+    many.rows = (0..2 * chunk_rows as u32 + 7)
         .map(|n| {
             let mut raw = template.clone();
             raw.rotate_left((n % 8) as usize);
@@ -1171,15 +1172,22 @@ fn streaming_verification_reads_rows_and_codes_across_chunks() {
         .collect();
     let built = build(&fixture.expected(), &many, &fixture.work_dir()).unwrap();
     let rows_bytes = std::fs::metadata(built.dir.join(ROWS_FILE)).unwrap().len();
-    assert!(rows_bytes > 1 << 16, "the rows span more than one chunk");
+    assert!(
+        rows_bytes > 2 * VERIFY_CHUNK_BYTES,
+        "the rows span three chunks"
+    );
     let digest = fixture.stage(&built).unwrap();
     let manifest = fixture.store.manifest(&digest).unwrap();
     let held = verification_bytes(&manifest, &built.sidecar);
     assert!(verify(&fixture.store, &digest, &fixture.expected(), held).is_ok());
 
-    // A code changed in the last row of the first chunk, the first row of the second, or the last row refuses as a code mismatch.
-    let chunk_rows = (1usize << 16) / (4 * DIMENSION as usize);
-    for row in [chunk_rows - 1, chunk_rows, many.rows.len() - 1] {
+    // A code changed in the last row of the first chunk, the first row of the second or third, or the last row refuses as a code mismatch.
+    for row in [
+        chunk_rows - 1,
+        chunk_rows,
+        2 * chunk_rows,
+        many.rows.len() - 1,
+    ] {
         let tampered = fixture.restaged(&digest, |dir| {
             let mut codes = fs::read(dir.join(CODES_FILE)).unwrap();
             let code = row * DIMENSION as usize;

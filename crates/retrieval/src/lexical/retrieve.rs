@@ -10,10 +10,11 @@
 //! A probe repeated later in the request therefore cannot change the ranking, and the engine counts and ranks it only once.
 //!
 //! Ranking work is bounded before the engine ranks anything. Each distinct probe is first counted in rowid order up to
-//! [`QUALIFYING_MATCHES`] plus one lookahead row. Probes within that count qualify and are ranked in increasing count
-//! order, original probe order breaking ties, while the counts of the ranked probes sum to at most
-//! [`RANKED_MATCH_BUDGET`]. When no probe qualifies, the common probes are read newest rowid first under the scan bound
-//! instead. A skipped probe of either kind leaves the result incomplete.
+//! [`RetrievalBounds::qualifying_matches`] plus one lookahead row. Probes with at most
+//! [`RetrievalBounds::qualifying_matches`] matches qualify and are ranked in increasing count order, original probe
+//! order breaking ties, while the counts of the ranked probes sum to at most [`RetrievalBounds::rank_budget`]. When no
+//! probe qualifies, the common probes are read in descending rowid order under the scan bound instead. A skipped probe
+//! of either kind leaves the result incomplete.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
@@ -46,6 +47,10 @@ pub struct RetrievalBounds {
     pub max_accepted: NonZeroUsize,
     /// Candidates judged per kernel batch, at most [`MAX_ELIGIBILITY_CANDIDATES`].
     pub batch_rows: NonZeroUsize,
+    /// A probe matching at most this many rows qualifies to be ranked; counting reads one lookahead row past it.
+    pub qualifying_matches: NonZeroUsize,
+    /// The counts of the probes one request ranks sum to at most this many matches.
+    pub rank_budget: NonZeroUsize,
 }
 
 /// One occurrence's lexical contribution: its raw FTS rank under the probe that ranked it best.
@@ -75,9 +80,10 @@ impl Contribution {
 pub enum IncompleteReason {
     /// A probe matched more rows than its scan bound, so lower-ranked hits were never seen.
     ScanBound,
-    /// A probe matched more than [`QUALIFYING_MATCHES`] rows, so it was not ranked; with no qualifying probe, the common probes' newest rows were read unranked by score.
+    /// A probe matched more than [`RetrievalBounds::qualifying_matches`] rows. When every matching probe is over that limit, retrieval reads each one's rows in descending rowid order and scores each row `0.0`.
+    /// Lexical rowids derive from occurrence identifier words, so this order follows identifier placement rather than occurrence age.
     CommonTerms,
-    /// A qualifying probe was not ranked because its count would take the ranked matches past [`RANKED_MATCH_BUDGET`].
+    /// A qualifying probe's count would take the ranked matches past [`RetrievalBounds::rank_budget`], so the engine skipped it.
     RankBudget,
     /// The accepted bound filled while unjudged or eligible candidates remained.
     AcceptedBound,
@@ -104,7 +110,7 @@ pub struct Consumed {
     pub scanned_rows: usize,
     /// Rows read to count the distinct probes, lookahead rows included.
     pub counted_rows: usize,
-    /// Matches the engine ranked: the summed counts of the ranked probes, at most [`RANKED_MATCH_BUDGET`].
+    /// Matches the engine ranked: the summed counts of the ranked probes, at most [`RetrievalBounds::rank_budget`].
     pub ranked_matches: usize,
     pub judged: usize,
     pub batches: usize,
@@ -123,6 +129,8 @@ pub struct Retrieval {
     /// Accepted, re-judged contributions in comparator order; at most one per occurrence.
     pub contributions: Vec<Contribution>,
     pub completion: Completion,
+    /// Every reason recorded for an incomplete result, each once, in the order first recorded; `completion` names the one of highest precedence.
+    pub reasons: Vec<IncompleteReason>,
     /// Records the kernel snapshot used to judge every contribution; `None` if no batch ran.
     pub snapshot: Option<EgressSnapshot>,
     pub incarnation: Option<CommitReadIncarnation>,
@@ -172,11 +180,6 @@ fn comparator((left_id, left): &(String, Hit), (right_id, right): &(String, Hit)
         .then_with(|| left_id.cmp(right_id))
 }
 
-/// D26b: a probe that matches at most this many rows qualifies to be ranked.
-pub const QUALIFYING_MATCHES: usize = 20_000;
-/// D26b: the counts of the probes one request ranks sum to at most this many matches.
-pub const RANKED_MATCH_BUDGET: usize = 30_000;
-
 /// Counts a probe's matches in the engine's rowid order inside SQLite, computing no rank; `?2` is the count limit.
 const COUNT_SQL: &str = "SELECT count(*) FROM (SELECT rowid FROM lexical WHERE lexical MATCH ?1 ORDER BY rowid LIMIT ?2)";
 
@@ -184,9 +187,9 @@ const COUNT_SQL: &str = "SELECT count(*) FROM (SELECT rowid FROM lexical WHERE l
 const RANKED_SQL: &str =
     "SELECT rowid, rank FROM lexical WHERE lexical MATCH ?1 ORDER BY rank LIMIT ?2";
 
-/// A common probe's newest rowids. Ranking even one row of a common term costs the engine a pass over its whole doclist, so these rows carry no rank; `?2` bounds the rows read.
+/// One page of a common probe's rowids in descending order, each at most `?2`, with at most `?3` rows; the engine computes no rank for them.
 const COMMON_SQL: &str =
-    "SELECT rowid FROM lexical WHERE lexical MATCH ?1 ORDER BY rowid DESC LIMIT ?2";
+    "SELECT rowid FROM lexical WHERE lexical MATCH ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT ?3";
 
 /// One lexical row's occurrence. The `LEFT JOIN` keeps a lexical row with no occurrence, and the last column marks a missing or
 /// tombstoned occurrence dead, so the reader can tell an exhausted match set from rows lost to the filter.
@@ -294,6 +297,7 @@ pub fn scan(
         snapshot: None,
         incarnation: None,
         consumed: Consumed::default(),
+        reasons: Vec::new(),
     };
     let mut best: BTreeMap<String, Hit> = BTreeMap::new();
     // Each distinct probe is counted once, under its first ordinal.
@@ -304,7 +308,7 @@ pub fn scan(
             return exhausted_scan(retrieval, bounds);
         }
         if !counted.contains(probe) {
-            match count_probe(conn, probe, budget) {
+            match count_probe(conn, probe, bounds.qualifying_matches, budget) {
                 Ok(count) => {
                     retrieval.consumed.counted_rows += count;
                     counted.insert(probe);
@@ -320,7 +324,7 @@ pub fn scan(
     let (mut qualifying, common): (Vec<_>, Vec<_>) = distinct
         .into_iter()
         .filter(|&(_, _, count)| count > 0)
-        .partition(|&(_, _, count)| count <= QUALIFYING_MATCHES);
+        .partition(|&(_, _, count)| count <= bounds.qualifying_matches.get());
     qualifying.sort_by_key(|&(ordinal, _, count)| (count, ordinal));
     if !common.is_empty() {
         incomplete(&mut retrieval, IncompleteReason::CommonTerms);
@@ -333,7 +337,7 @@ pub fn scan(
     } else {
         let mut ranked = Vec::new();
         for (ordinal, probe, count) in qualifying {
-            if retrieval.consumed.ranked_matches + count > RANKED_MATCH_BUDGET {
+            if retrieval.consumed.ranked_matches + count > bounds.rank_budget.get() {
                 incomplete(&mut retrieval, IncompleteReason::RankBudget);
                 break;
             }
@@ -439,12 +443,31 @@ fn exhausted(mut retrieval: Retrieval) -> Result<Retrieval, RetrievalRefusal> {
 }
 
 fn incomplete(retrieval: &mut Retrieval, reason: IncompleteReason) {
-    if reason == IncompleteReason::BudgetExhausted || retrieval.completion == Completion::Complete {
+    if !retrieval.reasons.contains(&reason) {
+        retrieval.reasons.push(reason);
+    }
+    let decides = match retrieval.completion {
+        Completion::Complete => true,
+        Completion::Empty => reason == IncompleteReason::BudgetExhausted,
+        Completion::Incomplete(current) => precedence(reason) > precedence(current),
+    };
+    if decides {
         retrieval.completion = Completion::Incomplete(reason);
     }
 }
 
-/// How one probe's rows are read: ranked by the engine in full, or newest rowid first under the scan bound.
+/// Equal-precedence reasons keep the first recorded one as the completion.
+fn precedence(reason: IncompleteReason) -> u8 {
+    match reason {
+        IncompleteReason::BudgetExhausted => 2,
+        IncompleteReason::KernelIncarnationChanged | IncompleteReason::SnapshotChanged => 1,
+        IncompleteReason::ScanBound
+        | IncompleteReason::CommonTerms
+        | IncompleteReason::RankBudget
+        | IncompleteReason::AcceptedBound => 0,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Run {
     /// Ranked by the engine; the probe's counted matches.
@@ -452,14 +475,15 @@ enum Run {
     Common,
 }
 
-/// The probe's match count in rowid order, stopping one row past [`QUALIFYING_MATCHES`] so an overflow is told apart from exactly the threshold without a full count.
+/// The probe's match count in rowid order, stopping one row past `qualifying` so an overflow is told apart from exactly the threshold without a full count.
 fn count_probe(
     conn: &GuardedConn<'_>,
     probe: &Probe,
+    qualifying: NonZeroUsize,
     budget: &EvalBudget,
 ) -> Result<usize, ScanStop> {
     budget.check().map_err(|_| ScanStop::Budget)?;
-    let limit = i64::try_from(QUALIFYING_MATCHES + 1).unwrap_or(i64::MAX);
+    let limit = i64::try_from(qualifying.get().saturating_add(1)).unwrap_or(i64::MAX);
     let count: i64 = conn
         .prepare_cached(COUNT_SQL)?
         .query_row(rusqlite::params![probe, limit], |row| row.get(0))?;
@@ -480,24 +504,9 @@ fn scan_probe(
 ) -> Result<(usize, bool), ScanStop> {
     let bound = scan_rows.get();
     let mut taken: Vec<(String, Hit)> = Vec::new();
-    let mut truncated = false;
     let mut detail = conn.prepare_cached(ROW_SQL)?;
-    match run {
-        Run::Common => {
-            let mut statement = conn.prepare_cached(COMMON_SQL)?;
-            let limit = i64::try_from(bound.saturating_add(1)).unwrap_or(i64::MAX);
-            let mut rows = statement.query(rusqlite::params![probe, limit])?;
-            while let Some(row) = rows.next()? {
-                budget.check().map_err(|_| ScanStop::Budget)?;
-                if let Some(found) = live_row(&mut detail, row.get(0)?, UNRANKED, ordinal)? {
-                    if taken.len() == bound {
-                        truncated = true;
-                        break;
-                    }
-                    taken.push(found);
-                }
-            }
-        }
+    let truncated = match run {
+        Run::Common => scan_common(conn, &mut detail, probe, ordinal, bound, budget, &mut taken)?,
         Run::Ranked(count) => {
             let mut statement = conn.prepare_cached(RANKED_SQL)?;
             let mut ids = conn.prepare_cached(ID_SQL)?;
@@ -506,7 +515,7 @@ fn scan_probe(
                 rusqlite::params![probe, i64::try_from(count).unwrap_or(i64::MAX)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            truncated = settle_ranked(
+            settle_ranked(
                 ranked,
                 &mut detail,
                 &mut ids,
@@ -514,9 +523,9 @@ fn scan_probe(
                 ordinal,
                 bound,
                 &mut taken,
-            )?;
+            )?
         }
-    }
+    };
     let seen = taken.len();
     for (occurrence_id, hit) in taken {
         if best
@@ -527,6 +536,41 @@ fn scan_probe(
         }
     }
     Ok((seen, truncated))
+}
+
+/// `scan_common` takes a common probe's first `bound` live rows in descending rowid order and returns `true` when another live row exists.
+/// Each page reads `bound + 1` rows below the last rowid seen, so a dead row costs one read and no kept slot, and a short page ends the match set.
+fn scan_common(
+    conn: &GuardedConn<'_>,
+    detail: &mut storage::CachedStatement<'_>,
+    probe: &Probe,
+    ordinal: usize,
+    bound: usize,
+    budget: &EvalBudget,
+    taken: &mut Vec<(String, Hit)>,
+) -> Result<bool, ScanStop> {
+    let mut statement = conn.prepare_cached(COMMON_SQL)?;
+    let page = i64::try_from(bound.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut ceiling = i64::MAX;
+    loop {
+        let mut rows = statement.query(rusqlite::params![probe, ceiling, page])?;
+        let mut fetched: i64 = 0;
+        while let Some(row) = rows.next()? {
+            budget.check().map_err(|_| ScanStop::Budget)?;
+            fetched += 1;
+            let rowid: i64 = row.get(0)?;
+            ceiling = rowid.saturating_sub(1);
+            if let Some(found) = live_row(detail, rowid, UNRANKED, ordinal)? {
+                if taken.len() == bound {
+                    return Ok(true);
+                }
+                taken.push(found);
+            }
+        }
+        if fetched < page {
+            return Ok(false);
+        }
+    }
 }
 
 /// Keeps the best `bound` live rows of `ranked`, which is in the engine's rank order; `true` when a live row lies past the bound.

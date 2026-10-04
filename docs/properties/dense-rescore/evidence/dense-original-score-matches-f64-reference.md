@@ -9,7 +9,7 @@ coordinates in f64 and accumulate in coordinate order.
 
 - `inner_product` (`crates/retrieval/src/dense/score.rs:13`) widens both
   operands before multiplying and adds to a `+0.0` accumulator.
-- `rescore` (`score.rs:199`) validates the query and each row, then scores
+- `rescore` (`score.rs:228`) validates the query and each row, then scores
   with `score`, which matches `Metric::InnerProduct` to `inner_product`.
 - `dense_numerics.rs` `reference_f32` restates the arithmetic.
 

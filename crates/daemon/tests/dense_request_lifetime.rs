@@ -47,6 +47,8 @@ fn route_limits() -> QueryRouteLimits {
         probes: NonZeroUsize::new(16).unwrap(),
         lexical_scan_rows: NonZeroUsize::new(256).unwrap(),
         lexical_accepted: NonZeroUsize::new(64).unwrap(),
+        lexical_qualifying_matches: NonZeroUsize::new(20_000).unwrap(),
+        lexical_rank_budget: NonZeroUsize::new(30_000).unwrap(),
         validation_batch: NonZeroUsize::new(16).unwrap(),
         exact_page_rows: NonZeroUsize::new(16).unwrap(),
         exact_pages: NonZeroUsize::new(4).unwrap(),
@@ -531,15 +533,12 @@ async fn client_cancellation_reaches_the_dense_scan_validation_and_original_read
         None
     );
 
-    let stages: [(&str, Stage); 4] = [
+    let stages: [(&str, Stage); 3] = [
         ("scan", |event| {
             matches!(event, RescoreEvent::Scan(Window::Visited(_)))
         }),
         ("validation", |event| {
             matches!(event, RescoreEvent::Scan(Window::AfterJudgment))
-        }),
-        ("revalidation", |event| {
-            matches!(event, RescoreEvent::Scan(Window::BeforeRevalidation))
         }),
         ("original read", |event| {
             matches!(event, RescoreEvent::ReadOriginal { .. })

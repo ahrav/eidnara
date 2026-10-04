@@ -538,6 +538,57 @@ fn extreme_scales_and_codes_score_finite_and_match_the_reference() {
 }
 
 #[test]
+fn each_block_lane_scores_its_row_like_the_reference() {
+    const LANES: usize = retrieval::dense::score::BLOCK_ROWS;
+    let dimension = 37u32;
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut code = || ((next() % 255) as i32 - 127) as i8;
+    let docs: Vec<Vec<i8>> = (0..LANES)
+        .map(|lane| match lane {
+            0 => vec![127; dimension as usize],
+            1 => vec![-127; dimension as usize],
+            2 => vec![0; dimension as usize],
+            _ => (0..dimension).map(|_| code()).collect(),
+        })
+        .collect();
+    let query: Vec<i8> = (0..dimension).map(|_| code()).collect();
+    let rows: [&[i8]; LANES] = std::array::from_fn(|lane| docs[lane].as_slice());
+    let regular: Vec<f32> = (0..dimension).map(|j| 1.0 / (j + 1) as f32).collect();
+    let mixed: Vec<f32> = (0..dimension)
+        .map(|j| match j % 4 {
+            0 => f32::MAX,
+            1 => f32::from_bits(1),
+            2 => f32::MIN_POSITIVE,
+            _ => 1.0,
+        })
+        .collect();
+    for scale_values in [regular, mixed, vec![f32::MAX; dimension as usize]] {
+        let scales = Scales::from_values(scale_values.clone(), dimension).unwrap();
+        let block = retrieval::dense::scalar::weighted_dot_block(&scales, &query, &rows);
+        for (lane, doc) in rows.iter().enumerate() {
+            let reference = reference_quantized(&scale_values, &query, doc);
+            assert_eq!(block[lane].to_bits(), reference.to_bits(), "lane {lane}");
+            assert_eq!(
+                block[lane].to_bits(),
+                retrieval::dense::scalar::weighted_dot(&scales, &query, doc).to_bits(),
+                "lane {lane}"
+            );
+        }
+        assert_eq!(
+            block[2].to_bits(),
+            0.0f64.to_bits(),
+            "a zero row scores +0.0"
+        );
+    }
+}
+
+#[test]
 fn scales_from_every_constructor_score_like_the_reference() {
     let unit = |raw: [f32; 4]| {
         let norm = raw
@@ -607,6 +658,128 @@ fn the_fixture_rejects_unweighted_and_f32_first_quantized_scoring() {
         bits_differ,
         "f32-first multiplication changes a score's bits"
     );
+}
+
+/// splitmix64, so every generated case replays from its seed.
+struct Mix(u64);
+
+impl Mix {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn code(&mut self) -> i8 {
+        match self.next() % 5 {
+            0 => 127,
+            1 => -127,
+            2 => 0,
+            _ => i8::try_from(i64::try_from(self.next() % 255).unwrap() - 127).unwrap(),
+        }
+    }
+}
+
+fn layout_of(dimension: usize) -> RowLayout {
+    RowLayout {
+        dimension: u32::try_from(dimension).unwrap(),
+        metric: Metric::InnerProduct,
+        unit_norm_tolerance: 1e-3,
+    }
+}
+
+fn mixed_scales(mix: &mut Mix, dimension: usize) -> Vec<f32> {
+    (0..dimension)
+        .map(|coordinate| match (coordinate, mix.next() % 6) {
+            (0, _) | (_, 0) => 1e-3 * (1.0 + mix.unit() as f32),
+            (_, 1) => f32::from_bits(1),
+            (_, 2) => f32::MIN_POSITIVE,
+            (_, 3) => f32::MAX,
+            (_, 4) => 1.0,
+            _ => 0.05 * (1.0 + mix.unit() as f32),
+        })
+        .collect()
+}
+
+fn unit_query(mix: &mut Mix, dimension: usize) -> Vec<f32> {
+    let raw: Vec<f64> = (0..dimension).map(|_| mix.unit() - 0.5).collect();
+    let norm = raw.iter().map(|v| v * v).sum::<f64>().sqrt();
+    raw.iter().map(|v| (v / norm) as f32).collect()
+}
+
+/// The test covers dimensions around the 16-coordinate chunk boundary and row counts around the 512-row tile boundary.
+#[test]
+fn term_table_scores_match_the_reference_for_every_chunk_and_tile_shape() {
+    let mut mix = Mix(0x6090_7ab1e);
+    let mut shapes: Vec<(usize, usize)> = (1..=40)
+        .flat_map(|dimension| [0, 1, 2, 17].map(|rows| (dimension, rows)))
+        .collect();
+    for dimension in [15, 16, 17, 384, 385] {
+        shapes.extend([511, 512, 513, 1100].map(|rows| (dimension, rows)));
+    }
+    for (dimension, rows) in shapes {
+        let scale_values = mixed_scales(&mut mix, dimension);
+        let scales = Scales::from_values(scale_values.clone(), dimension as u32).unwrap();
+        let query_row = unit_query(&mut mix, dimension);
+        let query = QuantizedQuery::new(&layout_of(dimension), &scales, &query_row).unwrap();
+        let table = query.term_table();
+        let mut buffer = vec![0i8; 1 + rows * dimension];
+        buffer[1..].iter_mut().for_each(|code| *code = mix.code());
+        let codes = &buffer[1..];
+        let mut out = vec![f64::NAN; rows];
+        table.score_rows(codes, &mut out);
+        for (index, (row, score)) in codes.chunks_exact(dimension).zip(&out).enumerate() {
+            let reference = reference_quantized(&scale_values, query.codes(), row);
+            assert_eq!(
+                score.to_bits(),
+                reference.to_bits(),
+                "dimension {dimension}, row {index} of {rows}"
+            );
+            assert_eq!(score.to_bits(), query.score(row).to_bits());
+            assert!(score.is_finite());
+            assert_ne!(score.to_bits(), (-0.0f64).to_bits());
+        }
+    }
+}
+
+#[test]
+fn term_table_scores_the_fixture_like_the_row_scorer() {
+    let scales = fixture_scales();
+    let query = QuantizedQuery::new(&layout(), &scales, &fixture_query()).unwrap();
+    let rows = fixture_codes();
+    let codes: Vec<i8> = rows.iter().flat_map(|(_, codes)| *codes).collect();
+    let mut out = vec![f64::NAN; rows.len()];
+    query.term_table().score_rows(&codes, &mut out);
+    for ((id, codes), score) in rows.iter().zip(&out) {
+        assert_eq!(score.to_bits(), query.score(codes).to_bits(), "{id}");
+    }
+    let zero = rows.iter().position(|(id, _)| *id == "zero").unwrap();
+    assert_eq!(out[zero].to_bits(), 0.0f64.to_bits(), "+0.0, not -0.0");
+}
+
+#[test]
+#[should_panic(expected = "codes of one calibration have one length")]
+fn term_table_refuses_codes_that_are_not_whole_rows() {
+    let scales = fixture_scales();
+    let query = QuantizedQuery::new(&layout(), &scales, &fixture_query()).unwrap();
+    query.term_table().score_rows(&[1; 7], &mut [0.0; 2]);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "the reserved code -128 never reaches scoring")]
+fn term_table_refuses_a_reserved_code_under_debug_assertions() {
+    let scales = fixture_scales();
+    let query = QuantizedQuery::new(&layout(), &scales, &fixture_query()).unwrap();
+    query
+        .term_table()
+        .score_rows(&[1, 2, i8::MIN, 4], &mut [0.0; 1]);
 }
 
 // ---- Retained-f32 scoring ----

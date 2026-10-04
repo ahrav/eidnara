@@ -68,6 +68,7 @@ impl InputEnvelope {
 /// The product cap on one backfill input's exact untruncated token count, below any wider lane window or manifest envelope. A longer input keeps its lexical occurrence and stops as `input_over_limit`.
 pub const BACKFILL_MAX_TOKENS: u64 = 512;
 
+/// Bounds one wait on a held job; `wait_for_job` returns early when the job settles or leaves the table.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const MAX_ELIGIBILITY_PAGES_PER_PASS: usize = 2;
 
@@ -660,7 +661,8 @@ impl<'a> EmbeddingDispatcher<'a> {
                     if started.elapsed() < pass.bounds.result_wait
                         && Instant::now() < deadline_at =>
                 {
-                    std::thread::sleep(POLL_INTERVAL);
+                    self.local_embeddings
+                        .wait_for_job(&host_job_id, Instant::now() + POLL_INTERVAL);
                 }
                 // This job's wait is over; the pass moves on and a later pass polls the held job.
                 PollOutcome::Pending { .. } => return Ok(None),

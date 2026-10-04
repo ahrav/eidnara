@@ -6,9 +6,10 @@
 
 ## Evidence trail
 
-- `rescore_pool` (`crates/retrieval/src/dense/candidates.rs:339`) validates
-  the query and each row, scores with `score`, sorts with `rank_order`, and
-  truncates to `k`.
+- `rescore_pool` (`crates/retrieval/src/dense/candidates.rs:410`) validates
+  the query, checks each row's length, scores and validates the row in one
+  pass with `score_with_squares`, sorts with `rank_order`, and truncates to
+  `k`. Corrected from a single-purpose `score` at `candidates.rs:340`.
 
 ## Failure scenario
 

@@ -100,26 +100,7 @@ fn create_secure_directory_inner(
     let temp = temp_name("dir");
     rfs::mkdirat(parent, temp.as_str(), Mode::from_raw_mode(0o700)).map_err(classify_errno)?;
     let secured = (|| {
-        let descriptor = rfs::openat(
-            parent,
-            temp.as_str(),
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(classify_errno)?;
-        let directory = File::from(descriptor);
-        // `fchmod` on the descriptor defeats the umask without re-resolving a name.
-        rfs::fchmod(&directory, Mode::from_raw_mode(0o700)).map_err(classify_errno)?;
-        let metadata = directory.metadata().map_err(classify_io)?;
-        if !metadata.is_dir()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.permissions().mode() & 0o777 != 0o700
-        {
-            return Err(classify_io(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "directory is not owner-only",
-            )));
-        }
+        let directory = open_new_owner_only_directory(parent, &temp)?;
         sync_directory(&directory)?;
         if let Some(hook) = hook.as_mut() {
             hook();
@@ -144,6 +125,93 @@ fn create_secure_directory_inner(
         let _ = rfs::unlinkat(parent, temp.as_str(), AtFlags::REMOVEDIR);
     }
     secured
+}
+
+/// Opens the directory `temp` just created under `parent` without following symlinks and makes it owner-only.
+fn open_new_owner_only_directory(parent: &File, temp: &str) -> Result<File, StorageError> {
+    let descriptor = rfs::openat(
+        parent,
+        temp,
+        OFlags::DIRECTORY | OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(classify_errno)?;
+    let directory = File::from(descriptor);
+    // `fchmod` on the descriptor defeats the umask without re-resolving a name.
+    rfs::fchmod(&directory, Mode::from_raw_mode(0o700)).map_err(classify_errno)?;
+    let metadata = directory.metadata().map_err(classify_io)?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(classify_io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "directory is not owner-only",
+        )));
+    }
+    Ok(directory)
+}
+
+/// Creates each of `names` under `parent` as [`create_secure_directory`] does: every new directory is synced before it is renamed into place and `parent` is synced after the renames. The new directories sync concurrently and `parent` syncs once. A name some other writer created first is opened with [`open_secure_directory`].
+pub(super) fn create_secure_directories(
+    parent: &File,
+    names: &[&str],
+) -> Result<Vec<File>, StorageError> {
+    for name in names {
+        validate_name(name)?;
+    }
+    let mut temps: Vec<String> = Vec::with_capacity(names.len());
+    let mut renamed = false;
+    let created = (|| {
+        let renamed = &mut renamed;
+        let mut made = Vec::with_capacity(names.len());
+        for _ in names {
+            let temp = temp_name("dir");
+            rfs::mkdirat(parent, temp.as_str(), Mode::from_raw_mode(0o700))
+                .map_err(classify_errno)?;
+            temps.push(temp);
+            made.push(open_new_owner_only_directory(
+                parent,
+                temps.last().expect("pushed"),
+            )?);
+        }
+        sync_all_concurrently(&made.iter().collect::<Vec<_>>())?;
+        let mut directories = Vec::with_capacity(names.len());
+        for ((name, temp), directory) in names.iter().zip(&temps).zip(made) {
+            let renaming = rfs::renameat_with(
+                parent,
+                temp.as_str(),
+                parent,
+                *name,
+                rfs::RenameFlags::NOREPLACE,
+            );
+            match renaming {
+                Ok(()) => {
+                    *renamed = true;
+                    directories.push(directory);
+                }
+                Err(rustix::io::Errno::EXIST) | Err(rustix::io::Errno::NOTEMPTY) => {
+                    let _ = rfs::unlinkat(parent, temp.as_str(), AtFlags::REMOVEDIR);
+                    directories.push(open_secure_directory(parent, name)?);
+                }
+                Err(error) => return Err(classify_errno(error)),
+            }
+        }
+        Ok(directories)
+    })();
+    if created.is_err() {
+        for temp in &temps {
+            let _ = rfs::unlinkat(parent, temp.as_str(), AtFlags::REMOVEDIR);
+        }
+    }
+    // A directory renamed into place before a later failure stays, so its entry is made durable either way; the earlier failure is the one reported.
+    if renamed {
+        let synced = sync_directory(parent);
+        if created.is_ok() {
+            synced?;
+        }
+    }
+    created
 }
 
 /// Opens an owner-only directory without following symlinks.
@@ -177,6 +245,10 @@ pub(super) fn open_or_create_secure_directory(
     parent: &File,
     name: &str,
 ) -> Result<File, StorageError> {
+    match open_secure_directory(parent, name) {
+        Err(StorageError::Other(source)) if source.kind() == io::ErrorKind::NotFound => {}
+        opened => return opened,
+    }
     match create_secure_directory(parent, OsStr::new(name)) {
         Ok(directory) => Ok(directory),
         Err(StorageError::Other(source)) if source.kind() == io::ErrorKind::AlreadyExists => {
@@ -328,6 +400,43 @@ pub(super) fn sync_directory(directory: &File) -> Result<(), StorageError> {
     sync_file(directory)
 }
 
+pub(super) const MAX_CONCURRENT_SYNCS: usize = 16;
+
+/// On success, every file and directory in `files` is durable. Up to [`MAX_CONCURRENT_SYNCS`] syncs run at once on scoped threads. Every sync runs even if another fails, and the error returned is one of the failures.
+pub(super) fn sync_all_concurrently(files: &[&File]) -> Result<(), StorageError> {
+    if files.len() <= 1 {
+        return files.iter().try_for_each(|file| sync_file(file));
+    }
+    let workers = files.len().min(MAX_CONCURRENT_SYNCS);
+    let stride = move |worker: usize| {
+        files
+            .iter()
+            .skip(worker)
+            .step_by(workers)
+            .map(|file| sync_file(file))
+            .fold(Ok(()), Result::and)
+    };
+    std::thread::scope(|scope| {
+        // A stride whose thread cannot be created syncs on this thread instead.
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, move || stride(worker))
+                    .map_err(|_| worker)
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(worker) => stride(worker),
+            })
+            .fold(Ok(()), Result::and)
+    })
+}
+
 /// Applies a publication durability barrier to destination, then distinct source.
 ///
 /// Directory identity uses device and inode numbers. Callers publishing across
@@ -426,6 +535,15 @@ pub(super) fn durable_unlink(directory: &File, name: &str) -> Result<(), Storage
     match rfs::unlinkat(directory, name, AtFlags::empty()) {
         Ok(()) => sync_directory(directory),
         Err(rustix::io::Errno::NOENT) => sync_directory(directory),
+        Err(error) => Err(classify_errno(error)),
+    }
+}
+
+/// Removes `name` from `directory` without syncing it; the caller syncs `directory` before relying on the removal.
+pub(super) fn unlink_temp(directory: &File, name: &str) -> Result<(), StorageError> {
+    validate_name(name)?;
+    match rfs::unlinkat(directory, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(error) => Err(classify_errno(error)),
     }
 }
@@ -630,6 +748,74 @@ mod tests {
         );
         assert_eq!(fs::read(root.path().join("digest")).unwrap(), b"old");
         assert_eq!(fs::read(root.path().join("temp")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn batched_directories_are_owner_only_and_a_name_taken_first_is_opened() {
+        let root = tempfile::tempdir().unwrap();
+        let root_dir = File::open(root.path()).unwrap();
+        fs::create_dir(root.path().join("bb")).unwrap();
+        fs::set_permissions(root.path().join("bb"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(root.path().join("bb/held"), b"kept").unwrap();
+        let names = ["aa", "bb", "cc"];
+        let created = create_secure_directories(&root_dir, &names).unwrap();
+        assert_eq!(created.len(), names.len());
+        for (name, directory) in names.iter().zip(&created) {
+            let metadata = fs::symlink_metadata(root.path().join(name)).unwrap();
+            assert!(metadata.is_dir());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700, "{name}");
+            assert_eq!(
+                directory.metadata().unwrap().ino(),
+                metadata.ino(),
+                "{name}"
+            );
+        }
+        assert_eq!(fs::read(root.path().join("bb/held")).unwrap(), b"kept");
+        let leftovers: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| !names.iter().any(|kept| name == *kept))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn a_batched_name_that_is_not_an_owner_only_directory_refuses_and_leaves_no_temporary() {
+        let root = tempfile::tempdir().unwrap();
+        let root_dir = File::open(root.path()).unwrap();
+        fs::create_dir(root.path().join("bb")).unwrap();
+        fs::set_permissions(root.path().join("bb"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(create_secure_directories(&root_dir, &["aa", "bb"]).is_err());
+        let mut names: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["aa", "bb"]);
+    }
+
+    #[test]
+    fn concurrent_syncs_cover_every_file_and_report_a_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = File::open(root.path()).unwrap();
+        let files: Vec<File> = (0..40)
+            .map(|index| {
+                let mut file = create_new_file(&directory, &format!("f{index}")).unwrap();
+                file.write_all(b"payload").unwrap();
+                file
+            })
+            .collect();
+        let mut all: Vec<&File> = files.iter().collect();
+        all.push(&directory);
+        sync_all_concurrently(&all).unwrap();
+        sync_all_concurrently(&[]).unwrap();
+        sync_all_concurrently(&all[..1]).unwrap();
+        // A pipe cannot be synced, so its failure surfaces whichever worker meets it.
+        let (reader, _writer) = std::io::pipe().unwrap();
+        let pipe = File::from(std::os::fd::OwnedFd::from(reader));
+        let mut with_pipe = all.clone();
+        with_pipe.insert(17, &pipe);
+        assert!(sync_all_concurrently(&with_pipe).is_err());
     }
 
     #[test]

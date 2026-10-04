@@ -25,9 +25,17 @@ pub struct DecisionRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionPage {
     /// Live decisions in object-id order.
-    pub decisions: Vec<(crate::ObjectRow, DecisionRow)>,
+    pub decisions: Vec<PagedDecision>,
     /// The cursor after which the next page starts; `None` when the page reached the last decision.
     pub next: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PagedDecision {
+    pub object: crate::ObjectRow,
+    pub decision: DecisionRow,
+    /// The latest commit at or before the page's sequence that created this decision or folded a predecessor into it. A fold keeps the survivor's row and creation commit, so a reader replaying commits after a checkpoint below this value has not yet applied the fold that invalidated the predecessor.
+    pub lineage_commit_seq: i64,
 }
 
 /// Observation visible at a requested commit sequence.
@@ -100,7 +108,7 @@ impl KernelStore {
 
     /// One keyset page of the decisions created at or before `requested`, in object-id order after `after`.
     ///
-    /// The page examines at most `max_rows` decision rows, live or invalidated, so its work is bounded whatever the share of invalidated decisions. It returns the live ones with their registry rows and stops before a live decision whose payload would take the page past `max_payload_bytes`; a single decision larger than the bound is returned alone. `next` is the last examined object id while decisions remain after it. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
+    /// The page examines at most `max_rows` decision rows, live or invalidated, so its work is bounded whatever the share of invalidated decisions. It returns the live ones with their registry rows as they stood at `requested`, and stops before a live decision whose payload would take the page past `max_payload_bytes`; a single decision larger than the bound is returned alone. `next` is the last examined object id while decisions remain after it. The wait for a pooled reader stops at `budget`'s deadline or interrupt.
     ///
     /// # Errors
     ///
@@ -158,20 +166,33 @@ impl KernelStore {
         let decisions = load_decisions_for_objects(&tx, requested, &live)?;
         let ids = serde_json::to_string(&live).map_err(|_| KernelError::Io)?;
         let mut objects = crate::envelope::load_object_states(&tx, &ids)?;
+        let mut folds = load_latest_folds(&tx, requested, &ids)?;
         let mut page = decisions
             .into_iter()
             .map(|decision| {
-                let object = objects
+                let mut object = objects
                     .remove(&decision.object_id)
                     .ok_or(KernelError::CorruptCanonicalRow)?
                     .object;
-                Ok((object, decision))
+                // A registry row is invalidated in the same commit as its decision, and the decision is live at `requested`, so the row's snapshot view is its live state.
+                object.invalidated_commit_seq = None;
+                object.superseded_by = None;
+                let lineage_commit_seq = folds
+                    .remove(&decision.object_id)
+                    .map_or(object.created_commit_seq, |fold| {
+                        fold.max(object.created_commit_seq)
+                    });
+                Ok(PagedDecision {
+                    object,
+                    decision,
+                    lineage_commit_seq,
+                })
             })
             .collect::<Result<Vec<_>, KernelError>>()?;
         if page.len() != live.len() {
             return Err(KernelError::CorruptCanonicalRow);
         }
-        page.sort_by(|a, b| a.0.object_id.cmp(&b.0.object_id));
+        page.sort_by(|a, b| a.object.object_id.cmp(&b.object.object_id));
         tx.commit().map_err(crate::map_sqlite)?;
         Ok(DecisionPage {
             decisions: page,
@@ -199,16 +220,17 @@ impl KernelStore {
         requested: i64,
     ) -> Result<Vec<DecisionRow>, KernelError> {
         let mut reader = self.lock_reader()?;
-        let tx = reader
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(|_| KernelError::Io)?;
-        snapshot_tip(&tx, requested)?;
-        if object_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows = load_decisions_for_objects(&tx, requested, object_ids)?;
-        tx.commit().map_err(|_| KernelError::Io)?;
-        Ok(rows)
+        decisions_for_objects_on(&mut reader, object_ids, requested)
+    }
+
+    pub fn decisions_for_objects_as_of_within_budget(
+        &self,
+        object_ids: &[String],
+        requested: i64,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<Vec<DecisionRow>, KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        decisions_for_objects_on(&mut reader, object_ids, requested)
     }
 
     /// The object ids `observation_id` depends on through `dependency_kind`,
@@ -281,6 +303,23 @@ pub(super) fn load_slice(
     })
 }
 
+fn decisions_for_objects_on(
+    reader: &mut rusqlite::Connection,
+    object_ids: &[String],
+    requested: i64,
+) -> Result<Vec<DecisionRow>, KernelError> {
+    let tx = reader
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|_| KernelError::Io)?;
+    snapshot_tip(&tx, requested)?;
+    if object_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = load_decisions_for_objects(&tx, requested, object_ids)?;
+    tx.commit().map_err(|_| KernelError::Io)?;
+    Ok(rows)
+}
+
 /// Returns the transaction-visible tip after validating `requested` against the commit range.
 pub(crate) fn snapshot_tip(tx: &Transaction<'_>, requested: i64) -> Result<i64, KernelError> {
     if requested < 0 {
@@ -348,6 +387,30 @@ fn load_decisions_for_objects(
         .collect::<rusqlite::Result<_>>()
         .map_err(classify_row_error)?;
     Ok(rows)
+}
+
+/// Returns each successor's latest predecessor invalidation commit at or before `requested`. `ids` is a JSON array of successor IDs.
+fn load_latest_folds(
+    tx: &Transaction<'_>,
+    requested: i64,
+    ids: &str,
+) -> Result<std::collections::HashMap<String, i64>, KernelError> {
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT superseded_by, MAX(invalidated_commit_seq)
+             FROM decisions
+             WHERE superseded_by IN (SELECT value FROM json_each(?2))
+               AND invalidated_commit_seq<=?1
+             GROUP BY superseded_by",
+        )
+        .map_err(crate::map_sqlite)?;
+    statement
+        .query_map(rusqlite::params![requested, ids], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(crate::map_sqlite)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(crate::map_sqlite)
 }
 
 /// Shares `load_decisions_for_objects`'s visibility predicate so a size row exists exactly when the full decision row would.

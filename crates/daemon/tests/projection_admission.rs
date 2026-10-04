@@ -1120,3 +1120,66 @@ fn installation_validates_and_publishes_owner_only_records() {
     assert!(install(linked.path(), &manifest, &campaign).is_err());
     assert!(fs::read_dir(target.path()).unwrap().next().is_none());
 }
+
+#[test]
+fn concurrent_installations_are_serialized_by_the_directory_lock() {
+    use daemon::projection_admission::install;
+
+    let home = tempfile::tempdir().unwrap();
+    let identity = support::embedding_fixtures::identity("installed-kernel");
+    let manifest = serde_json::to_vec(&manifest_json(&identity, &ProjectionHook::ALL)).unwrap();
+    let campaign = serde_json::to_vec(&campaign_json(&identity)).unwrap();
+    install(home.path(), &manifest, &campaign).unwrap();
+    let dir = fs::File::open(home.path().join(ADMISSION_DIR)).unwrap();
+    rustix::fs::flock(&dir, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    let installer = std::thread::spawn({
+        let home = home.path().to_path_buf();
+        move || install(&home, &manifest, &campaign)
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !installer.is_finished(),
+        "the installer published under another holder's lock"
+    );
+    rustix::fs::flock(&dir, rustix::fs::FlockOperation::Unlock).unwrap();
+    installer.join().unwrap().unwrap();
+}
+
+#[test]
+#[ignore = "launched by `installation_repairs_the_modes_a_umask_narrowed`"]
+fn umask_installation_child() {
+    use daemon::projection_admission::install;
+
+    let home = std::path::PathBuf::from(std::env::var("UMASK_CHILD_HOME").unwrap());
+    let identity = support::embedding_fixtures::identity("installed-kernel");
+    let manifest = serde_json::to_vec(&manifest_json(&identity, &ProjectionHook::ALL)).unwrap();
+    let campaign = serde_json::to_vec(&campaign_json(&identity)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o100));
+    install(&home, &manifest, &campaign).unwrap();
+    let dir = home.join(ADMISSION_DIR);
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o400));
+    install(&home, &manifest, &campaign).unwrap();
+    for record in [MANIFEST_RECORD, EVIDENCE_RECORD] {
+        assert_eq!(
+            fs::metadata(dir.join(record)).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "{record}"
+        );
+    }
+    assert!(AdmissionInputs::read(&home).unwrap().applies_to(&identity));
+}
+
+#[test]
+fn installation_repairs_the_modes_a_umask_narrowed() {
+    let home = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "umask_installation_child", "--ignored"])
+        .env("UMASK_CHILD_HOME", home.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+}

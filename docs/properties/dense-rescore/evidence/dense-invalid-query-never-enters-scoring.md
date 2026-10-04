@@ -7,7 +7,7 @@ or recipe mismatches; invalid query inputs cannot enter scoring.
 
 ## Evidence trail
 
-- `QuantizedQuery::new` (`crates/retrieval/src/dense/scalar.rs:305`) checks
+- `QuantizedQuery::new` (`crates/retrieval/src/dense/scalar.rs:464`) checks
   the layout and the scales' dimension, encodes through `encode`, which
   validates the query through `codec::validate`, and refuses all-zero codes.
 - Scales themselves are positive and finite by construction

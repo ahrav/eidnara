@@ -32,9 +32,10 @@ use crate::instance::{
 };
 use crate::lifecycle::{LifecycleTransactionLock, is_canonical_payload_digest, lifecycle_dir_path};
 use crate::store_fs::{
-    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, is_stale_mtime, is_temp_name,
-    open_created_dir, open_or_create_parents, open_rel_nofollow, path_names_descriptor,
-    read_dir_names, read_dir_names_partitioned, rename_no_replace, same_snapshot,
+    HARDENED_DIR_FLAGS, MAX_PATH_COMPONENTS, hash_copy, hash_copy_from, is_stale_mtime,
+    is_temp_name, open_created_dir, open_or_create_parents, open_rel_nofollow,
+    path_names_descriptor, read_dir_names, read_dir_names_partitioned, rename_no_replace,
+    same_snapshot,
 };
 
 pub const GENERATIONS_DIR_NAME: &str = "generations";
@@ -285,6 +286,161 @@ pub struct ValidatedGeneration {
     pub digest: String,
     pub manifest: GenerationManifest,
     dir: OwnedFd,
+    /// The descriptors [`GenerationStore::validate_streaming`] opened, one slot per manifest file in manifest order; empty after [`GenerationStore::validate`].
+    retained: Vec<Retained>,
+}
+
+/// A descriptor validation opened; `streamed` while its hash is left to a [`StreamedFile`].
+struct Retained {
+    fd: Option<OwnedFd>,
+    streamed: bool,
+}
+
+/// Heap bytes a generation from [`GenerationStore::validate_streaming`] holds per manifest file for its retained descriptors.
+pub const RETAINED_FILE_BYTES: usize = size_of::<Retained>();
+
+/// A generation [`GenerationStore::validate_streaming`] validated except the hashes of its streamed files. [`Self::finish`] checks those hashes and is the only way to the [`ValidatedGeneration`].
+pub struct PendingGeneration {
+    generation: ValidatedGeneration,
+}
+
+/// A streamed file read once from its start; every byte read is hashed, and [`PendingGeneration::finish`] hashes the rest and checks the whole against the manifest.
+pub struct StreamedFile {
+    fd: OwnedFd,
+    index: usize,
+    hasher: sha2::Sha256,
+    read: u64,
+    size: u64,
+}
+
+impl StreamedFile {
+    /// Fills `into` with the file's next bytes.
+    ///
+    /// # Errors
+    ///
+    /// A read failure, or a file that ends before `into` is full.
+    pub fn read_exact(&mut self, mut into: &mut [u8]) -> std::io::Result<()> {
+        while !into.is_empty() {
+            let count = match rustix::io::read(&self.fd, &mut *into) {
+                Err(rustix::io::Errno::INTR) => continue,
+                result => result?,
+            };
+            if count == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            self.hasher.update(&into[..count]);
+            self.read += count as u64;
+            into = &mut into[count..];
+        }
+        Ok(())
+    }
+
+    /// The manifest-declared size the file was checked against.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The bytes from the current offset to the manifest size.
+    ///
+    /// # Errors
+    ///
+    /// A read failure, or a file shorter than its manifest size.
+    pub fn read_rest(&mut self) -> Result<Vec<u8>, GenerationError> {
+        let rest = usize::try_from(self.size.saturating_sub(self.read))
+            .map_err(|_| invalid("file too large to read"))?;
+        let mut bytes = vec![0u8; rest];
+        self.read_exact(&mut bytes)
+            .map_err(|_| invalid("verified file read failed"))?;
+        Ok(bytes)
+    }
+}
+
+impl PendingGeneration {
+    pub fn manifest(&self) -> &GenerationManifest {
+        &self.generation.manifest
+    }
+
+    /// The stream of streamed `rel_path`, from its start. Each stream is taken once.
+    pub fn stream(&mut self, rel_path: &str) -> Result<StreamedFile, GenerationError> {
+        let generation = &mut self.generation;
+        let index = generation
+            .manifest
+            .files
+            .iter()
+            .position(|file| file.path == rel_path)
+            .ok_or_else(|| invalid("file is not named by the manifest"))?;
+        let slot = &mut generation.retained[index];
+        let fd = slot
+            .fd
+            .take_if(|_| slot.streamed)
+            .ok_or_else(|| invalid("file is not streamed or its stream was taken"))?;
+        Ok(StreamedFile {
+            fd,
+            index,
+            hasher: sha2::Sha256::new(),
+            read: 0,
+            size: generation.manifest.files[index].size,
+        })
+    }
+
+    /// Hashes the bytes each stream has not read and every streamed file no stream was taken for, then checks each streamed file's size and hash against the manifest. The descriptors return to the generation rewound, for [`ValidatedGeneration::take_verified_file`].
+    ///
+    /// # Errors
+    ///
+    /// A streamed file whose bytes diverge from the manifest, or whose stream was taken and not returned.
+    pub fn finish(
+        mut self,
+        streams: impl IntoIterator<Item = StreamedFile>,
+    ) -> Result<ValidatedGeneration, GenerationError> {
+        let generation = &mut self.generation;
+        for stream in streams {
+            settle(
+                generation,
+                stream.index,
+                stream.fd,
+                stream.hasher,
+                stream.read,
+            )?;
+        }
+        for index in 0..generation.retained.len() {
+            let slot = &mut generation.retained[index];
+            if let Some(fd) = slot.fd.take_if(|_| slot.streamed) {
+                settle(generation, index, fd, sha2::Sha256::new(), 0)?;
+            }
+        }
+        if generation.retained.iter().any(|slot| slot.streamed) {
+            return Err(invalid("file stream taken and not returned"));
+        }
+        Ok(self.generation)
+    }
+}
+
+/// Hashes streamed file `index` from `fd`'s offset, continuing `hasher` past the `read` bytes before it, checks the whole against the manifest, and retains the rewound descriptor as hashed.
+fn settle(
+    generation: &mut ValidatedGeneration,
+    index: usize,
+    fd: OwnedFd,
+    hasher: sha2::Sha256,
+    read: u64,
+) -> Result<(), GenerationError> {
+    let entry = &generation.manifest.files[index];
+    let (total, sha256) = hash_copy_from(&fd, None, entry.size, hasher, read).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            invalid("file grew past its manifest size")
+        } else {
+            invalid("file read failed")
+        }
+    })?;
+    if total != entry.size || sha256 != entry.sha256 {
+        return Err(invalid("file hash diverges from the manifest"));
+    }
+    rustix::fs::seek(&fd, rustix::fs::SeekFrom::Start(0))
+        .map_err(|_| invalid("file rewind after verification failed"))?;
+    generation.retained[index] = Retained {
+        fd: Some(fd),
+        streamed: false,
+    };
+    Ok(())
 }
 
 /// The wire shape of [`MEMBERS_FILE_NAME`].
@@ -408,6 +564,27 @@ impl ValidatedGeneration {
         Ok(bytes)
     }
 
+    /// The descriptor [`GenerationStore::validate_streaming`] hashed for `rel_path`, rewound, with its shape checked again; its bytes are not hashed a second time. Each descriptor is taken once.
+    ///
+    /// # Errors
+    ///
+    /// A path the generation retains no descriptor for, a descriptor already taken, or a shape that diverges from the manifest.
+    pub fn take_verified_file(&mut self, rel_path: &str) -> Result<OwnedFd, GenerationError> {
+        let index = self
+            .manifest
+            .files
+            .iter()
+            .position(|file| file.path == rel_path)
+            .ok_or_else(|| invalid("file is not named by the manifest"))?;
+        let fd = self
+            .retained
+            .get_mut(index)
+            .and_then(|slot| slot.fd.take_if(|_| !slot.streamed))
+            .ok_or_else(|| invalid("file descriptor is not retained"))?;
+        check_file_shape(&fd, &self.manifest.files[index])?;
+        Ok(fd)
+    }
+
     /// `open_verified_file` opens a manifest-listed file through the retained directory descriptor and rechecks its shape and hash.
     pub fn open_verified_file(&self, rel_path: &str) -> Result<OwnedFd, GenerationError> {
         let entry = self
@@ -450,6 +627,25 @@ fn open_rel_file(dir: &OwnedFd, rel: &str) -> Option<OwnedFd> {
 }
 
 fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), GenerationError> {
+    check_file_shape(fd, entry)?;
+    let (total, sha256) = hash_copy(fd, None, entry.size).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            invalid("file grew past its manifest size")
+        } else {
+            invalid("file read failed")
+        }
+    })?;
+    if total != entry.size || sha256 != entry.sha256 {
+        return Err(invalid("file hash diverges from the manifest"));
+    }
+    // The hash advanced `fd`'s offset, so rewind before returning it to callers.
+    rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0))
+        .map_err(|_| invalid("file rewind after verification failed"))?;
+    Ok(())
+}
+
+/// Checks type, owner, link count, mode, and size against `entry`; the bytes are not read.
+fn check_file_shape(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), GenerationError> {
     // The stager emits only `0o600` and `0o700`; a set-ID or sticky bit in a manifest names
     // permission semantics no generation can legitimately carry.
     if entry.mode & !0o777 != 0 {
@@ -471,19 +667,6 @@ fn verify_file_against_entry(fd: &OwnedFd, entry: &ManifestFile) -> Result<(), G
     if stat.st_size as u64 != entry.size {
         return Err(invalid("file size diverges from the manifest"));
     }
-    let (total, sha256) = hash_copy(fd, None, entry.size).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::InvalidData {
-            invalid("file grew past its manifest size")
-        } else {
-            invalid("file read failed")
-        }
-    })?;
-    if total != entry.size || sha256 != entry.sha256 {
-        return Err(invalid("file hash diverges from the manifest"));
-    }
-    // The hash advanced `fd`'s offset, so rewind before returning it to callers.
-    rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0))
-        .map_err(|_| invalid("file rewind after verification failed"))?;
     Ok(())
 }
 
@@ -680,17 +863,37 @@ impl GenerationStore {
 
     /// Failed validation never selects another generation.
     pub fn validate(&self, digest: &str) -> Result<ValidatedGeneration, GenerationError> {
+        self.validate_keeping(digest, false, &[])
+    }
+
+    /// [`Self::validate`] that keeps open the descriptor it opened for each manifest file, so [`ValidatedGeneration::take_verified_file`] reads a file without hashing it again. Each file in `streamed` has its shape checked and its hash left to the [`StreamedFile`] the caller reads it through, so each of its bytes is read once.
+    pub fn validate_streaming(
+        &self,
+        digest: &str,
+        streamed: &[&str],
+    ) -> Result<PendingGeneration, GenerationError> {
+        let generation = self.validate_keeping(digest, true, streamed)?;
+        Ok(PendingGeneration { generation })
+    }
+
+    fn validate_keeping(
+        &self,
+        digest: &str,
+        retain: bool,
+        streamed: &[&str],
+    ) -> Result<ValidatedGeneration, GenerationError> {
         if !is_canonical_payload_digest(digest) {
             return Err(invalid("generation digest is noncanonical"));
         }
         let Some(dir) = open_child_dir(&self.generations_fd, digest) else {
             return Err(invalid("generation directory is missing or insecure"));
         };
-        let manifest = self.validate_in_dir(&dir, digest)?;
+        let (manifest, retained) = self.validate_in_dir(&dir, digest, retain, streamed)?;
         Ok(ValidatedGeneration {
             digest: digest.to_owned(),
             manifest,
             dir,
+            retained,
         })
     }
 
@@ -794,9 +997,12 @@ impl GenerationStore {
         &self,
         dir: &OwnedFd,
         digest: &str,
-    ) -> Result<GenerationManifest, GenerationError> {
+        retain: bool,
+        streamed: &[&str],
+    ) -> Result<(GenerationManifest, Vec<Retained>), GenerationError> {
         let manifest = Self::read_manifest_in_dir(dir, digest)?;
         let mut expected: BTreeSet<String> = BTreeSet::new();
+        let mut retained = Vec::with_capacity(if retain { manifest.files.len() } else { 0 });
         for entry in &manifest.files {
             // The same path rules the stager enforces bound length and depth before the walk.
             validate_rel_path(&entry.path)?;
@@ -805,7 +1011,18 @@ impl GenerationStore {
             }
             let fd = open_rel_file(dir, &entry.path)
                 .ok_or_else(|| invalid("manifest-listed file is missing"))?;
-            verify_file_against_entry(&fd, entry)?;
+            let streamed = streamed.contains(&entry.path.as_str());
+            if streamed {
+                check_file_shape(&fd, entry)?;
+            } else {
+                verify_file_against_entry(&fd, entry)?;
+            }
+            if retain {
+                retained.push(Retained {
+                    fd: Some(fd),
+                    streamed,
+                });
+            }
         }
         let mut found: BTreeSet<String> = BTreeSet::new();
         walk_generation_tree(dir, "", &expected, &mut found)?;
@@ -819,7 +1036,7 @@ impl GenerationStore {
                 return Err(invalid("manifest-listed file is missing"));
             }
         }
-        Ok(manifest)
+        Ok((manifest, retained))
     }
 
     pub fn available_bytes(&self) -> Result<u64, GenerationError> {
@@ -2828,6 +3045,186 @@ mod tests {
         grown.push(0);
         std::fs::write(dir.join("rows.f32"), &grown).unwrap();
         assert!(generation.read_verified_file("rows.f32").is_err());
+    }
+
+    #[test]
+    fn retained_descriptors_are_taken_once_and_rechecked_for_shape() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5))
+            .map(|i| (i % 249) as u8)
+            .collect();
+        let sources = ["codes.int8", "rows.f32"].map(|name| SourceSpec {
+            rel_path: name.to_owned(),
+            source: write_source(src.path(), name, &payload),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        });
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let dir = store.root().join(GENERATIONS_DIR_NAME).join(&digest);
+        let retained = || {
+            store
+                .validate_streaming(&digest, &[])
+                .and_then(|pending| pending.finish([]))
+                .unwrap()
+        };
+
+        let mut generation = retained();
+        assert_eq!(
+            read_all(generation.take_verified_file("rows.f32").unwrap()),
+            payload
+        );
+        assert!(
+            generation.take_verified_file("rows.f32").is_err(),
+            "a descriptor is taken once"
+        );
+        assert!(generation.take_verified_file("missing").is_err());
+
+        // The retained descriptor's shape is checked when it is taken, not only when it was hashed.
+        let mut generation = retained();
+        let codes = dir.join("codes.int8");
+        std::fs::set_permissions(&codes, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(generation.take_verified_file("codes.int8").is_err());
+        std::fs::set_permissions(&codes, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A path renamed over after validation leaves the hashed inode unlinked, which the shape check refuses.
+        let mut generation = retained();
+        let replacement = dir.join("replacement");
+        std::fs::write(&replacement, &payload).unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&replacement, dir.join("rows.f32")).unwrap();
+        assert!(generation.take_verified_file("rows.f32").is_err());
+
+        // A file grown after validation diverges from its manifest size.
+        let mut generation = retained();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&codes)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &[0]))
+            .unwrap();
+        assert!(generation.take_verified_file("codes.int8").is_err());
+
+        // Plain validation retains nothing to take.
+        std::fs::write(&codes, &payload).unwrap();
+        let mut generation = store.validate(&digest).unwrap();
+        assert!(generation.take_verified_file("codes.int8").is_err());
+    }
+
+    fn read_all(fd: OwnedFd) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        std::fs::File::from(fd).read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn streamed_files_are_hashed_as_read_and_checked_when_validation_finishes() {
+        let root = tempfile::tempdir().expect("root");
+        let src = tempfile::tempdir().expect("src");
+        let store = store_at(root.path());
+        let payload: Vec<u8> = (0..(MAX_MANIFEST_BYTES + 5))
+            .map(|i| (i % 241) as u8)
+            .collect();
+        let sources = ["codes.int8", "rows.f32"].map(|name| SourceSpec {
+            rel_path: name.to_owned(),
+            source: write_source(src.path(), name, &payload),
+            executable: false,
+            expected_size: None,
+            expected_sha256: None,
+        });
+        let digest = store.stage(&sources, &meta(), &BTreeSet::new()).unwrap();
+        let rows = store
+            .root()
+            .join(GENERATIONS_DIR_NAME)
+            .join(&digest)
+            .join("rows.f32");
+
+        // A stream read in part is hashed to its end, and its descriptor returns rewound.
+        let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        assert!(
+            pending.stream("codes.int8").is_err(),
+            "a hashed file has no stream"
+        );
+        let mut stream = pending.stream("rows.f32").unwrap();
+        assert!(
+            pending.stream("rows.f32").is_err(),
+            "a stream is taken once"
+        );
+        let mut head = vec![0u8; 1000];
+        stream.read_exact(&mut head).unwrap();
+        assert_eq!(head, payload[..1000]);
+        assert_eq!(stream.size(), payload.len() as u64);
+        let mut generation = pending.finish([stream]).unwrap();
+        assert_eq!(
+            read_all(generation.take_verified_file("rows.f32").unwrap()),
+            payload
+        );
+        assert_eq!(
+            read_all(generation.take_verified_file("codes.int8").unwrap()),
+            payload
+        );
+
+        // The rest of a stream is the bytes up to its manifest size.
+        let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        let mut stream = pending.stream("rows.f32").unwrap();
+        stream.read_exact(&mut head).unwrap();
+        assert_eq!(stream.read_rest().unwrap(), payload[1000..]);
+        assert!(pending.finish([stream]).is_ok());
+
+        // A streamed file read to its end, or never streamed, verifies; a stream cannot read past the file.
+        let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        let mut stream = pending.stream("rows.f32").unwrap();
+        let mut all = vec![0u8; payload.len()];
+        stream.read_exact(&mut all).unwrap();
+        assert_eq!(
+            stream.read_exact(&mut [0u8]).unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        assert!(pending.finish([stream]).is_ok());
+        let pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        assert!(pending.finish([]).is_ok());
+
+        // A stream taken and dropped leaves its file unhashed, so validation cannot finish.
+        let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        drop(pending.stream("rows.f32").unwrap());
+        assert!(pending.finish([]).is_err());
+
+        // A streamed file's bytes are proven only when validation finishes.
+        let mut changed = payload.clone();
+        changed[payload.len() - 1] ^= 1;
+        std::fs::write(&rows, &changed).unwrap();
+        assert!(store.validate(&digest).is_err());
+        let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        let mut stream = pending.stream("rows.f32").unwrap();
+        stream.read_exact(&mut head).unwrap();
+        assert!(pending.finish([stream]).is_err());
+        let pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+        assert!(pending.finish([]).is_err());
+
+        // A file that grows after validation fails to finish, whether its stream was read to the end or not.
+        for read_first in [true, false] {
+            std::fs::write(&rows, &payload).unwrap();
+            let mut pending = store.validate_streaming(&digest, &["rows.f32"]).unwrap();
+            let mut stream = pending.stream("rows.f32").unwrap();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&rows)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, &[0]))
+                .unwrap();
+            if read_first {
+                stream.read_rest().unwrap();
+            }
+            assert!(
+                matches!(
+                    pending.finish([stream]),
+                    Err(GenerationError::NativePayloadInvalid {
+                        detail: "file grew past its manifest size"
+                    })
+                ),
+                "read first: {read_first}"
+            );
+        }
     }
 
     /// Persisted manifest bytes must equal the canonical serialization of the decoded manifest.

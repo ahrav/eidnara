@@ -7,9 +7,9 @@ preserve distinct occurrence identities even when payload bytes match.
 
 ## Evidence trail
 
-- `rank_order` (`crates/retrieval/src/dense/score.rs:92`) compares
+- `rank_order` (`crates/retrieval/src/dense/score.rs:126`) compares
   `total_cmp` descending, then identifier bytes.
-- `TopK::offer` (`score.rs:160`) admits a row only when it outranks the worst
+- `TopK::offer` (`score.rs:194`) admits a row only when it outranks the worst
   held member, keyed on score and identifier, never on payload.
 - `dense_numerics.rs` `reference_order` sorts with plain comparisons.
 

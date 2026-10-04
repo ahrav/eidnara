@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 
-use daemon::search_projection::{CACHE_KIB, SearchProjection, SearchProjectionError};
+use daemon::search_projection::{CACHE_KIB, MMAP_BYTES, SearchProjection, SearchProjectionError};
 use kernel::source_identity::{Occurrence, Span, select, validate_span};
 use kernel::{
     ArtifactIngestRequest, CommitIntent, DomainSpec, ExportWindow, KernelStore, ProviderEgress,
@@ -132,6 +132,7 @@ fn the_connection_is_verified_owner_only_and_rows_survive_close_and_reopen() {
         assert!(facts.foreign_keys);
         assert_eq!(facts.cache_size, -i64::from(CACHE_KIB));
         assert_eq!(facts.temp_store, 2, "MEMORY");
+        assert_eq!(facts.mmap_size, MMAP_BYTES);
         let path = projection.path().to_path_buf();
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         assert_eq!(mode(&path), 0o600);
@@ -560,6 +561,7 @@ fn a_name_only_remediation_changes_no_persisted_input() {
     for (pragma, wrong, pinned) in [
         ("cache_size", -16, -i64::from(CACHE_KIB)),
         ("temp_store", 0, 2),
+        ("mmap_size", 0, MMAP_BYTES),
     ] {
         projection.set_pragma_for_test(pragma, wrong);
         match projection.verify_connection() {

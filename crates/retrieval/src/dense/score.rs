@@ -88,6 +88,40 @@ pub fn score_block(metric: Metric, query: &[f32], rows: &[&[f32]; BLOCK_ROWS]) -
     }
 }
 
+/// One row's score and sum of squares.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RowSums {
+    /// Accumulation starts at `+0.0` and visits squared coordinates in increasing order.
+    pub sum_of_squares: f64,
+    pub score: f64,
+}
+
+/// [`inner_product`] and the row's sum of squares in one pass: two accumulators, each in coordinate order, so both match their single-purpose loops bit for bit.
+///
+/// Panics on unequal lengths so a shape error can never become a silently truncated score.
+pub fn inner_product_with_squares(query: &[f32], row: &[f32]) -> RowSums {
+    assert_eq!(query.len(), row.len(), "rows of one layout have one length");
+    let mut squares = 0.0f64;
+    let mut sum = 0.0f64;
+    for (q, r) in query.iter().zip(row) {
+        let widened = f64::from(*r);
+        squares += widened * widened;
+        let product = f64::from(*q) * widened;
+        sum += product;
+    }
+    RowSums {
+        sum_of_squares: squares,
+        score: sum,
+    }
+}
+
+/// [`score`] with the row's sum of squares; the metric is matched exhaustively like the single-row form.
+pub fn score_with_squares(metric: Metric, query: &[f32], row: &[f32]) -> RowSums {
+    match metric {
+        Metric::InnerProduct => inner_product_with_squares(query, row),
+    }
+}
+
 /// `total_cmp` orders finite scores; no NaN reaches it because rows are validated finite.
 pub fn rank_order(left: (f64, &str), right: (f64, &str)) -> Ordering {
     right
@@ -174,11 +208,6 @@ impl<T> TopK<T> {
 
     pub fn is_full(&self) -> bool {
         self.heap.len() == self.k.get()
-    }
-
-    /// The payload of the worst-ranked member, the one a full set displaces next.
-    pub fn worst(&self) -> Option<&T> {
-        self.heap.peek().map(|worst| &worst.1)
     }
 
     /// Best first.

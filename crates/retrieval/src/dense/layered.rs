@@ -13,8 +13,7 @@ use storage::GuardedConn;
 
 use super::codec::{self, Metric, RowLayout};
 use super::oracle::{
-    self, ExhaustiveRanking, Lane, OracleBounds, OracleRefusal, PageRow, RowSource, StorageBounds,
-    Walk, Window,
+    self, ExhaustiveRanking, Lane, OracleBounds, OracleRefusal, PageRow, RowSource, Walk, Window,
 };
 use super::resolve::{self, Layer, ResolveRefusal, RowFault, Winner};
 use crate::batch::VectorGeneration;
@@ -61,7 +60,7 @@ pub enum LayeredRefusal {
     Oracle(#[from] OracleRefusal),
 }
 
-/// The walk takes vectors or codes from the resolved layers; a NULL seventh page column defers the row's pending lookup to a separate query.
+/// The oracle's page over live required rows, leaving the vector and pending columns `NULL`: the walk takes vectors or codes from the resolved layers and reads pending work only for a row no layer holds.
 pub(super) static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT o.occurrence_id,o.class,o.source_object_id,o.revision,o.source_artifact_digest,NULL,NULL
@@ -69,16 +68,34 @@ pub(super) static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
          LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
          WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.occurrence_id>?2
          ORDER BY o.occurrence_id
-         LIMIT ?3",
+         LIMIT +?3",
         *oracle::DENSE_CLASSES
     )
 });
 
-/// Merges the winners, in identifier order, with the walk's rows in the same order.
+/// The live population's rows in rowid order for a ranked walk: the rowid, the identifier, and the two identity fields the walk validates.
+/// Rowid order reads each table page once, where identifier order reaches every row through the primary-key index.
+pub(super) static LIVE_ROWID_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT o.rowid,o.occurrence_id,o.source_object_id,o.source_artifact_digest
+         FROM occurrences o
+         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+         WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.rowid>=?2
+         ORDER BY o.rowid
+         LIMIT +?3",
+        *oracle::DENSE_CLASSES
+    )
+});
+
+/// Merges the winners, in identifier order, with the walk's rows in the same order, or finds the winner of a row visited in any order.
 pub(super) struct Cursor<'a> {
     pub winners: Vec<Winner<'a>>,
     next: usize,
     revoked: usize,
+    /// Winners [`Self::find`] returned.
+    found: usize,
+    /// Each distinct leading eight bytes of a winner's identifier and the first winner carrying them, built by the first [`Self::find`]; an empty slot holds `usize::MAX`.
+    firsts: Vec<(u64, usize)>,
     /// The last page read was visited in full and had no rows after it, so every winner still ahead of the cursor is past the live population.
     exhausted: bool,
 }
@@ -89,6 +106,8 @@ impl<'a> Cursor<'a> {
             winners,
             next: 0,
             revoked: 0,
+            found: 0,
+            firsts: Vec::new(),
             exhausted: false,
         }
     }
@@ -112,14 +131,84 @@ impl<'a> Cursor<'a> {
         None
     }
 
+    /// The index of the winner of a row visited in any order; each live row is visited once, so each winner is found at most once.
+    pub fn find(&mut self, visited: &str) -> Option<usize> {
+        if self.firsts.is_empty() && !self.winners.is_empty() {
+            self.index_prefixes();
+        }
+        let key = prefix(visited);
+        let mut slot = self.slot(key);
+        let first = loop {
+            let (held, first) = *self.firsts.get(slot)?;
+            if first == usize::MAX {
+                return None;
+            }
+            if held == key {
+                break first;
+            }
+            slot = (slot + 1) & (self.firsts.len() - 1);
+        };
+        let index = (first..self.winners.len())
+            .take_while(|index| prefix(self.winners[*index].occurrence_id) == key)
+            .find(|index| self.winners[*index].occurrence_id == visited)?;
+        self.found += 1;
+        Some(index)
+    }
+
+    /// An open-addressed table from each distinct identifier prefix to the first winner carrying it, at most half full.
+    fn index_prefixes(&mut self) {
+        let slots = (2 * self.winners.len()).next_power_of_two();
+        self.firsts = vec![(0, usize::MAX); slots];
+        let mut previous = None;
+        for (index, winner) in self.winners.iter().enumerate() {
+            let key = prefix(winner.occurrence_id);
+            if previous == Some(key) {
+                continue;
+            }
+            previous = Some(key);
+            let mut slot = self.slot(key);
+            while self.firsts[slot].1 != usize::MAX {
+                slot = (slot + 1) & (slots - 1);
+            }
+            self.firsts[slot] = (key, index);
+        }
+    }
+
+    fn slot(&self, key: u64) -> usize {
+        let mixed = key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (mixed >> (64 - self.firsts.len().trailing_zeros())) as usize
+    }
+
     pub fn after_page(&mut self, more: bool) {
         self.exhausted = !more;
     }
+
+    /// Winners whose liveness the walk established: those `seek` passed and those `find` returned.
+    fn settled(&self) -> usize {
+        self.next + self.found
+    }
 }
 
-/// A row source that draws the resolved winners through a [`Cursor`].
-pub(super) trait Resolving<'a>: RowSource {
+/// The leading eight bytes of `id`, zero-padded and big-endian, so prefix order never contradicts identifier byte order.
+fn prefix(id: &str) -> u64 {
+    let mut bytes = [0u8; 8];
+    let head = &id.as_bytes()[..id.len().min(8)];
+    bytes[..head.len()].copy_from_slice(head);
+    u64::from_be_bytes(bytes)
+}
+
+/// A row source that draws the resolved winners through a [`Cursor`], and the walk that reads it.
+pub(super) trait Resolving<'a> {
     fn cursor(&self) -> &Cursor<'a>;
+
+    fn walk(
+        &mut self,
+        conn: &GuardedConn<'_>,
+        kernel: &KernelStore,
+        request: &Walk<'_>,
+        budget: &EvalBudget,
+        hook: impl FnMut(Window<'_>),
+    ) -> Result<ExhaustiveRanking, OracleRefusal>;
 }
 
 /// The original f32 row of each resolved winner.
@@ -131,6 +220,17 @@ struct ResolvedRows<'a> {
 impl<'a> Resolving<'a> for ResolvedRows<'a> {
     fn cursor(&self) -> &Cursor<'a> {
         &self.cursor
+    }
+
+    fn walk(
+        &mut self,
+        conn: &GuardedConn<'_>,
+        kernel: &KernelStore,
+        request: &Walk<'_>,
+        budget: &EvalBudget,
+        hook: impl FnMut(Window<'_>),
+    ) -> Result<ExhaustiveRanking, OracleRefusal> {
+        oracle::walk(conn, kernel, request, budget, self, hook)
     }
 }
 
@@ -227,11 +327,9 @@ fn rank_layers_inner(
     budget: &EvalBudget,
     hook: impl FnMut(Window<'_>),
 ) -> Result<LayeredRanking, LayeredRefusal> {
-    let (ranking, _) = walk_resolved(conn, kernel, request, None, budget, hook, |cursor| {
-        ResolvedRows {
-            layers: request.layers,
-            cursor,
-        }
+    let (ranking, _) = walk_resolved(conn, kernel, request, budget, hook, |cursor| ResolvedRows {
+        layers: request.layers,
+        cursor,
     })?;
     Ok(ranking)
 }
@@ -241,7 +339,6 @@ pub(super) fn walk_resolved<'a, S: Resolving<'a>>(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     request: &LayeredQuery<'a>,
-    storage: Option<StorageBounds>,
     budget: &EvalBudget,
     hook: impl FnMut(Window<'_>),
     source: impl FnOnce(Cursor<'a>) -> S,
@@ -276,11 +373,10 @@ pub(super) fn walk_resolved<'a, S: Resolving<'a>>(
         query: request.query,
         authority: request.authority,
         bounds: request.bounds,
-        storage,
     };
-    let ranking = oracle::walk(conn, kernel, &walk, budget, &mut source, hook)?;
+    let ranking = source.walk(conn, kernel, &walk, budget, hook)?;
     let cursor = source.cursor();
-    let remaining = cursor.winners.len() - cursor.next;
+    let remaining = cursor.winners.len() - cursor.settled();
     account.revoked = cursor.revoked;
     // Only a walk whose last page had nothing after it knows that the winners past its last row are not live; how the walk then ended does not matter.
     if cursor.exhausted {
@@ -299,7 +395,7 @@ pub(super) fn walk_resolved<'a, S: Resolving<'a>>(
 
 #[cfg(test)]
 mod tests {
-    use super::LIVE_SQL;
+    use super::{Cursor, LIVE_ROWID_SQL, LIVE_SQL, Winner, prefix};
     use rusqlite::Connection;
 
     #[test]
@@ -327,5 +423,82 @@ mod tests {
             !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
             "{plan:?}"
         );
+    }
+
+    /// A ranked walk reads the table in rowid order, so no page sorts and none reaches rows through the identifier index.
+    #[test]
+    fn the_rowid_page_query_steps_the_table_in_rowid_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", *LIVE_ROWID_SQL))
+            .unwrap()
+            .query_map(rusqlite::params!["gen", 0, 3], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("SEARCH o USING INTEGER PRIMARY KEY (rowid>?)")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+
+    /// Winners that share their leading eight bytes sit in one run behind one table slot; each is found by its full identifier, and an identifier that only shares the prefix is not.
+    #[test]
+    fn find_tells_apart_winners_that_share_a_prefix() {
+        let ids = [
+            "aaaaaaaa",
+            "aaaaaaaa-1",
+            "aaaaaaaa-2",
+            "aaaaaaab",
+            "bbbbbbbb",
+            "c",
+            "cc",
+        ];
+        let winners: Vec<Winner<'_>> = ids
+            .iter()
+            .enumerate()
+            .map(|(row, id)| Winner {
+                occurrence_id: id,
+                layer: 0,
+                row,
+            })
+            .collect();
+        let mut cursor = Cursor::new(winners);
+        for (index, id) in ids.iter().enumerate().rev() {
+            assert_eq!(cursor.find(id), Some(index), "{id}");
+        }
+        for missing in ["aaaaaaaa-3", "aaaaaaa", "b", "ccc", ""] {
+            assert_eq!(cursor.find(missing), None, "{missing}");
+        }
+        assert_eq!(cursor.settled(), ids.len());
+        assert_eq!(Cursor::new(Vec::new()).find("a"), None);
+    }
+
+    #[test]
+    fn prefixes_never_contradict_identifier_order() {
+        let mut ids = vec![
+            "",
+            "a",
+            "ab",
+            "ab\u{0}",
+            "ab\u{0}c",
+            "abcdefgh",
+            "abcdefgh0",
+            "abcdefgi",
+            "b",
+        ];
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for pair in ids.windows(2) {
+            assert!(prefix(pair[0]) <= prefix(pair[1]), "{pair:?}");
+        }
+        assert_eq!(prefix("abcdefgh"), prefix("abcdefgh0"));
     }
 }

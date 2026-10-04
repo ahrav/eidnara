@@ -2,7 +2,7 @@
 //!
 //! Identity is the decision's object id and canonical source revision. The memory domain is selected by its stable id, never its name.
 //!
-//! The materializer consumes the kernel commit log as a registered outbox consumer: the next episode resumes from the durable checkpoint, publication replays by receipt, and retiring an already-retired descriptor is a no-op. Correction, retirement, and approval revocation retire the predecessor's descriptors before any successor's are published, so no snapshot serves both revisions; the retirements reach the projection as tombstones through the shared export. The checkpoint advances only after every decision of a page has been published or retired.
+//! The materializer consumes the kernel commit log as a registered outbox consumer: the next episode resumes from the durable checkpoint, publication replays by receipt, and retiring an already-retired descriptor is a no-op. Correction, retirement, and approval revocation retire the predecessor's descriptors in the commit that publishes any successor's, or an earlier one, so no snapshot serves both revisions; the retirements reach the projection as tombstones through the shared export. The checkpoint advances only after every decision of a page has been published or retired.
 //!
 //! A descriptor's admission records the decision's admission classes as they stood in the publishing transaction, with the decision as `trigger_object_id`. The materializer consumes decision registry rows only; an admission-only disposition of the decision (quarantine, rejection, contradiction, staleness) is recorded on the decision and not on its descriptors, so a reader that must honor it resolves eligibility through the decision the descriptor names.
 
@@ -23,7 +23,8 @@ use serde::Deserialize;
 use crate::canonical_memory::MEMORY_DOMAIN_ID;
 use crate::commit_stream::{CommitStreamBlocked, CommitWalk, drive_commit_pages, outcome_unknown};
 use crate::harness_sources::{
-    CANONICAL_ROLE, PublishError, Representation, SourcePublisher, SourceUnit,
+    CANONICAL_ROLE, KeyedWrite, PublishError, Representation, SourcePublisher, SourceUnit,
+    publish_batch,
 };
 use crate::memory_render::is_positive_memory_category;
 
@@ -75,6 +76,8 @@ pub enum ClaimExclusion {
     Unscoped,
     /// The object id is not a well-formed source-identity value, so the kernel refuses every descriptor keyed by it; none exists to publish or retire.
     MalformedIdentity,
+    /// The publisher refused the representation for a reason no retry of the same decision revision can clear, such as an oversized field or a payload the secret scan rejects, so the representation has no descriptor.
+    PublicationRefused(Representation),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -177,6 +180,44 @@ fn descriptor_ids(subject: &ClaimSubject) -> Result<Vec<String>, OccurrenceRefus
         .collect()
 }
 
+/// A correction retires the object it replaced; a retirement or approval revocation retires the object itself; an insert without a replaced object and an event append retire nothing.
+fn retired_by<'r>(row: &'r kernel::OutboxEntry, change: &'r DecisionChange) -> Option<&'r str> {
+    match change.change_kind.as_str() {
+        DECISION_INSERT_KIND | DECISION_CORRECT_KIND => change.replaced_object_id.as_deref(),
+        DECISION_RETIRE_KIND | APPROVAL_REVOKE_KIND => Some(&row.object_id),
+        _ => None,
+    }
+}
+
+fn retirement_intent(retirement: &Retirement) -> CommitIntent {
+    CommitIntent {
+        producer: PRODUCER.to_owned(),
+        operation_key: format!(
+            "claim-retire:{}:{}",
+            retirement.object_id, retirement.commit_seq
+        ),
+        request_digest: identity_digest(retirement.ids.join("\u{1f}").as_bytes()),
+        actor: CANONICAL_ROLE.to_owned(),
+        cause: "claim descriptor retirement".to_owned(),
+    }
+}
+
+/// Retires each of `ids` that names a live descriptor.
+fn retire_descriptors(
+    envelope: &mut kernel::Envelope<'_>,
+    ids: &[String],
+) -> Result<String, KernelError> {
+    for id in ids {
+        if envelope
+            .object_state(id)?
+            .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
+        {
+            envelope.retire_observation(id)?;
+        }
+    }
+    Ok(String::new())
+}
+
 /// Why an episode stopped short of its target. Nothing durable moved for the refused commit; the next episode starts from the same checkpoint.
 #[derive(Debug)]
 pub enum ClaimBlocked {
@@ -225,19 +266,30 @@ pub enum MaterializationEnd {
     Blocked(ClaimBlocked),
 }
 
-/// Bounds of one maintenance slice: a bootstrap page examines at most `decisions` decision rows carrying at most `decision_bytes` of payload, and a change page is one commit page under `commits`.
+/// Bounds of one maintenance slice: a bootstrap page examines at most `decisions` decision rows carrying at most `decision_bytes` of payload, and a change page is one commit page under `commits`. A page's decisions or retained commits are applied at most `batch` at a time, each batch in one kernel commit.
 #[derive(Debug, Clone, Copy)]
 pub struct ClaimSliceBounds {
     pub decisions: NonZeroUsize,
     pub decision_bytes: NonZeroU64,
     pub commits: CommitPageBounds,
+    pub batch: NonZeroUsize,
 }
 
-/// The runner's position. Bootstrap progress is owned by the process: after a restart the scan begins again from the first decision, and the change history retained from the consumer's registration covers every change the scan races.
+/// A batch closes before its units would exceed either bound, well inside the kernel's descriptors-per-commit limit; a single item past them commits on its own path.
+const BATCH_UNITS: usize = 512;
+const BATCH_TEXT_BYTES: usize = 8 * 1024 * 1024;
+
+/// The runner's position, owned by the process; a restart begins again at `Unregistered`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ClaimProgress {
     #[default]
     Unregistered,
+    /// Retiring the descriptors of `class`'s live inventory after `after` whose decisions are no longer live, canonical claims first and promoted memories second. Slices alternate with change pages as the scan's do.
+    Reconcile {
+        class: OccurrenceClass,
+        after: Option<String>,
+        changes_next: bool,
+    },
     /// Scanning current decisions after `after` in object-id order. Slices alternate between a scan page and a change page, so the durable checkpoint follows retained commits while the scan runs.
     Bootstrap {
         after: Option<String>,
@@ -299,6 +351,80 @@ pub struct ClaimMaterializer<'a> {
     fault: Option<EpisodeFault>,
     /// The running slice's budget; kernel writes and reads that have a budgeted entry wait within it.
     budget: Option<EvalBudget>,
+    /// Decisions or retained commits one kernel commit applies.
+    batch: NonZeroUsize,
+}
+
+/// Descriptor retirements of one invalidated decision, keyed by the commit that invalidated it.
+struct Retirement {
+    object_id: String,
+    commit_seq: i64,
+    ids: Vec<String>,
+}
+
+/// The effects of one bootstrap decision or retained commit: its retirements, then its publications.
+struct BatchItem {
+    /// The retained commit the item applies; `None` for a bootstrap decision.
+    commit_seq: Option<i64>,
+    /// The scanned decision the item completes; `None` for a retained commit.
+    scanned: Option<String>,
+    retirements: Vec<Retirement>,
+    decisions: Vec<(ClaimSubject, DecisionRow, ClaimUnits)>,
+}
+
+impl BatchItem {
+    fn objects(&self) -> impl Iterator<Item = &str> {
+        self.retirements
+            .iter()
+            .map(|retirement| retirement.object_id.as_str())
+            .chain(
+                self.decisions
+                    .iter()
+                    .map(|(subject, _, _)| subject.object_id.as_str()),
+            )
+    }
+
+    fn units(&self) -> usize {
+        self.decisions
+            .iter()
+            .map(|(_, _, units)| units.units.len())
+            .sum()
+    }
+
+    fn text_bytes(&self) -> usize {
+        self.decisions
+            .iter()
+            .flat_map(|(_, _, units)| &units.units)
+            .map(|unit| unit.text.len())
+            .sum()
+    }
+}
+
+/// Items whose effects commit together. No two items touch one decision object, so the batch may apply every retirement before every publication.
+#[derive(Default)]
+struct Batch {
+    items: Vec<BatchItem>,
+    objects: std::collections::HashSet<String>,
+    units: usize,
+    text_bytes: usize,
+}
+
+impl Batch {
+    /// Whether `item` may join without passing the batch bounds or touching a decision object an earlier item touches.
+    fn admits(&self, item: &BatchItem, limit: NonZeroUsize) -> bool {
+        self.items.is_empty()
+            || (self.items.len() < limit.get()
+                && self.units + item.units() <= BATCH_UNITS
+                && self.text_bytes + item.text_bytes() <= BATCH_TEXT_BYTES
+                && item.objects().all(|object| !self.objects.contains(object)))
+    }
+
+    fn push(&mut self, item: BatchItem) {
+        self.objects.extend(item.objects().map(str::to_owned));
+        self.units += item.units();
+        self.text_bytes += item.text_bytes();
+        self.items.push(item);
+    }
 }
 
 enum Stop {
@@ -362,10 +488,11 @@ impl<'a> ClaimMaterializer<'a> {
             egress,
             fault: None,
             budget: None,
+            batch: NonZeroUsize::MIN,
         }
     }
 
-    /// Registers the consumer and acknowledges through the registration commit, so the first episode starts after every commit that preceded registration; decisions committed before it are not materialized. A repeated call replays the receipt and acknowledges nothing the checkpoint has already passed.
+    /// Registers the consumer when it is absent and acknowledges through the registration commit, so the first episode materializes decisions from later commits. A call for a registered consumer returns at once and preserves its checkpoint.
     ///
     /// # Errors
     ///
@@ -379,36 +506,35 @@ impl<'a> ClaimMaterializer<'a> {
         budget: Option<&EvalBudget>,
         now: i64,
     ) -> Result<(), KernelError> {
-        let register = |operation_key: String| {
-            let intent = CommitIntent {
-                producer: PRODUCER.to_owned(),
-                operation_key,
-                request_digest: identity_digest(CLAIM_CONSUMER.as_bytes()),
-                actor: CANONICAL_ROLE.to_owned(),
-                cause: "claim consumer registration".to_owned(),
-            };
-            let operation = |envelope: &mut kernel::Envelope<'_>| {
-                envelope.register_outbox_consumer(CLAIM_CONSUMER, now)?;
-                Ok(String::new())
-            };
-            match budget {
-                Some(budget) => kernel.commit_within_budget(budget, intent, operation),
-                None => kernel.commit(intent, operation),
-            }
-        };
         let read_checkpoint = || match budget {
             Some(budget) => kernel.outbox_consumer_checkpoint_within_budget(budget, CLAIM_CONSUMER),
             None => kernel.outbox_consumer_checkpoint(CLAIM_CONSUMER),
         };
-        let mut receipt = register(format!("register:{CLAIM_CONSUMER}"))?;
-        let mut checkpoint = read_checkpoint()?;
-        // A consumer removed after its first registration leaves that receipt to replay without registering anything, so the runner registers again under a key that names the replayed commit.
-        if checkpoint.is_none() && receipt.replayed {
-            receipt = register(format!("register:{CLAIM_CONSUMER}:{}", receipt.commit_seq))?;
-            checkpoint = read_checkpoint()?;
+        if read_checkpoint()?.is_some() {
+            return Ok(());
         }
-        // The kernel registers a consumer at the oldest retained outbox commit. A replayed receipt carries the first registration's commit, so the guard keeps a later call from moving an advanced checkpoint.
-        let checkpoint = checkpoint.ok_or(KernelError::NotFound)?;
+        let tip = match budget {
+            Some(budget) => kernel.tip_within_budget(budget)?,
+            None => kernel.tip()?,
+        };
+        // Every registration and removal is a commit, so the tip read while the consumer is absent keys this registration alone.
+        let intent = CommitIntent {
+            producer: PRODUCER.to_owned(),
+            operation_key: format!("register:{CLAIM_CONSUMER}@{tip}"),
+            request_digest: identity_digest(CLAIM_CONSUMER.as_bytes()),
+            actor: CANONICAL_ROLE.to_owned(),
+            cause: "claim consumer registration".to_owned(),
+        };
+        let operation = |envelope: &mut kernel::Envelope<'_>| {
+            envelope.register_outbox_consumer(CLAIM_CONSUMER, now)?;
+            Ok(String::new())
+        };
+        let receipt = match budget {
+            Some(budget) => kernel.commit_within_budget(budget, intent, operation),
+            None => kernel.commit(intent, operation),
+        }?;
+        // The kernel registers a consumer at the oldest retained outbox commit. The skipped history is covered by the reconciliation and scan that follow registration.
+        let checkpoint = read_checkpoint()?.ok_or(KernelError::NotFound)?;
         if checkpoint < receipt.commit_seq {
             match budget {
                 Some(budget) => {
@@ -458,11 +584,11 @@ impl<'a> ClaimMaterializer<'a> {
         self.run_episode_inner(bounds, now)
     }
 
-    /// Runs one bounded maintenance slice from `progress` and advances it: the first slice registers the consumer, bootstrap slices alternate between one page of current decisions and one retained commit page, and change slices apply one retained commit page. The report ends `ReachedTarget` only once the scan is complete and the checkpoint sits at the captured tip.
+    /// Runs one bounded maintenance slice from `progress` and advances it: the first slice registers the consumer, reconciliation slices retire live descriptors whose decisions are no longer live, bootstrap slices publish one page of current decisions, and each of those alternates with one retained commit page; change slices apply one retained commit page. The report ends `ReachedTarget` only once reconciliation and the scan are complete and the checkpoint sits at the captured tip.
     ///
-    /// The consumer is registered before the scan reads any decision, so every change the scan races is retained for replay. The scan publishes only decisions created at or before the durable checkpoint read in the same slice; a later decision is published by the replay of its own commit, which retires the predecessor it replaced first. The proof assumes one writer of the consumer: the daemon's lifecycle owner serializes its slices, and no other production path acknowledges it.
+    /// The runner registers the consumer before reading decisions, so concurrent changes stay retained for replay. The scan publishes a decision only when its creation and latest fold into it are at or before the durable checkpoint read in the same slice; replay retires predecessors in the commit that publishes their successors, or an earlier one. The daemon's lifecycle owner serializes consumer slices and owns production acknowledgements.
     ///
-    /// Kernel reads, the retirement and descriptor commits, and the acknowledgement wait within `budget`; artifact retention has no budgeted entry. A slice starts its first decision or commit whatever the budget, stops between later ones once `budget` is exhausted, and acknowledges every fully applied commit within a short grace.
+    /// A slice applies its page's decisions or commits in batches of at most `bounds.batch`, each batch's artifact references, retirements, and descriptors in one kernel commit. Kernel reads, the batch commit's wait for the writer, and the acknowledgement wait within `budget`; staging a batch's artifact bytes runs before that wait and has no budget. A slice starts its first batch whatever the budget, stops between later batches once `budget` is exhausted, and acknowledges every fully applied commit within a short grace. A batch refused for any reason other than an exhausted budget applies its items one at a time under the same rule, which reports the refusal.
     ///
     /// # Errors
     ///
@@ -500,16 +626,44 @@ impl<'a> ClaimMaterializer<'a> {
         now: i64,
     ) -> Result<MaterializationReport, KernelError> {
         self.budget = Some(budget.clone());
+        self.batch = bounds.batch;
         let mut report = MaterializationReport::start(0, MaterializationEnd::Continues);
         let outcome = match progress.clone() {
             ClaimProgress::Unregistered => Self::register_within(self.kernel, Some(budget), now)
                 .map(|()| {
-                    *progress = ClaimProgress::Bootstrap {
+                    *progress = ClaimProgress::Reconcile {
+                        class: OccurrenceClass::CanonicalClaims,
                         after: None,
                         changes_next: false,
                     };
                 })
                 .map_err(Stop::Failed),
+            ClaimProgress::Reconcile {
+                class,
+                after,
+                changes_next: true,
+            } => {
+                *progress = ClaimProgress::Reconcile {
+                    class,
+                    after,
+                    changes_next: false,
+                };
+                self.change_page(bounds.commits, budget, now, &mut report)
+            }
+            ClaimProgress::Reconcile {
+                class,
+                after,
+                changes_next: false,
+            } => {
+                // A `reconcile_page` error preserves the cursor with `changes_next: true`.
+                *progress = ClaimProgress::Reconcile {
+                    class,
+                    after: after.clone(),
+                    changes_next: true,
+                };
+                self.reconcile_page(class, after, bounds, budget, &mut report)
+                    .map(|next| *progress = next)
+            }
             ClaimProgress::Bootstrap {
                 after,
                 changes_next: true,
@@ -523,9 +677,15 @@ impl<'a> ClaimMaterializer<'a> {
             ClaimProgress::Bootstrap {
                 after,
                 changes_next: false,
-            } => self
-                .bootstrap_page(after, bounds, budget, now, &mut report)
-                .map(|next| *progress = next),
+            } => {
+                // A `bootstrap_page` error preserves the cursor with `changes_next: true`.
+                *progress = ClaimProgress::Bootstrap {
+                    after: after.clone(),
+                    changes_next: true,
+                };
+                self.bootstrap_page(after, bounds, budget, now, &mut report)
+                    .map(|next| *progress = next)
+            }
             ClaimProgress::Changes => self.change_page(bounds.commits, budget, now, &mut report),
         };
         self.budget = None;
@@ -541,9 +701,10 @@ impl<'a> ClaimMaterializer<'a> {
             }
             Err(Stop::Failed(error)) => return Err(error),
         }
-        // A change page that reaches its target during the scan is not catch-up.
-        if matches!(progress, ClaimProgress::Bootstrap { .. })
-            && matches!(report.end, MaterializationEnd::ReachedTarget)
+        if matches!(
+            progress,
+            ClaimProgress::Reconcile { .. } | ClaimProgress::Bootstrap { .. }
+        ) && matches!(report.end, MaterializationEnd::ReachedTarget)
         {
             report.end = MaterializationEnd::Continues;
         }
@@ -558,6 +719,83 @@ impl<'a> ClaimMaterializer<'a> {
         {
             budget.cancel();
         }
+    }
+
+    fn object_states(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Option<kernel::ObjectState>>, KernelError> {
+        let (_, states) = match &self.budget {
+            Some(budget) => self
+                .kernel
+                .object_states_within_budget(budget, object_ids)?,
+            None => self.kernel.object_states(object_ids)?,
+        };
+        Ok(states)
+    }
+
+    fn decisions_as_of(
+        &self,
+        object_ids: &[String],
+        requested: i64,
+    ) -> Result<Vec<DecisionRow>, KernelError> {
+        match &self.budget {
+            Some(budget) => self
+                .kernel
+                .decisions_for_objects_as_of_within_budget(object_ids, requested, budget),
+            None => self
+                .kernel
+                .decisions_for_objects_as_of(object_ids, requested),
+        }
+    }
+
+    /// Retires the descriptors of every decision in one page of `class`'s live inventory that is no longer live, and returns where the reconciliation stands after it. Registration acknowledges past history the consumer did not apply, so a decision invalidated while the consumer was absent is retired here; the retirement key names the commit that invalidated the decision, which is the key the replay of that commit uses.
+    fn reconcile_page(
+        &self,
+        class: OccurrenceClass,
+        after: Option<String>,
+        bounds: ClaimSliceBounds,
+        budget: &EvalBudget,
+        report: &mut MaterializationReport,
+    ) -> Result<ClaimProgress, Stop> {
+        let tip = self.kernel.tip_within_budget(budget)?;
+        report.target = tip;
+        let page = self.kernel.live_source_descriptors(
+            class,
+            tip,
+            after.as_deref(),
+            bounds.decisions,
+            budget,
+        )?;
+        let decisions: Vec<String> = page
+            .rows
+            .iter()
+            .filter_map(|row| row.detail.identity.first().map(|(_, id)| id.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let states = self.object_states(&decisions)?;
+        for (object_id, state) in decisions.iter().zip(states) {
+            if let Some(invalidated) = state.and_then(|state| state.object.invalidated_commit_seq) {
+                self.retire_decision(object_id, invalidated, report)?;
+            }
+        }
+        Ok(match (page.next, class) {
+            (Some(next), class) => ClaimProgress::Reconcile {
+                class,
+                after: Some(next),
+                changes_next: true,
+            },
+            (None, OccurrenceClass::CanonicalClaims) => ClaimProgress::Reconcile {
+                class: OccurrenceClass::PromotedMemory,
+                after: None,
+                changes_next: true,
+            },
+            (None, _) => ClaimProgress::Bootstrap {
+                after: None,
+                changes_next: false,
+            },
+        })
     }
 
     /// Publishes one page of current decisions and returns where the scan stands after it.
@@ -585,40 +823,43 @@ impl<'a> ClaimMaterializer<'a> {
         )?;
         let mut done = after;
         let mut completed = 0;
-        for (object, decision) in &page.decisions {
-            if completed > 0 && budget.is_exhausted() {
+        let mut batch = Batch::default();
+        for kernel::PagedDecision {
+            object,
+            decision,
+            lineage_commit_seq,
+        } in &page.decisions
+        {
+            let mut item = BatchItem {
+                commit_seq: None,
+                scanned: Some(object.object_id.clone()),
+                retirements: Vec::new(),
+                decisions: Vec::new(),
+            };
+            if *lineage_commit_seq <= checkpoint {
+                let subject = ClaimSubject::from_object(object)?;
+                let units = claim_units(&subject, decision)?;
+                item.decisions.push((subject, decision.clone(), units));
+            }
+            if !batch.admits(&item, self.batch)
+                && let Some(stopped) =
+                    self.flush_scan(&mut batch, &mut done, &mut completed, budget, now, report)?
+            {
+                return Ok(stopped);
+            }
+            if completed > 0 && batch.items.is_empty() && budget.is_exhausted() {
                 report.end = MaterializationEnd::Exhausted;
                 return Ok(ClaimProgress::Bootstrap {
                     after: done,
                     changes_next: true,
                 });
             }
-            if object.created_commit_seq <= checkpoint {
-                let subject = ClaimSubject::from_object(object)?;
-                match self.publish_units(&subject, decision, now, report) {
-                    Ok(()) => report.bootstrapped += 1,
-                    Err(Stop::Blocked(blocked)) => {
-                        report.end = MaterializationEnd::Blocked(blocked);
-                        return Ok(ClaimProgress::Bootstrap {
-                            after: done,
-                            changes_next: true,
-                        });
-                    }
-                    // The decisions before this one are complete, so the cursor keeps them and the next slice runs a change page.
-                    Err(Stop::Failed(KernelError::Deadline)) if completed > 0 => {
-                        report.end = MaterializationEnd::Exhausted;
-                        return Ok(ClaimProgress::Bootstrap {
-                            after: done,
-                            changes_next: true,
-                        });
-                    }
-                    Err(stop) => return Err(stop),
-                }
-            }
-            done = Some(object.object_id.clone());
-            completed += 1;
-            report.scanned = completed;
-            self.exhaust_on_fault(completed);
+            batch.push(item);
+        }
+        if let Some(stopped) =
+            self.flush_scan(&mut batch, &mut done, &mut completed, budget, now, report)?
+        {
+            return Ok(stopped);
         }
         Ok(match page.next {
             Some(next) => ClaimProgress::Bootstrap {
@@ -627,6 +868,114 @@ impl<'a> ClaimMaterializer<'a> {
             },
             None => ClaimProgress::Changes,
         })
+    }
+
+    /// Publishes the batch's scanned decisions together and moves `done` past them. A refused batch publishes them one at a time and stops between them once `budget` is exhausted. `Some` is where the scan stops early, with `report.end` saying why.
+    fn flush_scan(
+        &self,
+        batch: &mut Batch,
+        done: &mut Option<String>,
+        completed: &mut usize,
+        budget: &EvalBudget,
+        now: i64,
+        report: &mut MaterializationReport,
+    ) -> Result<Option<ClaimProgress>, Stop> {
+        let items = std::mem::take(batch).items;
+        if items.is_empty() {
+            return Ok(None);
+        }
+        let stopped = |end, report: &mut MaterializationReport, done: &Option<String>| {
+            report.end = end;
+            Ok(Some(ClaimProgress::Bootstrap {
+                after: done.clone(),
+                changes_next: true,
+            }))
+        };
+        match self.commit_batch(&items, now, report) {
+            Ok(true) => {
+                *completed += items.len();
+                for item in items {
+                    report.bootstrapped += item.decisions.len();
+                    *done = item.scanned;
+                }
+                report.scanned = *completed;
+                self.exhaust_on_fault(*completed);
+                return Ok(None);
+            }
+            Ok(false) => {}
+            // The decisions before this batch are complete, so the cursor keeps them and the next slice runs a change page.
+            Err(Stop::Failed(KernelError::Deadline)) if *completed > 0 => {
+                return stopped(MaterializationEnd::Exhausted, report, done);
+            }
+            Err(stop) => return Err(stop),
+        }
+        for item in items {
+            if *completed > 0 && budget.is_exhausted() {
+                return stopped(MaterializationEnd::Exhausted, report, done);
+            }
+            for (subject, decision, _) in &item.decisions {
+                match self.publish_units(subject, decision, now, report) {
+                    Ok(()) => report.bootstrapped += 1,
+                    Err(Stop::Blocked(blocked)) => {
+                        return stopped(MaterializationEnd::Blocked(blocked), report, done);
+                    }
+                    Err(Stop::Failed(KernelError::Deadline)) if *completed > 0 => {
+                        return stopped(MaterializationEnd::Exhausted, report, done);
+                    }
+                    Err(stop) => return Err(stop),
+                }
+            }
+            *done = item.scanned;
+            *completed += 1;
+            report.scanned = *completed;
+            self.exhaust_on_fault(*completed);
+        }
+        Ok(None)
+    }
+
+    /// Catches the consumer up to the tip within `budget`, then deregisters it. Successful deregistration or [`KernelError::NotFound`] resets `progress` to `Unregistered` and returns `true`. The method returns `false` and preserves `progress` when `progress` is already `Unregistered`, catch-up stays incomplete, or deregistration reports [`KernelError::ConsumerPending`].
+    pub fn release(
+        &mut self,
+        progress: &mut ClaimProgress,
+        bounds: ClaimSliceBounds,
+        budget: &EvalBudget,
+        now: i64,
+    ) -> Result<bool, KernelError> {
+        if *progress == ClaimProgress::Unregistered {
+            return Ok(false);
+        }
+        let mut changes = ClaimProgress::Changes;
+        loop {
+            let report = self.run_slice(&mut changes, bounds, budget, now)?;
+            match &report.end {
+                MaterializationEnd::ReachedTarget if report.commits_consumed == 0 => break,
+                MaterializationEnd::ReachedTarget | MaterializationEnd::Continues
+                    if !budget.is_exhausted() => {}
+                _ => return Ok(false),
+            }
+        }
+        let tip = self.kernel.tip_within_budget(budget)?;
+        let intent = CommitIntent {
+            producer: PRODUCER.to_owned(),
+            operation_key: format!("deregister:{CLAIM_CONSUMER}@{tip}"),
+            request_digest: identity_digest(CLAIM_CONSUMER.as_bytes()),
+            actor: CANONICAL_ROLE.to_owned(),
+            cause: "claim consumer release".to_owned(),
+        };
+        let removed = self
+            .kernel
+            .commit_within_budget(budget, intent, |envelope| {
+                envelope.deregister_outbox_consumer(CLAIM_CONSUMER, now)?;
+                Ok(String::new())
+            });
+        match removed {
+            Ok(_) | Err(KernelError::NotFound) => {
+                *progress = ClaimProgress::Unregistered;
+                Ok(true)
+            }
+            Err(KernelError::ConsumerPending) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Applies one retained commit page from the durable checkpoint toward a captured target and acknowledges every commit it fully applied.
@@ -744,7 +1093,7 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
-    /// Retires and publishes every decision change of `page` in commit order and records in `applied` the last commit whose effects are complete. A `budget` that runs out stops the page between commits; the first commit starts whatever the budget, and its own budgeted writes may still refuse. Replaying the rest is idempotent.
+    /// Retires and publishes every decision change of `page` in commit order and records in `applied` the last commit whose effects are complete. Commits are applied in batches of at most `self.batch`, each in one kernel commit; a commit that touches a decision an earlier commit of the batch touched starts the next batch. A `budget` that runs out stops the page between batches; the first batch starts whatever the budget, and its own budgeted writes may still refuse. Replaying the rest is idempotent.
     fn apply_page(
         &self,
         page: &kernel::CommitPage,
@@ -753,26 +1102,112 @@ impl<'a> ClaimMaterializer<'a> {
         budget: Option<&EvalBudget>,
         applied: &mut i64,
     ) -> Result<(), Stop> {
-        for (index, commit) in page.commits.iter().enumerate() {
-            if index > 0 && budget.is_some_and(EvalBudget::is_exhausted) {
+        let exhausted = || budget.is_some_and(EvalBudget::is_exhausted);
+        let mut batch = Batch::default();
+        let mut consumed = 0;
+        for commit in &page.commits {
+            let item = match self.change_item(commit) {
+                Ok(item) => item,
+                Err(stop) => {
+                    self.flush_changes(&mut batch, &mut consumed, now, report, budget, applied)?;
+                    return Err(stop);
+                }
+            };
+            if !batch.admits(&item, self.batch) {
+                self.flush_changes(&mut batch, &mut consumed, now, report, budget, applied)?;
+                if exhausted() {
+                    return Err(KernelError::Deadline.into());
+                }
+            }
+            batch.push(item);
+        }
+        self.flush_changes(&mut batch, &mut consumed, now, report, budget, applied)
+    }
+
+    /// Reads what one retained commit changes. Every predecessor a commit invalidates is retired before any successor in it is published, whatever order the rows were written in, so no commit holds a predecessor beside its successor.
+    fn change_item(&self, commit: &kernel::CompleteCommit) -> Result<BatchItem, Stop> {
+        let changes = commit
+            .rows
+            .iter()
+            .filter(|row| row.object_kind == "decision")
+            .map(|row| Ok((row, self.parse_change(row, commit.commit_seq)?)))
+            .collect::<Result<Vec<_>, Stop>>()?;
+        let mut item = BatchItem {
+            commit_seq: Some(commit.commit_seq),
+            scanned: None,
+            retirements: Vec::new(),
+            decisions: Vec::new(),
+        };
+        for (row, change) in &changes {
+            if let Some(target) = retired_by(row, change)
+                && !item
+                    .retirements
+                    .iter()
+                    .any(|retirement| retirement.object_id == target)
+                && let Some(retirement) = self.retirement(target, commit.commit_seq)?
+            {
+                item.retirements.push(retirement);
+            }
+        }
+        for (row, change) in &changes {
+            if !matches!(
+                change.change_kind.as_str(),
+                DECISION_INSERT_KIND | DECISION_CORRECT_KIND
+            ) {
+                continue;
+            }
+            let subject = ClaimSubject {
+                object_id: row.object_id.clone(),
+                domain_id: change.object.domain_id.clone(),
+                revision: row.source_revision,
+                sensitivity: row.sensitivity,
+            };
+            // The commit that changed the decision also invalidated it; its descriptors, if any, are retired by that commit's own rows.
+            if let Some(decision) = self.decision_at(&subject.object_id, commit.commit_seq)? {
+                let units = claim_units(&subject, &decision)?;
+                item.decisions.push((subject, decision, units));
+            }
+        }
+        Ok(item)
+    }
+
+    /// Commits the batch's commits together and acknowledges nothing; a refused batch applies its commits one at a time and stops between them once `budget` is exhausted.
+    fn flush_changes(
+        &self,
+        batch: &mut Batch,
+        consumed: &mut usize,
+        now: i64,
+        report: &mut MaterializationReport,
+        budget: Option<&EvalBudget>,
+        applied: &mut i64,
+    ) -> Result<(), Stop> {
+        let items = std::mem::take(batch).items;
+        if items.is_empty() {
+            return Ok(());
+        }
+        if self.commit_batch(&items, now, report)? {
+            for item in &items {
+                report.commits_consumed += 1;
+                *applied = item.commit_seq.expect("a change item names its commit");
+            }
+            *consumed += items.len();
+            self.exhaust_on_fault(*consumed);
+            return Ok(());
+        }
+        for item in &items {
+            if *consumed > 0 && budget.is_some_and(EvalBudget::is_exhausted) {
                 return Err(KernelError::Deadline.into());
             }
-            let changes = commit
-                .rows
-                .iter()
-                .filter(|row| row.object_kind == "decision")
-                .map(|row| Ok((row, self.parse_change(row, commit.commit_seq)?)))
-                .collect::<Result<Vec<_>, Stop>>()?;
-            // Every predecessor a commit invalidates is retired before any successor in it is published, whatever order the rows were written in, so no commit holds a predecessor beside its successor.
-            for (row, change) in &changes {
-                self.retire_change(row, change, commit.commit_seq, report)?;
+            for retirement in &item.retirements {
+                self.retire(retirement, report)?;
             }
-            for (row, change) in &changes {
-                self.publish_change(row, change, commit.commit_seq, now, report)?;
+            for (subject, decision, _) in &item.decisions {
+                self.publish_units(subject, decision, now, report)?;
             }
             report.commits_consumed += 1;
-            *applied = commit.commit_seq;
-            self.exhaust_on_fault(index + 1);
+            *applied = item.commit_seq.expect("a change item names its commit");
+            *consumed += 1;
+            self.exhaust_on_fault(*consumed);
         }
         Ok(())
     }
@@ -799,63 +1234,6 @@ impl<'a> ClaimMaterializer<'a> {
         Ok(change)
     }
 
-    /// A correction retires the object it replaced; a retirement or approval revocation retires the object itself.
-    fn retire_change(
-        &self,
-        row: &kernel::OutboxEntry,
-        change: &DecisionChange,
-        commit_seq: i64,
-        report: &mut MaterializationReport,
-    ) -> Result<(), Stop> {
-        match change.change_kind.as_str() {
-            DECISION_INSERT_KIND | DECISION_CORRECT_KIND => match &change.replaced_object_id {
-                Some(replaced) => self.retire_decision(replaced, commit_seq, report),
-                None => Ok(()),
-            },
-            DECISION_RETIRE_KIND | APPROVAL_REVOKE_KIND => {
-                self.retire_decision(&row.object_id, commit_seq, report)
-            }
-            _ => Ok(()),
-        }
-    }
-
-    /// An insert or correction publishes the object's units; an event append changes no text and produces nothing.
-    fn publish_change(
-        &self,
-        row: &kernel::OutboxEntry,
-        change: &DecisionChange,
-        commit_seq: i64,
-        now: i64,
-        report: &mut MaterializationReport,
-    ) -> Result<(), Stop> {
-        match change.change_kind.as_str() {
-            DECISION_INSERT_KIND | DECISION_CORRECT_KIND => {
-                let subject = ClaimSubject {
-                    object_id: row.object_id.clone(),
-                    domain_id: change.object.domain_id.clone(),
-                    revision: row.source_revision,
-                    sensitivity: row.sensitivity,
-                };
-                self.publish_decision(&subject, commit_seq, now, report)
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn publish_decision(
-        &self,
-        subject: &ClaimSubject,
-        commit_seq: i64,
-        now: i64,
-        report: &mut MaterializationReport,
-    ) -> Result<(), Stop> {
-        let Some(decision) = self.decision_at(&subject.object_id, commit_seq)? else {
-            // The commit that changed the decision also invalidated it; its descriptors, if any, are retired by that commit's own rows.
-            return Ok(());
-        };
-        self.publish_units(subject, &decision, now, report)
-    }
-
     fn publish_units(
         &self,
         subject: &ClaimSubject,
@@ -878,18 +1256,26 @@ impl<'a> ClaimMaterializer<'a> {
             sensitivity: subject.sensitivity,
         };
         for unit in &units.units {
-            let published = publisher
-                .publish_within(unit, now, self.budget.as_ref())
-                .map_err(|error| match error {
-                    PublishError::Kernel {
-                        error: KernelError::Deadline,
-                        ..
-                    } => Stop::Failed(KernelError::Deadline),
-                    error => Stop::Blocked(ClaimBlocked::Publish {
+            let published = match publisher.publish_within(unit, now, self.budget.as_ref()) {
+                Ok(published) => published,
+                Err(PublishError::Kernel {
+                    error: KernelError::Deadline,
+                    ..
+                }) => return Err(Stop::Failed(KernelError::Deadline)),
+                Err(error) if error.is_permanent() => {
+                    report.exclusions.push((
+                        subject.object_id.clone(),
+                        ClaimExclusion::PublicationRefused(unit.representation),
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Stop::Blocked(ClaimBlocked::Publish {
                         object_id: subject.object_id.clone(),
                         error,
-                    }),
-                })?;
+                    }));
+                }
+            };
             if published.replayed {
                 report.replayed += 1;
             } else {
@@ -906,9 +1292,15 @@ impl<'a> ClaimMaterializer<'a> {
         commit_seq: i64,
         report: &mut MaterializationReport,
     ) -> Result<(), Stop> {
-        let (_, states) = self
-            .kernel
-            .object_states(std::slice::from_ref(&object_id.to_owned()))?;
+        match self.retirement(object_id, commit_seq)? {
+            Some(retirement) => self.retire(&retirement, report),
+            None => Ok(()),
+        }
+    }
+
+    /// The descriptors `object_id` could have published, retired under the key of `commit_seq`; `None` for an identity the encoding refuses, which was refused at publication too, so no descriptor of it exists.
+    fn retirement(&self, object_id: &str, commit_seq: i64) -> Result<Option<Retirement>, Stop> {
+        let states = self.object_states(std::slice::from_ref(&object_id.to_owned()))?;
         let Some(state) = states.into_iter().next().flatten() else {
             return Err(ClaimBlocked::DecisionUnreadable {
                 object_id: object_id.to_owned(),
@@ -916,28 +1308,23 @@ impl<'a> ClaimMaterializer<'a> {
             }
             .into());
         };
-        // An identity the encoding refuses was refused at publication too, so no descriptor of it exists.
-        let Ok(ids) = descriptor_ids(&ClaimSubject::from_object(&state.object)?) else {
-            return Ok(());
-        };
-        let intent = CommitIntent {
-            producer: PRODUCER.to_owned(),
-            operation_key: format!("claim-retire:{object_id}:{commit_seq}"),
-            request_digest: identity_digest(ids.join("\u{1f}").as_bytes()),
-            actor: CANONICAL_ROLE.to_owned(),
-            cause: "claim descriptor retirement".to_owned(),
-        };
-        let operation = |envelope: &mut kernel::Envelope<'_>| {
-            for id in &ids {
-                if envelope
-                    .object_state(id)?
-                    .is_some_and(|state| state.object.invalidated_commit_seq.is_none())
-                {
-                    envelope.retire_observation(id)?;
-                }
-            }
-            Ok(String::new())
-        };
+        Ok(descriptor_ids(&ClaimSubject::from_object(&state.object)?)
+            .ok()
+            .map(|ids| Retirement {
+                object_id: object_id.to_owned(),
+                commit_seq,
+                ids,
+            }))
+    }
+
+    fn retire(
+        &self,
+        retirement: &Retirement,
+        report: &mut MaterializationReport,
+    ) -> Result<(), Stop> {
+        let intent = retirement_intent(retirement);
+        let operation =
+            |envelope: &mut kernel::Envelope<'_>| retire_descriptors(envelope, &retirement.ids);
         let receipt = match &self.budget {
             Some(budget) => self.kernel.commit_within_budget(budget, intent, operation),
             None => self.kernel.commit(intent, operation),
@@ -949,14 +1336,29 @@ impl<'a> ClaimMaterializer<'a> {
             }
             Err(error) => {
                 return Err(ClaimBlocked::Retire {
-                    object_id: object_id.to_owned(),
+                    object_id: retirement.object_id.clone(),
                     error,
                 }
                 .into());
             }
         }
-        // Counted from durable state, so a replayed receipt reports what the first commit retired.
-        let (_, states) = self.kernel.object_states(&ids)?;
+        self.count_retired(&[retirement], report)
+    }
+
+    /// Counted from durable state, so a replayed receipt reports what the first commit retired.
+    fn count_retired(
+        &self,
+        retirements: &[&Retirement],
+        report: &mut MaterializationReport,
+    ) -> Result<(), Stop> {
+        let ids: Vec<String> = retirements
+            .iter()
+            .flat_map(|retirement| retirement.ids.iter().cloned())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let states = self.object_states(&ids)?;
         report.retired += states
             .iter()
             .filter(|state| {
@@ -968,17 +1370,78 @@ impl<'a> ClaimMaterializer<'a> {
         Ok(())
     }
 
+    /// Commits the effects of `items` in one kernel commit: every retirement, then every publication, each under its own receipt. `Ok(false)` reports a refused batch that committed nothing, which the caller applies item by item to learn the refusal.
+    fn commit_batch(
+        &self,
+        items: &[BatchItem],
+        now: i64,
+        report: &mut MaterializationReport,
+    ) -> Result<bool, Stop> {
+        let decisions: Vec<&(ClaimSubject, DecisionRow, ClaimUnits)> =
+            items.iter().flat_map(|item| &item.decisions).collect();
+        let publishers: Vec<SourcePublisher<'_>> = decisions
+            .iter()
+            .map(|(subject, decision, _)| SourcePublisher {
+                kernel: self.kernel,
+                domain_id: &subject.domain_id,
+                scope_id: decision.scope_id.as_deref(),
+                egress: self.egress,
+                sensitivity: subject.sensitivity,
+            })
+            .collect();
+        let units: Vec<(&SourcePublisher<'_>, &SourceUnit)> = publishers
+            .iter()
+            .zip(&decisions)
+            .flat_map(|(publisher, (_, _, units))| {
+                units.units.iter().map(move |unit| (publisher, unit))
+            })
+            .collect();
+        let retirements: Vec<&Retirement> =
+            items.iter().flat_map(|item| &item.retirements).collect();
+        let writes = retirements
+            .iter()
+            .map(|retirement| KeyedWrite {
+                intent: retirement_intent(retirement),
+                write: Box::new(|envelope: &mut kernel::Envelope<'_>| {
+                    retire_descriptors(envelope, &retirement.ids)
+                }),
+            })
+            .collect();
+        match publish_batch(self.kernel, writes, &units, now, self.budget.as_ref()) {
+            Ok(published) => {
+                for (subject, _, units) in &decisions {
+                    report.exclusions.extend(
+                        units
+                            .exclusions
+                            .iter()
+                            .map(|exclusion| (subject.object_id.clone(), *exclusion)),
+                    );
+                }
+                for published in published {
+                    if published.replayed {
+                        report.replayed += 1;
+                    } else {
+                        report.published += 1;
+                    }
+                }
+                self.count_retired(&retirements, report)?;
+                Ok(true)
+            }
+            Err(KernelError::Deadline) if self.budget.is_some() => {
+                Err(Stop::Failed(KernelError::Deadline))
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
     /// `None` when no decision row is visible at `commit_seq` because the commit itself invalidated the object: it was created and invalidated together, or an existing survivor absorbed a fold and was then retired or corrected. The same commit carries the row that retires its descriptors.
     fn decision_at(&self, object_id: &str, commit_seq: i64) -> Result<Option<DecisionRow>, Stop> {
-        let mut rows = self
-            .kernel
-            .decisions_for_objects_as_of(std::slice::from_ref(&object_id.to_owned()), commit_seq)?;
+        let mut rows =
+            self.decisions_as_of(std::slice::from_ref(&object_id.to_owned()), commit_seq)?;
         if let Some(row) = rows.pop() {
             return Ok(Some(row));
         }
-        let (_, states) = self
-            .kernel
-            .object_states(std::slice::from_ref(&object_id.to_owned()))?;
+        let states = self.object_states(std::slice::from_ref(&object_id.to_owned()))?;
         match states.into_iter().next().flatten() {
             Some(state) if state.object.invalidated_commit_seq == Some(commit_seq) => Ok(None),
             _ => Err(ClaimBlocked::DecisionUnreadable {

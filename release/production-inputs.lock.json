@@ -94,8 +94,8 @@
       "payload_path": "payload/model/gte-modernbert-base-f32/manifest.json",
       "provenance": "Project-authored schema-1 manifest for the Alibaba-NLP/gte-modernbert-base f32 ONNX export, locked tokenizer files, and recovered certification corpus; fingerprint computed by the eidnara-local-embeddings-fingerprint-v1 canonical contract",
       "qualified": true,
-      "sha256": "d4c46d5c18cae695592e64d585a4d6e1497f7c67b1119aa07c20b46b7723b606",
-      "size_bytes": 1195,
+      "sha256": "373d85be696651b3e93488128b7048415bf77cd48942f0732885338c158c9961",
+      "size_bytes": 1192,
       "source": "repo:release/local-embeddings/gte-modernbert-base-f32/manifest.json"
     },
     "config": {

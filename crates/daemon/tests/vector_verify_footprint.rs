@@ -140,7 +140,7 @@ fn a_long_model_name_stays_within_the_verification_bound() {
 
 #[test]
 fn wide_rows_stream_within_a_bound_below_the_row_payload() {
-    // Each 4096-coordinate row fills a whole chunk, so both passes stream the rows one at a time.
+    // Each 4096-coordinate row is 16 KiB, so the 33 rows stream through three chunks of whole rows.
     const DIMENSION: u32 = 4096;
     let fixture = Fixture::with_dimension(DIMENSION);
     let rows = (0..33)

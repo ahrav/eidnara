@@ -29,6 +29,6 @@ pub use resolve::{
     Layer, Precedence, ResolveRefusal, Resolved, RowAccess, RowFault, Winner, resolve,
 };
 pub use score::{
-    BLOCK_ROWS, BlockSums, Ranked, inner_product, inner_product_block, rank_order, rescore, score,
-    score_block,
+    BLOCK_ROWS, BlockSums, Ranked, RowSums, inner_product, inner_product_block,
+    inner_product_with_squares, rank_order, rescore, score, score_block, score_with_squares,
 };
