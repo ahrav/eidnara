@@ -598,7 +598,7 @@ async fn the_reconciling_pass_of_a_revert_serves_the_messages_after_the_declared
             keep_through_seq: Some(1)
         }
     );
-    let reconciling = call(&handler, reverted).await;
+    let reconciling = call(&handler, reverted.clone()).await;
     assert_eq!(reconciling["status"], "ok", "{reconciling}");
     assert_eq!(reconciling["action"], "SOFT+", "{reconciling}");
     assert_eq!(reconciling["reconcile_pending"], true, "{reconciling}");
@@ -607,6 +607,9 @@ async fn the_reconciling_pass_of_a_revert_serves_the_messages_after_the_declared
         ["n3", "n4", "n5"],
         "{reconciling}"
     );
+    let folded = call(&handler, reverted).await;
+    assert_eq!(folded["action"], "HARD", "{folded}");
+    assert_eq!(served_mids(&folded), ["n3", "n4", "n5"], "{folded}");
 }
 
 /// Arms `id`'s attempt hook to run `step` on each firing with its 1-based count, re-arming

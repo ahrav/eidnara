@@ -304,6 +304,46 @@ describe.skipIf(!active)("pi folding against the direct-host fixture", () => {
         }
     }, 300_000);
 
+    it("re-walks to the same entry ids after a plugin restart and infers no revert", async () => {
+        const f = await startFixture(["pi-restart"]);
+        const project = join(f.root, "restart");
+        const run = await openPiSession(f.root, f.stack, "pi-restart", project);
+        const { agent, extension } = await pluginModules();
+        const allRanges = Array.from(
+            { length: COVERED / 2 },
+            (_, k) => `${2 * k + 1}-${2 * k + 2}`,
+        );
+        try {
+            await run.harness.session.prompt("before the restart");
+            const sessionManager = (run.harness as unknown as { sessionManager: unknown })
+                .sessionManager;
+            await run.harness.dispose();
+            extension.__test.clearPiEidnaraActive();
+            const restarted = await agent.createTestAgentSession({
+                cwd: project,
+                extensionFactories: [extension.default],
+                sessionManager,
+                contextWindow: 1_000_000,
+            });
+            try {
+                await restarted.session.prompt("after the restart");
+                const served = (restarted.requests.at(-1)?.messages ?? []).map(textOf);
+                expect(segmentRanges(served[0] as string)).toEqual(allRanges);
+                expect(served.slice(2).map(untagged)).toEqual([
+                    ...Array.from({ length: MESSAGES - COVERED }, (_, k) => body(COVERED + 1 + k)),
+                    "before the restart",
+                    "ok",
+                    "after the restart",
+                ]);
+            } finally {
+                await restarted.dispose();
+            }
+        } finally {
+            await run.close().catch(() => undefined);
+            await f.stack.stop();
+        }
+    }, 300_000);
+
     it("resolves navigation across the rendered boundary and keeps every surviving segment", async () => {
         const f = await startFixture(["pi-navigation"]);
         const run = await openPiSession(f.root, f.stack, "pi-navigation", join(f.root, "nav"));
@@ -392,10 +432,10 @@ describe.skipIf(!active)("pi folding against the direct-host fixture", () => {
             .sessionManager;
         try {
             await first.harness.session.prompt("in project a");
-            await first.harness.dispose();
             // Lineage formed on the session's own cwd, not the process's boot directory.
             expect(await noteCall(client, "pi-cd", rootA)).toBeDefined();
             await expect(noteCall(client, "pi-cd", rootB)).rejects.toThrow(CROSS_ROOT);
+            await first.harness.dispose();
 
             // Pi continues a session in another directory through a runtime built for that cwd.
 
@@ -409,7 +449,13 @@ describe.skipIf(!active)("pi folding against the direct-host fixture", () => {
             try {
                 await moved.session.prompt("in project b");
                 expect(moved.requests).toHaveLength(1);
-                expect(await noteCall(client, "pi-cd", rootB)).toBeDefined();
+                // The first runtime's shutdown disconnected the shared transport.
+                const after = transport.createHostModuleClient(f.stack.connectionFile);
+                try {
+                    expect(await noteCall(after, "pi-cd", rootB)).toBeDefined();
+                } finally {
+                    after.disconnect();
+                }
             } finally {
                 await moved.dispose();
             }

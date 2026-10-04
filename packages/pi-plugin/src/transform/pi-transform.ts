@@ -14,7 +14,7 @@ import { encodePiRowsToCk, isPiRole, PI_RESERVED_ID_PREFIX, type PiRow } from ".
 
 type Json = Record<string, unknown>;
 
-export function reservedPiId(role: string, entryId: string): string {
+function reservedPiId(role: string, entryId: string): string {
     return `${PI_RESERVED_ID_PREFIX}${role}:${entryId}`;
 }
 
@@ -181,15 +181,15 @@ export function createPiTransform(options: PiTransformOptions) {
                 };
             },
             publicationRejection: () => null,
+            failOpen: false,
             publish(values) {
                 replacement = values.map((value) => (value as PiRow).message);
                 return undefined;
             },
         });
-        // A declined pass returns nothing, so Pi keeps its own array, even when the client
-        // failed open to the last applied output.
+        // A declined pass returns nothing, so Pi keeps its own array.
         return {
-            ...(replacement && outcome.kind === "applied" ? { messages: replacement } : {}),
+            ...(replacement ? { messages: replacement } : {}),
             outcome,
             branchEntriesVisited,
             entriesAligned: alignment.entriesRead,

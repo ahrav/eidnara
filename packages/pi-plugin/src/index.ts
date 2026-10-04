@@ -540,6 +540,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             if (!sessionId) return;
             try {
                 const deps = resolveCurrentProjectDeps(ctx);
+                // A project whose configuration withdraws fold authority leaves folding to Pi.
+                if (!isCompactionEnabled(deps.config)) return undefined;
                 const model = ctx.model;
                 const geometry = model
                     ? resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
@@ -828,7 +830,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     pi.on("session_before_compact", async (_event, ctx) => {
         await checkpointAndDrainMemory(ctx);
-        return handlePiSessionBeforeCompact({ compactionOff, ctx });
+        // Pi's compaction proceeds wherever the context handler leaves folding to Pi.
+        return handlePiSessionBeforeCompact({
+            compactionOff:
+                compactionOff || !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config),
+            ctx,
+        });
     });
 
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.

@@ -4,7 +4,7 @@ import { TransformCaptureAdmission } from "@eidnara/opencode/hooks/context/trans
 import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
 
 import { PiBranchIndex, type PiBranchReader } from "./pi-branch";
-import { createPiTransform, PiAlignment, reservedPiId } from "./pi-transform";
+import { createPiTransform, PiAlignment } from "./pi-transform";
 
 type Json = Record<string, unknown>;
 
@@ -98,7 +98,7 @@ describe("Pi id alignment", () => {
         ];
         expect(idsOf(messages, manager)).toEqual(expected);
         expect(idsOf(structuredClone(messages), manager)).toEqual(expected);
-        expect(expected).not.toContain(`eidnara:compactionSummary:${first}`);
+        expect(idsOf(messages, manager)).not.toContain(`eidnara:compactionSummary:${first}`);
     });
 
     it("matches a live custom message stamped before its entry was written", () => {
@@ -113,6 +113,18 @@ describe("Pi id alignment", () => {
         // Pi stamps a live custom message when it is created, before the entry is appended.
         messages[1] = { ...messages[1], timestamp: (messages[1]?.timestamp as number) - 5 };
         expect(idsOf(messages, manager)).toEqual([question, `eidnara:custom:${note}`]);
+    });
+
+    it("leaves a custom message unnamed when its type or content differs from the entry", () => {
+        for (const change of [{ customType: "other" }, { content: "edited" }]) {
+            const manager = SessionManager.inMemory("/project");
+            manager.appendMessage(user("question"));
+            manager.appendCustomMessageEntry("note", "custom text", true);
+            const last = manager.appendMessage(user("after"));
+            const messages = agentMessages(manager);
+            messages[1] = { ...messages[1], ...change };
+            expect(idsOf(messages, manager)).toEqual([undefined, undefined, last]);
+        }
     });
 
     it("leaves every slot before a mismatch unnamed", () => {
@@ -296,7 +308,7 @@ describe("Pi publication by return", () => {
         expect(result.messages).toBeUndefined();
     });
 
-    it("returns nothing when a pass after an applied one declines and fails open", async () => {
+    it("returns nothing when a pass after an applied one declines", async () => {
         const { manager, head } = session();
         const transport = fakeTransport({
             "transform.boundary": [() => ({ anchors: [{ mid: head, sequence: 2 }] })],
@@ -311,7 +323,7 @@ describe("Pi publication by return", () => {
         expect(first.outcome?.kind).toBe("applied");
         manager.appendMessage(assistant("more"));
         const second = await transform.run(passOver(manager, agentMessages(manager), branch));
-        expect(second.outcome).toEqual({ kind: "declined", servedLastApplied: true });
+        expect(second.outcome).toEqual({ kind: "declined", servedLastApplied: false });
         expect(second.messages).toBeUndefined();
     });
 

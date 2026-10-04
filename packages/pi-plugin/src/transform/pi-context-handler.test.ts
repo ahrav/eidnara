@@ -194,4 +194,56 @@ describe("Pi context handler under createAgentSession", () => {
             call.mockRestore();
         }
     });
+
+    it("leaves folding and compaction to Pi in a project whose configuration is unresolved", async () => {
+        const { call, transforms } = daemon(keepWindow);
+        try {
+            const project = join(root, "unresolved");
+            mkdirSync(join(project, ".eidnara"), { recursive: true });
+            writeFileSync(join(project, ".eidnara", "eidnara.jsonc"), "{ not json");
+            harness = await createTestAgentSession({
+                cwd: project,
+                extensionFactories: [eidnaraPiExtension],
+                settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+            });
+            for (const turn of [1, 2, 3])
+                await harness.session.prompt(`turn ${turn} ${"x".repeat(400)}`);
+            expect(transforms).toHaveLength(0);
+            const outcome = await harness.session.compact().then(
+                () => "compacted",
+                (error: Error) => error.message,
+            );
+            expect(outcome).toBe("compacted");
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("names a live custom message an extension adds before the turn", async () => {
+        const { call, transforms } = daemon(keepWindow);
+        try {
+            const addsNote = (pi: { on: (event: string, handler: () => unknown) => void }) => {
+                pi.on("before_agent_start", () => ({
+                    message: { customType: "note", content: "a hint", display: false },
+                }));
+            };
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [addsNote as never, eidnaraPiExtension],
+            });
+            await harness.session.prompt("first");
+            await harness.session.prompt("second");
+            const custom = harness.sessionManager
+                .getEntries()
+                .filter((entry) => entry.type === "custom_message")
+                .map((entry) => `eidnara:custom:${entry.id}`);
+            expect(custom).toHaveLength(2);
+            const sent = transforms.at(-1) ?? {};
+            const ids = (sent.native_messages as { id: string }[]).map((row) => row.id);
+            expect(ids).toEqual(expect.arrayContaining(custom));
+            expect(transforms).toHaveLength(2);
+        } finally {
+            call.mockRestore();
+        }
+    });
 });

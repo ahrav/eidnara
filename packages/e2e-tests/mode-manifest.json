@@ -37,7 +37,7 @@
         {
             "path": "tests/pi-rust-folding.test.ts",
             "tier": "pi-rust",
-            "rationale": "Pi context folding against the direct-host fixture: equal m0, m1, and tail to an equivalent OpenCode session; navigation across the rendered boundary keeps every surviving segment; the Pi RPC process folds through the daemon and a cross-root facade call takes the D32 refusal; after a /cd the first pass forms lineage on the new root",
+            "rationale": "Pi context folding against the direct-host fixture: equal m0, m1, and tail to an equivalent OpenCode session; the same entry ids and no inferred revert after a plugin restart; navigation across the rendered boundary keeps every surviving segment; the Pi RPC process folds through the daemon and a cross-root facade call takes the D32 refusal; after a /cd the first pass forms lineage on the new root",
             "contract_refs": [
                 "U5-PORT"
             ]

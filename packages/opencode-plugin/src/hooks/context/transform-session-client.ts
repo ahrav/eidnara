@@ -597,6 +597,8 @@ export interface TransformPassSource {
     validateOutput?(values: readonly unknown[], boundaryId: string): void;
     /** Why publishing `slots` values would be refused, or `null`. */
     publicationRejection(slots: number): string | null;
+    /** `false` for a harness that keeps its own array on a failed pass instead of the last applied output. */
+    readonly failOpen?: boolean;
     /** Publishes `values` over the captured `window` at `boundaryIndex`; a failure names its cause. */
     publish(
         values: readonly unknown[],
@@ -899,7 +901,7 @@ export function createTransformSessionClient(
         const serveLastApplied = (): boolean => {
             const failOpen = failOpenSource;
             const applied = failOpen?.previous.applied;
-            if (!failOpen || !applied) return false;
+            if (!failOpen || !applied || source.failOpen === false) return false;
             try {
                 failOpen.recheck("fail-open");
                 if (

@@ -21,7 +21,9 @@ on:
         type: string
         default: ""
       scale_budget_seconds:
-        description: Wall-clock budget for each driver run (one tier of one arm)
+        description: >-
+          Wall-clock budget for each driver run: one tier of one arm, or every
+          tier of one arm for pi-pass, whose measured arm needs about 9000
         type: string
         default: "1200"
 
@@ -1095,6 +1097,9 @@ jobs:
             # baseline.json. Any other arm without rows fails the job.
             if [ "$SCALE_DRIVER/$arm" = pi-pass/base ] && [ ! -s "$out/$arm/rows.jsonl" ]; then
               continue
+            fi
+            if [ ! -s "$out/$arm/rows.jsonl" ]; then
+              echo "no pass rows for the $arm arm" >&2; exit 1
             fi
             "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
               --manifest "$out/$arm/manifest.json" \

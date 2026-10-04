@@ -64,11 +64,10 @@ export function isDeadline(error: unknown): boolean {
     );
 }
 
-export function passOutcome(pass: {
-    published: boolean;
-    status?: unknown;
-    error?: unknown;
-}): { outcome: PassOutcome; refusal: PassRow["refusal"] } {
+export function passOutcome(pass: { published: boolean; status?: unknown; error?: unknown }): {
+    outcome: PassOutcome;
+    refusal: PassRow["refusal"];
+} {
     if (pass.published) return { outcome: "completed", refusal: null };
     if (isDeadline(pass.error)) return { outcome: "censored", refusal: null };
     if (pass.error !== undefined) return { outcome: "refused", refusal: "transport_error" };
