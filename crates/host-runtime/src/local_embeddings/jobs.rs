@@ -206,6 +206,8 @@ pub struct JobTable {
     inner: std::sync::Mutex<Jobs>,
     /// Result bytes still alive anywhere: retained by a job or held by a page being served. `Jobs::retained_result_bytes` counts only retained jobs and drives eviction; this total is what admission measures against the cap.
     live_result_bytes: Arc<AtomicU64>,
+    /// Job settlement and removal notify [`Self::wait_settled`] while holding `inner`.
+    settled: std::sync::Condvar,
 }
 
 /// The serialized JSON string contains `s`'s escaped form, excluding its delimiting quotes.
@@ -410,6 +412,7 @@ impl JobTable {
             incarnation: nonce.iter().map(|b| format!("{b:02x}")).collect(),
             cursor_key,
             live_result_bytes: Arc::new(AtomicU64::new(0)),
+            settled: std::sync::Condvar::new(),
             inner: std::sync::Mutex::new(Jobs {
                 by_key: HashMap::new(),
                 by_seq: HashMap::new(),
@@ -669,6 +672,7 @@ impl JobTable {
         jobs.release_bytes(text_bytes, 0);
         jobs.retained_result_bytes += result_bytes;
         self.enforce_retention(&mut jobs, Some(seq), &mut released);
+        self.settled.notify_all();
     }
 
     pub fn publish_failed(&self, seq: u64, code: String, message: String) {
@@ -706,6 +710,28 @@ impl JobTable {
         released.charge(excess);
         jobs.release_bytes(text_bytes, 0);
         self.enforce_retention(jobs, Some(seq), released);
+        self.settled.notify_all();
+    }
+
+    /// `wait_settled` blocks the calling thread until the job completes, `until` passes, or the job leaves the table, whichever comes first. Identifiers rejected by `parse_job_id` return immediately.
+    pub fn wait_settled(&self, job_id: &str, until: Instant) {
+        let Some(seq) = self.parse_job_id(job_id) else {
+            return;
+        };
+        let mut jobs = self.lock_jobs();
+        while jobs.by_seq.get(&seq).is_some_and(|job| !job.is_completed()) {
+            let Some(left) = until
+                .checked_duration_since(Instant::now())
+                .filter(|left| !left.is_zero())
+            else {
+                return;
+            };
+            jobs = self
+                .settled
+                .wait_timeout(jobs, left)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
     }
 
     pub fn poll(&self, job_id: &str, key: &str, cursor: Option<&str>) -> PollOutcome {
@@ -1043,6 +1069,7 @@ impl JobTable {
         for seq in queued {
             released.job(Self::remove(&mut jobs, seq));
         }
+        self.settled.notify_all();
     }
 
     pub fn clear(&self) {
@@ -1055,6 +1082,7 @@ impl JobTable {
         jobs.by_key.clear();
         jobs.queued_text_bytes = 0;
         jobs.retained_result_bytes = 0;
+        self.settled.notify_all();
     }
 }
 
@@ -1379,6 +1407,89 @@ mod tests {
         jobs.clear();
         assert_eq!(first.vectors[0].2.len(), 256 * 1024);
         assert_eq!(second.vectors[0].2[0], 0.5);
+    }
+
+    #[test]
+    fn wait_settled_wakes_on_settlement_or_removal_and_otherwise_returns_at_its_deadline() {
+        use std::time::Duration;
+        let jobs = JobTable::new(LocalEmbeddingsLimits::default());
+        let admit = |key: &str| {
+            let AdmitOutcome::Admitted { job_id, seq } =
+                jobs.admit_uncharged_for_tests(key.to_owned(), vec![charged_item(key, "alpha")], 2)
+            else {
+                panic!("{key} is admitted");
+            };
+            (job_id, seq)
+        };
+        let far = || Instant::now() + Duration::from_secs(30);
+
+        let started = Instant::now();
+        jobs.wait_settled("other-incarnation-1", far());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a foreign identifier returns at once"
+        );
+
+        let (running, seq) = admit("running");
+        jobs.start(seq).expect("the job starts");
+        let started = Instant::now();
+        jobs.wait_settled(&running, started + Duration::from_millis(20));
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "a running job waits until the deadline"
+        );
+        assert_eq!(jobs.status(&running), Some("running"));
+
+        std::thread::scope(|scope| {
+            let started = Instant::now();
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                jobs.publish_ready(seq, vec![vec![0.5, 0.5]]);
+            });
+            jobs.wait_settled(&running, far());
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "publication wakes the waiter"
+            );
+        });
+        assert_eq!(jobs.status(&running), Some("ready"));
+        let started = Instant::now();
+        jobs.wait_settled(&running, far());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a settled job returns at once"
+        );
+
+        let (failing, seq) = admit("failing");
+        jobs.start(seq).expect("the job starts");
+        std::thread::scope(|scope| {
+            let started = Instant::now();
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                jobs.publish_failed(seq, "internal_error".to_owned(), "worker died".to_owned());
+            });
+            jobs.wait_settled(&failing, far());
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "failure wakes the waiter"
+            );
+        });
+        assert_eq!(jobs.status(&failing), Some("failed"));
+
+        let (queued, _) = admit("queued");
+        std::thread::scope(|scope| {
+            let started = Instant::now();
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                jobs.close_admission();
+            });
+            jobs.wait_settled(&queued, far());
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "removal at shutdown wakes the waiter"
+            );
+        });
+        assert_eq!(jobs.status(&queued), None);
     }
 
     #[test]

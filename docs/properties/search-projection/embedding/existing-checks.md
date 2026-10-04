@@ -145,10 +145,11 @@ Closely related checks are grouped by file; each named check is unaudited.
 | `a_page_leased_result_is_not_evicted_while_its_page_is_served`, `crates/host-runtime/src/local_embeddings/jobs.rs:1382` | A served page keeps result capacity live. | unaudited |
 | `bounded_query_waiters_are_fifo_and_reject_bound_plus_one`, `crates/host-runtime/tests/local_embeddings_protocol.rs:67` | Query waiter capacity and FIFO. | unaudited |
 | `expired_waiter_releases_its_slot_without_engine_work`, `crates/host-runtime/tests/local_embeddings_protocol.rs:112` | Expired queued query does not infer. | unaudited |
-| `mixed_batch_and_query_waiters_share_fifo_cpu_without_starvation`, `crates/host-runtime/tests/local_embeddings_protocol.rs:186` | Asserts query, query, batch, query order. This is FIFO evidence, not priority. | unaudited |
-| `shutdown_cancels_waiters_but_drains_started_query`, `crates/host-runtime/tests/local_embeddings_protocol.rs:236` | Started native work delays shutdown; queued query is cancelled. | unaudited |
-| `route_loss_drops_queued_query_without_engine_work_and_releases_slot`, `crates/host-runtime/tests/local_embeddings_protocol.rs:312` | Queued query cancellation on route loss. | unaudited |
-| `boundary_waiters_with_maximal_texts_are_all_admitted`, `crates/host-runtime/tests/local_embeddings_protocol.rs:416` | Ignored boundary scenario; do not count it as exercised. | unaudited |
+| `a_waiting_query_takes_the_slot_ahead_of_a_waiting_batch_text`, `crates/host-runtime/tests/local_embeddings_protocol.rs:186` | Asserts a waiting query is granted the slot before a batch text that registered earlier. Priority evidence for one pair, not a saturated-workload bound. | unaudited |
+| `a_multi_text_batch_yields_to_a_waiting_query_between_texts`, `crates/host-runtime/tests/local_embeddings_protocol.rs:241` | A two-text batch takes one grant per text, so a query that waits during the first text runs before the second. | unaudited |
+| `shutdown_cancels_waiters_but_drains_started_query`, `crates/host-runtime/tests/local_embeddings_protocol.rs:285` | Started native work delays shutdown; queued query is cancelled. | unaudited |
+| `route_loss_drops_queued_query_without_engine_work_and_releases_slot`, `crates/host-runtime/tests/local_embeddings_protocol.rs:361` | Queued query cancellation on route loss. | unaudited |
+| `boundary_waiters_with_maximal_texts_are_all_admitted`, `crates/host-runtime/tests/local_embeddings_protocol.rs:493` | Ignored boundary scenario; do not count it as exercised. | unaudited |
 | `queued_query_wait_is_bounded_by_its_deadline`, `crates/host-runtime/tests/local_embeddings_jobs.rs:389` | Existing query deadline during wait. | unaudited |
 | `shutdown_with_queued_running_and_retained_jobs_is_graceful`, `crates/host-runtime/tests/local_embeddings_jobs.rs:499` | Mixed local job states at shutdown. | unaudited |
 | `embed_blocking_shares_the_cpu_permit_and_reports_a_held_lane`, `crates/host-runtime/src/local_embeddings/mod.rs:1308` | Synchronous and routed calls share CPU admission. | unaudited |

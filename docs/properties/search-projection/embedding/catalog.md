@@ -39,8 +39,8 @@ Existing paths have distinct classifications:
 
 | Existing path | Classification and current evidence |
 | --- | --- |
-| LocalEmbeddings composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1128` composes it; a Linux generation missing the ORT library or the bundle manifest uses `new(None)` at `:1080`, `:1089` and reports `degraded`. |
-| Certified inference, bundle validation, and live JobTable serving | `default-production` for payloads built by `scripts/build-host-payload.ts`, which stage the locked bundle and ORT library; the generation's bundle manifest and ORT digests bind them (`serve.rs:1073-1100`). Only the macOS branch reports `unsupported` (`serve.rs:1058`). |
+| LocalEmbeddings composition and disabled fallback | `default-production`: `crates/daemon/src/bin/eidnara_host/serve.rs:1137` composes it; a Linux generation missing the ORT library or the bundle manifest uses `new(None)` at `:1078`, `:1087` and reports `degraded`. |
+| Certified inference, bundle validation, and live JobTable serving | `default-production` for payloads built by `scripts/build-host-payload.ts`, which stage the locked bundle and ORT library; the generation's bundle manifest and ORT digests bind them (`serve.rs:1071-1096`), and `lane_limits` (`serve.rs:1102-1107`) admits one text per inference call, the shape certification exercises. Only the macOS branch reports `unsupported` (`serve.rs:1056`). |
 | Claude accounting calls | `default-production`: `crates/daemon/Cargo.toml:32` and `crates/daemon/src/token_cache.rs:133` contradict the old tokenizer catalog's absent-caller premise. |
 | MemoryClassifier scheduler loop | `default-production` after store open: `crates/daemon/src/lib.rs:3646-3660`. |
 | Due review-user-memories slots | `explicit-config-only`: scheduled MODULE projects come from `lib.rs:13979-14027`. Actual scheduled model dispatch has only test-installed inputs (`lib.rs:3084-3105`, `:14041-14044`). |
@@ -129,7 +129,7 @@ cannot report the bounded-liveness or resource checks as passed.
 | [embedding-completion-is-identity-fenced](#embedding-completion-is-identity-fenced) | safety | test-only | always | active | high |
 | [embedding-complete-requires-durable-vector](#embedding-complete-requires-durable-vector) | safety | test-only | always | active | high |
 | [embedding-restart-retries-durable-pending](#embedding-restart-retries-durable-pending) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
-| [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | test-only | always (per admitted episode; RP2.9-blocked) | active | medium |
+| [embedding-backfill-preserves-query-admission](#embedding-backfill-preserves-query-admission) | liveness | default-production | always (per admitted episode; RP2.9-blocked) | active | medium |
 | [embedding-identity-gc-preserves-live-work](#embedding-identity-gc-preserves-live-work) | safety | test-only | always | active | medium |
 | [embedding-supervisor-shares-budget-and-joins](#embedding-supervisor-shares-budget-and-joins) | safety | test-only | always | active | medium |
 | [embedding-dispatch-scan-makes-bounded-progress](#embedding-dispatch-scan-makes-bounded-progress) | liveness | test-only | always | active | high |
@@ -368,12 +368,12 @@ Reachability: default-production - every native call takes a grant from one
 scheduler that serves queries first and a background text after eight query
 grants (`crates/host-runtime/src/local_embeddings/scheduler.rs:50-59`,
 `:126-172`, `:188-200`). Routed and in-process queries wait as `Query`
-(`mod.rs:1112-1168`, `:511-543`); batch texts wait one text at a time as
-`Background` (`mod.rs:902-935`).
+(`mod.rs:1117-1173`, `:511-543`); batch texts wait one text at a time as
+`Background` (`mod.rs:907-940`).
 Status: active
 Exercised: partial - the scheduler queues, priority, the ninth grant, and the
 fifth-waiter refusal behind a background holder are constructed
-(`scheduler.rs:271-315`, `mod.rs:1793-1845`,
+(`scheduler.rs:271-315`, `mod.rs:1798-1850`,
 `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). A saturated
 product backfill workload and the approved service bound are missing.
 Guarantee: Backfill saturation preserves the declared query admission capacity
@@ -443,9 +443,9 @@ Open questions:
 Type: safety
 Reachability: test-only - no production RP2.1 embedding supervisor slice exists.
 The fused route now awaits in-process query embedding under its request budget
-before any scan unit (`crates/daemon/src/query_route.rs:1572`, `:578-600`), and a
+before any scan unit (`crates/daemon/src/query_route.rs:1650-1652`, `:581-602`), and a
 started native call keeps its grant and admission permit after its caller's
-deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1112-1168`). The
+deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1117-1173`). The
 existing scheduler and kernel budget are separate paths
 (`crates/daemon/src/memory_classifier_scheduler.rs:163-220`;
 `crates/kernel/src/applicability/checkout.rs:146-203`).
@@ -472,7 +472,7 @@ P2 line 53 and P7 line 81 require composition; existing ownership paths are
 source-verified but not composed for RP2.1.
 Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:240-313` and
 `crates/daemon/src/memory_classifier_scheduler.rs:1180-1254` are unaudited cancellation
-checks. `crates/host-runtime/src/local_embeddings/mod.rs:1848-1884` asserts a timed-out
+checks. `crates/host-runtime/src/local_embeddings/mod.rs:1853-1889` asserts a timed-out
 query keeps its grant and permit until the native call returns;
 `crates/host-runtime/src/local_embeddings/scheduler.rs:318-375` and `scheduler.rs:427-458` asserts cancelled,
 handed-but-untaken, and closed waiters release exactly once. No shared

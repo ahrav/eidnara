@@ -192,7 +192,7 @@ fn exact_page_bound_loses_the_rule_at_the_exact_lane(coverage: &mut Coverage) {
         let read = exact_rows(&run);
         assert_eq!(
             *view(&run).status(Lane::Exact),
-            LaneStatus::Incomplete("page_bound")
+            LaneStatus::incomplete("page_bound")
         );
         assert!(!read.is_empty() && !read.contains(&rule), "{read:?}");
         coverage.record("ldg_injection_exact_page_bound").unwrap();
@@ -228,7 +228,7 @@ fn lexical_accepted_bound_loses_the_rule_at_the_lexical_lane(coverage: &mut Cove
         let ranked = view(&run).ranking(Lane::Lexical);
         assert_eq!(
             *view(&run).status(Lane::Lexical),
-            LaneStatus::Incomplete("accepted_bound")
+            LaneStatus::incomplete("accepted_bound")
         );
         assert_eq!(ranked.len(), 1, "{ranked:?}");
         assert!(!ranked.contains(&rule));

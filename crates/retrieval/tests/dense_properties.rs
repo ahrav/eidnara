@@ -7,7 +7,7 @@ use kernel::source_identity::OccurrenceClass;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::dense::codec::{self, Metric, RowLayout};
-use retrieval::dense::scalar::{Scales, encode, weighted_dot};
+use retrieval::dense::scalar::{Scales, encode, encode_into, weighted_dot};
 use retrieval::dense::score::TopK;
 use retrieval::dense::{BLOCK_ROWS, Ranked, inner_product, inner_product_block};
 
@@ -226,6 +226,9 @@ fn encoding_codes_are_clamped_counted_and_rounded_to_even() {
                     }
                 }
                 prop_assert_eq!(encoded.clipped, clipped);
+                let mut reused = vec![i8::MAX; row.len() + 3];
+                let reused_clipped = encode_into(&layout, &scales, &row, &mut reused).unwrap();
+                prop_assert_eq!((reused, reused_clipped), (encoded.codes, encoded.clipped));
                 Ok(())
             },
         )

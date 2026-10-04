@@ -151,6 +151,10 @@ function isNonNegativeInteger(value: unknown): value is number {
     return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isStringArray(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 function oneOf<const T extends readonly string[]>(set: T, value: unknown): value is T[number] {
     return typeof value === "string" && (set as readonly string[]).includes(value);
 }
@@ -490,7 +494,7 @@ export interface RouteCanonicalReference {
 
 export interface RouteEntry {
     occurrence_id: string;
-    /** 1-based fused display position. */
+    /** 1-based fused position; positions rise strictly across a ranking and skip where the daemon withheld an occurrence. */
     position: number;
     /** Lanes that ranked the occurrence, in route lane order. */
     lanes: RouteLane[];
@@ -502,10 +506,13 @@ export type QueryPayload =
           kind: "fused";
           degraded: boolean;
           truncated: boolean;
-          lanes: Record<RouteLane, { status: string; reason: string | null }>;
+          lanes: Record<RouteLane, LaneStatus>;
           entries: RouteEntry[];
       }
     | { kind: "terminal"; terminal: RouteTerminal; reason: string | null };
+
+/** `reason` is the bound that decided the lane's status; `also` names the lane's further bounds, in the daemon's order. */
+export type LaneStatus = { status: string; reason: string | null; also: string[] };
 
 function parseRouteEntry(raw: unknown): RouteEntry | null {
     if (!isRecord(raw) || typeof raw.occurrence_id !== "string") return null;
@@ -537,9 +544,15 @@ function parseRouteEntry(raw: unknown): RouteEntry | null {
     return { occurrence_id: raw.occurrence_id, position: raw.position, lanes, canonical };
 }
 
-/** `retrieval.query` answers a bare ranking or terminal document rather than a kernel state envelope; any other shape is `unrecognized_state`. */
+/**
+ * `retrieval.query` answers a bare ranking or terminal document. Before the route runs, the daemon's shared kernel scope binding answers a project mismatch or an unopened store with a state-only envelope, which keeps its typed state; an envelope claiming `available` carries no ranking and is `unrecognized_state`, as is any other shape.
+ */
 export function parseQueryResponse(raw: unknown): Parsed<QueryPayload> {
     if (!isRecord(raw)) return failed();
+    if (raw.kind === undefined && raw.state !== undefined) {
+        const state = parseKernelState(raw.state);
+        return state.kind === "available" ? failed() : { state, payload: null };
+    }
     if (raw.kind === "terminal") {
         if (!ROUTE_TERMINALS.includes(raw.terminal as RouteTerminal)) return failed();
         if (raw.reason !== undefined && typeof raw.reason !== "string") return failed();
@@ -555,20 +568,25 @@ export function parseQueryResponse(raw: unknown): Parsed<QueryPayload> {
     if (raw.kind !== "fused") return failed();
     if (typeof raw.degraded !== "boolean" || typeof raw.truncated !== "boolean") return failed();
     if (!isRecord(raw.lanes) || !Array.isArray(raw.entries)) return failed();
-    const lanes = {} as Record<RouteLane, { status: string; reason: string | null }>;
+    const lanes = {} as Record<RouteLane, LaneStatus>;
     for (const lane of ROUTE_LANES) {
         const status = raw.lanes[lane];
         if (!isRecord(status) || typeof status.status !== "string") return failed();
         if (status.reason !== undefined && typeof status.reason !== "string") return failed();
+        if (status.also !== undefined && !isStringArray(status.also)) return failed();
         lanes[lane] = {
             status: status.status,
             reason: typeof status.reason === "string" ? status.reason : null,
+            also: status.also ?? [],
         };
     }
+    // The daemon drops withheld occurrences after fusion and keeps each survivor's fused position, so positions rise strictly but may skip.
     const entries: RouteEntry[] = [];
+    let previous = 0;
     for (const item of raw.entries) {
         const entry = parseRouteEntry(item);
-        if (!entry || entry.position !== entries.length + 1) return failed();
+        if (!entry || entry.position <= previous) return failed();
+        previous = entry.position;
         entries.push(entry);
     }
     return {

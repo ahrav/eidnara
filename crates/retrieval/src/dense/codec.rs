@@ -147,10 +147,44 @@ pub fn validate_length(row: &[f32], dimension: u32) -> Result<(), RowRejection> 
     check_dimension(row.len(), dimension)
 }
 
+/// A non-finite coordinate makes the sum of squares non-finite.
 pub fn validate(row: &[f32], layout: &RowLayout) -> Result<(), RowRejection> {
-    layout.check()?;
-    validate_shape(row, layout.dimension)?;
-    check_norm(row, layout.unit_norm_tolerance)
+    if layout.check().is_ok()
+        && row.len() == layout.dimension as usize
+        && surely_unit(row, layout.unit_norm_tolerance)
+    {
+        return Ok(());
+    }
+    validate_from_sum(row, layout, sum_of_squares(row))
+}
+
+/// Lanes [`surely_unit`] accumulates squares in.
+const SUM_LANES: usize = 16;
+
+/// Whether the in-order sum of squares of `row` passes the norm check, decided from an f32 sum over [`SUM_LANES`] lanes; `false` leaves the decision to the in-order sum.
+///
+/// With `u = 2^-24`, each f32 square is within `u` of the exact square plus `2^-150` where it underflows, and every summation order of the `n` squares adds relative `γ = (n - 1)u / (1 - (n - 1)u)`. Once the lane sum is at least `2^-60`, underflow is below `2^-57` of it, so the lane sum lies within relative `γ + 2u` of the exact sum, and the in-order f64 sum within `(n - 1)2^-53` of it.
+/// The margin `3(n + 2)u` covers both and the rounding of the interval's ends while it stays below `1/4`. The rounded square root and the subtraction are monotone, so the sums the norm check admits form an interval; when both ends of the lane sum's interval pass, the in-order sum passes too.
+fn surely_unit(row: &[f32], tolerance: f64) -> bool {
+    let mut lanes = [0.0f32; SUM_LANES];
+    let (blocks, tail) = row.as_chunks::<SUM_LANES>();
+    for block in blocks {
+        for (lane, value) in lanes.iter_mut().zip(block) {
+            *lane += value * value;
+        }
+    }
+    let mut sum = lanes.iter().sum::<f32>();
+    for value in tail {
+        sum += value * value;
+    }
+    let sum = f64::from(sum);
+    let margin = 1.5 * (row.len() + 2) as f64 * f64::from(f32::EPSILON);
+    sum.is_finite()
+        && sum >= 2.0f64.powi(-60)
+        && margin < 0.25
+        && [sum * (1.0 - margin), sum * (1.0 + margin)]
+            .into_iter()
+            .all(|end| check_norm_sum(end, tolerance).is_ok())
 }
 
 /// Validates a row whose sum of squares was accumulated as [`validate`] accumulates it: from `+0.0`, in increasing coordinate order.
@@ -188,12 +222,17 @@ fn check_finite(row: &[f32]) -> Result<(), RowRejection> {
 
 /// The accumulator starts at `+0.0` and each square is added in coordinate order; `Iterator::sum` is not used because its initial value is not part of the contract.
 fn check_norm(row: &[f32], tolerance: f64) -> Result<(), RowRejection> {
+    check_norm_sum(sum_of_squares(row), tolerance)
+}
+
+/// `sum_of_squares` guarantees accumulation from `+0.0` in coordinate order.
+fn sum_of_squares(row: &[f32]) -> f64 {
     let mut sum_of_squares = 0.0f64;
     for value in row {
         let widened = f64::from(*value);
         sum_of_squares += widened * widened;
     }
-    check_norm_sum(sum_of_squares, tolerance)
+    sum_of_squares
 }
 
 /// The admission test is written as the contract's inclusive bound so a NaN sum is refused rather than admitted by a false `>` comparison.

@@ -14,14 +14,14 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, ClaimFactBounds, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
-    Surface, SurfaceVisibility,
+    ArtifactDestination, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::claims::{
-    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, classify_selected_claims,
-    validate_for_surface,
+    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, judge_selected_for_surface,
+    read_selected_claims,
 };
 use retrieval::dense::{
     Completion as DenseCompletion, ExhaustiveQuery, IncompleteReason as DenseIncompleteReason,
@@ -29,10 +29,11 @@ use retrieval::dense::{
 };
 use retrieval::eligibility::{
     Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
+    snapshot_moved,
 };
 use retrieval::exact::{
-    ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
-    SelectorValue, classify, page,
+    Coverage, ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
+    SelectorValue, classify, coverage, page,
 };
 use retrieval::fusion::IdentityRefusal;
 use retrieval::fusion::{
@@ -99,6 +100,10 @@ pub struct QueryRouteLimits {
     pub probes: NonZeroUsize,
     pub lexical_scan_rows: NonZeroUsize,
     pub lexical_accepted: NonZeroUsize,
+    /// A lexical probe matching at most this many rows qualifies to be ranked.
+    pub lexical_qualifying_matches: NonZeroUsize,
+    /// The match counts of the lexical probes one request ranks sum to at most this many.
+    pub lexical_rank_budget: NonZeroUsize,
     pub validation_batch: NonZeroUsize,
     pub exact_page_rows: NonZeroUsize,
     pub exact_pages: NonZeroUsize,
@@ -119,6 +124,8 @@ impl QueryRouteLimits {
             probes: n(16),
             lexical_scan_rows: n(4096),
             lexical_accepted: n(128),
+            lexical_qualifying_matches: n(20_000),
+            lexical_rank_budget: n(30_000),
             validation_batch: n(128),
             exact_page_rows: n(32),
             exact_pages: n(4),
@@ -141,6 +148,18 @@ impl QueryRouteLimits {
                 max_rows: n(1_500_000),
                 unit_norm_tolerance: 1e-3,
             }),
+        }
+    }
+
+    /// The lexical lane's retrieval bounds, drawn from these limits.
+    pub fn lexical_retrieval_bounds(&self) -> RetrievalBounds {
+        RetrievalBounds {
+            max_probes: self.probes,
+            scan_rows: self.lexical_scan_rows,
+            max_accepted: self.lexical_accepted,
+            batch_rows: self.validation_batch,
+            qualifying_matches: self.lexical_qualifying_matches,
+            rank_budget: self.lexical_rank_budget,
         }
     }
 
@@ -257,23 +276,39 @@ impl From<Terminal> for QueryFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaneStatus {
     Complete,
-    Incomplete(&'static str),
+    /// `reason` names the deciding bound and `also` the lane's other bounds; `also` is serialized only when it is not empty.
+    Incomplete {
+        reason: &'static str,
+        also: Vec<&'static str>,
+    },
     Unavailable(&'static str),
     Undeclared,
 }
 
 impl LaneStatus {
+    pub fn incomplete(reason: &'static str) -> Self {
+        Self::Incomplete {
+            reason,
+            also: Vec::new(),
+        }
+    }
+
     fn json(&self) -> Value {
         match self {
             Self::Complete => json!({ "status": "complete" }),
-            Self::Incomplete(reason) => json!({ "status": "incomplete", "reason": reason }),
+            Self::Incomplete { reason, also } if also.is_empty() => {
+                json!({ "status": "incomplete", "reason": reason })
+            }
+            Self::Incomplete { reason, also } => {
+                json!({ "status": "incomplete", "reason": reason, "also": also })
+            }
             Self::Unavailable(reason) => json!({ "status": "unavailable", "reason": reason }),
             Self::Undeclared => json!({ "status": "undeclared" }),
         }
     }
 
     fn degrades(&self) -> bool {
-        matches!(self, Self::Incomplete(_) | Self::Unavailable(_))
+        matches!(self, Self::Incomplete { .. } | Self::Unavailable(_))
     }
 }
 
@@ -296,6 +331,7 @@ pub enum Phase {
 
 pub struct QueryOutcome {
     pub statuses: [LaneStatus; Lane::ORDER.len()],
+    /// The surviving ranking through the first survivor past `result_rows`, every claim in it validated.
     pub fused: Fused,
     pub truncated: bool,
     pub body: Value,
@@ -511,10 +547,10 @@ impl DenseProducer for ExhaustiveProducer {
                 return Err(DenseRefusal::Budget);
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::DenseCoverageShortfall) => {
-                LaneStatus::Incomplete("coverage_shortfall")
+                LaneStatus::incomplete("coverage_shortfall")
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::RowBound) => {
-                LaneStatus::Incomplete("row_bound")
+                LaneStatus::incomplete("row_bound")
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::KernelIncarnationChanged) => {
                 return Err(DenseRefusal::Unavailable("kernel_incarnation_changed"));
@@ -827,7 +863,7 @@ fn exact_read(
             }
         }
         if cursor.is_some() {
-            status = LaneStatus::Incomplete("page_bound");
+            status = LaneStatus::incomplete("page_bound");
         }
     }
     Ok(LaneRead::Pending(ExactHits { hits, status }))
@@ -856,13 +892,12 @@ fn lexical_read(
         return Ok(LaneRead::Ended(LaneStatus::Undeclared));
     }
     let probes = compile(&analysis);
-    let bounds = RetrievalBounds {
-        max_probes: limits.probes,
-        scan_rows: limits.lexical_scan_rows,
-        max_accepted: limits.lexical_accepted,
-        batch_rows: limits.validation_batch,
-    };
-    match scan(conn, &probes, bounds, budget.eval()) {
+    match scan(
+        conn,
+        &probes,
+        limits.lexical_retrieval_bounds(),
+        budget.eval(),
+    ) {
         Ok(scanned) => Ok(LaneRead::Pending(scanned)),
         Err(refusal) => match retrieval_refusal(&refusal) {
             LaneRefusal::Budget => Err(exhaustion(budget).into()),
@@ -1036,7 +1071,7 @@ fn admit_lexical(
             | IncompleteReason::CommonTerms
             | IncompleteReason::RankBudget
             | IncompleteReason::AcceptedBound),
-        ) => LaneStatus::Incomplete(lexical_bound_reason(reason)),
+        ) => lexical_incomplete(reason, &retrieval.reasons),
         Completion::Incomplete(IncompleteReason::KernelIncarnationChanged) => {
             return Ok(LaneOutput::unavailable("kernel_incarnation_changed"));
         }
@@ -1265,26 +1300,30 @@ pub fn select(
         };
     let fused = fused.filter(|entry| eligible.contains(entry.occurrence()));
     // A claim occurrence is served only with the canonical decision it validates to now; one the surface denies is dropped, and the survivors keep their fused positions and scores.
-    let claims: Vec<String> = fused
+    let ranked: Vec<Option<&str>> = fused
         .entries()
         .iter()
-        .filter_map(|entry| {
+        .map(|entry| {
             let candidate = &terms[entry.occurrence()];
-            is_claim(candidate.class).then(|| candidate.occurrence_id.clone())
+            is_claim(candidate.class).then_some(candidate.occurrence_id.as_str())
         })
         .collect();
-    let references = canonical_references(
+    let (references, survivors) = canonical_references(
         projection,
         kernel,
         authority,
         limits,
         budget,
-        &claims,
+        &ranked,
         &mut before_phase,
     )?;
+    let mut room = survivors;
     let fused = fused.filter(|entry| {
         let candidate = &terms[entry.occurrence()];
-        !is_claim(candidate.class) || references.contains_key(&candidate.occurrence_id)
+        let keep = room > 0
+            && (!is_claim(candidate.class) || references.contains_key(&candidate.occurrence_id));
+        room -= usize::from(keep);
+        keep
     });
 
     before_phase(Phase::Materialization);
@@ -1340,16 +1379,29 @@ fn lane_slot(lane: Lane) -> usize {
         .expect("every lane has a slot in Lane::ORDER")
 }
 
-/// The lexical lane's `incomplete` reason for a bound the scan or admission stopped at.
-fn lexical_bound_reason(reason: IncompleteReason) -> &'static str {
+/// The lexical lane's status when `deciding` is a bound; `recorded` adds every other bound the scan or admission stopped at.
+fn lexical_incomplete(deciding: IncompleteReason, recorded: &[IncompleteReason]) -> LaneStatus {
+    let reason = lexical_bound_reason(deciding).unwrap_or("not_a_bound");
+    LaneStatus::Incomplete {
+        reason,
+        also: recorded
+            .iter()
+            .filter(|&&recorded| recorded != deciding)
+            .filter_map(|&recorded| lexical_bound_reason(recorded))
+            .collect(),
+    }
+}
+
+/// The lexical lane's `incomplete` code for a bound the scan or admission stopped at; `None` for any other reason.
+fn lexical_bound_reason(reason: IncompleteReason) -> Option<&'static str> {
     match reason {
-        IncompleteReason::ScanBound => "scan_bound",
-        IncompleteReason::CommonTerms => "common_terms",
-        IncompleteReason::RankBudget => "rank_budget",
-        IncompleteReason::AcceptedBound => "accepted_bound",
+        IncompleteReason::ScanBound => Some("scan_bound"),
+        IncompleteReason::CommonTerms => Some("common_terms"),
+        IncompleteReason::RankBudget => Some("rank_budget"),
+        IncompleteReason::AcceptedBound => Some("accepted_bound"),
         IncompleteReason::BudgetExhausted
         | IncompleteReason::KernelIncarnationChanged
-        | IncompleteReason::SnapshotChanged => "not_a_bound",
+        | IncompleteReason::SnapshotChanged => None,
     }
 }
 
@@ -1376,23 +1428,75 @@ fn fused_envelope(
     })
 }
 
+/// `retrieval::claims` filters its selected read by the classes `coverage(Family::Id)` lists, so the route's claim set is read from the same table.
 fn is_claim(class: OccurrenceClass) -> bool {
-    matches!(
-        class,
-        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
-    )
+    matches!(coverage(Family::Id), Coverage::Extracted(classes) if classes.contains(&class))
 }
 
-/// The canonical decision and source revision each claim occurrence validates to on the explicit-search surface at a fresh kernel snapshot, keyed by occurrence id. The projection read and the kernel facts cover the selected occurrences alone; an occurrence that is not a current, permitted claim of the bound project is absent.
+/// The canonical decision and source revision each reachable claim occurrence validates to on the explicit-search surface, keyed by occurrence id, with the number of `ranked` entries that survive. `ranked` holds each fused entry's occurrence id when the entry is a claim. Claims are validated in ranked order until the survivors reach `result_rows` plus the one entry that marks the response truncated, so the projection read and the kernel facts cover the claims the response can serve; an occurrence that is not a current, permitted claim of the bound project is absent.
 fn canonical_references(
     projection: &SearchProjection,
     kernel: &KernelStore,
     authority: Authority<'_>,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-    occurrence_ids: &[String],
+    ranked: &[Option<&str>],
     before_phase: &mut impl FnMut(Phase),
-) -> Result<BTreeMap<String, CanonicalReference>, QueryFailure> {
+) -> Result<(BTreeMap<String, CanonicalReference>, usize), QueryFailure> {
+    let claims: Vec<String> = ranked.iter().flatten().map(|id| id.to_string()).collect();
+    let reach = limits.result_rows.get().saturating_add(1);
+    let mut references = BTreeMap::new();
+    let mut judged_at = None;
+    let (mut survivors, mut validated, mut claim) = (0, 0, 0);
+    for (index, entry) in ranked.iter().enumerate() {
+        if survivors == reach {
+            break;
+        }
+        if let Some(occurrence_id) = entry {
+            if claim == validated {
+                // Counting ranked entries before flattening lets non-claim entries fill the remaining rows. Using `validated` as the growth target makes batches grow geometrically during denial runs until `limits.validation_batch` caps their size.
+                let within_reach = ranked[index..]
+                    .iter()
+                    .take(reach - survivors)
+                    .flatten()
+                    .count();
+                let size = within_reach
+                    .max(validated)
+                    .min(limits.validation_batch.get());
+                let batch = &claims[validated..claims.len().min(validated + size)];
+                before_phase(Phase::ClaimValidation);
+                check(budget)?;
+                validate_claims(
+                    projection,
+                    kernel,
+                    authority,
+                    budget,
+                    batch,
+                    &mut judged_at,
+                    &mut references,
+                )?;
+                validated += batch.len();
+            }
+            claim += 1;
+            if !references.contains_key(*occurrence_id) {
+                continue;
+            }
+        }
+        survivors += 1;
+    }
+    Ok((references, survivors))
+}
+
+/// All batches contributing to one answer share the snapshot and incarnation recorded in `judged_at`; a change returns `QueryFailure::Unavailable`.
+fn validate_claims(
+    projection: &SearchProjection,
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    budget: &SharedBudget,
+    batch: &[String],
+    judged_at: &mut Option<(EgressSnapshot, CommitReadIncarnation)>,
+    references: &mut BTreeMap<String, CanonicalReference>,
+) -> Result<(), QueryFailure> {
     let refused = |_: ClaimCandidateError| {
         if budget.is_exhausted() {
             QueryFailure::from(exhaustion(budget))
@@ -1400,58 +1504,80 @@ fn canonical_references(
             QueryFailure::Unavailable("claim_validation")
         }
     };
-    let mut references = BTreeMap::new();
-    // Each batch of at most `validation_batch` selected occurrences is classified and validated at its own fresh snapshot.
-    for batch in occurrence_ids.chunks(limits.validation_batch.get()) {
-        before_phase(Phase::ClaimValidation);
-        check(budget)?;
-        let max = NonZeroUsize::new(batch.len()).expect("chunks are not empty");
-        let bounds = ClaimCandidateBounds {
-            max_rows: max,
-            facts: ClaimFactBounds {
-                max_claims: max,
-                max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
-            },
-        };
-        let classified = projection
-            .read(|conn| {
-                Ok(classify_selected_claims(
-                    conn,
-                    kernel,
-                    budget.eval(),
-                    bounds,
-                    batch,
-                ))
-            })
-            .map_err(|_| QueryFailure::Unavailable("claim_validation"))?
-            .map_err(refused)?;
-        let validation = validate_for_surface(
+    let max = NonZeroUsize::new(batch.len()).expect("a batch starts at an unvalidated claim");
+    let bounds = ClaimCandidateBounds {
+        max_rows: max,
+        facts: ClaimFactBounds {
+            max_claims: max,
+            max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
+        },
+    };
+    let read = projection.read_under(budget, |conn| {
+        Ok(read_selected_claims(
+            conn,
             kernel,
-            &classified.candidates,
-            authority.project,
-            authority.destination,
-            Surface::ExplicitSearch,
-            bounds.facts,
-            classified.incarnation,
             budget.eval(),
-        )
-        .map_err(refused)?;
-        references.extend(validation.candidates.into_iter().filter_map(|validated| {
-            let UseVerdict::Permitted(visibility) = validated.verdict else {
-                return None;
-            };
-            let row = validated.candidate.row;
-            Some((
-                row.occurrence_id,
-                CanonicalReference {
-                    object_id: row.object_id,
-                    revision: row.revision,
-                    visibility,
-                },
-            ))
-        }));
+            bounds,
+            batch,
+        ))
+    });
+    let selected = match read {
+        Ok(selected) => selected.map_err(refused)?,
+        Err(SearchProjectionError::Store(StoreError::Deadline)) => {
+            return Err(exhaustion(budget).into());
+        }
+        Err(_) => return Err(QueryFailure::Unavailable("claim_validation")),
+    };
+    let judgement = judge_selected_for_surface(
+        kernel,
+        &selected,
+        authority.project,
+        authority.destination,
+        Surface::ExplicitSearch,
+        bounds.facts,
+        budget.eval(),
+    )
+    .map_err(refused)?;
+    let (snapshot, incarnation) = judged_at
+        .as_ref()
+        .map_or((None, None), |(snapshot, incarnation)| {
+            (Some(snapshot), Some(incarnation))
+        });
+    match snapshot_moved(
+        snapshot,
+        incarnation,
+        &judgement.snapshot,
+        &judgement.incarnation,
+    ) {
+        Some(AuthorityMoved::Incarnation) => {
+            return Err(QueryFailure::Unavailable("kernel_incarnation_changed"));
+        }
+        Some(AuthorityMoved::Snapshot) => {
+            return Err(QueryFailure::Unavailable("snapshot_changed"));
+        }
+        None => {}
     }
-    Ok(references)
+    judged_at.get_or_insert((judgement.snapshot, judgement.incarnation));
+    references.extend(
+        selected
+            .rows
+            .into_iter()
+            .zip(judgement.verdicts)
+            .filter_map(|(row, verdict)| {
+                let UseVerdict::Permitted(visibility) = verdict else {
+                    return None;
+                };
+                Some((
+                    row.occurrence_id,
+                    CanonicalReference {
+                        object_id: row.object_id,
+                        revision: row.revision,
+                        visibility,
+                    },
+                ))
+            }),
+    );
+    Ok(())
 }
 
 /// The canonical decision a served claim occurrence names, as validated at the response's snapshot.
@@ -1763,17 +1889,34 @@ mod tests {
             (IncompleteReason::AcceptedBound, "accepted_bound"),
         ] {
             assert_eq!(
-                LaneStatus::Incomplete(lexical_bound_reason(reason)).json(),
+                lexical_incomplete(reason, &[reason]).json(),
                 json!({"status": "incomplete", "reason": code})
             );
         }
+        assert_eq!(
+            lexical_incomplete(
+                IncompleteReason::CommonTerms,
+                &[
+                    IncompleteReason::CommonTerms,
+                    IncompleteReason::RankBudget,
+                    IncompleteReason::ScanBound,
+                    IncompleteReason::AcceptedBound,
+                ],
+            )
+            .json(),
+            json!({
+                "status": "incomplete",
+                "reason": "common_terms",
+                "also": ["rank_budget", "scan_bound", "accepted_bound"],
+            })
+        );
     }
 
     #[test]
     fn lane_statuses_serialize_their_reason_and_only_incomplete_or_unavailable_degrade() {
         assert_eq!(LaneStatus::Complete.json(), json!({"status": "complete"}));
         assert_eq!(
-            LaneStatus::Incomplete("scan_bound").json(),
+            LaneStatus::incomplete("scan_bound").json(),
             json!({"status": "incomplete", "reason": "scan_bound"})
         );
         assert_eq!(
@@ -1786,7 +1929,7 @@ mod tests {
         );
         assert!(!LaneStatus::Complete.degrades());
         assert!(!LaneStatus::Undeclared.degrades());
-        assert!(LaneStatus::Incomplete("page_bound").degrades());
+        assert!(LaneStatus::incomplete("page_bound").degrades());
         assert!(LaneStatus::Unavailable("engine").degrades());
     }
 
@@ -1810,6 +1953,8 @@ mod tests {
             probes: NonZeroUsize::new(4).unwrap(),
             lexical_scan_rows: NonZeroUsize::new(16).unwrap(),
             lexical_accepted: NonZeroUsize::new(8).unwrap(),
+            lexical_qualifying_matches: NonZeroUsize::new(64).unwrap(),
+            lexical_rank_budget: NonZeroUsize::new(96).unwrap(),
             validation_batch: NonZeroUsize::new(8).unwrap(),
             exact_page_rows: NonZeroUsize::new(4).unwrap(),
             exact_pages: NonZeroUsize::new(2).unwrap(),
