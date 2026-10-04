@@ -108,6 +108,7 @@ interface CallMarks {
     contextEnd?: number;
     lengthIn?: number;
     lengthOut?: number;
+    seen?: unknown;
     replaced?: boolean;
     agentEndStart?: number;
     agentEndEnd?: number;
@@ -152,7 +153,6 @@ runtime.transport.HostModuleTransport.prototype.call = async function measured(
 
 function bracket(position: "before" | "after") {
     return (pi: ExtensionApi) => {
-        let seen: unknown;
         pi.on("context", (event) => {
             const messages = event.messages as unknown[];
             // The timed span starts on a collected heap, as the OpenCode driver's does; Pi's
@@ -162,11 +162,11 @@ function bracket(position: "before" | "after") {
             if (position === "before") {
                 marks.beforePlugin = now;
                 marks.lengthIn = messages.length;
-                seen = messages;
+                marks.seen = messages;
             } else {
                 marks.afterPlugin = now;
                 marks.lengthOut = messages.length;
-                marks.replaced = messages !== seen;
+                marks.replaced = messages !== marks.seen;
             }
             return undefined;
         });
