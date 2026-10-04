@@ -4702,9 +4702,6 @@ impl HandlerCore {
             })
     }
 
-    /// Whether transform lineage for `session_id` exists under a root other than `project_root`:
-    /// an in-process root, a live transform route, or durable cache state with no record of this
-    /// root.
     fn session_lineage_on_another_root(&self, session_id: &str, project_root: &Path) -> bool {
         let canonical_project_root = canonical_root(project_root);
         let other = |root: &PathBuf| canonical_root(root) != canonical_project_root;
@@ -4730,11 +4727,9 @@ impl HandlerCore {
             return false;
         };
         store.has_cache_state(session_id).unwrap_or(false)
-            && !canonical_project_root.to_str().is_some_and(|root| {
-                store
-                    .knows_transform_session_root(session_id, root)
-                    .unwrap_or(false)
-            })
+            && store
+                .knows_transform_session_root_other_than(session_id, &canonical_project_root)
+                .unwrap_or(false)
     }
 
     /// Whether any transform lineage exists for `session_id` under any root: an in-process root,
@@ -29553,6 +29548,85 @@ mod tests {
             )
         );
         assert!(resolver.calls().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pruned_root_lineage_on_its_own_root_asks_the_resolver_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let root_a = dir.path().join("project-a");
+        std::fs::create_dir_all(&root_a).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        {
+            let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+            let handler = Handler::with_producer_factory_config_resolver(
+                Arc::new(TestProducerFactory {
+                    state: Arc::new(ProducerState::default()),
+                }),
+                default_test_config(),
+                Arc::new(MissingSessionResolver),
+            );
+            handler.install_store_for_test(Arc::clone(&store));
+            handler.bind_route(
+                test_route(7),
+                binding_with_harness(root_a.to_str().unwrap(), PI_HARNESS, "ses"),
+            );
+            let transformed =
+                call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")]))
+                    .await;
+            assert_eq!(transformed["action"], "HARD");
+            // Setting both timestamps to 0 causes the next store open to prune the root
+            // observation while the cache state remains.
+            store
+                .with_fenced_conn_for_test(|conn| {
+                    conn.execute(
+                        "UPDATE transform_session_roots SET observed_at = 0 WHERE session_id = 'ses'",
+                        [],
+                    )?;
+                    conn.execute(
+                        "UPDATE cache_state SET last_activity_at = 0 WHERE session_id = 'ses'",
+                        [],
+                    )
+                })
+                .unwrap();
+        }
+
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+        assert!(store.has_cache_state("ses").unwrap());
+        assert!(
+            !store
+                .knows_transform_session_root("ses", root_a.to_str().unwrap())
+                .unwrap()
+        );
+        let handler = Handler::with_producer_factory_config_resolver(
+            Arc::new(TestProducerFactory {
+                state: Arc::new(ProducerState::default()),
+            }),
+            default_test_config(),
+            resolver.clone(),
+        );
+        handler.install_store_for_test(Arc::clone(&store));
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_a.to_str().unwrap(), PI_HARNESS, "ses"),
+        );
+        let note = call_facade_on_channel(
+            &handler,
+            8,
+            "eidnara_note",
+            json!({ "action": "write", "content": "same root" }),
+        )
+        .await;
+        assert_eq!(
+            error_frame(note),
+            (
+                "session_unresolved".to_string(),
+                SESSION_UNRESOLVED_MESSAGE.to_string()
+            )
+        );
+        assert_eq!(resolver.calls(), vec!["ses"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
