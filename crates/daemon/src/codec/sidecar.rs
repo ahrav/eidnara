@@ -218,6 +218,16 @@ pub(crate) fn has_stamped_block_identity(block: &WireBlock) -> bool {
     stamped_block_identity(block).is_some()
 }
 
+pub(crate) fn equals_decoded_block(block: &WireBlock, decoded: &WireBlock) -> bool {
+    fn content(block: &WireBlock) -> impl Iterator<Item = (&String, &BTreeMap<String, Value>)> {
+        block
+            .provider_extras
+            .iter()
+            .filter(|(namespace, _)| namespace.as_str() != BLOCK_IDENTITY_NAMESPACE)
+    }
+    block.kind() == decoded.kind() && content(block).eq(content(decoded))
+}
+
 pub(crate) fn block_is_unchanged(block: &WireBlock, meta: &BlockMeta) -> bool {
     meta.content_fingerprint
         .as_deref()
@@ -551,6 +561,37 @@ mod tests {
 
         let null = stable_hash(&Value::Null);
         assert_ne!(bare, null);
+    }
+
+    #[test]
+    fn decoded_block_equality_ignores_only_the_codec_namespace_and_agrees_with_the_fingerprint() {
+        let mut decoded = WireBlock::bare(BlockKind::Text {
+            text: "hello".into(),
+        });
+        decoded
+            .provider_extras
+            .entry("pi".into())
+            .or_default()
+            .insert("textSignature".into(), Value::from("sig"));
+        let plain = decoded.clone();
+        stamp_block_identity(&mut decoded, 0, 0, "fp");
+        assert!(equals_decoded_block(&plain, &decoded));
+        assert_eq!(
+            decoded_block_fingerprint(&plain),
+            decoded_block_fingerprint(&decoded)
+        );
+
+        let mut other_extras = plain.clone();
+        other_extras
+            .provider_extras
+            .entry("pi".into())
+            .or_default()
+            .insert("textSignature".into(), Value::from("other"));
+        assert!(!equals_decoded_block(&other_extras, &decoded));
+        let mut no_extras = plain.clone();
+        no_extras.provider_extras.clear();
+        assert!(!equals_decoded_block(&no_extras, &decoded));
+        assert!(!equals_decoded_block(&text_block("other"), &decoded));
     }
 
     #[test]

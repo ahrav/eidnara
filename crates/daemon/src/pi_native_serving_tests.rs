@@ -151,8 +151,10 @@ async fn a_pi_window_folds_to_the_m0_m1_and_tail_an_opencode_window_gets() {
     let pi_native = pi_rows(&transcript);
     let opencode_native = opencode_messages(&transcript);
     let pi_ck = ingress(
-        codec::pi::decode_pi_rows(&pi_native.iter().cloned().map(Arc::new).collect::<Vec<_>>())
-            .unwrap(),
+        codec::pi::decode_pi_rows_stamped(
+            &pi_native.iter().cloned().map(Arc::new).collect::<Vec<_>>(),
+        )
+        .unwrap(),
     );
     let opencode_ck = ingress(codec::decode_opencode(&opencode_native));
     assert_eq!(
@@ -332,7 +334,7 @@ async fn every_closed_role_serves_through_the_handler_and_replays_its_row() {
         } }),
     ];
     let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
-    let ck = ingress(codec::pi::decode_pi_rows(&shared).unwrap());
+    let ck = ingress(codec::pi::decode_pi_rows_stamped(&shared).unwrap());
     let mut request = native_request("pi", ck, rows.clone());
     request["usage"] = json!(ModuleUsage {
         current_total_input_tokens: 1_000,

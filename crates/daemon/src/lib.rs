@@ -14111,34 +14111,41 @@ fn attach_native_messages_with_tags(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let mut native_messages = match profile {
+    let native_messages = match profile {
         Some(SerializerProfile::Pi) => {
             // Admission already checked every row, so the decode cannot decline here.
-            let sidecar = codec::pi::decode_pi_rows(native_input)
-                .map(|decoded| decoded.sidecar)
-                .unwrap_or_else(|_| codec::DecodeSidecar::new("pi"));
-            codec::pi::encode_pi_rows(&served_messages, &sidecar, &mutation_exempt_mids)
+            let decoded = codec::pi::decode_pi_rows(native_input).unwrap_or_else(|_| {
+                codec::DecodedHarnessMessages {
+                    messages: Vec::new(),
+                    boundary: None,
+                    sidecar: codec::DecodeSidecar::new("pi"),
+                }
+            });
+            codec::pi::encode_pi_rows(&served_messages, &decoded, &mutation_exempt_mids)
         }
-        _ => codec::opencode::encode_opencode_with_session_exemptions(
-            &served_messages,
-            &codec::opencode::decode_opencode_shared(native_input).sidecar,
-            Some(&request.session_id),
-            &mutation_exempt_mids,
-        ),
+        _ => {
+            let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
+                &served_messages,
+                &codec::opencode::decode_opencode_shared(native_input).sidecar,
+                Some(&request.session_id),
+                &mutation_exempt_mids,
+            );
+            if let Some(profile) = profile {
+                transform::clear_served_native_reasoning_with_tags(
+                    profile,
+                    transform::request_accepts_empty_content(request),
+                    &mut native_messages,
+                    &served_messages,
+                    &request.messages,
+                    reasoning_watermark,
+                    request.mid_turn,
+                    tag_numbers,
+                );
+            }
+            native_messages.into_iter().map(Arc::new).collect()
+        }
     };
-    if let Some(profile) = profile {
-        transform::clear_served_native_reasoning_with_tags(
-            profile,
-            transform::request_accepts_empty_content(request),
-            &mut native_messages,
-            &served_messages,
-            &request.messages,
-            reasoning_watermark,
-            request.mid_turn,
-            tag_numbers,
-        );
-    }
-    response.native_messages = Some(native_messages.into_iter().map(Arc::new).collect());
+    response.native_messages = Some(native_messages);
 }
 
 /// The caller's previously applied native output, offered as the recipe's `previous` source only

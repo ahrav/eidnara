@@ -23,8 +23,8 @@ use crate::wire::{
 
 use super::sidecar::{
     BlockMeta, DecodeSidecar, DecodedHarnessMessages, HarnessMessageMeta, MatchedBlockMetas,
-    block_is_unchanged, decoded_block_fingerprint, match_block_metas, stable_hash_prefix,
-    stamp_block_identity,
+    block_is_unchanged, decoded_block_fingerprint, equals_decoded_block,
+    has_stamped_block_identity, match_block_metas, stable_hash_prefix, stamp_block_identity,
 };
 
 const HARNESS: &str = "pi";
@@ -172,9 +172,22 @@ pub(crate) fn row_id(row: &Value) -> Option<&str> {
 /// Decodes a window of Pi rows, or declines it.
 ///
 /// A message's ordinal is its window position, `index + 1`. Each decoded message's mid is its
-/// row id. The sidecar retains each row through an `Arc` clone and each content part by value;
-/// a block decoded from the whole message retains no copy of it.
+/// row id. The sidecar retains each row through an `Arc` clone. Decoded blocks carry no identity
+/// stamp, and [`encode_pi_rows`] fingerprints a message's decoded blocks when it aligns them.
 pub(crate) fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiDecline> {
+    decode_rows(rows, false)
+}
+
+/// Decodes like [`decode_pi_rows`], then fingerprints every block meta and stamps every decoded
+/// block with its origin and fingerprint.
+#[cfg(test)]
+pub(crate) fn decode_pi_rows_stamped(
+    rows: &[Arc<Value>],
+) -> Result<DecodedHarnessMessages, PiDecline> {
+    decode_rows(rows, true)
+}
+
+fn decode_rows(rows: &[Arc<Value>], stamp: bool) -> Result<DecodedHarnessMessages, PiDecline> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
     let mut decoded = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
@@ -213,6 +226,18 @@ pub(crate) fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessag
                     string_field(message, "summary").unwrap_or_default()
                 ),
             ),
+        }
+        if stamp {
+            for (block, block_meta) in content.iter_mut().zip(&mut block_metas) {
+                let fingerprint = decoded_block_fingerprint(block);
+                stamp_block_identity(
+                    block,
+                    block_meta.block_index,
+                    block_meta.native_index.unwrap_or_default(),
+                    &fingerprint,
+                );
+                block_meta.content_fingerprint = Some(fingerprint);
+            }
         }
         let origin = if role == PiRole::Assistant {
             pi_origin(message)
@@ -328,19 +353,20 @@ fn bash_execution_text(message: &Value) -> String {
 
 /// Encodes canonical messages as Pi rows, reusing retained rows matched by mid.
 ///
-/// An untouched retained message replays its exact row, as does any retained message named in
-/// `mutation_exempt_mids`. An edited user, custom, or assistant message keeps its native parts and
+/// An untouched retained message replays its retained row `Arc`, as does any retained message named
+/// in `mutation_exempt_mids`. An edited user, custom, or assistant message keeps its native parts and
 /// updates the edited ones; an edited tool result rewrites its content. An edited message of a role
 /// whose native shape has no content array becomes the `user` message Pi's `convertToLlm` would
 /// build, under the same id. A message without a retained row is built in Pi's current shape; a
 /// synthetic or unidentified one takes a reserved id derived from its encoded message, suffixed
 /// with its occurrence when an equal message earlier in the output took that id. A retained
-/// message whose content is empty after editing is omitted.
+/// message whose content is empty after editing is omitted. `decoded` is the [`decode_pi_rows`]
+/// output for the retained rows.
 pub(crate) fn encode_pi_rows(
     messages: &[WireMessage],
-    sidecar: &DecodeSidecar,
+    decoded: &DecodedHarnessMessages,
     mutation_exempt_mids: &[&str],
-) -> Vec<Value> {
+) -> Vec<Arc<Value>> {
     let mut synthetic_ids = HashMap::<String, usize>::new();
     messages
         .iter()
@@ -349,16 +375,28 @@ pub(crate) fn encode_pi_rows(
                 .meta
                 .harness_id
                 .as_deref()
-                .and_then(|mid| sidecar.message_by_mid(mid));
+                .and_then(|mid| decoded.sidecar.message_by_mid(mid));
             match meta {
                 Some(meta) if mutation_exempt_mids.contains(&meta.mid.as_str()) => {
-                    Some(meta.raw.as_ref().clone())
+                    Some(Arc::clone(&meta.raw))
                 }
-                Some(meta) => encode_with_meta(message, meta),
-                None => Some(encode_new_row(message, &mut synthetic_ids)),
+                Some(meta) => encode_with_meta(message, meta, decoded_blocks(decoded, meta)),
+                None => Some(Arc::new(encode_new_row(message, &mut synthetic_ids))),
             }
         })
         .collect()
+}
+
+fn decoded_blocks<'a>(
+    decoded: &'a DecodedHarnessMessages,
+    meta: &HarnessMessageMeta,
+) -> &'a [WireBlock] {
+    usize::try_from(meta.ordinal)
+        .ok()
+        .and_then(|ordinal| ordinal.checked_sub(1))
+        .and_then(|index| decoded.messages.get(index))
+        .filter(|message| message.mid == meta.mid)
+        .map_or(&[], |message| message.ck.content())
 }
 
 fn decode_user_message(
@@ -523,42 +561,56 @@ fn push_message_text(content: &mut Vec<WireBlock>, block_metas: &mut Vec<BlockMe
 fn push_block(
     content: &mut Vec<WireBlock>,
     block_metas: &mut Vec<BlockMeta>,
-    mut block: WireBlock,
+    block: WireBlock,
     native_index: usize,
     raw: &Value,
     kind: &str,
 ) {
-    let block_index = content.len();
-    let content_fingerprint = decoded_block_fingerprint(&block);
-    stamp_block_identity(&mut block, block_index, native_index, &content_fingerprint);
-    content.push(block);
     block_metas.push(BlockMeta {
-        block_index,
+        block_index: content.len(),
         kind: kind.to_string(),
         native_index: Some(native_index),
         native_id: string_field(raw, "id").or_else(|| string_field(raw, "toolCallId")),
         item_id: None,
-        content_fingerprint: Some(content_fingerprint),
-        raw: raw.clone(),
+        content_fingerprint: None,
+        raw: Value::Null,
     });
+    content.push(block);
 }
 
-fn encode_with_meta(msg: &WireMessage, meta: &HarnessMessageMeta) -> Option<Value> {
-    let raw_row = meta.raw.as_ref();
-    let matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
-    let unchanged = msg.content().len() == meta.blocks.len()
+fn encode_with_meta(
+    msg: &WireMessage,
+    meta: &HarnessMessageMeta,
+    decoded: &[WireBlock],
+) -> Option<Arc<Value>> {
+    if replays_retained_row(msg, meta, decoded) {
+        return Some(Arc::clone(&meta.raw));
+    }
+    let fingerprinted;
+    let block_metas = if meta
+        .blocks
+        .iter()
+        .all(|block_meta| block_meta.content_fingerprint.is_some())
+    {
+        &meta.blocks
+    } else {
+        fingerprinted = fingerprint_block_metas(&meta.blocks, decoded);
+        &fingerprinted
+    };
+    let matched_metas = match_block_metas(msg.content(), block_metas, block_matches_meta);
+    let unchanged = msg.content().len() == block_metas.len()
         && msg
             .content()
             .iter()
             .zip(&matched_metas.by_block)
             .all(|(block, matched)| matched.is_some_and(|meta| block_is_unchanged(block, meta)));
     if unchanged {
-        return Some(raw_row.clone());
+        return Some(Arc::clone(&meta.raw));
     }
     if msg.content().is_empty() {
         return None;
     }
-    let mut row = raw_row.clone();
+    let mut row = meta.raw.as_ref().clone();
     let message = row.get_mut("message")?;
     match PiRole::parse(&meta.role)? {
         PiRole::ToolResult => {
@@ -582,7 +634,42 @@ fn encode_with_meta(msg: &WireMessage, meta: &HarnessMessageMeta) -> Option<Valu
             });
         }
     }
-    Some(row)
+    Some(Arc::new(row))
+}
+
+/// Fills each missing fingerprint from the decoded block at the meta's index.
+fn fingerprint_block_metas(block_metas: &[BlockMeta], decoded: &[WireBlock]) -> Vec<BlockMeta> {
+    block_metas
+        .iter()
+        .map(|block_meta| BlockMeta {
+            content_fingerprint: block_meta.content_fingerprint.clone().or_else(|| {
+                decoded
+                    .get(block_meta.block_index)
+                    .map(decoded_block_fingerprint)
+            }),
+            ..block_meta.clone()
+        })
+        .collect()
+}
+
+fn replays_retained_row(
+    msg: &WireMessage,
+    meta: &HarnessMessageMeta,
+    decoded: &[WireBlock],
+) -> bool {
+    msg.content().len() == meta.blocks.len()
+        && msg
+            .content()
+            .iter()
+            .zip(&meta.blocks)
+            .all(|(block, block_meta)| {
+                !has_stamped_block_identity(block)
+                    && block_matches_meta(block, block_meta)
+                    && (decoded
+                        .get(block_meta.block_index)
+                        .is_some_and(|decoded| equals_decoded_block(block, decoded))
+                        || block_is_unchanged(block, block_meta))
+            })
 }
 
 fn block_matches_meta(block: &WireBlock, meta: &BlockMeta) -> bool {
@@ -1162,12 +1249,12 @@ mod tests {
     }
 
     fn decode(messages: &[Value]) -> DecodedHarnessMessages {
-        decode_pi_rows(&rows(messages)).expect("closed-role window decodes")
+        decode_pi_rows_stamped(&rows(messages)).expect("closed-role window decodes")
     }
 
     /// Encodes and unwraps each row's message.
-    fn encode(messages: &[WireMessage], sidecar: &DecodeSidecar) -> Vec<Value> {
-        encode_pi_rows(messages, sidecar, &[])
+    fn encode(messages: &[WireMessage], decoded: &DecodedHarnessMessages) -> Vec<Value> {
+        encode_pi_rows(messages, decoded, &[])
             .into_iter()
             .map(|row| row["message"].clone())
             .collect()
@@ -1268,7 +1355,7 @@ mod tests {
             .iter()
             .map(|(row, _, _)| Arc::new(row.clone()))
             .collect();
-        let decoded = decode_pi_rows(&window).unwrap();
+        let decoded = decode_pi_rows_stamped(&window).unwrap();
         for ((row, wire_role, texts), message) in table.iter().zip(&decoded.messages) {
             assert_eq!(message.mid, row["id"].as_str().unwrap());
             assert_eq!(
@@ -1280,8 +1367,9 @@ mod tests {
                 assert_eq!(&text_of(&message.ck), texts, "{row}");
             }
         }
-        let encoded = encode_pi_rows(&cks(&decoded), &decoded.sidecar, &[]);
-        let expected: Vec<Value> = table.into_iter().map(|(row, _, _)| row).collect();
+        let encoded = encode_pi_rows(&cks(&decoded), &decoded, &[]);
+        let expected: Vec<Arc<Value>> =
+            table.into_iter().map(|(row, _, _)| Arc::new(row)).collect();
         assert_eq!(encoded, expected);
     }
 
@@ -1295,7 +1383,7 @@ mod tests {
             json!({ "id": "8192a3b4", "message": { "role": "system", "content": "x" } }),
         ));
         assert_eq!(
-            decode_pi_rows(&window),
+            decode_pi_rows_stamped(&window),
             Err(PiDecline::UnknownRole {
                 index: 7,
                 role: "system".to_string()
@@ -1307,7 +1395,7 @@ mod tests {
             .collect();
         assert_eq!(
             check_pi_rows(&window, mids.iter().map(String::as_str)),
-            decode_pi_rows(&window).map(drop)
+            decode_pi_rows_stamped(&window).map(drop)
         );
         assert_eq!(
             check_pi_rows(&window[..1], ["other"].into_iter()),
@@ -1328,7 +1416,7 @@ mod tests {
             json!({ "info": { "id": "a", "role": "user" }, "parts": [] }),
         ] {
             assert_eq!(
-                decode_pi_rows(&[Arc::new(malformed.clone())]),
+                decode_pi_rows_stamped(&[Arc::new(malformed.clone())]),
                 Err(PiDecline::MalformedRow { index: 0 }),
                 "{malformed}"
             );
@@ -1343,14 +1431,14 @@ mod tests {
             "role": "compactionSummary", "summary": "s", "tokensBefore": 1, "timestamp": 1
         } });
         assert_eq!(
-            decode_pi_rows(&[Arc::new(host_with_reserved)]),
+            decode_pi_rows_stamped(&[Arc::new(host_with_reserved)]),
             Err(PiDecline::IdSpace {
                 index: 0,
                 role: PiRole::User
             })
         );
         assert_eq!(
-            decode_pi_rows(&[Arc::new(synthetic_with_host)]),
+            decode_pi_rows_stamped(&[Arc::new(synthetic_with_host)]),
             Err(PiDecline::IdSpace {
                 index: 0,
                 role: PiRole::CompactionSummary
@@ -1362,8 +1450,8 @@ mod tests {
         let m1 = WireMessage::synthetic_user_text("m1");
         let mut output = vec![m0.clone(), m1.clone()];
         output.extend(cks(&decoded));
-        let first = encode_pi_rows(&output, &decoded.sidecar, &[]);
-        let again = encode_pi_rows(&output, &decoded.sidecar, &[]);
+        let first = encode_pi_rows(&output, &decoded, &[]);
+        let again = encode_pi_rows(&output, &decoded, &[]);
         assert_eq!(first, again, "a re-encode yields the same rows and ids");
         let ids: Vec<&str> = first.iter().map(|row| row_id(row).unwrap()).collect();
         assert!(is_reserved_id(ids[0]) && is_reserved_id(ids[1]), "{ids:?}");
@@ -1371,7 +1459,7 @@ mod tests {
         assert_eq!(ids[2], "00000000");
         assert!(!is_reserved_id(ids[2]));
 
-        let twice = encode_pi_rows(&[m1.clone(), m1.clone()], &decoded.sidecar, &[]);
+        let twice = encode_pi_rows(&[m1.clone(), m1.clone()], &decoded, &[]);
         assert_eq!(row_id(&twice[0]), Some(ids[1]));
         assert_eq!(
             row_id(&twice[1]).map(str::to_owned),
@@ -1382,7 +1470,7 @@ mod tests {
         let mut labelled = m0;
         labelled.meta.harness_id = Some("1a2b3c4d".to_string());
         assert_eq!(
-            row_id(&encode_pi_rows(&[labelled], &decoded.sidecar, &[])[0]),
+            row_id(&encode_pi_rows(&[labelled], &decoded, &[])[0]),
             Some(ids[0])
         );
     }
@@ -1405,7 +1493,7 @@ mod tests {
                 "usage": {}, "stopReason": "stop", "timestamp": 7
             } })),
         ];
-        let decoded = decode_pi_rows(&window).unwrap();
+        let decoded = decode_pi_rows_stamped(&window).unwrap();
         assert!(decoded.boundary.is_none());
         assert_eq!(
             decoded
@@ -1423,14 +1511,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2, 3]
         );
-        let encoded = encode_pi_rows(&cks(&decoded), &decoded.sidecar, &[]);
-        assert_eq!(
-            encoded,
-            window
-                .iter()
-                .map(|row| row.as_ref().clone())
-                .collect::<Vec<_>>()
-        );
+        let encoded = encode_pi_rows(&cks(&decoded), &decoded, &[]);
+        assert_eq!(encoded, window);
     }
 
     #[test]
@@ -1439,19 +1521,19 @@ mod tests {
             "role": "bashExecution", "command": "pwd", "output": "", "exitCode": 0,
             "cancelled": false, "truncated": false, "timestamp": 9
         } }))];
-        let decoded = decode_pi_rows(&window).unwrap();
+        let decoded = decode_pi_rows_stamped(&window).unwrap();
         let mut message = decoded.messages[0].ck.clone();
         assert_eq!(text_of(&message), ["Ran `pwd`\n(no output)"]);
         *message.content_mut()[0].kind_mut() = BlockKind::Text {
             text: "§4§ Ran `pwd`\n(no output)".to_string(),
         };
         assert_eq!(
-            encode_pi_rows(&[message], &decoded.sidecar, &[]),
-            [json!({ "id": "a1b2c3d4", "message": {
+            encode_pi_rows(&[message], &decoded, &[]),
+            [Arc::new(json!({ "id": "a1b2c3d4", "message": {
                 "role": "user",
                 "content": [{ "type": "text", "text": "§4§ Ran `pwd`\n(no output)" }],
                 "timestamp": 9
-            } })]
+            } }))]
         );
     }
 
@@ -1461,12 +1543,9 @@ mod tests {
             "role": "bashExecution", "command": "secret", "output": "x", "exitCode": 0,
             "cancelled": false, "truncated": false, "excludeFromContext": true, "timestamp": 9
         } }))];
-        let decoded = decode_pi_rows(&window).unwrap();
+        let decoded = decode_pi_rows_stamped(&window).unwrap();
         assert!(decoded.messages[0].ck.content().is_empty());
-        assert_eq!(
-            encode_pi_rows(&cks(&decoded), &decoded.sidecar, &[]),
-            [window[0].as_ref().clone()]
-        );
+        assert_eq!(encode_pi_rows(&cks(&decoded), &decoded, &[]), window);
     }
 
     #[test]
@@ -1477,15 +1556,11 @@ mod tests {
             text: "edited".to_string(),
         };
         assert_eq!(
-            encode_pi_rows(
-                std::slice::from_ref(&message),
-                &decoded.sidecar,
-                &["00000000"]
-            )[0]["message"]["content"],
+            encode_pi_rows(std::slice::from_ref(&message), &decoded, &["00000000"])[0]["message"]["content"],
             "original"
         );
         assert_eq!(
-            encode_pi_rows(&[message], &decoded.sidecar, &[])[0]["message"]["content"],
+            encode_pi_rows(&[message], &decoded, &[])[0]["message"]["content"],
             "edited"
         );
     }
@@ -1507,10 +1582,105 @@ mod tests {
                 "vendorMessage": "keep"
             }
         }))];
-        let decoded = decode_pi_rows(&window).unwrap();
+        let decoded = decode_pi_rows_stamped(&window).unwrap();
+        let encoded = encode_pi_rows(&cks(&decoded), &decoded, &[]);
+        assert_eq!(encoded, window);
+        assert!(Arc::ptr_eq(&encoded[0], &window[0]));
+    }
+
+    fn unstamped(messages: &[WireMessage]) -> Vec<WireMessage> {
+        messages
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                for block in message.content_mut() {
+                    block
+                        .provider_extras
+                        .retain(|namespace, _| namespace == HARNESS);
+                    assert!(!has_stamped_block_identity(block));
+                }
+                message
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unstamped_messages_replay_untouched_rows_and_encode_edits_as_stamped_metas_do() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../../testdata/codec/pi-golden.json")).unwrap();
+        let rows: Vec<Arc<Value>> = golden["cases"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+        let decoded = decode_pi_rows(&rows).unwrap();
+        let stamped = decode_pi_rows_stamped(&rows).unwrap();
+        let messages = cks(&decoded);
+        assert_eq!(unstamped(&cks(&stamped)), messages);
+        assert!(decoded.sidecar.messages.values().all(|meta| {
+            meta.blocks
+                .iter()
+                .all(|block_meta| block_meta.content_fingerprint.is_none())
+        }));
+
+        let encoded = encode_pi_rows(&messages, &decoded, &[]);
+        assert_eq!(encoded, rows);
+        assert!(
+            encoded
+                .iter()
+                .zip(&rows)
+                .all(|(encoded, row)| Arc::ptr_eq(encoded, row))
+        );
+
+        let mut edited = messages;
+        let multi_block = edited
+            .iter()
+            .position(|message| message.content().len() > 1)
+            .unwrap();
+        let BlockKind::Text { text } = edited[multi_block]
+            .content_mut()
+            .iter_mut()
+            .map(WireBlock::kind_mut)
+            .find(|kind| matches!(kind, BlockKind::Text { .. }))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        text.push_str(" (edited)");
+        let tool_result = edited
+            .iter()
+            .position(|message| message.role == "tool")
+            .unwrap();
+        let BlockKind::ToolResult { output, .. } = edited[tool_result].content_mut()[0].kind_mut()
+        else {
+            unreachable!()
+        };
+        *output = ToolOutput::bare(OutputKind::Text {
+            text: "reduced".to_string(),
+        });
+        let last_multi_block = edited
+            .iter()
+            .rposition(|message| message.content().len() > 1)
+            .unwrap();
+        edited[last_multi_block].content_mut().remove(0);
+
+        let encoded = encode_pi_rows(&edited, &decoded, &[]);
+        assert_eq!(encoded, encode_pi_rows(&edited, &stamped, &[]));
+        assert_ne!(encoded[multi_block], rows[multi_block]);
+        assert!(
+            encoded[multi_block]["message"]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|part| part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.ends_with(" (edited)")))
+        );
         assert_eq!(
-            encode_pi_rows(&cks(&decoded), &decoded.sidecar, &[]),
-            [window[0].as_ref().clone()]
+            encoded[tool_result]["message"]["content"],
+            json!([{ "type": "text", "text": "reduced" }])
         );
     }
 
@@ -1540,10 +1710,7 @@ mod tests {
             block.provider_extras[HARNESS]["itemId"],
             Value::String("item-9".to_string())
         );
-        assert_eq!(
-            encode(&[decoded.messages[0].ck.clone()], &decoded.sidecar),
-            raw
-        );
+        assert_eq!(encode(&[decoded.messages[0].ck.clone()], &decoded), raw);
     }
 
     #[test]
@@ -1568,7 +1735,7 @@ mod tests {
         let mut message = decoded.messages[0].ck.clone();
         message.content_mut().remove(1);
 
-        let encoded = encode(&[message], &decoded.sidecar);
+        let encoded = encode(&[message], &decoded);
         let content = encoded[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         assert_eq!(content[0], raw[0]["content"][0]);
@@ -1590,7 +1757,7 @@ mod tests {
         let mut message = decoded.messages[0].ck.clone();
         message.content_mut().remove(0);
 
-        let encoded = encode(&[message], &decoded.sidecar);
+        let encoded = encode(&[message], &decoded);
         assert_eq!(encoded[0]["content"], json!([raw[0]["content"][1].clone()]));
     }
 
@@ -1614,7 +1781,7 @@ mod tests {
         let mut message = decoded.messages[0].ck.clone();
         message.content_mut().remove(1);
 
-        let encoded = encode(&[message], &decoded.sidecar);
+        let encoded = encode(&[message], &decoded);
         assert_eq!(
             encoded[0]["content"],
             json!([
@@ -1653,7 +1820,7 @@ mod tests {
             text: "§3§ SURVIVE".to_string(),
         };
 
-        let encoded = encode(&[message], &decoded.sidecar);
+        let encoded = encode(&[message], &decoded);
         assert_eq!(
             encoded[0]["content"],
             json!([
@@ -1686,10 +1853,7 @@ mod tests {
             panic!("expected tool result");
         };
         assert!(matches!(output.kind, OutputKind::Content { .. }));
-        assert_eq!(
-            encode(&[decoded.messages[0].ck.clone()], &decoded.sidecar),
-            raw
-        );
+        assert_eq!(encode(&[decoded.messages[0].ck.clone()], &decoded), raw);
     }
 
     #[test]
@@ -1727,7 +1891,7 @@ mod tests {
         };
         media.filename = Some("failure.png".to_string());
 
-        let encoded = encode(&[message], &decoded.sidecar);
+        let encoded = encode(&[message], &decoded);
         assert_eq!(encoded[0]["isError"], true);
         assert_eq!(
             encoded[0]["content"],
@@ -1765,10 +1929,7 @@ mod tests {
             panic!("mixed opaque error must decode as ErrorContent");
         };
         assert!(matches!(blocks[1].kind, ResultBlockKind::Opaque { .. }));
-        assert_eq!(
-            encode(&[decoded.messages[0].ck.clone()], &decoded.sidecar),
-            raw
-        );
+        assert_eq!(encode(&[decoded.messages[0].ck.clone()], &decoded), raw);
 
         let mut message = decoded.messages[0].ck.clone();
         let result = &mut message.content_mut()[0];
@@ -1782,7 +1943,7 @@ mod tests {
             panic!("expected leading text block");
         };
         *text = "tagged failed".to_string();
-        let encoded = encode(&[message], &decoded.sidecar);
+        let encoded = encode(&[message], &decoded);
         assert_eq!(encoded[0]["isError"], true);
         assert_eq!(
             encoded[0]["content"],
@@ -1811,10 +1972,7 @@ mod tests {
             output.kind,
             OutputKind::ErrorContent { ref blocks } if blocks.is_empty()
         ));
-        assert_eq!(
-            encode(&[decoded.messages[0].ck.clone()], &decoded.sidecar),
-            raw
-        );
+        assert_eq!(encode(&[decoded.messages[0].ck.clone()], &decoded), raw);
     }
 
     #[test]
@@ -1831,8 +1989,8 @@ mod tests {
         let mut message = decoded.messages[0].ck.clone();
         message.content_mut().remove(0);
 
-        let first = encode(&[message.clone()], &decoded.sidecar);
-        let replay = encode(&[message], &decoded.sidecar);
+        let first = encode(&[message.clone()], &decoded);
+        let replay = encode(&[message], &decoded);
         assert_eq!(replay, first);
         assert_eq!(first[0]["content"], json!([raw[0]["content"][1].clone()]));
     }
@@ -1851,6 +2009,6 @@ mod tests {
         let mut message = decoded.messages[0].ck.clone();
         message.content_mut().clear();
 
-        assert!(encode(&[message], &decoded.sidecar).is_empty());
+        assert!(encode(&[message], &decoded).is_empty());
     }
 }
