@@ -13,10 +13,10 @@ Reachability is test-only because no production RP2.1 priority driver exists.
 - `crates/host-runtime/src/local_embeddings/mod.rs:229-247` keeps separate query
   admission capacity and batch JobTable bounds, and one inference scheduler for
   every native call. (Corrected: the earlier `:206-225` FIFO semaphore is gone.)
-- `mod.rs:1171-1205` computes the query deadline before nonblocking admission.
-- `mod.rs:1112-1168` waits for a query grant within the tracked query worker and
+- `mod.rs:1176-1210` computes the query deadline before nonblocking admission.
+- `mod.rs:1117-1173` waits for a query grant within the tracked query worker and
   checks the deadline again before native work.
-- `mod.rs:1339-1381` and `:902-935` give batch workers one background grant per
+- `mod.rs:1344-1386` and `:907-940` give batch workers one background grant per
   text.
 - `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237` constructs mixed
   query/batch order and asserts query, query, query, batch: waiting queries go
@@ -96,7 +96,7 @@ A free slot goes to the oldest query; after eight query grants made while
 background work waits, the next grant goes to the oldest background waiter
 (`scheduler.rs:50-59`). At most `max_waiting_queries` queries wait, and the holder
 is not a waiter (`scheduler.rs:139-141`). Batch workers take one grant per text
-(`mod.rs:902-935`), so a query waits at most one background text. The mixed-order
+(`mod.rs:907-940`), so a query waits at most one background text. The mixed-order
 test now asserts query, query, query, batch
 (`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The saturated
 product workload and the RP2.9 service bound are still missing, so the record

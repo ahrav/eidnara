@@ -9,7 +9,14 @@ import { ROUTE_MAX_SELECTORS, ROUTE_SEARCH_DEADLINE_MS } from "./route-search";
 const ctx = { sessionID: "ses-route", directory: "/tmp/eidnara-route" };
 const id = (n: number) => `mem_${String(n).padStart(32, "0")}`;
 
-type Entry = { object?: string; revision?: number; lanes?: string[]; labeled?: boolean };
+type Entry = {
+    object?: string;
+    revision?: number;
+    lanes?: string[];
+    labeled?: boolean;
+    /** The fused position; the daemon keeps it when it filters earlier entries out. */
+    position?: number;
+};
 
 function fused(entries: Entry[], extra: Record<string, unknown> = {}) {
     return {
@@ -23,7 +30,7 @@ function fused(entries: Entry[], extra: Record<string, unknown> = {}) {
         },
         entries: entries.map((entry, index) => ({
             occurrence_id: `occ-${index}`,
-            position: index + 1,
+            position: entry.position ?? index + 1,
             score: 1 / (index + 1),
             lanes: Object.fromEntries(
                 (entry.lanes ?? ["dense"]).map((lane) => [lane, { position: index + 1, raw: 0.5 }]),
@@ -95,6 +102,59 @@ describe("eidnara_search through the fused route", () => {
         expect(transport.calls[1]?.body).toMatchObject({ object_ids: [id(2), id(1)] });
         expect(bodies[0]).toMatchObject({ query: "semantic phrasing", destination: "local" });
         expect(bodies[0]?.remaining_ms as number).toBeLessThanOrEqual(ROUTE_SEARCH_DEADLINE_MS);
+        expect(Number.isSafeInteger(bodies[0]?.remaining_ms)).toBe(true);
+    });
+
+    it("renders the survivors of a ranking whose filtered entries left position gaps", async () => {
+        const { kernel, transport, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Second survivor.",
+        });
+        kernel.seedDecision({
+            object_id: id(2),
+            decision_kind: "NAMING",
+            summary: "First survivor.",
+        });
+        kernel.routeReply = () =>
+            fused([
+                { object: id(2), position: 2 },
+                { object: id(1), position: 4 },
+            ]);
+        const execution = await run({ query: "survivor" });
+        if (execution.status !== "complete") throw new Error(execution.text);
+        expect(execution.prePack.map((result) => result.objectId)).toEqual([id(2), id(1)]);
+        expect(execution.text).toContain("First survivor.");
+        expect(execution.text).toContain("Second survivor.");
+        expect(methods(transport)).toEqual(["retrieval.query", "kernel.read"]);
+    });
+
+    it("refuses with the daemon's typed state when the route answers a state-only envelope", async () => {
+        const cases = [
+            {
+                state: { kind: "unavailable", reason: "store_starting" },
+                text: "Memory is unavailable while the store opens",
+            },
+            {
+                state: { kind: "invalid", reason: "project_mismatch" },
+                text: "The request named a project other than the bound one.",
+            },
+        ];
+        for (const { state, text } of cases) {
+            const { kernel, transport, run } = harness();
+            kernel.seedDecision({
+                object_id: id(1),
+                decision_kind: "NAMING",
+                summary: "memory text",
+            });
+            kernel.routeReply = () => ({ state });
+            const execution = await run({ query: "memory text" });
+            expect(execution.status).toBe("invalid");
+            expect(execution.text).toContain(text);
+            expect(execution.text).not.toContain("does not recognize");
+            expect(methods(transport)).toEqual(["retrieval.query"]);
+        }
     });
 
     it("translates explicit memory ids into route selectors and refuses more than the route probes", async () => {
@@ -204,6 +264,11 @@ describe("eidnara_search through the fused route", () => {
                         occurrence_id: "occ-0",
                         position: 2,
                         lanes: { dense: { position: 1, raw: 0.5 } },
+                    },
+                    {
+                        occurrence_id: "occ-1",
+                        position: 2,
+                        lanes: { dense: { position: 2, raw: 0.4 } },
                     },
                 ],
             },

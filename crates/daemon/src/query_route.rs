@@ -14,14 +14,14 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OCCURRENCE_ENCODING_VERSION;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    ArtifactDestination, ClaimFactBounds, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES,
-    Surface, SurfaceVisibility,
+    ArtifactDestination, ClaimFactBounds, CommitReadIncarnation, EgressSnapshot, KernelError,
+    KernelStore, MAX_ELIGIBILITY_CANDIDATES, Surface, SurfaceVisibility,
 };
 use retrieval::ProjectionError;
 use retrieval::batch::VectorGeneration;
 use retrieval::claims::{
-    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, classify_selected_claims,
-    validate_for_surface,
+    ClaimCandidateBounds, ClaimCandidateError, UseVerdict, judge_selected_for_surface,
+    read_selected_claims,
 };
 use retrieval::dense::{
     Completion as DenseCompletion, ExhaustiveQuery, IncompleteReason as DenseIncompleteReason,
@@ -29,10 +29,11 @@ use retrieval::dense::{
 };
 use retrieval::eligibility::{
     Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
+    snapshot_moved,
 };
 use retrieval::exact::{
-    ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
-    SelectorValue, classify, page,
+    Coverage, ExactQuery, Family, Intent, LookupContext, LookupRefusal, Selector, SelectorBounds,
+    SelectorValue, classify, coverage, page,
 };
 use retrieval::fusion::IdentityRefusal;
 use retrieval::fusion::{
@@ -330,6 +331,7 @@ pub enum Phase {
 
 pub struct QueryOutcome {
     pub statuses: [LaneStatus; Lane::ORDER.len()],
+    /// The surviving ranking through the first survivor past `result_rows`, every claim in it validated.
     pub fused: Fused,
     pub truncated: bool,
     pub body: Value,
@@ -1291,26 +1293,30 @@ pub fn select(
         };
     let fused = fused.filter(|entry| eligible.contains(entry.occurrence()));
     // A claim occurrence is served only with the canonical decision it validates to now; one the surface denies is dropped, and the survivors keep their fused positions and scores.
-    let claims: Vec<String> = fused
+    let ranked: Vec<Option<&str>> = fused
         .entries()
         .iter()
-        .filter_map(|entry| {
+        .map(|entry| {
             let candidate = &terms[entry.occurrence()];
-            is_claim(candidate.class).then(|| candidate.occurrence_id.clone())
+            is_claim(candidate.class).then_some(candidate.occurrence_id.as_str())
         })
         .collect();
-    let references = canonical_references(
+    let (references, survivors) = canonical_references(
         projection,
         kernel,
         authority,
         limits,
         budget,
-        &claims,
+        &ranked,
         &mut before_phase,
     )?;
+    let mut room = survivors;
     let fused = fused.filter(|entry| {
         let candidate = &terms[entry.occurrence()];
-        !is_claim(candidate.class) || references.contains_key(&candidate.occurrence_id)
+        let keep = room > 0
+            && (!is_claim(candidate.class) || references.contains_key(&candidate.occurrence_id));
+        room -= usize::from(keep);
+        keep
     });
 
     before_phase(Phase::Materialization);
@@ -1415,23 +1421,75 @@ fn fused_envelope(
     })
 }
 
+/// `retrieval::claims` filters its selected read by the classes `coverage(Family::Id)` lists, so the route's claim set is read from the same table.
 fn is_claim(class: OccurrenceClass) -> bool {
-    matches!(
-        class,
-        OccurrenceClass::CanonicalClaims | OccurrenceClass::PromotedMemory
-    )
+    matches!(coverage(Family::Id), Coverage::Extracted(classes) if classes.contains(&class))
 }
 
-/// The canonical decision and source revision each claim occurrence validates to on the explicit-search surface at a fresh kernel snapshot, keyed by occurrence id. The projection read and the kernel facts cover the selected occurrences alone; an occurrence that is not a current, permitted claim of the bound project is absent.
+/// The canonical decision and source revision each reachable claim occurrence validates to on the explicit-search surface, keyed by occurrence id, with the number of `ranked` entries that survive. `ranked` holds each fused entry's occurrence id when the entry is a claim. Claims are validated in ranked order until the survivors reach `result_rows` plus the one entry that marks the response truncated, so the projection read and the kernel facts cover the claims the response can serve; an occurrence that is not a current, permitted claim of the bound project is absent.
 fn canonical_references(
     projection: &SearchProjection,
     kernel: &KernelStore,
     authority: Authority<'_>,
     limits: &QueryRouteLimits,
     budget: &SharedBudget,
-    occurrence_ids: &[String],
+    ranked: &[Option<&str>],
     before_phase: &mut impl FnMut(Phase),
-) -> Result<BTreeMap<String, CanonicalReference>, QueryFailure> {
+) -> Result<(BTreeMap<String, CanonicalReference>, usize), QueryFailure> {
+    let claims: Vec<String> = ranked.iter().flatten().map(|id| id.to_string()).collect();
+    let reach = limits.result_rows.get().saturating_add(1);
+    let mut references = BTreeMap::new();
+    let mut judged_at = None;
+    let (mut survivors, mut validated, mut claim) = (0, 0, 0);
+    for (index, entry) in ranked.iter().enumerate() {
+        if survivors == reach {
+            break;
+        }
+        if let Some(occurrence_id) = entry {
+            if claim == validated {
+                // Counting ranked entries before flattening lets non-claim entries fill the remaining rows. Using `validated` as the growth target makes batches grow geometrically during denial runs until `limits.validation_batch` caps their size.
+                let within_reach = ranked[index..]
+                    .iter()
+                    .take(reach - survivors)
+                    .flatten()
+                    .count();
+                let size = within_reach
+                    .max(validated)
+                    .min(limits.validation_batch.get());
+                let batch = &claims[validated..claims.len().min(validated + size)];
+                before_phase(Phase::ClaimValidation);
+                check(budget)?;
+                validate_claims(
+                    projection,
+                    kernel,
+                    authority,
+                    budget,
+                    batch,
+                    &mut judged_at,
+                    &mut references,
+                )?;
+                validated += batch.len();
+            }
+            claim += 1;
+            if !references.contains_key(*occurrence_id) {
+                continue;
+            }
+        }
+        survivors += 1;
+    }
+    Ok((references, survivors))
+}
+
+/// All batches contributing to one answer share the snapshot and incarnation recorded in `judged_at`; a change returns `QueryFailure::Unavailable`.
+fn validate_claims(
+    projection: &SearchProjection,
+    kernel: &KernelStore,
+    authority: Authority<'_>,
+    budget: &SharedBudget,
+    batch: &[String],
+    judged_at: &mut Option<(EgressSnapshot, CommitReadIncarnation)>,
+    references: &mut BTreeMap<String, CanonicalReference>,
+) -> Result<(), QueryFailure> {
     let refused = |_: ClaimCandidateError| {
         if budget.is_exhausted() {
             QueryFailure::from(exhaustion(budget))
@@ -1439,58 +1497,80 @@ fn canonical_references(
             QueryFailure::Unavailable("claim_validation")
         }
     };
-    let mut references = BTreeMap::new();
-    // Each batch of at most `validation_batch` selected occurrences is classified and validated at its own fresh snapshot.
-    for batch in occurrence_ids.chunks(limits.validation_batch.get()) {
-        before_phase(Phase::ClaimValidation);
-        check(budget)?;
-        let max = NonZeroUsize::new(batch.len()).expect("chunks are not empty");
-        let bounds = ClaimCandidateBounds {
-            max_rows: max,
-            facts: ClaimFactBounds {
-                max_claims: max,
-                max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
-            },
-        };
-        let classified = projection
-            .read(|conn| {
-                Ok(classify_selected_claims(
-                    conn,
-                    kernel,
-                    budget.eval(),
-                    bounds,
-                    batch,
-                ))
-            })
-            .map_err(|_| QueryFailure::Unavailable("claim_validation"))?
-            .map_err(refused)?;
-        let validation = validate_for_surface(
+    let max = NonZeroUsize::new(batch.len()).expect("a batch starts at an unvalidated claim");
+    let bounds = ClaimCandidateBounds {
+        max_rows: max,
+        facts: ClaimFactBounds {
+            max_claims: max,
+            max_causal_payload_bytes: CLAIM_CAUSAL_PAYLOAD_BYTES,
+        },
+    };
+    let read = projection.read_under(budget, |conn| {
+        Ok(read_selected_claims(
+            conn,
             kernel,
-            &classified.candidates,
-            authority.project,
-            authority.destination,
-            Surface::ExplicitSearch,
-            bounds.facts,
-            classified.incarnation,
             budget.eval(),
-        )
-        .map_err(refused)?;
-        references.extend(validation.candidates.into_iter().filter_map(|validated| {
-            let UseVerdict::Permitted(visibility) = validated.verdict else {
-                return None;
-            };
-            let row = validated.candidate.row;
-            Some((
-                row.occurrence_id,
-                CanonicalReference {
-                    object_id: row.object_id,
-                    revision: row.revision,
-                    visibility,
-                },
-            ))
-        }));
+            bounds,
+            batch,
+        ))
+    });
+    let selected = match read {
+        Ok(selected) => selected.map_err(refused)?,
+        Err(SearchProjectionError::Store(StoreError::Deadline)) => {
+            return Err(exhaustion(budget).into());
+        }
+        Err(_) => return Err(QueryFailure::Unavailable("claim_validation")),
+    };
+    let judgement = judge_selected_for_surface(
+        kernel,
+        &selected,
+        authority.project,
+        authority.destination,
+        Surface::ExplicitSearch,
+        bounds.facts,
+        budget.eval(),
+    )
+    .map_err(refused)?;
+    let (snapshot, incarnation) = judged_at
+        .as_ref()
+        .map_or((None, None), |(snapshot, incarnation)| {
+            (Some(snapshot), Some(incarnation))
+        });
+    match snapshot_moved(
+        snapshot,
+        incarnation,
+        &judgement.snapshot,
+        &judgement.incarnation,
+    ) {
+        Some(AuthorityMoved::Incarnation) => {
+            return Err(QueryFailure::Unavailable("kernel_incarnation_changed"));
+        }
+        Some(AuthorityMoved::Snapshot) => {
+            return Err(QueryFailure::Unavailable("snapshot_changed"));
+        }
+        None => {}
     }
-    Ok(references)
+    judged_at.get_or_insert((judgement.snapshot, judgement.incarnation));
+    references.extend(
+        selected
+            .rows
+            .into_iter()
+            .zip(judgement.verdicts)
+            .filter_map(|(row, verdict)| {
+                let UseVerdict::Permitted(visibility) = verdict else {
+                    return None;
+                };
+                Some((
+                    row.occurrence_id,
+                    CanonicalReference {
+                        object_id: row.object_id,
+                        revision: row.revision,
+                        visibility,
+                    },
+                ))
+            }),
+    );
+    Ok(())
 }
 
 /// The canonical decision a served claim occurrence names, as validated at the response's snapshot.

@@ -15,7 +15,8 @@ use retrieval::fusion::Lane;
 use retrieval::install_identity;
 use serde_json::json;
 use support::query_route::{
-    ALL_PHASES, FOREIGN, Fixture, QUERY, entry_ids, limits, projection_identity, request_budget,
+    ALL_PHASES, FOREIGN, Fixture, QUERY, entry_ids, intent, limits, projection_identity,
+    request_budget,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -104,6 +105,54 @@ async fn cancellation_and_deadline_are_observed_in_every_phase() {
         );
         assert_eq!(reached.last(), Some(&target), "{reached:?}");
     }
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_validation_stops_waiting_for_a_held_connection_when_the_budget_ends() {
+    const HOLD: Duration = Duration::from_secs(3);
+    let fixture = Fixture::build().await;
+    let held_during_claim_validation = |budget_ms: u64, cancel_after: Option<Duration>| {
+        let (token, budget) = request_budget(budget_ms);
+        std::thread::scope(|scope| {
+            let mut holding = false;
+            let started = std::time::Instant::now();
+            let outcome = fixture.run(&limits(), budget.shared(), QUERY, |phase| {
+                if phase != Phase::ClaimValidation || holding {
+                    return;
+                }
+                holding = true;
+                let (acquired, wait) = std::sync::mpsc::channel();
+                let projection = &fixture.projection;
+                scope.spawn(move || {
+                    projection
+                        .read(|_| {
+                            acquired.send(()).unwrap();
+                            std::thread::sleep(HOLD);
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+                wait.recv().unwrap();
+                if let Some(delay) = cancel_after {
+                    let token = token.clone();
+                    scope.spawn(move || {
+                        std::thread::sleep(delay);
+                        token.cancel();
+                    });
+                }
+            });
+            assert!(holding, "the query reached claim validation");
+            (outcome.err(), started.elapsed())
+        })
+    };
+    let (deadline, waited) = held_during_claim_validation(400, None);
+    assert_eq!(deadline, Some(QueryFailure::Terminal(Terminal::Deadline)));
+    assert!(waited < HOLD - Duration::from_secs(1), "{waited:?}");
+    let (cancelled, waited) =
+        held_during_claim_validation(10_000, Some(Duration::from_millis(200)));
+    assert_eq!(cancelled, Some(QueryFailure::Terminal(Terminal::Cancelled)));
+    assert!(waited < HOLD - Duration::from_secs(1), "{waited:?}");
     fixture.daemon.shutdown().await;
 }
 
@@ -295,7 +344,11 @@ async fn each_bound_saturates_before_its_protected_work() {
     assert_eq!(entry_ids(&outcome.body).len(), 1);
     assert!(outcome.truncated);
     assert_eq!(outcome.body["truncated"], true);
-    assert_eq!(outcome.fused.entries().len(), total);
+    assert_eq!(
+        outcome.fused.entries().len(),
+        2,
+        "the ranking ends at the survivor that marks the answer truncated"
+    );
 
     let mut bytes = limits();
     bytes.response_bytes = NonZeroUsize::new(200).unwrap();
@@ -667,5 +720,270 @@ async fn the_lexical_ranking_bounds_report_every_scope_they_skip() {
         json!({"status": "incomplete", "reason": "common_terms", "also": ["rank_budget"]})
     );
     assert_eq!(lexical, 2);
+    fixture.daemon.shutdown().await;
+}
+
+/// Claim validation reads only the claims the answer can serve plus its truncation witness: a corrupt claim row ranked past them fails the full answer closed and leaves an answer bounded to one row unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_validation_reads_only_the_claims_the_answer_can_reach() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let full = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let entries = full.body["entries"].as_array().unwrap();
+    let corrupt = entries
+        .iter()
+        .skip(2)
+        .rfind(|entry| entry["canonical"]["decision_object_id"] != "rule")
+        .and_then(|entry| entry["occurrence_id"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "a claim the exact lane never reads ranks third or later: {}",
+                full.body
+            )
+        });
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::MIN;
+    let before = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    fixture
+        .projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE exact_associations SET extraction_version=7 WHERE occurrence_id=?1",
+                [corrupt],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.run(&limits(), budget.shared(), QUERY, |_| {}).err(),
+        Some(QueryFailure::Unavailable("claim_validation"))
+    );
+    let after = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(after.body, before.body);
+    fixture.daemon.shutdown().await;
+}
+
+/// A validation batch reads the claims within the ranked entries that fill the remaining result rows and the truncation witness. A non-claim entry fills the witness position, so a corrupt claim ranked past it leaves the bounded answer unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_claim_entry_counts_toward_the_claims_a_batch_reaches() {
+    const COPY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let healthy = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let lexical_id = healthy
+        .fused
+        .entries()
+        .iter()
+        .find(|entry| entry.lane(Lane::Lexical).is_some())
+        .map(|entry| entry.occurrence().to_string())
+        .unwrap();
+    fixture.non_claim_lexical_copy(&lexical_id, COPY);
+    let full = fixture
+        .run(&limits(), budget.shared(), QUERY, |_| {})
+        .unwrap();
+    let entries = full.body["entries"].as_array().unwrap();
+    let witness = entries
+        .iter()
+        .position(|entry| entry["occurrence_id"] == COPY)
+        .unwrap_or_else(|| panic!("the copy is served: {}", full.body));
+    assert!(witness >= 1, "{}", full.body);
+    assert!(entries[witness]["canonical"].is_null(), "{}", full.body);
+    assert!(
+        entries[..witness]
+            .iter()
+            .all(|entry| entry["canonical"]["decision_object_id"].is_string()),
+        "{}",
+        full.body
+    );
+    let corrupt = entries[witness + 1..]
+        .iter()
+        .find(|entry| {
+            entry["canonical"]["decision_object_id"].is_string()
+                && entry["canonical"]["decision_object_id"] != "rule"
+        })
+        .and_then(|entry| entry["occurrence_id"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "a claim the exact lane never reads ranks past the copy: {}",
+                full.body
+            )
+        });
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::new(witness).unwrap();
+    let before = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(before.body["entries"].as_array().unwrap().len(), witness);
+    assert_eq!(before.body["truncated"], true);
+    fixture
+        .projection
+        .write(|conn| {
+            conn.execute(
+                "UPDATE exact_associations SET extraction_version=7 WHERE occurrence_id=?1",
+                [corrupt],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fixture.run(&limits(), budget.shared(), QUERY, |_| {}).err(),
+        Some(QueryFailure::Unavailable("claim_validation"))
+    );
+    let after = fixture
+        .run(&bounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(after.body, before.body);
+    fixture.daemon.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_largest_result_row_bound_serves_the_whole_surviving_ranking() {
+    let fixture = Fixture::build().await;
+    let (_token, budget) = request_budget(10_000);
+    let mut wide = limits();
+    wide.result_rows = wide.fused_union;
+    let expected = fixture.run(&wide, budget.shared(), QUERY, |_| {}).unwrap();
+    assert!(!entry_ids(&expected.body).is_empty(), "{}", expected.body);
+    let mut unbounded = limits();
+    unbounded.result_rows = NonZeroUsize::MAX;
+    let outcome = fixture
+        .run(&unbounded, budget.shared(), QUERY, |_| {})
+        .unwrap();
+    assert_eq!(outcome.body, expected.body);
+    fixture.daemon.shutdown().await;
+}
+
+/// Claim validation batches for one answer share a kernel snapshot; a commit between batches yields `QueryFailure::Unavailable("snapshot_changed")`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_between_claim_validation_batches_refuses_the_answer() {
+    let bulk: Vec<String> = (0..12).map(|n| format!("bulk{n}")).collect();
+    let extra: Vec<(&str, &str)> = bulk
+        .iter()
+        .map(|object| (object.as_str(), "An explicit contract stays explicit."))
+        .collect();
+    let fixture = Fixture::build_with(&extra).await;
+    let query = "explicit contract";
+    let (_token, budget) = request_budget(10_000);
+    let mut wide = limits();
+    wide.result_rows = wide.fused_union;
+    let ranking = fixture.run(&wide, budget.shared(), query, |_| {}).unwrap();
+    let mut ordered: Vec<String> = Vec::new();
+    for entry in ranking.body["entries"].as_array().unwrap() {
+        let decision = entry["canonical"]["decision_object_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        if !ordered.contains(&decision) {
+            ordered.push(decision);
+        }
+    }
+    assert!(ordered.len() >= 4, "{}", ranking.body);
+    let kept = ordered[0].clone();
+    // The kernel retires every ranked decision between the first and the last while their descriptors stay live, so the first batch permits `kept` and the denied run forces later batches.
+    let retired: Vec<serde_json::Value> = ordered[1..ordered.len() - 1]
+        .iter()
+        .map(|object| serde_json::json!({"op": "retire_decision", "object_id": object}))
+        .collect();
+    let committed = fixture.daemon.commit("retire-middle", retired).await;
+    assert_eq!(committed["state"]["kind"], "available", "{committed}");
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::MIN;
+    let mut batches = 0usize;
+    let steady = fixture
+        .run(&bounded, budget.shared(), query, |phase| {
+            batches += usize::from(phase == Phase::ClaimValidation);
+        })
+        .unwrap();
+    assert_eq!(
+        steady.body["entries"][0]["canonical"]["decision_object_id"], kept,
+        "{}",
+        steady.body
+    );
+    assert!(batches >= 2, "{batches} batches: {}", steady.body);
+    let mut seen = 0usize;
+    let outcome = fixture.run(&bounded, budget.shared(), query, |phase| {
+        if phase == Phase::ClaimValidation {
+            seen += 1;
+            if seen == 2 {
+                fixture
+                    .store
+                    .commit(intent("revoke-between-batches"), |envelope| {
+                        envelope.retire_decision(&kept)?;
+                        Ok(String::new())
+                    })
+                    .unwrap();
+            }
+        }
+    });
+    assert_eq!(
+        outcome.err(),
+        Some(QueryFailure::Unavailable("snapshot_changed"))
+    );
+    fixture.daemon.shutdown().await;
+}
+
+/// A run of denied claims grows each validation batch to the claims validated before it, so the batches over the run stay logarithmic in its length while the answer stays the one a single wide validation gives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_of_denied_claims_is_validated_in_logarithmically_many_batches() {
+    let bulk: Vec<String> = (0..12).map(|n| format!("bulk{n}")).collect();
+    let mut extra: Vec<(&str, &str)> = bulk
+        .iter()
+        .map(|object| (object.as_str(), "An explicit contract stays explicit."))
+        .collect();
+    extra.push(("keeper", "A contract."));
+    let fixture = Fixture::build_with(&extra).await;
+    // The kernel retires every matching decision but the keeper while their descriptors stay live, so revalidation admits their occurrences and claim validation denies them.
+    let retired: Vec<serde_json::Value> = bulk
+        .iter()
+        .map(String::as_str)
+        .chain(["rule", "other"])
+        .map(|object| serde_json::json!({"op": "retire_decision", "object_id": object}))
+        .collect();
+    let committed = fixture
+        .daemon
+        .commit("retire-bulk-without-sources", retired)
+        .await;
+    assert_eq!(committed["state"]["kind"], "available", "{committed}");
+    let query = "explicit contract";
+    let (_token, budget) = request_budget(10_000);
+    let mut wide = limits();
+    wide.result_rows = wide.fused_union;
+    let survivors = fixture.run(&wide, budget.shared(), query, |_| {}).unwrap();
+    let first = &survivors.body["entries"][0];
+    assert_eq!(
+        first["canonical"]["decision_object_id"], "keeper",
+        "{}",
+        survivors.body
+    );
+    let denied = first["position"].as_u64().unwrap() as usize - 1;
+    assert!(denied >= 16, "{}", survivors.body);
+    let mut bounded = limits();
+    bounded.result_rows = NonZeroUsize::MIN;
+    let mut batches = 0usize;
+    let answer = fixture
+        .run(&bounded, budget.shared(), query, |phase| {
+            batches += usize::from(phase == Phase::ClaimValidation);
+        })
+        .unwrap();
+    assert_eq!(answer.body["entries"][0], *first, "{}", answer.body);
+    // Batches of 2, 2, 4, 8, ... cover the run and the two answer rows; a batch of the remaining room alone would take one per two denials.
+    let reach = bounded.result_rows.get() + 1;
+    let bound = 2
+        + (denied + reach)
+            .div_ceil(reach)
+            .next_power_of_two()
+            .trailing_zeros() as usize;
+    assert!(
+        batches <= bound && batches < (denied + reach).div_ceil(reach),
+        "{batches} batches over a run of {denied} denials, bound {bound}"
+    );
     fixture.daemon.shutdown().await;
 }

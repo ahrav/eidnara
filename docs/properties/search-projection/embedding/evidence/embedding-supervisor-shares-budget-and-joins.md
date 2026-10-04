@@ -90,8 +90,8 @@ submits no scan unit before it settles (`crates/daemon/src/query_route.rs:1572`)
 `LocalEmbeddingsComponent::embed_query` ends its wait at the request deadline and
 leaves the queue (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`); a
 started native call keeps its grant, admission permit, and input charge in the
-tracked worker until it returns (`mod.rs:1112-1168`). Shutdown closes the
+tracked worker until it returns (`mod.rs:1117-1173`). Shutdown closes the
 scheduler, drains the tracker, then waits for the slot to go idle before it
-writes the terminal lane state (`mod.rs:1634-1648`). Tests:
-`mod.rs:1848-1884` and `scheduler.rs:318-375` and `scheduler.rs:427-458`. The maintenance supervisor slice
+writes the terminal lane state (`mod.rs:1639-1653`). Tests:
+`mod.rs:1853-1889` and `scheduler.rs:318-375` and `scheduler.rs:427-458`. The maintenance supervisor slice
 remains unexercised.

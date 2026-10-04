@@ -608,6 +608,16 @@ function assertLauncherMatchesRelease(
     }
 }
 
+function assertLauncherProfile(launcherPath: string, mode: PayloadMode): void {
+    const expected = mode === "development" ? "debug" : "release";
+    const profile = launcherOutput(launcherPath, "build-profile");
+    if (profile !== expected) {
+        fail(
+            `${mode} payload requires a ${expected} eidnara-host; ${launcherPath} reports ${profile}`,
+        );
+    }
+}
+
 function defaultAddonPath(rootDir: string): string {
     const candidate = join(rootDir, "target", "release", "libshm_native.so");
     if (existsSync(candidate)) return candidate;
@@ -650,6 +660,7 @@ export async function buildPayload(
     const launcherBytes = readSourceFile(launcherPath, "launcher");
     const addonBytes = readSourceFile(addonPath, "addon");
     assertLauncherMatchesRelease(launcherPath, context);
+    assertLauncherProfile(launcherPath, mode);
     // Every cached input is proven before the output tree is touched, so a wrong or partial cache leaves the previous payload in place.
     const inputsDir = options.inputsDir ?? defaultInputsDir(rootDir);
     const inputSources: { input: LockedInput; source: string }[] = [];

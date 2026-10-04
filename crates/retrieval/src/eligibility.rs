@@ -263,10 +263,24 @@ pub fn authority_moved(
     initial_incarnation: Option<&CommitReadIncarnation>,
     report: &EligibilityReport,
 ) -> Option<AuthorityMoved> {
-    if initial_incarnation.is_some_and(|initial| *initial != report.incarnation) {
+    snapshot_moved(
+        initial_snapshot,
+        initial_incarnation,
+        &report.snapshot,
+        &report.incarnation,
+    )
+}
+
+pub fn snapshot_moved(
+    initial_snapshot: Option<&EgressSnapshot>,
+    initial_incarnation: Option<&CommitReadIncarnation>,
+    snapshot: &EgressSnapshot,
+    incarnation: &CommitReadIncarnation,
+) -> Option<AuthorityMoved> {
+    if initial_incarnation.is_some_and(|initial| initial != incarnation) {
         Some(AuthorityMoved::Incarnation)
-    } else if !report.is_reusable()
-        || initial_snapshot.is_some_and(|initial| *initial != report.snapshot)
+    } else if snapshot.classification_generation.is_none()
+        || initial_snapshot.is_some_and(|initial| initial != snapshot)
     {
         Some(AuthorityMoved::Snapshot)
     } else {

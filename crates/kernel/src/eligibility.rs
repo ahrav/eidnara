@@ -1,13 +1,14 @@
 //! One judgement for every consumer of `kernel.eligibility.batch` verdicts: the precedence and the scope decision live here so the daemon route and later adapters cannot drift from each other, while consumers keep decoding, authorization, wire literals, and caching. The artifact egress route keeps its own refusal vocabulary and is not routed through this module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::Transaction;
 
 use crate::admission::{EgressCandidate, EgressSnapshot, Surface, egress_candidates_tx};
 use crate::cas::{ArtifactDestination, ArtifactEligibility, is_artifact_digest};
 use crate::claim_facts::{
-    ClaimFactBounds, ClaimFacts, ClaimFactsError, check_claim_bounds, load_claims_in_tx,
+    ClaimFactBounds, ClaimFacts, ClaimFactsError, KnownServed, ServedFacts, WantedOccurrences,
+    check_claim_bounds, load_claims_served_in_tx,
 };
 use crate::commit_read::CommitReadIncarnation;
 use crate::scope::{
@@ -136,6 +137,21 @@ pub struct SurfaceEligibilityBatch {
     pub verdicts: Vec<SurfaceVerdict>,
 }
 
+/// A claim occurrence named by a projection row: its decision object, class, and representation. [`KernelStore::judge_surface_eligibility_with_selected_claims`] reads the object facts of a `required` occurrence for every batch verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectedOccurrence<'a> {
+    pub object_id: &'a str,
+    pub class: crate::source_identity::OccurrenceClass,
+    pub representation: &'a str,
+    pub required: bool,
+}
+
+#[derive(Default)]
+struct Selection<'a> {
+    wanted: WantedOccurrences<'a>,
+    required: HashSet<&'a str>,
+}
+
 /// [`SurfaceEligibilityBatch`] read together with the canonical claim facts
 /// of `object_ids`, so a caller can reclassify a projection row against the
 /// occurrence inventory and causality the same snapshot holds.
@@ -255,6 +271,19 @@ pub(crate) fn judge_surface_in_tx(
     surface: Surface,
     candidates: &[EligibilityCandidate],
 ) -> Result<Vec<SurfaceVerdict>, KernelError> {
+    judge_surface_served_in_tx(tx, tip, project, destination, surface, candidates)
+        .map(|(verdicts, _)| verdicts)
+}
+
+/// Verdicts and serving facts use the same serving read; `None` denotes an unserved object.
+fn judge_surface_served_in_tx<'c>(
+    tx: &Transaction<'_>,
+    tip: i64,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    surface: Surface,
+    candidates: &'c [EligibilityCandidate],
+) -> Result<(Vec<SurfaceVerdict>, KnownServed<'c>), KernelError> {
     let named: Vec<(&str, Option<&str>)> = candidates
         .iter()
         .map(|candidate| {
@@ -270,6 +299,7 @@ pub(crate) fn judge_surface_in_tx(
         verdicts: HashMap::new(),
     };
     let mut verdicts = Vec::with_capacity(candidates.len());
+    let mut served = HashMap::with_capacity(candidates.len());
     for (candidate, facts) in candidates.iter().zip(facts) {
         let scope_id = facts
             .state
@@ -282,8 +312,17 @@ pub(crate) fn judge_surface_in_tx(
                 served.visibility_on(surface)
             }),
         });
+        served.insert(
+            candidate.object_id.as_str(),
+            facts.served.map(|class| ServedFacts {
+                sensitivity: class.sensitivity,
+                auto_inject: class.auto_inject,
+                auto_search: class.auto_search,
+                explicit_search: class.visibility,
+            }),
+        );
     }
-    Ok(verdicts)
+    Ok((verdicts, served))
 }
 
 /// Runs before any reader is acquired; `egress_candidates_tx` repeats the digest check because it also serves callers that skip this gate.
@@ -408,6 +447,73 @@ impl KernelStore {
         classified_in: CommitReadIncarnation,
         budget: &crate::applicability::EvalBudget,
     ) -> Result<SurfaceEligibilityWithClaims, ClaimFactsError> {
+        self.judge_surface_with_claims(
+            (project, destination, surface),
+            candidates,
+            object_ids,
+            None,
+            bounds,
+            classified_in,
+            budget,
+        )
+    }
+
+    /// [`Self::judge_surface_eligibility_with_claims`] over the claim occurrences in `selected`. The facts read covers each selected object that a permitted candidate names or that a `required` occurrence names, and lists only the selected occurrences of that object. `claims` and `missing` follow the first-seen order of the selected objects.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`Self::judge_surface_eligibility_with_claims`]; the facts bounds apply to every selected object.
+    #[allow(clippy::too_many_arguments)] // Splitting the call would split the snapshot.
+    pub fn judge_surface_eligibility_with_selected_claims(
+        &self,
+        project: &ProjectScope,
+        destination: ArtifactDestination,
+        surface: Surface,
+        candidates: &[EligibilityCandidate],
+        selected: &[SelectedOccurrence<'_>],
+        bounds: ClaimFactBounds,
+        classified_in: CommitReadIncarnation,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<SurfaceEligibilityWithClaims, ClaimFactsError> {
+        let mut object_ids = Vec::new();
+        let mut selection = Selection::default();
+        for occurrence in selected {
+            let pairs = selection
+                .wanted
+                .entry(occurrence.object_id)
+                .or_insert_with(|| {
+                    object_ids.push(occurrence.object_id.to_owned());
+                    Vec::new()
+                });
+            if !pairs.contains(&(occurrence.class, occurrence.representation)) {
+                pairs.push((occurrence.class, occurrence.representation));
+            }
+            if occurrence.required {
+                selection.required.insert(occurrence.object_id);
+            }
+        }
+        self.judge_surface_with_claims(
+            (project, destination, surface),
+            candidates,
+            &object_ids,
+            Some(&selection),
+            bounds,
+            classified_in,
+            budget,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Splitting the call would split the snapshot.
+    fn judge_surface_with_claims(
+        &self,
+        (project, destination, surface): (&ProjectScope, ArtifactDestination, Surface),
+        candidates: &[EligibilityCandidate],
+        object_ids: &[String],
+        selection: Option<&Selection<'_>>,
+        bounds: ClaimFactBounds,
+        classified_in: CommitReadIncarnation,
+        budget: &crate::applicability::EvalBudget,
+    ) -> Result<SurfaceEligibilityWithClaims, ClaimFactsError> {
         check_bounds(candidates)?;
         check_claim_bounds(object_ids, bounds)?;
         let limit = budget.acquire_limit();
@@ -419,8 +525,25 @@ impl KernelStore {
                     Err(ClaimFactsError::IncarnationMismatch),
                 ));
             }
-            let verdicts = judge_surface_in_tx(tx, tip, project, destination, surface, candidates)?;
-            let claims = load_claims_in_tx(tx, tip, object_ids, bounds, &limit);
+            let (verdicts, served) =
+                judge_surface_served_in_tx(tx, tip, project, destination, surface, candidates)?;
+            let permitted: HashSet<&str> = candidates
+                .iter()
+                .zip(&verdicts)
+                .filter(|(_, verdict)| verdict.permits())
+                .map(|(candidate, _)| candidate.object_id.as_str())
+                .collect();
+            let read: Vec<String> = object_ids
+                .iter()
+                .filter(|id| {
+                    selection.is_none_or(|selection| {
+                        selection.required.contains(id.as_str()) || permitted.contains(id.as_str())
+                    })
+                })
+                .cloned()
+                .collect();
+            let wanted = selection.map(|selection| &selection.wanted);
+            let claims = load_claims_served_in_tx(tx, tip, &read, bounds, &limit, &served, wanted);
             Ok((self.incarnation(), verdicts, claims))
         };
         let (snapshot, (incarnation, verdicts, claims)) = self.egress_read_within(&limit, read)?;
