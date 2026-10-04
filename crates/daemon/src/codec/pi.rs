@@ -1517,9 +1517,9 @@ mod tests {
 
     /// The Pi plugin's CK encoder reads the same fixture and must produce `expected`.
     #[test]
-    fn the_pi_ck_parity_fixture_is_the_ck_the_daemon_decodes() {
+    fn the_pi_codec_parity_fixture_is_the_canonical_form_the_daemon_decodes() {
         let fixture: Value = serde_json::from_str(include_str!(
-            "../../../../packages/pi-plugin/src/transform/__fixtures__/pi-ck-parity.json"
+            "../../../../packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json"
         ))
         .unwrap();
         let rows: Vec<Arc<Value>> = fixture["rows"]
@@ -1531,13 +1531,13 @@ mod tests {
             .collect();
         let decoded = decode_pi_rows(&rows).unwrap();
         let derived = plugin_ck(&decoded);
-        if std::env::var_os("EIDNARA_WRITE_PI_CK_PARITY").is_some() {
+        if std::env::var_os("EIDNARA_WRITE_PI_CODEC_PARITY").is_some() {
             let mut fixture = fixture.clone();
             fixture["expected"] = Value::Array(derived.clone());
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../packages/pi-plugin/src/transform/__fixtures__/pi-ck-parity.json"
+                    "/../../packages/pi-plugin/src/transform/__fixtures__/pi-codec-parity.json"
                 ),
                 format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap()),
             )

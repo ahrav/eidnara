@@ -1,7 +1,7 @@
 /**
  * The CK encoder for Pi `AgentMessage` rows. Its output equals what the daemon's closed Pi codec
  * decodes the same rows to (`decode_pi_rows` in `crates/daemon/src/codec/pi.rs`), less the
- * daemon's own block identity stamps and ordinals; `__fixtures__/pi-ck-parity.json` pins both
+ * daemon's own block identity stamps and ordinals; `__fixtures__/pi-codec-parity.json` pins both
  * sides to one set of values.
  */
 

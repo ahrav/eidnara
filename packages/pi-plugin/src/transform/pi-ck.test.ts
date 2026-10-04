@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { encodePiRowsToCk, type PiRow } from "./pi-ck";
 
 const fixture = JSON.parse(
-    readFileSync(join(import.meta.dir, "__fixtures__", "pi-ck-parity.json"), "utf8"),
+    readFileSync(join(import.meta.dir, "__fixtures__", "pi-codec-parity.json"), "utf8"),
 ) as { rows: PiRow[]; expected: unknown[] };
 
 describe("Pi CK encoder", () => {

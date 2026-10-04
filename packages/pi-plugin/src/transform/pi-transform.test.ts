@@ -127,6 +127,23 @@ describe("Pi id alignment", () => {
         }
     });
 
+    it("leaves a branch summary unnamed when its summary or origin differs from the entry", () => {
+        for (const change of [{ summary: "other summary" }, { fromId: "elsewhere" }]) {
+            const manager = SessionManager.inMemory("/project");
+            const question = manager.appendMessage(user("question"));
+            manager.branchWithSummary(question, "left a branch");
+            const last = manager.appendMessage(user("after"));
+            const messages = agentMessages(manager);
+            expect(messages.map((message) => message.role)).toEqual([
+                "user",
+                "branchSummary",
+                "user",
+            ]);
+            messages[1] = { ...messages[1], ...change };
+            expect(idsOf(messages, manager)).toEqual([undefined, undefined, last]);
+        }
+    });
+
     it("leaves every slot before a mismatch unnamed", () => {
         const manager = SessionManager.inMemory("/project");
         manager.appendMessage(user("one"));
