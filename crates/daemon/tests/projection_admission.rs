@@ -1046,3 +1046,140 @@ fn parsed_vector_limits_bound_the_ledger() {
         }
     );
 }
+
+/// Installation applies the daemon's own parse, refuses a mismatched pair or a malformed record without touching the installed records, and publishes owner-only files that the daemon then reads back.
+#[test]
+fn installation_validates_and_publishes_owner_only_records() {
+    use daemon::projection_admission::{InstallRefusal, install};
+
+    let home = tempfile::tempdir().unwrap();
+    let identity = support::embedding_fixtures::identity("installed-kernel");
+    let manifest = serde_json::to_vec(&manifest_json(&identity, &ProjectionHook::ALL)).unwrap();
+    let campaign = serde_json::to_vec(&campaign_json(&identity)).unwrap();
+    install(home.path(), &manifest, &campaign).unwrap();
+    let dir = home.path().join(ADMISSION_DIR);
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for record in [MANIFEST_RECORD, EVIDENCE_RECORD] {
+        assert_eq!(
+            fs::metadata(dir.join(record)).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let inputs = AdmissionInputs::read(home.path()).unwrap();
+    assert!(inputs.applies_to(&identity));
+
+    let mut other = identity.clone();
+    other.embedding_model = "another-model".to_owned();
+    let mismatched = serde_json::to_vec(&campaign_json(&other)).unwrap();
+    assert_eq!(
+        install(home.path(), &manifest, &mismatched),
+        Err(InstallRefusal::IdentityMismatch)
+    );
+    assert!(matches!(
+        install(home.path(), b"{", &campaign),
+        Err(InstallRefusal::Inputs(InputRefusal::Malformed(
+            MANIFEST_RECORD
+        )))
+    ));
+    let oversized = vec![b' '; MAX_RECORD_BYTES as usize + 1];
+    assert!(matches!(
+        install(home.path(), &oversized, &campaign),
+        Err(InstallRefusal::TooLarge { .. })
+    ));
+    assert!(
+        AdmissionInputs::read(home.path())
+            .unwrap()
+            .applies_to(&identity)
+    );
+
+    // A second valid pair replaces the first.
+    let mut next = identity.clone();
+    next.generation_epoch += 1;
+    install(
+        home.path(),
+        &serde_json::to_vec(&manifest_json(&next, &ProjectionHook::ALL)).unwrap(),
+        &serde_json::to_vec(&campaign_json(&next)).unwrap(),
+    )
+    .unwrap();
+    let reinstalled = AdmissionInputs::read(home.path()).unwrap();
+    assert!(reinstalled.applies_to(&next) && !reinstalled.applies_to(&identity));
+
+    // A directory the daemon would refuse is refused before anything is written.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(
+        install(home.path(), &manifest, &campaign),
+        Err(InstallRefusal::Directory(_))
+    ));
+    let linked = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(target.path(), linked.path().join(ADMISSION_DIR)).unwrap();
+    assert!(install(linked.path(), &manifest, &campaign).is_err());
+    assert!(fs::read_dir(target.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn concurrent_installations_are_serialized_by_the_directory_lock() {
+    use daemon::projection_admission::install;
+
+    let home = tempfile::tempdir().unwrap();
+    let identity = support::embedding_fixtures::identity("installed-kernel");
+    let manifest = serde_json::to_vec(&manifest_json(&identity, &ProjectionHook::ALL)).unwrap();
+    let campaign = serde_json::to_vec(&campaign_json(&identity)).unwrap();
+    install(home.path(), &manifest, &campaign).unwrap();
+    let dir = fs::File::open(home.path().join(ADMISSION_DIR)).unwrap();
+    rustix::fs::flock(&dir, rustix::fs::FlockOperation::LockExclusive).unwrap();
+    let installer = std::thread::spawn({
+        let home = home.path().to_path_buf();
+        move || install(&home, &manifest, &campaign)
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !installer.is_finished(),
+        "the installer published under another holder's lock"
+    );
+    rustix::fs::flock(&dir, rustix::fs::FlockOperation::Unlock).unwrap();
+    installer.join().unwrap().unwrap();
+}
+
+#[test]
+#[ignore = "launched by `installation_repairs_the_modes_a_umask_narrowed`"]
+fn umask_installation_child() {
+    use daemon::projection_admission::install;
+
+    let home = std::path::PathBuf::from(std::env::var("UMASK_CHILD_HOME").unwrap());
+    let identity = support::embedding_fixtures::identity("installed-kernel");
+    let manifest = serde_json::to_vec(&manifest_json(&identity, &ProjectionHook::ALL)).unwrap();
+    let campaign = serde_json::to_vec(&campaign_json(&identity)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o100));
+    install(&home, &manifest, &campaign).unwrap();
+    let dir = home.join(ADMISSION_DIR);
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o400));
+    install(&home, &manifest, &campaign).unwrap();
+    for record in [MANIFEST_RECORD, EVIDENCE_RECORD] {
+        assert_eq!(
+            fs::metadata(dir.join(record)).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "{record}"
+        );
+    }
+    assert!(AdmissionInputs::read(&home).unwrap().applies_to(&identity));
+}
+
+#[test]
+fn installation_repairs_the_modes_a_umask_narrowed() {
+    let home = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "umask_installation_child", "--ignored"])
+        .env("UMASK_CHILD_HOME", home.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+}

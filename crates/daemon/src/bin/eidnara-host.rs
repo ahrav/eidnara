@@ -300,9 +300,14 @@ enum Command {
         payload_manifest_digest: Option<String>,
     },
     Serve,
+    /// Installs an owner's search admission records after the daemon's own validation.
+    InstallSearchAdmission {
+        manifest: PathBuf,
+        campaign: PathBuf,
+    },
 }
 
-const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest|build-profile> [--payload-dir <dir> --payload-manifest-digest <sha256>] | --version (probe is an alias of status)";
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest|build-profile> [--payload-dir <dir> --payload-manifest-digest <sha256>] | install-search-admission <runtime-manifest.json> <campaign-evidence.json> | --version (probe is an alias of status)";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -312,6 +317,13 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let Some(first) = first.to_str() else {
         return Err("command is not valid UTF-8".to_owned());
     };
+    if first == "install-search-admission" {
+        let paths: Vec<PathBuf> = iter.map(PathBuf::from).collect();
+        let [manifest, campaign] = <[PathBuf; 2]>::try_from(paths).map_err(|_| {
+            "install-search-admission takes a manifest and a campaign path".to_owned()
+        })?;
+        return Ok(Command::InstallSearchAdmission { manifest, campaign });
+    }
     let mut payload_dir: Option<PathBuf> = None;
     let mut payload_manifest_digest: Option<String> = None;
     let takes_payload = matches!(first, "start" | "restart");
@@ -940,6 +952,46 @@ fn supported_target() -> Result<&'static str, (&'static str, &'static str)> {
         return Err(unsupported);
     }
     Ok(target)
+}
+
+/// The extra byte preserves oversized-record detection. `O_NONBLOCK` lets a FIFO input reach the regular-file check immediately.
+fn read_admission_input(path: &Path) -> Result<Vec<u8>, String> {
+    let describe = |error: std::io::Error| format!("{}: {error}", path.display());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(describe)?;
+    if !file.metadata().map_err(describe)?.is_file() {
+        return Err(format!("{}: not a regular file", path.display()));
+    }
+    let mut bytes = Vec::new();
+    file.take(daemon::projection_lifecycle::MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(describe)?;
+    Ok(bytes)
+}
+
+/// Installs both records under the data home after bounded reads; prints `installed` or the refusal.
+fn install_search_admission(manifest: &Path, campaign: &Path) -> i32 {
+    let outcome = host_runtime::data_dir_path(None)
+        .map_err(|_| "no data directory".to_owned())
+        .and_then(|home| {
+            let manifest = read_admission_input(manifest)?;
+            let campaign = read_admission_input(campaign)?;
+            daemon::projection_admission::install(&home, &manifest, &campaign)
+                .map_err(|refusal| refusal.to_string())
+        });
+    match outcome {
+        Ok(()) => {
+            println!("installed");
+            0
+        }
+        Err(reason) => {
+            eprintln!("eidnara-host: search admission not installed: {reason}");
+            1
+        }
+    }
 }
 
 /// The validation confirms that the generation was staged by this release for this target.
@@ -1917,6 +1969,9 @@ fn real_main() -> i32 {
             );
             0
         }
+        Command::InstallSearchAdmission { manifest, campaign } => {
+            install_search_admission(&manifest, &campaign)
+        }
         Command::BuildProfile => {
             println!(
                 "{}",
@@ -2419,6 +2474,46 @@ mod tests {
             result,
             Err(GenerationError::NativePayloadInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn an_admission_input_that_is_a_fifo_is_refused_without_a_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("input");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .expect("mkfifo");
+        let read = std::thread::spawn(move || read_admission_input(&fifo));
+        let started = Instant::now();
+        while !read.is_finished() && started.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            read.is_finished(),
+            "the read blocked on a FIFO without a writer"
+        );
+        assert!(read.join().expect("join").is_err());
+    }
+
+    #[test]
+    fn install_search_admission_takes_exactly_two_paths() {
+        let args = |values: &[&str]| -> Vec<std::ffi::OsString> {
+            values.iter().map(std::ffi::OsString::from).collect()
+        };
+        assert!(matches!(
+            parse_args(&args(&["install-search-admission", "m.json", "c.json"])),
+            Ok(Command::InstallSearchAdmission { .. })
+        ));
+        for arity in [
+            &["install-search-admission"][..],
+            &["install-search-admission", "m.json"],
+            &["install-search-admission", "a", "b", "c"],
+        ] {
+            assert!(parse_args(&args(arity)).is_err(), "{arity:?}");
+        }
     }
 
     #[test]

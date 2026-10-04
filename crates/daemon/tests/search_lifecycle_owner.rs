@@ -3463,7 +3463,6 @@ async fn a_request_wakes_an_idle_slice_loop() {
     let home = root.path();
     let corpus = Corpus::open(home);
     corpus.seed();
-    records(home);
     let owner = Arc::new(owner(home, &corpus.kernel));
     let (events_tx, events) = std::sync::mpsc::channel();
     owner.tap_slice_events_for_test(move |event| match event {
@@ -3493,6 +3492,8 @@ async fn a_request_wakes_an_idle_slice_loop() {
     })
     .await
     .unwrap();
+    // The records arrive during the idle wait, so the loop's own registration cannot record first.
+    records(home);
     let requested = Instant::now();
     owner
         .request(&rebuild(home), now(), &slice_budget())
@@ -4586,6 +4587,312 @@ async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slice
             daemon::claim_sources::ClaimProgress::Bootstrap { after: Some(_), .. }
         )),
         "a lifecycle slice ran while the scan was mid-backlog: {observed:?}"
+    );
+    daemon.shutdown().await;
+}
+
+/// Installed records alone register the projection: the running daemon records the first build, reaches Current over the memories the claim-source runner published, and a restart resumes Current without a request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let kernel_root = home.join("eidnara").join("context");
+    {
+        let seed = KernelStore::open(kernel_root.join("kernel")).unwrap();
+        seed_memories(
+            &seed,
+            "project:registered",
+            &["registered-1", "registered-2"],
+        );
+        drop(seed);
+    }
+    let incarnation = kernel_incarnation_id(&kernel_root);
+    let identity = identity(&incarnation);
+    write_records(
+        &home,
+        &manifest_json(&identity, &ProjectionHook::ALL),
+        &campaign_json(&identity),
+    );
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let current = loop {
+        if let Ok(lifecycle) = ProjectionLifecycle::open(&home)
+            && let ControlState::Current(intent) = lifecycle.read()
+        {
+            break intent;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "installed records did not register a current projection"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(current.cause, Cause::Registration);
+    assert_eq!(
+        current.consumer.consumer_id,
+        daemon::search_lifecycle_owner::REGISTERED_CONSUMER
+    );
+    // The claim-source runner publishes the seeded memories in batched commits that may land after the registration build; the Current family catches up to them in later slices while this daemon runs.
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    loop {
+        let reader = tokio::task::spawn_blocking({
+            let owner = Arc::clone(&owner);
+            move || owner.pin(&slice_budget())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let live = reader
+            .projection()
+            .read(|conn| {
+                retrieval::eligibility::live_candidates(conn, None, NonZeroUsize::new(64).unwrap())
+            })
+            .unwrap();
+        if live.len() >= 2 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the registered projection never caught up to the published memories: {live:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(owner);
+    let data = daemon.shutdown_keeping_data().await;
+
+    let restarted = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let owner = loop {
+        if let Some(owner) = restarted.handler().search_lifecycle() {
+            break owner;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let reader = loop {
+        let pinned = tokio::task::spawn_blocking({
+            let owner = Arc::clone(&owner);
+            move || owner.pin(&slice_budget())
+        })
+        .await
+        .unwrap();
+        if let Ok(reader) = pinned {
+            break reader;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the restarted daemon did not resume its current projection"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        reader.consumer().consumer_id,
+        daemon::search_lifecycle_owner::REGISTERED_CONSUMER
+    );
+    // The resumed projection still serves the memories the first daemon caught up to.
+    loop {
+        let live = reader
+            .projection()
+            .read(|conn| {
+                retrieval::eligibility::live_candidates(conn, None, NonZeroUsize::new(64).unwrap())
+            })
+            .unwrap();
+        if live.len() >= 2 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the projection never served the published memories: {live:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(reader);
+    assert_eq!(
+        ProjectionLifecycle::open(&home).unwrap().read(),
+        ControlState::Current(current),
+        "the restart resumed the registered record unchanged"
+    );
+    restarted.shutdown().await;
+}
+
+fn seed_memories(store: &KernelStore, scope: &str, objects: &[&str]) {
+    store
+        .commit(
+            kernel::CommitIntent {
+                producer: "test".to_string(),
+                operation_key: format!("seed:{scope}"),
+                request_digest: "d".repeat(64),
+                actor: "test".to_string(),
+                cause: "seed".to_string(),
+            },
+            |envelope| {
+                envelope.insert_domain(kernel::DomainSpec {
+                    domain_id: "memory".to_string(),
+                    object_id: "domain:memory".to_string(),
+                    name: "memory".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_id: "domain:memory".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                })?;
+                envelope.insert_scope(kernel::ScopeSpec {
+                    scope_id: scope.to_string(),
+                    object_id: scope.to_string(),
+                    source_id: scope.to_string(),
+                    domain_id: "memory".to_string(),
+                    source_kind: "kernel_route".to_string(),
+                    source_revision: 1,
+                    sensitivity: kernel::Sensitivity::Normal,
+                    terms: vec![kernel::ScopeTermSpec {
+                        dimension: kernel::Dimension::Project.as_str().to_string(),
+                        operator: "exact".to_string(),
+                        exact_value: Some("e".repeat(64)),
+                        ..kernel::ScopeTermSpec::default()
+                    }],
+                })?;
+                for object in objects {
+                    envelope.insert_decision(seed_decision(object, scope))?;
+                    admitted(envelope, object)?;
+                }
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+}
+
+/// Records that deny the bootstrap hook register nothing, whatever the slice loop retries.
+#[test]
+fn records_that_deny_the_bootstrap_register_nothing() {
+    use daemon::projection_lifecycle::IntentRefusal;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    let enabled: Vec<_> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBootstrap)
+        .collect();
+    let mut stale = identity.clone();
+    stale.generation_epoch += 1;
+    let mut failed = campaign_json(&identity);
+    failed["harness_runs"]["pi"] = serde_json::json!({"outcome": "failed"});
+    let owner = owner(home, &corpus.kernel);
+    for (case, manifest, campaign) in [
+        (
+            "bootstrap hook disabled",
+            manifest_json(&identity, &enabled),
+            campaign_json(&identity),
+        ),
+        (
+            "stale identity",
+            manifest_json(&stale, &ProjectionHook::ALL),
+            campaign_json(&stale),
+        ),
+        (
+            "failed harness run",
+            manifest_json(&identity, &ProjectionHook::ALL),
+            failed,
+        ),
+    ] {
+        write_records(home, &manifest, &campaign);
+        owner.run_slice(&slice_budget());
+        assert!(
+            owner.register_projection(now(), &slice_budget()).is_err(),
+            "{case}"
+        );
+        assert_eq!(control(home), ControlState::Absent, "{case}");
+        assert!(
+            owner
+                .admission()
+                .gate()
+                .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Dispatch)
+                .is_err(),
+            "{case}"
+        );
+    }
+    // A malformed manifest is refused as absent approval.
+    std::fs::write(home.join("search-admission/runtime-manifest.json"), b"{").unwrap();
+    assert!(matches!(
+        owner.register_projection(now(), &slice_budget()),
+        Err(BuildError::Intent(IntentRefusal::Denied(
+            Denial::NoManifest
+        )))
+    ));
+    assert_eq!(control(home), ControlState::Absent);
+}
+
+#[test]
+fn a_registration_takes_the_largest_allowance_the_installed_limits_bound() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    owner.register_projection(now(), &slice_budget()).unwrap();
+    match control(home) {
+        ControlState::Intent(intent) => assert_eq!(intent.episodes.allowance, 2),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Without installed records the daemon records nothing and hooks stay closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn absent_records_register_nothing() {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let started = Instant::now();
+    let owner = loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            break owner;
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let refused = tokio::task::spawn_blocking({
+        let owner = Arc::clone(&owner);
+        move || owner.register_projection(now(), &slice_budget())
+    })
+    .await
+    .unwrap();
+    assert!(refused.is_err(), "{refused:?}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(control(&home), ControlState::Absent);
+    assert_eq!(
+        owner
+            .admission()
+            .gate()
+            .admit(ProjectionHook::EmbeddingBackfill, EntryPoint::Dispatch)
+            .unwrap_err(),
+        Denial::NoManifest
     );
     daemon.shutdown().await;
 }

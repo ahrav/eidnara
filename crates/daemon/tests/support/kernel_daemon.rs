@@ -331,6 +331,12 @@ impl KernelDaemon {
     pub async fn shutdown(self) {
         self.handler.shutdown().await.unwrap();
     }
+
+    /// Shuts the daemon down and returns its data directory, so a test can start a successor over it.
+    pub async fn shutdown_keeping_data(self) -> tempfile::TempDir {
+        self.handler.shutdown().await.unwrap();
+        self._data
+    }
 }
 
 fn digest(seed: &str) -> String {
