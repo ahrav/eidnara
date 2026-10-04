@@ -3,6 +3,7 @@ import {
     isAvailable,
     isMemoryDecisionRow,
     type KernelClient,
+    type LaneStatus,
     type MemoryState,
     type ReadRow,
     ROUTE_LANES,
@@ -60,10 +61,13 @@ function servesRevision(row: ReadRow | undefined, revision: number): row is Read
     );
 }
 
-function degradedNote(lanes: Record<string, { status: string; reason: string | null }>): string {
+function degradedNote(lanes: Record<string, LaneStatus>): string {
     const affected = Object.entries(lanes)
         .filter(([, lane]) => lane.status !== "complete" && lane.status !== "undeclared")
-        .map(([name, lane]) => `${name} ${lane.status}${lane.reason ? ` (${lane.reason})` : ""}`);
+        .map(([name, lane]) => {
+            const bounds = lane.reason === null ? lane.also : [lane.reason, ...lane.also];
+            return `${name} ${lane.status}${bounds.length > 0 ? ` (${bounds.join(", ")})` : ""}`;
+        });
     return `Memory: the fused ranking is degraded: ${affected.join(", ")}.`;
 }
 
