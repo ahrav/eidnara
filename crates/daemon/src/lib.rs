@@ -4702,6 +4702,41 @@ impl HandlerCore {
             })
     }
 
+    /// Whether transform lineage for `session_id` exists under a root other than `project_root`:
+    /// an in-process root, a live transform route, or durable cache state whose recorded root is
+    /// not this one.
+    fn session_lineage_on_another_root(&self, session_id: &str, project_root: &Path) -> bool {
+        let canonical_project_root = canonical_root(project_root);
+        let other = |root: &PathBuf| canonical_root(root) != canonical_project_root;
+        if self
+            .transform_session_roots
+            .lock()
+            .expect("transform session roots mutex")
+            .get(session_id)
+            .is_some_and(|roots| roots.iter().any(other))
+        {
+            return true;
+        }
+        if self
+            .transform_route_channels
+            .lock()
+            .expect("transform route channels mutex")
+            .values()
+            .any(|(session, root)| session == session_id && other(root))
+        {
+            return true;
+        }
+        let Some(store) = self.store() else {
+            return false;
+        };
+        store.has_cache_state(session_id).unwrap_or(false)
+            && !canonical_project_root.to_str().is_some_and(|root| {
+                store
+                    .knows_transform_session_root(session_id, root)
+                    .unwrap_or(false)
+            })
+    }
+
     /// Whether any transform lineage exists for `session_id` under any root: an in-process root,
     /// durable cache state, or a live transform route. A session with lineage is proven only on
     /// its own roots; `module_knows_transform_session` answers that root-scoped question over
@@ -8659,7 +8694,8 @@ impl HandlerCore {
                 Some(SerializerProfile::OpencodeAiSdk) => {}
                 Some(SerializerProfile::Pi) => {
                     let rows = parsed.native_messages.as_deref().unwrap_or_default();
-                    if let Err(decline) = codec::pi::check_pi_rows(rows) {
+                    let mids = parsed.messages.iter().map(|message| message.mid.as_str());
+                    if let Err(decline) = codec::pi::check_pi_rows(rows, mids) {
                         return invalid_params_error(decline.to_string());
                     }
                 }
@@ -11530,16 +11566,19 @@ impl HandlerCore {
         // under another root is refused here. A session without any transform lineage (one
         // before its first accepted transform, or one running compaction-off, has sent none)
         // has nothing to contradict the route-bound identity, and the plugins bind their
-        // harness's own session id, so the bound session is the conversation. The same
-        // predicate applies to both harnesses: `harness` is a client claim, not authority (§7.2).
+        // harness's own session id, so the bound session is the conversation. Lineage held only
+        // on this root and not proven by it asks the resolver. The same predicate applies to
+        // both harnesses: `harness` is a client claim, not authority (§7.2).
         let harness_session_is_conversation = match binding.harness.as_str() {
             OPENCODE_HARNESS | PI_HARNESS => {
-                if !self.module_knows_transform_session(bound_session, &binding.project_root)
-                    && self.session_has_transform_lineage(bound_session)
+                if self.module_knows_transform_session(bound_session, &binding.project_root) {
+                    true
+                } else if self.session_lineage_on_another_root(bound_session, &binding.project_root)
                 {
                     return Err(cross_root_lineage_error());
+                } else {
+                    !self.session_has_transform_lineage(bound_session)
                 }
-                true
             }
             _ => false,
         };
@@ -14141,15 +14180,17 @@ fn native_carries_user_hint(
     native
         .iter()
         .filter(|message| native_key(profile, message).as_deref() == Some(mid))
-        .flat_map(|message| match profile {
-            Some(SerializerProfile::Pi) => message["message"]["content"].as_array(),
-            _ => message["parts"].as_array(),
+        .map(|message| match profile {
+            Some(SerializerProfile::Pi) => &message["message"]["content"],
+            _ => &message["parts"],
         })
-        .flatten()
-        .any(|part| {
-            part["text"]
-                .as_str()
-                .is_some_and(|text| outcome.carried_by(text))
+        .any(|content| match content {
+            Value::String(text) => outcome.carried_by(text.as_str()),
+            content => content.as_array().into_iter().flatten().any(|part| {
+                part["text"]
+                    .as_str()
+                    .is_some_and(|text| outcome.carried_by(text))
+            }),
         })
 }
 
@@ -25108,7 +25149,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn serve_native_rejects_non_opencode_profiles() {
+    async fn serve_native_rejects_unsupported_profiles() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
         let mut request = request(vec![ck("m1", 1, "hello")]);
@@ -29591,10 +29632,10 @@ mod tests {
             error_frame(note),
             (
                 "session_unresolved".to_string(),
-                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+                SESSION_UNRESOLVED_MESSAGE.to_string()
             )
         );
-        assert!(resolver.calls().is_empty());
+        assert_eq!(resolver.calls(), vec!["ses"]);
     }
 
     #[tokio::test(flavor = "current_thread")]

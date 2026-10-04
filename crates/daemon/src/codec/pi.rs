@@ -8,6 +8,7 @@
 //! Encoding is a pure function of its inputs, so identical frozen messages re-encode to identical
 //! rows.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ const HARNESS: &str = "pi";
 
 /// Prefix of every reserved row id. Pi entry ids are lowercase hexadecimal, optionally
 /// hyphenated, so no host id contains the `:` this prefix carries.
-pub const PI_RESERVED_ID_PREFIX: &str = "eidnara:";
+pub(crate) const PI_RESERVED_ID_PREFIX: &str = "eidnara:";
 
 /// Text Pi 0.80.2 renders around a compaction summary (`COMPACTION_SUMMARY_PREFIX` and
 /// `COMPACTION_SUMMARY_SUFFIX` in `core/messages.js`).
@@ -44,7 +45,7 @@ const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
 
 /// The closed Pi 0.80.2 `AgentMessage` role set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PiRole {
+pub(crate) enum PiRole {
     User,
     Assistant,
     ToolResult,
@@ -55,7 +56,7 @@ pub enum PiRole {
 }
 
 impl PiRole {
-    pub const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::User,
         Self::Assistant,
         Self::ToolResult,
@@ -65,13 +66,13 @@ impl PiRole {
         Self::CompactionSummary,
     ];
 
-    pub fn parse(role: &str) -> Option<Self> {
+    pub(crate) fn parse(role: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|candidate| candidate.wire_id() == role)
     }
 
-    pub const fn wire_id(self) -> &'static str {
+    pub(crate) const fn wire_id(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
@@ -84,7 +85,7 @@ impl PiRole {
     }
 
     /// Roles the plugin builds from a non-message session entry; their rows carry reserved ids.
-    pub const fn is_synthetic_entry(self) -> bool {
+    pub(crate) const fn is_synthetic_entry(self) -> bool {
         matches!(
             self,
             Self::Custom | Self::BranchSummary | Self::CompactionSummary
@@ -107,7 +108,7 @@ impl PiRole {
 
 /// Why [`decode_pi_rows`] declined a window. Every reason refuses the whole pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PiDecline {
+pub(crate) enum PiDecline {
     /// The row is not an object with a non-empty string `id` and an object `message` whose
     /// `role` is a string.
     MalformedRow { index: usize },
@@ -115,7 +116,12 @@ pub enum PiDecline {
     UnknownRole { index: usize, role: String },
     /// A host-message row carries a reserved id, or a synthetic-entry row carries a host id.
     IdSpace { index: usize, role: PiRole },
+    /// The row's id is not the `mid` of the CK message at its position, or the two windows
+    /// differ in length.
+    IdMismatch { index: usize },
 }
+
+impl std::error::Error for PiDecline {}
 
 impl fmt::Display for PiDecline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,25 +146,30 @@ impl fmt::Display for PiDecline {
                     role.wire_id()
                 )
             }
+            Self::IdMismatch { index } => write!(
+                f,
+                "pi native message {index} does not carry the mid of messages[{index}]"
+            ),
         }
     }
 }
 
 /// Returns whether `id` is in the reserved id space.
-pub fn is_reserved_id(id: &str) -> bool {
+pub(crate) fn is_reserved_id(id: &str) -> bool {
     id.starts_with(PI_RESERVED_ID_PREFIX)
 }
 
 /// Returns a row's id, the recipe key of a Pi native value.
-pub fn row_id(row: &Value) -> Option<&str> {
+pub(crate) fn row_id(row: &Value) -> Option<&str> {
     row.get("id").and_then(Value::as_str)
 }
 
 /// Decodes a window of Pi rows, or declines it.
 ///
 /// A message's ordinal is its window position, `index + 1`. Each decoded message's mid is its
-/// row id. Rows are retained through `Arc` clones, so the sidecar pays no deep copy.
-pub fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiDecline> {
+/// row id. The sidecar retains each row through an `Arc` clone and each content part by value;
+/// a block decoded from the whole message retains no copy of it.
+pub(crate) fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiDecline> {
     let mut sidecar = DecodeSidecar::new(HARNESS);
     let mut decoded = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
@@ -168,27 +179,45 @@ pub fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiD
         let mut block_metas = Vec::new();
         match role {
             PiRole::User | PiRole::Custom => {
-                decode_user_message(message, ordinal, &mut content, &mut block_metas);
+                decode_user_message(message, &mut content, &mut block_metas);
             }
             PiRole::Assistant => {
                 decode_assistant_message(message, ordinal, &mut content, &mut block_metas);
             }
             PiRole::ToolResult => {
-                decode_tool_result_message(message, ordinal, &mut content, &mut block_metas);
+                decode_tool_result_message(message, &mut content, &mut block_metas);
             }
-            PiRole::BashExecution | PiRole::BranchSummary | PiRole::CompactionSummary => {
-                if let Some(text) = rendered_text(role, message) {
-                    let block = WireBlock::bare(BlockKind::Text { text });
-                    push_block(&mut content, &mut block_metas, block, 0, message, "text");
+            PiRole::BashExecution => {
+                if message.get("excludeFromContext").and_then(Value::as_bool) != Some(true) {
+                    push_message_text(&mut content, &mut block_metas, bash_execution_text(message));
                 }
             }
+            PiRole::BranchSummary => push_message_text(
+                &mut content,
+                &mut block_metas,
+                format!(
+                    "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
+                    string_field(message, "summary").unwrap_or_default()
+                ),
+            ),
+            PiRole::CompactionSummary => push_message_text(
+                &mut content,
+                &mut block_metas,
+                format!(
+                    "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
+                    string_field(message, "summary").unwrap_or_default()
+                ),
+            ),
         }
+        let origin = if role == PiRole::Assistant {
+            pi_origin(message)
+        } else {
+            None
+        };
         let ck = WireMessage::from_parts(
             role.wire_role(),
             content,
-            (role == PiRole::Assistant)
-                .then(|| pi_origin(message))
-                .flatten(),
+            origin,
             ProviderExtras::new(),
             HarnessMeta {
                 harness_id: Some(mid.to_string()),
@@ -223,11 +252,27 @@ pub fn decode_pi_rows(rows: &[Arc<Value>]) -> Result<DecodedHarnessMessages, PiD
     })
 }
 
-/// Validates every row of a window without decoding its blocks.
-pub fn check_pi_rows(rows: &[Arc<Value>]) -> Result<(), PiDecline> {
+/// Validates every row of a window against the CK window's mids, without decoding its blocks.
+pub(crate) fn check_pi_rows<'a>(
+    rows: &[Arc<Value>],
+    mids: impl ExactSizeIterator<Item = &'a str>,
+) -> Result<(), PiDecline> {
+    if rows.len() != mids.len() {
+        return Err(PiDecline::IdMismatch {
+            index: rows.len().min(mids.len()),
+        });
+    }
     rows.iter()
+        .zip(mids)
         .enumerate()
-        .try_for_each(|(index, row)| classify_row(index, row).map(drop))
+        .try_for_each(|(index, (row, mid))| {
+            let (id, _, _) = classify_row(index, row)?;
+            if id == mid {
+                Ok(())
+            } else {
+                Err(PiDecline::IdMismatch { index })
+            }
+        })
 }
 
 fn classify_row(index: usize, row: &Value) -> Result<(&str, &Value, PiRole), PiDecline> {
@@ -251,28 +296,6 @@ fn classify_row(index: usize, row: &Value) -> Result<(&str, &Value, PiRole), PiD
         return Err(PiDecline::IdSpace { index, role });
     }
     Ok((id, message, role))
-}
-
-/// The user text Pi's `convertToLlm` builds for a role whose native shape carries no content
-/// array; `None` for a `bashExecution` excluded from context.
-fn rendered_text(role: PiRole, message: &Value) -> Option<String> {
-    match role {
-        PiRole::BashExecution => {
-            if message.get("excludeFromContext").and_then(Value::as_bool) == Some(true) {
-                return None;
-            }
-            Some(bash_execution_text(message))
-        }
-        PiRole::BranchSummary => Some(format!(
-            "{BRANCH_SUMMARY_PREFIX}{}{BRANCH_SUMMARY_SUFFIX}",
-            string_field(message, "summary").unwrap_or_default()
-        )),
-        PiRole::CompactionSummary => Some(format!(
-            "{COMPACTION_SUMMARY_PREFIX}{}{COMPACTION_SUMMARY_SUFFIX}",
-            string_field(message, "summary").unwrap_or_default()
-        )),
-        PiRole::User | PiRole::Assistant | PiRole::ToolResult | PiRole::Custom => None,
-    }
 }
 
 /// Pi 0.80.2 `bashExecutionToText`.
@@ -304,13 +327,15 @@ fn bash_execution_text(message: &Value) -> String {
 /// updates the edited ones; an edited tool result rewrites its content. An edited message of a role
 /// whose native shape has no content array becomes the `user` message Pi's `convertToLlm` would
 /// build, under the same id. A message without a retained row is built in Pi's current shape; a
-/// synthetic or unidentified one takes a reserved id derived from its role and content. A retained
+/// synthetic or unidentified one takes a reserved id derived from its encoded message, suffixed
+/// with its occurrence when an equal message earlier in the output took that id. A retained
 /// message whose content is empty after editing is omitted.
-pub fn encode_pi_rows(
+pub(crate) fn encode_pi_rows(
     messages: &[WireMessage],
     sidecar: &DecodeSidecar,
     mutation_exempt_mids: &[&str],
 ) -> Vec<Value> {
+    let mut synthetic_ids = HashMap::<String, usize>::new();
     messages
         .iter()
         .filter_map(|message| {
@@ -324,7 +349,7 @@ pub fn encode_pi_rows(
                     Some(meta.raw.as_ref().clone())
                 }
                 Some(meta) => encode_with_meta(message, meta),
-                None => Some(encode_new_row(message)),
+                None => Some(encode_new_row(message, &mut synthetic_ids)),
             }
         })
         .collect()
@@ -332,15 +357,11 @@ pub fn encode_pi_rows(
 
 fn decode_user_message(
     message: &Value,
-    _ordinal: u64,
     content: &mut Vec<WireBlock>,
     block_metas: &mut Vec<BlockMeta>,
 ) {
     match message.get("content") {
-        Some(Value::String(text)) => {
-            let block = WireBlock::bare(BlockKind::Text { text: text.clone() });
-            push_block(content, block_metas, block, 0, message, "text");
-        }
+        Some(Value::String(text)) => push_message_text(content, block_metas, text.clone()),
         Some(Value::Array(parts)) => {
             for (part_index, part) in parts.iter().enumerate() {
                 match part.get("type").and_then(Value::as_str) {
@@ -421,7 +442,7 @@ fn decode_assistant_message(
                         synth_tool_id(ordinal, part_index, &tool_name(part), &input)
                     });
                 let (canonical_id, item_id) = canonical_tool_id(&native_id);
-                let mut extras = pi_extras_for_tool(part, item_id.as_deref(), Some(&native_id));
+                let extras = pi_extras_for_tool(part, item_id.as_deref(), &native_id);
                 let block = WireBlock::with_provider_extras(
                     BlockKind::ToolCall {
                         id: canonical_id,
@@ -429,7 +450,7 @@ fn decode_assistant_message(
                         input,
                         provider_executed: false,
                     },
-                    std::mem::take(&mut extras),
+                    extras,
                 );
                 push_block(content, block_metas, block, part_index, part, "tool_call");
                 if let Some(last) = block_metas.last_mut() {
@@ -451,7 +472,6 @@ fn decode_assistant_message(
 
 fn decode_tool_result_message(
     message: &Value,
-    _ordinal: u64,
     content: &mut Vec<WireBlock>,
     block_metas: &mut Vec<BlockMeta>,
 ) {
@@ -481,11 +501,17 @@ fn decode_tool_result_message(
         },
         extras,
     );
-    push_block(content, block_metas, block, 0, message, "tool_result");
+    push_block(content, block_metas, block, 0, &Value::Null, "tool_result");
     if let Some(last) = block_metas.last_mut() {
         last.native_id = Some(native_id);
         last.item_id = item_id;
     }
+}
+
+/// Pushes a text block decoded from the whole message rather than from one content part.
+fn push_message_text(content: &mut Vec<WireBlock>, block_metas: &mut Vec<BlockMeta>, text: String) {
+    let block = WireBlock::bare(BlockKind::Text { text });
+    push_block(content, block_metas, block, 0, &Value::Null, "text");
 }
 
 fn push_block(
@@ -550,11 +576,7 @@ fn encode_with_meta(msg: &WireMessage, meta: &HarnessMessageMeta) -> Option<Valu
             });
         }
     }
-    Some(if row == *raw_row {
-        raw_row.clone()
-    } else {
-        row
-    })
+    Some(row)
 }
 
 fn block_matches_meta(block: &WireBlock, meta: &BlockMeta) -> bool {
@@ -730,7 +752,7 @@ fn update_content_part(part: &mut Value, block: &WireBlock) {
     }
 }
 
-fn encode_new_row(msg: &WireMessage) -> Value {
+fn encode_new_row(msg: &WireMessage, synthetic_ids: &mut HashMap<String, usize>) -> Value {
     let message = if msg.role == "tool" {
         let mut raw =
             json!({ "role": "toolResult", "content": [], "timestamp": SYNTHETIC_TIMESTAMP });
@@ -774,17 +796,19 @@ fn encode_new_row(msg: &WireMessage) -> Value {
         .harness_id
         .clone()
         .filter(|id| !msg.meta.synthetic && !id.is_empty())
-        .unwrap_or_else(|| synthetic_row_id(&message));
+        .unwrap_or_else(|| {
+            let id = format!(
+                "{PI_RESERVED_ID_PREFIX}synthetic:{}",
+                stable_hash_prefix(&message, 24)
+            );
+            let occurrence = synthetic_ids.entry(id.clone()).or_default();
+            *occurrence += 1;
+            match *occurrence {
+                1 => id,
+                n => format!("{id}:{n}"),
+            }
+        });
     json!({ "id": id, "message": message })
-}
-
-/// A reserved id derived only from the encoded message, so a re-encode of the same synthetic
-/// message yields the same id.
-fn synthetic_row_id(message: &Value) -> String {
-    format!(
-        "{PI_RESERVED_ID_PREFIX}synthetic:{}",
-        stable_hash_prefix(message, 24)
-    )
 }
 
 fn render_block_as_content_part(block: &WireBlock) -> Value {
@@ -886,11 +910,7 @@ fn pi_extras_for_text(part: &Value) -> ProviderExtras {
     extras
 }
 
-fn pi_extras_for_tool(
-    part: &Value,
-    item_id: Option<&str>,
-    native_id: Option<&str>,
-) -> ProviderExtras {
+fn pi_extras_for_tool(part: &Value, item_id: Option<&str>, native_id: &str) -> ProviderExtras {
     let mut extras = ProviderExtras::new();
     if let Some(signature) = string_field(part, "thoughtSignature") {
         insert_pi_extra(&mut extras, "thoughtSignature", Value::String(signature));
@@ -898,13 +918,11 @@ fn pi_extras_for_tool(
     if let Some(item_id) = item_id {
         insert_pi_extra(&mut extras, "itemId", Value::String(item_id.to_string()));
     }
-    if let Some(native_id) = native_id {
-        insert_pi_extra(
-            &mut extras,
-            "nativeToolCallId",
-            Value::String(native_id.to_string()),
-        );
-    }
+    insert_pi_extra(
+        &mut extras,
+        "nativeToolCallId",
+        Value::String(native_id.to_string()),
+    );
     extras
 }
 
@@ -1277,7 +1295,22 @@ mod tests {
                 role: "system".to_string()
             })
         );
-        assert_eq!(check_pi_rows(&window), decode_pi_rows(&window).map(drop));
+        let mids: Vec<String> = window
+            .iter()
+            .map(|row| row_id(row).unwrap().to_string())
+            .collect();
+        assert_eq!(
+            check_pi_rows(&window, mids.iter().map(String::as_str)),
+            decode_pi_rows(&window).map(drop)
+        );
+        assert_eq!(
+            check_pi_rows(&window[..1], ["other"].into_iter()),
+            Err(PiDecline::IdMismatch { index: 0 })
+        );
+        assert_eq!(
+            check_pi_rows(&window[..1], std::iter::empty()),
+            Err(PiDecline::IdMismatch { index: 0 })
+        );
         for malformed in [
             json!({ "message": { "role": "user", "content": "x" } }),
             json!({ "id": "", "message": { "role": "user", "content": "x" } }),
@@ -1328,6 +1361,13 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert_eq!(ids[2], "00000000");
         assert!(!is_reserved_id(ids[2]));
+
+        let twice = encode_pi_rows(&[m1.clone(), m1.clone()], &decoded.sidecar, &[]);
+        assert_eq!(row_id(&twice[0]), Some(ids[1]));
+        assert_eq!(
+            row_id(&twice[1]).map(str::to_owned),
+            Some(format!("{}:2", ids[1]))
+        );
 
         // A synthetic message's id follows its content, not a harness id it may carry.
         let mut labelled = m0;

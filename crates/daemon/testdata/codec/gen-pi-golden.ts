@@ -36,6 +36,45 @@ type RequiredClass = (typeof requiredClasses)[number];
 
 type CapturedEntry = { path: string; entry: any };
 
+/** Path label of the authored entries below. */
+const AUTHORED = "authored";
+
+/**
+ * Entries for classes the captured sessions may lack, each written in Pi 0.80.2's session-entry
+ * shape. One is used only when no captured entry covers its class.
+ */
+const authoredEntries: CapturedEntry[] = [
+  {
+    path: AUTHORED,
+    entry: {
+      type: "message",
+      id: "c3d4e5f6",
+      parentId: "ad9f3999",
+      timestamp: "2026-05-01T17:00:00.000Z",
+      message: {
+        role: "bashExecution",
+        command: "git status",
+        output: "clean",
+        exitCode: 0,
+        cancelled: false,
+        truncated: false,
+        timestamp: 1777654800000,
+      },
+    },
+  },
+  {
+    path: AUTHORED,
+    entry: {
+      type: "branch_summary",
+      id: "d4e5f607",
+      parentId: "c3d4e5f6",
+      timestamp: "2026-05-01T17:01:00.000Z",
+      fromId: "781a4cd4",
+      summary: "Explored an alternate fix and returned.",
+    },
+  },
+];
+
 if (check) {
   const golden = JSON.parse(readFileSync(outPath, "utf8"));
   assertInternalConsistency(golden);
@@ -52,8 +91,14 @@ const golden = {
       "The Pi provider serializer entry points are not vendored in the Rust workspace test closure; these goldens assert round-trip identity of the {id, message} AgentMessage rows the plugin builds from session entries.",
   },
   generated_from: {
-    session_files: [...new Set(selected.entries.map((entry) => entry.path))].sort(),
-    selection: "JSONL session-entry feature scan over captured Pi session files",
+    session_files: [
+      ...new Set(selected.entries.map((entry) => entry.path).filter((path) => path !== AUTHORED)),
+    ].sort(),
+    authored_entries: selected.entries
+      .filter((entry) => entry.path === AUTHORED)
+      .map((entry) => entry.entry.id),
+    selection:
+      "JSONL session-entry feature scan over captured Pi session files, then authored entries for classes no captured entry covers",
   },
   coverage: selected.coverage,
   missing_capture_classes: selected.missing,
@@ -111,6 +156,12 @@ function selectEntries(files: string[]): {
         // redacted_thinking is allowed to be absent when no scanned JSONL entry contains it.
         break;
       }
+    }
+  }
+
+  for (const authored of authoredEntries) {
+    for (const klass of classify(authored.entry)) {
+      if (wanted.has(klass) && !byClass.has(klass)) byClass.set(klass, authored);
     }
   }
 

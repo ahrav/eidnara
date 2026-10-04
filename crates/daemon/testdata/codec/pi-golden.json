@@ -5,9 +5,14 @@
   },
   "generated_from": {
     "session_files": [
-      "/tmp/goal/pisessions/s.jsonl"
+      "/Users/ufukaltinok/.pi/agent/sessions/--Users-ufukaltinok-Work-Projects-Eidnara-anthropic-auth--/2026-05-01T16-48-44-508Z_019de471-4fdc-762d-9286-624dfad0b5fe.jsonl",
+      "/Users/ufukaltinok/.pi/agent/sessions/--Users-ufukaltinok-Work-Projects-Eidnara-antigravity-auth--/2026-06-13T18-34-17-664Z_019ec243-66c0-7021-9633-f26944d30e88.jsonl"
     ],
-    "selection": "JSONL session-entry feature scan over captured Pi session files"
+    "authored_entries": [
+      "d4e5f607",
+      "c3d4e5f6"
+    ],
+    "selection": "JSONL session-entry feature scan over captured Pi session files, then authored entries for classes no captured entry covers"
   },
   "coverage": [
     "text_signature",

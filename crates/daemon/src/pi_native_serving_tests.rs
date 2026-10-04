@@ -102,6 +102,40 @@ fn texts(profile: &str, applied: &Value) -> Vec<Vec<String>> {
         .collect()
 }
 
+fn assert_no_session_state(handler: &Handler, store: &MemoryStore) {
+    assert!(!store.has_cache_state("ses").unwrap());
+    assert!(
+        !handler
+            .transform_snapshots
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key("ses")
+    );
+    assert!(
+        !handler
+            .transform_session_roots
+            .lock()
+            .unwrap()
+            .contains_key("ses")
+    );
+}
+
+fn roles(profile: &str, applied: &Value) -> Vec<String> {
+    applied
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| {
+            let role = match profile {
+                "pi" => &value["message"]["role"],
+                _ => &value["info"]["role"],
+            };
+            role.as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
 fn pi_ids(applied: &Value) -> Vec<String> {
     applied
         .as_array()
@@ -127,6 +161,7 @@ async fn a_pi_window_folds_to_the_m0_m1_and_tail_an_opencode_window_gets() {
     );
 
     let mut applied = BTreeMap::new();
+    let mut replayed = BTreeMap::new();
     for (profile, ck, native) in [
         ("pi", pi_ck, pi_native.clone()),
         ("opencode-aisdk", opencode_ck, opencode_native),
@@ -134,17 +169,29 @@ async fn a_pi_window_folds_to_the_m0_m1_and_tail_an_opencode_window_gets() {
         let producer = Arc::new(ProducerState::default());
         let (handler, _store, _dir, _project) =
             handler_with_store(Arc::clone(&producer), default_test_config());
-        let response = call_transform_request(&handler, native_request(profile, ck, native)).await;
+        let request = native_request(profile, ck, native);
+        let response = call_transform_request(&handler, request.clone()).await;
         assert_eq!(response["status"], "ok", "{profile}: {response}");
         assert_eq!(response["action"], "HARD", "{profile}: {response}");
         assert_eq!(producer.starts.load(Ordering::SeqCst), 1, "{profile}");
         applied.insert(profile, response["native_messages"].clone());
+        let mut again = request;
+        again["base_revision"] = json!("test-base-again");
+        let response = call_transform_request(&handler, again).await;
+        assert_eq!(response["status"], "ok", "{profile}: {response}");
+        replayed.insert(profile, response["native_messages"].clone());
     }
 
-    let pi = texts("pi", &applied["pi"]);
-    let opencode = texts("opencode-aisdk", &applied["opencode-aisdk"]);
-    assert!(pi[0][0].contains("autonomous summary"), "{:?}", pi[0]);
-    assert_eq!(pi, opencode, "m0, m1, and tail are equal across profiles");
+    for outputs in [&applied, &replayed] {
+        let pi = texts("pi", &outputs["pi"]);
+        let opencode = texts("opencode-aisdk", &outputs["opencode-aisdk"]);
+        assert!(pi[0][0].contains("autonomous summary"), "{:?}", pi[0]);
+        assert_eq!(pi, opencode, "m0, m1, and tail are equal across profiles");
+        assert_eq!(
+            roles("pi", &outputs["pi"]),
+            roles("opencode-aisdk", &outputs["opencode-aisdk"]),
+        );
+    }
 
     let ids = pi_ids(&applied["pi"]);
     let tail_start = ids
@@ -160,6 +207,26 @@ async fn a_pi_window_folds_to_the_m0_m1_and_tail_an_opencode_window_gets() {
             .expect("a tail row comes from the window");
         assert_eq!(row, input);
     }
+
+    let later: BTreeMap<String, String> = replayed["pi"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["message"].to_string(),
+                row["id"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let first_m0 = &rows[0];
+    assert_eq!(
+        later
+            .get(&first_m0["message"].to_string())
+            .map(String::as_str),
+        first_m0["id"].as_str(),
+        "the second pass renders m0 from the same history under the same reserved id"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -204,10 +271,7 @@ async fn native_serving_admits_pi_and_still_refuses_another_profile_with_no_effe
         )
         .await;
         assert_eq!(error_code(outcome), "serve_native_unsupported_profile");
-        assert!(
-            store.load("ses").unwrap().meta == Default::default(),
-            "{profile}"
-        );
+        assert_no_session_state(&handler, &store);
     }
 
     let rows = pi_rows(&messages);
@@ -228,6 +292,68 @@ async fn native_serving_admits_pi_and_still_refuses_another_profile_with_no_effe
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn every_closed_role_serves_through_the_handler_and_replays_its_row() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+    let rows = vec![
+        json!({ "id": "eidnara:compactionSummary:c0ffee00", "message": {
+            "role": "compactionSummary", "summary": "earlier", "tokensBefore": 10, "timestamp": 1
+        } }),
+        json!({ "id": "eidnara:branchSummary:c0ffee01", "message": {
+            "role": "branchSummary", "summary": "branch", "fromId": "1a2b3c4d", "timestamp": 2
+        } }),
+        json!({ "id": "1a2b3c4d", "message": {
+            "role": "user", "content": [{ "type": "text", "text": "run it" }], "timestamp": 3
+        } }),
+        json!({ "id": "2b3c4d5e", "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall", "id": "call-1", "name": "bash", "arguments": { "command": "ls" }
+            }],
+            "usage": {}, "stopReason": "toolUse", "timestamp": 4
+        } }),
+        json!({ "id": "3c4d5e6f", "message": {
+            "role": "toolResult", "toolCallId": "call-1", "toolName": "bash",
+            "content": [{ "type": "text", "text": "a b" }], "isError": false, "timestamp": 5
+        } }),
+        json!({ "id": "4d5e6f70", "message": {
+            "role": "bashExecution", "command": "pwd", "output": "/w", "exitCode": 0,
+            "cancelled": false, "truncated": false, "timestamp": 6
+        } }),
+        json!({ "id": "eidnara:custom:5e6f7081", "message": {
+            "role": "custom", "customType": "note", "content": "custom", "display": true,
+            "timestamp": 7
+        } }),
+    ];
+    let shared: Vec<Arc<Value>> = rows.iter().cloned().map(Arc::new).collect();
+    let ck = ingress(codec::pi::decode_pi_rows(&shared).unwrap());
+    let mut request = native_request("pi", ck, rows.clone());
+    request["usage"] = json!(ModuleUsage {
+        current_total_input_tokens: 1_000,
+        context_limit_tokens: 200_000,
+        ..ModuleUsage::default()
+    });
+    let response = call_transform_request(&handler, request).await;
+    assert_eq!(response["status"], "ok", "{response}");
+    let applied = response["native_messages"].as_array().unwrap();
+    for row in &rows {
+        assert!(applied.contains(row), "{row} is replayed: {response}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_first_pi_window_with_an_unknown_role_leaves_no_session_state() {
+    let producer = Arc::new(ProducerState::default());
+    let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
+    let messages = vec![ck("1a2b3c4d", 1, "hello")];
+    let mut rows = pi_rows(&messages);
+    rows[0]["message"]["role"] = json!("systemNotice");
+    let outcome = call_transform_outcome(&handler, native_request("pi", messages, rows)).await;
+    assert_eq!(error_code(outcome), "invalid_params");
+    assert_no_session_state(&handler, &store);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_pi_window_with_an_unknown_role_declines_with_no_state_change() {
     let producer = Arc::new(ProducerState::default());
     let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -240,18 +366,23 @@ async fn a_pi_window_with_an_unknown_role_declines_with_no_state_change() {
     assert_eq!(first["status"], "ok", "{first}");
     let before = store.load("ses").unwrap();
 
-    let mut rows = pi_rows(&messages);
-    rows[1]["message"]["role"] = json!("systemNotice");
-    let outcome =
-        call_transform_outcome(&handler, native_request("pi", messages.clone(), rows)).await;
-    let (code, message) = error_frame(outcome);
-    assert_eq!(code, "invalid_params");
-    assert!(message.contains("\"systemNotice\""), "{message}");
-
+    let mut unknown = pi_rows(&messages);
+    unknown[1]["message"]["role"] = json!("systemNotice");
     let mut reserved = pi_rows(&messages);
     reserved[0]["id"] = json!("eidnara:user:1a2b3c4d");
-    let outcome = call_transform_outcome(&handler, native_request("pi", messages, reserved)).await;
-    assert_eq!(error_code(outcome), "invalid_params");
+    let mut renamed = pi_rows(&messages);
+    renamed[1]["id"] = json!("3c4d5e6f");
+    for (rows, expected) in [
+        (unknown, "\"systemNotice\""),
+        (reserved, "must carry a host entry id"),
+        (renamed, "does not carry the mid"),
+    ] {
+        let outcome =
+            call_transform_outcome(&handler, native_request("pi", messages.clone(), rows)).await;
+        let (code, message) = error_frame(outcome);
+        assert_eq!(code, "invalid_params");
+        assert!(message.contains(expected), "{message}");
+    }
 
     let after = store.load("ses").unwrap();
     assert_eq!(after.row_version, before.row_version);
@@ -293,4 +424,34 @@ async fn tagging_applies_to_a_pi_window() {
         .expect("the first host message is served");
     assert_eq!(first_host["message"]["content"], "§1§ output 1");
     assert_eq!(first_host["message"]["role"], "user");
+}
+
+#[test]
+fn a_user_hint_in_string_content_counts_as_carried() {
+    let outcome = transform::UserHintOutcome {
+        block_id: "00000001#0".to_string(),
+        hint_text: "remembered hint".to_string(),
+        trace: transform::UserHintTrace::default(),
+        deferred: false,
+        applied: true,
+        attached: false,
+    };
+    let carried = [Arc::new(json!({
+        "id": "00000001",
+        "message": { "role": "user", "content": "question\n\nremembered hint", "timestamp": 1 }
+    }))];
+    assert!(native_carries_user_hint(
+        Some(SerializerProfile::Pi),
+        &carried,
+        &outcome
+    ));
+    let absent = [Arc::new(json!({
+        "id": "00000001",
+        "message": { "role": "user", "content": "question", "timestamp": 1 }
+    }))];
+    assert!(!native_carries_user_hint(
+        Some(SerializerProfile::Pi),
+        &absent,
+        &outcome
+    ));
 }
