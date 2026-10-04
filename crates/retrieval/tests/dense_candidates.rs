@@ -1004,9 +1004,10 @@ fn the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_t
         &layout(),
         &axis(0),
         NonZeroUsize::new(3).unwrap(),
-        |winner| {
+        |winner, row| {
             reads.push(winner.row);
-            Ok::<_, ()>(rows[winner.row].clone())
+            row.clone_from(&rows[winner.row]);
+            Ok::<_, ()>(())
         },
     )
     .unwrap();
@@ -1035,9 +1036,10 @@ fn the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed
     let mut reads = 0;
     let zero = vec![0.0f32; 8];
     assert_eq!(
-        rescore_pool(&pool, &layout(), &zero, k, |_| {
+        rescore_pool(&pool, &layout(), &zero, k, |_, row| {
             reads += 1;
-            Ok::<_, ()>(axis(0))
+            *row = axis(0);
+            Ok::<_, ()>(())
         }),
         Err(RescoreRefusal::Query(
             retrieval::dense::RowRejection::ZeroNorm
@@ -1045,13 +1047,13 @@ fn the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed
     );
     assert_eq!(reads, 0);
     let mut reads = 0;
-    let failed = rescore_pool(&pool, &layout(), &axis(0), k, |winner| {
+    let failed = rescore_pool(&pool, &layout(), &axis(0), k, |winner, row| {
         reads += 1;
         if winner.row == 1 {
-            Err("torn")
-        } else {
-            Ok(axis(0))
+            return Err("torn");
         }
+        *row = axis(0);
+        Ok(())
     });
     assert_eq!(
         failed,
@@ -1062,12 +1064,13 @@ fn the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed
         })
     );
     assert_eq!(reads, 2);
-    let malformed = rescore_pool(&pool, &layout(), &axis(0), k, |winner| {
-        Ok::<_, ()>(if winner.row == 2 {
+    let malformed = rescore_pool(&pool, &layout(), &axis(0), k, |winner, row| {
+        *row = if winner.row == 2 {
             vec![2.0; 8]
         } else {
             axis(0)
-        })
+        };
+        Ok::<_, ()>(())
     });
     assert!(matches!(
         malformed,

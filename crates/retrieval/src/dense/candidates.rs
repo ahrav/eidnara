@@ -21,7 +21,7 @@ use super::oracle::{
 };
 use super::resolve::{Layer, RowFault};
 use super::scalar::{self, QuantizedQuery, QueryRefusal, Scales};
-use super::score::{Ranked, rank_order, score};
+use super::score::{Ranked, rank_order, score_with_squares};
 use crate::batch::VectorGeneration;
 use crate::eligibility::{Authority, OccurrenceCandidate};
 
@@ -336,30 +336,36 @@ pub enum RescoreRefusal<E> {
 }
 
 /// Reads the original row of every pool entry through `read`, in pool order and once each, scores it against `query` with the retained-f32 arithmetic, and returns the `k` best under the dense order.
+/// `read` replaces the contents of one row buffer reused across entries.
 /// Only pool entries are read, and each from the winning layer row the pool names, so the result is `Top(k, A, f32_score)` over the accepted set `A`.
 pub fn rescore_pool<E>(
     pool: &CandidatePool,
     layout: &RowLayout,
     query: &[f32],
     k: NonZeroUsize,
-    mut read: impl FnMut(&WinnerRow) -> Result<Vec<f32>, E>,
+    mut read: impl FnMut(&WinnerRow, &mut Vec<f32>) -> Result<(), E>,
 ) -> Result<Rescored, RescoreRefusal<E>> {
     codec::validate(query, layout).map_err(RescoreRefusal::Query)?;
     let ranking = &pool.ranking;
     let mut scored = Vec::with_capacity(pool.winners.len());
+    let mut row = Vec::with_capacity(query.len());
     for (index, (winner, candidate)) in pool.winners.iter().zip(&ranking.candidates).enumerate() {
         let occurrence_id = &candidate.occurrence_id;
-        let row = read(winner).map_err(|fault| RescoreRefusal::Read {
+        read(winner, &mut row).map_err(|fault| RescoreRefusal::Read {
             occurrence_id: occurrence_id.clone(),
             winner: *winner,
             fault,
         })?;
-        codec::validate(&row, layout).map_err(|rejection| RescoreRefusal::Row {
+        let reject = |rejection| RescoreRefusal::Row {
             occurrence_id: occurrence_id.clone(),
             winner: *winner,
             rejection,
-        })?;
-        scored.push((score(layout.metric, query, &row), index));
+        };
+        // The length is checked before the pass that scores and validates the row.
+        codec::validate_length(&row, layout.dimension).map_err(reject)?;
+        let sums = score_with_squares(layout.metric, query, &row);
+        codec::validate_from_sum(&row, layout, sums.sum_of_squares).map_err(reject)?;
+        scored.push((sums.score, index));
     }
     scored.sort_by(|left, right| {
         rank_order(

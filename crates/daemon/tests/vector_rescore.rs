@@ -14,14 +14,16 @@ use daemon::vector_reader::{
     RescoreEvent, rank_compressed,
 };
 use kernel::applicability::EvalBudget;
+use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::codec::ARTIFACT_HEADER_BYTES;
+use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
     BLOCK_ROWS, CandidateCapacity, CandidatePolicy, CandidateRefusal, Completion, IncompleteReason,
     LayeredRefusal, OracleRefusal, RowFault, ScanBounds, StorageBounds,
 };
 use support::dense_projection::{Projection, occurrence_id, reference};
-use support::vector_store::{Fixture, unit};
+use support::vector_store::{Fixture, KERNEL, unit};
 
 use support::vector_reads::*;
 
@@ -642,6 +644,141 @@ fn missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_
 }
 
 #[test]
+fn a_code_window_across_a_cut_serves_the_rows_before_it_and_refuses_the_first_missing_row() {
+    let mut fixture = Fixture::new();
+    let projection = projection(&fixture, &OBJECTS);
+    let base = fixture.layer_from(&export(&corpus(), &[], 10));
+    fixture
+        .publish(&fixture.compose(1, &base, &[]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    // Two of the five rows of codes remain, so the layer's first window cannot be read whole.
+    let codes = fixture
+        .generation_dir(&base.digest)
+        .join(daemon::vector_generation::CODES_FILE);
+    std::fs::File::options()
+        .write(true)
+        .open(&codes)
+        .unwrap()
+        .set_len(2 * 8)
+        .unwrap();
+    let (outcome, reads) = run(
+        &fixture,
+        &projection,
+        &view,
+        &axis(0),
+        capacity(2, 3),
+        &ROOMY,
+        &EvalBudget::unbounded(),
+        || panic!("nothing is selected"),
+    );
+    match outcome {
+        Err(CompressedRefusal::Candidates(CandidateRefusal::Layered(LayeredRefusal::Oracle(
+            OracleRefusal::Unreadable { occurrence_id, .. },
+        )))) => assert_eq!(occurrence_id, view.layers()[0].occurrence_ids()[2]),
+        other => panic!("{other:?}"),
+    }
+    assert!(reads.is_empty());
+    assert!(view.is_quarantined());
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+}
+
+/// Unit rows `dimension` wide from a linear congruential sequence; only their order under each layer's scales matters.
+fn wide_rows(names: &[String], dimension: usize, seed: u32) -> Vec<(String, Vec<f32>)> {
+    let mut state = seed;
+    names
+        .iter()
+        .map(|name| {
+            let raw: Vec<f64> = (0..dimension)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    f64::from(state >> 8) / f64::from(1u32 << 24) - 0.5
+                })
+                .collect();
+            let norm = raw.iter().map(|value| value * value).sum::<f64>().sqrt();
+            let row = raw.iter().map(|value| (value / norm) as f32).collect();
+            (name.clone(), row)
+        })
+        .collect()
+}
+
+fn wide_export(fixture: &Fixture, rows: &[(String, Vec<f32>)], checkpoint: i64) -> LiveRows {
+    let mut rows: Vec<ExportedRow> = rows
+        .iter()
+        .map(|(object, vector)| ExportedRow {
+            occurrence_id: occurrence_id(object),
+            vector: vector.clone(),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.occurrence_id.cmp(&b.occurrence_id));
+    LiveRows {
+        generation: fixture.generation.clone(),
+        kernel_incarnation_id: KERNEL.to_owned(),
+        checkpoint: ProjectionCheckpoint {
+            snapshot_commit_seq: checkpoint - 1,
+            checkpoint_commit_seq: checkpoint,
+            hold_id: "hold-7".to_owned(),
+        },
+        rows,
+        tombstones: Vec::new(),
+    }
+}
+
+#[test]
+fn a_layer_spanning_several_code_windows_selects_the_pool_its_own_codes_predict() {
+    // Four rows of 4096 codes fill one window, so the base's eleven rows span three windows and the delta's winners interleave with them.
+    const WIDE: u32 = 4096;
+    let names: Vec<String> = (0..11).map(|index| format!("wide-{index:02}")).collect();
+    let objects: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut fixture = Fixture::with_dimension(WIDE);
+    let projection = Projection::new(
+        fixture.root.path(),
+        &fixture.identity,
+        &fixture.generation,
+        &objects,
+        &objects,
+    );
+    let rows = wide_rows(&names, WIDE as usize, 0x2545_f491);
+    let replaced: Vec<String> = vec![names[1].clone(), names[6].clone()];
+    let delta_rows = wide_rows(&replaced, WIDE as usize, 0x0bad_5eed);
+    let base = fixture.layer_from(&wide_export(&fixture, &rows, 10));
+    let delta = fixture.layer_from(&wide_export(&fixture, &delta_rows, 12));
+    fixture
+        .publish(&fixture.compose(1, &base, &[delta]).unwrap())
+        .unwrap();
+    let view = acquire_view(&mut fixture, &mut |_| {}).unwrap();
+    let query = wide_rows(&["query".to_owned()], WIDE as usize, 0x1234_5678)
+        .pop()
+        .unwrap()
+        .1;
+    let winners: BTreeMap<String, (usize, usize)> = names
+        .iter()
+        .map(|name| {
+            let layer = usize::from(replaced.contains(name));
+            winner(&view, layer, name)
+        })
+        .collect();
+    let (ranking, reads) = rank_simple(&fixture, &projection, &view, &query, 3, 8);
+    assert_eq!(
+        pool_keys(&ranking),
+        expected_pool(&view, &query, &winners, 8)
+    );
+    assert_eq!(reads.len(), 8);
+    let mut vectors: BTreeMap<String, Vec<f32>> = rows
+        .iter()
+        .map(|(name, row)| (occurrence_id(name), row.clone()))
+        .collect();
+    for (name, row) in &delta_rows {
+        vectors.insert(occurrence_id(name), row.clone());
+    }
+    assert_eq!(
+        rescored(&ranking),
+        top_of_pool(&query, &ranking, &vectors, 3)
+    );
+    assert_eq!(held(&fixture.ledger, ResourceClass::Scratch), 0);
+}
+
+#[test]
 fn a_view_of_another_identity_is_refused_first() {
     let mut fixture = Fixture::new();
     let projection = projection(&fixture, &OBJECTS);
@@ -790,7 +927,13 @@ fn every_view_and_read_bound_refuses_before_the_projection_is_read() {
     );
     // A resident limit the view's tables already fill leaves no room for the pool's row buffers.
     let tables = fixture.ledger.census().resident;
-    let code_scratch = (BLOCK_ROWS as u64 + 1) * 8;
+    // One block of decoded codes and one window per layer; a window this narrow holds every row of its layer.
+    let windows: usize = view
+        .layers()
+        .iter()
+        .map(|layer| layer.occurrence_ids().len())
+        .sum();
+    let code_scratch = (BLOCK_ROWS + windows) as u64 * 8;
     fixture.set_limit(RESIDENT_LIMIT, tables + code_scratch);
     let (refused, _) = run(
         &fixture,

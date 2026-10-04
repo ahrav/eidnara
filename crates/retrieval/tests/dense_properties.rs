@@ -9,7 +9,9 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::dense::codec::{self, Metric, RowLayout};
 use retrieval::dense::scalar::{Scales, encode, weighted_dot};
 use retrieval::dense::score::TopK;
-use retrieval::dense::{BLOCK_ROWS, Ranked, inner_product, inner_product_block};
+use retrieval::dense::{
+    BLOCK_ROWS, Ranked, inner_product, inner_product_block, inner_product_with_squares,
+};
 
 const SEED: [u8; 32] = *b"dense-ranking-laws-seed-00000001";
 
@@ -278,6 +280,44 @@ fn inner_product_block_matches_the_single_row_functions_bit_for_bit() {
             }
             Ok(())
         })
+        .unwrap();
+}
+
+/// The one-pass score and sum of squares equal the single-purpose loops bit for bit, over every f32 exponent, both signed zeros, and non-finite coordinates, so validating from the pass's sum decides as the scalar validator does.
+#[test]
+fn inner_product_with_squares_matches_the_single_purpose_loops_bit_for_bit() {
+    runner()
+        .run(
+            &(block_rows(), any::<usize>(), 0u8..4, 0.0f64..2.0),
+            |((query, rows), seed, poison, tolerance)| {
+                let dimension = query.len();
+                let mut row = rows[0].clone();
+                match poison {
+                    1 => row[seed % dimension] = f32::NAN,
+                    2 => row[seed % dimension] = f32::INFINITY,
+                    3 => row.iter_mut().for_each(|value| *value = 0.0),
+                    _ => {}
+                }
+                let sums = inner_product_with_squares(&query, &row);
+                prop_assert_eq!(sums.score.to_bits(), inner_product(&query, &row).to_bits());
+                let mut squares = 0.0f64;
+                for value in &row {
+                    let widened = f64::from(*value);
+                    squares += widened * widened;
+                }
+                prop_assert_eq!(sums.sum_of_squares.to_bits(), squares.to_bits());
+                let layout = RowLayout {
+                    dimension: dimension as u32,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: tolerance,
+                };
+                prop_assert_eq!(
+                    codec::validate_from_sum(&row, &layout, sums.sum_of_squares),
+                    codec::validate(&row, &layout)
+                );
+                Ok(())
+            },
+        )
         .unwrap();
 }
 
