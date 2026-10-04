@@ -899,6 +899,26 @@ describe("call policy is keyed off the body it forwards", () => {
 });
 
 describe("connection backoff is not a connection failure", () => {
+    test("a dial whose connection-file snapshot deadline expired leaves the next dial unthrottled", async () => {
+        const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
+        const expired = Object.assign(new Error("connection file snapshot deadline expired"), {
+            name: "ConnectionFileError",
+            code: "deadline_expired",
+        });
+        transport.clientOptions = () => {
+            throw expired;
+        };
+        await expect(transport.ensureConnected(Deadline.start(1_000))).rejects.toBe(expired);
+        expect(transport.nextProbeMs).toBe(0);
+
+        const refused = Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+        transport.clientOptions = () => {
+            throw refused;
+        };
+        await expect(transport.ensureConnected(Deadline.start(1_000))).rejects.toBe(refused);
+        expect(transport.nextProbeMs).toBeGreaterThan(performance.now());
+    });
+
     test("an active backoff propagates without a generation change", async () => {
         const transport = internals(new HostModuleTransport("/tmp/unused-eidnara-host.json"));
         transport.nextProbeMs = performance.now() + 60_000;

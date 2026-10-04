@@ -155,6 +155,9 @@ function bracket(position: "before" | "after") {
         let seen: unknown;
         pi.on("context", (event) => {
             const messages = event.messages as unknown[];
+            // The timed span starts on a collected heap, as the OpenCode driver's does; Pi's
+            // clone of the array leaves the previous call's copy for this collection.
+            if (position === "before") Bun.gc(true);
             const now = performance.now();
             if (position === "before") {
                 marks.beforePlugin = now;

@@ -1301,7 +1301,9 @@ under test dialing a fresh direct-host fixture whose summarizer command answers
 with one short segment per five messages. Each sample prompts with a 20 KiB
 message, so the window crosses the execute threshold and folds within the
 first hundred turns. Two extensions loaded before and after the plugin time its
-`context` and `agent_end` handlers, and a wrapper around Pi's `context` emitter
+`context` and `agent_end` handlers; the first collects the garbage of Pi's
+previous clone before the plugin's timer starts, as the OpenCode driver collects
+before its timer. A wrapper around Pi's `context` emitter
 times the whole event, including Pi's clone of the array. Every call goes to
 `calls.jsonl` (the `context` event, Pi's clone, the plugin's `context` handler,
 its `agent_end` handler, the array length in and out, and RSS), and

@@ -1358,8 +1358,12 @@ export class HostModuleTransport {
                 return { client: candidate, ...certification };
             } catch (error) {
                 if (generation === this.connectionGeneration) void this.invalidateConnection();
-                this.nextProbeMs = performance.now() + this.backoffMs;
-                this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
+                // An expired snapshot deadline is the caller's budget running out, often across
+                // an event-loop stall in the host, and leaves the next caller free to dial.
+                if (!isSnapshotDeadlineExpiry(error)) {
+                    this.nextProbeMs = performance.now() + this.backoffMs;
+                    this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
+                }
                 throw error;
             }
         })();
@@ -1401,6 +1405,14 @@ export class HostModuleTransport {
         }
         return Promise.resolve();
     }
+}
+
+function isSnapshotDeadlineExpiry(error: unknown): boolean {
+    return (
+        error instanceof Error &&
+        error.name === "ConnectionFileError" &&
+        (error as { code?: unknown }).code === "deadline_expired"
+    );
 }
 
 export const __moduleTransportTest = {
