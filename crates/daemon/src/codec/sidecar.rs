@@ -42,7 +42,6 @@ pub struct DecodedHarnessMessages {
 /// Harness metadata indexed by message ID with a separate decode-order list.
 ///
 /// Repeated message IDs replace metadata without changing their first-seen position.
-/// `mid_pins` retains stable-key assignments across encode cycles.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecodeSidecar {
     pub harness: String,
@@ -50,8 +49,6 @@ pub struct DecodeSidecar {
     pub order: Vec<String>,
     #[serde(default)]
     pub messages: BTreeMap<String, Arc<HarnessMessageMeta>>,
-    #[serde(default)]
-    pub mid_pins: BTreeMap<String, String>,
 }
 
 impl DecodeSidecar {
@@ -60,7 +57,6 @@ impl DecodeSidecar {
             harness: harness.into(),
             order: Vec::new(),
             messages: BTreeMap::new(),
-            mid_pins: BTreeMap::new(),
         }
     }
 
@@ -82,14 +78,6 @@ impl DecodeSidecar {
             .get(index)
             .and_then(|mid| self.messages.get(mid.as_str()))
             .map(Arc::as_ref)
-    }
-
-    pub fn inherit_pin(&self, stable_key: &str) -> Option<String> {
-        self.mid_pins.get(stable_key).cloned()
-    }
-
-    pub fn pin_mid(&mut self, stable_key: impl Into<String>, mid: impl Into<String>) {
-        self.mid_pins.insert(stable_key.into(), mid.into());
     }
 }
 
@@ -142,6 +130,55 @@ impl MatchedBlockMetas<'_> {
                 (!decoded_block_was_removed).then_some(part)
             })
             .collect()
+    }
+}
+
+impl<'a> MatchedBlockMetas<'a> {
+    /// Positional pairing treats equal-length unmatched runs as in-place edits and restores
+    /// their native slots.
+    pub(crate) fn pair_in_place_edits(
+        &mut self,
+        blocks: &[WireBlock],
+        metas: &'a [BlockMeta],
+        mut matches: impl FnMut(&WireBlock, &BlockMeta) -> bool,
+    ) {
+        let (mut run_block, mut run_meta) = (0, 0);
+        for block_index in 0..=blocks.len() {
+            let anchor_meta = match self.by_block.get(block_index) {
+                Some(None) => continue,
+                Some(Some(anchor)) => {
+                    let Some(offset) = metas[run_meta..]
+                        .iter()
+                        .position(|meta| std::ptr::eq(meta, *anchor))
+                    else {
+                        return;
+                    };
+                    run_meta + offset
+                }
+                None => metas.len(),
+            };
+            let run_blocks = run_block..block_index;
+            let run_metas = run_meta..anchor_meta;
+            let in_place = !run_blocks.is_empty()
+                && run_blocks.len() == run_metas.len()
+                && run_blocks
+                    .clone()
+                    .zip(run_metas.clone())
+                    .all(|(block, meta)| {
+                        !has_stamped_block_identity(&blocks[block])
+                            && matches(&blocks[block], &metas[meta])
+                    });
+            if in_place {
+                for (block, meta) in run_blocks.zip(run_metas) {
+                    self.by_block[block] = Some(&metas[meta]);
+                    if let Some(native_index) = metas[meta].native_index {
+                        self.retained_native_indices.insert(native_index);
+                    }
+                }
+            }
+            run_block = block_index + 1;
+            run_meta = anchor_meta + 1;
+        }
     }
 }
 
@@ -613,6 +650,52 @@ mod tests {
             );
         }
         assert_eq!(matched.retained_native_indices.len(), count);
+    }
+
+    #[test]
+    fn in_place_edit_pairing_restores_equal_runs_and_leaves_ambiguous_runs() {
+        let originals = ["a", "b", "c"].map(text_block);
+        let metas: Vec<BlockMeta> = originals
+            .iter()
+            .enumerate()
+            .map(|(index, block)| BlockMeta {
+                content_fingerprint: Some(decoded_block_fingerprint(block)),
+                ..text_meta(index)
+            })
+            .collect();
+        let text = |_: &WireBlock, meta: &BlockMeta| meta.kind == "text";
+        let paired = |blocks: &[WireBlock]| {
+            let mut matched = match_block_metas(blocks, &metas, text);
+            matched.pair_in_place_edits(blocks, &metas, text);
+            let by_block = matched
+                .by_block
+                .iter()
+                .map(|meta| meta.map(|meta| meta.block_index))
+                .collect::<Vec<_>>();
+            (
+                by_block,
+                matched.remove_unretained_native_parts(vec![0, 1, 2]),
+            )
+        };
+
+        let edited = [text_block("a"), text_block("§1§ b"), text_block("c")];
+        assert_eq!(
+            paired(&edited),
+            (vec![Some(0), Some(1), Some(2)], vec![0, 1, 2])
+        );
+        let leading_and_trailing = [text_block("§1§ a"), text_block("b"), text_block("§2§ c")];
+        assert_eq!(
+            paired(&leading_and_trailing),
+            (vec![Some(0), Some(1), Some(2)], vec![0, 1, 2])
+        );
+
+        let deleted_and_edited = [text_block("§1§ b"), text_block("c")];
+        assert_eq!(paired(&deleted_and_edited), (vec![None, Some(2)], vec![2]));
+
+        let mut foreign = text_block("§1§ b");
+        stamp_block_identity(&mut foreign, 7, 7, "elsewhere");
+        let stamped = [text_block("a"), foreign, text_block("c")];
+        assert_eq!(paired(&stamped), (vec![Some(0), None, Some(2)], vec![0, 2]));
     }
 
     #[test]

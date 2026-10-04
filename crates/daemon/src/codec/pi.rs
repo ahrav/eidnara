@@ -597,7 +597,8 @@ fn encode_with_meta(
         fingerprinted = fingerprint_block_metas(&meta.blocks, decoded);
         &fingerprinted
     };
-    let matched_metas = match_block_metas(msg.content(), block_metas, block_matches_meta);
+    let mut matched_metas = match_block_metas(msg.content(), block_metas, block_matches_meta);
+    matched_metas.pair_in_place_edits(msg.content(), block_metas, block_matches_meta);
     let unchanged = msg.content().len() == block_metas.len()
         && msg
             .content()
@@ -1682,6 +1683,84 @@ mod tests {
             encoded[tool_result]["message"]["content"],
             json!([{ "type": "text", "text": "reduced" }])
         );
+    }
+
+    #[test]
+    fn unstamped_in_place_edits_keep_their_native_slot_and_extras() {
+        let raw = vec![
+            json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "caption" },
+                    { "type": "image", "mimeType": "image/png", "data": "aW1n" }
+                ],
+                "timestamp": 1
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "plan", "thinkingSignature": "sig-think" },
+                    {
+                        "type": "text",
+                        "text": "answer",
+                        "textSignature": "sig-text",
+                        "vendorPart": "keep"
+                    },
+                    { "type": "toolCall", "id": "call-1", "name": "read", "arguments": {} }
+                ],
+                "api": "anthropic-messages",
+                "provider": "anthropic",
+                "model": "m",
+                "usage": {},
+                "stopReason": "toolUse",
+                "timestamp": 2
+            }),
+        ];
+        let tag = |mut messages: Vec<WireMessage>| {
+            for (message, block, number) in [(0, 0, 1), (1, 1, 2)] {
+                let BlockKind::Text { text } = messages[message].content_mut()[block].kind_mut()
+                else {
+                    panic!("expected text");
+                };
+                *text = format!("§{number}§ {text}");
+            }
+            messages
+        };
+        let expected = vec![
+            json!([
+                { "type": "text", "text": "§1§ caption" },
+                raw[0]["content"][1].clone()
+            ]),
+            json!([
+                raw[1]["content"][0].clone(),
+                {
+                    "type": "text",
+                    "text": "§2§ answer",
+                    "textSignature": "sig-text",
+                    "vendorPart": "keep"
+                },
+                raw[1]["content"][2].clone()
+            ]),
+        ];
+        let content = |encoded: Vec<Value>| {
+            encoded
+                .into_iter()
+                .map(|message| message["content"].clone())
+                .collect::<Vec<_>>()
+        };
+
+        let unstamped = decode_pi_rows(&rows(&raw)).unwrap();
+        let unstamped_ck = tag(cks(&unstamped));
+        assert!(
+            unstamped_ck
+                .iter()
+                .flat_map(WireMessage::content)
+                .all(|block| !has_stamped_block_identity(block))
+        );
+        assert_eq!(content(encode(&unstamped_ck, &unstamped)), expected);
+
+        let stamped = decode(&raw);
+        assert_eq!(content(encode(&tag(cks(&stamped)), &stamped)), expected);
     }
 
     #[test]
