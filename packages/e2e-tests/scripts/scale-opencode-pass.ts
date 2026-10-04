@@ -7,12 +7,8 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { HermeticHostStack } from "../src/rust-runner/hermetic-host";
-import {
-    type PassRow,
-    PassRowWriter,
-    type ScaleTier,
-    TIER_MESSAGES,
-} from "../src/scale-report/rows";
+import { classifyPass } from "../src/scale-report/pass-outcome";
+import { PassRowWriter, type ScaleTier, TIER_MESSAGES } from "../src/scale-report/rows";
 
 const { values: flags } = parseArgs({
     options: {
@@ -170,16 +166,6 @@ function exchangedBytes(exchanged: readonly unknown[]): number {
     return bytes;
 }
 
-/** The transform call itself ran out of time, after its request may have been sent. */
-function isDeadline(error: unknown): boolean {
-    if (!(error instanceof Error)) return false;
-    const code = (error as { code?: unknown }).code;
-    return (
-        (code === "ETIMEDOUT" && !/while queued/.test(error.message)) ||
-        /request deadline expired after a possible send/.test(error.message)
-    );
-}
-
 const plugin = await loadPlugin();
 mkdirSync(outDir, { recursive: true });
 const rowsPath = join(outDir, "rows.jsonl");
@@ -259,15 +245,7 @@ async function measureTier(tier: ScaleTier): Promise<number> {
             const boundary = JSON.stringify(state.boundary ?? null);
             const published = output.messages[turn === 0 ? 0 : covered] !== head;
             const ok = pass.status === "ok" && state.failureCount === failuresBefore && published;
-            const censored = !ok && isDeadline(pass.error);
-            const refusal: PassRow["refusal"] =
-                ok || censored
-                    ? null
-                    : pass.error !== undefined
-                      ? "transport_error"
-                      : pass.status === undefined || pass.status === "ok"
-                        ? "declined"
-                        : "daemon_error";
+            const { outcome, refusal } = classifyPass({ ok, error: pass.error });
             writer.write({
                 harness: "opencode",
                 tier,
@@ -279,7 +257,7 @@ async function measureTier(tier: ScaleTier): Promise<number> {
                         : boundary === previousBoundary && pass.action !== "HARD"
                           ? "replay"
                           : "warming",
-                outcome: ok ? "completed" : censored ? "censored" : "refused",
+                outcome,
                 refusal,
                 response_us: responseUs,
                 service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),

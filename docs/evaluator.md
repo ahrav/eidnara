@@ -1286,7 +1286,10 @@ slots minimal, a 300-message window of the 5 KiB shape) and collects the
 garbage of the previous array before the timer starts. It times the whole
 `run` call of the transform hook: preflight, discovery, capture, IPC, recipe
 application, publication, and note delivery. Its first pass is `cold`, later
-passes are `replay`, and a pass after a fold is `warming`.
+passes are `replay`, and a pass after a fold is `warming`. A pass that throws a
+terminal `HostCallError`, which the daemon answered, is a `daemon_error`; any
+other thrown error is a `transport_error`; a pass the plugin declined with
+nothing thrown is `declined`.
 
 ## Paired worlds
 
