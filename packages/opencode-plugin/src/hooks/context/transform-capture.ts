@@ -173,6 +173,34 @@ export function rootArrayRejection(value: unknown): ReferenceableRejection | und
     return undefined;
 }
 
+/** `JSON_ESCAPE_CANDIDATE` matches every UTF-16 unit that can increase `jsonEscapeGrowth`. */
+const JSON_ESCAPE_CANDIDATE = /["\\]|[^\x20-\ud7ff\ue000-\uffff]/;
+
+/** `jsonEscapeGrowth` returns the additional bytes JSON escaping requires above two bytes per UTF-16 unit. */
+function jsonEscapeGrowth(value: string): number {
+    if (!JSON_ESCAPE_CANDIDATE.test(value)) return 0;
+    let growth = 0;
+    for (let index = 0; index < value.length; index += 1) {
+        const unit = value.charCodeAt(index);
+        if (unit === 0x22 || unit === 0x5c || (unit >= 0x08 && unit <= 0x0d && unit !== 0x0b)) {
+            growth += 2;
+        } else if (unit < 0x20) {
+            growth += 10;
+        } else if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = value.charCodeAt(index + 1);
+            if (next >= 0xdc00 && next <= 0xdfff) index += 1;
+            else growth += 10;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+            growth += 10;
+        }
+    }
+    return growth;
+}
+
+function childPath(path: string, child: string | number | undefined): string {
+    return child === undefined ? path : `${path}/${child}`;
+}
+
 class SourceRejected extends Error {
     constructor(
         readonly reason: ReferenceableRejection["reason"],
@@ -194,6 +222,13 @@ class ReferenceableWalk {
     wireBytes = 0;
     private field?: (value: SnapshotField) => void;
     private readonly ancestors = new Set<object>();
+    /**
+     * Built-in prototype state the walk checks once: own descriptor reads run no source code, so
+     * the state holds for the rest of a synchronous walk.
+     */
+    private arrayChain?: boolean;
+    private arrayPrototypeToJsonChecked = false;
+    private objectPrototypeToJsonChecked = false;
 
     /** Only inspection reads `wireBytes`; capture and recheck walks skip the per-unit escape scan. */
     constructor(
@@ -211,34 +246,21 @@ class ReferenceableWalk {
     /** `wireBytes` counts only tokens JSON serialization emits; tape-only markers pass zero. */
     private emit(value: SnapshotField, wireBytes: number): void {
         // A tape slot keeps its string, or a symbol's description, alive after the host drops it.
-        const retained =
-            typeof value === "string"
-                ? value.length * 2
-                : typeof value === "symbol"
-                  ? (value.description?.length ?? 0) * 2
-                  : 0;
-        this.spend(TAPE_SLOT_BYTES + retained);
-        if (typeof value === "string" && wireBytes > 0 && this.estimateWire) {
-            for (let index = 0; index < value.length; index += 1) {
-                const unit = value.charCodeAt(index);
-                if (
-                    unit === 0x22 ||
-                    unit === 0x5c ||
-                    (unit >= 0x08 && unit <= 0x0d && unit !== 0x0b)
-                ) {
-                    wireBytes += 2;
-                } else if (unit < 0x20) {
-                    wireBytes += 10;
-                } else if (unit >= 0xd800 && unit <= 0xdbff) {
-                    const next = value.charCodeAt(index + 1);
-                    if (next >= 0xdc00 && next <= 0xdfff) index += 1;
-                    else wireBytes += 10;
-                } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-                    wireBytes += 10;
-                }
-            }
-        }
-        this.wire(wireBytes);
+        if (typeof value === "string") {
+            this.spend(TAPE_SLOT_BYTES + value.length * 2);
+            if (wireBytes > 0 && this.estimateWire) wireBytes += jsonEscapeGrowth(value);
+        } else
+            this.spend(
+                TAPE_SLOT_BYTES +
+                    (typeof value === "symbol" ? (value.description?.length ?? 0) * 2 : 0),
+            );
+        if (wireBytes !== 0) this.wire(wireBytes);
+        this.field?.(value);
+    }
+
+    /** Records a number or boolean that JSON serialization never emits. */
+    private scalar(value: number | boolean): void {
+        this.spend(TAPE_SLOT_BYTES);
         this.field?.(value);
     }
 
@@ -248,20 +270,24 @@ class ReferenceableWalk {
         this.wireBytes = total;
     }
 
-    walk(value: unknown, path = ""): void {
+    /** Walks `value` at `path`, or at `path/key` when `key` is given; the joined path is built only when needed. */
+    walk(value: unknown, path = "", key?: string): void {
         const type = typeof value;
         if (value === null || type !== "object") {
             if (type === "number" && !Number.isFinite(value))
-                throw new SourceRejected("nonfinite_number", path);
+                throw new SourceRejected("nonfinite_number", childPath(path, key));
             if (value !== null && type !== "string" && type !== "number" && type !== "boolean")
-                throw new SourceRejected(type as ReferenceableRejection["reason"], path);
+                throw new SourceRejected(
+                    type as ReferenceableRejection["reason"],
+                    childPath(path, key),
+                );
             this.emit(
                 value as SnapshotField,
                 type === "string" ? (value as string).length * 2 + 4 : SCALAR_WIRE_BYTES,
             );
             return;
         }
-        this.entries(value as object, path, (key, slot) => this.walk(slot.value, `${path}/${key}`));
+        this.entries(value as object, childPath(path, key));
     }
 
     members(messages: unknown, visit: (slot: PropertyDescriptor, index: number) => void): number {
@@ -310,25 +336,52 @@ class ReferenceableWalk {
     }
 
     private attributes(slot: PropertyDescriptor): void {
-        this.emit(slot.enumerable === true, 0);
-        this.emit(slot.writable === true, 0);
-        this.emit(slot.configurable === true, 0);
+        this.scalar(slot.enumerable === true);
+        this.scalar(slot.writable === true);
+        this.scalar(slot.configurable === true);
     }
 
-    /** Every descriptor read spends one slot so the byte budget also bounds traversal work. */
-    private data(value: object, key: PropertyKey, path: string): PropertyDescriptor {
+    /**
+     * Every descriptor read spends one slot so the byte budget also bounds traversal work. A
+     * rejection names `path`, or `path/child` when `child` is given.
+     */
+    private data(
+        value: object,
+        key: PropertyKey,
+        path: string,
+        child?: string | number,
+    ): PropertyDescriptor {
         this.spend(TAPE_SLOT_BYTES);
         const slot = Object.getOwnPropertyDescriptor(value, key);
-        if (!slot) throw new SourceRejected("sparse_array", path);
-        if (!Object.hasOwn(slot, "value")) throw new SourceRejected("accessor", path);
+        if (!slot) throw new SourceRejected("sparse_array", childPath(path, child));
+        if (!Object.hasOwn(slot, "value"))
+            throw new SourceRejected("accessor", childPath(path, child));
         return slot;
     }
 
-    /** Proxy rejection precedes prototype and descriptor reads; source iterators are never used. */
+    /** JSON looks up `toJSON` even when it is hidden or inherited. */
+    private rejectToJson(holder: object, path: string): void {
+        const hook = Object.getOwnPropertyDescriptor(holder, "toJSON");
+        if (hook && (!Object.hasOwn(hook, "value") || hook.value !== undefined)) {
+            const reason = !Object.hasOwn(hook, "value")
+                ? "accessor"
+                : types.isProxy(hook.value)
+                  ? "proxy"
+                  : typeof hook.value === "function"
+                    ? "function"
+                    : "to_json";
+            throw new SourceRejected(reason, `${path}/toJSON`);
+        }
+    }
+
+    /**
+     * Proxy rejection precedes prototype and descriptor reads; source iterators are never used.
+     * Without `visit`, each counted entry is walked at `path/key`.
+     */
     private entries(
         value: object,
         path: string,
-        visit: (key: string, slot: PropertyDescriptor) => void,
+        visit?: (key: string, slot: PropertyDescriptor) => void,
     ): number {
         if (types.isProxy(value)) throw new SourceRejected("proxy", path);
         // JSON serializes a boxed primitive by its internal slot, which no own property records.
@@ -339,49 +392,43 @@ class ReferenceableWalk {
             (array
                 ? prototype !== Array.prototype
                 : prototype !== Object.prototype && prototype !== null) ||
-            Object.getPrototypeOf(Array.prototype) !== Object.prototype
+            !(this.arrayChain ??= Object.getPrototypeOf(Array.prototype) === Object.prototype)
         )
             throw new SourceRejected("prototype", path);
         if (this.ancestors.size > MAX_REFERENCEABLE_DEPTH) throw new SourceRejected("depth", path);
         if (this.ancestors.has(value)) throw new SourceRejected("cycle", path);
-        // JSON looks up toJSON even when it is hidden or inherited.
-        for (
-            let holder: object | null = value;
-            holder !== null;
-            holder = Object.getPrototypeOf(holder)
-        ) {
-            const hook = Object.getOwnPropertyDescriptor(holder, "toJSON");
-            if (hook && (!Object.hasOwn(hook, "value") || hook.value !== undefined)) {
-                const reason = !Object.hasOwn(hook, "value")
-                    ? "accessor"
-                    : types.isProxy(hook.value)
-                      ? "proxy"
-                      : typeof hook.value === "function"
-                        ? "function"
-                        : "to_json";
-                throw new SourceRejected(reason, `${path}/toJSON`);
-            }
+        // The holder chain is the value, then `Array.prototype` for an array, then `Object.prototype` unless the prototype is null.
+        this.rejectToJson(value, path);
+        if (array && !this.arrayPrototypeToJsonChecked) {
+            this.rejectToJson(Array.prototype, path);
+            this.arrayPrototypeToJsonChecked = true;
+        }
+        if (prototype !== null && !this.objectPrototypeToJsonChecked) {
+            this.rejectToJson(Object.prototype, path);
+            this.objectPrototypeToJsonChecked = true;
         }
         const lengthSlot = array ? this.data(value, "length", path) : undefined;
         const length: number = lengthSlot?.value ?? 0;
+        const symbols = Object.getOwnPropertySymbols(value);
         if (array) {
             // The declared length is charged before any element read so a huge sparse length fails early.
             this.spend(length);
-            if (ARRAY_SYMBOLS.some((key) => Object.getOwnPropertyDescriptor(value, key)))
-                throw new SourceRejected("extra_property", path);
+            for (let index = 0; index < symbols.length; index += 1)
+                if (ARRAY_SYMBOLS.includes(symbols[index] as symbol))
+                    throw new SourceRejected("extra_property", path);
         }
         // Opening and closing brackets; each element or key pays its own separator.
         this.emit(array ? ARRAY : OBJECT, 1);
         // A null prototype changes what an absent optional field reads as, so the tape records it.
-        if (!array) this.emit(prototype === null, 0);
+        if (!array) this.scalar(prototype === null);
         if (lengthSlot) {
-            this.emit(length, 0);
+            this.scalar(length);
             this.attributes(lengthSlot);
         }
         this.ancestors.add(value);
         let count = 0;
         try {
-            for (const key of Object.getOwnPropertySymbols(value)) {
+            for (const key of symbols) {
                 const slot = this.data(value, key, path);
                 this.emit(EXTRA_KEY, 0);
                 this.emit(key, 0);
@@ -392,16 +439,16 @@ class ReferenceableWalk {
                 if (array && key === "length") continue;
                 if (array && ARRAY_METHODS.has(key))
                     throw new SourceRejected("extra_property", path);
-                const slot = this.data(value, key, `${path}/${key}`);
+                const slot = this.data(value, key, path, key);
                 // Own names list integer indexes ascending, so an index key that is not `count` leaves a hole at `count`.
                 if (array && key !== String(count)) {
                     const index = Number(key);
                     if (Number.isInteger(index) && index >= 0 && String(index) === key)
-                        this.data(value, String(count), `${path}/${count}`);
+                        this.data(value, String(count), path, count);
                     this.emit(EXTRA_KEY, 0);
                     this.emit(key, 0);
                     this.attributes(slot);
-                    this.walk(slot.value, `${path}/${key}`);
+                    this.walk(slot.value, path, key);
                     continue;
                 }
                 if (slot.value === undefined) {
@@ -412,12 +459,13 @@ class ReferenceableWalk {
                 if (array) this.wire(1);
                 else this.emit(key, key.length * 2 + 6);
                 this.attributes(slot);
-                visit(key, slot);
+                if (visit) visit(key, slot);
+                else this.walk(slot.value, path, key);
                 count += 1;
             }
-            if (array && count !== length) this.data(value, String(count), `${path}/${count}`);
+            if (array && count !== length) this.data(value, String(count), path, count);
             this.emit(array ? END_ARRAY : END_OBJECT, 1);
-            this.emit(count, 0);
+            this.scalar(count);
             return count;
         } finally {
             this.ancestors.delete(value);
@@ -639,6 +687,33 @@ export function captureMessages(messages: unknown, lease: CaptureLease): Capture
 }
 
 /**
+ * Captures `messages` within the lease's headroom, then reserves the walk's spend, which equals
+ * the charge an inspection without wire estimates reports. The walk and the reservation form one
+ * synchronous section, so no other reservation runs while the capture is unreserved. `undefined`
+ * when the lease is cancelled, a value is not referenceable, or the headroom is short; nothing is
+ * then reserved.
+ */
+export function captureReserved(
+    messages: unknown,
+    lease: CaptureLease,
+): { capture: CapturedMessages; bytes: number } | undefined {
+    if (lease.signal.aborted) return undefined;
+    const walker = new ReferenceableWalk(
+        Math.min(lease.remainingBytes, TRANSFORM_CAPTURE_MAX_BYTES),
+        false,
+    );
+    let capture: CapturedMessages;
+    try {
+        capture = walkMembers(walker, messages);
+    } catch (error) {
+        if (error instanceof SourceRejected || error instanceof CaptureBudgetExceeded)
+            return undefined;
+        throw error;
+    }
+    return lease.reserve(walker.bytes) ? { capture, bytes: walker.bytes } : undefined;
+}
+
+/**
  * With a `prefix`, capture charges only the root and members after the prefix; it verifies
  * leading members instead of retaining them. A mismatch, or no member after the prefix, returns
  * `undefined`.
@@ -690,10 +765,18 @@ function walkCapture(
 ): CapturedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
-    const walker = new ReferenceableWalk(
-        Math.min(lease.chargedBytes, TRANSFORM_CAPTURE_MAX_BYTES),
-        false,
+    return walkMembers(
+        new ReferenceableWalk(Math.min(lease.chargedBytes, TRANSFORM_CAPTURE_MAX_BYTES), false),
+        messages,
+        digest,
     );
+}
+
+function walkMembers(
+    walker: ReferenceableWalk,
+    messages: unknown,
+    digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
+): CapturedMessages {
     const verifier = digest?.verifier;
     const verifiedCount = verifier?.expected.count ?? 0;
     const members: unknown[] = [];

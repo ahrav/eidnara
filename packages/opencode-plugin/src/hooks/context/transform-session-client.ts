@@ -30,7 +30,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory,
-    captureMessages,
+    captureReserved,
     filterMayHold,
     fnv1a32,
     type HistoryDigest,
@@ -1364,30 +1364,17 @@ export function createTransformSessionClient(
                         ),
                 );
                 const candidate = application.values;
-                let applied: AppliedOutput | undefined;
-                try {
-                    // Only the charge is read here, so the per-unit escape scan is skipped.
-                    const inspection = inspectReferenceableMessages(
-                        candidate,
-                        lease.remainingBytes,
-                        0,
-                        false,
-                    );
-                    if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
-                        applied = {
-                            revision: application.outputRevision,
-                            values: candidate,
-                            lengths: application.lengths,
-                            capture: captureMessages(candidate, lease),
-                            charge:
-                                application.bytes +
-                                application.lengths.length * LENGTH_SLOT_BYTES +
-                                inspection.estimatedBytes,
-                        };
-                    }
-                } catch (error) {
-                    if (!(error instanceof CaptureBudgetExceeded)) throw error;
-                }
+                const reserved = captureReserved(candidate, lease);
+                const applied: AppliedOutput | undefined = reserved && {
+                    revision: application.outputRevision,
+                    values: candidate,
+                    lengths: application.lengths,
+                    capture: reserved.capture,
+                    charge:
+                        application.bytes +
+                        application.lengths.length * LENGTH_SLOT_BYTES +
+                        reserved.bytes,
+                };
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     source.validateOutput?.(candidate, boundaryId);

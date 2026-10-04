@@ -7,6 +7,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory as captureHistoryWithLease,
+    captureReserved,
     captureMessages as captureWithLease,
     defaultTransformCaptureAdmission,
     type HistoryDigest,
@@ -1391,6 +1392,23 @@ describe("capture admission", () => {
 
 describe("bounded capture sizing", () => {
     it.each([
+        ["plain \u0020\u4e2d\ud7ff\ue000\uffff", 0],
+        ['"', 2],
+        ["\\", 2],
+        ["\b\t\n\f\r", 10],
+        ["\u000b", 10],
+        ["\u0000\u001f", 20],
+        ["\ud83d\ude00", 0],
+        ["\ud800", 10],
+        ["\udc00", 10],
+        ["\ud800\ud800", 20],
+    ])("adds the exact escape growth to a string's wire bound for %j", (text, growth) => {
+        const inspection = inspectReferenceableMessages([text]);
+        if (!inspection.ok) throw new Error("valid source rejected");
+        expect(inspection.messageWireBytes[0]).toBe(text.length * 2 + 4 + growth);
+    });
+
+    it.each([
         "plain",
         '"\\\b\t\n\f\r',
         "\u0000\u001f",
@@ -1440,6 +1458,46 @@ describe("bounded capture sizing", () => {
         Object.defineProperty(source[0], "parts", { get: counter.trap });
         expect(() => captureWithLease(source, lease)).toThrow("accessor");
         expect(counter.count).toBe(0);
+    });
+
+    it("reserves the inspection charge with the capture it walks, and reserves nothing when it refuses", () => {
+        const source = [message("m1"), message("m2", "x".repeat(4096))];
+        const inspection = inspectReferenceableMessages(source, undefined, 0, false);
+        if (!inspection.ok) throw new Error("valid source rejected");
+        const leaseWithin = (maxBytes: number): [TransformCaptureAdmission, CaptureLease] => {
+            const owner = new TransformCaptureAdmission({ maxPasses: 1, maxBytes });
+            const admitted = owner.admit("s");
+            if (!("lease" in admitted)) throw new Error("unexpected refusal");
+            return [owner, admitted.lease];
+        };
+
+        const [exactOwner, exact] = leaseWithin(inspection.estimatedBytes);
+        const reserved = captureReserved(source, exact);
+        expect(reserved?.bytes).toBe(inspection.estimatedBytes);
+        expect(exactOwner.chargedBytes).toBe(inspection.estimatedBytes);
+        expect(reserved && capturedMessagesUnchanged(source, reserved.capture)).toBe(true);
+        expect(reserved?.capture.members).toEqual(source);
+        exact.release();
+
+        const [shortOwner, short] = leaseWithin(inspection.estimatedBytes - 1);
+        expect(captureReserved(source, short)).toBeUndefined();
+        expect(shortOwner.chargedBytes).toBe(0);
+        short.release();
+
+        const [cancelledOwner, cancelled] = leaseWithin(inspection.estimatedBytes);
+        cancelled.requestCancel("cancelled");
+        expect(captureReserved(source, cancelled)).toBeUndefined();
+        expect(cancelledOwner.chargedBytes).toBe(0);
+        cancelled.release();
+
+        const counter = trapCounter();
+        const [rejectedOwner, rejected] = leaseWithin(inspection.estimatedBytes);
+        const hooked = [message("m1")];
+        Object.defineProperty(hooked[0], "parts", { get: counter.trap });
+        expect(captureReserved(hooked, rejected)).toBeUndefined();
+        expect(rejectedOwner.chargedBytes).toBe(0);
+        expect(counter.count).toBe(0);
+        rejected.release();
     });
 
     it("charges root metadata and every root and message tape slot", () => {
