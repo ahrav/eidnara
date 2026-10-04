@@ -10,7 +10,7 @@ use memory_store::{Claim, HistorySummarizerPhase, MemoryStore, StoredHistorySegm
 use crate::history_summarizer_citations::CLAIMS_PER_SEGMENT;
 
 /// How often a synthetic session's user corrects an earlier value. Every claim names one of
-/// [`CLAIM_KEYS`] keys, so a later claim supersedes an earlier one with the same key.
+/// `CLAIM_KEYS` keys, so a later claim supersedes an earlier one with the same key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimRegime {
     None,
