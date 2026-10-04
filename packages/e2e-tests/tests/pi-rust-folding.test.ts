@@ -137,6 +137,18 @@ async function startFixture(
         if (result.status !== 0) throw new Error(`scale-seed failed: ${result.stderr}`);
     }
     const stack = await HermeticHostStack.start({ dataDir, fixtureBin, startTimeoutMs: 120_000 });
+    // The fixture opens its store after it reports ready; a pass sent before then declines.
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+        try {
+            await stack.primaryStatus("store-probe", root, "session.status");
+            break;
+        } catch (error) {
+            const code = (error as { code?: unknown }).code;
+            if (code !== "store_unavailable" || Date.now() > deadline) throw error;
+            await Bun.sleep(100);
+        }
+    }
     return { root, stack };
 }
 
