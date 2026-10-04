@@ -772,3 +772,96 @@ async fn a_request_that_ranks_no_dense_lane_holds_no_view() {
         .expect("the request released the daemon");
     daemon.shutdown().await;
 }
+
+/// Runs `swap` once, inside the embedding wait, so the route's configuration changes between the request's admission and its unit.
+struct SwappingEmbedder {
+    swap: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl QueryEmbedder for SwappingEmbedder {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _deadline: tokio::time::Instant,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = EmbedResult> + Send + 'a>> {
+        if let Some(swap) = self.swap.lock().unwrap().take() {
+            swap();
+        }
+        Box::pin(async { Ok(query_vector()) })
+    }
+}
+
+/// The unit ranks under route limits and vectors read as one pair after the embedding settles, so a reconfiguration during the embedding wait leaves the request on a pair `check_pair` admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_ranks_under_the_limits_and_vectors_installed_together() {
+    let (daemon, ids) = served_daemon().await;
+    let incarnation = daemon
+        .store()
+        .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+        .unwrap();
+    let (store, view) = composition(&incarnation, &ids);
+    daemon
+        .handler()
+        .set_query_route_limits(Some(route_limits()))
+        .unwrap();
+    daemon
+        .handler()
+        .set_dense_vectors(Some(DenseVectors::new(
+            Arc::clone(&view),
+            store.admission.clone(),
+            compressed_limits(),
+        )))
+        .unwrap();
+    let daemon = Arc::new(daemon);
+    // The replacement pair: a pool capped at two rows, admissible only under `k` of one.
+    let mut narrow = compressed_limits();
+    narrow.candidates.cap = NonZeroUsize::new(2).unwrap();
+    let mut single = route_limits();
+    single.dense.as_mut().unwrap().k = NonZeroUsize::new(1).unwrap();
+    let replacement = DenseVectors::new(Arc::clone(&view), store.admission.clone(), narrow);
+    let swap = {
+        let daemon = Arc::clone(&daemon);
+        Box::new(move || {
+            daemon.handler().set_dense_vectors(None).unwrap();
+            daemon
+                .handler()
+                .set_query_route_limits(Some(single))
+                .unwrap();
+            daemon
+                .handler()
+                .set_dense_vectors(Some(replacement))
+                .unwrap();
+        })
+    };
+    daemon
+        .handler()
+        .set_query_embedder_for_test(Some(Arc::new(SwappingEmbedder {
+            swap: Mutex::new(Some(swap)),
+        })));
+    let project = daemon.project().to_owned();
+    let daemon::dispatch::PreparedOutcome::Response(output) =
+        watchdog(daemon.outcome(serde_json::from_slice(&request(&project)).unwrap())).await
+    else {
+        panic!("the request answers");
+    };
+    let answer = output.json_for_test().unwrap().clone();
+    assert_eq!(answer["kind"], "fused", "{answer}");
+    assert_eq!(
+        answer["lanes"]["dense"]["status"], "complete",
+        "the unit ranks under the pair installed together: {answer}"
+    );
+    assert_eq!(
+        answer["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| !entry["lanes"]["dense"].is_null())
+            .count(),
+        1,
+        "one dense hit under the replacement's k of one: {answer}"
+    );
+    let daemon = Arc::try_unwrap(daemon)
+        .ok()
+        .expect("the request released the daemon");
+    daemon.shutdown().await;
+}

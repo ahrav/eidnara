@@ -672,14 +672,16 @@ Reachability: test-only - as above.
 Status: active
 Exercised: yes - `crates/daemon/tests/dense_request_lifetime.rs`
 `client_cancellation_reaches_the_dense_scan_validation_and_original_reads_and_the_work_joins_before_the_request_settles`
-and `a_request_that_ranks_no_dense_lane_holds_no_view`;
+and `a_request_that_ranks_no_dense_lane_holds_no_view` and
+`a_request_ranks_under_the_limits_and_vectors_installed_together`;
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`;
 `vector_rescore.rs` `the_scan_scratch_charges_the_encoded_query_of_every_layer`
-for the bytes `Scratch` covers.
+for the payload buffers `Scratch` covers.
 Guarantee: The dense unit of a request whose embedding settled as a vector
-owns a clone of the view's `Arc`, taken before the unit is submitted
-(`query_route.rs:1977`), so the view's pins and the ranking's `Scratch` and
+owns a clone of the view's `Arc`, taken with the route limits under both
+setters' locks before the unit is submitted (`query_route.rs:1977`), so the
+unit ranks under a pair the setters checked together and the view's pins and the ranking's `Scratch` and
 `RowBuffers` reservations stay charged until the blocking work returns; a
 cancelled request settles only after that work ends, and every charge is
 released when it does. A request whose embedding is undeclared or unavailable

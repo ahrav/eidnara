@@ -3500,7 +3500,7 @@ impl Handler {
         (outcome, units.load(Ordering::SeqCst))
     }
 
-    /// `run_unit` counts submissions in `submitted` and retains `work` and its captured state while waiting for `gate` to grant a permit or close.
+    /// `run_unit` counts submissions in `submitted`; each submitted unit waits in its own task for a permit from `gate` before it runs, and a closed gate refuses it.
     pub async fn dispatch_value_for_test_gated(
         &self,
         route: RouteHandle,

@@ -1974,13 +1974,27 @@ impl HandlerCore {
             return terminal_response(terminal);
         }
         // For `Embedded::Vector`, the unit retains the cloned view, keeping its pins and charges held until the unit exits.
-        let dense_vectors = match &embedded {
-            Embedded::Vector(_) => self
-                .dense_vectors
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-            Embedded::Undeclared | Embedded::Unavailable(_) => None,
+        let (limits, dense_vectors) = match &embedded {
+            Embedded::Vector(_) => {
+                let route = self
+                    .query_route
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let vectors = self
+                    .dense_vectors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match route.clone() {
+                    Some(limits) => (limits, vectors.clone()),
+                    None => {
+                        drop(vectors);
+                        drop(route);
+                        drop(budget);
+                        return terminal_response(Terminal::Disabled);
+                    }
+                }
+            }
+            Embedded::Undeclared | Embedded::Unavailable(_) => (limits, None),
         };
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {

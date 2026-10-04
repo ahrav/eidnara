@@ -1222,7 +1222,7 @@ fn cancellation_at_an_original_read_ends_the_request_before_the_row_is_read() {
     assert_eq!(held(&fixture.ledger, ResourceClass::RowBuffers), 0);
 }
 
-/// The scan's `Scratch` reservation covers every byte the scan retains per layer: one block of decoded codes, the layer's code window, and the query encoded under that layer's scales.
+/// The scan's `Scratch` reservation covers the payload buffers the scan retains per layer: one block of decoded codes, the layer's code window, and the query encoded under that layer's scales.
 #[test]
 fn the_scan_scratch_charges_the_encoded_query_of_every_layer() {
     let mut fixture = Fixture::new();
