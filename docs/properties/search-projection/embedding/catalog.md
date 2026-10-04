@@ -443,7 +443,7 @@ Open questions:
 Type: safety
 Reachability: test-only - no production RP2.1 embedding supervisor slice exists.
 The fused route now awaits in-process query embedding under its request budget
-before any scan unit (`crates/daemon/src/query_route.rs:1650-1652`, `:581-602`), and a
+before any scan unit (`crates/daemon/src/query_route.rs:1711-1735`, `:615-636`), and a
 started native call keeps its grant and admission permit after its caller's
 deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1117-1173`). The
 existing scheduler and kernel budget are separate paths
