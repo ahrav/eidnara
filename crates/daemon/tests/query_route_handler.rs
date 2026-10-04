@@ -22,7 +22,7 @@ use retrieval::fusion::{FusionParameters, LaneWeights};
 use serde_json::{Value, json};
 use support::embedding_fixtures::{GENERATION, identity, kernel_incarnation_id};
 use support::kernel_daemon::{KernelDaemon, SESSION};
-use support::projection_gate::{campaign_json, manifest_json, open_gate, write_records};
+use support::projection_gate::{campaign_json, manifest_json_with, open_gate, write_records};
 
 fn limits() -> QueryRouteLimits {
     QueryRouteLimits {
@@ -181,6 +181,11 @@ fn now() -> i64 {
 
 /// A daemon whose scheduled slices converged a family over an empty kernel, with the route enabled.
 async fn converged_daemon() -> KernelDaemon {
+    converged_daemon_with(&[]).await
+}
+
+/// [`converged_daemon`] under a fixture manifest whose `overrides` replace the named limits.
+async fn converged_daemon_with(overrides: &[(&str, u64)]) -> KernelDaemon {
     let data = tempfile::tempdir().unwrap();
     let home = data.path().to_owned();
     let kernel_root = home.join("eidnara").join("context");
@@ -192,7 +197,7 @@ async fn converged_daemon() -> KernelDaemon {
     let identity = identity(&incarnation);
     write_records(
         &home,
-        &manifest_json(&identity, &ProjectionHook::ALL),
+        &manifest_json_with(&identity, &ProjectionHook::ALL, overrides),
         &campaign_json(&identity),
     );
     let request_record = LifecycleRequest {
@@ -530,5 +535,55 @@ async fn an_artifact_fault_during_inference_is_embedding_failed_and_the_lane_is_
     assert_eq!(answer["degraded"], true);
     assert_eq!(answer["lanes"]["dense"]["status"], "unavailable");
     assert_eq!(answer["lanes"]["dense"]["reason"], "disabled");
+    daemon.shutdown().await;
+}
+
+/// Under the production limit set, memories committed to a running daemon reach the route through the claim sources and the qualified projection, and each served claim carries the canonical decision it validates to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn committed_memories_are_served_with_canonical_references_under_production_limits() {
+    let daemon = converged_daemon_with(&[("catchup_lag_commits", 1_000)]).await;
+    daemon
+        .handler()
+        .set_query_route_limits(Some(QueryRouteLimits::production()))
+        .unwrap();
+    let created = daemon
+        .commit(
+            "create",
+            vec![json!({"op": "insert_decision", "spec": {
+                "decision_id": "rule-decision",
+                "object_id": "rule",
+                "domain_id": "memory",
+                "decision_kind": "PROJECT_RULES",
+                "payload": {"summary": "Keep the public contract explicit.", "rationale": "because rule"},
+                "source_id": "rule-lineage",
+                "source_revision": 1,
+            }})],
+        )
+        .await;
+    assert_eq!(created["state"]["kind"], "available", "{created}");
+    daemon.handler().resume_claim_sources_for_test();
+    let project = daemon.project().to_owned();
+    let started = Instant::now();
+    let served = loop {
+        let fused = body(
+            daemon
+                .outcome(request(&project, "id:rule explicit contract"))
+                .await,
+        );
+        // The family is briefly unavailable while the lifecycle catches up with the commit.
+        if fused["kind"] == "fused" && !fused["entries"].as_array().unwrap().is_empty() {
+            break fused;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the committed memory never reached the route: {fused}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    for entry in served["entries"].as_array().unwrap() {
+        assert_eq!(entry["canonical"]["decision_object_id"], "rule", "{served}");
+        assert_eq!(entry["canonical"]["source_revision"], 1, "{served}");
+    }
+    assert!(serde_json::to_vec(&served).unwrap().len() <= 65_536);
     daemon.shutdown().await;
 }

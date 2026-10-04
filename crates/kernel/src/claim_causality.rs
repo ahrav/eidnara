@@ -405,15 +405,9 @@ impl Envelope<'_> {
             .prepare_cached(&record_rows_sql("r.invalidated_commit_seq IS NULL"))
             .map_err(map_sqlite)?;
         let live: Vec<String> = statement
-            .query_map(
-                params![
-                    CLAIM_CAUSALITY_KIND,
-                    subject_id,
-                    format!("{OBJECT_ID_PREFIX}*"),
-                    i64::MAX
-                ],
-                |row| row.get(1),
-            )
+            .query_map(params![CLAIM_CAUSALITY_KIND, subject_id, i64::MAX], |row| {
+                row.get(1)
+            })
             .map_err(map_sqlite)?
             .collect::<rusqlite::Result<_>>()
             .map_err(map_sqlite)?;
@@ -461,8 +455,9 @@ fn creation_operation(
 /// Writer and reader select records through this one statement so they agree
 /// on what a record is: a `claimcauseobj:` registry row of the causality
 /// source kind whose observation carries the causality kind.
-/// `?1` kind, `?2` subject, `?3` object glob, `?4` snapshot bound.
+/// `?1` kind, `?2` subject, `?3` snapshot bound.
 fn record_rows_sql(liveness: &str) -> String {
+    // The literal GLOB pattern lets SQLite reuse the cached statement across parameter bindings.
     format!(
         "SELECT b.observation_id,r.object_id,r.created_commit_seq,c.producer,
                 length(b.observation_payload),b.evidence_id
@@ -470,8 +465,8 @@ fn record_rows_sql(liveness: &str) -> String {
          JOIN observations b ON b.object_id=r.object_id
          JOIN commit_log c ON c.commit_seq=r.created_commit_seq
          WHERE r.object_kind='observation' AND r.source_kind=?1 AND r.source_id=?2
-           AND r.object_id GLOB ?3 AND b.observation_kind=?1
-           AND r.created_commit_seq<=?4 AND {liveness}
+           AND r.object_id GLOB '{OBJECT_ID_PREFIX}*' AND b.observation_kind=?1
+           AND r.created_commit_seq<=?3 AND {liveness}
          ORDER BY r.created_commit_seq DESC LIMIT 2"
     )
 }
@@ -549,17 +544,12 @@ pub(crate) fn causal_class_at(
 ) -> Result<(CausalClass, Option<CausalRecord>), KernelError> {
     let mut statement = tx
         .prepare_cached(&record_rows_sql(
-            "(r.invalidated_commit_seq IS NULL OR ?4<r.invalidated_commit_seq)",
+            "(r.invalidated_commit_seq IS NULL OR ?3<r.invalidated_commit_seq)",
         ))
         .map_err(map_sqlite)?;
     let records: Vec<StoredRecord> = statement
         .query_map(
-            params![
-                CLAIM_CAUSALITY_KIND,
-                subject.object_id,
-                format!("{OBJECT_ID_PREFIX}*"),
-                requested
-            ],
+            params![CLAIM_CAUSALITY_KIND, subject.object_id, requested],
             |row| {
                 Ok(StoredRecord {
                     observation_id: row.get(0)?,

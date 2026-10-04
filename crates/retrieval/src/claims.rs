@@ -24,7 +24,7 @@ use kernel::{
     ArtifactDestination, ClaimFactBounds, ClaimFacts, ClaimFactsError, CommitReadIncarnation,
     Disposition, EgressSnapshot, EligibilityCandidate, EligibilityVerdict, KernelError,
     KernelStore, MAX_ELIGIBILITY_CANDIDATES, MAX_ELIGIBILITY_OBJECT_ID_BYTES, ProjectScope,
-    ServedStanding, Surface, SurfaceVisibility,
+    SelectedOccurrence, ServedStanding, Surface, SurfaceVisibility,
 };
 use rusqlite::params;
 use storage::GuardedConn;
@@ -148,19 +148,38 @@ fn claim_classes() -> &'static [OccurrenceClass] {
     }
 }
 
+macro_rules! claim_row_columns {
+    () => {
+        "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
+            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
+            o.created_commit_seq,o.source_artifact_digest\n"
+    };
+}
+
 /// `?1` and `?2` are the two claim class codes, `?3` the row probe, `?4` the
 /// association family keyword, `?5` the association namespace.
-const LIVE_CLAIM_ROWS_SQL: &str =
-    "SELECT o.occurrence_id,o.class,o.representation,a.target_id,a.extraction_version,o.revision,
-            a.key,o.tuple,o.lineage_id,o.span_start,o.span_end,a.created_commit_seq,
-            o.created_commit_seq,o.source_artifact_digest
-     FROM occurrences o
+const LIVE_CLAIM_ROWS_SQL: &str = concat!(
+    claim_row_columns!(),
+    "FROM occurrences o
      LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
      LEFT JOIN exact_associations a
        ON a.occurrence_id=o.occurrence_id AND a.family=?4 AND a.namespace=?5
      WHERE t.occurrence_id IS NULL AND o.class IN (?1,?2)
      ORDER BY o.class,o.occurrence_id
-     LIMIT ?3";
+     LIMIT ?3"
+);
+
+/// [`LIVE_CLAIM_ROWS_SQL`] over the occurrence ids bound as one JSON array in `?3`. The selection drives the join, and each table is reached through its occurrence key, so the work grows with the selection alone.
+const SELECTED_CLAIM_ROWS_SQL: &str = concat!(
+    claim_row_columns!(),
+    "FROM json_each(?3) j
+     CROSS JOIN occurrences o ON o.occurrence_id=j.value
+     LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
+     LEFT JOIN exact_associations a INDEXED BY idx_exact_associations_occurrence
+       ON a.occurrence_id=o.occurrence_id AND a.family=?4 AND a.namespace=?5
+     WHERE t.occurrence_id IS NULL AND o.class IN (?1,?2)
+     ORDER BY o.class,o.occurrence_id"
+);
 
 struct LiveRow {
     occurrence_id: String,
@@ -214,29 +233,63 @@ pub fn live_claim_candidates(
                 Family::Id.keyword(),
                 CANONICAL_OBJECT_NAMESPACE
             ],
-            |row| {
-                Ok(LiveRow {
-                    occurrence_id: row.get(0)?,
-                    class: row.get(1)?,
-                    representation: row.get(2)?,
-                    target_id: row.get(3)?,
-                    version: row.get(4)?,
-                    revision: row.get(5)?,
-                    key: row.get(6)?,
-                    tuple: row.get(7)?,
-                    lineage_id: row.get(8)?,
-                    span_start: row.get(9)?,
-                    span_end: row.get(10)?,
-                    association_commit_seq: row.get(11)?,
-                    created_commit_seq: row.get(12)?,
-                    source_artifact_digest: row.get(13)?,
-                })
-            },
+            live_row,
         )?
         .collect::<rusqlite::Result<_>>()?;
     if rows.len() > max.get() {
         return Err(ProjectionError::TooManyRecords { count: rows.len() });
     }
+    rows.into_iter().map(candidate_row).collect()
+}
+
+fn live_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveRow> {
+    Ok(LiveRow {
+        occurrence_id: row.get(0)?,
+        class: row.get(1)?,
+        representation: row.get(2)?,
+        target_id: row.get(3)?,
+        version: row.get(4)?,
+        revision: row.get(5)?,
+        key: row.get(6)?,
+        tuple: row.get(7)?,
+        lineage_id: row.get(8)?,
+        span_start: row.get(9)?,
+        span_end: row.get(10)?,
+        association_commit_seq: row.get(11)?,
+        created_commit_seq: row.get(12)?,
+        source_artifact_digest: row.get(13)?,
+    })
+}
+
+/// The live claim rows among `occurrence_ids`, with the same association and tuple checks as [`live_claim_candidates`]. The read work is bounded by the selected set, whatever the projection holds; ids of other classes, tombstoned rows, and unknown ids are absent from the result.
+///
+/// # Errors
+///
+/// Returns [`ProjectionError::CorruptRow`] for a row whose association does not decode to its own identity.
+pub fn selected_claim_candidates(
+    conn: &GuardedConn<'_>,
+    occurrence_ids: &[String],
+) -> Result<Vec<ClaimCandidateRow>, ProjectionError> {
+    let classes = claim_classes();
+    assert_eq!(
+        classes.len(),
+        2,
+        "SELECTED_CLAIM_ROWS_SQL binds two claim class codes"
+    );
+    let ids = serde_json::to_string(occurrence_ids).map_err(|_| ProjectionError::CorruptRow)?;
+    let rows: Vec<LiveRow> = conn
+        .prepare_cached(SELECTED_CLAIM_ROWS_SQL)?
+        .query_map(
+            params![
+                classes[0].code(),
+                classes[1].code(),
+                ids,
+                Family::Id.keyword(),
+                CANONICAL_OBJECT_NAMESPACE
+            ],
+            live_row,
+        )?
+        .collect::<rusqlite::Result<_>>()?;
     rows.into_iter().map(candidate_row).collect()
 }
 
@@ -367,48 +420,160 @@ pub fn classify_live_claims(
     budget: &EvalBudget,
     bounds: ClaimCandidateBounds,
 ) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
-    let identity = read_identity(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
-    let entry = kernel
-        .capture_commit_read_target_within_budget(budget)
-        .map_err(ClaimFactsError::from)?;
-    let database = kernel
-        .database_incarnation_id_within_budget(budget)
-        .map_err(ClaimFactsError::from)?;
-    if identity.kernel_incarnation_id != database {
-        return Err(ClaimCandidateError::ForeignKernel {
-            kernel_incarnation_id: identity.kernel_incarnation_id,
+    classify_rows(conn, kernel, budget, bounds, |conn| {
+        live_claim_candidates(conn, bounds.max_rows)
+    })
+}
+
+/// The live claim rows among `occurrence_ids`, read under the identity, checkpoint, and incarnation guards of [`classify_live_claims`]; [`judge_selected_for_surface`] classifies them at its judgement snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedClaims {
+    pub rows: Vec<ClaimCandidateRow>,
+    /// The kernel incarnation the rows were read against; the judgement refuses another.
+    pub incarnation: CommitReadIncarnation,
+}
+
+/// `read_selected_claims` applies the guards of [`classify_live_claims`] to the live claim rows among `occurrence_ids`. [`judge_selected_for_surface`] reads their canonical facts once, at its judgement snapshot.
+///
+/// # Errors
+///
+/// Returns the refusals [`classify_live_claims`] returns before its facts read; a selection naming more distinct claims than `bounds.facts.max_claims` is refused whole.
+pub fn read_selected_claims(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    budget: &EvalBudget,
+    bounds: ClaimCandidateBounds,
+    occurrence_ids: &[String],
+) -> Result<SelectedClaims, ClaimCandidateError> {
+    if occurrence_ids.len() > bounds.max_rows.get() {
+        return Err(ProjectionError::TooManyRecords {
+            count: occurrence_ids.len(),
+        }
+        .into());
+    }
+    let (rows, target) = guarded_rows(conn, kernel, budget, bounds, |conn| {
+        selected_claim_candidates(conn, occurrence_ids)
+    })?;
+    Ok(SelectedClaims {
+        rows,
+        incarnation: target.incarnation,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedJudgement {
+    /// `verdicts[i]` judges `selected.rows[i]`.
+    pub verdicts: Vec<UseVerdict>,
+    pub snapshot: EgressSnapshot,
+    pub incarnation: CommitReadIncarnation,
+}
+
+/// `judge_selected_for_surface` reads eligibility verdicts and canonical claim facts at one kernel snapshot and classifies every selected row with those facts. A row is permitted when the kernel permits its object, revision, and artifact on `surface` and the row classifies `Current`. A row whose artifact digest fails the eligibility shape check is classified from the facts alone.
+///
+/// # Errors
+///
+/// Budget exhaustion returns `Eligibility(Deadline)`. More than `MAX_ELIGIBILITY_CANDIDATES` submitted rows returns `Eligibility(InvalidInput)`. Kernel errors become `Eligibility`; other claim-facts errors become `Facts`.
+pub fn judge_selected_for_surface(
+    kernel: &KernelStore,
+    selected: &SelectedClaims,
+    project: &ProjectScope,
+    destination: ArtifactDestination,
+    surface: Surface,
+    bounds: ClaimFactBounds,
+    budget: &EvalBudget,
+) -> Result<SelectedJudgement, ClaimCandidateError> {
+    let check_budget = || {
+        budget
+            .check()
+            .map_err(|_| ClaimCandidateError::Eligibility(KernelError::Deadline))
+    };
+    let submits = |row: &ClaimCandidateRow| {
+        EligibilityCandidate::validate_fields(&row.object_id, Some(&row.artifact_digest)).is_ok()
+    };
+    check_budget()?;
+    let rows = &selected.rows;
+    let mut submitted = Vec::new();
+    for row in rows.iter().filter(|row| submits(row)) {
+        check_budget()?;
+        submitted.push(EligibilityCandidate {
+            object_id: row.object_id.clone(),
+            source_revision: row.revision,
+            artifact_digest: Some(row.artifact_digest.clone()),
         });
     }
-    let checkpoint = read_checkpoint(conn, &database)?.ok_or(ClaimCandidateError::NoCheckpoint)?;
-    let rows = live_claim_candidates(conn, bounds.max_rows)?;
-    let mut seen = BTreeSet::new();
-    let object_ids: Vec<String> = rows
+    if submitted.len() > MAX_ELIGIBILITY_CANDIDATES {
+        return Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput));
+    }
+    let occurrences: Vec<SelectedOccurrence<'_>> = rows
         .iter()
-        .map(|row| row.object_id.as_str())
-        .filter(|id| seen.insert(*id))
-        .map(str::to_string)
+        .map(|row| SelectedOccurrence {
+            object_id: &row.object_id,
+            class: row.class,
+            representation: &row.representation,
+            required: !submits(row),
+        })
         .collect();
-    if object_ids.len() > bounds.facts.max_claims.get() {
-        return Err(ClaimFactsError::TooManyClaims.into());
+    let judged = kernel
+        .judge_surface_eligibility_with_selected_claims(
+            project,
+            destination,
+            surface,
+            &submitted,
+            &occurrences,
+            bounds,
+            selected.incarnation,
+            budget,
+        )
+        .map_err(|error| match error {
+            ClaimFactsError::Kernel(error) => ClaimCandidateError::Eligibility(error),
+            other => ClaimCandidateError::Facts(other),
+        })?;
+    check_budget()?;
+    let facts: HashMap<&str, &ClaimFacts> = judged
+        .claims
+        .iter()
+        .map(|claim| (claim.object.object_id.as_str(), claim))
+        .collect();
+    let mut verdicts = judged.batch.verdicts.iter();
+    let mut validated = Vec::with_capacity(rows.len());
+    for row in rows {
+        check_budget()?;
+        let state = classify(row, facts.get(row.object_id.as_str()).copied());
+        let verdict = if submits(row) {
+            match verdicts.next() {
+                Some(judged) if judged.permits() => match state {
+                    CandidateState::Current => UseVerdict::Permitted(judged.visibility),
+                    state => UseVerdict::Denied(UseDenial::State(state)),
+                },
+                Some(judged) if judged.verdict == EligibilityVerdict::Ok => {
+                    UseVerdict::Denied(UseDenial::SurfaceHidden)
+                }
+                Some(judged) => UseVerdict::Denied(UseDenial::Verdict(judged.verdict)),
+                None => return Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput)),
+            }
+        } else if state == CandidateState::Current {
+            return Err(ClaimCandidateError::Eligibility(KernelError::InvalidInput));
+        } else {
+            UseVerdict::Denied(UseDenial::State(state))
+        };
+        validated.push(verdict);
     }
-    // The target carries the tip and the incarnation it was read from. A
-    // restore during the row read changes the incarnation since `entry`; one
-    // between here and the facts read is refused by `claim_facts_at`.
-    let target = kernel
-        .capture_commit_read_target_within_budget(budget)
-        .map_err(ClaimFactsError::from)?;
-    if target.incarnation != entry.incarnation {
-        return Err(ClaimFactsError::IncarnationMismatch.into());
-    }
-    // A kernel restored from an older backup of the same database keeps its
-    // identity and generation but not the commits the projection applied;
-    // rows past its tip would read as Retracted instead of as another history.
-    if target.through_commit < checkpoint.checkpoint_commit_seq {
-        return Err(ClaimCandidateError::KernelBehindProjection {
-            tip: target.through_commit,
-            checkpoint: checkpoint.checkpoint_commit_seq,
-        });
-    }
+    Ok(SelectedJudgement {
+        verdicts: validated,
+        snapshot: judged.batch.snapshot,
+        incarnation: judged.batch.incarnation,
+    })
+}
+
+fn classify_rows(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    budget: &EvalBudget,
+    bounds: ClaimCandidateBounds,
+    read_rows: impl FnOnce(&GuardedConn<'_>) -> Result<Vec<ClaimCandidateRow>, ProjectionError>,
+) -> Result<ClaimCandidateBatch, ClaimCandidateError> {
+    let (rows, target) = guarded_rows(conn, kernel, budget, bounds, read_rows)?;
+    let object_ids = distinct_objects(&rows);
     let snapshot =
         kernel.claim_facts_at_within_budget(&object_ids, target, bounds.facts, budget)?;
     let known_as_of = target.through_commit;
@@ -435,6 +600,60 @@ pub fn classify_live_claims(
         claims: snapshot.claims,
         candidates,
     })
+}
+
+fn distinct_objects(rows: &[ClaimCandidateRow]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    rows.iter()
+        .map(|row| row.object_id.as_str())
+        .filter(|id| seen.insert(*id))
+        .map(str::to_string)
+        .collect()
+}
+
+fn guarded_rows(
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    budget: &EvalBudget,
+    bounds: ClaimCandidateBounds,
+    read_rows: impl FnOnce(&GuardedConn<'_>) -> Result<Vec<ClaimCandidateRow>, ProjectionError>,
+) -> Result<(Vec<ClaimCandidateRow>, kernel::CommitReadTarget), ClaimCandidateError> {
+    let identity = read_identity(conn)?.ok_or(ClaimCandidateError::NoIdentity)?;
+    let entry = kernel
+        .capture_commit_read_target_within_budget(budget)
+        .map_err(ClaimFactsError::from)?;
+    let database = kernel
+        .database_incarnation_id_within_budget(budget)
+        .map_err(ClaimFactsError::from)?;
+    if identity.kernel_incarnation_id != database {
+        return Err(ClaimCandidateError::ForeignKernel {
+            kernel_incarnation_id: identity.kernel_incarnation_id,
+        });
+    }
+    let checkpoint = read_checkpoint(conn, &database)?.ok_or(ClaimCandidateError::NoCheckpoint)?;
+    let rows = read_rows(conn)?;
+    if distinct_objects(&rows).len() > bounds.facts.max_claims.get() {
+        return Err(ClaimFactsError::TooManyClaims.into());
+    }
+    // The target carries the tip and the incarnation it was read from. A
+    // restore during the row read changes the incarnation since `entry`. The
+    // facts read requires the kernel incarnation to match the target's incarnation.
+    let target = kernel
+        .capture_commit_read_target_within_budget(budget)
+        .map_err(ClaimFactsError::from)?;
+    if target.incarnation != entry.incarnation {
+        return Err(ClaimFactsError::IncarnationMismatch.into());
+    }
+    // A kernel restored from an older backup of the same database keeps its
+    // identity and generation but not the commits the projection applied;
+    // rows past its tip would read as Retracted instead of as another history.
+    if target.through_commit < checkpoint.checkpoint_commit_seq {
+        return Err(ClaimCandidateError::KernelBehindProjection {
+            tip: target.through_commit,
+            checkpoint: checkpoint.checkpoint_commit_seq,
+        });
+    }
+    Ok((rows, target))
 }
 
 /// Why a surface may not present a candidate at the validated snapshot.
@@ -665,6 +884,48 @@ pub fn validate_for_surface(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selected_read_plan_follows_the_selection() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../baseline.sql")).unwrap();
+        let classes = claim_classes();
+        let mut statement = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SELECTED_CLAIM_ROWS_SQL}"))
+            .unwrap();
+        let plan: Vec<String> = statement
+            .query_map(
+                params![
+                    classes[0].code(),
+                    classes[1].code(),
+                    "[\"a\",\"b\"]",
+                    Family::Id.keyword(),
+                    CANONICAL_OBJECT_NAMESPACE
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| step.starts_with("SCAN j")),
+            "{plan:?}"
+        );
+        for table in ["o", "t", "a"] {
+            assert!(
+                plan.iter()
+                    .any(|step| step.starts_with(&format!("SEARCH {table} "))
+                        && step.contains("occurrence_id=?")),
+                "{table} is reached by its occurrence key: {plan:?}"
+            );
+        }
+        assert!(
+            !plan
+                .iter()
+                .any(|step| step.starts_with("SCAN o") || step.starts_with("SCAN a")),
+            "{plan:?}"
+        );
+    }
     use std::cell::Cell;
     use std::sync::{Arc, atomic::AtomicBool};
     use std::time::Instant;

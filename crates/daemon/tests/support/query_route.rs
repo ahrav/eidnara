@@ -48,7 +48,6 @@ pub const MEMORY: &str = "memory";
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 pub const MODEL: &str = "tiny-test-model";
 pub const NOW: i64 = 1_700_000_000_000;
-pub const KERNEL: &str = "route-kernel";
 pub const QUERY: &str = "id:rule explicit contract";
 pub const WEIGHTS: LaneWeights = LaneWeights {
     exact: 2.0,
@@ -56,7 +55,7 @@ pub const WEIGHTS: LaneWeights = LaneWeights {
     dense: 1.0,
 };
 pub const K: f64 = 7.0;
-pub const ALL_PHASES: [Phase; 9] = [
+pub const ALL_PHASES: [Phase; 10] = [
     Phase::Probes,
     Phase::Exact,
     Phase::Lexical,
@@ -64,6 +63,7 @@ pub const ALL_PHASES: [Phase; 9] = [
     Phase::Admission,
     Phase::Fusion,
     Phase::Revalidation,
+    Phase::ClaimValidation,
     Phase::Materialization,
     Phase::Response,
 ];
@@ -108,10 +108,10 @@ pub fn page_bounds() -> SourcePageBounds {
     }
 }
 
-pub fn projection_identity() -> ProjectionIdentity {
+pub fn projection_identity(kernel_incarnation_id: &str) -> ProjectionIdentity {
     ProjectionIdentity {
         schema_version: retrieval::SCHEMA_VERSION,
-        kernel_incarnation_id: KERNEL.to_string(),
+        kernel_incarnation_id: kernel_incarnation_id.to_string(),
         projection_policy_version: POLICY.to_string(),
         identity_contract_version: "search-projection-identity-v3".to_string(),
         limit_manifest_protocol_version: "limits.v1".to_string(),
@@ -157,6 +157,8 @@ pub fn request_budget(remaining_ms: u64) -> (CancellationToken, RequestBudget) {
 pub struct Fixture {
     pub daemon: KernelDaemon,
     pub store: Arc<KernelStore>,
+    /// The kernel incarnation the fixture projection is built for.
+    pub kernel_incarnation: String,
     pub project: ProjectScope,
     pub projection: SearchProjection,
     _dir: tempfile::TempDir,
@@ -164,8 +166,16 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn build() -> Self {
+        Self::build_with(&[]).await
+    }
+
+    /// [`Self::build`] with each `(object, summary)` in `extra` committed beside the three decisions.
+    pub async fn build_with(extra: &[(&str, &str)]) -> Self {
         let daemon = KernelDaemon::start().await;
         let store = daemon.store();
+        let kernel_incarnation = store
+            .database_incarnation_id_within_budget(&kernel::applicability::EvalBudget::unbounded())
+            .unwrap();
         ClaimMaterializer::register(&store, NOW).unwrap();
         let spec = |object: &str, revision: i64, summary: &str| {
             json!({
@@ -178,16 +188,15 @@ impl Fixture {
                 "source_revision": revision,
             })
         };
-        let created = daemon
-            .commit(
-                "create",
-                vec![
-                    json!({"op": "insert_decision", "spec": spec("rule", 1, "Keep the public contract explicit.")}),
-                    json!({"op": "insert_decision", "spec": spec("other", 1, "Name things after the contract.")}),
-                    json!({"op": "insert_decision", "spec": spec("third", 1, "Short names win.")}),
-                ],
-            )
-            .await;
+        let mut decisions = vec![
+            json!({"op": "insert_decision", "spec": spec("rule", 1, "Keep the public contract explicit.")}),
+            json!({"op": "insert_decision", "spec": spec("other", 1, "Name things after the contract.")}),
+            json!({"op": "insert_decision", "spec": spec("third", 1, "Short names win.")}),
+        ];
+        decisions.extend(extra.iter().map(
+            |(object, summary)| json!({"op": "insert_decision", "spec": spec(object, 1, summary)}),
+        ));
+        let created = daemon.commit("create", decisions).await;
         assert_eq!(created["state"]["kind"], "available", "{created}");
         let scope_id = daemon.read("explicit_search", None, None).await["rows"][0]["scope_id"]
             .as_str()
@@ -210,13 +219,14 @@ impl Fixture {
         let projection = SearchProjection::open(dir.path()).unwrap();
         projection
             .write(|conn| {
-                install_identity(conn, &projection_identity(), 1)?;
+                install_identity(conn, &projection_identity(&kernel_incarnation), 1)?;
                 register_generation(conn, &generation(), 1).map(|_| ())
             })
             .unwrap();
         let fixture = Self {
             daemon,
             store,
+            kernel_incarnation,
             project,
             projection,
             _dir: dir,
@@ -281,7 +291,7 @@ impl Fixture {
             &rows,
             &identities,
             MutationIdentity {
-                kernel_incarnation_id: KERNEL.to_string(),
+                kernel_incarnation_id: self.kernel_incarnation.clone(),
                 hold_id: hold.hold_id.clone(),
                 snapshot_commit_seq: hold.snapshot,
                 through_commit_seq: hold.snapshot,
@@ -342,6 +352,31 @@ impl Fixture {
                      SELECT 1<<40,original,parts,'not-an-occurrence-identifier'
                      FROM lexical WHERE occurrence_id=?1",
                     [occurrence_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The lexical row makes the `messages` copy searchable by the same terms as `occurrence_id`.
+    pub fn non_claim_lexical_copy(&self, occurrence_id: &str, copy_id: &str) {
+        self.projection
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO occurrences(occurrence_id,tuple,lineage_id,class,revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at)
+                     SELECT ?2,tuple,lineage_id,'messages',revision,representation,
+                         span_start,span_end,payload_id,domain_id,sensitivity,source_object_id,
+                         source_evidence_id,source_artifact_digest,created_commit_seq,persisted_at
+                     FROM occurrences WHERE occurrence_id=?1",
+                    [occurrence_id, copy_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO lexical(rowid,original,parts,occurrence_id)
+                     SELECT 1<<41,original,parts,?2
+                     FROM lexical WHERE occurrence_id=?1",
+                    [occurrence_id, copy_id],
                 )?;
                 Ok(())
             })
@@ -409,7 +444,7 @@ impl Fixture {
         self.projection
             .read(|conn| {
                 let context = LookupContext {
-                    kernel_incarnation_id: KERNEL,
+                    kernel_incarnation_id: &self.kernel_incarnation,
                     page_rows: limits.exact_page_rows,
                     budget: shared.eval(),
                 };
