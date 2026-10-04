@@ -16,6 +16,7 @@ import {
 
 export interface TestAgentSession {
     session: AgentSession;
+    authStorage: AuthStorage;
     sessionManager: SessionManager;
     requests: { messages: unknown[] }[];
     respond(steps: FauxResponseStep[]): void;
@@ -32,6 +33,8 @@ export async function createTestAgentSession(args: {
     sessionManager?: SessionManager;
     contextWindow?: number;
     settings?: Record<string, unknown>;
+    /** Tool names to enable; none when unset. */
+    tools?: string[];
 }): Promise<TestAgentSession> {
     const faux = registerFauxProvider({
         provider: "faux",
@@ -76,11 +79,12 @@ export async function createTestAgentSession(args: {
         settingsManager,
         sessionManager,
         resourceLoader,
-        noTools: "all",
+        ...(args.tools ? { tools: args.tools } : { noTools: "all" as const }),
     });
     await session.bindExtensions({});
     return {
         session,
+        authStorage,
         sessionManager,
         requests,
         respond: (steps) => script.push(...steps),

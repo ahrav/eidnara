@@ -8,6 +8,10 @@
 import { createHash } from "node:crypto";
 
 import { serdeJsonCompact } from "@eidnara/opencode/hooks/context/module-wire";
+import {
+    BLOCK_OVERHEAD_BYTES,
+    type TransformWindowSize,
+} from "@eidnara/opencode/hooks/context/window-cap";
 
 /** One window row: the message's persisted entry id, or a reserved id, and the message. */
 export interface PiRow {
@@ -324,4 +328,25 @@ export function encodePiRowsToCk(rows: readonly PiRow[]): PiCkMessage[] {
             },
         };
     });
+}
+
+/**
+ * A row's size against the daemon's window cap: its CK block count exactly, and its canonical
+ * bytes bounded from above by the encoded blocks plus each block's overhead. A row outside the
+ * closed role set, or one whose blocks do not serialize, has no size.
+ */
+export function piRowSize(row: PiRow): TransformWindowSize | undefined {
+    if (!isPiRole(row.message.role)) return undefined;
+    const blocks = content(row.message.role, row.message, 1);
+    if (blocks.length === 0) return { blocks: 0, bytes: 0 };
+    let text: string;
+    try {
+        text = JSON.stringify(blocks);
+    } catch {
+        return undefined;
+    }
+    return {
+        blocks: blocks.length,
+        bytes: Buffer.byteLength(text) + blocks.length * BLOCK_OVERHEAD_BYTES,
+    };
 }

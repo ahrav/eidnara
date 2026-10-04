@@ -79,7 +79,7 @@ import {
 } from "./tools/todo-view-pi";
 import { PiBranchIndex, type PiBranchReader } from "./transform/pi-branch";
 import { piPassFields } from "./transform/pi-pass-inputs";
-import { createPiTransform } from "./transform/pi-transform";
+import { createPiTransform, type PiEviction } from "./transform/pi-transform";
 
 const PREFIX = "[eidnara][pi]";
 /**
@@ -125,18 +125,31 @@ function clearPiEidnaraActive(): void {
 }
 
 /**
- * In normal mode, Eidnara cancels Pi's event because Eidnara owns compaction.
- * Compaction-off mode lets Pi's native compaction proceed.
+ * Eidnara answers every compaction reason (manual, threshold, overflow) alike: with the eviction
+ * of its acknowledged rendered boundary when that boundary's end entry is on the branch, and with
+ * a cancel otherwise, so no Pi LLM summary hides the boundary. Compaction-off mode lets Pi's
+ * native compaction proceed, and so does `handBack`, set after a declined pass sent Pi's own
+ * array, when no eviction is available: Pi's compaction is then that session's only recovery.
  */
 export async function handlePiSessionBeforeCompact(args: {
     compactionOff: boolean;
-    ctx: { sessionManager?: { getSessionId?: () => string | undefined } };
-}): Promise<{ cancel: true } | undefined> {
+    handBack?: boolean;
+    eviction?: () => PiEviction | undefined;
+}): Promise<{ cancel: true } | { compaction: PiEviction } | undefined> {
     if (args.compactionOff) {
         info("session_before_compact: native Pi compaction proceeds (compaction-off mode)");
         return;
     }
-    info("session_before_compact: cancelling — eidnara owns compaction");
+    const compaction = args.eviction?.();
+    if (compaction) {
+        info(`session_before_compact: evicting through ${compaction.firstKeptEntryId}`);
+        return { compaction };
+    }
+    if (args.handBack) {
+        info("session_before_compact: native Pi compaction proceeds after a declined pass");
+        return;
+    }
+    info("session_before_compact: cancelling — no acknowledged boundary on the branch");
     return { cancel: true };
 }
 
@@ -799,9 +812,86 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         if (scope) scheduleMemoryDrain(ctx, scope);
     }
 
-    pi.on("agent_end", async (_event, ctx) => {
+    pi.on("agent_end", async (event, ctx) => {
+        // A compaction offered during the previous run has committed or failed by now.
+        const ended = sessionIdFromContext(ctx);
+        if (ended) offered.delete(ended);
         await checkpointAndDrainMemory(ctx);
+        // A run that ended in an error or an abort is Pi's to retry or recover; the eviction
+        // waits for an `agent_end` that closes a completed run.
+        const last = (event as { messages?: unknown[] }).messages?.at(-1);
+        const stop = (last as { stopReason?: unknown } | undefined)?.stopReason;
+        if (stop !== "error" && stop !== "aborted") scheduleEviction(ctx);
     });
+
+    /** Sessions whose eviction `ctx.compact()` is running. */
+    const evicting = new Set<string>();
+    /**
+     * Sessions whose `session_before_compact` answered with an eviction that has not committed:
+     * Pi appends whatever each answered compaction carries, so only one is offered at a time.
+     */
+    const offered = new Set<string>();
+    /**
+     * Per session, Pi's consecutive refusals of the scheduled eviction and the completed
+     * `agent_end`s left to skip: Pi shows each refusal as a failed compaction, so the retries
+     * back off, doubling up to every 32nd `agent_end`, until one commits.
+     */
+    const refusals = new Map<string, { count: number; skip: number }>();
+    const MAX_REFUSAL_SKIP = 32;
+    pi.on("session_compact", async (_event, ctx) => {
+        const sessionId = sessionIdFromContext(ctx);
+        if (sessionId) offered.delete(sessionId);
+    });
+    /**
+     * The eviction runs once the agent is idle: `ctx.compact()` aborts a running turn, so it
+     * starts after `agent_end` returns and only with no queued message. It is due while the
+     * acknowledged boundary is on the branch and no compaction has evicted through it; a refusal
+     * leaves it due for a later `agent_end`.
+     */
+    function scheduleEviction(ctx: ExtensionContext): void {
+        const sessionId = sessionIdFromContext(ctx);
+        if (!sessionId || !piTransform || evicting.has(sessionId)) return;
+        const due = () =>
+            isCompactionEnabled(resolveCurrentProjectDeps(ctx).config) &&
+            piTransform.eviction(sessionId, ctx.sessionManager, 0) !== undefined;
+        if (!due()) return;
+        const refused = refusals.get(sessionId);
+        if (refused && refused.skip > 0) {
+            refused.skip -= 1;
+            return;
+        }
+        setTimeout(() => {
+            try {
+                if (
+                    evicting.has(sessionId) ||
+                    offered.has(sessionId) ||
+                    !ctx.isIdle() ||
+                    ctx.hasPendingMessages() ||
+                    !due()
+                )
+                    return;
+                evicting.add(sessionId);
+                ctx.compact({
+                    onComplete: () => {
+                        evicting.delete(sessionId);
+                        refusals.delete(sessionId);
+                    },
+                    onError: (error) => {
+                        evicting.delete(sessionId);
+                        offered.delete(sessionId);
+                        const count = (refusals.get(sessionId)?.count ?? 0) + 1;
+                        const skip = Math.min(2 ** (count - 1) - 1, MAX_REFUSAL_SKIP - 1);
+                        refusals.set(sessionId, { count, skip });
+                        info(`eviction deferred: ${error.message}`);
+                    },
+                });
+            } catch (error) {
+                // A session replaced or shut down since `agent_end` keeps its eviction due.
+                evicting.delete(sessionId);
+                info("eviction deferred:", error);
+            }
+        }, 0);
+    }
 
     // `tool_execution_start` exposes `event.args` before tool output.
     pi.on("tool_execution_start", async (event, ctx) => {
@@ -829,16 +919,29 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         }
     });
 
-    pi.on("session_before_compact", async (_event, ctx) => {
+    pi.on("session_before_compact", async (event, ctx) => {
         await checkpointAndDrainMemory(ctx);
         const sessionId = sessionIdFromContext(ctx);
-        return handlePiSessionBeforeCompact({
+        // Pi's compaction proceeds wherever the context handler leaves folding to Pi, except
+        // for the plugin's own eviction, which always commits the plugin's result or cancels.
+        const ownEviction = sessionId !== undefined && evicting.has(sessionId);
+        const answer = await handlePiSessionBeforeCompact({
             compactionOff:
                 compactionOff ||
-                !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config) ||
-                (sessionId !== undefined && piTransform?.folds(sessionId) === false),
-            ctx,
+                (!ownEviction && !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config)),
+            handBack:
+                !ownEviction && sessionId !== undefined && piTransform?.folds(sessionId) === false,
+            eviction: () =>
+                sessionId && !offered.has(sessionId)
+                    ? piTransform?.eviction(
+                          sessionId,
+                          ctx.sessionManager,
+                          event.preparation.tokensBefore,
+                      )
+                    : undefined,
         });
+        if (sessionId && answer && "compaction" in answer) offered.add(sessionId);
+        return answer;
     });
 
     // Mutating `event.message` changes the message persisted by `sessionManager.appendMessage`.
@@ -888,6 +991,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         checkpointedLeafBySession.delete(sessionId);
         branchIndexes.delete(sessionId);
         piTransform?.clearSession(sessionId);
+        offered.delete(sessionId);
+        refusals.delete(sessionId);
         clearPiSystemPromptSession(sessionId);
         promptSurfaceGuidanceEpochs.clear(sessionId);
         systemPromptRefreshSessions.delete(sessionId);

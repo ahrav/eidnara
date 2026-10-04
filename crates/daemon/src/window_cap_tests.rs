@@ -534,13 +534,6 @@ async fn a_window_at_the_cap_fires_a_chunk_that_reaches_the_half_cap_cut() {
     producer.block_output.store(true, Ordering::SeqCst);
     let (handler, store, _dir, _project) =
         handler_with_store(Arc::clone(&producer), default_test_config());
-    let below = window(WINDOW_CAP_BLOCKS as u64 - 1);
-    let quiet = pass(&handler, &below).await;
-    assert_ne!(
-        quiet["history_summarizer"]["reason"], "window_cap",
-        "{quiet}"
-    );
-
     let messages = window(WINDOW_CAP_BLOCKS as u64 + 100);
     let first = pass(&handler, &messages).await;
     assert_eq!(first["history_summarizer"]["fired"], true, "{first}");
@@ -628,4 +621,72 @@ async fn meta_at_the_cap_with_a_firing_in_flight_stays_within_384_kib() {
         producer.block_output.store(false, Ordering::SeqCst);
         producer.notify.notify_waiters();
     }
+}
+
+/// A first pass whose window reaches half the cap is a cold import: it fires the History
+/// Summarizer for its oldest span, through the edge before its newest quarter of the cap, at a
+/// pressure that fires nothing for a smaller first pass, and numbers its messages from 1 at the
+/// submitted head. Once that firing publishes, the covered session no longer imports cold.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cold_first_pass_at_half_the_cap_fires_for_its_oldest_span() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    let (handler, store, _dir, _project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    let last = HALF_CAP_BLOCKS as u64;
+    let cold = pass(&handler, &window(last)).await;
+    assert_eq!(cold["history_summarizer"]["fired"], true, "{cold}");
+    assert_eq!(
+        cold["history_summarizer"]["reason"], "cold_import",
+        "{cold}"
+    );
+    wait_for_phase(&store, HistorySummarizerPhase::AwaitingProducer).await;
+    let cut = last - HALF_CAP_BLOCKS as u64 / 2;
+    let range = chunk_range(&store);
+    assert_eq!(range.from_ordinal, 1);
+    assert!(
+        range.to_ordinal >= cut,
+        "{range:?} ends before the cold cut {cut}"
+    );
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+    let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
+    while store.max_history_segment_end_ordinal("ses").unwrap() < cut as i64
+        || store.load("ses").unwrap().meta.history_summarizer.state != HistorySummarizerPhase::Idle
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cold firing did not publish through its cut"
+        );
+        tokio::time::sleep(TEST_WAIT_POLL).await;
+    }
+    let starts = producer.starts.load(Ordering::SeqCst);
+    let covered = pass(&handler, &window(last + 50)).await;
+    assert_eq!(covered["status"], "ok", "{covered}");
+    // A null-boundary suffix that meets the stored coverage resolves to its anchor (#824 D10).
+    assert!(covered["boundary"].is_object(), "{covered}");
+    assert_ne!(
+        covered["history_summarizer"]["reason"], "cold_import",
+        "{covered}"
+    );
+    assert_eq!(producer.starts.load(Ordering::SeqCst), starts);
+    // So does a cold suffix whose head lies inside the covered span, as after a plugin restart.
+    let covered_end = store.max_history_segment_end_ordinal("ses").unwrap();
+    let suffix = pass(&handler, &window(last + 50)[100..]).await;
+    assert_eq!(suffix["status"], "ok", "{suffix}");
+    assert!(suffix["boundary"].is_object(), "{suffix}");
+    assert_ne!(
+        suffix["history_summarizer"]["reason"], "cold_import",
+        "{suffix}"
+    );
+    assert_eq!(
+        store.max_history_segment_end_ordinal("ses").unwrap(),
+        covered_end
+    );
+
+    let (small_handler, _small_store, _small_dir, _small_project) =
+        handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+    let small = pass(&small_handler, &window(HALF_CAP_BLOCKS as u64 - 1)).await;
+    assert_eq!(small["status"], "ok", "{small}");
+    assert_eq!(small["history_summarizer"]["fired"], false, "{small}");
 }

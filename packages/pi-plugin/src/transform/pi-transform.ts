@@ -6,11 +6,12 @@ import {
 import {
     createTransformSessionClient,
     type RustModeModuleClient,
+    type TransformBoundary,
     type TransformPassOutcome,
 } from "@eidnara/opencode/hooks/context/transform-session-client";
 
 import type { PiBranchIndex, PiBranchReader } from "./pi-branch";
-import { encodePiRowsToCk, isPiRole, PI_RESERVED_ID_PREFIX, type PiRow } from "./pi-ck";
+import { encodePiRowsToCk, isPiRole, PI_RESERVED_ID_PREFIX, type PiRow, piRowSize } from "./pi-ck";
 
 type Json = Record<string, unknown>;
 
@@ -154,6 +155,29 @@ export interface PiPassResult {
     entriesAligned: number;
 }
 
+/** The compaction Pi commits for an eviction (spec D3, D13). */
+export interface PiEviction {
+    summary: string;
+    firstKeptEntryId: string;
+    tokensBefore: number;
+    details: { sequence: number };
+}
+
+/** The rendered boundary the daemon acknowledged and the m0 text it rendered with it. */
+interface Acknowledged {
+    boundary: TransformBoundary;
+    summary: string;
+}
+
+function textOf(message: Json | undefined): string | undefined {
+    const content = message?.content;
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return undefined;
+    return content
+        .map((part) => ((part as Json).type === "text" ? String((part as Json).text) : ""))
+        .join("");
+}
+
 export interface PiTransformOptions {
     moduleClient: RustModeModuleClient;
     branchOf: (sessionId: string) => PiBranchIndex;
@@ -165,6 +189,7 @@ export function createPiTransform(options: PiTransformOptions) {
     const admission = options.captureAdmission ?? defaultTransformCaptureAdmission;
     /** Sessions whose latest admitted pass returned no replacement array. */
     const declined = new Set<string>();
+    const acknowledged = new Map<string, Acknowledged>();
 
     async function run(inputs: PiPassInputs): Promise<PiPassResult> {
         const branch = options.branchOf(inputs.sessionId);
@@ -203,6 +228,12 @@ export function createPiTransform(options: PiTransformOptions) {
             },
             preflight: async () => inputs.projectRoot,
             readWindow: rows,
+            sizeOf: (index) => {
+                const row = rows(index, index + 1)?.[0];
+                return row && piRowSize(row);
+            },
+            // After a store reset the compaction summary heads a cold import as ordinary content.
+            coldLead: inputs.messages[0]?.role === "compactionSummary" ? 1 : 0,
             idOf: (value) => (value as PiRow).id,
             liveWindow: rows,
             privateWindow: true,
@@ -229,6 +260,14 @@ export function createPiTransform(options: PiTransformOptions) {
                 return undefined;
             },
         });
+        // An applied pass at a rendered boundary leads with m0, the text an eviction carries; an
+        // applied pass with no boundary, as after a store reset, leaves nothing to evict.
+        if (replacement && outcome.kind === "applied") {
+            const summary = textOf(replacement[0]);
+            if (outcome.boundary && summary)
+                acknowledged.set(inputs.sessionId, { boundary: outcome.boundary, summary });
+            else acknowledged.delete(inputs.sessionId);
+        }
         // A declined pass returns nothing, so Pi keeps its own array.
         if (replacement) declined.delete(inputs.sessionId);
         return {
@@ -239,8 +278,43 @@ export function createPiTransform(options: PiTransformOptions) {
         };
     }
 
+    /**
+     * The compaction that evicts the history before the acknowledged rendered boundary: its end
+     * entry is the first kept entry, so the boundary stays in view (C3). `undefined` when no
+     * boundary is acknowledged, its end entry is off the branch (as after a navigation), or the
+     * branch's latest compaction already evicted through it, whichever path committed that one.
+     */
+    function eviction(
+        sessionId: string,
+        reader: PiBranchReader,
+        tokensBefore: number,
+    ): PiEviction | undefined {
+        const ack = acknowledged.get(sessionId);
+        if (!ack) return undefined;
+        const branch = options.branchOf(sessionId);
+        branch.sync(reader);
+        if (branch.indexOf(ack.boundary.mid) === undefined) return undefined;
+        const latest = branch.latestCompaction();
+        const committed =
+            latest === undefined ? undefined : reader.getEntry(branch.idAt(latest) ?? "");
+        if (
+            committed?.type === "compaction" &&
+            committed.firstKeptEntryId === ack.boundary.mid &&
+            (committed.details as { sequence?: unknown } | undefined)?.sequence ===
+                ack.boundary.sequence
+        )
+            return undefined;
+        return {
+            summary: ack.summary,
+            firstKeptEntryId: ack.boundary.mid,
+            tokensBefore,
+            details: { sequence: ack.boundary.sequence },
+        };
+    }
+
     return {
         run,
+        eviction,
         /**
          * `folds` returns `false` after a declined pass until a pass supplies replacement
          * messages or `clearSession` clears the session.
@@ -250,6 +324,7 @@ export function createPiTransform(options: PiTransformOptions) {
         },
         clearSession(sessionId: string): void {
             declined.delete(sessionId);
+            acknowledged.delete(sessionId);
             admission.requestCancel(sessionId, `pi session ${sessionId} cleared`);
             client.clear(sessionId);
         },
