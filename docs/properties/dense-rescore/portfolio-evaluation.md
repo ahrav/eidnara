@@ -79,7 +79,7 @@ a wildcard pass that questioned the framing itself.
    that calls the same function on both sides (`existing-checks.md`, resource
    accounting). Queue a record `dense-resident-charge-covers-decoded-scales`
    (default-production through the ledger at `vector_generation.rs:948` and
-   `crates/daemon/src/vector_reader.rs:316`; `always`): for a manifest whose
+   `crates/daemon/src/vector_reader.rs:318`; `always`): for a manifest whose
    scales file is `n` bytes, `resident_bytes` equals the other resident sizes
    plus `3n`, and `3n / 4` equals `n / 4` coordinates times
    `size_of::<f32>() + size_of::<f64>()`. A unit test beside

@@ -361,7 +361,7 @@ Type: safety
 Reachability: test-only - `select_candidates_observed`
 (`crates/retrieval/src/dense/candidates.rs:273`) is called from
 `crates/retrieval/tests/dense_candidates.rs` and from `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:879`); `select_candidates`
+(`crates/daemon/src/vector_reader.rs:881`); `select_candidates`
 (`candidates.rs:263`) has no caller in the workspace. The route reaches
 `rank_compressed` only through `CompressedProducer`, which it builds only after
 `set_dense_vectors` (`crates/daemon/src/query_route.rs:1865`) installs a
@@ -464,7 +464,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:808`) is called by
+(`crates/daemon/src/vector_reader.rs:810`) is called by
 `CompressedProducer::rank` (`crates/daemon/src/query_route.rs:717`), which the
 route builds only after `set_dense_vectors` (`query_route.rs:1865`) installs a
 composition; no production caller installs one at this HEAD.
@@ -660,7 +660,7 @@ Open questions:
 - Parent Q5 approval of the bridge and the cancellation checkpoints, which are
   the ranked walk's check every sixteen visited rows (`BUDGET_STRIDE`), its
   batch checks, and the checks around each original read's observer
-  (`vector_reader.rs:900`, `:909`) (needs human input).
+  (`vector_reader.rs:902`, `:911`) (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.
