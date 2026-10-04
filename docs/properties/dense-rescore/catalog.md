@@ -134,7 +134,7 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the query route's `ExhaustiveProducer`
-(`crates/daemon/src/query_route.rs:503`) ranks through the oracle walk, which
+(`crates/daemon/src/query_route.rs:539`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
 `rescore` (`score.rs:194`), which have no production caller at this base, so
@@ -452,7 +452,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:800`) has no production caller at this
+(`crates/daemon/src/vector_reader.rs:802`) has no production caller at this
 base; #620 puts it behind the dense lane.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
@@ -606,8 +606,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - the route builds `CompressedProducer`
-(`crates/daemon/src/query_route.rs:644`) only when `set_dense_vectors`
-(`query_route.rs:1728`) has installed a composition, and no production caller
+(`crates/daemon/src/query_route.rs:680`) only when `set_dense_vectors`
+(`query_route.rs:1854`) has installed a composition, and no production caller
 installs one at this base; #897 configures the live producer.
 Status: active
 Exercised: yes - `crates/daemon/tests/query_route_compressed.rs`
@@ -642,8 +642,8 @@ Impact: A stage with its own budget runs past the caller's deadline or
 ignores its cancellation.
 Open questions:
 - Parent Q5 approval of the bridge and the cancellation checkpoints, which are
-  the walk's row and batch checks and one check per original read (needs
-  human input).
+  the ranked walk's check every sixteen visited rows (`BUDGET_STRIDE`), its
+  batch checks, and one check per original read (needs human input).
 - The validation stage holds after an eligibility batch; an interrupt inside
   a running kernel statement is witnessed only by the kernel's and storage's
   own progress-handler tests.
@@ -658,7 +658,7 @@ Exercised: yes - `crates/daemon/tests/dense_request_lifetime.rs`
 `query_route_compressed.rs`
 `cancellation_at_each_stage_ends_the_request_on_the_original_budget_and_releases_its_charges`.
 Guarantee: The dense unit owns a clone of the view's `Arc`, taken before the
-unit is submitted (`query_route.rs:1836`), so the view's pins and the
+unit is submitted (`query_route.rs:1962`), so the view's pins and the
 ranking's `Scratch` and `RowBuffers` reservations stay charged until the
 blocking work returns; a cancelled request settles only after that work ends,
 and every charge is released when it does.
@@ -726,7 +726,7 @@ Exercised: yes - `query_route_compressed.rs`
 `vectors_install_only_under_declared_dense_limits`, which also refuses a
 later route-limit change that the installed vectors cannot serve.
 Guarantee: A composition installs only under declared dense limits, and only
-when the pool `CompressedLimits::capacity` (`query_route.rs:575`) derives from
+when the pool `CompressedLimits::capacity` (`query_route.rs:611`) derives from
 the lane's `k` and the alpha policy passes the capacity checks and fits one
 kernel eligibility batch, with scan pages within the batch as well.
 Check: `always` - no dense limits refuses `DenseUndeclared`; alpha 0.5
@@ -759,8 +759,8 @@ original score; a view bound degrades the dense lane as `view_bound` while the
 other lanes answer; a missing accepted original ends the request as
 `dense_corruption` and quarantines the view, which later requests see as
 `quarantined`; cancellation and deadlines end the request with their own
-terminals (`compressed_refusal`, `query_route.rs:711`; `lane_status`,
-`query_route.rs:540`).
+terminals (`compressed_refusal`, `query_route.rs:747`; `lane_status`,
+`query_route.rs:576`).
 Check: `always` - the dense positions and raw score bits equal the f64
 reference; the degraded answer marks `degraded`; pinned bytes and read bytes
 degrade as `view_bound`, one scan row as `row_bound`, a one-byte heap as
