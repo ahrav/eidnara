@@ -9,6 +9,31 @@ export interface StatusLineDeps {
 }
 
 const lastRenderedBySession = new Map<string, string>();
+/**
+ * Context tokens the latest assistant response reported, by session. Pi's `getContextUsage`
+ * reads the whole branch, so the footer reads it only for a session with no response observed
+ * since it started or compacted.
+ */
+const reportedTokensBySession = new Map<string, number>();
+
+function reportedTokens(message: unknown): number | undefined {
+    const record = message as
+        | { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> }
+        | undefined;
+    if (record?.role !== "assistant" || record.stopReason === "error") return undefined;
+    if (record.stopReason === "aborted") return undefined;
+    const usage = record.usage;
+    const count = (value: unknown) =>
+        typeof value === "number" && Number.isFinite(value) ? value : 0;
+    if (!usage) return undefined;
+    const total = count(usage.totalTokens);
+    return total > 0
+        ? total
+        : count(usage.input) +
+              count(usage.output) +
+              count(usage.cacheRead) +
+              count(usage.cacheWrite);
+}
 
 /**
  * The daemon applies the whole recomp inside the `session.recomp` call and exposes no progress
@@ -30,15 +55,26 @@ export function registerStatusLine(pi: ExtensionAPI, deps: StatusLineDeps): void
 
     pi.on("session_start", async (_event, ctx) => updateStatusLine(ctx, deps, true));
     pi.on("agent_end", async (_event, ctx) => updateStatusLine(ctx, deps));
-    pi.on("session_compact", async (_event, ctx) => updateStatusLine(ctx, deps, true));
+    pi.on("session_compact", async (_event, ctx) => {
+        const sessionId = resolveSessionId(ctx);
+        if (sessionId) reportedTokensBySession.delete(sessionId);
+        updateStatusLine(ctx, deps, true);
+    });
     pi.on("tool_execution_end", async (_event, ctx) => updateStatusLine(ctx, deps));
     pi.on("message_end", async (event, ctx) => {
         const role = (event.message as { role?: unknown } | undefined)?.role;
-        if (role === "assistant") updateStatusLine(ctx, deps);
+        if (role !== "assistant") return;
+        const sessionId = resolveSessionId(ctx);
+        const tokens = reportedTokens(event.message);
+        if (sessionId && tokens !== undefined) reportedTokensBySession.set(sessionId, tokens);
+        updateStatusLine(ctx, deps);
     });
     pi.on("session_shutdown", async (_event, ctx) => {
         const sessionId = resolveSessionId(ctx);
-        if (sessionId) lastRenderedBySession.delete(sessionId);
+        if (sessionId) {
+            lastRenderedBySession.delete(sessionId);
+            reportedTokensBySession.delete(sessionId);
+        }
         ctx.ui.setStatus(STATUS_KEY, undefined);
     });
 }
@@ -58,11 +94,13 @@ function paintStatusLine(ctx: ExtensionContext, sessionId: string, force: boolea
 }
 
 export function renderStatusText(ctx: ExtensionContext, sessionId: string): string {
-    const usage = ctx.getContextUsage?.();
+    const reported = reportedTokensBySession.get(sessionId);
+    const usage = reported === undefined ? ctx.getContextUsage?.() : undefined;
     const inputTokens =
-        typeof usage?.tokens === "number" && Number.isFinite(usage.tokens)
+        reported ??
+        (typeof usage?.tokens === "number" && Number.isFinite(usage.tokens)
             ? usage.tokens
-            : undefined;
+            : undefined);
     const windowGeometry = resolvePiWindowGeometry({
         rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
         model: ctx.model,

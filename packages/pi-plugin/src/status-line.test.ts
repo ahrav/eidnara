@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { fakeContext } from "./__tests__/test-utils";
-import { renderStatusText, setEidnaraRecompActive } from "./status-line";
+import { createCountingPi, fakeContext } from "./__tests__/test-utils";
+import { registerStatusLine, renderStatusText, setEidnaraRecompActive } from "./status-line";
 
 function reservedWindowContext(sessionId: string, tokens: number) {
     return {
@@ -56,6 +56,50 @@ describe("Pi footer status", () => {
         } finally {
             setEidnaraRecompActive(active.ctx as never, "ses-footer-recomp-a", false);
         }
+    });
+});
+
+describe("Pi footer per-turn work", () => {
+    it("paints from the reported response usage without reading the branch", async () => {
+        const sessionId = "ses-footer-reported";
+        const counting = createCountingPi();
+        registerStatusLine(counting.pi as never, { projectIdentity: "" });
+        const { ctx, statuses } = statusRecordingContext(sessionId, 50_000);
+        let usageReads = 0;
+        const counted = {
+            ...ctx,
+            getContextUsage: () => {
+                usageReads += 1;
+                return ctx.getContextUsage();
+            },
+        };
+        const messageEnd = counting.handlers.get("message_end") as (
+            event: unknown,
+            context: unknown,
+        ) => Promise<void>;
+        const agentEnd = counting.handlers.get("agent_end") as (
+            event: unknown,
+            context: unknown,
+        ) => Promise<void>;
+        await messageEnd(
+            {
+                message: {
+                    role: "assistant",
+                    stopReason: "stop",
+                    usage: {
+                        input: 10,
+                        output: 5,
+                        cacheRead: 30_000,
+                        cacheWrite: 0,
+                        totalTokens: 30_015,
+                    },
+                },
+            },
+            counted,
+        );
+        await agentEnd({}, counted);
+        expect(statuses.at(-1)).toBe("eidnara: 30K (38%) · idle");
+        expect(usageReads).toBe(0);
     });
 });
 

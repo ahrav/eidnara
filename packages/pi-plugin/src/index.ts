@@ -9,7 +9,7 @@
  */
 
 import { resolve } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { isCompactionEnabled } from "@eidnara/opencode/config/agent-disable";
 import type {
     ContextResearcherConfig,
@@ -59,11 +59,16 @@ import { registerCtxStatusEntryRenderer } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import { createPiKernelClientResolver, forgetPiSessionKernelTokens } from "./kernel-client-pi";
 import { piMemoryCaptureExecutor } from "./memory-capture-native";
+import { resolvePiWindowGeometry } from "./pi-context-limit";
 import { createPiRustToolBackends } from "./rust-tool-backends";
 import { registerStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { configurePiSubagentExtensions, EIDNARA_PI_SUBAGENT_ENV } from "./subagent-runner";
-import { clearPiSystemPromptSession, processSystemPromptForCache } from "./system-prompt";
+import {
+    clearPiSystemPromptSession,
+    piSystemPromptStateFor,
+    processSystemPromptForCache,
+} from "./system-prompt";
 import { registerEidnaraTools } from "./tools";
 import {
     parseTodos,
@@ -72,16 +77,16 @@ import {
     rememberTodowriteToolCallTodos,
     setTodoSnapshot,
 } from "./tools/todo-view-pi";
+import { PiBranchIndex, type PiBranchReader } from "./transform/pi-branch";
+import { piPassFields } from "./transform/pi-pass-inputs";
+import { createPiTransform } from "./transform/pi-transform";
 
 const PREFIX = "[eidnara][pi]";
 /**
- * The Pi plugin has no message transform: nothing folds history or serves `§N§` tags, so
- * owning compaction would only cancel Pi's native compaction and leave the session to
- * overflow. While this is false, every compaction-on path in this file is skipped, whatever
- * the compaction setting says. The Pi transform that flips it is tracked in the issue tracker
- * (`docs/agents/issue-tracker.md`).
+ * The Pi `context` handler folds history through the daemon's window protocol and serves
+ * `§N§` tags, so the compaction setting decides whether Eidnara owns compaction on Pi.
  */
-export const PI_TRANSFORM_AVAILABLE: boolean = false;
+export const PI_TRANSFORM_AVAILABLE: boolean = true;
 const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
     parentPackageName: "@eidnara/pi",
@@ -348,11 +353,6 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // Pi registers tools once per process, so compaction registration does not follow later /cd config changes.
     const compactionRequested = isCompactionEnabled(config);
     const compactionOff = !PI_TRANSFORM_AVAILABLE || !compactionRequested;
-    if (compactionRequested && !PI_TRANSFORM_AVAILABLE) {
-        info(
-            "the compaction setting is not honored on Pi: no Pi context transform exists yet, so native Pi compaction proceeds and eidnara_reduce is not registered",
-        );
-    }
     setEidnaraReduceRegisteredGlobally(!compactionOff);
     // Pi configures child-runner extensions once at boot because the allowlist is user-tier only.
     // The returned merged config strips project-level subagent extension settings.
@@ -523,6 +523,60 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
 
     const systemPromptRefreshSessions = new Set<string>();
 
+    // Memory capture and the transform read one branch index per session.
+    const branchIndexes = new Map<string, PiBranchIndex>();
+    function branchOf(sessionId: string): PiBranchIndex {
+        let branch = branchIndexes.get(sessionId);
+        if (!branch) {
+            branch = new PiBranchIndex();
+            branchIndexes.set(sessionId, branch);
+        }
+        return branch;
+    }
+    const piTransform = compactionOff ? undefined : createPiTransform({ moduleClient, branchOf });
+    if (piTransform) {
+        pi.on("context", async (event, ctx) => {
+            const sessionId = sessionIdFromContext(ctx);
+            if (!sessionId) return;
+            try {
+                const deps = resolveCurrentProjectDeps(ctx);
+                const model = ctx.model;
+                const geometry = model
+                    ? resolvePiWindowGeometry({ rawContextWindow: model.contextWindow, model })
+                    : undefined;
+                const modelKey = model ? canonicalPiModelKey(model.provider, model.id) : null;
+                const result = await piTransform.run({
+                    sessionId,
+                    messages: event.messages as unknown as Record<string, unknown>[],
+                    reader: ctx.sessionManager,
+                    projectRoot: deps.projectDir,
+                    contextLimit: geometry?.usableSoft,
+                    fields: (messages) =>
+                        piPassFields({
+                            config: deps.config,
+                            promptSurfaceRuntime,
+                            geometry,
+                            providerId: model?.provider ?? null,
+                            modelKey,
+                            systemPromptHash:
+                                piSystemPromptStateFor(sessionId)?.systemPromptHash ?? "",
+                            reduceRegistered: true,
+                            todowriteRegistered: todowriteEnabled,
+                            messages,
+                            now: Date.now(),
+                        }),
+                });
+                return result.messages
+                    ? { messages: result.messages as unknown as typeof event.messages }
+                    : undefined;
+            } catch (error) {
+                warn("context transform declined:", error);
+                return undefined;
+            }
+        });
+        info("registered context transform handler");
+    }
+
     pi.on("before_agent_start", async (event, ctx) => {
         scheduleMemoryDrainFor(ctx);
         try {
@@ -624,16 +678,26 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     pi.on("session_start", async (event, ctx) => {
         if (event.reason !== "fork") return;
         const sessionId = ctx.sessionManager.getSessionId();
-        const leaf = ctx.sessionManager.getBranch().at(-1);
-        if (sessionId && leaf) checkpointedLeafBySession.set(sessionId, leaf.id);
+        const leaf = ctx.sessionManager.getLeafId();
+        if (sessionId && leaf) checkpointedLeafBySession.set(sessionId, leaf);
     });
-    function entriesAfterCheckpoint(sessionId: string, branch: readonly { id: string }[]) {
+    /**
+     * Entries after the checkpointed leaf, read from the end through the session's branch
+     * index; without a checkpointed leaf on the branch, the read stops at the first entry older
+     * than `notBefore`, the oldest entry capture keeps.
+     */
+    function entriesAfterCheckpoint(sessionId: string, reader: PiBranchReader, notBefore: number) {
+        const branch = branchOf(sessionId);
+        branch.sync(reader);
         const leaf = checkpointedLeafBySession.get(sessionId);
-        if (leaf === undefined) return branch;
-        for (let index = branch.length - 1; index >= 0; index--) {
-            if (branch[index]?.id === leaf) return branch.slice(index + 1);
+        const stop = (leaf === undefined ? undefined : branch.indexOf(leaf)) ?? -1;
+        const entries: SessionEntry[] = [];
+        for (let index = branch.length - 1; index > stop; index -= 1) {
+            const entry = reader.getEntry(branch.idAt(index) as string);
+            if (!entry || (stop < 0 && Date.parse(entry.timestamp) < notBefore)) break;
+            entries.push(entry);
         }
-        return branch;
+        return { entries: entries.reverse(), leaf: branch.idAt(branch.length - 1) };
     }
     function setCaptureStatus(ctx: ExtensionContext, status: string | undefined): void {
         try {
@@ -704,18 +768,20 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         try {
             scope = captureScope(ctx);
             if (!scope) return undefined;
-            const branch = ctx.sessionManager.getBranch();
+            const notBefore = Date.now() - CAPTURE_MAX_AGE_MS;
+            const { entries, leaf } = entriesAfterCheckpoint(
+                scope.sessionId,
+                ctx.sessionManager,
+                notBefore,
+            );
             const accepted = await captureCheckpoint({
                 ...scope,
-                messages: piCaptureMessages(entriesAfterCheckpoint(scope.sessionId, branch), {
-                    notBefore: Date.now() - CAPTURE_MAX_AGE_MS,
-                }),
+                messages: piCaptureMessages(entries, { notBefore }),
             });
             // A disabled daemon wrote nothing; those entries stay ahead of the stored leaf and a
             // refused earlier checkpoint stays unconfirmed.
-            const leaf = branch.at(-1);
             if (accepted === "accepted") {
-                if (leaf) checkpointedLeafBySession.set(scope.sessionId, leaf.id);
+                if (leaf) checkpointedLeafBySession.set(scope.sessionId, leaf);
                 unconfirmedCheckpoints.delete(scope.projectRoot);
             }
         } catch (error) {
@@ -810,6 +876,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     // The kernel transport is shared per connection file, and a session that `/cd`s across projects with distinct connection files holds routes on each, so every project config this process has resolved is released.
     function releaseSessionResources(sessionId: string): void {
         checkpointedLeafBySession.delete(sessionId);
+        branchIndexes.delete(sessionId);
+        piTransform?.clearSession(sessionId);
         clearPiSystemPromptSession(sessionId);
         promptSurfaceGuidanceEpochs.clear(sessionId);
         systemPromptRefreshSessions.delete(sessionId);

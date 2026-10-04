@@ -1490,6 +1490,62 @@ mod tests {
         );
     }
 
+    /// The CK `decode_pi_rows` derives, as the Pi plugin sends it: the daemon's own block
+    /// identity stamps and ordinals removed.
+    fn plugin_ck(decoded: &DecodedHarnessMessages) -> Vec<Value> {
+        decoded
+            .messages
+            .iter()
+            .map(|message| {
+                let mut value = serde_json::to_value(message).unwrap();
+                value.as_object_mut().unwrap().remove("ordinal");
+                let ck = &mut value["ck"];
+                ck["meta"].as_object_mut().unwrap().remove("ordinal");
+                for block in ck["content"].as_array_mut().unwrap() {
+                    let extras = block.as_object_mut().unwrap();
+                    if let Some(Value::Object(namespaces)) = extras.get_mut("provider_extras") {
+                        namespaces.remove("_eidnara_codec");
+                        if namespaces.is_empty() {
+                            extras.remove("provider_extras");
+                        }
+                    }
+                }
+                value
+            })
+            .collect()
+    }
+
+    /// The Pi plugin's CK encoder reads the same fixture and must produce `expected`.
+    #[test]
+    fn the_pi_ck_parity_fixture_is_the_ck_the_daemon_decodes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../packages/pi-plugin/src/transform/__fixtures__/pi-ck-parity.json"
+        ))
+        .unwrap();
+        let rows: Vec<Arc<Value>> = fixture["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+        let decoded = decode_pi_rows(&rows).unwrap();
+        let derived = plugin_ck(&decoded);
+        if std::env::var_os("EIDNARA_WRITE_PI_CK_PARITY").is_some() {
+            let mut fixture = fixture.clone();
+            fixture["expected"] = Value::Array(derived.clone());
+            std::fs::write(
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../packages/pi-plugin/src/transform/__fixtures__/pi-ck-parity.json"
+                ),
+                format!("{}\n", serde_json::to_string_pretty(&fixture).unwrap()),
+            )
+            .unwrap();
+        }
+        assert_eq!(Value::Array(derived), fixture["expected"]);
+    }
+
     #[test]
     fn untouched_row_replays_the_exact_retained_value() {
         let window = vec![Arc::new(json!({
