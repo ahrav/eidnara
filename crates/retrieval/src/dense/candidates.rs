@@ -3,6 +3,7 @@
 //! The oracle's ranked walk visits the live population in rowid order and marks the live winners, every live winner is scored, and the kernel judges them best first in bounded batches before any is admitted, until the pool holds `R` eligible rows or the winners run out.
 //! A rejected row takes no place in the pool and never ends the scan; every batch runs after the walk under one snapshot, so the pool needs no re-judgment, and a pool that fills was judged over itself, every excluded row ranked above its last member, and the rest of the batch that filled it.
 //! Beyond the pool and one judgment batch, the scan keeps per resolved winner a live bit, a rowid, and a slot of a prefix table at most half full, and per scored row a score and a winner index; the resolution's `max_entries` bounds them all.
+//! The pool is then rescored against each entry's original f32 row from the same layer, and the best `K` under the retained-f32 arithmetic are returned.
 //! A walk that ends before every live required row was visited, that reaches a storage bound, or whose authority moved returns no candidate; only a coverage shortfall leaves the pool in place, marked incomplete.
 
 use std::num::NonZeroUsize;
@@ -12,7 +13,7 @@ use kernel::applicability::EvalBudget;
 use storage::GuardedConn;
 
 use super::capacity::CandidateCapacity;
-use super::codec::{Metric, RowLayout};
+use super::codec::{self, Metric, RowLayout, RowRejection};
 use super::layered::{
     self, Cursor, LayerAccount, LayeredQuery, LayeredRefusal, Resolving, fault_refusal,
 };
@@ -22,9 +23,9 @@ use super::oracle::{
 };
 use super::resolve::{Layer, RowFault};
 use super::scalar::{self, QuantizedQuery, QueryRefusal, Scales};
-use super::score::BLOCK_ROWS;
+use super::score::{BLOCK_ROWS, Ranked, rank_order, score_with_squares};
 use crate::batch::VectorGeneration;
-use crate::eligibility::Authority;
+use crate::eligibility::{Authority, OccurrenceCandidate};
 
 /// A layer's int8 codes by row index, in the order of the layer's identifiers.
 pub trait CodeAccess {
@@ -43,7 +44,7 @@ impl CodeAccess for Vec<Vec<i8>> {
 
     fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault> {
         let codes = self.get(index).ok_or_else(|| {
-            RowFault::Unavailable(format!(
+            RowFault::Missing(format!(
                 "row {index} is past the {} resident rows",
                 self.len()
             ))
@@ -236,21 +237,23 @@ impl Block {
     /// Scores the filled lanes into `scored` and empties the block; block scoring is bit-for-bit identical to scoring each row alone.
     fn score(&mut self, query: &QuantizedQuery<'_>, scored: &mut Vec<(f64, usize)>) {
         let filled = std::mem::take(&mut self.filled);
-        if filled == BLOCK_ROWS {
-            let rows = self.lanes.each_ref().map(|lane| lane.codes.as_slice());
-            let scores = query.score_block(&rows);
-            scored.extend(
-                scores
-                    .into_iter()
-                    .zip(self.lanes.iter().map(|lane| lane.winner)),
-            );
-            return;
+        match filled {
+            0 => {}
+            1 => scored.push((query.score(&self.lanes[0].codes), self.lanes[0].winner)),
+            _ => {
+                let rows = std::array::from_fn(|slot| {
+                    self.lanes[if slot < filled { slot } else { 0 }]
+                        .codes
+                        .as_slice()
+                });
+                let scores = query.score_block(&rows);
+                scored.extend(
+                    scores
+                        .into_iter()
+                        .zip(self.lanes[..filled].iter().map(|lane| lane.winner)),
+                );
+            }
         }
-        scored.extend(
-            self.lanes[..filled]
-                .iter()
-                .map(|lane| (query.score(&lane.codes), lane.winner)),
-        );
     }
 }
 
@@ -372,4 +375,86 @@ fn select_inner<'a>(
         layers: ranked.layers,
         winners,
     })
+}
+
+/// The pool rescored against its original rows: at most `k` entries, best first, with the terms each was judged under.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rescored {
+    pub ranked: Vec<Ranked>,
+    pub candidates: Vec<OccurrenceCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RescoreRefusal<E> {
+    #[error("the query is not a member of the generation: {0}")]
+    Query(RowRejection),
+    #[error("the original row of occurrence {occurrence_id} could not be read: {fault}")]
+    Read {
+        occurrence_id: String,
+        winner: WinnerRow,
+        fault: E,
+    },
+    #[error(
+        "the original row of occurrence {occurrence_id} is not a member of the generation: {rejection}"
+    )]
+    Row {
+        occurrence_id: String,
+        winner: WinnerRow,
+        rejection: RowRejection,
+    },
+}
+
+/// Reads the original row of every pool entry through `read`, in pool order and once each, scores it against `query` with the retained-f32 arithmetic, and returns the `k` best under the dense order.
+/// `read` replaces the contents of one row buffer reused across entries.
+/// Only pool entries are read, and each from the winning layer row the pool names, so the result is `Top(k, A, f32_score)` over the accepted set `A`.
+pub fn rescore_pool<E>(
+    pool: &CandidatePool,
+    layout: &RowLayout,
+    query: &[f32],
+    k: NonZeroUsize,
+    mut read: impl FnMut(&WinnerRow, &mut Vec<f32>) -> Result<(), E>,
+) -> Result<Rescored, RescoreRefusal<E>> {
+    codec::validate(query, layout).map_err(RescoreRefusal::Query)?;
+    let ranking = &pool.ranking;
+    let mut scored = Vec::with_capacity(pool.winners.len());
+    let mut row = Vec::with_capacity(query.len());
+    for (index, (winner, candidate)) in pool.winners.iter().zip(&ranking.candidates).enumerate() {
+        let occurrence_id = &candidate.occurrence_id;
+        read(winner, &mut row).map_err(|fault| RescoreRefusal::Read {
+            occurrence_id: occurrence_id.clone(),
+            winner: *winner,
+            fault,
+        })?;
+        let reject = |rejection| RescoreRefusal::Row {
+            occurrence_id: occurrence_id.clone(),
+            winner: *winner,
+            rejection,
+        };
+        // The length is checked before the pass that scores and validates the row.
+        codec::validate_length(&row, layout.dimension).map_err(reject)?;
+        let sums = score_with_squares(layout.metric, query, &row);
+        codec::validate_from_sum(&row, layout, sums.sum_of_squares).map_err(reject)?;
+        scored.push((sums.score, index));
+    }
+    scored.sort_by(|left, right| {
+        rank_order(
+            (left.0, &ranking.candidates[left.1].occurrence_id),
+            (right.0, &ranking.candidates[right.1].occurrence_id),
+        )
+    });
+    scored.truncate(k.get());
+    let candidates: Vec<OccurrenceCandidate> = scored
+        .iter()
+        .map(|(_, index)| ranking.candidates[*index].clone())
+        .collect();
+    let ranked = scored
+        .into_iter()
+        .zip(&candidates)
+        .map(|((score, _), candidate)| Ranked {
+            occurrence_id: candidate.occurrence_id.clone(),
+            class: candidate.class,
+            score,
+        })
+        .collect();
+    Ok(Rescored { ranked, candidates })
 }

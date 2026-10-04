@@ -649,7 +649,7 @@ pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
     sum
 }
 
-/// [`weighted_dot`] of `query` with each of eight rows, as eight independent accumulation chains. Each lane accumulates the same terms from `+0.0` in increasing coordinate order, so lane `i` equals `weighted_dot(scales, query, docs[i])` bit for bit.
+/// [`weighted_dot`] of `query` with each of eight rows, as eight independent accumulation chains. Each lane accumulates the same terms from `+0.0` in increasing coordinate order, so lane `i` equals `weighted_dot(scales, query, docs[i])` bit for bit. The integer product is formed as `f64(c_query_j) * f64(c_doc_j)`, which is exact because it lies in `[-16129, 16129]`, so each term is `weighted_dot`'s.
 ///
 /// Panics when the scale weights or any row of `docs` differ in length from `query`, enforcing full-vector scoring.
 pub fn weighted_dot_block(
@@ -668,19 +668,37 @@ pub fn weighted_dot_block(
             doc.len(),
             "codes of one calibration have one length"
         );
+        debug_assert!(
+            !doc.contains(&i8::MIN),
+            "the reserved code -128 never reaches scoring"
+        );
     }
+    // Rows cut to the query's length let the compiler drop the per-coordinate bounds checks.
+    let rows: [&[i8]; BLOCK_ROWS] = std::array::from_fn(|lane| &docs[lane][..query.len()]);
     let mut sums = [0.0f64; BLOCK_ROWS];
     for (coordinate, (weight, q)) in scales.weights.iter().zip(query).enumerate() {
-        let q = i32::from(*q);
-        for (sum, doc) in sums.iter_mut().zip(docs) {
-            let d = doc[coordinate];
-            debug_assert!(
-                q != i32::from(i8::MIN) && d != i8::MIN,
-                "the reserved code -128 never reaches scoring"
-            );
-            let product = q * i32::from(d);
-            *sum += *weight * f64::from(product);
+        debug_assert!(
+            *q != i8::MIN,
+            "the reserved code -128 never reaches scoring"
+        );
+        let q = code_value(*q);
+        for (sum, row) in sums.iter_mut().zip(&rows) {
+            *sum += *weight * (q * code_value(row[coordinate]));
         }
     }
     sums
+}
+
+/// A code as an f64 by one table load, so a block widens its codes without a conversion per term.
+fn code_value(code: i8) -> f64 {
+    static VALUES: [f64; 256] = {
+        let mut values = [0.0f64; 256];
+        let mut byte = 0;
+        while byte < 256 {
+            values[byte] = byte as u8 as i8 as f64;
+            byte += 1;
+        }
+        values
+    };
+    VALUES[code as u8 as usize]
 }

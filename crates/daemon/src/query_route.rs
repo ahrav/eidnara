@@ -532,6 +532,7 @@ impl DenseProducer for ExhaustiveProducer {
                 OracleRefusal::StoredRow { .. } | OracleRefusal::Unreadable { .. } => {
                     DenseRefusal::Corruption
                 }
+                OracleRefusal::ReadFailed { .. } => DenseRefusal::Unavailable("read_failed"),
                 OracleRefusal::BatchOverBound { .. } => {
                     DenseRefusal::Unavailable("batch_over_bound")
                 }

@@ -7,13 +7,13 @@ stop discovery of lower eligible rows.
 
 ## Evidence trail
 
-- `Progress::judge_batch` (`crates/retrieval/src/dense/oracle.rs:1237`)
+- `Progress::judge_batch` (`crates/retrieval/src/dense/oracle.rs:1243`)
   offers only rows the kernel judged eligible.
-- `Progress::judge_ranked` (`oracle.rs:1020`) judges the scored rows best
+- `Progress::judge_ranked` (`oracle.rs:1026`) judges the scored rows best
   first and stops once the set holds `R` eligible rows, or the rows run out.
   Every judged row ranks ahead of every unjudged row, so a full set admits
   none of the rest.
-- `Unjudged::draw` (`oracle.rs:1385`) hands out the unjudged rows in rank
+- `Unjudged::draw` (`oracle.rs:1391`) hands out the unjudged rows in rank
   order. A batch is sized by the admission rate, so the batch that fills the
   set can also judge rows ranked below its last member: with one page of
   forty, the second batch judges all 36 remaining rows, sixteen of them

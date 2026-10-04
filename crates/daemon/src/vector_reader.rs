@@ -1,13 +1,15 @@
 //! Reads a vector composition through pinned files. Acquisition takes the lifecycle's shared protection only around manifest reads: it observes the selector, pins the candidate record and every member it names with shared locks, and reserves the bytes the view keeps resident and records the bytes it pins on disk in the ledger, then releases the protection before verification hashes the members under the pins alone; it keeps the row and code artifacts open on the descriptors verification hashed them through and re-reads the selector under the protection once more before handoff. A failure anywhere returns nothing, and the pins, descriptors, and reservations go with it.
-//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec; the int8 codes are read the same way under the layer's own scales. Positioned reads after acquisition are not re-hashed: pins protect lifetime, and same-user writes after verification are outside the cooperative-file threat model.
+//! Ranking reads only the rows the resolver names, each by its offset in the row artifact into scratch charged for one page, and decodes them through the original-row codec. The candidate scan reads a layer's int8 codes through that layer's `CodeWindow` and scores only the rows the resolver names, under the layer's own scales. Positioned reads after acquisition rely on the hashes verification checked: pins protect lifetime, and the cooperative-file threat model assumes same-user files stay unchanged after verification.
 //! A caller runs the ranking through the request's blocking seam with the view moved into the work, so the view lives until the physical read returns whatever happens to the caller.
 
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs::File;
 use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use host_runtime::generation::{
     CurrentProfile, GenerationError, GenerationStore, PinnedGeneration, ValidatedGeneration,
@@ -19,8 +21,10 @@ use retrieval::batch::ProjectionCheckpoint;
 use retrieval::dense::codec::{self, ARTIFACT_HEADER_BYTES, RowLayout};
 use retrieval::dense::scalar::{self, Scales};
 use retrieval::dense::{
-    Layer, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, Precedence, RowAccess,
-    RowFault, rank_layers,
+    CandidateCapacity, CandidatePool, CandidateQuery, CandidateRefusal, CodeAccess, Layer,
+    LayerCodes, LayeredQuery, LayeredRanking, LayeredRefusal, OracleBounds, OracleRefusal,
+    Precedence, RescoreRefusal, Rescored, RowAccess, RowFault, RowRejection, ScanBounds, WinnerRow,
+    rank_layers, rescore_pool, select_candidates,
 };
 use retrieval::eligibility::Authority;
 use storage::GuardedConn;
@@ -151,17 +155,36 @@ impl PinnedLayer {
         width: usize,
         index: usize,
     ) -> Result<Vec<u8>, RowFault> {
-        if index >= self.occurrence_ids.len() {
-            return Err(RowFault::Unavailable(format!(
-                "row {index} is past the {} rows the layer declares",
-                self.occurrence_ids.len()
-            )));
-        }
+        self.check_declared(index)?;
         let offset = header as u64 + index as u64 * width as u64;
         let mut bytes = vec![0u8; width];
         file.read_exact_at(&mut bytes, offset)
-            .map_err(|error| RowFault::Unavailable(format!("row {index}: {error}")))?;
+            .map_err(|error| read_fault(index, &error))?;
         Ok(bytes)
+    }
+
+    fn check_declared(&self, index: usize) -> Result<(), RowFault> {
+        check_declared(index, self.occurrence_ids.len())
+    }
+
+    /// The original row `index`, read through `bytes` into `into`; both buffers are reused, and `into` holds exactly the decoded row on success.
+    fn row_into(
+        &self,
+        index: usize,
+        bytes: &mut Vec<u8>,
+        into: &mut Vec<f32>,
+    ) -> Result<(), RowFault> {
+        self.check_declared(index)?;
+        let width = self.dimension() * 4;
+        let offset = ARTIFACT_HEADER_BYTES as u64 + index as u64 * width as u64;
+        bytes.resize(width, 0);
+        self.rows
+            .read_exact_at(bytes, offset)
+            .map_err(|error| read_fault(index, &error))?;
+        let dimension = self.sidecar.vector_dimension;
+        codec::decode_length_into(bytes, dimension, into)
+            .and_then(|()| codec::validate_shape(into, dimension))
+            .map_err(RowFault::Rejected)
     }
 
     /// The int8 codes of row `index`; they score with this layer's scales and no other's.
@@ -172,8 +195,122 @@ impl PinnedLayer {
     pub fn codes(&self, index: usize) -> Result<Vec<i8>, RowFault> {
         let bytes = self.read_row_bytes(&self.codes, 0, self.dimension(), index)?;
         scalar::decode_codes(&bytes, self.sidecar.vector_dimension)
-            .map_err(|rejection| RowFault::Unavailable(rejection.to_string()))
+            .map_err(|rejection| RowFault::Missing(rejection.to_string()))
     }
+}
+
+/// A row at or past `declared` is not where its layer says it is.
+fn check_declared(index: usize, declared: usize) -> Result<(), RowFault> {
+    if index < declared {
+        return Ok(());
+    }
+    Err(RowFault::Missing(format!(
+        "row {index} is past the {declared} rows the layer declares"
+    )))
+}
+
+/// The byte budget of one layer's scan window; a window holds one row even when that row is wider.
+const CODE_WINDOW_BYTES: usize = 64 * 1024;
+
+/// One layer's codes for one candidate scan: `declared` rows of `width` bytes each, from offset 0 of `codes`. A row outside the held window refills the window with the run of declared rows that starts at that row, so later rows inside the run are served without another read.
+struct CodeWindow<'a> {
+    codes: &'a File,
+    width: usize,
+    declared: usize,
+    /// The per-fill row limit: what [`CODE_WINDOW_BYTES`] holds, one row when a row is wider, capped at the layer's declared rows. A failed window read drops it to one row for the rest of the scan.
+    capacity: Cell<usize>,
+    held: RefCell<HeldCodes>,
+}
+
+/// Raw codes of rows `first..first + rows`.
+#[derive(Default)]
+struct HeldCodes {
+    first: usize,
+    rows: usize,
+    bytes: Vec<u8>,
+}
+
+impl<'a> CodeWindow<'a> {
+    fn new(codes: &'a File, width: usize, declared: usize) -> Self {
+        Self {
+            codes,
+            width,
+            declared,
+            capacity: Cell::new(window_rows(width, declared)),
+            held: RefCell::default(),
+        }
+    }
+
+    fn of(layer: &'a PinnedLayer) -> Self {
+        Self::new(&layer.codes, layer.dimension(), layer.occurrence_ids.len())
+    }
+
+    /// A window that fails to read whole falls back to the requested row alone, so a file cut short or a failed sector past that row classifies exactly as a single-row read does. Later fills read one row each, so the failing span is not read again for every row before it.
+    fn fill(&self, held: &mut HeldCodes, index: usize) -> Result<(), RowFault> {
+        check_declared(index, self.declared)?;
+        let width = self.width;
+        let rows = self.capacity.get().min(self.declared - index);
+        let offset = index as u64 * width as u64;
+        held.rows = 0;
+        held.bytes.resize(rows * width, 0);
+        let read = self.codes.read_exact_at(&mut held.bytes, offset);
+        let rows = match read {
+            Ok(()) => rows,
+            Err(error) if rows == 1 => return Err(read_fault(index, &error)),
+            Err(_) => {
+                self.capacity.set(1);
+                held.bytes.truncate(width);
+                self.codes
+                    .read_exact_at(&mut held.bytes, offset)
+                    .map_err(|error| read_fault(index, &error))?;
+                1
+            }
+        };
+        held.first = index;
+        held.rows = rows;
+        Ok(())
+    }
+}
+
+impl CodeAccess for CodeWindow<'_> {
+    fn row_count(&self) -> usize {
+        self.declared
+    }
+
+    /// The candidate scan checks the dimension and the reserved code.
+    fn codes_into(&self, index: usize, into: &mut Vec<i8>) -> Result<(), RowFault> {
+        let mut held = self.held.borrow_mut();
+        if !(held.first..held.first + held.rows).contains(&index) {
+            self.fill(&mut held, index)?;
+        }
+        let width = self.width;
+        let start = (index - held.first) * width;
+        into.clear();
+        into.extend(
+            held.bytes[start..start + width]
+                .iter()
+                .map(|byte| *byte as i8),
+        );
+        Ok(())
+    }
+}
+
+fn window_rows(width: usize, declared: usize) -> usize {
+    (CODE_WINDOW_BYTES / width.max(1)).max(1).min(declared)
+}
+
+/// Scan scratch: one block of decoded codes per layer, held through the scan, and every layer's window of raw codes.
+fn scan_scratch_bytes(view: &PinnedVectors) -> u64 {
+    let dimension = u64::from(view.layout.dimension);
+    let windows: u64 = view
+        .layers
+        .iter()
+        .map(|layer| window_rows(layer.dimension(), layer.occurrence_ids.len()) as u64)
+        .sum();
+    (retrieval::dense::BLOCK_ROWS as u64)
+        .saturating_mul(view.layers.len() as u64)
+        .saturating_add(windows)
+        .saturating_mul(dimension)
 }
 
 impl RowAccess for PinnedLayer {
@@ -182,13 +319,9 @@ impl RowAccess for PinnedLayer {
     }
 
     fn row(&self, index: usize) -> Result<Vec<f32>, RowFault> {
-        let bytes = self.read_row_bytes(
-            &self.rows,
-            ARTIFACT_HEADER_BYTES,
-            self.dimension() * 4,
-            index,
-        )?;
-        codec::decode_shape(&bytes, self.sidecar.vector_dimension).map_err(RowFault::Rejected)
+        let mut row = Vec::new();
+        self.row_into(index, &mut Vec::new(), &mut row)?;
+        Ok(row)
     }
 }
 
@@ -200,7 +333,9 @@ pub struct PinnedVectors {
     layers: Vec<PinnedLayer>,
     _record: ValidatedGeneration,
     resident: Reservation,
-    _pinned: Pinned,
+    pinned: Pinned,
+    /// Set when a read found this view's rows or codes missing or corrupt; every later ranking over this view refuses. The flag belongs to this view alone: another acquisition of the same composition re-verifies its members and refuses one whose files no longer hash.
+    quarantined: AtomicBool,
 }
 
 impl std::fmt::Debug for PinnedVectors {
@@ -229,6 +364,19 @@ impl PinnedVectors {
     /// ```
     pub fn layers(&self) -> &[PinnedLayer] {
         &self.layers
+    }
+
+    /// Bytes on disk the view pins: the record and every member's files.
+    pub fn pinned_bytes(&self) -> u64 {
+        self.pinned.bytes()
+    }
+
+    fn quarantine(&self) {
+        self.quarantined.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_quarantined(&self) -> bool {
+        self.quarantined.load(Ordering::Relaxed)
     }
 
     pub fn members(&self) -> Vec<String> {
@@ -459,7 +607,8 @@ fn hand_off(
         layers,
         _record: record,
         resident,
-        _pinned: pinned,
+        pinned,
+        quarantined: AtomicBool::new(false),
     }))
 }
 
@@ -478,6 +627,8 @@ pub struct RankRequest<'a> {
 pub enum RankRefusal {
     #[error("the view's {field} is not the request's")]
     Identity { field: &'static str },
+    #[error("the view of composition {digest} is quarantined")]
+    Quarantined { digest: String },
     #[error("one page of rows needs {bytes} bytes of scratch: {refusal}")]
     Scratch {
         bytes: u64,
@@ -501,17 +652,13 @@ pub fn rank(
     budget: &EvalBudget,
     grant: &Admission,
 ) -> Result<LayeredRanking, RankRefusal> {
-    let expected = request.expected;
-    for layer in &view.layers {
-        vector_generation::check_identity(&layer.sidecar, expected).map_err(|refusal| {
-            RankRefusal::Identity {
-                field: match refusal {
-                    VectorRefusal::Identity { field } => field,
-                    _ => "identity",
-                },
-            }
-        })?;
+    if view.is_quarantined() {
+        return Err(RankRefusal::Quarantined {
+            digest: view.digest.clone(),
+        });
     }
+    let expected = request.expected;
+    check_view(view, expected).map_err(|field| RankRefusal::Identity { field })?;
     // The page's decoded rows plus the one raw row being read.
     let bytes = u64::try_from(request.bounds.page_rows.min(request.bounds.max_rows).get())
         .ok()
@@ -540,5 +687,365 @@ pub fn rank(
         layers: &layers,
         max_entries: request.max_entries,
     };
-    Ok(rank_layers(conn, kernel, &query, budget)?)
+    rank_layers(conn, kernel, &query, budget).map_err(|refusal| {
+        if walk_corruption(&refusal) {
+            view.quarantine();
+        }
+        RankRefusal::Layered(refusal)
+    })
+}
+
+/// Every layer's sidecar against the request's expectation; the refused field names the mismatch.
+fn check_view(view: &PinnedVectors, expected: &ExpectedVectors<'_>) -> Result<(), &'static str> {
+    for layer in &view.layers {
+        vector_generation::check_identity(&layer.sidecar, expected).map_err(
+            |refusal| match refusal {
+                VectorRefusal::Identity { field } => field,
+                _ => "identity",
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// A failed positioned read: a file that ends before the row is a missing row; any other error is a failed read.
+fn read_fault(index: usize, error: &std::io::Error) -> RowFault {
+    match error.kind() {
+        std::io::ErrorKind::UnexpectedEof => RowFault::Missing(format!("row {index}: {error}")),
+        _ => RowFault::Unavailable(format!("row {index}: {error}")),
+    }
+}
+
+/// Not `Debug`: the query row is embedding content.
+pub struct CompressedRequest<'a> {
+    /// What the caller expects the view to be; every identity field of every layer is rechecked first.
+    pub expected: &'a ExpectedVectors<'a>,
+    pub query: &'a [f32],
+    pub authority: Authority<'a>,
+    pub capacity: CandidateCapacity,
+    pub bounds: ScanBounds,
+    /// Rows and tombstones the layers may carry together.
+    pub max_entries: NonZeroUsize,
+    /// Generations the view may hold, the base included.
+    pub max_layers: NonZeroUsize,
+    /// Bytes on disk the view may pin.
+    pub max_pinned_bytes: u64,
+    /// Original-row bytes the rescore may read. Each pool entry is one positioned read of exactly one row, so a full pool reads `R` rows and nothing else.
+    pub max_read_bytes: u64,
+}
+
+/// The rescored ranking and the quantized pool it came from, kept apart so candidate coverage and rescored quality are measured on their own stages.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressedRanking {
+    pub pool: CandidatePool,
+    pub rescored: Rescored,
+}
+
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum CompressedRefusal {
+    #[error("the view's {field} is not the request's")]
+    Identity { field: &'static str },
+    #[error("the view of composition {digest} is quarantined")]
+    Quarantined { digest: String },
+    #[error("the view holds {layers} generations, over the bound of {limit}")]
+    Layers { layers: usize, limit: usize },
+    #[error("the view pins {bytes} bytes, over the bound of {limit}")]
+    PinnedBytes { bytes: u64, limit: u64 },
+    #[error("a full pool reads {bytes} original-row bytes, over the bound of {limit}")]
+    ReadBytes { bytes: u64, limit: u64 },
+    #[error("the ranking needs {bytes} bytes of {class:?}: {refusal}")]
+    Reservation {
+        class: ResourceClass,
+        bytes: u64,
+        refusal: vector_admission::Refusal,
+    },
+    /// The scan refused; when the generation's own codes were missing or malformed, the view is quarantined too.
+    #[error(transparent)]
+    Candidates(CandidateRefusal),
+    #[error("the query is not a member of the generation: {0}")]
+    Query(RowRejection),
+    #[error("the request's budget ended during the scan or the rescore")]
+    Budget,
+    /// An accepted occurrence's original row is missing or malformed in member `member`; the view is quarantined and nothing older or reconstructed stands in for it.
+    #[error("the original row of occurrence {occurrence_id} in member {member}: {fault}")]
+    Corrupt {
+        member: String,
+        occurrence_id: String,
+        fault: RowFault,
+    },
+    /// An accepted row's read failed with its bytes possibly intact; the view stays usable.
+    #[error(
+        "reading the original row of occurrence {occurrence_id} in member {member} failed: {detail}"
+    )]
+    Io {
+        member: String,
+        occurrence_id: String,
+        detail: String,
+    },
+}
+
+/// Why the rescore stopped reading.
+enum ReadStop {
+    Budget,
+    Fault(RowFault),
+}
+
+/// Where a compressed ranking stands; a test may hold or mutate the store here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RescoreEvent<'a> {
+    /// The pool is selected; no original row has been read.
+    AfterSelection,
+    /// The original row `row` of member `member` is about to be read.
+    ReadOriginal { member: &'a str, row: usize },
+}
+
+/// Selects one quantized pool over the view's layers inside the caller's read transaction, then rescores it from the original rows of the same pinned layers and returns the best `K`.
+/// The view's identity, quarantine, generation count, pinned bytes, and the full pool's read bytes are checked, and the code scratch and the pool's row buffers are reserved in the ledger that holds the view's tables, before the projection is read.
+/// An accepted row that is missing or fails the codec quarantines the view: the request refuses, and so does every later ranking over the view.
+/// Run it through the request's blocking seam with the `Arc<PinnedVectors>` moved into the work, as [`rank`] is.
+pub fn rank_compressed(
+    view: &PinnedVectors,
+    conn: &GuardedConn<'_>,
+    kernel: &KernelStore,
+    request: &CompressedRequest<'_>,
+    budget: &EvalBudget,
+    grant: &Admission,
+    observe: &mut dyn FnMut(RescoreEvent<'_>),
+) -> Result<CompressedRanking, CompressedRefusal> {
+    if view.is_quarantined() {
+        return Err(CompressedRefusal::Quarantined {
+            digest: view.digest.clone(),
+        });
+    }
+    check_view(view, request.expected).map_err(|field| CompressedRefusal::Identity { field })?;
+    if view.layers.len() > request.max_layers.get() {
+        return Err(CompressedRefusal::Layers {
+            layers: view.layers.len(),
+            limit: request.max_layers.get(),
+        });
+    }
+    if view.pinned_bytes() > request.max_pinned_bytes {
+        return Err(CompressedRefusal::PinnedBytes {
+            bytes: view.pinned_bytes(),
+            limit: request.max_pinned_bytes,
+        });
+    }
+    let row_bytes = codec::row_bytes(view.layout.dimension);
+    let read_bytes = (request.capacity.candidates().get() as u64).saturating_mul(row_bytes);
+    if read_bytes > request.max_read_bytes {
+        return Err(CompressedRefusal::ReadBytes {
+            bytes: read_bytes,
+            limit: request.max_read_bytes,
+        });
+    }
+    let ledger = view.resident.ledger();
+    let reserve = |class: ResourceClass, bytes: u64| {
+        ledger
+            .reserve(grant, class, bytes)
+            .map_err(|refusal| CompressedRefusal::Reservation {
+                class,
+                bytes,
+                refusal,
+            })
+    };
+    let _scratch = reserve(ResourceClass::Scratch, scan_scratch_bytes(view))?;
+    // The rescore reads one row at a time: its raw bytes and its decoded coordinates.
+    let _rows = reserve(ResourceClass::RowBuffers, row_bytes.saturating_mul(2))?;
+    let layers = view.resolver_layers();
+    let windows: Vec<CodeWindow<'_>> = view.layers.iter().map(CodeWindow::of).collect();
+    let codes: Vec<LayerCodes<'_>> = view
+        .layers
+        .iter()
+        .zip(&windows)
+        .map(|(layer, window)| LayerCodes {
+            scales: &layer.scales,
+            codes: window,
+        })
+        .collect();
+    let query = CandidateQuery {
+        generation: request.expected.generation,
+        metric: view.layout.metric,
+        unit_norm_tolerance: view.layout.unit_norm_tolerance,
+        query: request.query,
+        authority: request.authority,
+        capacity: request.capacity,
+        bounds: request.bounds,
+        layers: &layers,
+        codes: &codes,
+        max_entries: request.max_entries,
+    };
+    let pool = select_candidates(conn, kernel, &query, budget).map_err(|refusal| {
+        if let CandidateRefusal::Layered(layered) = &refusal
+            && walk_corruption(layered)
+        {
+            view.quarantine();
+        }
+        CompressedRefusal::Candidates(refusal)
+    })?;
+    observe(RescoreEvent::AfterSelection);
+    let mut bytes = Vec::new();
+    let rescored = rescore_pool(
+        &pool,
+        &view.layout,
+        request.query,
+        request.capacity.k(),
+        |winner: &WinnerRow, row: &mut Vec<f32>| {
+            if budget.check().is_err() {
+                return Err(ReadStop::Budget);
+            }
+            let layer = &view.layers[winner.layer];
+            observe(RescoreEvent::ReadOriginal {
+                member: &layer.digest,
+                row: winner.row,
+            });
+            layer
+                .row_into(winner.row, &mut bytes, row)
+                .map_err(ReadStop::Fault)
+        },
+    );
+    let rescored = rescored.map_err(|refusal| rescore_refusal(view, refusal))?;
+    budget.check().map_err(|_| CompressedRefusal::Budget)?;
+    Ok(CompressedRanking { pool, rescored })
+}
+
+/// A missing or malformed accepted row quarantines the view; a failed read and an ended budget leave it usable.
+fn rescore_refusal(view: &PinnedVectors, refusal: RescoreRefusal<ReadStop>) -> CompressedRefusal {
+    let (occurrence_id, winner, fault) = match refusal {
+        RescoreRefusal::Query(rejection) => return CompressedRefusal::Query(rejection),
+        RescoreRefusal::Read {
+            fault: ReadStop::Budget,
+            ..
+        } => return CompressedRefusal::Budget,
+        RescoreRefusal::Read {
+            occurrence_id,
+            winner,
+            fault: ReadStop::Fault(fault),
+        } => (occurrence_id, winner, fault),
+        RescoreRefusal::Row {
+            occurrence_id,
+            winner,
+            rejection,
+        } => (occurrence_id, winner, RowFault::Rejected(rejection)),
+    };
+    let member = view.layers[winner.layer].digest.clone();
+    if let RowFault::Unavailable(detail) = fault {
+        return CompressedRefusal::Io {
+            member,
+            occurrence_id,
+            detail,
+        };
+    }
+    view.quarantine();
+    CompressedRefusal::Corrupt {
+        member,
+        occurrence_id,
+        fault,
+    }
+}
+
+/// Rows or codes a walk could not read or that the recipe refuses: the generation's own bytes are bad.
+fn walk_corruption(refusal: &LayeredRefusal) -> bool {
+    matches!(
+        refusal,
+        LayeredRefusal::Oracle(OracleRefusal::Unreadable { .. } | OracleRefusal::StoredRow { .. })
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a file that ends before the row reads as a missing row; every other error leaves the row's bytes possibly intact.
+    #[test]
+    fn a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read() {
+        let short = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        assert!(matches!(read_fault(3, &short), RowFault::Missing(_)));
+        for kind in [
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let error = std::io::Error::from(kind);
+            assert!(
+                matches!(read_fault(3, &error), RowFault::Unavailable(_)),
+                "{kind:?}"
+            );
+        }
+        let eio = std::io::Error::from_raw_os_error(5);
+        assert!(matches!(read_fault(3, &eio), RowFault::Unavailable(_)));
+    }
+
+    const WIDTH: usize = 4;
+    const DECLARED: usize = 5;
+
+    fn all_codes() -> Vec<u8> {
+        (0..DECLARED * WIDTH).map(|byte| byte as u8).collect()
+    }
+
+    fn row_codes(codes: &[u8], row: usize) -> Vec<i8> {
+        codes[row * WIDTH..(row + 1) * WIDTH]
+            .iter()
+            .map(|byte| *byte as i8)
+            .collect()
+    }
+
+    /// A whole file fills one window with every declared row, so later rows are served without another read.
+    #[test]
+    fn a_whole_code_file_fills_one_window_with_every_declared_row() {
+        let codes = all_codes();
+        let file = tempfile::tempfile().unwrap();
+        file.write_all_at(&codes, 0).unwrap();
+        let window = CodeWindow::new(&file, WIDTH, DECLARED);
+        let mut into = Vec::new();
+        for row in 0..DECLARED {
+            window.codes_into(row, &mut into).unwrap();
+            assert_eq!(into, row_codes(&codes, row), "row {row}");
+            assert_eq!(window.held.borrow().first, 0, "row {row} refilled");
+            assert_eq!(window.held.borrow().rows, DECLARED);
+        }
+    }
+
+    /// After a window read fails, every later fill of the scan reads one row, so a failing span past the requested row is not read again for each row before it.
+    /// The missing rows are restored after the first fill: a retried window read would then succeed and hold every remaining row, which makes the retry observable.
+    #[test]
+    fn a_failed_window_read_is_not_retried_for_the_rows_after_it() {
+        let codes = all_codes();
+        let file = tempfile::tempfile().unwrap();
+        file.write_all_at(&codes[..2 * WIDTH], 0).unwrap();
+        let window = CodeWindow::new(&file, WIDTH, DECLARED);
+        let mut into = Vec::new();
+        window.codes_into(0, &mut into).unwrap();
+        assert_eq!(into, row_codes(&codes, 0));
+        assert_eq!(window.held.borrow().rows, 1);
+        file.write_all_at(&codes[2 * WIDTH..], (2 * WIDTH) as u64)
+            .unwrap();
+        for row in 1..DECLARED {
+            window.codes_into(row, &mut into).unwrap();
+            assert_eq!(into, row_codes(&codes, row), "row {row}");
+            assert_eq!(
+                window.held.borrow().rows,
+                1,
+                "row {row} retried the full window"
+            );
+        }
+    }
+
+    /// A failed read leaves the view usable; missing or malformed rows or codes quarantine it.
+    #[test]
+    fn only_missing_or_malformed_rows_count_as_walk_corruption() {
+        let oracle = LayeredRefusal::Oracle;
+        let id = || "occurrence".to_owned();
+        assert!(!walk_corruption(&oracle(OracleRefusal::ReadFailed {
+            occurrence_id: id(),
+            detail: "eio".to_owned()
+        })));
+        assert!(!walk_corruption(&oracle(OracleRefusal::BudgetExhausted)));
+        assert!(walk_corruption(&oracle(OracleRefusal::Unreadable {
+            occurrence_id: id(),
+            detail: "short".to_owned()
+        })));
+        assert!(walk_corruption(&oracle(OracleRefusal::StoredRow {
+            occurrence_id: id(),
+            rejection: RowRejection::ZeroNorm
+        })));
+    }
 }

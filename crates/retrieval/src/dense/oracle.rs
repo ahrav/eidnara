@@ -321,6 +321,12 @@ pub enum OracleRefusal {
         occurrence_id: String,
         detail: String,
     },
+    /// A row source's read failed without showing the row missing or malformed; the row's bytes may be intact.
+    #[error("reading the vector of occurrence {occurrence_id} failed: {detail}")]
+    ReadFailed {
+        occurrence_id: String,
+        detail: String,
+    },
     #[error("the request's budget ended before any page was read")]
     BudgetExhausted,
     #[error(

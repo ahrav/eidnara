@@ -14,8 +14,10 @@ implementation ticket reconstructs the records its change makes executable
 from the specification's T1 to T7 seams and verifies them against the code
 that implements them. The RP2.6.U1 ticket
 ([#609](https://github.com/ahrav/eidnara/issues/609)) lands the numerical
-records, and the RP2.6.U2 ticket
+records, the RP2.6.U2 ticket
 ([#610](https://github.com/ahrav/eidnara/issues/610)) lands the candidate-pool
+records, and the RP2.6.U3 ticket
+([#613](https://github.com/ahrav/eidnara/issues/613)) lands the pinned-rescore
 records.
 
 This part owns the dense numerical contract, the quantized candidate pool, the
@@ -38,10 +40,14 @@ exported at `crates/retrieval/src/lib.rs` and exercised by
 `crates/retrieval/tests/dense_numerics.rs`, `dense_scalar.rs`, and
 `dense_properties.rs`. The references in `dense_numerics.rs` are written from
 the formulas and call no scorer or comparator of `retrieval::dense`. The
-fixtures exercise the scalar scorers. The term-table scan
+candidate scan scores the lanes of one layer through `weighted_dot_block`, an
+eight-lane block with its own tail and extrema fixtures: `dense_numerics.rs`
+`each_block_lane_scores_its_row_like_the_reference` and `dense_properties.rs`
+`a_quantized_block_scores_each_lane_as_the_single_row_score_does` check every
+lane against `weighted_dot` and an in-order model. The term-table scan
 (`TermTable::score_rows`) is scalar code with its own chunk-tail, tile-boundary,
-alignment, and extrema fixture; a vectorized path (U5) needs its own fixtures,
-which are not measured here.
+alignment, and extrema fixture. A vectorized path (U5) needs its own tail,
+alignment, and extrema fixtures, which are not measured here.
 
 ## Index
 
@@ -56,6 +62,10 @@ which are not measured here.
 | [dense-rejected-leaders-never-starve-eligible-rows](#dense-rejected-leaders-never-starve-eligible-rows) | liveness | test-only | always | active | high |
 | [dense-pool-never-mixes-authority-states](#dense-pool-never-mixes-authority-states) | safety | test-only | always | active | high |
 | [dense-scan-bounds-end-with-no-candidate](#dense-scan-bounds-end-with-no-candidate) | safety | test-only | always | active | high |
+| [dense-rescore-reads-only-accepted-rows-from-their-pinned-layers](#dense-rescore-reads-only-accepted-rows-from-their-pinned-layers) | safety | test-only | always | active | high |
+| [dense-rescore-is-the-top-k-of-the-pool](#dense-rescore-is-the-top-k-of-the-pool) | safety | test-only | always | active | high |
+| [dense-missing-original-quarantines-without-substitute](#dense-missing-original-quarantines-without-substitute) | safety | test-only | always | active | medium |
+| [dense-stage-evidence-keeps-coverage-and-recall-apart](#dense-stage-evidence-keeps-coverage-and-recall-apart) | safety | test-only | always | active | medium |
 
 ## Records
 
@@ -63,8 +73,10 @@ which are not measured here.
 
 Type: safety
 Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:448`)
-and `TermTable::score_rows` (`scalar.rs:565`) are called from
-`crates/retrieval/tests/` only at this base; no producer scans codes yet.
+is built by `select_candidates` (`crates/retrieval/src/dense/candidates.rs:263`),
+whose only caller is `daemon::vector_reader::rank_compressed`; no production
+path calls `rank_compressed` at this HEAD. `TermTable::score_rows`
+(`scalar.rs:565`) is called from `crates/retrieval/tests/` only.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
@@ -75,7 +87,12 @@ Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `scales_from_every_constructor_score_like_the_reference` (scales from
 `calibrate`, `from_values`, `decode`, and the fixture score alike),
 `term_table_refuses_codes_that_are_not_whole_rows`, and
-`term_table_refuses_a_reserved_code_under_debug_assertions`.
+`term_table_refuses_a_reserved_code_under_debug_assertions`; the block
+form by `dense_numerics.rs` `each_block_lane_scores_its_row_like_the_reference`,
+`crates/retrieval/tests/dense_properties.rs`
+`a_quantized_block_scores_each_lane_as_the_single_row_score_does`, and
+`crates/retrieval/tests/dense_candidates.rs`
+`a_block_of_winners_from_two_layers_scores_each_under_its_own_layer`.
 Guarantee: The quantized score of a document is
 `sum_j (s_j * s_j) * i32(c_query_j) * i32(c_doc_j)` with the weight and the
 integer product widened to f64 before they multiply, accumulated from `+0.0`
@@ -95,9 +112,9 @@ magnitude across coordinates, codes at `+127` and `-127`, scales at
 leave a partial 16-coordinate chunk, and row counts that leave a partial
 512-row tile.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:628`) and `QuantizedQuery::term_table`
-(`scalar.rs:501`) were read against the formula and the tests run
-against both.
+`weighted_dot` (`scalar.rs:628`), `weighted_dot_block` (`scalar.rs:655`), and
+`QuantizedQuery::term_table` (`scalar.rs:501`) were read against the formula
+and the tests run against them.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
 `nonuniform_scales_rank_differently_from_a_raw_integer_dot`.
@@ -113,9 +130,10 @@ Reachability: default-production - the query route's `ExhaustiveProducer`
 (`crates/daemon/src/query_route.rs:503`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
-`rescore` (`score.rs:194`), which have no production caller at this base, so
-the label rests on `dense_properties.rs:258` holding `inner_product_block`
-equal to `inner_product` bit for bit.
+`rescore` (`score.rs:228`), which have no production caller at this base, so
+the label rests on `dense_properties.rs:346` holding `inner_product_block`
+equal to `inner_product` bit for bit. Corrected from `score.rs:194` and
+`dense_properties.rs:258`, their lines at main `f6f42ea4a`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`,
@@ -140,7 +158,7 @@ Open questions: None.
 ### dense-order-is-total-and-keeps-distinct-identities
 
 Type: safety
-Reachability: default-production - `rank_order` (`score.rs:92`) orders the
+Reachability: default-production - `rank_order` (`score.rs:126`) orders the
 oracle walk's `TopK`, which the query route's producer uses.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
@@ -191,7 +209,7 @@ unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
 size, and the candidate scan sizes its pool from it
-(`crates/retrieval/src/dense/candidates.rs:321`).
+(`crates/retrieval/src/dense/candidates.rs:324`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -212,7 +230,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:464`) is reached
-from tests only; `rescore` (`score.rs:194`) is also test-only at this base and
+from tests only; `rescore` (`score.rs:228`) is also test-only at this base and
 validates its query the same way through `codec::validate`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
@@ -244,7 +262,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:260`) has no production caller at
+(`crates/retrieval/src/dense/candidates.rs:263`) has no production caller at
 this base; #613 connects it to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
@@ -288,7 +306,7 @@ Open questions:
 
 Type: liveness
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:260`) is called only from
+(`crates/retrieval/src/dense/candidates.rs:263`) is called only from
 `crates/retrieval/tests/dense_candidates.rs` at this base; no producer calls
 it until #613 connects it to pinned generations.
 Status: active
@@ -325,8 +343,8 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:260`) and
-`select_candidates_with_hook_for_test` (`candidates.rs:271`, behind the
+(`crates/retrieval/src/dense/candidates.rs:263`) and
+`select_candidates_with_hook_for_test` (`candidates.rs:274`, behind the
 `test-support` feature) are called only from
 `crates/retrieval/tests/dense_candidates.rs` at this base; no producer calls
 either until #613 connects the scan to pinned generations.
@@ -368,8 +386,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:260`) and
-`select_candidates_with_hook_for_test` (`candidates.rs:271`) are called only
+(`crates/retrieval/src/dense/candidates.rs:263`) and
+`select_candidates_with_hook_for_test` (`candidates.rs:274`) are called only
 from `crates/retrieval/tests/dense_candidates.rs` at this base; the slot
 reservation test runs inside `crates/retrieval/src/dense/oracle.rs`. No
 producer calls the scan until #613 connects it to pinned generations.
@@ -406,11 +424,11 @@ Required faults and enabling state: Each bound set at, and one unit below,
 the value the fixture needs.
 Confidence: high - [evidence](evidence/dense-scan-bounds-end-with-no-candidate.md).
 Batch bytes are checked from the row's strings before a batch candidate is
-allocated (`Progress::read_candidate`, `crates/retrieval/src/dense/oracle.rs:1090`),
+allocated (`Progress::read_candidate`, `crates/retrieval/src/dense/oracle.rs:1096`),
 and a batch reserves only the candidate and score slots its batch bytes can
-fill (`Stored::batch_slots`, `oracle.rs:641`); heap bytes are checked before an
+fill (`Stored::batch_slots`, `oracle.rs:647`); heap bytes are checked before an
 eligible row moves into the set (`Progress::hold`,
-`oracle.rs:1215`). The heap bound covers the set while the scan runs; the
+`oracle.rs:1221`). The heap bound covers the set while the scan runs; the
 result moves the same entries through two more vectors of at most `R` slots,
 which the bound does not count. The scan also keeps, per resolved winner, a
 live bit, a rowid, and a prefix-table slot, and per scored row a score and a
@@ -423,3 +441,158 @@ Impact: An unbounded batch or set exhausts memory; a truncated pool labeled
 complete loses neighbors silently.
 Open questions:
 - Parent Q6 approval of the production byte bounds (needs human input).
+
+### dense-rescore-reads-only-accepted-rows-from-their-pinned-layers
+
+Type: safety
+Reachability: test-only - `rank_compressed`
+(`crates/daemon/src/vector_reader.rs:806`) has no production caller at this
+base; #620 puts it behind the dense lane.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer`,
+`a_promotion_and_prune_after_selection_leave_the_rescore_on_the_pinned_files`,
+and `the_ranking_is_the_same_however_the_rows_are_spread_across_layers`.
+Physical order here means how rows spread across a composition's layers; the
+order of rows within one layer file is fixed by the format, which writes and
+verifies identifiers in strictly increasing byte order.
+Guarantee: The rescore reads one original row per pool entry, by a positioned
+read of the member and row the entry's winner names, through the descriptors
+the view verified; it never reads a superseded, masked, or unselected row and
+never consults the selector, so a promotion and prune after selection leave it
+on the pinned files.
+Check: `always` - the observed reads equal the pool's winner rows in pool
+order, one each; the base's stale rows are never read; after a replacement is
+published and the store pruned mid-ranking, every read names the old member
+and the ranking is the old content's. `always` because every rescore must
+read only what the scan accepted.
+Fault/timing angle: The window between selection and the first original read.
+Required faults and enabling state: A delta that supersedes and masks; a
+publication and a prune inside `RescoreEvent::AfterSelection`.
+Confidence: high - [evidence](evidence/dense-rescore-reads-only-accepted-rows-from-their-pinned-layers.md).
+Real lifecycle generations, pins, and positioned reads; no SQLite vectors.
+Existing check: `crates/daemon/tests/vector_reader.rs`
+`old_readers_keep_their_complete_set_while_a_new_composition_is_published_and_pruned`
+for the f32 layered ranking.
+Impact: Reading the current selector's files or a stale row rescores a pool
+against data the scan did not select.
+Open questions: None.
+
+### dense-rescore-is-the-top-k-of-the-pool
+
+Type: safety
+Reachability: test-only - as above; `rescore_pool`
+(`crates/retrieval/src/dense/candidates.rs:410`) is pure.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
+`negative_scores_ties_and_an_underfilled_pool_keep_the_global_order`;
+`crates/retrieval/tests/dense_candidates.rs`
+`the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier`
+and
+`the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed_or_malformed_row`.
+Guarantee: For the accepted pool `A`, the result is exactly
+`Top(K, A, f32_score)` under the dense order, with distinct identities for
+equal rows and every returned score the retained-f32 score of its row.
+Check: `always` - the rescored identifiers and scores equal the shared f64
+reference over the pool's own vectors; with negative scores, an underfilled
+pool, and two equal rows the order equals the full reference. `always`
+because rescore defines the returned dense ranking.
+Fault/timing angle: none.
+Required faults and enabling state: An opposite-axis query, a pool larger
+than the eligible set, two identical rows.
+Confidence: high - [evidence](evidence/dense-rescore-is-the-top-k-of-the-pool.md).
+Existing check: `crates/retrieval/tests/dense_numerics.rs` for `rescore`.
+Impact: A rescore that reorders or drops pool entries returns a ranking the
+contract does not define.
+Open questions: None.
+
+### dense-missing-original-quarantines-without-substitute
+
+Type: safety
+Reachability: test-only - as above.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`a_missing_accepted_row_quarantines_the_view_and_recovery_serves_the_prior_set_under_current_eligibility`,
+`a_corrupt_accepted_row_is_refused_and_quarantined_without_a_substitute`,
+`missing_codes_found_by_the_scan_quarantine_the_view_and_ordinary_refusals_do_not`,
+`cancellation_during_the_rescore_is_a_budget_refusal_and_quarantines_nothing`,
+`cancellation_after_an_empty_selection_is_a_budget_refusal`, and
+`a_corrupt_row_found_by_the_f32_ranking_quarantines_the_view`;
+the unit tests
+`a_short_read_is_a_missing_row_and_any_other_read_error_is_a_failed_read` and
+`only_missing_or_malformed_rows_count_as_walk_corruption` in
+`crates/daemon/src/vector_reader.rs`.
+Guarantee: An accepted row that is missing (a short read or an index past the
+layer) or fails the codec or the layout refuses the whole request as
+`Corrupt` naming the member and the occurrence and quarantines the view, so
+every later ranking over it refuses; codes the scan finds missing, and rows
+the f32 ranking finds missing or malformed, quarantine it the same way; a read error other than a short read is `RowFault::Unavailable`
+and refuses as `Io`, or as `OracleRefusal::ReadFailed` in the scan, and
+quarantines nothing; cancellation refuses as `Budget`; nothing older,
+quantized, or reconstructed stands in, and no shorter ranking is returned.
+Check: `always` - a rows file cut to its header after selection refuses with
+`Missing` after one read, quarantines the view, and releases the scratch and
+row buffers; NaN rows and doubled, finite rows refuse with `Rejected` naming
+the member and the pool's best entry; an emptied codes file refuses the scan
+and quarantines the view, while a cancelled scan does not; the read
+classifier maps only `UnexpectedEof` to `Missing`; a cancelled budget refuses
+with no read and no quarantine, and so does one cancelled over a pool with no
+entry to read; a
+re-acquisition re-verifies, recovery takes the prior verified composition, and
+its ranking excludes an occurrence retired in the kernel meanwhile. `always`
+because a corrupt generation must never yield a result.
+Fault/timing angle: Corruption between selection and the original reads.
+Required faults and enabling state: A truncated and a NaN-filled rows file
+inside `RescoreEvent::AfterSelection`; a prior composition to recover to.
+Confidence: medium - [evidence](evidence/dense-missing-original-quarantines-without-substitute.md).
+The quarantine flag lives on the shared view; persistence across a restart is
+the verification a new acquisition runs.
+Existing check: `crates/daemon/tests/vector_reader.rs` truncated-row
+refusal for the f32 layered ranking.
+Impact: A substitute row returns scores for bytes the generation never held.
+Open questions:
+- Parent Q4: persistent quarantine is re-verification on acquisition, which
+  refuses a member whose files no longer hash; a transient fault that leaves
+  the files intact is served again after re-acquisition (needs human input).
+- The I/O classification is checked at the classifier and the
+  code-corruption predicate; no test makes a real file return a read error
+  other than a short read, so the rescore's `Io` arm and the scan's
+  `ReadFailed` arm are reached only by reading.
+- Process-restart evidence here is a fresh acquisition in the same process,
+  which reads only durable state; it is not a separate process and not
+  power-loss evidence.
+
+### dense-stage-evidence-keeps-coverage-and-recall-apart
+
+Type: safety
+Reachability: test-only - the stage record is assembled by the test from
+`CompressedRanking`, which returns the pool and the rescored ranking apart.
+Status: active
+Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
+`the_alpha_sweep_keeps_candidate_coverage_and_rescored_recall_as_separate_stage_records`.
+Guarantee: For alpha in `{1, 2, 5, 10, 20, 50}` the baseline, candidate, and
+rescored identity sets are retained with separate candidate-coverage and
+rescored Recall@10 fields against one frozen eligible f32 baseline; an empty
+baseline yields no value rather than a perfect score.
+Check: `always` - six records with the alphas in order, ten baseline
+identities each, coverage below one at alpha one, coverage non-decreasing in
+alpha, recall at most coverage,
+the widest pool covering the baseline with the rescore equal to it, and no
+value for an empty baseline. `always` because every sweep must keep the
+stages apart.
+Fault/timing angle: none.
+Required faults and enabling state: Sixty fixed rows, every fifth
+unadmitted.
+Confidence: medium - [evidence](evidence/dense-stage-evidence-keeps-coverage-and-recall-apart.md).
+The corpus clusters sixty rows around the query so that coverage at alpha one
+is below one; coverage and recall are equal at each alpha, which the
+specification allows; every alpha from five up pools all 48 eligible rows, so
+those four records measure one state; the corpus is not the RP2.9 frozen
+corpus.
+Existing check: none.
+Impact: A collapsed field hides whether a miss came from the pool or the
+rescore.
+Open questions:
+- Parent Q6 and RP2.9 own the frozen corpus, the target, and the aggregation;
+  this record measures nothing against them (needs human input).
