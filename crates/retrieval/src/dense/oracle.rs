@@ -1006,7 +1006,7 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
         }
     }
 
-    /// Judges a ranked walk's scored rows best first across the whole walk, a batch at a time, until the set holds `k` eligible rows and the best unjudged row cannot enter it.
+    /// Judges a ranked walk's scored rows best first across the whole walk, a batch at a time, until the set holds `k` eligible rows or the rows run out.
     /// Each batch is sized to the rows expected to fill the set at the observed admission rate, at most `page_rows` rows and the batch bytes; its rows' identity fields are read again at the rowids the walk saw them at, inside the caller's transaction.
     fn judge_ranked(
         &mut self,
@@ -1014,7 +1014,7 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
         kernel: &KernelStore,
         request: &Walk<'_>,
         source: &impl RankedSource,
-        mut rows: Vec<(f64, usize)>,
+        rows: Vec<(f64, usize)>,
         budget: &EvalBudget,
     ) -> Result<ControlFlow<Option<AuthorityMoved>>, OracleRefusal> {
         // `rank_order` with the identifiers read only for tied scores, so most comparisons touch no winner.
@@ -1028,29 +1028,28 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
         };
         let k = self.top.k();
         let cap = request.bounds.page_rows.get();
-        let mut next = 0;
+        let mut unjudged = Unjudged::new(rows, order);
+        // Drawn rows not yet judged, best first; each ranks ahead of every row still in `unjudged`.
+        let mut drawn = Vec::new();
         let mut eligible = 0usize;
-        while next < rows.len() {
+        loop {
+            let remaining = drawn.len() + unjudged.len();
+            // Rows are judged best first, so a full set ranks ahead of every remaining row and admits none of them.
+            if remaining == 0 || self.top.is_full() {
+                break;
+            }
             if budget.is_exhausted() {
                 return Ok(ControlFlow::Break(None));
             }
-            let rest = &mut rows[next..];
             let want = self
                 .admissions
-                .ranked_batch(k - eligible.min(k), rest.len())
+                .ranked_batch(k - eligible.min(k), remaining)
                 .min(cap);
-            if want < rest.len() {
-                rest.select_nth_unstable_by(want - 1, order);
-            }
-            rest[..want].sort_unstable_by(order);
-            let (best, key) = rest[0];
-            if !self.top.admits(best, source.occurrence_id(key)) {
-                break;
-            }
+            unjudged.draw(&mut drawn, want);
             self.stored.selected = 0;
             let mut candidates = Vec::with_capacity(want);
             let mut scores = Vec::with_capacity(want);
-            for &(score, key) in &rest[..want] {
+            for &(score, key) in &drawn[..want] {
                 match self.read_candidate(conn, source.occurrence_id(key), source.rowid(key)) {
                     Ok(Some(candidate)) => {
                         candidates.push(candidate);
@@ -1072,7 +1071,7 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
                 return Ok(flow);
             }
             eligible += self.admissions.eligible - before;
-            next += taken;
+            drawn.drain(..taken);
         }
         Ok(ControlFlow::Continue(()))
     }
@@ -1344,6 +1343,58 @@ impl Admissions {
     }
 }
 
+/// The scored rows of a ranked walk still available to later batches, drawn best first under `order`, where `Less` ranks ahead.
+/// `rows[..ranked]` is in rank order ahead of every later row, and `rows[..next]` is drawn. The first [`EXACT_PASSES`] extensions of the ranked prefix rank only the rows their draw needs; each later one at least doubles the prefix or exhausts the remaining rows, bounding a full drain to `EXACT_PASSES + log2 n` selection passes. Draws within the ranked prefix use zero comparator calls.
+struct Unjudged<F> {
+    rows: Vec<(f64, usize)>,
+    next: usize,
+    ranked: usize,
+    passes: usize,
+    order: F,
+}
+
+/// Selection passes that rank exactly the rows their draw needs before the ranked prefix starts doubling.
+const EXACT_PASSES: usize = 3;
+
+impl<F: Fn(&(f64, usize), &(f64, usize)) -> std::cmp::Ordering> Unjudged<F> {
+    fn new(rows: Vec<(f64, usize)>, order: F) -> Self {
+        Self {
+            rows,
+            next: 0,
+            ranked: 0,
+            passes: 0,
+            order,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len() - self.next
+    }
+
+    /// Moves the best available rows onto the end of `drawn`, best first, until it holds `want` rows or the rows run out.
+    fn draw(&mut self, drawn: &mut Vec<(f64, usize)>, want: usize) {
+        let need = want.saturating_sub(drawn.len()).min(self.len());
+        let missing = need.saturating_sub(self.ranked - self.next);
+        if missing > 0 {
+            let rest = &mut self.rows[self.ranked..];
+            let grown = if self.passes < EXACT_PASSES {
+                missing
+            } else {
+                missing.max(self.ranked)
+            };
+            let chunk = grown.min(rest.len());
+            if chunk < rest.len() {
+                rest.select_nth_unstable_by(chunk - 1, &self.order);
+            }
+            rest[..chunk].sort_unstable_by(&self.order);
+            self.ranked += chunk;
+            self.passes += 1;
+        }
+        drawn.extend_from_slice(&self.rows[self.next..self.next + need]);
+        self.next += need;
+    }
+}
+
 /// `None` means the budget ended during the judgment and `ranking` already says so.
 fn judge_page(
     kernel: &KernelStore,
@@ -1495,6 +1546,68 @@ mod tests {
             248,
             "no eligible row yet: every remaining row"
         );
+    }
+
+    /// Drawing `n` rows one at a time costs at most `4 n log n` comparisons, so a scan that judges every row in small batches pays for one ranking of its rows.
+    #[test]
+    fn drawing_every_row_one_at_a_time_costs_n_log_n_comparisons() {
+        let n = 1usize << 13;
+        let rank = |left: &(f64, usize), right: &(f64, usize)| {
+            right.0.total_cmp(&left.0).then(left.1.cmp(&right.1))
+        };
+        // Scores repeat, so ties fall to the key as `rank_order` falls to the identifier.
+        let rows: Vec<(f64, usize)> = (0..n)
+            .map(|key| (((key * 7919) % 509) as f64, key))
+            .collect();
+        let mut expected = rows.clone();
+        expected.sort_by(rank);
+        let comparisons = std::cell::Cell::new(0usize);
+        let mut unjudged = Unjudged::new(rows, |left: &(f64, usize), right: &(f64, usize)| {
+            comparisons.set(comparisons.get() + 1);
+            rank(left, right)
+        });
+        let mut drawn = Vec::new();
+        let mut order = Vec::with_capacity(n);
+        while unjudged.len() != 0 {
+            unjudged.draw(&mut drawn, 1);
+            order.push(drawn.remove(0));
+        }
+        assert_eq!(order, expected);
+        let bound = 4 * n * n.ilog2() as usize;
+        assert!(
+            comparisons.get() <= bound,
+            "{} comparisons for {n} rows, above {bound}",
+            comparisons.get()
+        );
+    }
+
+    /// Rows a batch drew but did not judge stay ahead of every row still undrawn, so mixed batch sizes yield the full rank order.
+    #[test]
+    fn rows_left_drawn_stay_ahead_of_the_undrawn_rows() {
+        let rank = |left: &(f64, usize), right: &(f64, usize)| {
+            right.0.total_cmp(&left.0).then(left.1.cmp(&right.1))
+        };
+        let rows: Vec<(f64, usize)> = (0..200)
+            .map(|key| (((key * 37) % 23) as f64, key))
+            .collect();
+        let mut expected = rows.clone();
+        expected.sort_by(rank);
+        let mut unjudged = Unjudged::new(rows, rank);
+        let mut drawn = Vec::new();
+        let mut order = Vec::new();
+        for (want, taken) in [(5, 2), (1, 1), (7, 7), (3, 1), (9, 4), (2, 2)]
+            .into_iter()
+            .cycle()
+        {
+            if drawn.len() + unjudged.len() == 0 {
+                break;
+            }
+            let want = want.min(drawn.len() + unjudged.len());
+            unjudged.draw(&mut drawn, want);
+            assert!(drawn.len() >= want);
+            order.extend(drawn.drain(..taken.min(want)));
+        }
+        assert_eq!(order, expected);
     }
 
     /// A ranking discarded for an ended budget keeps `candidates` in step with the emptied `ranked`.
