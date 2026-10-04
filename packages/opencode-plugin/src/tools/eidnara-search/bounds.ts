@@ -1,13 +1,14 @@
 import { estimateTokens } from "../../shared/token-estimator";
 
-/** The query validator checks the 16 KiB UTF-8 limit before trimming or tokenization. */
-export const MAX_QUERY_BYTES = 16 * 1024;
+/** The query validator checks the fused route's 4 KiB UTF-8 limit before trimming or tokenization. */
+export const MAX_QUERY_BYTES = 4096;
 export const MAX_QUERY_TOKENS = 512;
-/** The memory ranker scans every operand against every served row, so the operand count bounds its work. */
-export const MAX_QUERY_ATOMS = 64;
+/** The memory ranker scans every operand against every served row, so the operand count bounds its work; the fused route's lexical lane admits 16. */
+export const MAX_QUERY_ATOMS = 16;
 /** Missing or non-finite result-limit requests default to 10. */
 export const DEFAULT_SEARCH_RESULT_LIMIT = 10;
-export const MAX_SEARCH_RESULT_LIMIT = 50;
+/** The fused route serves at most 32 entries. */
+export const MAX_SEARCH_RESULT_LIMIT = 32;
 export const MAX_RENDERED_RESULT_TOKENS = 4096;
 /** Renderers must apply the 1024-byte field limit before tokenization or compression. */
 export const MAX_RENDER_FIELD_BYTES = 1024;
@@ -108,21 +109,43 @@ export function prepareExplicitQuery(raw: string): ExplicitQueryPreparation {
     return { ok: true, query: trimmed };
 }
 
-/** The function returns the longest prefix of `text` whose UTF-8 encoding is at most `maxBytes` without splitting surrogate pairs. */
+/** The cast supplies the `String.prototype.isWellFormed` signature for ES2022 library typings. */
+export function isWellFormed(text: string): boolean {
+    return (text as string & { isWellFormed(): boolean }).isWellFormed();
+}
+
+const utf8Encoder = new TextEncoder();
+let utf8Scratch = new Uint8Array(MAX_RENDER_FIELD_BYTES);
+
+/** `truncateUtf8Bytes` returns the longest prefix of `text` that preserves surrogate pairs and fits within `maxBytes` UTF-8 bytes. */
 export function truncateUtf8Bytes(text: string, maxBytes: number): string {
-    if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+    // A UTF-16 code unit encodes to at most 3 bytes.
+    if (text.length * 3 <= maxBytes) return text;
+    // Every code unit encodes to at least one byte, so the cut falls within the first `maxBytes + 1` units.
+    const window = text.length > maxBytes ? text.slice(0, maxBytes + 1) : text;
+    if (Number.isSafeInteger(maxBytes) && maxBytes >= 0 && isWellFormed(window)) {
+        // `Buffer.byteLength` is exact for well-formed text.
+        if (text.length <= maxBytes && Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+        if (utf8Scratch.length < maxBytes) utf8Scratch = new Uint8Array(maxBytes);
+        let { read } = utf8Encoder.encodeInto(window, utf8Scratch.subarray(0, maxBytes));
+        // In a well-formed window a cut after a high surrogate splits a pair.
+        if (read > 0 && (window.charCodeAt(read - 1) & 0xfc00) === 0xd800) read -= 1;
+        return text.slice(0, read);
+    }
     return text.slice(0, utf8PrefixEnd(text, maxBytes));
 }
 
-/** Iterating by code point keeps a surrogate pair as one 4-byte unit so the cut never lands inside it. */
+/** A surrogate pair encodes as one 4-byte code point; a lone surrogate encodes as 3-byte U+FFFD. The cut falls on a code point boundary. */
 function utf8PrefixEnd(text: string, maxBytes: number): number {
     let bytes = 0;
     let end = 0;
-    for (const char of text) {
-        const charBytes = Buffer.byteLength(char, "utf8");
-        if (bytes + charBytes > maxBytes) break;
-        bytes += charBytes;
-        end += char.length;
+    while (end < text.length) {
+        const unit = text.charCodeAt(end);
+        const pair = (unit & 0xfc00) === 0xd800 && (text.charCodeAt(end + 1) & 0xfc00) === 0xdc00;
+        const size = pair ? 4 : unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+        if (bytes + size > maxBytes) break;
+        bytes += size;
+        end += pair ? 2 : 1;
     }
     return end;
 }
