@@ -269,20 +269,24 @@ Reachability: test-only - as above.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_eligible_suffix`
-and `an_all_eligible_scan_judges_only_the_pool`.
+and `an_all_eligible_scan_judges_only_the_pool`; `crates/retrieval/src/dense/oracle.rs`
+`rows_left_drawn_stay_ahead_of_the_undrawn_rows` for the best-first draw order.
 Guarantee: Rows the kernel rejects take no place in the pool and do not end
 the scan, so twenty hidden leaders ahead of a pool of four and pages of four
 leave the four best eligible rows in the pool; rows are judged best first
-after the walk, so the rows judged are the pool and every rejected row ranked
-above its last member.
+after the walk, so a pool that fills was judged over itself, every rejected
+row ranked above its last member, and the rest of the batch that filled it,
+at most a page of rows.
 Check: `always` - the pool equals the reference top four of the eligible
-suffix and at least four hidden rows were judged; with one page of forty the
-first batch is the four hidden leaders and the second judges the rest, so all
-twenty hidden rows and two batches are counted; with every row eligible the
-scan judges exactly `R` rows in batches of at most a page; the unchecked
-top-R-then-filter over the same rows returns nothing, so the fixture separates
-the two. `always` because the bound is the scan's own population, which it
-always completes when its bounds allow.
+suffix and at least four hidden rows were judged; with pages of four the scan
+judges exactly the twenty hidden rows and the pool, 24 rows in six batches;
+with one page of forty the first batch is the four hidden leaders and the
+second judges the rest, so all twenty hidden rows, two batches, and forty
+judged rows are counted, sixteen of them eligible rows below the pool; with
+every row eligible the scan judges exactly `R` rows in batches of at most a
+page; the unchecked top-R-then-filter over the same rows returns nothing, so
+the fixture separates the two. `always` because the bound is the scan's own
+population, which it always completes when its bounds allow.
 Fault/timing angle: none.
 Required faults and enabling state: A rejected score prefix longer than both
 the pool and the page.
@@ -340,7 +344,10 @@ Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `an_ended_budget_returns_no_candidate`,
 `an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush`,
 `a_coverage_shortfall_keeps_the_pool_and_says_so`, and
-`codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read`.
+`codes_that_do_not_cover_their_layer_refuse_before_the_projection_is_read`;
+`crates/retrieval/src/dense/oracle.rs`
+`a_batch_reserves_only_the_slots_its_batch_bytes_can_fill` for the slot
+reservation.
 Guarantee: The scan-row bound, the batch-byte bound on the rows of one
 judgment batch, the heap-byte bound on the accepted set, the preallocated-slot
 check, the kernel batch limit on the pool, and the request budget each stop
@@ -364,9 +371,11 @@ Required faults and enabling state: Each bound set at, and one unit below,
 the value the fixture needs.
 Confidence: high - [evidence](evidence/dense-scan-bounds-end-with-no-candidate.md).
 Batch bytes are checked from the row's strings before a batch candidate is
-allocated (`Progress::read_candidate`, `crates/retrieval/src/dense/oracle.rs:1081`)
-and heap bytes before an eligible row moves into the set (`Progress::hold`,
-`oracle.rs:1206`). The heap bound covers the set while the scan runs; the
+allocated (`Progress::read_candidate`, `crates/retrieval/src/dense/oracle.rs:1090`),
+and a batch reserves only the candidate and score slots its batch bytes can
+fill (`Stored::batch_slots`, `oracle.rs:641`); heap bytes are checked before an
+eligible row moves into the set (`Progress::hold`,
+`oracle.rs:1215`). The heap bound covers the set while the scan runs; the
 result moves the same entries through two more vectors of at most `R` slots,
 which the bound does not count. The scan also keeps, per resolved winner, a
 live bit, a rowid, and a prefix-table slot, and per scored row a score and a

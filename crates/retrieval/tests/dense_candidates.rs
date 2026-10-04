@@ -348,13 +348,19 @@ fn a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_elig
             .map(|(_, count)| count)
             .sum();
         assert!(excluded >= 4, "rejected leaders were judged: {excluded}");
+        if page_rows == 4 {
+            // Four-row batches judge exactly the twenty hidden leaders and the pool: five batches admit nothing, the sixth fills the set.
+            assert_eq!(pool.ranking.consumed.judged, 24);
+            assert_eq!(pool.ranking.consumed.batches, 6);
+        }
         if page_rows == 40 {
-            // One page: the first batch is the four best rows, all hidden; it admits nothing, so the rest is one batch.
+            // One page: the first batch is the four best rows, all hidden; it admits nothing, so the rest is one batch, which also judges the sixteen eligible rows below the pool.
             assert_eq!(
                 pool.ranking.consumed.excluded,
                 vec![(EligibilityVerdict::Hidden, 20)]
             );
             assert_eq!(pool.ranking.consumed.batches, 2);
+            assert_eq!(pool.ranking.consumed.judged, 40);
         }
     }
 

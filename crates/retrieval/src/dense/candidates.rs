@@ -1,7 +1,7 @@
 //! Selects one global pool of quantized candidates over a composition's resolved layers.
 //! Resolution runs first, so only each occurrence's winning row is scored; each winner scores its own layer's codes under a query encoded with that layer's scales.
-//! The walk is the oracle's ranked walk: it visits the live population in rowid order and marks which winners are live, then every live winner is scored, and the kernel judges those rows best first in bounded batches before any is admitted, until the pool holds `R` eligible rows and the best unjudged row ranks below them.
-//! A rejected row takes no place in the pool and never ends the scan; every batch runs after the walk under one snapshot, so the pool needs no re-judgment, and the rows judged are the pool and every excluded row ranked above its last member.
+//! The oracle's ranked walk visits the live population in rowid order and marks the live winners, every live winner is scored, and the kernel judges them best first in bounded batches before any is admitted, until the pool holds `R` eligible rows or the winners run out.
+//! A rejected row takes no place in the pool and never ends the scan; every batch runs after the walk under one snapshot, so the pool needs no re-judgment, and a pool that fills was judged over itself, every excluded row ranked above its last member, and the rest of the batch that filled it.
 //! Beyond the pool and one judgment batch, the scan keeps per resolved winner a live bit, a rowid, and a slot of a prefix table at most half full, and per scored row a score and a winner index; the resolution's `max_entries` bounds them all.
 //! A walk that ends before every live required row was visited, that reaches a storage bound, or whose authority moved returns no candidate; only a coverage shortfall leaves the pool in place, marked incomplete.
 

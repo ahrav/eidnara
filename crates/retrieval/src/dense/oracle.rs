@@ -3,7 +3,7 @@
 //! Judging only rows that can enter the set returns the same rows as judging every row: a member of the final top-K outranks the worst held member at every earlier point of the walk, so it is never skipped.
 //! A live required row without a vector is a coverage shortfall, so the result is incomplete even when every scored row was eligible; a kernel snapshot or incarnation that moves between batches ends the walk the same way.
 //! The walk itself is shared: a `RowSource` supplies the page query and the vector of each visited row, so the oracle reads `occurrence_vectors` and the layered ranking reads resolved layer rows through one judgment, admission, and revalidation path.
-//! A ranked walk visits the same population in rowid order, scores every visited row once its last page is read, and judges those rows best first across the whole walk until `k` eligible rows are held and the best unjudged row cannot enter; the rows judged are then the eligible top-K and every excluded row ranked above its last member.
+//! A ranked walk visits the same population in rowid order, scores every visited row once its last page is read, and judges those rows best first across the whole walk until `k` eligible rows are held or the rows run out; a set that fills was judged over the eligible top-K, every excluded row ranked above its last member, and the rest of the batch that filled it, at most `page_rows` rows.
 //! Those batches run after every page under one snapshot, so a ranked walk returns its held set without a re-judgment.
 
 use std::num::NonZeroUsize;
