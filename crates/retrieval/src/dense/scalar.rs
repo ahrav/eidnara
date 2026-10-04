@@ -276,6 +276,10 @@ pub fn check_codes(codes: &[i8], dimension: u32) -> Result<(), ScalarBytesReject
             actual: codes.len(),
         });
     }
+    // `ReservedCode` names a coordinate, so a row holding `i8::MIN` takes a second search for it.
+    if !codes.contains(&i8::MIN) {
+        return Ok(());
+    }
     match codes.iter().position(|code| *code == i8::MIN) {
         Some(coordinate) => Err(ScalarBytesRejection::ReservedCode { coordinate }),
         None => Ok(()),

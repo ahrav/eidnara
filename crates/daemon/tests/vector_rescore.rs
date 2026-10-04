@@ -109,6 +109,7 @@ fn run(
                     RescoreEvent::ReadOriginal { member, row } => {
                         reads.push((member.to_owned(), row));
                     }
+                    RescoreEvent::Scan(_) => {}
                 },
             ))
         })

@@ -23,9 +23,11 @@ use retrieval::claims::{
     ClaimCandidateBounds, ClaimCandidateError, UseVerdict, classify_selected_claims,
     validate_for_surface,
 };
+use retrieval::dense::scalar::ScalarRecipe;
 use retrieval::dense::{
+    CandidateCapacity, CandidatePolicy, CandidateRefusal, CapacityRefusal,
     Completion as DenseCompletion, ExhaustiveQuery, IncompleteReason as DenseIncompleteReason,
-    Metric, OracleBounds, OracleRefusal, exhaustive,
+    LayeredRefusal, Metric, OracleBounds, OracleRefusal, Rescored, ScanBounds, exhaustive,
 };
 use retrieval::eligibility::{
     Authority, AuthorityMoved, Disposition, EligibilityReport, OccurrenceCandidate, judge_tracked,
@@ -49,12 +51,17 @@ use storage::{GuardedConn, StoreError};
 
 use crate::dispatch::{PreparedOutcome, PreparedOutput, measure_json};
 use crate::kernel_routes::RouteScope;
+use crate::projection_gates::Admission;
 use crate::request_budget::{
     BlockingFailure, BudgetRefusal, Exhaustion, RequestBudget, SharedBudget,
 };
 use crate::search_lifecycle_owner::SearchLifecycleOwner;
 use crate::search_projection::{SearchProjection, SearchProjectionError};
 use crate::transform_unit::{UnitOutcome, UnitRunner};
+use crate::vector_generation::ExpectedVectors;
+use crate::vector_reader::{
+    CompressedRefusal, CompressedRequest, PinnedVectors, RescoreEvent, rank_compressed,
+};
 use crate::{HandlerCore, invalid_params_error};
 
 pub(crate) const OPERATION: &str = "retrieval.query";
@@ -62,7 +69,7 @@ pub(crate) const OPERATION: &str = "retrieval.query";
 const CLAIM_CAUSAL_PAYLOAD_BYTES: std::num::NonZeroU64 =
     std::num::NonZeroU64::new(1024 * 1024).expect("nonzero");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum LimitsRefusal {
     #[error(
         "validation_batch {value} exceeds the kernel's {MAX_ELIGIBILITY_CANDIDATES} candidate batch"
@@ -82,6 +89,10 @@ pub enum LimitsRefusal {
     Dense { bound: &'static str, value: usize },
     #[error("dense unit_norm_tolerance must be finite and not negative")]
     DenseTolerance,
+    #[error("the dense candidate pool is refused: {0}")]
+    DenseCapacity(CapacityRefusal),
+    #[error("compressed dense vectors need declared dense limits")]
+    DenseUndeclared,
 }
 
 /// An absent dense limit set leaves the dense lane undeclared; RP2.9 approves the values before it is declared.
@@ -432,6 +443,8 @@ fn hit(occurrence_id: &str, raw_score: RawScore) -> Result<LaneHit, IdentityRefu
 
 pub struct DenseRequest<'a> {
     pub generation: &'a VectorGeneration,
+    /// The kernel incarnation the projection was built for, which every generation the producer reads must name.
+    pub kernel_incarnation_id: &'a str,
     pub query: &'a [f32],
     pub authority: Authority<'a>,
     pub budget: &'a EvalBudget,
@@ -487,48 +500,12 @@ impl DenseProducer for ExhaustiveProducer {
                 max_rows: self.limits.max_rows,
             },
         };
-        let ranking =
-            exhaustive(conn, kernel, &query, request.budget).map_err(|refusal| match refusal {
-                OracleRefusal::BudgetExhausted
-                | OracleRefusal::Projection(ProjectionError::Interrupted)
-                | OracleRefusal::Kernel(KernelError::Deadline) => DenseRefusal::Budget,
-                OracleRefusal::Query(_) => DenseRefusal::QueryShape,
-                OracleRefusal::StoredRow { .. } | OracleRefusal::Unreadable { .. } => {
-                    DenseRefusal::Corruption
-                }
-                OracleRefusal::ReadFailed { .. } => DenseRefusal::Unavailable("read_failed"),
-                OracleRefusal::BatchOverBound { .. } => {
-                    DenseRefusal::Unavailable("batch_over_bound")
-                }
-                OracleRefusal::HeapOverBound { .. } => DenseRefusal::Unavailable("heap_over_bound"),
-                OracleRefusal::Projection(error) => {
-                    DenseRefusal::Unavailable(projection_reason(&error))
-                }
-                OracleRefusal::Kernel(_) => DenseRefusal::Unavailable("kernel"),
-            })?;
+        let ranking = exhaustive(conn, kernel, &query, request.budget).map_err(oracle_refusal)?;
         let status = match ranking.completion {
-            DenseCompletion::Complete => LaneStatus::Complete,
-            DenseCompletion::Incomplete(DenseIncompleteReason::BudgetExhausted) => {
-                return Err(DenseRefusal::Budget);
-            }
-            DenseCompletion::Incomplete(DenseIncompleteReason::DenseCoverageShortfall) => {
-                LaneStatus::Incomplete("coverage_shortfall")
-            }
             DenseCompletion::Incomplete(DenseIncompleteReason::RowBound) => {
                 LaneStatus::Incomplete("row_bound")
             }
-            DenseCompletion::Incomplete(DenseIncompleteReason::KernelIncarnationChanged) => {
-                return Err(DenseRefusal::Unavailable("kernel_incarnation_changed"));
-            }
-            DenseCompletion::Incomplete(DenseIncompleteReason::SnapshotChanged) => {
-                return Err(DenseRefusal::Unavailable("snapshot_changed"));
-            }
-            DenseCompletion::Incomplete(DenseIncompleteReason::BatchBytes) => {
-                return Err(DenseRefusal::Unavailable("batch_bytes"));
-            }
-            DenseCompletion::Incomplete(DenseIncompleteReason::HeapBytes) => {
-                return Err(DenseRefusal::Unavailable("heap_bytes"));
-            }
+            completion => lane_status(completion)?,
         };
         Ok(DenseRanking {
             hits: ranking
@@ -539,6 +516,219 @@ impl DenseProducer for ExhaustiveProducer {
                 .collect(),
             status,
         })
+    }
+}
+
+fn oracle_refusal(refusal: OracleRefusal) -> DenseRefusal {
+    match refusal {
+        OracleRefusal::BudgetExhausted
+        | OracleRefusal::Projection(ProjectionError::Interrupted)
+        | OracleRefusal::Kernel(KernelError::Deadline) => DenseRefusal::Budget,
+        OracleRefusal::Query(_) => DenseRefusal::QueryShape,
+        OracleRefusal::StoredRow { .. } | OracleRefusal::Unreadable { .. } => {
+            DenseRefusal::Corruption
+        }
+        OracleRefusal::ReadFailed { .. } => DenseRefusal::Unavailable("read_failed"),
+        OracleRefusal::BatchOverBound { .. } => DenseRefusal::Unavailable("batch_over_bound"),
+        OracleRefusal::HeapOverBound { .. } => DenseRefusal::Unavailable("heap_over_bound"),
+        OracleRefusal::Projection(error) => DenseRefusal::Unavailable(projection_reason(&error)),
+        OracleRefusal::Kernel(_) => DenseRefusal::Unavailable("kernel"),
+    }
+}
+
+/// A complete walk serves; a coverage shortfall serves marked incomplete; an ended budget ends the request; every other stop degrades the lane with its reason. The exhaustive producer keeps its rows at the row bound and serves that stop itself.
+fn lane_status(completion: DenseCompletion) -> Result<LaneStatus, DenseRefusal> {
+    let reason = match completion {
+        DenseCompletion::Complete => return Ok(LaneStatus::Complete),
+        DenseCompletion::Incomplete(DenseIncompleteReason::DenseCoverageShortfall) => {
+            return Ok(LaneStatus::Incomplete("coverage_shortfall"));
+        }
+        DenseCompletion::Incomplete(DenseIncompleteReason::BudgetExhausted) => {
+            return Err(DenseRefusal::Budget);
+        }
+        DenseCompletion::Incomplete(DenseIncompleteReason::RowBound) => "row_bound",
+        DenseCompletion::Incomplete(DenseIncompleteReason::KernelIncarnationChanged) => {
+            "kernel_incarnation_changed"
+        }
+        DenseCompletion::Incomplete(DenseIncompleteReason::SnapshotChanged) => "snapshot_changed",
+        DenseCompletion::Incomplete(DenseIncompleteReason::BatchBytes) => "batch_bytes",
+        DenseCompletion::Incomplete(DenseIncompleteReason::HeapBytes) => "heap_bytes",
+    };
+    Err(DenseRefusal::Unavailable(reason))
+}
+
+/// Bounds of the compressed producer beyond [`DenseLimits`]; RP2.9 approves the values before a view is installed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompressedLimits {
+    /// How the quantized pool's size follows from the lane's `k`.
+    pub candidates: CandidatePolicy,
+    pub scan: ScanBounds,
+    /// Rows and tombstones the view's layers may carry together.
+    pub max_entries: NonZeroUsize,
+    pub max_layers: NonZeroUsize,
+    pub max_pinned_bytes: u64,
+    pub max_read_bytes: u64,
+}
+
+impl CompressedLimits {
+    /// The pool `k` and the policy give; the kernel's eligibility batch must be able to re-judge it whole.
+    pub fn capacity(&self, dense: &DenseLimits) -> Result<CandidateCapacity, LimitsRefusal> {
+        let capacity = CandidateCapacity::new(dense.k.get(), self.candidates)
+            .map_err(LimitsRefusal::DenseCapacity)?
+            .ok_or(LimitsRefusal::Dense {
+                bound: "k",
+                value: 0,
+            })?;
+        for (bound, value) in [
+            ("candidates", capacity.candidates().get()),
+            ("scan_page_rows", self.scan.page_rows.get()),
+        ] {
+            if value > MAX_ELIGIBILITY_CANDIDATES {
+                return Err(LimitsRefusal::Dense { bound, value });
+            }
+        }
+        Ok(capacity)
+    }
+}
+
+/// A verified composition the dense lane ranks through, the grant its ledger charges are taken under, and the producer's bounds.
+#[derive(Clone)]
+pub struct DenseVectors {
+    view: Arc<PinnedVectors>,
+    grant: Admission,
+    limits: CompressedLimits,
+    #[cfg(any(test, feature = "test-support"))]
+    observe: Option<DenseObserver>,
+}
+
+/// A test's view of the ranking's progress, run on the blocking thread that ranks.
+#[cfg(any(test, feature = "test-support"))]
+pub type DenseObserver = Arc<dyn Fn(RescoreEvent<'_>) + Send + Sync>;
+
+impl DenseVectors {
+    pub fn new(view: Arc<PinnedVectors>, grant: Admission, limits: CompressedLimits) -> Self {
+        Self {
+            view,
+            grant,
+            limits,
+            #[cfg(any(test, feature = "test-support"))]
+            observe: None,
+        }
+    }
+
+    /// Runs `observe` at every scan window and rescore event, on the blocking thread that ranks, so a test can hold the physical work there.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_observer_for_test(mut self, observe: DenseObserver) -> Self {
+        self.observe = Some(observe);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn observe(&self, event: RescoreEvent<'_>) {
+        if let Some(observe) = &self.observe {
+            observe(event);
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn observe(&self, _event: RescoreEvent<'_>) {}
+}
+
+/// The compressed producer: one quantized pool over the view's pinned codes, rescored from the same pinned original rows.
+/// The producer owns a clone of the view's `Arc`, so a unit that moves the producer into its work keeps the view's pins and charges until that work returns.
+pub struct CompressedProducer {
+    pub limits: DenseLimits,
+    pub vectors: DenseVectors,
+}
+
+impl DenseProducer for CompressedProducer {
+    fn rank(
+        &self,
+        conn: &GuardedConn<'_>,
+        kernel: &KernelStore,
+        request: DenseRequest<'_>,
+    ) -> Result<DenseRanking, DenseRefusal> {
+        let vectors = &self.vectors;
+        // Installation checked the pool against the route's limits; this check covers a producer built outside the handler and a request whose limits were read before a concurrent reinstallation.
+        let capacity = vectors
+            .limits
+            .capacity(&self.limits)
+            .map_err(|_| DenseRefusal::Unavailable("capacity"))?;
+        let expected = ExpectedVectors {
+            generation: request.generation,
+            kernel_incarnation_id: request.kernel_incarnation_id,
+            metric: Metric::InnerProduct,
+            unit_norm_tolerance: self.limits.unit_norm_tolerance,
+            recipe: ScalarRecipe::SymmetricInt8V1,
+            checkpoint: None,
+        };
+        let compressed = CompressedRequest {
+            expected: &expected,
+            query: request.query,
+            authority: request.authority,
+            capacity,
+            bounds: vectors.limits.scan,
+            max_entries: vectors.limits.max_entries,
+            max_layers: vectors.limits.max_layers,
+            max_pinned_bytes: vectors.limits.max_pinned_bytes,
+            max_read_bytes: vectors.limits.max_read_bytes,
+        };
+        let mut observe = |event: RescoreEvent<'_>| vectors.observe(event);
+        let ranking = rank_compressed(
+            &vectors.view,
+            conn,
+            kernel,
+            &compressed,
+            request.budget,
+            &vectors.grant,
+            &mut observe,
+        )
+        .map_err(compressed_refusal)?;
+        let status = lane_status(ranking.pool.ranking.completion)?;
+        let Rescored { ranked, candidates } = ranking.rescored;
+        Ok(DenseRanking {
+            hits: candidates
+                .into_iter()
+                .zip(ranked)
+                .map(|(candidate, row)| (candidate, row.score))
+                .collect(),
+            status,
+        })
+    }
+}
+
+/// Installed vectors need declared dense limits whose `k` gives an admissible pool.
+fn check_pair(
+    limits: Option<&QueryRouteLimits>,
+    vectors: &DenseVectors,
+) -> Result<(), LimitsRefusal> {
+    let dense = limits
+        .and_then(|limits| limits.dense)
+        .ok_or(LimitsRefusal::DenseUndeclared)?;
+    vectors.limits.capacity(&dense).map(|_| ())
+}
+
+fn compressed_refusal(refusal: CompressedRefusal) -> DenseRefusal {
+    match refusal {
+        CompressedRefusal::Budget => DenseRefusal::Budget,
+        CompressedRefusal::Query(_)
+        | CompressedRefusal::Candidates(CandidateRefusal::Query { .. }) => DenseRefusal::QueryShape,
+        CompressedRefusal::Candidates(CandidateRefusal::Layered(LayeredRefusal::Oracle(
+            refusal,
+        ))) => oracle_refusal(refusal),
+        CompressedRefusal::Corrupt { .. } => DenseRefusal::Corruption,
+        CompressedRefusal::Io { .. } => DenseRefusal::Unavailable("read_failed"),
+        CompressedRefusal::Quarantined { .. } => DenseRefusal::Unavailable("quarantined"),
+        CompressedRefusal::Identity { .. } => DenseRefusal::Unavailable("identity"),
+        CompressedRefusal::Layers { .. }
+        | CompressedRefusal::PinnedBytes { .. }
+        | CompressedRefusal::ReadBytes { .. } => DenseRefusal::Unavailable("view_bound"),
+        CompressedRefusal::Reservation { .. } => DenseRefusal::Unavailable("reservation"),
+        CompressedRefusal::Candidates(
+            CandidateRefusal::Codes { .. }
+            | CandidateRefusal::CodeRows { .. }
+            | CandidateRefusal::Layered(_),
+        ) => DenseRefusal::Unavailable("layers"),
     }
 }
 
@@ -703,6 +893,7 @@ fn dense_lane(
     };
     let request = DenseRequest {
         generation: &generation,
+        kernel_incarnation_id: &identity.kernel_incarnation_id,
         query,
         authority,
         budget: budget.eval(),
@@ -1509,6 +1700,7 @@ fn unavailable_response(reason: &'static str) -> PreparedOutcome {
 }
 
 impl HandlerCore {
+    /// With dense vectors installed, the new limits must declare dense limits that serve them; uninstall the vectors first to remove dense limits.
     pub fn set_query_route_limits(
         &self,
         limits: Option<QueryRouteLimits>,
@@ -1516,10 +1708,36 @@ impl HandlerCore {
         if let Some(limits) = &limits {
             limits.validate()?;
         }
-        *self
+        // Route limits, then vectors: both setters take the locks in this order and check the pair before either changes.
+        let mut route = self
             .query_route
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = limits.map(Arc::new);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let vectors = self
+            .dense_vectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vectors) = vectors.as_ref() {
+            check_pair(limits.as_ref(), vectors)?;
+        }
+        *route = limits.map(Arc::new);
+        Ok(())
+    }
+
+    /// Installs the composition the dense lane ranks through, or removes it so the lane runs the exhaustive producer. The pool the installed limits give is checked against the route's dense limits first, and a later change of route limits is checked against it again.
+    pub fn set_dense_vectors(&self, vectors: Option<DenseVectors>) -> Result<(), LimitsRefusal> {
+        let route = self
+            .query_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut installed = self
+            .dense_vectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(vectors) = &vectors {
+            check_pair(route.as_deref(), vectors)?;
+        }
+        *installed = vectors;
         Ok(())
     }
 
@@ -1614,6 +1832,12 @@ impl HandlerCore {
             drop(budget);
             return terminal_response(terminal);
         }
+        // Cloned once the embedding settled and moved into the unit, so the view's pins and charges stay with the physical work.
+        let dense_vectors = self
+            .dense_vectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let work = runner.run_unit(Box::new(move || {
             let reader = match lifecycle.pin(shared.eval()) {
                 Ok(reader) => reader,
@@ -1624,14 +1848,19 @@ impl HandlerCore {
                     return UnitOutcome::Terminal(unavailable_response("no_family"));
                 }
             };
-            let producer = limits
-                .dense
-                .map(|dense| ExhaustiveProducer { limits: dense });
+            let producer: Option<Box<dyn DenseProducer>> =
+                limits.dense.map(|dense| match dense_vectors {
+                    Some(vectors) => Box::new(CompressedProducer {
+                        limits: dense,
+                        vectors,
+                    }) as Box<dyn DenseProducer>,
+                    None => Box::new(ExhaustiveProducer { limits: dense }),
+                });
             let dense = match (&embedded, &producer) {
                 (Embedded::Vector(vector), Some(producer)) => DenseLane::Ready {
                     query: vector,
                     generation_id: &reader.consumer().generation_id,
-                    producer,
+                    producer: producer.as_ref(),
                 },
                 (Embedded::Unavailable(reason), _) => DenseLane::Unavailable(reason),
                 (Embedded::Undeclared, _) | (Embedded::Vector(_), None) => DenseLane::Undeclared,

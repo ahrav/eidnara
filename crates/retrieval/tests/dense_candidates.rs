@@ -8,13 +8,13 @@ use std::num::NonZeroUsize;
 
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
-use retrieval::dense::candidates::select_candidates_with_hook_for_test;
 use retrieval::dense::oracle::{HELD_SLOT_BYTES, held_bytes, selected_bytes};
 use retrieval::dense::scalar::{QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::{
     CandidateCapacity, CandidatePolicy, CandidatePool, CandidateQuery, CandidateRefusal,
     Completion, IncompleteReason, Layer, LayerCodes, LayeredRefusal, Metric, OracleRefusal,
     RescoreRefusal, ScanBounds, StorageBounds, Window, WinnerRow, rescore_pool,
+    select_candidates_observed,
 };
 use retrieval::eligibility::OccurrenceCandidate;
 
@@ -127,7 +127,7 @@ fn select<'a>(
     fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -749,7 +749,7 @@ fn an_ended_budget_returns_no_candidate() {
     let pool = fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -813,6 +813,15 @@ fn a_coverage_shortfall_keeps_the_pool_and_says_so() {
         Completion::Incomplete(IncompleteReason::RowBound)
     );
     assert_discarded(&bounded);
+    let coverage = |pool: &CandidatePool| {
+        let coverage = pool.ranking.coverage;
+        (coverage.missing_pending, coverage.missing_without_pending)
+    };
+    assert_eq!(coverage(&pool), (0, 1));
+    fixture.job_state("beta", "pending");
+    let reopened = select(&fixture, &layers, &codes, &axis(0), 3, roomy(2), |_| {}).unwrap();
+    assert_eq!(coverage(&reopened), (1, 0));
+    assert_eq!(pool_of(&reopened), pool_of(&pool));
 }
 
 #[test]
@@ -847,7 +856,7 @@ fn an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush() {
     let pool = fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,

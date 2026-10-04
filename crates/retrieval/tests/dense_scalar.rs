@@ -2,7 +2,7 @@ use kernel::source_identity::OccurrenceClass;
 use retrieval::dense::codec::{self, Metric, RowLayout, RowRejection};
 use retrieval::dense::scalar::{
     CODE_MAX, CODE_MIN, CalibrationRejection, ScalarBytesRejection, ScalarRecipe, Scales,
-    calibrate, decode_codes, encode, encode_codes, weighted_dot,
+    calibrate, check_codes, decode_codes, encode, encode_codes, weighted_dot,
 };
 use retrieval::dense::{inner_product, rank_order, rescore};
 
@@ -643,6 +643,24 @@ fn scales_and_codes_round_trip_deterministically_and_refuse_malformed_bytes() {
     );
     assert_eq!(ScalarRecipe::from_id("scalar-int8-symmetric.v2"), None);
     assert_eq!(ScalarRecipe::from_id(""), None);
+}
+
+#[test]
+fn a_reserved_code_anywhere_in_a_wide_row_is_refused_at_its_first_coordinate() {
+    let dimension = 397u32;
+    let clean: Vec<i8> = (0..dimension)
+        .map(|i| ((i % 255) as i32 - 127) as i8)
+        .collect();
+    assert_eq!(check_codes(&clean, dimension), Ok(()));
+    for coordinate in 0..dimension as usize {
+        let mut codes = clean.clone();
+        codes[coordinate] = i8::MIN;
+        codes[dimension as usize - 1] = i8::MIN;
+        assert_eq!(
+            check_codes(&codes, dimension),
+            Err(ScalarBytesRejection::ReservedCode { coordinate })
+        );
+    }
 }
 
 /// Pinned bytes for the fixed corpus. A recipe change needs a new `ScalarRecipe`

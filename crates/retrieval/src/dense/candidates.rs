@@ -200,9 +200,8 @@ pub fn select_candidates<'a>(
     select_inner(conn, kernel, request, budget, |_| {})
 }
 
-/// See [`super::oracle::exhaustive_with_hook_for_test`].
-#[cfg(feature = "test-support")]
-pub fn select_candidates_with_hook_for_test<'a>(
+/// [`select_candidates`] with `observe` run before each visited row is decoded, after each judgment and each page, and once before the final re-judgment, so a caller can watch the scan's progress or act inside its windows.
+pub fn select_candidates_observed<'a>(
     conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     request: &CandidateQuery<'a>,

@@ -14,7 +14,7 @@ RP2.6 R1 to R3 and #610 AC1 and AC3: a complete scan yields
   `Cursor::seek` (`crates/retrieval/src/dense/layered.rs:99`), so rows a newer
   layer superseded or masked are never loaded.
 - The pool's capacity is `CandidateCapacity::candidates`
-  (`candidates.rs:255`).
+  (`candidates.rs:254`).
 
 ## Failure scenario
 

@@ -335,8 +335,8 @@ pub(super) struct PageRow<'r> {
     pub source_artifact_digest: &'r str,
     /// The projection's stored vector bytes, when the page query selects them.
     pub stored: Option<&'r [u8]>,
-    /// Durable work for the row's vector is still open.
-    pub pending: bool,
+    /// Durable work for the row's vector is still open; `None` when the page query leaves it to [`probe_pending`], which the walk runs only for a row the source holds nothing for.
+    pub pending: Option<bool>,
 }
 
 /// The quoted codes of every class that requires a vector, for an SQL `IN` list.
@@ -364,6 +364,25 @@ static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
         *DENSE_CLASSES
     )
 });
+
+/// A NULL seventh page column defers the row's pending lookup to this query.
+static PENDING_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!("SELECT {CURRENT_PENDING} FROM occurrences o WHERE o.occurrence_id=?2")
+});
+
+/// Returns whether durable work for `occurrence_id`'s vector in `generation` remains open.
+fn probe_pending(
+    conn: &GuardedConn<'_>,
+    generation: &VectorGeneration,
+    occurrence_id: &str,
+) -> Result<bool, ScanStop> {
+    let mut statement = conn.prepare_cached(&PENDING_SQL)?;
+    let pending: i64 = statement
+        .query_row(params![&generation.generation_id, occurrence_id], |row| {
+            row.get(0)
+        })?;
+    Ok(pending != 0)
+}
 
 /// # Errors
 ///
@@ -697,7 +716,7 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
     }
 
     /// Steps one page of at most `take` rows plus one probe row past it, copying each row into a reused scoring lane while the statement is positioned on it, so nothing is allocated for a row that cannot enter the top-K.
-    /// The source's SQL selects the seven columns of [`PAGE_SQL`] in that order and binds the generation identifier, the identifier to start after, and the limit as `?1`, `?2`, `?3`; `after` is left at the last visited identifier.
+    /// The source's SQL selects the seven columns of [`PAGE_SQL`] in that order and binds the generation identifier, the identifier to start after, and the limit as `?1`, `?2`, `?3`; `after` is left at the last visited identifier. A NULL seventh column leaves a row's pending flag to [`probe_pending`], run only when the source holds nothing for the row; an interrupted probe leaves the row unvisited, as an interrupted page step does.
     /// Rows are validated and scored in blocks of up to [`BLOCK_ROWS`]: when a block is full, when the page ends, and before an ended budget or a later row's error is acted on, so the rows visited before it are judged for the layout exactly as they would have been one at a time.
     /// A row's identity fields are validated before `top.admits` is consulted, so a corrupt row is refused even when it could not enter the top-K; a missing vector is counted and its row is neither judged nor scored.
     /// `None` means the budget ended inside the page or a storage bound stopped it; `ranking` then describes the rows visited before it did.
@@ -776,8 +795,24 @@ impl<P: Default, H: FnMut(Window<'_>)> Progress<P, H> {
                         }
                     }
                 }
-                Ok(false) if row.pending => self.ranking.coverage.missing_pending += 1,
-                Ok(false) => self.ranking.coverage.missing_without_pending += 1,
+                Ok(false) => {
+                    let pending = match row.pending {
+                        Some(pending) => Ok(pending),
+                        None => probe_pending(conn, request.generation, row.occurrence_id),
+                    };
+                    match pending {
+                        Ok(true) => self.ranking.coverage.missing_pending += 1,
+                        Ok(false) => self.ranking.coverage.missing_without_pending += 1,
+                        Err(stop) => {
+                            self.ranking.coverage.required -= 1;
+                            let flushed = self.flush(request, source, &mut selected);
+                            return match stop {
+                                ScanStop::Budget => flushed.and(Ok(None)),
+                                ScanStop::Projection(error) => flushed.and(Err(error.into())),
+                            };
+                        }
+                    }
+                }
                 // The buffered rows were visited before this one, so a rejection among them refuses the request instead of this error.
                 Err(error) => return self.flush(request, source, &mut selected).and(Err(error)),
             }
@@ -984,7 +1019,10 @@ fn borrow_row<'r>(row: &'r rusqlite::Row<'r>) -> Result<PageRow<'r>, OracleRefus
         revision: integer(3)?,
         source_artifact_digest: text(4)?,
         stored,
-        pending: integer(6)? != 0,
+        pending: match column(6)? {
+            rusqlite::types::ValueRef::Null => None,
+            value => Some(value.as_i64().map_err(|_| ProjectionError::CorruptRow)? != 0),
+        },
     })
 }
 
@@ -1204,5 +1242,27 @@ mod tests {
             !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
             "{plan:?}"
         );
+    }
+
+    #[test]
+    fn the_pending_probe_searches_one_occurrence_and_its_job_by_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::BASELINE).unwrap();
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", *PENDING_SQL))
+            .unwrap()
+            .query_map(rusqlite::params!["gen", "occ"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for search in [
+            "SEARCH o USING COVERING INDEX sqlite_autoindex_occurrences_1 (occurrence_id=?)",
+            "SEARCH j USING INDEX sqlite_autoindex_embedding_jobs_2 (occurrence_id=? AND generation_id=?)",
+        ] {
+            assert!(plan.iter().any(|detail| detail == search), "{plan:?}");
+        }
+        assert_eq!(plan.len(), 3, "{plan:?}");
     }
 }
