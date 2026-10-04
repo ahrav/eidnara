@@ -197,6 +197,10 @@ use session_resolver::{MissingSessionResolver, SessionResolveError, SessionResol
 #[cfg(test)]
 use transform::ReductionDecision;
 
+/// #826's synthetic history generator, for drivers that seed a store before a measured run.
+#[cfg(all(feature = "test-support", not(test)))]
+#[path = "test_support/synthetic_history.rs"]
+pub mod synthetic_history;
 #[cfg(test)]
 pub mod test_support;
 

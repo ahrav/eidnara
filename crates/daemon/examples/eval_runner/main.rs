@@ -32,6 +32,9 @@ mod fault;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod growth;
+/// The scale shell seeds a fixture store and builds scale reports for the scale drivers.
+#[cfg(unix)]
+mod scale;
 /// The shrink shell is shared with the daemon's shrink test the same way.
 #[cfg(unix)]
 #[allow(dead_code)]
@@ -631,6 +634,10 @@ fn main() {
         Some("fault-child") => run_fault_child(),
         #[cfg(unix)]
         Some("growth") => run_growth(args),
+        #[cfg(unix)]
+        Some("scale-seed") => scale::run_seed(args),
+        #[cfg(unix)]
+        Some("scale-report") => scale::run_report(args),
         #[cfg(unix)]
         Some("shrink") => run_shrink(args),
         #[cfg(unix)]

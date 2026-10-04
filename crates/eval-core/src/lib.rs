@@ -47,6 +47,7 @@ mod reducer;
 mod render;
 mod report;
 mod residue;
+mod scale;
 mod shrink;
 mod stale;
 mod statistics;
@@ -168,6 +169,13 @@ pub use report::{
 pub use residue::{
     CLOCK_FIELD_KEEP_ALLOWLIST, ObservationSchema, ResidueEntry, ResidueError, Rule, SemanticTrace,
     TRACE_DIGEST_PROTOCOL, is_clock_named, is_never_kept,
+};
+pub use scale::{
+    ArtifactIdentity, BoundaryState, DriverIdentity, Flatness, Histogram, HistogramBucket,
+    HostManifest, MIN_RATIO_SESSIONS, OpenLoopCounts, PassOutcome, PassRow, RATIO_GATE,
+    RATIO_REPLICATES, RatioClaim, RatioWithheld, RefusalRate, RefusalReason, SCALE_REPORT_SCHEMA,
+    ScaleHarness, ScaleInputs, ScaleReport, ScaleReportError, ScaleTier, SessionSummary, TierRatio,
+    TierSummary, bucket_index, bucket_upper_bound, parse_pass_row, parse_scale_report,
 };
 pub use shrink::{
     CandidateRecord, CandidateVerdict, Element, FailurePredicate, History,

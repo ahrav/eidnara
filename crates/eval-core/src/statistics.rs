@@ -991,7 +991,7 @@ pub enum IntervalWithheld {
 
 /// The bootstrap draw for replicate `replicate`, position `draw`: the first
 /// 64 bits of the protocol digest over the key, reduced by the cluster count.
-fn bootstrap_draw(seed: u64, replicate: u32, draw: u32, clusters: u32) -> usize {
+pub(crate) fn bootstrap_draw(seed: u64, replicate: u32, draw: u32, clusters: u32) -> usize {
     let key = json!({"seed": seed.to_string(), "replicate": replicate, "draw": draw});
     let hex = protocol_digest(BOOTSTRAP_PROTOCOL, &key).expect("draw key is canonical");
     let word = u64::from_str_radix(&hex[..16], 16).expect("digest is lowercase hex");
