@@ -7,6 +7,7 @@
 use sha2::{Digest, Sha256};
 
 use super::codec::{self, RowLayout, RowRejection};
+use super::score::BLOCK_ROWS;
 
 /// The recipe every persisted code was produced under; a new recipe is a new variant, never a reinterpretation of old bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,17 +405,30 @@ pub fn encode_codes(codes: &[i8]) -> Vec<u8> {
 
 /// Rejects the reserved code `-128` so a corrupt byte cannot widen into a product outside the recipe's range.
 pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytesRejection> {
-    if bytes.len() != dimension as usize {
+    let codes: Vec<i8> = bytes.iter().map(|byte| *byte as i8).collect();
+    check_codes(&codes, dimension)?;
+    Ok(codes)
+}
+
+/// The row of codes [`decode_codes`] admits: `dimension` codes, none of them the reserved `-128`.
+pub fn check_codes(codes: &[i8], dimension: u32) -> Result<(), ScalarBytesRejection> {
+    if codes.len() != dimension as usize {
         return Err(ScalarBytesRejection::Dimension {
             expected: dimension,
-            actual: bytes.len(),
+            actual: codes.len(),
         });
     }
-    let codes: Vec<i8> = bytes.iter().map(|byte| *byte as i8).collect();
-    if let Some(coordinate) = codes.iter().position(|code| *code == i8::MIN) {
-        return Err(ScalarBytesRejection::ReservedCode { coordinate });
+    if !codes
+        .iter()
+        .fold(false, |reserved, code| reserved | (*code == i8::MIN))
+    {
+        return Ok(());
     }
-    Ok(codes)
+    let coordinate = codes
+        .iter()
+        .position(|code| *code == i8::MIN)
+        .expect("the pass found a reserved code");
+    Err(ScalarBytesRejection::ReservedCode { coordinate })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
@@ -469,6 +483,11 @@ impl<'s> QuantizedQuery<'s> {
     /// The query's codes, derived from its embedding, for the scan that scores them.
     pub fn codes(&self) -> &[i8] {
         &self.codes
+    }
+
+    /// [`Self::score`] of eight rows at once; lane `i` holds the score of `docs[i]`, bit for bit.
+    pub fn score_block(&self, docs: &[&[i8]; BLOCK_ROWS]) -> [f64; BLOCK_ROWS] {
+        weighted_dot_block(self.scales, &self.codes, docs)
     }
 
     /// [`weighted_dot`] of the query's codes with `doc`, a row [`decode_codes`] produced from the same layer, so its length is the dimension and no code is `-128`.
@@ -628,4 +647,40 @@ pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
         sum += term;
     }
     sum
+}
+
+/// [`weighted_dot`] of `query` with each of eight rows, as eight independent accumulation chains. Each lane accumulates the same terms from `+0.0` in increasing coordinate order, so lane `i` equals `weighted_dot(scales, query, docs[i])` bit for bit.
+///
+/// Panics when the scale weights or any row of `docs` differ in length from `query`, enforcing full-vector scoring.
+pub fn weighted_dot_block(
+    scales: &Scales,
+    query: &[i8],
+    docs: &[&[i8]; BLOCK_ROWS],
+) -> [f64; BLOCK_ROWS] {
+    assert_eq!(
+        scales.weights.len(),
+        query.len(),
+        "codes of one calibration have one length"
+    );
+    for doc in docs {
+        assert_eq!(
+            query.len(),
+            doc.len(),
+            "codes of one calibration have one length"
+        );
+    }
+    let mut sums = [0.0f64; BLOCK_ROWS];
+    for (coordinate, (weight, q)) in scales.weights.iter().zip(query).enumerate() {
+        let q = i32::from(*q);
+        for (sum, doc) in sums.iter_mut().zip(docs) {
+            let d = doc[coordinate];
+            debug_assert!(
+                q != i32::from(i8::MIN) && d != i8::MIN,
+                "the reserved code -128 never reaches scoring"
+            );
+            let product = q * i32::from(d);
+            *sum += *weight * f64::from(product);
+        }
+    }
+    sums
 }

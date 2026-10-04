@@ -172,6 +172,10 @@ impl<T> TopK<T> {
         self.heap.is_empty()
     }
 
+    pub fn is_full(&self) -> bool {
+        self.heap.len() == self.k.get()
+    }
+
     /// Best first.
     pub fn into_ranked(self) -> Vec<(Ranked, T)> {
         self.heap

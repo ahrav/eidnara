@@ -535,6 +535,7 @@ impl DenseProducer for ExhaustiveProducer {
                 OracleRefusal::BatchOverBound { .. } => {
                     DenseRefusal::Unavailable("batch_over_bound")
                 }
+                OracleRefusal::HeapOverBound { .. } => DenseRefusal::Unavailable("heap_over_bound"),
                 OracleRefusal::Projection(error) => {
                     DenseRefusal::Unavailable(projection_reason(&error))
                 }
@@ -556,6 +557,12 @@ impl DenseProducer for ExhaustiveProducer {
             }
             DenseCompletion::Incomplete(DenseIncompleteReason::SnapshotChanged) => {
                 return Err(DenseRefusal::Unavailable("snapshot_changed"));
+            }
+            DenseCompletion::Incomplete(DenseIncompleteReason::BatchBytes) => {
+                return Err(DenseRefusal::Unavailable("batch_bytes"));
+            }
+            DenseCompletion::Incomplete(DenseIncompleteReason::HeapBytes) => {
+                return Err(DenseRefusal::Unavailable("heap_bytes"));
             }
         };
         Ok(DenseRanking {
