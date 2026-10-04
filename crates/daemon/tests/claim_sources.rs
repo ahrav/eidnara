@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use daemon::claim_sources::{
     CLAIM_CONSUMER, ClaimBlocked, ClaimExclusion, ClaimMaterializer, ClaimProgress,
@@ -2918,6 +2919,53 @@ fn an_exhausted_budget_stops_between_decisions_and_commits_and_keeps_completed_w
         held,
         "a failed acknowledgement moves nothing"
     );
+}
+
+#[test]
+fn a_slice_reads_through_the_free_reader_while_another_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(dir.path());
+    corpus.seed_kernel();
+    let seeds = [memory("h1", "One."), memory("h2", "Two.")];
+    for seed in seeds {
+        corpus.decide(seed);
+    }
+    let mut progress = ClaimProgress::default();
+    corpus.start(&mut progress, slice_bounds(8));
+    corpus.catch_up(&mut progress, slice_bounds(8), |_| {});
+    assert_eq!(progress, ClaimProgress::Changes);
+    let revisions = [
+        revised("h1b", "One, revised."),
+        revised("h2b", "Two, revised."),
+    ];
+    corpus.correct("h1", revisions[0]);
+    corpus.correct("h2", revisions[1]);
+
+    // A slice that waits on the held reader includes the remaining hold time in elapsed.
+    let hold = Duration::from_secs(5);
+    let held = std::sync::Barrier::new(2);
+    let elapsed = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            corpus
+                .kernel
+                .preview(Instant::now() + Duration::from_secs(30), |_| {
+                    held.wait();
+                    std::thread::sleep(hold);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        held.wait();
+        let started = Instant::now();
+        let report = corpus.slice(&mut progress, slice_bounds(8));
+        assert_eq!(report.commits_consumed, 2, "{report:?}");
+        started.elapsed()
+    });
+    assert!(
+        elapsed < hold,
+        "a slice waited {elapsed:?} on a held reader while the other was free"
+    );
+    assert_eq!(corpus.inventory(), ledger(&revisions));
 }
 
 /// A cancelled budget moves nothing; excluded decisions are reported with their exclusion; a decision of another project publishes under that project's own scope; a lost history boundary blocks without acknowledging past it, every time.

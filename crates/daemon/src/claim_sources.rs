@@ -721,6 +721,34 @@ impl<'a> ClaimMaterializer<'a> {
         }
     }
 
+    fn object_states(
+        &self,
+        object_ids: &[String],
+    ) -> Result<Vec<Option<kernel::ObjectState>>, KernelError> {
+        let (_, states) = match &self.budget {
+            Some(budget) => self
+                .kernel
+                .object_states_within_budget(budget, object_ids)?,
+            None => self.kernel.object_states(object_ids)?,
+        };
+        Ok(states)
+    }
+
+    fn decisions_as_of(
+        &self,
+        object_ids: &[String],
+        requested: i64,
+    ) -> Result<Vec<DecisionRow>, KernelError> {
+        match &self.budget {
+            Some(budget) => self
+                .kernel
+                .decisions_for_objects_as_of_within_budget(object_ids, requested, budget),
+            None => self
+                .kernel
+                .decisions_for_objects_as_of(object_ids, requested),
+        }
+    }
+
     /// Retires the descriptors of every decision in one page of `class`'s live inventory that is no longer live, and returns where the reconciliation stands after it. Registration acknowledges past history the consumer did not apply, so a decision invalidated while the consumer was absent is retired here; the retirement key names the commit that invalidated the decision, which is the key the replay of that commit uses.
     fn reconcile_page(
         &self,
@@ -746,7 +774,7 @@ impl<'a> ClaimMaterializer<'a> {
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let (_, states) = self.kernel.object_states(&decisions)?;
+        let states = self.object_states(&decisions)?;
         for (object_id, state) in decisions.iter().zip(states) {
             if let Some(invalidated) = state.and_then(|state| state.object.invalidated_commit_seq) {
                 self.retire_decision(object_id, invalidated, report)?;
@@ -1272,9 +1300,7 @@ impl<'a> ClaimMaterializer<'a> {
 
     /// The descriptors `object_id` could have published, retired under the key of `commit_seq`; `None` for an identity the encoding refuses, which was refused at publication too, so no descriptor of it exists.
     fn retirement(&self, object_id: &str, commit_seq: i64) -> Result<Option<Retirement>, Stop> {
-        let (_, states) = self
-            .kernel
-            .object_states(std::slice::from_ref(&object_id.to_owned()))?;
+        let states = self.object_states(std::slice::from_ref(&object_id.to_owned()))?;
         let Some(state) = states.into_iter().next().flatten() else {
             return Err(ClaimBlocked::DecisionUnreadable {
                 object_id: object_id.to_owned(),
@@ -1332,7 +1358,7 @@ impl<'a> ClaimMaterializer<'a> {
         if ids.is_empty() {
             return Ok(());
         }
-        let (_, states) = self.kernel.object_states(&ids)?;
+        let states = self.object_states(&ids)?;
         report.retired += states
             .iter()
             .filter(|state| {
@@ -1410,15 +1436,12 @@ impl<'a> ClaimMaterializer<'a> {
 
     /// `None` when no decision row is visible at `commit_seq` because the commit itself invalidated the object: it was created and invalidated together, or an existing survivor absorbed a fold and was then retired or corrected. The same commit carries the row that retires its descriptors.
     fn decision_at(&self, object_id: &str, commit_seq: i64) -> Result<Option<DecisionRow>, Stop> {
-        let mut rows = self
-            .kernel
-            .decisions_for_objects_as_of(std::slice::from_ref(&object_id.to_owned()), commit_seq)?;
+        let mut rows =
+            self.decisions_as_of(std::slice::from_ref(&object_id.to_owned()), commit_seq)?;
         if let Some(row) = rows.pop() {
             return Ok(Some(row));
         }
-        let (_, states) = self
-            .kernel
-            .object_states(std::slice::from_ref(&object_id.to_owned()))?;
+        let states = self.object_states(std::slice::from_ref(&object_id.to_owned()))?;
         match states.into_iter().next().flatten() {
             Some(state) if state.object.invalidated_commit_seq == Some(commit_seq) => Ok(None),
             _ => Err(ClaimBlocked::DecisionUnreadable {
