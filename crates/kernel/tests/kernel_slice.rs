@@ -1644,11 +1644,22 @@ fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
     assert_eq!(live(&second), ["decision-object-4", "decision-object-5"]);
     assert_eq!(second.next, None);
 
-    // Read at the insert commit, every decision is live.
+    // Read at the insert commit, every decision is live, and each registry row reads as it stood at that commit.
     let earlier = store
         .decision_page_within_budget(inserted.commit_seq, None, rows(8), bytes, &budget)
         .unwrap();
     assert_eq!(earlier.decisions.len(), 5);
+    for entry in &earlier.decisions {
+        assert_eq!(
+            (
+                entry.object.invalidated_commit_seq,
+                entry.object.superseded_by.as_deref()
+            ),
+            (None, None),
+            "{} carries post-snapshot registry columns",
+            entry.object.object_id
+        );
+    }
 
     // A byte bound smaller than two payloads cuts the page after one live decision; one larger payload is still returned alone.
     let one = NonZeroU64::new(1).unwrap();
@@ -1744,6 +1755,18 @@ fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
     assert_eq!(
         lineage(&before_fold),
         [("decision-object-5".to_string(), inserted.commit_seq)]
+    );
+    // A snapshot before the fold keeps the predecessor's live registry state.
+    let predecessor = store
+        .decision_page_within_budget(tip, Some("decision-object-3"), rows(1), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&predecessor), ["decision-object-4"]);
+    assert_eq!(
+        (
+            predecessor.decisions[0].object.invalidated_commit_seq,
+            predecessor.decisions[0].object.superseded_by.as_deref()
+        ),
+        (None, None)
     );
 
     let cancelled = kernel::applicability::EvalBudget::unbounded();

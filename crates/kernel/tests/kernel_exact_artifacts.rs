@@ -620,6 +620,47 @@ fn an_empty_batch_commits_its_operation_and_recorded_receipts_replay() {
     assert_eq!(store.tip().unwrap(), tip + 1);
 }
 
+#[test]
+fn a_refused_receipt_poisons_the_envelope_and_a_poisoned_envelope_records_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(root.path()).unwrap();
+    seed_domain(&store);
+    store
+        .commit(intent("first", b"first"), |envelope| {
+            envelope
+                .record_receipt(intent("recorded", b"recorded"), "recorded result")
+                .map(|()| String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+
+    let discarded = store.commit(intent("discarded", b"discarded"), |envelope| {
+        let refused = envelope.record_receipt(intent("recorded", b"recorded"), "again");
+        assert_eq!(refused, Err(kernel::KernelError::Conflict));
+        Ok(String::new())
+    });
+    assert_eq!(
+        discarded.unwrap_err(),
+        kernel::KernelError::Conflict,
+        "a discarded receipt refusal committed"
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+
+    let poisoned = store.commit(intent("poisoned", b"poisoned"), |envelope| {
+        let missing = envelope.retire_decision("decision-object-missing");
+        assert_eq!(missing, Err(kernel::KernelError::NotFound));
+        envelope
+            .record_receipt(intent("after-poison", b"after-poison"), "written")
+            .map(|()| String::new())
+    });
+    assert_eq!(
+        poisoned.unwrap_err(),
+        kernel::KernelError::NotFound,
+        "a poisoned envelope recorded a receipt"
+    );
+    assert_eq!(store.tip().unwrap(), tip);
+}
+
 /// A batch larger than one staging chunk retains every payload, and a refusal after staging several chunks leaves no temporary file, reservation, or object behind.
 #[test]
 fn a_batch_of_many_payloads_stages_in_chunks_and_a_refusal_leaves_a_clean_store() {

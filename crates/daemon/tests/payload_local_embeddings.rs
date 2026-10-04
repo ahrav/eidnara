@@ -13,7 +13,17 @@ use sha2::Digest as _;
 const BIN: &str = env!("CARGO_BIN_EXE_eidnara-host");
 const BUNDLE_DIR: &str = "payload/model/gte-modernbert-base-f32";
 const ORT_LIBRARY: &str = "payload/ort/libonnxruntime.so";
-const SETTLE_DEADLINE: Duration = Duration::from_secs(900);
+
+/// The locked hard budget for embedding certification after publication.
+fn certification_budget() -> Duration {
+    let lock: Value = serde_json::from_str(daemon::production_inputs::PRODUCTION_INPUTS_LOCK_JSON)
+        .expect("production inputs lock parses");
+    let hard = lock["cold_start_budgets_ms"]["linux_local_embeddings_certification_post_publication"]
+        ["hard"]
+        .as_u64()
+        .expect("the lock names a certification hard budget");
+    Duration::from_millis(hard)
+}
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", sha2::Sha256::digest(bytes))
@@ -89,7 +99,11 @@ impl Drop for Daemon {
     }
 }
 
-async fn settled_lane_state(client: &Client) -> (String, Duration) {
+/// Polls host health from the first read after `start`, which follows publication, until the lane
+/// leaves `starting`. Polling outlasts the locked budget so a miss reports its elapsed time; the
+/// settled state must arrive within the budget.
+async fn settled_lane_state(client: &Client) -> String {
+    let budget = certification_budget();
     let started = tokio::time::Instant::now();
     loop {
         let status = client.host_status().await.expect("host status");
@@ -98,12 +112,18 @@ async fn settled_lane_state(client: &Client) -> (String, Duration) {
                 .as_str()
                 .unwrap_or("absent")
                 .to_owned();
+        let elapsed = started.elapsed();
         if state != "starting" {
-            return (state, started.elapsed());
+            assert!(
+                elapsed <= budget,
+                "the lane settled {state} after {elapsed:?}, beyond the locked {budget:?} budget"
+            );
+            return state;
         }
         assert!(
-            started.elapsed() < SETTLE_DEADLINE,
-            "the lane never settled: {status:?}"
+            elapsed < 2 * budget,
+            "the lane never settled within {:?}: {status:?}",
+            2 * budget
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -115,9 +135,7 @@ async fn a_built_payload_reaches_ready_and_serves_a_certified_embedding() {
     let payload = payload_dir();
     let daemon = Daemon::start(&payload);
     let client = daemon.client().await;
-    let (state, elapsed) = settled_lane_state(&client).await;
-    assert_eq!(state, "ready");
-    eprintln!("local_embeddings ready after {elapsed:?} from first health read");
+    assert_eq!(settled_lane_state(&client).await, "ready");
 
     let bundle = payload.join(BUNDLE_DIR);
     let manifest: Value =
@@ -223,8 +241,7 @@ async fn a_valid_payload_whose_runtime_fails_to_initialize_reports_degraded() {
     payload_with_broken_runtime(&payload_dir(), copy.path());
     let daemon = Daemon::start(copy.path());
     let client = daemon.client().await;
-    let (state, _) = settled_lane_state(&client).await;
-    assert_eq!(state, "degraded");
+    assert_eq!(settled_lane_state(&client).await, "degraded");
 }
 
 #[tokio::test]

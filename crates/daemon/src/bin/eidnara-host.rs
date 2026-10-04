@@ -1,7 +1,8 @@
 //! `eidnara-host` is the lifecycle and serve executable.
 //!
 //! `eidnara-host` depends on `daemon` and `host-runtime`; neither dependency depends on `eidnara-host`.
-//! `--version`, `release-info`, and `input-lock-digest` have no side effects.
+//! `--version`, `release-info`, `input-lock-digest`, and `build-profile` have no side effects.
+//! `build-profile` prints `debug` when debug assertions are compiled in and `release` otherwise; payload builders match it against the manifest mode.
 //! Each lifecycle command emits exactly one `eidnara.daemon/v1` JSON object on stdout.
 //! Exit 0 means `ok:true`; exit 1 indicates an operational failure.
 //! Exit 2 indicates a usage error and makes no lifecycle call.
@@ -287,6 +288,7 @@ enum Command {
     Version,
     ReleaseInfo,
     InputLockDigest,
+    BuildProfile,
     Status,
     Start {
         payload_dir: Option<PathBuf>,
@@ -305,7 +307,7 @@ enum Command {
     },
 }
 
-const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest> [--payload-dir <dir> --payload-manifest-digest <sha256>] | install-search-admission <runtime-manifest.json> <campaign-evidence.json> | --version (probe is an alias of status)";
+const USAGE: &str = "usage: eidnara-host <serve|start|stop|restart|status|probe|release-info|input-lock-digest|build-profile> [--payload-dir <dir> --payload-manifest-digest <sha256>] | install-search-admission <runtime-manifest.json> <campaign-evidence.json> | --version (probe is an alias of status)";
 
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
     let mut iter = args.iter();
@@ -366,6 +368,7 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Command, String> {
         "--version" => Ok(Command::Version),
         "release-info" => Ok(Command::ReleaseInfo),
         "input-lock-digest" => Ok(Command::InputLockDigest),
+        "build-profile" => Ok(Command::BuildProfile),
         "status" | "probe" => Ok(Command::Status),
         "start" => Ok(Command::Start {
             payload_dir,
@@ -1968,6 +1971,17 @@ fn real_main() -> i32 {
         }
         Command::InstallSearchAdmission { manifest, campaign } => {
             install_search_admission(&manifest, &campaign)
+        }
+        Command::BuildProfile => {
+            println!(
+                "{}",
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                }
+            );
+            0
         }
         Command::Status => emit(cmd_probe()),
         Command::Start {

@@ -564,6 +564,14 @@ impl Envelope<'_> {
         intent: CommitIntent,
         result: &str,
     ) -> Result<(), KernelError> {
+        self.guarded(|envelope| envelope.record_receipt_inner(intent, result))
+    }
+
+    fn record_receipt_inner(
+        &mut self,
+        intent: CommitIntent,
+        result: &str,
+    ) -> Result<(), KernelError> {
         intent.refuse_reserved_producer()?;
         let intent = RedactedIntent::new(intent)?;
         if stored_receipt(self.tx, &intent)?.is_some() {
@@ -787,12 +795,17 @@ impl KernelStore {
         &self,
         object_ids: &[String],
     ) -> Result<(i64, Vec<Option<ObjectState>>), KernelError> {
-        self.read_snapshot(0, |tx, _| {
-            object_ids
-                .iter()
-                .map(|object_id| load_object_state(tx, object_id))
-                .collect()
-        })
+        let mut reader = self.lock_reader()?;
+        object_states_on(&mut reader, object_ids)
+    }
+
+    pub fn object_states_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        object_ids: &[String],
+    ) -> Result<(i64, Vec<Option<ObjectState>>), KernelError> {
+        let mut reader = self.lock_reader_within(&budget.acquire_limit())?;
+        object_states_on(&mut reader, object_ids)
     }
 
     /// The envelope's `commit_seq` is the sequence the next commit would take, so `check_token` judges a token from the tip the way that commit would.
@@ -1181,6 +1194,18 @@ pub(super) fn replace_alignment_projection_tx(
 }
 
 /// The deferred transaction makes `tip` and `read` observe one snapshot.
+fn object_states_on(
+    reader: &mut Connection,
+    object_ids: &[String],
+) -> Result<(i64, Vec<Option<ObjectState>>), KernelError> {
+    read_snapshot_on(reader, 0, |tx, _| {
+        object_ids
+            .iter()
+            .map(|object_id| load_object_state(tx, object_id))
+            .collect()
+    })
+}
+
 fn read_snapshot_on<T>(
     reader: &mut Connection,
     requested: i64,
