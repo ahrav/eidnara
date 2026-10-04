@@ -64,8 +64,12 @@ Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
 `extreme_scales_and_codes_score_finite_and_match_the_reference`,
 `the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`,
-`term_table_scores_match_the_reference_for_every_chunk_and_tile_shape`, and
-`term_table_scores_the_fixture_like_the_row_scorer`.
+`term_table_scores_match_the_reference_for_every_chunk_and_tile_shape`,
+`term_table_scores_the_fixture_like_the_row_scorer`,
+`scales_from_every_constructor_score_like_the_reference` (scales from
+`calibrate`, `from_values`, `decode`, and the fixture score alike),
+`term_table_refuses_codes_that_are_not_whole_rows`, and
+`term_table_refuses_a_reserved_code_under_debug_assertions`.
 Guarantee: The quantized score of a document is
 `sum_j (s_j * s_j) * i32(c_query_j) * i32(c_doc_j)` with the weight and the
 integer product widened to f64 before they multiply, accumulated from `+0.0`
@@ -73,8 +77,8 @@ in increasing coordinate order, whether `QuantizedQuery::score` forms each term
 or `TermTable::score_rows` looks it up.
 Check: `always` - for every fixture row, the production score bits equal the
 independent reference's bits; the fixture's order under an unweighted integer
-dot differs from the weighted order, and squaring the scale or forming the term
-in f32 changes at least one score's bits. The term-table scan's bits equal the
+dot differs from the weighted order, and squaring the scale and rounding the
+product in f32 together change at least one score's bits. The term-table scan's bits equal the
 reference's for dimensions 1 to 40 with 0, 1, 2, and 17 rows, and for
 dimensions 15, 16, 17, 384, and 385 with 511, 512, 513, and 1100 rows.
 `always` because every scored row must carry the contract's exact value.
@@ -85,7 +89,7 @@ magnitude across coordinates, codes at `+127` and `-127`, scales at
 leave a partial 16-coordinate chunk, and row counts that leave a partial
 512-row tile.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:460`) and `QuantizedQuery::term_table`
+`weighted_dot` (`scalar.rs:468`) and `QuantizedQuery::term_table`
 (`scalar.rs:341`) were read against the formula and the tests run
 against both.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
@@ -100,9 +104,12 @@ Open questions:
 
 Type: safety
 Reachability: default-production - the query route's `ExhaustiveProducer`
-(`crates/daemon/src/query_route.rs`) ranks through the oracle walk, which
-scores with `score_block`; `rescore` and `inner_product`
-(`crates/retrieval/src/dense/score.rs:13`) share its arithmetic.
+(`crates/daemon/src/query_route.rs:467`) ranks through the oracle walk, which
+scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:508`). The
+tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
+`rescore` (`score.rs:190`), which have no production caller at this base, so
+the label rests on `dense_properties.rs:255` holding `inner_product_block`
+equal to `inner_product` bit for bit.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`,
@@ -113,7 +120,7 @@ coordinates in f64 and accumulates from `+0.0` in increasing coordinate order,
 so orthogonal rows with negative-zero coordinates score `+0.0`.
 Check: `always` - production score bits equal the reference's bits; two rows
 whose f32-first products tie are separated by the f64 products. `always`
-because rescore defines the returned dense score.
+because the row scorer is the contract the block scorer is held to.
 Fault/timing angle: none.
 Required faults and enabling state: Rows one or a few ulps apart in two
 coordinates, negative-zero coordinates, a row opposite the query.
@@ -195,8 +202,8 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:309`) is reached
-from tests only; `rescore` validates its query the same way through
-`codec::validate`.
+from tests only; `rescore` (`score.rs:190`) is also test-only at this base and
+validates its query the same way through `codec::validate`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `the_query_transform_refuses_invalid_queries_before_any_code_exists`,
@@ -209,8 +216,10 @@ tolerance, scales of another dimension (refused as `ScalesDimension`, a generati
 wiring fault), or all-zero codes produces a typed
 refusal and no quantized query exists to score with.
 Check: `always` - each witness returns its refusal; an accepted query's codes
-equal the stored-row encoding under the same scales. `always` because scoring
-consumes only constructed queries.
+equal the stored-row encoding under the same scales (an equality between two
+production paths, `QuantizedQuery::new` and `encode`; the literal code
+witnesses are `[1, 0, 0, 0]` and the pinned fixture codes `[127, 1, 32, -10]`).
+`always` because scoring consumes only constructed queries.
 Fault/timing angle: none.
 Required faults and enabling state: The listed malformed queries; scales of
 one on every coordinate with a query of four halves.
