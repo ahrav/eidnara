@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 
 use kernel::KernelStore;
 use kernel::applicability::EvalBudget;
+use kernel::source_identity::OccurrenceClass;
 use storage::GuardedConn;
 
 use super::codec::{self, Metric, RowLayout};
@@ -16,7 +17,7 @@ use super::oracle::{
     self, ExhaustiveRanking, Lane, OracleBounds, OracleRefusal, PageRow, RowSource, Walk, Window,
 };
 use super::resolve::{self, Layer, ResolveRefusal, RowFault, Winner};
-use crate::batch::VectorGeneration;
+use crate::batch::{VectorGeneration, dense_eligible};
 use crate::eligibility::Authority;
 
 /// Not `Debug`: the query row is embedding content.
@@ -73,17 +74,28 @@ pub(super) static LIVE_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
+/// The quoted codes of every class that requires no vector, for an SQL `NOT IN` list.
+static NON_DENSE_CLASSES: LazyLock<String> = LazyLock::new(|| {
+    OccurrenceClass::ALL
+        .into_iter()
+        .filter(|class| !dense_eligible(*class))
+        .map(|class| format!("'{}'", class.code()))
+        .collect::<Vec<_>>()
+        .join(",")
+});
+
 /// The live population's rows in rowid order for a ranked walk: the rowid, the identifier, and the two identity fields the walk validates.
 /// Rowid order reads each table page once, where identifier order reaches every row through the primary-key index.
+/// The schema's class check admits only the classes of [`OccurrenceClass::ALL`], so comparing each row against the vector-free classes selects the dense-required rows, and the one-code list compiles to a single comparison.
 pub(super) static LIVE_ROWID_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT o.rowid,o.occurrence_id,o.source_object_id,o.source_artifact_digest
          FROM occurrences o
          LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-         WHERE t.occurrence_id IS NULL AND +o.class IN ({}) AND o.rowid>=?2
+         WHERE t.occurrence_id IS NULL AND +o.class NOT IN ({}) AND o.rowid>=?2
          ORDER BY o.rowid
          LIMIT +?3",
-        *oracle::DENSE_CLASSES
+        *NON_DENSE_CLASSES
     )
 });
 
