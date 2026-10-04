@@ -104,13 +104,13 @@ None.
 ### Q: What does `busy` mean once queries wait for the inference slot?
 
 The route awaits the embedding in place under the request budget and drops the
-wait on cancellation (`crates/daemon/src/query_route.rs:1650-1652`). The query
+wait on cancellation (`crates/daemon/src/query_route.rs:1711-1713`). The query
 waits asynchronously for the slot ahead of background texts; it is refused as
 `LaneBusy` when `max_waiting_queries` queries already wait, which maps to the
-dense lane's `busy` reason (`query_route.rs:604-613`). The component also ends a
+dense lane's `busy` reason (`query_route.rs:638-647`). The component also ends a
 wait as `LaneBusy` at the deadline it is given
 (`crates/host-runtime/src/local_embeddings/mod.rs:511-543`), but the route passes
 the request deadline itself, so a wait that reaches it ends the request as
-`deadline` (`query_route.rs:1653-1657`). That matches this record's "never as
+`deadline` (`query_route.rs:1714-1718`). That matches this record's "never as
 `deadline`" clause only for the full-queue case; the deadline case is the
 request's own exhaustion, not a lane degradation.
