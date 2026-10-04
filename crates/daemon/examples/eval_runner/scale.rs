@@ -24,7 +24,7 @@ const REPORT_USAGE: &str =
 
 /// Seeds `--segments` synthetic history segments of two messages each into `--session` of the
 /// fixture store under `--state-root`, with the ordinal continuation base the newest segment
-/// ends on, and prints the anchor the first pass declares.
+/// ends on, and prints the anchor the daemon renders on the first pass and later passes declare.
 pub fn run_seed(args: impl Iterator<Item = String>) -> io::Result<()> {
     let values = parse_flags(args, &["state-root", "session", "segments"], SEED_USAGE)
         .map_err(io::Error::other)?;
