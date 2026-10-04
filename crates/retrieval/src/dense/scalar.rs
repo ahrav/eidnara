@@ -64,6 +64,8 @@ pub enum ScalarBytesRejection {
 #[derive(Clone, PartialEq)]
 pub struct Scales {
     scales: Vec<f32>,
+    /// `f64(s_j) * f64(s_j)`, the weight [`weighted_dot`] applies at coordinate `j`; squaring a widened f32 is exact in f64.
+    weights: Vec<f64>,
 }
 
 impl std::fmt::Debug for Scales {
@@ -90,7 +92,15 @@ impl Scales {
         {
             return Err(ScalarBytesRejection::NotPositiveFinite { coordinate });
         }
-        Ok(Self { scales })
+        Ok(Self::weighted(scales))
+    }
+
+    fn weighted(scales: Vec<f32>) -> Self {
+        let weights = scales
+            .iter()
+            .map(|scale| f64::from(*scale) * f64::from(*scale))
+            .collect();
+        Self { scales, weights }
     }
 
     pub fn as_slice(&self) -> &[f32] {
@@ -207,7 +217,7 @@ impl Calibrator {
             }
             scales.push(scale);
         }
-        let scales = Scales { scales };
+        let scales = Scales::weighted(scales);
         let identity = CalibrationIdentity {
             recipe: ScalarRecipe::SymmetricInt8V1,
             calibrated_rows: self.count,
@@ -407,6 +417,189 @@ pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytes
     Ok(codes)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum QueryRefusal {
+    #[error("the query is not a member of the generation: {0}")]
+    Row(#[from] RowRejection),
+    /// Every coordinate rounds to code zero under the layer's scales, so every quantized score is zero.
+    #[error("every coordinate of the query encodes to code zero")]
+    ZeroCodes,
+    /// The scales belong to a calibration of another dimension than the layout, a wiring fault of the generation rather than of the query.
+    #[error("the scales have {actual} coordinates, not the layout's {expected}")]
+    ScalesDimension { expected: u32, actual: usize },
+}
+
+/// A query encoded under one layer's scales. Its documents are that layer's codes, because scoring weights each product by those scales squared.
+#[derive(Clone, PartialEq)]
+pub struct QuantizedQuery<'s> {
+    scales: &'s Scales,
+    codes: Vec<i8>,
+}
+
+impl std::fmt::Debug for QuantizedQuery<'_> {
+    /// Codes derive from the query embedding, so diagnostics show only the dimension.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuantizedQuery")
+            .field("dimension", &self.codes.len())
+            .finish()
+    }
+}
+
+impl<'s> QuantizedQuery<'s> {
+    /// Validates `query` against `layout` and encodes it under `scales` exactly as a stored row is encoded, clipping included.
+    pub fn new(
+        layout: &RowLayout,
+        scales: &'s Scales,
+        query: &[f32],
+    ) -> Result<Self, QueryRefusal> {
+        layout.check()?;
+        if scales.scales.len() != layout.dimension as usize {
+            return Err(QueryRefusal::ScalesDimension {
+                expected: layout.dimension,
+                actual: scales.scales.len(),
+            });
+        }
+        let Encoded { codes, .. } = encode(layout, scales, query)?;
+        if codes.iter().all(|code| *code == 0) {
+            return Err(QueryRefusal::ZeroCodes);
+        }
+        Ok(Self { scales, codes })
+    }
+
+    /// The query's codes, derived from its embedding, for the scan that scores them.
+    pub fn codes(&self) -> &[i8] {
+        &self.codes
+    }
+
+    /// [`weighted_dot`] of the query's codes with `doc`, a row [`decode_codes`] produced from the same layer, so its length is the dimension and no code is `-128`.
+    pub fn score(&self, doc: &[i8]) -> f64 {
+        weighted_dot(self.scales, &self.codes, doc)
+    }
+
+    /// Every term [`Self::score`] can add, tabulated once so a scan over many rows looks each term up.
+    ///
+    /// The table holds `2048 * dimension` bytes. Building it forms `256 * dimension` terms, as many as scoring 256 rows with [`Self::score`] forms.
+    pub fn term_table(&self) -> TermTable {
+        let mut terms = vec![0.0f64; self.codes.len() * CODE_VALUES];
+        for ((weight, q), entries) in self
+            .scales
+            .weights
+            .iter()
+            .zip(&self.codes)
+            .zip(terms.as_chunks_mut::<CODE_VALUES>().0)
+        {
+            let q = f64::from(*q);
+            for (entry, code) in entries.iter_mut().zip(&CODE_AS_F64) {
+                // `q * code` is the integer product, exact in f64; adding `+0.0` turns a `-0.0` product into the `+0.0` that widening the zero i32 product gives.
+                let product = q * *code + 0.0;
+                *entry = *weight * product;
+            }
+        }
+        TermTable {
+            dimension: self.codes.len(),
+            terms,
+        }
+    }
+}
+
+/// Entries per coordinate in a [`TermTable`], one for each byte a code can occupy.
+const CODE_VALUES: usize = 256;
+
+const CODE_AS_F64: [f64; CODE_VALUES] = {
+    let mut values = [0.0f64; CODE_VALUES];
+    let mut byte = 0;
+    while byte < CODE_VALUES {
+        values[byte] = byte as u8 as i8 as f64;
+        byte += 1;
+    }
+    values
+};
+
+/// Coordinates a [`TermTable`] scan adds per pass over its rows; their terms occupy 32 KiB, sized for the L1 data cache.
+const TABLE_CHUNK: usize = 16;
+
+/// Rows a [`TermTable`] scan carries through every chunk before it moves on, so each chunk's terms are loaded once per this many rows.
+const TABLE_ROWS: usize = 512;
+
+pub struct TermTable {
+    dimension: usize,
+    terms: Vec<f64>,
+}
+
+impl std::fmt::Debug for TermTable {
+    /// Terms derive from the query embedding, so diagnostics show only the dimension.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TermTable")
+            .field("dimension", &self.dimension)
+            .finish()
+    }
+}
+
+impl TermTable {
+    /// Scores `out.len()` rows stored back to back in `codes`, writing [`QuantizedQuery::score`] of row `i` to `out[i]`.
+    ///
+    /// Each row sums its terms from `+0.0` in increasing coordinate order. Rows advance together one chunk of coordinates at a time, which keeps that chunk's terms cached; the order within each row is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// When `codes` is not `out.len()` rows of the table's dimension.
+    pub fn score_rows(&self, codes: &[i8], out: &mut [f64]) {
+        let dimension = self.dimension;
+        assert_eq!(
+            Some(codes.len()),
+            out.len().checked_mul(dimension),
+            "codes of one calibration have one length"
+        );
+        debug_assert!(
+            !codes.contains(&i8::MIN),
+            "the reserved code -128 never reaches scoring"
+        );
+        let chunked = dimension / TABLE_CHUNK * TABLE_CHUNK;
+        let (chunks, tail) = self.terms.split_at(chunked * CODE_VALUES);
+        let rows_per_tile = TABLE_ROWS * dimension;
+        for (tile, sums) in codes.chunks(rows_per_tile).zip(out.chunks_mut(TABLE_ROWS)) {
+            sums.fill(0.0);
+            for (index, chunk) in chunks
+                .as_chunks::<{ TABLE_CHUNK * CODE_VALUES }>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let start = index * TABLE_CHUNK;
+                for (row, sum) in tile.chunks_exact(dimension).zip(sums.iter_mut()) {
+                    let bytes: &[i8; TABLE_CHUNK] = row[start..start + TABLE_CHUNK]
+                        .try_into()
+                        .expect("a chunk lies inside the row");
+                    let mut acc = *sum;
+                    for quad in 0..TABLE_CHUNK / 4 {
+                        let word =
+                            u32::from_le_bytes(std::array::from_fn(|i| bytes[4 * quad + i] as u8));
+                        let (low, high) = (word as u16, (word >> 16) as u16);
+                        let terms = 4 * quad * CODE_VALUES;
+                        acc += chunk[terms + usize::from(low as u8)];
+                        acc += chunk[terms + CODE_VALUES + usize::from(low >> 8)];
+                        acc += chunk[terms + 2 * CODE_VALUES + usize::from(high as u8)];
+                        acc += chunk[terms + 3 * CODE_VALUES + usize::from(high >> 8)];
+                    }
+                    *sum = acc;
+                }
+            }
+            for (row, sum) in tile.chunks_exact(dimension).zip(sums.iter_mut()) {
+                let mut acc = *sum;
+                for (terms, code) in tail
+                    .as_chunks::<CODE_VALUES>()
+                    .0
+                    .iter()
+                    .zip(&row[chunked..])
+                {
+                    acc += terms[usize::from(*code as u8)];
+                }
+                *sum = acc;
+            }
+        }
+    }
+}
+
 /// `sum_j (s_j * s_j) * (c_query_j * c_doc_j)` in f64, increasing coordinate order, starting at `+0.0`; the integer product is formed in i32 and lies in `[-16129, 16129]`.
 ///
 /// Inputs must not contain the reserved `-128`: it widens to a product outside the recipe's
@@ -415,7 +608,7 @@ pub fn decode_codes(bytes: &[u8], dimension: u32) -> Result<Vec<i8>, ScalarBytes
 /// Panics on unequal lengths so a shape error can never become a silently truncated score.
 pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
     assert_eq!(
-        scales.scales.len(),
+        scales.weights.len(),
         query.len(),
         "codes of one calibration have one length"
     );
@@ -425,14 +618,13 @@ pub fn weighted_dot(scales: &Scales, query: &[i8], doc: &[i8]) -> f64 {
         "codes of one calibration have one length"
     );
     let mut sum = 0.0f64;
-    for ((scale, q), d) in scales.scales.iter().zip(query).zip(doc) {
+    for ((weight, q), d) in scales.weights.iter().zip(query).zip(doc) {
         debug_assert!(
             *q != i8::MIN && *d != i8::MIN,
             "the reserved code -128 never reaches scoring"
         );
-        let weight = f64::from(*scale) * f64::from(*scale);
         let product = i32::from(*q) * i32::from(*d);
-        let term = weight * f64::from(product);
+        let term = *weight * f64::from(product);
         sum += term;
     }
     sum

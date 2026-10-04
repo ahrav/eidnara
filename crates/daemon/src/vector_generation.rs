@@ -748,13 +748,20 @@ impl std::fmt::Debug for VerifiedVectors {
 /// The files whose decoded contents [`VerifiedVectors`] keeps in memory: `occurrence_ids`, `tombstones`, `scales`, and `sidecar`. Rows and codes stay behind their descriptors.
 pub const RESIDENT_FILES: [&str; 4] = [ROW_IDS_FILE, TOMBSTONES_FILE, SCALES_FILE, SIDECAR_FILE];
 
-/// Returns the manifest-declared bytes of the [`RESIDENT_FILES`], the charge for one generation's decoded tables.
+/// Returns the manifest-declared bytes of the [`RESIDENT_FILES`] plus the squared weights the decoded scales keep beside them, an f64 for every four-byte scale: the charge for one generation's decoded tables.
 pub fn resident_bytes(manifest: &GenerationManifest) -> u64 {
     manifest
         .files
         .iter()
         .filter(|file| RESIDENT_FILES.contains(&file.path.as_str()))
-        .fold(0u64, |total, file| total.saturating_add(file.size))
+        .fold(0u64, |total, file| {
+            let weights = if file.path == SCALES_FILE {
+                file.size.saturating_mul(2)
+            } else {
+                0
+            };
+            total.saturating_add(file.size).saturating_add(weights)
+        })
 }
 
 /// Verifies `digest` independently of its manifest: the store checks inventory, sizes, modes, and hashes; this checks that the manifest is a vector manifest bound to a canonical sidecar, that the sidecar carries `expected`, and that the rows, scales, codes, and identifiers agree with one another under the recipe: the scales are the calibration of the rows, and the codes are the rows encoded under them.
