@@ -9,7 +9,8 @@ prune.
 ## Evidence trail
 
 - `rank_compressed` (`crates/daemon/src/vector_reader.rs:808`) selects the
-  pool through `select_candidates` over the view's own layers, then rescores
+  pool through `select_candidates_observed` (`vector_reader.rs:879`) over the
+  view's own layers, then rescores
   through `rescore_pool` with a read closure that names
   `view.layers[winner.layer]` and `winner.row`.
 - `PinnedLayer::row` reads one row at its offset through the descriptor
