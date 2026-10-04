@@ -7,7 +7,7 @@ use kernel::source_identity::OccurrenceClass;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use retrieval::dense::codec::{self, Metric, RowLayout};
-use retrieval::dense::scalar::{Scales, encode, weighted_dot};
+use retrieval::dense::scalar::{QuantizedQuery, Scales, encode, weighted_dot};
 use retrieval::dense::score::TopK;
 use retrieval::dense::{
     BLOCK_ROWS, Ranked, inner_product, inner_product_block, inner_product_with_squares,
@@ -186,6 +186,92 @@ fn weighted_dot_matches_the_in_order_model_over_the_full_code_range() {
                     weighted_dot(&scales, &query, &doc).to_bits(),
                     model.to_bits()
                 );
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+/// Full-mantissa scales, whose squared weights times a code round, mixed with scales from the smallest subnormal to `f32::MAX`, so the weights span from about `2e-90` to `1.2e77`.
+fn extreme_scales() -> impl Strategy<Value = Vec<f32>> {
+    prop::collection::vec(
+        prop_oneof![
+            1.0e-3f32..2.0,
+            prop::sample::select(vec![
+                1.0f32,
+                1.0 / 127.0,
+                1.0e-6,
+                1.0e30,
+                f32::MAX,
+                f32::MIN_POSITIVE,
+                f32::from_bits(1),
+            ]),
+        ],
+        1..=40,
+    )
+}
+
+/// Each lane of a quantized block equals `QuantizedQuery::score` and the in-order model bit for bit, over every tail length, extreme weights, and the full code range, so any lane crossing, reassociation, or fusion in the block fails here.
+#[test]
+fn a_quantized_block_scores_each_lane_as_the_single_row_score_does() {
+    runner()
+        .run(
+            &extreme_scales().prop_flat_map(|scales| {
+                let n = scales.len();
+                (
+                    Just(scales),
+                    prop::collection::vec(-127i8..=127, n),
+                    prop::collection::vec(prop::collection::vec(-127i8..=127, n), BLOCK_ROWS),
+                )
+            }),
+            |(scales, targets, docs)| {
+                let dimension = scales.len() as u32;
+                let layout = RowLayout {
+                    dimension,
+                    metric: Metric::InnerProduct,
+                    unit_norm_tolerance: f64::MAX,
+                };
+                // Each coordinate aims at its target code; one past the f32 range aims at the target's sign instead.
+                let query: Vec<f32> = targets
+                    .iter()
+                    .zip(&scales)
+                    .map(|(target, scale)| {
+                        let value = f64::from(*target) * f64::from(*scale);
+                        if value.abs() <= f64::from(f32::MAX) {
+                            value as f32
+                        } else {
+                            scale * f32::from(target.signum())
+                        }
+                    })
+                    .collect();
+                let scales = Scales::from_values(scales, dimension).unwrap();
+                let Ok(quantized) = QuantizedQuery::new(&layout, &scales, &query) else {
+                    // Every target code was zero, so the query has no nonzero code to score with.
+                    prop_assert!(targets.iter().all(|target| *target == 0));
+                    return Ok(());
+                };
+                let lanes: [&[i8]; BLOCK_ROWS] = std::array::from_fn(|lane| docs[lane].as_slice());
+                let sums = quantized.score_block(&lanes);
+                for (lane, doc) in docs.iter().enumerate() {
+                    let mut model = 0.0f64;
+                    for (j, code) in doc.iter().enumerate() {
+                        let s = f64::from(scales.as_slice()[j]);
+                        let product = i32::from(quantized.codes()[j]) * i32::from(*code);
+                        model += (s * s) * f64::from(product);
+                    }
+                    prop_assert_eq!(
+                        sums[lane].to_bits(),
+                        quantized.score(doc).to_bits(),
+                        "lane {}",
+                        lane
+                    );
+                    prop_assert_eq!(
+                        sums[lane].to_bits(),
+                        model.to_bits(),
+                        "model, lane {}",
+                        lane
+                    );
+                }
                 Ok(())
             },
         )

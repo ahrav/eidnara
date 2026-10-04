@@ -179,20 +179,37 @@ impl RowSource for ResolvedCodes<'_> {
         scores: &mut Vec<f64>,
     ) -> Result<(), OracleRefusal> {
         scores.clear();
-        // Block scoring produces bit-for-bit identical results to per-row scoring.
-        if let Ok(block) = <&[Lane<WinnerCodes>; BLOCK_ROWS]>::try_from(lanes) {
-            let layer = block[0].payload.layer;
-            if block.iter().all(|lane| lane.payload.layer == layer) {
-                let rows = block.each_ref().map(|lane| lane.payload.codes.as_slice());
-                scores.extend(self.queries[layer].score_block(&rows));
-                return Ok(());
+        scores.resize(lanes.len(), 0.0);
+        // Block scoring produces bit-for-bit identical results to per-row scoring, so the lanes of one layer score as one block under that layer's query and a layer with a single lane in the block scores it alone.
+        for (block, scores) in lanes.chunks(BLOCK_ROWS).zip(scores.chunks_mut(BLOCK_ROWS)) {
+            let mut scored = [false; BLOCK_ROWS];
+            for lead in 0..block.len() {
+                if scored[lead] {
+                    continue;
+                }
+                let layer = block[lead].payload.layer;
+                let query = &self.queries[layer];
+                let mut members = [lead; BLOCK_ROWS];
+                let mut count = 0;
+                for (index, lane) in block.iter().enumerate().skip(lead) {
+                    if lane.payload.layer == layer {
+                        members[count] = index;
+                        count += 1;
+                        scored[index] = true;
+                    }
+                }
+                if count == 1 {
+                    scores[lead] = query.score(&block[lead].payload.codes);
+                    continue;
+                }
+                // Slots past `count` repeat the lead row; their sums are discarded.
+                let rows = members.map(|member| block[member].payload.codes.as_slice());
+                let sums = query.score_block(&rows);
+                for (member, sum) in members[..count].iter().zip(sums) {
+                    scores[*member] = sum;
+                }
             }
         }
-        scores.extend(
-            lanes
-                .iter()
-                .map(|lane| self.queries[lane.payload.layer].score(&lane.payload.codes)),
-        );
         Ok(())
     }
 }

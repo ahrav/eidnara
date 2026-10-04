@@ -424,6 +424,55 @@ fn only_resolved_winners_are_scored_and_each_scores_under_its_own_layer() {
     assert_aligned(&coded, &pool);
 }
 
+/// Pages of three, eight, and sixteen rows put winners of both layers in one scoring block. The lanes of each layer score together under that layer's query, and a layer with one lane in the block scores it alone; every pool score still carries the restated formula's bits.
+#[test]
+fn a_block_of_winners_from_two_layers_scores_each_under_its_own_layer() {
+    let fixture = Fixture::all_admitted();
+    let query = unit([0.5, 0.3, 0.2, 0.4, 0.1, 0.3, 0.2, 0.1]);
+    let replacements = [
+        ("beta", unit([0.2, 0.7, 0.1, 0.0, 0.3, 0.0, 0.1, 0.0])),
+        ("delta", unit([0.6, 0.1, 0.0, 0.5, 0.2, 0.0, 0.0, 0.3])),
+        ("theta", unit([0.1, 0.2, 0.6, 0.0, 0.0, 0.4, 0.3, 0.2])),
+    ];
+    // One replaced row leaves the delta a single lane in its block; three give each layer several.
+    for replaced in [&replacements[1..2], &replacements[..]] {
+        let base = full_base(&fixture);
+        let delta = Coded::new(&fixture, 1, replaced, &[]);
+        assert_ne!(base.scales, delta.scales);
+        let coded = [base, delta];
+        let layers: Vec<Layer<'_>> = coded.iter().map(|c| c.layer.layer()).collect();
+        let codes: Vec<LayerCodes<'_>> = coded.iter().map(Coded::codes).collect();
+        let mut eligible = base_positions(&fixture, &coded[0]);
+        for (object, _) in replaced {
+            let id = fixture.id(object);
+            let row = coded[1].layer.ids.iter().position(|c| *c == id).unwrap();
+            eligible.insert(object, (1, row));
+        }
+        let expected = reference_pool(&fixture, &coded, &query, &eligible, 8);
+        assert_eq!(expected.len(), 8);
+        for page_rows in [3, 8, 16] {
+            let pool = select(
+                &fixture,
+                &layers,
+                &codes,
+                &query,
+                8,
+                roomy(page_rows),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(
+                pool_of(&pool),
+                expected,
+                "{} replaced, page {page_rows}",
+                replaced.len()
+            );
+            assert_aligned(&coded, &pool);
+            assert_eq!(pool.layers.superseded, replaced.len());
+        }
+    }
+}
+
 #[test]
 fn a_kernel_change_between_batches_discards_the_pool() {
     let fixture = Fixture::all_admitted();

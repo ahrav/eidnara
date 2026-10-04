@@ -40,7 +40,11 @@ exported at `crates/retrieval/src/lib.rs` and exercised by
 `crates/retrieval/tests/dense_numerics.rs`, `dense_scalar.rs`, and
 `dense_properties.rs`. The references in `dense_numerics.rs` are written from
 the formulas and call no scorer or comparator of `retrieval::dense`. The
-fixtures exercise the scalar scorers only; a blocked or vectorized path (U5)
+candidate scan scores the lanes of one layer through `weighted_dot_block`, an
+eight-lane block with its own tail and extrema fixtures: `dense_numerics.rs`
+`each_block_lane_scores_its_row_like_the_reference` and `dense_properties.rs`
+`a_quantized_block_scores_each_lane_as_the_single_row_score_does` check every
+lane against `weighted_dot` and an in-order model. A vectorized path (U5)
 needs its own tail, alignment, and extrema fixtures, which are not measured
 here.
 
@@ -67,14 +71,20 @@ here.
 ### dense-quantized-score-matches-weighted-reference
 
 Type: safety
-Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:305`)
-is called from `crates/retrieval/tests/` only at this base; no producer scans
-codes yet.
+Reachability: test-only - `QuantizedQuery` (`crates/retrieval/src/dense/scalar.rs:307`)
+is built by `select_candidates` (`crates/retrieval/src/dense/candidates.rs:220`),
+whose only caller is `daemon::vector_reader::rank_compressed`; no production
+path calls `rank_compressed` at this HEAD. Corrected from `scalar.rs:305`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `quantized_scores_and_order_match_the_independent_reference_and_full_sort`,
 `extreme_scales_and_codes_score_finite_and_match_the_reference`, and
-`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`.
+`the_fixture_rejects_unweighted_and_f32_first_quantized_scoring`; the block
+form by `dense_numerics.rs` `each_block_lane_scores_its_row_like_the_reference`,
+`crates/retrieval/tests/dense_properties.rs`
+`a_quantized_block_scores_each_lane_as_the_single_row_score_does`, and
+`crates/retrieval/tests/dense_candidates.rs`
+`a_block_of_winners_from_two_layers_scores_each_under_its_own_layer`.
 Guarantee: The quantized score of a document is
 `sum_j (s_j * s_j) * i32(c_query_j) * i32(c_doc_j)` with the weight and the
 integer product widened to f64 before they multiply, accumulated from `+0.0`
@@ -89,8 +99,9 @@ Required faults and enabling state: Scales that differ by two orders of
 magnitude across coordinates, codes at `+127` and `-127`, scales at
 `f32::MAX`, `f32::MIN_POSITIVE`, and the smallest subnormal.
 Confidence: high - [evidence](evidence/dense-quantized-score-matches-weighted-reference.md).
-`weighted_dot` (`scalar.rs:341`) was read against the formula and the tests run
-against it.
+`weighted_dot` (`scalar.rs:364`) and `weighted_dot_block` (`scalar.rs:391`)
+were read against the formula and the tests run against them. Corrected from
+`scalar.rs:341`.
 Existing check: `crates/retrieval/tests/dense_scalar.rs`
 `weighted_scoring_accumulates_in_f64_in_increasing_coordinate_order` and
 `nonuniform_scales_rank_differently_from_a_raw_integer_dot`.
@@ -130,7 +141,7 @@ Open questions: None.
 ### dense-order-is-total-and-keeps-distinct-identities
 
 Type: safety
-Reachability: default-production - `rank_order` (`score.rs:92`) orders the
+Reachability: default-production - `rank_order` (`score.rs:126`) orders the
 oracle walk's `TopK`, which the query route's producer uses.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
@@ -177,7 +188,7 @@ unrepresentable product refuses next, and a pool above the cap refuses last.
 Every outcome is decided from three scalars, before any R-sized state exists;
 the private fields make `CandidateCapacity` the only source of a checked pool
 size, and the candidate scan sizes its pool from it
-(`crates/retrieval/src/dense/candidates.rs:255`).
+(`crates/retrieval/src/dense/candidates.rs:281`).
 Check: `always` - each refusal class is returned for its witness and in the
 stated precedence; the capacity for the approved alpha set
 `{1, 2, 5, 10, 20, 50}` equals `alpha * K`. `always` because a scan cannot
@@ -197,7 +208,7 @@ Open questions:
 ### dense-invalid-query-never-enters-scoring
 
 Type: safety
-Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:305`) is reached
+Reachability: test-only - `QuantizedQuery::new` (`scalar.rs:323`) is reached
 from tests only; `rescore` validates its query the same way through
 `codec::validate`.
 Status: active
@@ -228,7 +239,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `select_candidates`
-(`crates/retrieval/src/dense/candidates.rs:194`) has no production caller at
+(`crates/retrieval/src/dense/candidates.rs:220`) has no production caller at
 this base; #613 connects it to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
@@ -371,7 +382,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - `rank_compressed`
-(`crates/daemon/src/vector_reader.rs:685`) has no production caller at this
+(`crates/daemon/src/vector_reader.rs:791`) has no production caller at this
 base; #620 puts it behind the dense lane.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
@@ -407,7 +418,7 @@ Open questions: None.
 
 Type: safety
 Reachability: test-only - as above; `rescore_pool`
-(`crates/retrieval/src/dense/candidates.rs:340`) is pure.
+(`crates/retrieval/src/dense/candidates.rs:367`) is pure.
 Status: active
 Exercised: yes - `crates/daemon/tests/vector_rescore.rs`
 `only_pool_entries_are_read_and_each_from_its_winning_pinned_layer` and
