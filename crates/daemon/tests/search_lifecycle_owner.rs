@@ -4481,7 +4481,20 @@ async fn the_running_daemon_publishes_memories_from_before_and_after_it_started(
         owner.claim_progress(),
         daemon::claim_sources::ClaimProgress::Changes
     );
+    assert!(
+        store
+            .outbox_consumer_checkpoint(daemon::claim_sources::CLAIM_CONSUMER)
+            .unwrap()
+            .is_some()
+    );
     daemon.shutdown().await;
+    assert_eq!(
+        store
+            .outbox_consumer_checkpoint(daemon::claim_sources::CLAIM_CONSUMER)
+            .unwrap(),
+        None,
+        "a clean stop removes the caught-up claim consumer"
+    );
 }
 
 /// A source backlog several scan pages long advances a bounded page per claim slice while lifecycle slices keep running between them.
@@ -4624,6 +4637,32 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         current.consumer.consumer_id,
         daemon::search_lifecycle_owner::REGISTERED_CONSUMER
     );
+    // The claim-source runner publishes the seeded memories in batched commits that may land after the registration build; the Current family catches up to them in later slices while this daemon runs.
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    loop {
+        let reader = tokio::task::spawn_blocking({
+            let owner = Arc::clone(&owner);
+            move || owner.pin(&slice_budget())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let live = reader
+            .projection()
+            .read(|conn| {
+                retrieval::eligibility::live_candidates(conn, None, NonZeroUsize::new(64).unwrap())
+            })
+            .unwrap();
+        if live.len() >= 2 {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the registered projection never caught up to the published memories: {live:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(owner);
     let data = daemon.shutdown_keeping_data().await;
 
     let restarted = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
@@ -4660,7 +4699,7 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         reader.consumer().consumer_id,
         daemon::search_lifecycle_owner::REGISTERED_CONSUMER
     );
-    // The selected projection serves the memories the claim-source runner published from the kernel.
+    // The resumed projection still serves the memories the first daemon caught up to.
     loop {
         let live = reader
             .projection()

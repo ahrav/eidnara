@@ -147,6 +147,10 @@ pub struct KernelStore {
     #[cfg(feature = "test-support")]
     pub(super) staged_artifacts: std::sync::atomic::AtomicUsize,
     pub(super) artifact_cap: u64,
+    /// Bytes below `objects` as counted under the writer lock, kept current by every publication and forgotten by every unlink, so ingestion walks the tree only after a removal or at the first ingest since open.
+    pub(super) artifact_usage: Mutex<crate::cas::ArtifactUsage>,
+    #[cfg(feature = "test-support")]
+    pub(super) artifact_census_walks: std::sync::atomic::AtomicUsize,
     /// The store root and the artifact tree's `objects` and `tmp` children,
     /// opened `NOFOLLOW` when the store opened and held for its lifetime. Every
     /// later directory open resolves below one of them rather than re-resolving
@@ -398,6 +402,9 @@ impl KernelStore {
             #[cfg(feature = "test-support")]
             staged_artifacts: std::sync::atomic::AtomicUsize::new(0),
             artifact_cap,
+            artifact_usage: Mutex::new(crate::cas::ArtifactUsage::default()),
+            #[cfg(feature = "test-support")]
+            artifact_census_walks: std::sync::atomic::AtomicUsize::new(0),
             root_directory,
             objects_directory: artifact_directories.objects,
             tmp_directory: artifact_directories.tmp,

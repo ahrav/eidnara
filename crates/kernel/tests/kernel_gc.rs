@@ -554,6 +554,34 @@ fn reclaim_frees_capacity_for_next_write() {
 }
 
 #[test]
+fn ingestion_counts_the_object_tree_once_until_an_object_is_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let store = KernelStore::open_with_artifact_cap_for_test(root.path(), 6).unwrap();
+    seed_domain(&store);
+    let walks = || store.artifact_census_walks_for_test();
+    let first = store.ingest_artifact(request("one", b"12")).unwrap();
+    store.ingest_artifact(request("two", b"34")).unwrap();
+    store.ingest_artifact(request("two-again", b"34")).unwrap();
+    assert_eq!(walks(), 1, "later ingests reuse the counted usage");
+    let error = store.ingest_artifact(request("over", b"5678")).unwrap_err();
+    assert_eq!(error.kind(), ArtifactErrorKind::Capacity);
+    assert_eq!(error.usage(), Some(4));
+    assert_eq!(walks(), 1);
+
+    invalidate(root.path(), &first.evidence_id, 0);
+    store.run_staging_maintenance(15 * DAY_MS).unwrap();
+    store.ingest_artifact(request("three", b"5678")).unwrap();
+    assert_eq!(
+        walks(),
+        2,
+        "a reclaimed object makes the next ingest count again"
+    );
+    assert_eq!(store.artifact_budget_facts().unwrap().usage_bytes, 6);
+    let error = store.ingest_artifact(request("full", b"9")).unwrap_err();
+    assert_eq!(error.usage(), Some(6));
+}
+
+#[test]
 fn facts_unless_abandons_the_artifact_walk_once_cancelled() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();

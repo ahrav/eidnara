@@ -445,14 +445,15 @@ impl Envelope<'_> {
         domain_id: &str,
         fresh: &SourceDescriptorDetail,
     ) -> Result<Option<(String, i64)>, SourceDescriptorError> {
-        let object_pattern = descriptor_object_id(&fresh.lineage_id, "*");
+        let lineage_low = descriptor_object_id(&fresh.lineage_id, "");
+        let lineage_high = super::envelope::prefix_upper_bound(&lineage_low);
         let mut statement = self
             .tx
             .prepare_cached(
                 "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
                  FROM object_registry o
                  JOIN observations b ON b.object_id=o.object_id
-                 WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id GLOB ?2
+                 WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id>=?2 AND o.object_id<?4
                    AND b.observation_kind=?3 AND o.invalidated_commit_seq IS NULL
                    AND b.invalidated_commit_seq IS NULL
                  LIMIT 2",
@@ -462,8 +463,9 @@ impl Envelope<'_> {
             .query_map(
                 [
                     fresh.lineage_id.as_str(),
-                    object_pattern.as_str(),
+                    lineage_low.as_str(),
                     SOURCE_DESCRIPTOR_KIND,
+                    lineage_high.as_str(),
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -484,13 +486,14 @@ impl Envelope<'_> {
                     "SELECT o.object_id,o.domain_id,o.source_revision,b.observation_payload
                      FROM object_registry o
                      JOIN observations b ON b.object_id=o.object_id
-                     WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id GLOB ?2
+                     WHERE o.object_kind='observation' AND o.source_id=?1 AND o.object_id>=?2 AND o.object_id<?4
                        AND b.observation_kind=?3
                      ORDER BY o.source_revision DESC LIMIT 1",
                     [
                         fresh.lineage_id.as_str(),
-                        object_pattern.as_str(),
+                        lineage_low.as_str(),
                         SOURCE_DESCRIPTOR_KIND,
+                        lineage_high.as_str(),
                     ],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )

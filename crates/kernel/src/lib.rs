@@ -147,7 +147,7 @@ pub use slice::{
     DECISION_INSERT_KIND, DECISION_RETIRE_KIND, DecisionEventOutcome, DecisionEventPayload,
     DecisionEventSpec, DecisionPage, DecisionPayload, DecisionRow, DecisionSpec,
     DecisionWriteOutcome, ObservationDependencySpec, ObservationPayload, ObservationRow,
-    ObservationSpec, ObservationWriteOutcome, RetirementOutcome, SliceSnapshot,
+    ObservationSpec, ObservationWriteOutcome, PagedDecision, RetirementOutcome, SliceSnapshot,
 };
 pub use source_descriptor::{
     LiveDescriptor, LiveDescriptorPage, MAX_DESCRIPTORS_PER_COMMIT,
