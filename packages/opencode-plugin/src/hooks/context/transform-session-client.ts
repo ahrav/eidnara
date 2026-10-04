@@ -581,6 +581,12 @@ export interface TransformPassSource {
      */
     liveWindow(start: number, end: number): unknown[] | undefined;
     /**
+     * `true` when the pass holds the only references to the captured values from capture to
+     * publication, so a recheck compares the live window's slots with the captured members by
+     * reference.
+     */
+    readonly privateWindow?: boolean;
+    /**
      * The trusted context limit the invocation gate reads, resolved from the captured members
      * before the pass can decline into fail-open.
      */
@@ -663,6 +669,13 @@ function ensureState(
         states.set(sessionId, state);
     }
     return state;
+}
+
+function sameMembers(live: readonly unknown[], captured: readonly unknown[]): boolean {
+    if (live.length !== captured.length) return false;
+    for (let index = 0; index < live.length; index += 1)
+        if (!Object.is(live[index], captured[index])) return false;
+    return true;
 }
 
 /** Scans host ids from the end until `stop` accepts one and returns its index, or -1. */
@@ -1141,12 +1154,15 @@ export function createTransformSessionClient(
                 timings,
                 `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0}`,
             );
-            /** The same root, length, and boundary index, with every window slot and tape unchanged. */
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();
                 const startedAt = performance.now();
                 const live = source.liveWindow(boundaryIndex, capturedLength);
-                const unchanged = live !== undefined && capturedMessagesUnchanged(live, captured);
+                const unchanged =
+                    live !== undefined &&
+                    (source.privateWindow === true
+                        ? sameMembers(live, captured.members)
+                        : capturedMessagesUnchanged(live, captured));
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };

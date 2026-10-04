@@ -172,6 +172,7 @@ export function createPiTransform(options: PiTransformOptions) {
             readWindow: rows,
             idOf: (value) => (value as PiRow).id,
             liveWindow: rows,
+            privateWindow: true,
             contextLimit: () => inputs.contextLimit,
             prepare: async (members) => {
                 const window = members as PiRow[];
