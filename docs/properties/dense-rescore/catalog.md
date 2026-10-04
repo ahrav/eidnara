@@ -265,7 +265,10 @@ Open questions:
 ### dense-rejected-leaders-never-starve-eligible-rows
 
 Type: liveness
-Reachability: test-only - as above.
+Reachability: test-only - `select_candidates`
+(`crates/retrieval/src/dense/candidates.rs:260`) is called only from
+`crates/retrieval/tests/dense_candidates.rs` at this base; no producer calls
+it until #613 connects it to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_rejected_prefix_longer_than_the_pool_and_the_batch_does_not_starve_the_eligible_suffix`
@@ -299,7 +302,12 @@ Open questions: None.
 ### dense-pool-never-mixes-authority-states
 
 Type: safety
-Reachability: test-only - as above.
+Reachability: test-only - `select_candidates`
+(`crates/retrieval/src/dense/candidates.rs:260`) and
+`select_candidates_with_hook_for_test` (`candidates.rs:271`, behind the
+`test-support` feature) are called only from
+`crates/retrieval/tests/dense_candidates.rs` at this base; no producer calls
+either until #613 connects the scan to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `a_kernel_change_between_batches_discards_the_pool`,
@@ -337,7 +345,12 @@ Open questions:
 ### dense-scan-bounds-end-with-no-candidate
 
 Type: safety
-Reachability: test-only - as above.
+Reachability: test-only - `select_candidates`
+(`crates/retrieval/src/dense/candidates.rs:260`) and
+`select_candidates_with_hook_for_test` (`candidates.rs:271`) are called only
+from `crates/retrieval/tests/dense_candidates.rs` at this base; the slot
+reservation test runs inside `crates/retrieval/src/dense/oracle.rs`. No
+producer calls the scan until #613 connects it to pinned generations.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_candidates.rs`
 `each_storage_and_row_bound_saturates_alone_and_returns_no_candidate`,
