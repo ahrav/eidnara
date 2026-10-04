@@ -2773,6 +2773,8 @@ pub struct HandlerCore {
     bindings: Arc<Mutex<RouteBindings>>,
     /// The lifecycle owner exists only when the SQLite store has a data home, the kernel is available, and local embeddings are attached. Cleared after a successful shutdown joins the owner's supervisor.
     search_lifecycle: Arc<Mutex<Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>>>>,
+    /// The claim-source runner's pause flag, shared with the lifecycle owner once it binds.
+    claim_sources_paused: Arc<std::sync::atomic::AtomicBool>,
     /// The lane the projection's identity and embedding work come from; attached by the daemon binary before activation.
     local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
     /// The Model Execution supervisor and startup credentials MemoryReviewer runs use; without them the worker never starts and accepted candidates stay recorded as not admitted.
@@ -3712,6 +3714,7 @@ impl Handler {
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
             search_lifecycle: Arc::new(Mutex::new(None)),
+            claim_sources_paused: Arc::default(),
             local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
@@ -3805,6 +3808,7 @@ impl HandlerCore {
         let bindings = Arc::clone(&self.bindings);
         let memory_classifier = Arc::clone(&self.memory_classifier);
         let search_lifecycle = Arc::clone(&self.search_lifecycle);
+        let claim_sources_paused = Arc::clone(&self.claim_sources_paused);
         let local_embeddings = self
             .local_embeddings
             .lock()
@@ -3867,6 +3871,7 @@ impl HandlerCore {
                                 local_embeddings,
                                 &bindings,
                                 path,
+                                claim_sources_paused,
                             )
                         {
                             task_admission
@@ -4045,6 +4050,7 @@ impl HandlerCore {
         local_embeddings: Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>,
         bindings: &Arc<Mutex<RouteBindings>>,
         sqlite_path: &str,
+        claim_sources_paused: Arc<std::sync::atomic::AtomicBool>,
     ) -> Option<Arc<search_lifecycle_owner::SearchLifecycleOwner>> {
         let Some(home) = sqlite_store_data_home(sqlite_path) else {
             eprintln!("daemon: search stays unavailable: the store path is not under a data home");
@@ -4068,6 +4074,7 @@ impl HandlerCore {
         let roster = Arc::clone(bindings);
         let owner = Arc::new(
             search_lifecycle_owner::SearchLifecycleOwner::for_home(home, kernel, local_embeddings)
+                .with_claims_paused(claim_sources_paused)
                 .with_roster(Arc::new(move || {
                     roster
                         .lock()
@@ -4200,6 +4207,7 @@ impl Handler {
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
             search_lifecycle: Arc::new(Mutex::new(None)),
+            claim_sources_paused: Arc::default(),
             local_embeddings: Mutex::new(None),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             note_evaluator_registrations: Mutex::new(HashMap::new()),
@@ -13657,6 +13665,23 @@ impl HandlerCore {
     #[cfg(feature = "test-support")]
     pub fn disable_kernel_sampler_for_test(&self) {
         self.kernel.disable_background_sampler();
+    }
+
+    /// Lets a paused claim-source runner run again.
+    #[cfg(feature = "test-support")]
+    pub fn resume_claim_sources_for_test(&self) {
+        self.claim_sources_paused
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Keeps the claim-source runner from running, so a test that drives the materializer or counts kernel commits sees no background publication. A slice already in flight finishes first.
+    #[cfg(feature = "test-support")]
+    pub fn pause_claim_sources_for_test(&self) {
+        self.claim_sources_paused
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(owner) = self.lifecycle_owner() {
+            owner.pause_claim_sources();
+        }
     }
 
     /// Ages the published kernel health block past `SAMPLE_STALE_AFTER`.

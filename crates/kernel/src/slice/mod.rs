@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::Sensitivity;
 
 pub use alignment::{ALIGNMENT_DEPENDENCY_KIND, AlignmentRebuild, AlignmentRow, AlignmentSnapshot};
-pub use read::{DecisionRow, ObservationRow, SliceSnapshot};
+pub use read::{DecisionPage, DecisionRow, ObservationRow, PagedDecision, SliceSnapshot};
 pub use write::{
     APPROVAL_REVOKE_KIND, DECISION_CHANGE_KINDS, DECISION_CORRECT_KIND, DECISION_EVENT_APPEND_KIND,
     DECISION_INSERT_KIND, DECISION_RETIRE_KIND,

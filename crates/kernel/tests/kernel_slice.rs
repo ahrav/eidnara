@@ -1595,3 +1595,184 @@ fn a_decision_serves_no_lower_than_its_cited_evidence_reads_today() {
         "a decision citing now-secret evidence kept serving"
     );
 }
+
+#[test]
+fn decision_pages_examine_a_bounded_row_count_and_cut_before_the_byte_bound() {
+    use std::num::{NonZeroU64, NonZeroUsize};
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let inserted = store
+        .commit(intent("decisions", '1'), |envelope| {
+            for index in 1..=5 {
+                envelope.insert_decision(decision(index))?;
+            }
+            Ok(String::new())
+        })
+        .unwrap();
+    store
+        .commit(intent("retire", '2'), |envelope| {
+            envelope.retire_decision("decision-object-2")?;
+            envelope.retire_decision("decision-object-3")?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let tip = store.tip().unwrap();
+    let budget = kernel::applicability::EvalBudget::unbounded();
+    let rows = |n| NonZeroUsize::new(n).unwrap();
+    let bytes = NonZeroU64::new(1 << 20).unwrap();
+    let live = |page: &kernel::DecisionPage| -> Vec<String> {
+        page.decisions
+            .iter()
+            .map(|entry| {
+                assert_eq!(entry.object.object_id, entry.decision.object_id);
+                entry.object.object_id.clone()
+            })
+            .collect()
+    };
+
+    // Three rows are examined, two of them invalidated, so the page returns one live decision and continues.
+    let first = store
+        .decision_page_within_budget(tip, None, rows(3), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&first), ["decision-object-1"]);
+    assert_eq!(first.next.as_deref(), Some("decision-object-3"));
+    let second = store
+        .decision_page_within_budget(tip, first.next.as_deref(), rows(3), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&second), ["decision-object-4", "decision-object-5"]);
+    assert_eq!(second.next, None);
+
+    // Read at the insert commit, every decision is live, and each registry row reads as it stood at that commit.
+    let earlier = store
+        .decision_page_within_budget(inserted.commit_seq, None, rows(8), bytes, &budget)
+        .unwrap();
+    assert_eq!(earlier.decisions.len(), 5);
+    for entry in &earlier.decisions {
+        assert_eq!(
+            (
+                entry.object.invalidated_commit_seq,
+                entry.object.superseded_by.as_deref()
+            ),
+            (None, None),
+            "{} carries post-snapshot registry columns",
+            entry.object.object_id
+        );
+    }
+
+    // A byte bound smaller than two payloads cuts the page after one live decision; one larger payload is still returned alone.
+    let one = NonZeroU64::new(1).unwrap();
+    let cut = store
+        .decision_page_within_budget(tip, None, rows(8), one, &budget)
+        .unwrap();
+    assert_eq!(live(&cut), ["decision-object-1"]);
+    assert_eq!(cut.next.as_deref(), Some("decision-object-3"));
+
+    // Twin bounds one byte apart separate a cut before the crossing decision from a cut after it.
+    let length = |object: &str| -> u64 {
+        Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT length(decision_payload) FROM decisions WHERE object_id=?1",
+            [object],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as u64
+    };
+    let both = length("decision-object-1") + length("decision-object-4");
+    let short = store
+        .decision_page_within_budget(
+            tip,
+            None,
+            rows(8),
+            NonZeroU64::new(both - 1).unwrap(),
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(live(&short), ["decision-object-1"]);
+    assert_eq!(short.next.as_deref(), Some("decision-object-3"));
+    let exact = store
+        .decision_page_within_budget(tip, None, rows(8), NonZeroU64::new(both).unwrap(), &budget)
+        .unwrap();
+    assert_eq!(live(&exact), ["decision-object-1", "decision-object-4"]);
+    assert_eq!(exact.next.as_deref(), Some("decision-object-4"));
+
+    // A page of only invalidated rows returns nothing live and still moves the cursor.
+    let empty = store
+        .decision_page_within_budget(tip, Some("decision-object-1"), rows(2), bytes, &budget)
+        .unwrap();
+    assert!(empty.decisions.is_empty());
+    assert_eq!(empty.next.as_deref(), Some("decision-object-3"));
+    // Exactly `max_rows` rows left: the page ends without a cursor.
+    let last = store
+        .decision_page_within_budget(tip, Some("decision-object-3"), rows(2), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&last), ["decision-object-4", "decision-object-5"]);
+    assert_eq!(last.next, None);
+    let lineage = |page: &kernel::DecisionPage| -> Vec<(String, i64)> {
+        page.decisions
+            .iter()
+            .map(|entry| (entry.object.object_id.clone(), entry.lineage_commit_seq))
+            .collect()
+    };
+    assert_eq!(
+        lineage(&last),
+        [
+            ("decision-object-4".to_string(), inserted.commit_seq),
+            ("decision-object-5".to_string(), inserted.commit_seq),
+        ]
+    );
+
+    // Every decision shares one source lineage, so correcting 4 with 5's spec folds 4 into the live 5 without rewriting 5's row.
+    let folded = store
+        .commit(intent("fold", '3'), |envelope| {
+            envelope.correct_decision("decision-object-4", decision(5))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let after_fold = store
+        .decision_page_within_budget(folded.commit_seq, None, rows(8), bytes, &budget)
+        .unwrap();
+    assert_eq!(
+        lineage(&after_fold),
+        [
+            ("decision-object-1".to_string(), inserted.commit_seq),
+            ("decision-object-5".to_string(), folded.commit_seq),
+        ]
+    );
+    assert_eq!(
+        after_fold.decisions[1].object.created_commit_seq,
+        inserted.commit_seq
+    );
+    // Read before the fold, the survivor still reports its creation commit.
+    let before_fold = store
+        .decision_page_within_budget(tip, Some("decision-object-4"), rows(8), bytes, &budget)
+        .unwrap();
+    assert_eq!(
+        lineage(&before_fold),
+        [("decision-object-5".to_string(), inserted.commit_seq)]
+    );
+    // A snapshot before the fold keeps the predecessor's live registry state.
+    let predecessor = store
+        .decision_page_within_budget(tip, Some("decision-object-3"), rows(1), bytes, &budget)
+        .unwrap();
+    assert_eq!(live(&predecessor), ["decision-object-4"]);
+    assert_eq!(
+        (
+            predecessor.decisions[0].object.invalidated_commit_seq,
+            predecessor.decisions[0].object.superseded_by.as_deref()
+        ),
+        (None, None)
+    );
+
+    let cancelled = kernel::applicability::EvalBudget::unbounded();
+    cancelled.cancel();
+    assert_eq!(
+        store.decision_page_within_budget(tip, None, rows(3), bytes, &cancelled),
+        Err(KernelError::Deadline)
+    );
+}

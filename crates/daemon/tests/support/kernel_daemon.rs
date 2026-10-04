@@ -39,6 +39,8 @@ pub struct StartOptions {
     pub harness: String,
     pub consumer_capabilities: Vec<String>,
     pub capability_source: Option<Arc<dyn CapabilitySource>>,
+    /// Runs the daemon's claim-source maintenance; off by default so background publication changes no tip or count a test reads.
+    pub claim_sources: bool,
 }
 
 impl Default for StartOptions {
@@ -49,6 +51,7 @@ impl Default for StartOptions {
             harness: "test".to_owned(),
             consumer_capabilities: Vec::new(),
             capability_source: None,
+            claim_sources: false,
         }
     }
 }
@@ -99,6 +102,9 @@ impl KernelDaemon {
             handler = handler.with_capability_source(source);
         }
         handler.disable_kernel_sampler_for_test();
+        if !options.claim_sources {
+            handler.pause_claim_sources_for_test();
+        }
         let init = HostInit {
             host_capabilities: Vec::new(),
             storage: Some(serde_json::to_value(&descriptor).unwrap()),
