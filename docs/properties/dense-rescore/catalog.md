@@ -130,9 +130,10 @@ Reachability: default-production - the query route's `ExhaustiveProducer`
 (`crates/daemon/src/query_route.rs:503`) ranks through the oracle walk, which
 scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
-`rescore` (`score.rs:194`), which have no production caller at this base, so
-the label rests on `dense_properties.rs:258` holding `inner_product_block`
-equal to `inner_product` bit for bit.
+`rescore` (`score.rs:228`), which have no production caller at this base, so
+the label rests on `dense_properties.rs:346` holding `inner_product_block`
+equal to `inner_product` bit for bit. Corrected from `score.rs:194` and
+`dense_properties.rs:258`, their lines at main `f6f42ea4a`.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
 `rescore_matches_the_independent_reference_and_full_sort_with_negatives_and_ties`,
