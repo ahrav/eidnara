@@ -111,10 +111,10 @@ Open questions:
 Type: safety
 Reachability: default-production - the query route's `ExhaustiveProducer`
 (`crates/daemon/src/query_route.rs:503`) ranks through the oracle walk, which
-scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:508`). The
+scores with `score_block` (`crates/retrieval/src/dense/oracle.rs:181`). The
 tests exercise `inner_product` (`crates/retrieval/src/dense/score.rs:13`) and
-`rescore` (`score.rs:190`), which have no production caller at this base, so
-the label rests on `dense_properties.rs:255` holding `inner_product_block`
+`rescore` (`score.rs:194`), which have no production caller at this base, so
+the label rests on `dense_properties.rs:258` holding `inner_product_block`
 equal to `inner_product` bit for bit.
 Status: active
 Exercised: yes - `crates/retrieval/tests/dense_numerics.rs`
