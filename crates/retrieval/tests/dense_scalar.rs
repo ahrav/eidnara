@@ -2,8 +2,9 @@ use kernel::source_identity::OccurrenceClass;
 use retrieval::dense::codec::{self, Metric, RowLayout, RowRejection};
 use retrieval::dense::scalar::{
     CODE_MAX, CODE_MIN, CalibrationRejection, ScalarBytesRejection, ScalarRecipe, Scales,
-    calibrate, decode_codes, encode, encode_codes, weighted_dot,
+    calibrate, decode_codes, encode, encode_codes, weighted_dot, weighted_dot_block,
 };
+use retrieval::dense::score::BLOCK_ROWS;
 use retrieval::dense::{inner_product, rank_order, rescore};
 
 const DIMENSION: u32 = 8;
@@ -328,6 +329,15 @@ fn weighted_scoring_never_fuses_the_multiply_into_the_add() {
 #[should_panic(expected = "codes of one calibration have one length")]
 fn weighted_scoring_refuses_unequal_lengths_instead_of_truncating() {
     let _ = weighted_dot(&scales_of([1.0; 8]), &[1; 8], &[1; 7]);
+}
+
+#[test]
+#[should_panic(expected = "codes of one calibration have one length")]
+fn block_scoring_refuses_a_short_row_in_any_lane() {
+    let short = [1i8; 7];
+    let mut rows: [&[i8]; BLOCK_ROWS] = [&[1; 8]; BLOCK_ROWS];
+    rows[BLOCK_ROWS - 1] = &short;
+    let _ = weighted_dot_block(&scales_of([1.0; 8]), &[1; 8], &rows);
 }
 
 // `weighted_dot` guards the reserved code with `debug_assert!`, so these two panics exist only in

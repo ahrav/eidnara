@@ -20,6 +20,7 @@ use super::oracle::{
 };
 use super::resolve::{Layer, RowFault};
 use super::scalar::{self, QuantizedQuery, QueryRefusal, Scales};
+use super::score::BLOCK_ROWS;
 use crate::batch::VectorGeneration;
 use crate::eligibility::Authority;
 
@@ -177,6 +178,15 @@ impl RowSource for ResolvedCodes<'_> {
         scores: &mut Vec<f64>,
     ) -> Result<(), OracleRefusal> {
         scores.clear();
+        // Block scoring produces bit-for-bit identical results to per-row scoring.
+        if let Ok(block) = <&[Lane<WinnerCodes>; BLOCK_ROWS]>::try_from(lanes) {
+            let layer = block[0].payload.layer;
+            if block.iter().all(|lane| lane.payload.layer == layer) {
+                let rows = block.each_ref().map(|lane| lane.payload.codes.as_slice());
+                scores.extend(self.queries[layer].score_block(&rows));
+                return Ok(());
+            }
+        }
         scores.extend(
             lanes
                 .iter()
