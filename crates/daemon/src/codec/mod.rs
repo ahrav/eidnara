@@ -12,7 +12,6 @@ pub use opencode::{
     MessageV2Json, encode_opencode, encode_opencode_with_session,
     encode_opencode_with_session_exemptions,
 };
-pub use pi::{PiSessionEntryJson, decode_pi, decode_pi_with_sidecar, encode_pi};
 pub use sidecar::{DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary};
 
 #[cfg(test)]
@@ -25,9 +24,8 @@ mod tests {
     use crate::injection::build_synthetic_todo_pair;
     use crate::wire::WireMessage;
 
-    use super::{
-        decode_opencode, decode_pi, encode_opencode, encode_opencode_with_session, encode_pi,
-    };
+    use super::pi::{decode_pi_rows, encode_pi_rows};
+    use super::{decode_opencode, encode_opencode, encode_opencode_with_session};
 
     #[derive(Deserialize)]
     struct OpenCodeGolden {
@@ -52,7 +50,7 @@ mod tests {
 
     #[derive(Deserialize)]
     struct PiCase {
-        entries: Vec<Value>,
+        rows: Vec<Value>,
     }
 
     #[test]
@@ -181,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_golden_round_trips_non_compaction_entries_and_is_deterministic() {
+    fn pi_golden_round_trips_every_row_and_is_deterministic() {
         let golden: PiGolden =
             serde_json::from_str(include_str!("../../testdata/codec/pi-golden.json")).unwrap();
         assert_coverage_or_recorded_missing(
@@ -198,23 +196,23 @@ mod tests {
                 "tool_result_details",
                 "custom_message",
                 "compaction",
+                "branch_summary",
+                "bash_execution",
                 "aborted_assistant",
-                "response_id_mid",
-                "timestamp_fallback_mid",
             ],
         );
 
         for case in golden.cases {
-            let decoded = decode_pi(&case.entries);
-            let decoded_again = decode_pi(&case.entries);
+            let rows: Vec<_> = case.rows.iter().cloned().map(std::sync::Arc::new).collect();
+            let decoded = decode_pi_rows(&rows).expect("golden rows use the closed role set");
+            let decoded_again = decode_pi_rows(&rows).unwrap();
             assert_eq!(decoded, decoded_again);
-            assert!(decoded.boundary.is_some());
 
             let messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
-            let encoded = encode_pi(&messages, &decoded.sidecar);
-            let encoded_again = encode_pi(&messages, &decoded.sidecar);
+            let encoded = encode_pi_rows(&messages, &decoded.sidecar, &[]);
+            let encoded_again = encode_pi_rows(&messages, &decoded.sidecar, &[]);
             assert_eq!(encoded, encoded_again);
-            assert_eq!(encoded, strip_pi_compaction(case.entries));
+            assert_eq!(encoded, case.rows);
         }
     }
 
@@ -240,19 +238,19 @@ mod tests {
             json!([{ "type": "text", "text": "survivor" }])
         );
 
-        let pi_raw = vec![json!({
+        let pi_raw = vec![std::sync::Arc::new(json!({ "id": "a1b2c3d4", "message": {
             "role": "assistant",
             "content": [
                 { "type": "toolCall", "id": "call-a", "name": "first", "arguments": {} },
                 { "type": "text", "text": "survivor" }
             ],
             "timestamp": 1
-        })];
-        let pi_decoded = decode_pi(&pi_raw);
+        } }))];
+        let pi_decoded = decode_pi_rows(&pi_raw).unwrap();
         let mut pi_message = pi_decoded.messages[0].ck.clone();
         pi_message.content_mut().remove(0);
         assert_eq!(
-            encode_pi(&[pi_message], &pi_decoded.sidecar)[0]["content"],
+            encode_pi_rows(&[pi_message], &pi_decoded.sidecar, &[])[0]["message"]["content"],
             json!([{ "type": "text", "text": "survivor" }])
         );
     }
@@ -284,12 +282,5 @@ mod tests {
             parts.retain(|part| part.get("type").and_then(Value::as_str) != Some("compaction"));
         }
         messages
-    }
-
-    fn strip_pi_compaction(entries: Vec<Value>) -> Vec<Value> {
-        entries
-            .into_iter()
-            .filter(|entry| entry.get("type").and_then(Value::as_str) != Some("compaction"))
-            .collect()
     }
 }

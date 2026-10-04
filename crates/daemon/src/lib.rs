@@ -778,14 +778,18 @@ pub const fn cc_u1_active(profile: Option<SerializerProfile>, tool_present: bool
     matches!(profile, Some(SerializerProfile::ClaudeCodeAnthropic)) && tool_present
 }
 
-/// `tagging_surface_active` permits the provider-visible tagging and reduction overlay only when `tool_present` is true for Claude Code or OpenCode.
+/// `tagging_surface_active` permits the provider-visible tagging and reduction overlay only when `tool_present` is true for Claude Code, OpenCode, or Pi.
 pub const fn tagging_surface_active(
     profile: Option<SerializerProfile>,
     tool_present: bool,
 ) -> bool {
     matches!(
         profile,
-        Some(SerializerProfile::ClaudeCodeAnthropic | SerializerProfile::OpencodeAiSdk)
+        Some(
+            SerializerProfile::ClaudeCodeAnthropic
+                | SerializerProfile::OpencodeAiSdk
+                | SerializerProfile::Pi
+        )
     ) && tool_present
 }
 
@@ -819,8 +823,10 @@ const SESSION_STATUS_HISTORY_SEGMENT_PAGE_LIMIT: usize = 50;
 const HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS: i64 =
     history_summarizer::HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS;
 const SESSION_UNRESOLVED_MESSAGE: &str = "session unresolved; launch Claude Code through the Eidnara wrapper so eidnara_* can bind to this conversation";
+/// D32: a session whose transform lineage belongs to another project root is refused on this one.
+const CROSS_ROOT_LINEAGE_MESSAGE: &str = "this session's context lineage belongs to another project root; start a new session in this directory.";
 const OPENCODE_HARNESS: &str = "opencode";
-/// Pi binds routes with its own session id and has no transform, so no lineage proof exists for it.
+/// Pi binds routes with its own session id; its transform lineage follows the same rule as OpenCode's.
 const PI_HARNESS: &str = "pi";
 const STATE_SYNC_SEED_MAX_ID_BYTES: usize = 128;
 const STATE_SYNC_SEED_MAX_STAGED_BYTES: usize = 32 * 1024 * 1024;
@@ -8227,7 +8233,7 @@ impl HandlerCore {
         }
         let selection = self.freeze_prompt_surface_selection(session_id, requested_selection);
         // The full variant explains the `§N§` tags and `eidnara_reduce`; it goes to every
-        // profile whose transform renders that overlay, which is Claude Code and OpenCode.
+        // profile whose transform renders that overlay, which is Claude Code, OpenCode, and Pi.
         let active = tagging_surface_active(profile, tool_present);
         let expected_variant = if active { "full" } else { "no_reduce" };
         if let Some(variant) = request.get("variant").and_then(Value::as_str)
@@ -8648,8 +8654,17 @@ impl HandlerCore {
         if serializer_profile.is_none() {
             return unknown_serializer_profile_error();
         }
-        if parsed.serve_native && serializer_profile != Some(SerializerProfile::OpencodeAiSdk) {
-            return serve_native_unsupported_profile_error(&parsed.serializer_profile);
+        if parsed.serve_native {
+            match serializer_profile {
+                Some(SerializerProfile::OpencodeAiSdk) => {}
+                Some(SerializerProfile::Pi) => {
+                    let rows = parsed.native_messages.as_deref().unwrap_or_default();
+                    if let Err(decline) = codec::pi::check_pi_rows(rows) {
+                        return invalid_params_error(decline.to_string());
+                    }
+                }
+                _ => return serve_native_unsupported_profile_error(&parsed.serializer_profile),
+            }
         }
         if parsed.tail_delta_retired {
             return PreparedOutcome::Error {
@@ -9536,7 +9551,11 @@ impl HandlerCore {
             );
             let values = response.native_messages.take().unwrap_or_default();
             if let Some(transform::UserHintPass::Decided(outcome)) = response.user_hint.as_mut() {
-                outcome.attached = native_carries_user_hint(&values, outcome);
+                outcome.attached = native_carries_user_hint(
+                    SerializerProfile::parse(&parsed.serializer_profile),
+                    &values,
+                    outcome,
+                );
             }
             let candidate = NativeOutputCandidate::new(
                 &parsed.session_id,
@@ -11508,16 +11527,19 @@ impl HandlerCore {
         }
 
         // A transform accepted on this root proves the session, and a session with lineage
-        // under another root cannot be rebound here. A session without any transform lineage
-        // (Pi has no transform; an OpenCode session before its first accepted transform, or
-        // one running compaction-off, has sent none) has nothing to contradict the route-bound
-        // identity, and the plugins bind their harness's
-        // own session id, so the bound session is the conversation. The same predicate applies
-        // to both harnesses: `harness` is a client claim, not authority (§7.2).
+        // under another root is refused here. A session without any transform lineage (one
+        // before its first accepted transform, or one running compaction-off, has sent none)
+        // has nothing to contradict the route-bound identity, and the plugins bind their
+        // harness's own session id, so the bound session is the conversation. The same
+        // predicate applies to both harnesses: `harness` is a client claim, not authority (§7.2).
         let harness_session_is_conversation = match binding.harness.as_str() {
             OPENCODE_HARNESS | PI_HARNESS => {
-                self.module_knows_transform_session(bound_session, &binding.project_root)
-                    || !self.session_has_transform_lineage(bound_session)
+                if !self.module_knows_transform_session(bound_session, &binding.project_root)
+                    && self.session_has_transform_lineage(bound_session)
+                {
+                    return Err(cross_root_lineage_error());
+                }
+                true
             }
             _ => false,
         };
@@ -13987,7 +14009,9 @@ fn unknown_serializer_profile_error() -> PreparedOutcome {
 fn serve_native_unsupported_profile_error(profile: &str) -> PreparedOutcome {
     PreparedOutcome::Error {
         code: "serve_native_unsupported_profile".to_string(),
-        message: format!("serve_native requires serializer_profile opencode-aisdk, got {profile}"),
+        message: format!(
+            "serve_native requires serializer_profile opencode-aisdk or pi, got {profile}"
+        ),
     }
 }
 
@@ -14037,12 +14061,8 @@ fn attach_native_messages_with_tags(
     if !request.serve_native {
         return;
     }
-    let sidecar = request
-        .native_messages
-        .as_deref()
-        .map(codec::opencode::decode_opencode_shared)
-        .map(|decoded| decoded.sidecar)
-        .unwrap_or_else(|| codec::DecodeSidecar::new("opencode"));
+    let profile = SerializerProfile::parse(&request.serializer_profile);
+    let native_input = request.native_messages.as_deref().unwrap_or_default();
     let served_messages = response
         .messages()
         .iter()
@@ -14052,13 +14072,22 @@ fn attach_native_messages_with_tags(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
-        &served_messages,
-        &sidecar,
-        Some(&request.session_id),
-        &mutation_exempt_mids,
-    );
-    if let Some(profile) = SerializerProfile::parse(&request.serializer_profile) {
+    let mut native_messages = match profile {
+        Some(SerializerProfile::Pi) => {
+            // Admission already checked every row, so the decode cannot decline here.
+            let sidecar = codec::pi::decode_pi_rows(native_input)
+                .map(|decoded| decoded.sidecar)
+                .unwrap_or_else(|_| codec::DecodeSidecar::new("pi"));
+            codec::pi::encode_pi_rows(&served_messages, &sidecar, &mutation_exempt_mids)
+        }
+        _ => codec::opencode::encode_opencode_with_session_exemptions(
+            &served_messages,
+            &codec::opencode::decode_opencode_shared(native_input).sidecar,
+            Some(&request.session_id),
+            &mutation_exempt_mids,
+        ),
+    };
+    if let Some(profile) = profile {
         transform::clear_served_native_reasoning_with_tags(
             profile,
             transform::request_accepts_empty_content(request),
@@ -14101,14 +14130,22 @@ impl NativeOutput {
 
 /// The host's own survivor check: the native output the recipe will insert or
 /// keep carries the hint on the message its block names.
-fn native_carries_user_hint(native: &[Arc<Value>], outcome: &transform::UserHintOutcome) -> bool {
+fn native_carries_user_hint(
+    profile: Option<SerializerProfile>,
+    native: &[Arc<Value>],
+    outcome: &transform::UserHintOutcome,
+) -> bool {
     let Some((mid, _)) = wire::split_block_id(&outcome.block_id) else {
         return false;
     };
     native
         .iter()
-        .filter(|message| message["info"]["id"].as_str() == Some(mid))
-        .flat_map(|message| message["parts"].as_array().into_iter().flatten())
+        .filter(|message| native_key(profile, message).as_deref() == Some(mid))
+        .flat_map(|message| match profile {
+            Some(SerializerProfile::Pi) => message["message"]["content"].as_array(),
+            _ => message["parts"].as_array(),
+        })
+        .flatten()
         .any(|part| {
             part["text"]
                 .as_str()
@@ -15198,12 +15235,16 @@ fn recipe_keyed<'a>(
         .collect()
 }
 
-fn native_key(value: &Value) -> Option<String> {
-    value
-        .get("info")
-        .and_then(|info| info.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+/// The recipe key of a native value: an OpenCode message's `info.id`, a Pi row's `id`.
+fn native_key(profile: Option<SerializerProfile>, value: &Value) -> Option<String> {
+    match profile {
+        Some(SerializerProfile::Pi) => codec::pi::row_id(value),
+        _ => value
+            .get("info")
+            .and_then(|info| info.get("id"))
+            .and_then(Value::as_str),
+    }
+    .map(str::to_owned)
 }
 
 /// Sums canonical lengths with brackets and commas; `None` when the sum overflows or exceeds the
@@ -15293,11 +15334,12 @@ fn respond_transform(
                         .try_fold(2usize, |total, len| total.checked_add(*len)),
                 );
             }
+            let profile = SerializerProfile::parse(&request.serializer_profile);
             let keyed = |values: &[Arc<Value>]| -> Vec<Keyed<Option<String>, Arc<Value>>> {
                 values
                     .iter()
                     .map(|value| Keyed {
-                        key: native_key(value),
+                        key: native_key(profile, value),
                         value: Arc::clone(value),
                     })
                     .collect()
@@ -15804,6 +15846,14 @@ fn mcp_text_result(text: String, is_error: bool) -> PreparedOutcome {
 
 fn tool_error_result(message: impl Into<String>) -> PreparedOutcome {
     mcp_text_result(message.into(), true)
+}
+
+/// The refusal for a session whose transform lineage belongs to another project root.
+fn cross_root_lineage_error() -> PreparedOutcome {
+    PreparedOutcome::Error {
+        code: "session_unresolved".to_string(),
+        message: CROSS_ROOT_LINEAGE_MESSAGE.to_string(),
+    }
 }
 
 fn session_unresolved_error() -> PreparedOutcome {
@@ -18098,6 +18148,8 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "fold_authority_handler_tests.rs"]
     mod fold_authority_handler_tests;
+    #[path = "pi_native_serving_tests.rs"]
+    mod pi_native_serving_tests;
     #[path = "request_budget/host_tests.rs"]
     mod request_budget_host_tests;
     #[path = "transform/revision_3.rs"]
@@ -27043,8 +27095,8 @@ mod tests {
             )
             .await;
         assert_eq!(error_code(contradictory), "bad_request");
-        // OpenCode's transform renders the same tag overlay, so its profile selects the full
-        // variant too; Pi has no transform and never sees `eidnara_reduce`.
+        // OpenCode's and Pi's transforms render the same tag overlay, so their profiles select
+        // the full variant too.
         let opencode = call_dispatch_request(
             &handler,
             json!({
@@ -27066,7 +27118,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(pi["bytes"], trimmed["bytes"]);
+        assert_eq!(pi["bytes"], full["bytes"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -29102,8 +29154,14 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(error_code(outcome), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            error_frame(outcome),
+            (
+                "session_unresolved".to_string(),
+                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+            )
+        );
+        assert!(resolver.calls().is_empty());
         assert_eq!(
             store
                 .authority_project_for_route(root_b, "memories")
@@ -29144,8 +29202,14 @@ mod tests {
             json!({ "action": "write", "content": "must not cross roots" }),
         )
         .await;
-        assert_eq!(error_code(outcome), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            error_frame(outcome),
+            (
+                "session_unresolved".to_string(),
+                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+            )
+        );
+        assert!(resolver.calls().is_empty());
         assert_eq!(
             store
                 .authority_project_for_route(root_b, "memories")
@@ -29188,8 +29252,14 @@ mod tests {
             json!({ "action": "write", "content": "must not cross roots" }),
         )
         .await;
-        assert_eq!(error_code(outcome), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            error_frame(outcome),
+            (
+                "session_unresolved".to_string(),
+                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+            )
+        );
+        assert!(resolver.calls().is_empty());
         assert_eq!(
             store
                 .authority_project_for_route(root_b, "memories")
@@ -29456,8 +29526,14 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(error_code(cross_root), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            error_frame(cross_root),
+            (
+                "session_unresolved".to_string(),
+                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+            )
+        );
+        assert!(resolver.calls().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -29511,8 +29587,14 @@ mod tests {
             json!({ "action": "write", "content": "after delete" }),
         )
         .await;
-        assert_eq!(error_code(note), "session_unresolved");
-        assert_eq!(resolver.calls(), vec!["ses"]);
+        assert_eq!(
+            error_frame(note),
+            (
+                "session_unresolved".to_string(),
+                CROSS_ROOT_LINEAGE_MESSAGE.to_string()
+            )
+        );
+        assert!(resolver.calls().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
