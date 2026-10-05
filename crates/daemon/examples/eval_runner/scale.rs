@@ -22,7 +22,8 @@ pub const REPORT_USAGE: &str = "scale-report --rows <jsonl> --manifest <json> --
 
 /// Seeds `--segments` synthetic history segments of two messages each into `--session` of the
 /// fixture store under `--state-root`, with the ordinal continuation base the newest segment
-/// ends on, and prints the anchor the daemon renders on the first pass and later passes declare.
+/// ends on and that segment's end as the rendered boundary, so `transform.boundary` pages
+/// anchors before any pass ran, and prints the anchor the first pass declares.
 pub fn run_seed(args: impl Iterator<Item = String>) -> io::Result<()> {
     let values = parse_flags(args, &["state-root", "session", "segments"], SEED_USAGE)
         .map_err(io::Error::other)?;
@@ -41,10 +42,13 @@ pub fn run_seed(args: impl Iterator<Item = String>) -> io::Result<()> {
     history.seed(&store, session);
     let end = history.span * segments as i64;
     let loaded = store.load(session).map_err(io::Error::other)?;
+    let mut core = loaded.core.clone();
+    core.boundary_id = format!("m{end}#0");
     let mut meta = loaded.meta.clone();
     meta.ordinal_continuation_base = Some((end - 2) as u64);
+    meta.coverage_ordinal = Some(end as u64);
     store
-        .commit(session, None, &loaded.core, &meta)
+        .commit(session, None, &core, &meta)
         .map_err(io::Error::other)?;
     println!(
         "{}",
@@ -150,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn scale_seed_writes_history_and_the_continuation_base_the_anchor_needs() {
+    fn scale_seed_writes_history_the_continuation_base_and_the_rendered_boundary() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().to_str().unwrap();
         run_seed(args(&[
@@ -165,10 +169,12 @@ mod tests {
         let store =
             MemoryStore::open(&daemon::managed_store_descriptor(root.path()).unwrap()).unwrap();
         assert_eq!(store.max_history_segment_end_ordinal("ses").unwrap(), 6);
-        assert_eq!(
-            store.load("ses").unwrap().meta.ordinal_continuation_base,
-            Some(4)
-        );
+        let loaded = store.load("ses").unwrap();
+        assert_eq!(loaded.meta.ordinal_continuation_base, Some(4));
+        assert_eq!(loaded.core.boundary_id, "m6#0");
+        assert_eq!(loaded.meta.coverage_ordinal, Some(6));
+        let anchors: Vec<(i64, String)> = store.coverage_anchor_page("ses", 0..=10, 8).unwrap();
+        assert_eq!(anchors.first(), Some(&(3, "m6#0".to_string())));
         assert!(run_seed(args(&["--state-root", path, "--session", "ses"])).is_err());
     }
 

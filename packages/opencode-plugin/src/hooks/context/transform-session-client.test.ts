@@ -299,6 +299,91 @@ describe("transform session client over plain data", () => {
         expect(host.published[1]).toEqual([...(applied ?? []), host.values[6]]);
         expect(client.state("ses")).toMatchObject({ consecutiveFailures: 1, failureCount: 1 });
     });
+
+    async function passEditedDuringPrepare(
+        host: PlainHost,
+        privateWindow: boolean,
+        edit: () => void,
+    ): Promise<TransformPassOutcome> {
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [{ mid: "m2", sequence: 1 }] })],
+            transform: [foldReply({ mid: "m2", sequence: 1 })],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admitted = new TransformCaptureAdmission().admit("ses");
+        if (!("lease" in admitted)) throw new Error("admission declined");
+        return client.run("ses", admitted.lease, {
+            ...source(host),
+            privateWindow,
+            prepare: async () => {
+                edit();
+                return { encodeInput: () => [], fields: { model_key: "test/model" } };
+            },
+        });
+    }
+
+    it("rechecks a shared window's contents and a private window's slots", async () => {
+        for (const privateWindow of [false, true]) {
+            const host = plainHost(4);
+            const outcome = await passEditedDuringPrepare(host, privateWindow, () => {
+                (host.values[3] as { text: string }).text = "edited in place";
+            });
+            expect(outcome.kind).toBe(privateWindow ? "applied" : "declined");
+            expect(host.published).toHaveLength(privateWindow ? 1 : 0);
+        }
+    });
+
+    it("declines a private window whose slot now holds another value", async () => {
+        const host = plainHost(4);
+        const outcome = await passEditedDuringPrepare(host, true, () => {
+            host.values[3] = { id: "m4", text: "message 4" };
+        });
+        expect(outcome).toEqual({ kind: "declined", servedLastApplied: false });
+        expect(host.published).toEqual([]);
+    });
+
+    it("skips the id scan for anchors a host reports it does not hold", async () => {
+        const host = plainHost(1_000);
+        const newer = { mid: "m901", sequence: 3 };
+        const older = { mid: "m601", sequence: 2 };
+        const transport = fakeTransport({
+            "transform.boundary": [
+                () => ({ anchors: [newer, older] }),
+                () => ({ anchors: [newer, older] }),
+            ],
+            transform: [foldReply(newer), foldReply(older)],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admission = new TransformCaptureAdmission();
+        let idReads = 0;
+        const counted = (): TransformPassSource => {
+            const plain = source(host);
+            return {
+                ...plain,
+                host: {
+                    get length() {
+                        return host.values.length;
+                    },
+                    idAt: (index) => {
+                        idReads += 1;
+                        return host.values[index]?.id;
+                    },
+                    holds: (id) => host.values.some((value) => value.id === id),
+                },
+            };
+        };
+        const run = () => {
+            const admitted = admission.admit("ses");
+            if (!("lease" in admitted)) throw new Error("admission declined");
+            return client.run("ses", admitted.lease, counted());
+        };
+        expect(await run()).toEqual({ kind: "applied", boundary: newer });
+        host.values.length = 900;
+        idReads = 0;
+        expect(await run()).toEqual({ kind: "applied", boundary: older });
+        expect(idReads).toBe(300);
+        expect(host.windows.at(-1)).toEqual([600, 900]);
+    });
 });
 
 /** What one module's source loads at runtime: static specifiers (value imports, re-exports, side-effect imports) and the argument text of each dynamic import. */

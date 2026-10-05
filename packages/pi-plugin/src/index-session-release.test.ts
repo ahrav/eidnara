@@ -94,6 +94,25 @@ describe("Pi fork token caches across session lifecycle events", () => {
     });
 });
 
+/**
+ * A session manager whose branch is `branch` in order; it reads the array on every call, and
+ * `getBranch` throws, since memory capture reads only new entries.
+ */
+function branchReader(branch: unknown[]) {
+    const entries = branch as { id: string }[];
+    return {
+        getBranch: () => {
+            throw new Error("memory capture called getBranch");
+        },
+        getLeafId: () => entries.at(-1)?.id ?? null,
+        getEntry: (id: string) => {
+            const index = entries.findIndex((entry) => entry.id === id);
+            if (index < 0) return undefined;
+            return { ...entries[index], parentId: index > 0 ? entries[index - 1]?.id : null };
+        },
+    };
+}
+
 describe("Pi daemon transport across runtime teardown", () => {
     const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -107,7 +126,7 @@ describe("Pi daemon transport across runtime teardown", () => {
             model: args.model,
             sessionManager: {
                 getSessionId: () => "capture-status",
-                getBranch: () =>
+                ...branchReader(
                     args.branch ?? [
                         {
                             type: "message",
@@ -115,6 +134,7 @@ describe("Pi daemon transport across runtime teardown", () => {
                             message: { role: "user", content: "Production uses port 4567." },
                         },
                     ],
+                ),
             },
             hasUI: true,
             ui: { setStatus: args.setStatus ?? mock(() => undefined) },

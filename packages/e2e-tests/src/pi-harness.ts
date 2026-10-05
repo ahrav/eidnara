@@ -16,6 +16,8 @@ export interface PiTestHarnessOptions {
     piSettingsExtra?: Record<string, unknown>;
     modelContextLimit?: number;
     mockDefault?: MockResponse;
+    /** An isolated environment the caller owns and removes; a fresh one when unset. */
+    env?: PiIsolatedEnv;
 }
 
 export function finalAssistantText(agentEnd: PiRpcEvent): string | null {
@@ -40,11 +42,13 @@ export class PiTestHarness {
     readonly env: PiIsolatedEnv;
 
     private readonly rpc: PiRpcClient;
+    private readonly ownsEnv: boolean;
 
-    private constructor(mock: MockProvider, rpc: PiRpcClient) {
+    private constructor(mock: MockProvider, rpc: PiRpcClient, ownsEnv: boolean) {
         this.mock = mock;
         this.rpc = rpc;
         this.env = rpc.env;
+        this.ownsEnv = ownsEnv;
     }
 
     static async create(options: PiTestHarnessOptions = {}): Promise<PiTestHarness> {
@@ -52,12 +56,13 @@ export class PiTestHarness {
         const { baseURL } = await mock.start();
         mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
         const rpc = new PiRpcClient({
-            env: createPiIsolatedEnv(),
+            env: options.env ?? createPiIsolatedEnv(),
             mockProviderURL: baseURL,
             eidnaraConfig: options.eidnaraConfig,
             piSettingsExtra: options.piSettingsExtra,
             modelContextLimit: options.modelContextLimit,
         });
+        const ownsEnv = options.env === undefined;
 
         try {
             await rpc.start();
@@ -65,11 +70,11 @@ export class PiTestHarness {
             // `afterAll` never sees a harness that failed to start, so this path owns its cleanup.
             await rpc.shutdown().catch(() => undefined);
             await mock.stop();
-            rmSync(rpc.env.baseDir, { recursive: true, force: true });
+            if (ownsEnv) rmSync(rpc.env.baseDir, { recursive: true, force: true });
             throw error;
         }
 
-        return new PiTestHarness(mock, rpc);
+        return new PiTestHarness(mock, rpc, ownsEnv);
     }
 
     async sendPrompt(
@@ -134,7 +139,7 @@ export class PiTestHarness {
             await this.rpc.shutdown();
         } finally {
             await this.mock.stop();
-            rmSync(this.env.baseDir, { recursive: true, force: true });
+            if (this.ownsEnv) rmSync(this.env.baseDir, { recursive: true, force: true });
         }
     }
 }

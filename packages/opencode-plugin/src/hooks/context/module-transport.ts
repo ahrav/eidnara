@@ -521,6 +521,8 @@ export class HostModuleTransport {
     // A caller that joins the in-flight dial does not demand certification again.
     private connectionPromise: Promise<CertifiedConnection> | null = null;
     private backoffMs = CONNECT_BACKOFF_INITIAL_MS;
+    /** Consecutive dials whose connection-file snapshot deadline expired since the last success. */
+    private snapshotExpiries = 0;
     private connectionGeneration = 0;
     /**
      * `connectionCertification` is `null` until a demand settles for the live connection.
@@ -1355,11 +1357,19 @@ export class HostModuleTransport {
                 this.routes.clear();
                 this.backoffMs = CONNECT_BACKOFF_INITIAL_MS;
                 this.nextProbeMs = 0;
+                this.snapshotExpiries = 0;
                 return { client: candidate, ...certification };
             } catch (error) {
                 if (generation === this.connectionGeneration) void this.invalidateConnection();
-                this.nextProbeMs = performance.now() + this.backoffMs;
-                this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
+                // One expired snapshot deadline is the caller's budget running out, often across
+                // an event-loop stall in the host, and leaves the next caller free to dial. A
+                // second in a row points at a stalled filesystem, which backoff paces.
+                const expiry = isSnapshotDeadlineExpiry(error);
+                this.snapshotExpiries = expiry ? this.snapshotExpiries + 1 : 0;
+                if (!expiry || this.snapshotExpiries > 1) {
+                    this.nextProbeMs = performance.now() + this.backoffMs;
+                    this.backoffMs = Math.min(this.backoffMs * 2, CONNECT_BACKOFF_MAX_MS);
+                }
                 throw error;
             }
         })();
@@ -1401,6 +1411,14 @@ export class HostModuleTransport {
         }
         return Promise.resolve();
     }
+}
+
+function isSnapshotDeadlineExpiry(error: unknown): boolean {
+    return (
+        error instanceof Error &&
+        error.name === "ConnectionFileError" &&
+        (error as { code?: unknown }).code === "deadline_expired"
+    );
 }
 
 export const __moduleTransportTest = {

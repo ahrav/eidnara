@@ -57,14 +57,13 @@ describe("Pi config load logging", () => {
 });
 
 describe("Pi compaction gate", () => {
-    it("runs compaction-off until a Pi context transform exists", async () => {
-        // Cancelling `session_before_compact` without a transform leaves the session to overflow.
-        expect(PI_TRANSFORM_AVAILABLE).toBe(false);
-        expect(
-            await handlePiSessionBeforeCompact({ compactionOff: true, ctx: {} }),
-        ).toBeUndefined();
+    it("cancels every compaction while Eidnara owns compaction", async () => {
+        expect(PI_TRANSFORM_AVAILABLE).toBe(true);
         expect(await handlePiSessionBeforeCompact({ compactionOff: false, ctx: {} })).toEqual({
             cancel: true,
         });
+        expect(
+            await handlePiSessionBeforeCompact({ compactionOff: true, ctx: {} }),
+        ).toBeUndefined();
     });
 });

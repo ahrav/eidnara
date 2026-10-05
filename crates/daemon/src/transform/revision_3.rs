@@ -557,6 +557,7 @@ async fn pressured_revert(handler: &Handler, store: &MemoryStore, end: &str) -> 
     let deferred = call(handler, reverted.clone()).await;
     assert_eq!(deferred["action"], "SOFT+", "{deferred}");
     assert_eq!(deferred["reconcile_pending"], true, "{deferred}");
+    assert_eq!(served_mids(&deferred), ["n3"], "{deferred}");
     let kept = identity_mids(store);
     assert!(identities.iter().all(|mid| kept.contains(mid)), "{kept:?}");
     call(handler, reverted).await
@@ -582,6 +583,33 @@ async fn a_revert_under_pressure_defers_then_folds_and_keeps_the_identity_histor
             "{end}: {after:?}"
         );
     }
+}
+
+/// The pass that starts a revert's reconcile serves every message after the declared anchor,
+/// though their ordinals reuse numbers the reverted coverage still counts: here n3 to n5 take
+/// ordinals 3 to 5 under a coverage ordinal of 4.
+#[tokio::test(flavor = "current_thread")]
+async fn the_reconciling_pass_of_a_revert_serves_the_messages_after_the_declared_anchor() {
+    let (handler, store, _dir) = folded().await;
+    let reverted = body(&["m2", "n3", "n4", "n5"], anchor("m2", 1));
+    assert_eq!(
+        resolution(&store, &reverted).resolution,
+        Resolution::Revert {
+            keep_through_seq: Some(1)
+        }
+    );
+    let reconciling = call(&handler, reverted.clone()).await;
+    assert_eq!(reconciling["status"], "ok", "{reconciling}");
+    assert_eq!(reconciling["action"], "SOFT+", "{reconciling}");
+    assert_eq!(reconciling["reconcile_pending"], true, "{reconciling}");
+    assert_eq!(
+        served_mids(&reconciling),
+        ["n3", "n4", "n5"],
+        "{reconciling}"
+    );
+    let folded = call(&handler, reverted).await;
+    assert_eq!(folded["action"], "HARD", "{folded}");
+    assert_eq!(served_mids(&folded), ["n3", "n4", "n5"], "{folded}");
 }
 
 /// Arms `id`'s attempt hook to run `step` on each firing with its 1-based count, re-arming
@@ -1205,6 +1233,7 @@ async fn a_revert_on_a_render_config_change_defers_then_folds() {
     let deferred = call(&handler, reverted.clone()).await;
     assert_eq!(deferred["action"], "SOFT+", "{deferred}");
     assert_eq!(deferred["reconcile_pending"], true);
+    assert_eq!(served_mids(&deferred), ["n3"], "{deferred}");
     assert_eq!(store.load_history_segments(session()).unwrap().len(), 2);
     let hard = call(&handler, reverted).await;
     assert_eq!(hard["action"], "HARD", "{hard}");

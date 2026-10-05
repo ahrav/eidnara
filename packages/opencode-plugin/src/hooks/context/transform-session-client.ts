@@ -543,6 +543,11 @@ export interface TransformHostView {
     readonly length: number;
     /** The id at `index`, or `undefined` for a slot without one. */
     idAt(index: number): string | undefined;
+    /**
+     * `false` when no slot's `idAt` can return `id`, so a lookup skips the backward scan; `true`
+     * when a slot may return `id`. Lookups scan hosts that omit `holds`.
+     */
+    holds?(id: string): boolean;
 }
 
 /** What the adapter computed for one pass after the window was captured. */
@@ -582,6 +587,12 @@ export interface TransformPassSource {
      */
     liveWindow(start: number, end: number): unknown[] | undefined;
     /**
+     * `true` when the pass holds the only references to the captured values from capture to
+     * publication, so a recheck compares the live window's slots with the captured members by
+     * reference.
+     */
+    readonly privateWindow?: boolean;
+    /**
      * The trusted context limit the invocation gate reads, resolved from the captured members
      * before the pass can decline into fail-open.
      */
@@ -598,6 +609,8 @@ export interface TransformPassSource {
     validateOutput?(values: readonly unknown[], boundaryId: string): void;
     /** Why publishing `slots` values would be refused, or `null`. */
     publicationRejection(slots: number): string | null;
+    /** `false` for a harness that keeps its own array on a failed pass instead of the last applied output. */
+    readonly failOpen?: boolean;
     /** Publishes `values` over the captured `window` at `boundaryIndex`; a failure names its cause. */
     publish(
         values: readonly unknown[],
@@ -662,6 +675,13 @@ function ensureState(
         states.set(sessionId, state);
     }
     return state;
+}
+
+function sameMembers(live: readonly unknown[], captured: readonly unknown[]): boolean {
+    if (live.length !== captured.length) return false;
+    for (let index = 0; index < live.length; index += 1)
+        if (!Object.is(live[index], captured[index])) return false;
+    return true;
 }
 
 /** Scans host ids from the end until `stop` accepts one and returns its index, or -1. */
@@ -900,7 +920,7 @@ export function createTransformSessionClient(
         const serveLastApplied = (): boolean => {
             const failOpen = failOpenSource;
             const applied = failOpen?.previous.applied;
-            if (!failOpen || !applied) return false;
+            if (!failOpen || !applied || source.failOpen === false) return false;
             try {
                 failOpen.recheck("fail-open");
                 if (
@@ -1022,19 +1042,24 @@ export function createTransformSessionClient(
                     // D17: one backward id scan against the first page stops at the first hit.
                     const anchors = new Map<string, TransformBoundary>();
                     for (const anchor of page)
-                        if (!anchors.has(anchor.mid)) anchors.set(anchor.mid, anchor);
+                        if (!anchors.has(anchor.mid) && host.holds?.(anchor.mid) !== false)
+                            anchors.set(anchor.mid, anchor);
                     let hit: TransformBoundary | undefined;
-                    const index = scan((id) => {
-                        hit = anchors.get(id);
-                        return hit !== undefined;
-                    });
+                    const index =
+                        anchors.size === 0
+                            ? -1
+                            : scan((id) => {
+                                  hit = anchors.get(id);
+                                  return hit !== undefined;
+                              });
                     // `hit` is set by the last callback, so it is defined only when the scan stopped on one.
                     if (hit) return { boundary: hit, index };
+                    before = last.sequence;
+                    if (host.holds) continue;
                     // The whole host holds none of this page; later pages probe the filter.
                     timings.scannedItems += host.length;
                     filter = hostIdFilter(host, (bytes) => lease.reserve(bytes));
                     if (!filter) throw new CaptureBudgetExceeded("membership filter");
-                    before = last.sequence;
                     continue;
                 }
                 const wanted = new Set<string>();
@@ -1062,7 +1087,11 @@ export function createTransformSessionClient(
             // An unknown boundary, or one the scan cannot find, needs a discovery walk.
             const known = state.boundary;
             let boundary = known ?? null;
-            let boundaryIndex = known ? scan((id) => id === known.mid) : 0;
+            let boundaryIndex = !known
+                ? 0
+                : host.holds?.(known.mid) === false
+                  ? -1
+                  : scan((id) => id === known.mid);
             if (known === undefined || boundaryIndex < 0) {
                 const discovered = await discover(options.projectRoot ?? directory);
                 boundary = discovered.boundary;
@@ -1140,12 +1169,15 @@ export function createTransformSessionClient(
                 timings,
                 `phase=capture boundary_index=${boundaryIndex} verified=${verified?.verified?.count ?? 0}`,
             );
-            /** The same root, length, and boundary index, with every window slot and tape unchanged. */
             const recheckCapture = (phase: string): void => {
                 assertCurrentPass();
                 const startedAt = performance.now();
                 const live = source.liveWindow(boundaryIndex, capturedLength);
-                const unchanged = live !== undefined && capturedMessagesUnchanged(live, captured);
+                const unchanged =
+                    live !== undefined &&
+                    (source.privateWindow === true
+                        ? sameMembers(live, captured.members)
+                        : capturedMessagesUnchanged(live, captured));
                 logStage(sessionId, "prefixGuard", startedAt, timings, `phase=${phase}`);
                 if (!unchanged) throw new PassDeclined(sessionId, "source_changed", phase);
             };
