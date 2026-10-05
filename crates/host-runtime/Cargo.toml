@@ -28,6 +28,10 @@ rustix = { workspace = true, features = ["event", "fs", "net", "pipe", "process"
 getrandom = { workspace = true }
 libc = { workspace = true }
 shm-transport = { workspace = true }
+# The pinned AWS profile parser admits captured configuration bytes; no credential provider or process feature.
+aws-runtime = { version = "=1.10.0", default-features = false }
+aws-types = { version = "=1.6.0", default-features = false }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
