@@ -129,7 +129,8 @@ function clearPiEidnaraActive(): void {
  * of its acknowledged rendered boundary when that boundary's end entry is on the branch, and with
  * a cancel otherwise, so no Pi LLM summary hides the boundary. Compaction-off mode lets Pi's
  * native compaction proceed, and so does `handBack`, set after a declined pass sent Pi's own
- * array, when no eviction is available: Pi's compaction is then that session's only recovery.
+ * array of a session with no Eidnara compaction, when no eviction is available: Pi's compaction
+ * is then that session's only recovery.
  */
 export async function handlePiSessionBeforeCompact(args: {
     compactionOff: boolean;
@@ -838,9 +839,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
      */
     const refusals = new Map<string, { count: number; skip: number }>();
     const MAX_REFUSAL_SKIP = 32;
-    pi.on("session_compact", async (_event, ctx) => {
+    pi.on("session_compact", async (event, ctx) => {
         const sessionId = sessionIdFromContext(ctx);
-        if (sessionId) offered.delete(sessionId);
+        if (!sessionId) return;
+        offered.delete(sessionId);
+        // An eviction Pi committed on its own path ends the scheduled call's backoff too.
+        if (event.fromExtension) refusals.delete(sessionId);
     });
     /**
      * The eviction runs once the agent is idle: `ctx.compact()` aborts a running turn, so it
@@ -929,8 +933,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
             compactionOff:
                 compactionOff ||
                 (!ownEviction && !isCompactionEnabled(resolveCurrentProjectDeps(ctx).config)),
+            // After a declined pass Pi's compaction is the session's recovery, except over an Eidnara compaction, whose m0 the fail-open array keeps.
             handBack:
-                !ownEviction && sessionId !== undefined && piTransform?.folds(sessionId) === false,
+                !ownEviction &&
+                sessionId !== undefined &&
+                piTransform?.folds(sessionId) === false &&
+                !piTransform.ownsCompaction(sessionId, ctx.sessionManager),
             eviction: () =>
                 sessionId && !offered.has(sessionId)
                     ? piTransform?.eviction(

@@ -1,4 +1,4 @@
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { CompactionEntry, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
     defaultTransformCaptureAdmission,
     type TransformCaptureAdmission,
@@ -184,6 +184,16 @@ export interface PiTransformOptions {
     captureAdmission?: TransformCaptureAdmission;
 }
 
+/** The latest compaction entry on `branch`, read through `reader`. */
+function latestCompaction(
+    branch: PiBranchIndex,
+    reader: PiBranchReader,
+): CompactionEntry | undefined {
+    const latest = branch.latestCompaction();
+    const entry = latest === undefined ? undefined : reader.getEntry(branch.idAt(latest) ?? "");
+    return entry?.type === "compaction" ? entry : undefined;
+}
+
 export function createPiTransform(options: PiTransformOptions) {
     const client = createTransformSessionClient({ moduleClient: options.moduleClient });
     const admission = options.captureAdmission ?? defaultTransformCaptureAdmission;
@@ -294,14 +304,15 @@ export function createPiTransform(options: PiTransformOptions) {
         const branch = options.branchOf(sessionId);
         branch.sync(reader);
         if (branch.indexOf(ack.boundary.mid) === undefined) return undefined;
-        const latest = branch.latestCompaction();
-        const committed =
-            latest === undefined ? undefined : reader.getEntry(branch.idAt(latest) ?? "");
+        const committed = latestCompaction(branch, reader);
+        // A compaction that already evicted through this boundary, or one that keeps less, leaves nothing to evict.
         if (
-            committed?.type === "compaction" &&
-            committed.firstKeptEntryId === ack.boundary.mid &&
-            (committed.details as { sequence?: unknown } | undefined)?.sequence ===
-                ack.boundary.sequence
+            committed &&
+            ((committed.firstKeptEntryId === ack.boundary.mid &&
+                (committed.details as { sequence?: unknown } | undefined)?.sequence ===
+                    ack.boundary.sequence) ||
+                (branch.indexOf(committed.firstKeptEntryId) ?? -1) >
+                    (branch.indexOf(ack.boundary.mid) ?? -1))
         )
             return undefined;
         return {
@@ -315,6 +326,17 @@ export function createPiTransform(options: PiTransformOptions) {
     return {
         run,
         eviction,
+        /** Whether the branch's latest compaction is one an Eidnara eviction committed. */
+        ownsCompaction(sessionId: string, reader: PiBranchReader): boolean {
+            const branch = options.branchOf(sessionId);
+            branch.sync(reader);
+            const committed = latestCompaction(branch, reader);
+            return (
+                committed?.fromHook === true &&
+                typeof (committed.details as { sequence?: unknown } | undefined)?.sequence ===
+                    "number"
+            );
+        },
         /**
          * `folds` returns `false` after a declined pass until a pass supplies replacement
          * messages or `clearSession` clears the session.

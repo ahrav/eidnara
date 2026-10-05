@@ -251,6 +251,39 @@ describe("Pi eviction", () => {
         }
     });
 
+    it("cancels Pi's compaction over an Eidnara compaction after a declined pass", async () => {
+        const { call } = foldingDaemon(true);
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+                settings: SETTINGS,
+            });
+            await harness.session.prompt(`one ${"x".repeat(400)}`);
+            await harness.session.prompt(`two ${"x".repeat(400)}`);
+            await eventually(() => compactions(harness as TestAgentSession).length > 0);
+            const [evicted] = compactions(harness);
+            // The daemon is gone: the next pass declines and Pi keeps its own array.
+            call.mockImplementation(async (input) => {
+                if (input.method === "transform") throw new Error("daemon down");
+                return input.method === "transform.boundary"
+                    ? { anchors: [] }
+                    : { state: "accepted" };
+            });
+            await harness.session.prompt(`three ${"x".repeat(400)}`);
+            const requests = harness.requests.length;
+            const outcome = await harness.session.compact().then(
+                () => "compacted",
+                (error: Error) => error.message,
+            );
+            expect(outcome).toBe("Compaction cancelled");
+            expect(compactions(harness)).toEqual([evicted as CompactionEntry]);
+            expect(harness.requests).toHaveLength(requests);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("cancels an overflow with no acknowledged boundary", async () => {
         const call = unfoldedDaemon();
         try {
@@ -372,12 +405,15 @@ describe("Pi eviction", () => {
                 settings: { compaction: { enabled: true, keepRecentTokens: 100_000 } },
             });
             const ends = compactionEnds(harness);
+            const refusedAfter: number[] = [];
             for (let turn = 1; turn <= 7; turn += 1) {
+                const before = ends.length;
                 await harness.session.prompt(`turn ${turn}`);
                 await Bun.sleep(5);
+                if (ends.length > before) refusedAfter.push(turn);
             }
             // Refusals at the 1st, 2nd, and 4th completed runs; the next is due at the 8th.
-            expect(ends.map((end) => end.errorMessage ?? "")).toHaveLength(3);
+            expect(refusedAfter).toEqual([1, 2, 4]);
             expect(ends.every((end) => end.errorMessage?.includes("Nothing to compact"))).toBe(
                 true,
             );
