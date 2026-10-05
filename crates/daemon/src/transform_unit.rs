@@ -56,6 +56,19 @@ pub(crate) struct DetachedRunner {
     pub(crate) cancel: CancellationToken,
     pub(crate) cancel_before_step: bool,
     pub(crate) units: Arc<std::sync::atomic::AtomicUsize>,
+    /// A submitted unit waits in its own task for one permit from this gate before it runs; a closed gate refuses it as `RouteClosing`.
+    pub(crate) gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn join_blocking(
+    joined: tokio::task::JoinHandle<UnitOutcome>,
+) -> Result<UnitOutcome, BlockingWorkFailed> {
+    match joined.await {
+        Ok(outcome) => Ok(outcome),
+        Err(join) if join.is_panic() => Err(BlockingWorkFailed::Panicked),
+        Err(_) => Err(BlockingWorkFailed::RuntimeStopped),
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -66,13 +79,20 @@ impl UnitRunner for DetachedRunner {
     ) -> Pin<Box<dyn Future<Output = Result<UnitOutcome, BlockingWorkFailed>> + Send + 'static>>
     {
         self.units.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let joined = tokio::task::spawn_blocking(work);
-        Box::pin(async move {
-            match joined.await {
-                Ok(outcome) => Ok(outcome),
-                Err(join) if join.is_panic() => Err(BlockingWorkFailed::Panicked),
-                Err(_) => Err(BlockingWorkFailed::RuntimeStopped),
+        let Some(gate) = self.gate.clone() else {
+            return Box::pin(join_blocking(tokio::task::spawn_blocking(work)));
+        };
+        // Submitted when called: the waiting task owns `work`, so a dropped future leaves the unit to run once the gate opens.
+        let waiting = tokio::spawn(async move {
+            match gate.acquire().await {
+                Ok(_permit) => join_blocking(tokio::task::spawn_blocking(work)).await,
+                Err(_) => Err(BlockingWorkFailed::RouteClosing),
             }
+        });
+        Box::pin(async move {
+            waiting
+                .await
+                .unwrap_or(Err(BlockingWorkFailed::RuntimeStopped))
         })
     }
 
@@ -265,5 +285,62 @@ impl Drop for SessionPass {
             return;
         }
         lanes.remove(&self.session_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use host_runtime::BlockingWorkFailed;
+
+    use super::{DetachedRunner, UnitOutcome, UnitRunner};
+
+    fn runner(gate: &Arc<tokio::sync::Semaphore>) -> DetachedRunner {
+        DetachedRunner {
+            gate: Some(Arc::clone(gate)),
+            ..Default::default()
+        }
+    }
+
+    fn work(ran: &Arc<AtomicBool>) -> Box<dyn FnOnce() -> UnitOutcome + Send> {
+        let ran = Arc::clone(ran);
+        Box::new(move || {
+            ran.store(true, Ordering::SeqCst);
+            UnitOutcome::Terminal(crate::dispatch::PreparedOutcome::Streamed)
+        })
+    }
+
+    /// The gated unit is submitted when `run_unit` is called, as the trait requires, so it runs once the gate opens even when its caller dropped the returned future.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gated_unit_is_submitted_at_the_call_and_runs_after_its_future_is_dropped() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let ran = Arc::new(AtomicBool::new(false));
+        drop(runner(&gate).run_unit(work(&ran)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!ran.load(Ordering::SeqCst), "the gate holds the unit");
+        gate.add_permits(1);
+        let started = std::time::Instant::now();
+        while !ran.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the submitted unit runs once the gate opens"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// A closed gate grants no permit, so the unit it guards is refused unrun.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_gate_refuses_the_unit_without_running_it() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        gate.close();
+        let ran = Arc::new(AtomicBool::new(false));
+        let outcome = runner(&gate).run_unit(work(&ran)).await;
+        assert!(matches!(outcome, Err(BlockingWorkFailed::RouteClosing)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!ran.load(Ordering::SeqCst));
     }
 }

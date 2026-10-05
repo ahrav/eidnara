@@ -689,10 +689,7 @@ impl AnalysisFamily {
             ClusteringUnit::Family => families,
             ClusteringUnit::WorldSeed => worlds,
         };
-        let draws = u64::from(self.bootstrap_replicates) * u64::from(bootstrap_clusters);
-        if draws > MAX_BOOTSTRAP_DRAWS {
-            return Err(StatisticsError::TooManyDraws(draws));
-        }
+        check_bootstrap_draws(self.bootstrap_replicates, bootstrap_clusters)?;
         // No table the plan permits beats each level at its own optimum. If
         // even that falls short of the required N, the plan can only ever
         // block, so it is refused now; a plan that passes is decided exactly on
@@ -998,6 +995,21 @@ pub(crate) fn bootstrap_draw(seed: u64, replicate: u32, draw: u32, clusters: u32
     (word % u64::from(clusters)) as usize
 }
 
+pub(crate) fn check_bootstrap_draws(replicates: u32, clusters: u32) -> Result<(), StatisticsError> {
+    let draws = u64::from(replicates) * u64::from(clusters);
+    if draws > MAX_BOOTSTRAP_DRAWS {
+        return Err(StatisticsError::TooManyDraws(draws));
+    }
+    Ok(())
+}
+
+/// The `1/40` and `39/40` order statistics of `B` sorted replicates: the `ceil(B/40)`-th and
+/// `ceil(39B/40)`-th smallest. `sorted` must contain at least one element.
+pub(crate) fn bootstrap_bounds<T: Copy>(sorted: &[T]) -> (T, T) {
+    let b = sorted.len();
+    (sorted[b.div_ceil(40) - 1], sorted[b - b / 40 - 1])
+}
+
 /// Percentile cluster bootstrap of `quality_loss`: clusters are resampled with
 /// replacement, the statistic is the ratio of resampled sums, and the interval
 /// is the `1/40` and `39/40` order statistics of the replicates (the
@@ -1045,10 +1057,7 @@ pub fn cluster_bootstrap_interval(
             reason: IntervalWithheld::FewerThanTwoClusters { n_clusters },
         });
     }
-    let draws = u64::from(replicates) * u64::from(n_clusters);
-    if draws > MAX_BOOTSTRAP_DRAWS {
-        return Err(StatisticsError::TooManyDraws(draws));
-    }
+    check_bootstrap_draws(replicates, n_clusters)?;
     let mut statistics = Vec::with_capacity(replicates as usize);
     for replicate in 0..replicates {
         let mut resample = PairCounts::default();
@@ -1058,15 +1067,15 @@ pub fn cluster_bootstrap_interval(
         statistics.push(resample.quality_loss()?);
     }
     statistics.sort();
-    let replicates = replicates as usize;
+    let (lower, upper) = bootstrap_bounds(&statistics);
     Ok(IntervalOutcome::Computed(Interval {
         unit,
         method: IntervalMethod::ClusterBootstrap,
         n_clusters,
         n_items,
-        replicates: replicates as u32,
-        lower: statistics[replicates.div_ceil(40) - 1],
-        upper: statistics[replicates - replicates / 40 - 1],
+        replicates,
+        lower,
+        upper,
     }))
 }
 

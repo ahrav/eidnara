@@ -346,6 +346,12 @@ pub struct Pinned {
     bytes: u64,
 }
 
+impl Pinned {
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
 impl Drop for Pinned {
     fn drop(&mut self) {
         self.ledger.unpin(self.bytes);

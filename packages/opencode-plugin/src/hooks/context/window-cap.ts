@@ -1,5 +1,6 @@
-import { isRecord } from "../../shared/record-type-guard";
 import cap from "./__fixtures__/window-cap.json";
+import { encodeOpenCodeMessagesToCk } from "./module-wire";
+import { copyWindow, inspectReferenceableMessages } from "./transform-capture";
 
 /** Half the daemon's window cap in CK blocks: the most a cold import's suffix sends. */
 export const HALF_CAP_BLOCKS: number = cap.half_cap_blocks;
@@ -22,39 +23,59 @@ export function withinHalfCap(size: TransformWindowSize): boolean {
     return size.blocks <= HALF_CAP_BLOCKS && size.bytes <= HALF_CAP_BYTES;
 }
 
-/** Part types the daemon's OpenCode codec decodes to no block. */
-const OPENCODE_BLOCKLESS_PARTS = new Set(["compaction", "snapshot", "patch", "agent", "retry"]);
-
-function isSyntheticPart(part: unknown): boolean {
-    return isRecord(part) && (part.synthetic === true || part.syntheticTodoMarker === true);
+/**
+ * The CK blocks the daemon counts for one OpenCode message: the request carries the blocks
+ * `encodeOpenCodeMessagesToCk` builds, and a synthetic message's blocks are not counted.
+ */
+function openCodeBlocks(message: unknown): unknown[] {
+    const [encoded] = encodeOpenCodeMessagesToCk([message]);
+    const ck = encoded?.ck as { content: unknown[]; meta: { synthetic: boolean } } | undefined;
+    return !ck || ck.meta.synthetic ? [] : ck.content;
 }
 
-/** The CK blocks `decode_opencode_shared` gives one OpenCode message: a part is one block, a finished tool part two. */
-function openCodeBlocks(message: unknown): number {
-    const parts = isRecord(message) && Array.isArray(message.parts) ? message.parts : [];
-    if (parts.length > 0 && parts.every(isSyntheticPart)) return 0;
-    let blocks = 0;
-    for (const part of parts) {
-        if (!isRecord(part) || typeof part.type !== "string") {
-            blocks += 1;
-        } else if (part.type === "text") {
-            blocks += part.ignored === true ? 0 : 1;
-        } else if (part.type === "tool") {
-            const state = isRecord(part.state) ? part.state : undefined;
-            const status = typeof state?.status === "string" ? state.status : part.status;
-            blocks += status === "completed" || status === "error" ? 2 : 1;
-        } else if (!OPENCODE_BLOCKLESS_PARTS.has(part.type)) {
-            blocks += 1;
-        }
-    }
-    return blocks;
+export function openCodeMessageSize(message: unknown): TransformWindowSize {
+    const blocks = openCodeBlocks(message);
+    if (blocks.length === 0) return { blocks: 0, bytes: 0 };
+    return {
+        blocks: blocks.length,
+        bytes: Buffer.byteLength(JSON.stringify(blocks)) + blocks.length * BLOCK_OVERHEAD_BYTES,
+    };
 }
+
+const MEASURED_RUN_SLOTS = 32;
 
 /**
- * An OpenCode message's size against the cap: the daemon's block count exactly, and its canonical
- * bytes bounded from above by the message's wire bytes plus each block's overhead.
+ * The sizes it returns hold until the caller awaits, since the host array can change across an
+ * await. A slot that its own inspection refuses, or throws on, does so when it is asked for.
  */
-export function openCodeMessageSize(message: unknown, wireBytes: number): TransformWindowSize {
-    const blocks = openCodeBlocks(message);
-    return { blocks, bytes: blocks === 0 ? 0 : wireBytes + blocks * BLOCK_OVERHEAD_BYTES };
+export function openCodeSlotSizes(
+    host: readonly unknown[],
+): (index: number) => TransformWindowSize | undefined {
+    const sizes = new Map<number, TransformWindowSize>();
+    let runs = true;
+    const alone = (index: number): TransformWindowSize | undefined => {
+        const message = copyWindow(host, index, index + 1);
+        const inspection = message && inspectReferenceableMessages(message);
+        if (!message || !inspection?.ok) return undefined;
+        return openCodeMessageSize(message[0]);
+    };
+    return (index) => {
+        const known = sizes.get(index);
+        if (known || !runs) return known ?? alone(index);
+        const start = Math.max(0, index + 1 - MEASURED_RUN_SLOTS);
+        const run = copyWindow(host, start, index + 1);
+        let inspection: ReturnType<typeof inspectReferenceableMessages> | undefined;
+        try {
+            inspection = run && inspectReferenceableMessages(run);
+        } catch {
+            inspection = undefined;
+        }
+        if (!run || !inspection?.ok) {
+            runs = false;
+            return alone(index);
+        }
+        for (let slot = start; slot <= index; slot += 1)
+            sizes.set(slot, openCodeMessageSize(run[slot - start]));
+        return sizes.get(index);
+    };
 }

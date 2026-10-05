@@ -346,23 +346,35 @@ mod tests {
         assert!(!window_after(&window, cut.end - 1).within(COLD_IMPORT_KEEP));
     }
 
-    /// Each parity message's size is what the daemon counts against the cap once its harness
-    /// codec decodes the window: the plugins measure the same host messages.
     #[test]
     fn the_window_cap_parity_cases_carry_the_daemons_sizes() {
         let cap: serde_json::Value = serde_json::from_str(WINDOW_CAP_FIXTURE).unwrap();
         for harness in ["opencode", "pi"] {
             let cases = cap["parity"][harness].as_array().unwrap();
-            let messages: Vec<Arc<serde_json::Value>> = cases
-                .iter()
-                .map(|case| Arc::new(case["message"].clone()))
-                .collect();
-            let decoded = match harness {
-                "opencode" => crate::codec::opencode::decode_opencode_shared(&messages),
-                _ => crate::codec::pi::decode_pi_rows(&messages).unwrap(),
+            let ingress: Vec<Arc<IngressMessage>> = match harness {
+                "opencode" => cases
+                    .iter()
+                    .enumerate()
+                    .map(|(index, case)| {
+                        let mut message: IngressMessage =
+                            serde_json::from_value(case["ingress"].clone()).unwrap();
+                        message.ordinal = index as u64 + 1;
+                        Arc::new(message)
+                    })
+                    .collect(),
+                _ => {
+                    let rows: Vec<Arc<serde_json::Value>> = cases
+                        .iter()
+                        .map(|case| Arc::new(case["message"].clone()))
+                        .collect();
+                    crate::codec::pi::decode_pi_rows(&rows)
+                        .unwrap()
+                        .messages
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect()
+                }
             };
-            let ingress: Vec<Arc<IngressMessage>> =
-                decoded.messages.into_iter().map(Arc::new).collect();
             let projection = project_messages(&ingress).unwrap();
             let mut sizes: BTreeMap<u64, WindowSize> = BTreeMap::new();
             for message in window_messages(&projection) {

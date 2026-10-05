@@ -30,7 +30,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory,
-    captureMessages,
+    captureReserved,
     filterMayHold,
     fnv1a32,
     type HistoryDigest,
@@ -435,16 +435,17 @@ export interface TransformRequestCore {
     nativeMessages: readonly unknown[];
 }
 
-/**
- * A native-serving revision 3 transform body: the adapter's `fields`, then the protocol fields
- * and the window, so no pass input can replace a protocol field.
- */
 export function buildTransformRequest(
     core: TransformRequestCore,
     fields: Record<string, unknown>,
 ): Record<string, unknown> {
+    let passFields = fields;
+    if (Object.hasOwn(fields, "previous_output_revision")) {
+        const { previous_output_revision: _stripped, ...rest } = fields;
+        passFields = rest;
+    }
     return {
-        ...fields,
+        ...passFields,
         method: "transform",
         kind: "transform",
         v: 3,
@@ -614,8 +615,17 @@ export interface TransformPassSource {
     validateOutput?(values: readonly unknown[], boundaryId: string): void;
     /** Why publishing `slots` values would be refused, or `null`. */
     publicationRejection(slots: number): string | null;
-    /** The CK size of host slot `index`, which cold import measures; absent disables cold import. */
-    sizeOf?(index: number): TransformWindowSize | undefined;
+    /**
+     * The returned function provides CK sizes of host slots for one synchronous cold-import walk;
+     * cold import requires `measure`.
+     */
+    measure?(): (index: number) => TransformWindowSize | undefined;
+    /**
+     * Whether a cold import's suffix may start at host slot `index`: `false` for a slot that
+     * answers a tool call in an earlier slot, since a window headed by it carries the answer
+     * without its call. Every slot may start one when this is absent.
+     */
+    startsWindow?(index: number): boolean;
     /** Host slots a cold import sends ahead of its suffix, such as a summary that heads the array. */
     readonly coldLead?: number;
     /** `false` for a harness that keeps its own array on a failed pass instead of the last applied output. */
@@ -727,20 +737,23 @@ export function hostIdFilter(
  * The cold-import head (spec D8): the pinned head while it is still in the host; otherwise, for
  * a host past half the window cap, the oldest slot of the longest suffix that, with the cold lead
  * slots ahead of it, stays within half the cap as the daemon counts it. The newest slot is sent
- * alone when nothing older fits, and the daemon's window cap folds it. `undefined` sends the whole
- * array: a host within half the cap, or one with a slot `sizeOf` cannot measure, which is a slot
- * the source's capture refuses, so that pass declines. A head found here is pinned in `state`
- * until the first anchor exists.
+ * alone when nothing older fits, and the daemon's window cap folds it. A head `startsWindow`
+ * refuses moves to the nearest slot it accepts, a later one before an earlier one, so a refused
+ * head keeps the suffix within its measure unless every later slot is refused too. `undefined`
+ * sends the whole array: a host within half the cap, one with no accepted head after its lead
+ * slots, or one with a slot `measure` cannot size, which is a slot the source's capture refuses,
+ * so that pass declines. A head found here is pinned in `state` until the first anchor exists.
  */
 function coldHead(state: TransformSessionState, source: TransformPassSource): number | undefined {
-    const { host, sizeOf } = source;
+    const { host } = source;
     const lead = source.coldLead ?? 0;
     if (state.pinnedHead !== undefined) {
         const pinned = scanHostIds(host, (id) => id === state.pinnedHead);
         if (pinned >= lead) return pinned;
         state.pinnedHead = undefined;
     }
-    if (!sizeOf || host.length <= lead) return undefined;
+    const sizeOf = host.length > lead ? source.measure?.() : undefined;
+    if (!sizeOf) return undefined;
     const size: TransformWindowSize = { blocks: 0, bytes: 0 };
     let unmeasured = false;
     const fits = (index: number): boolean => {
@@ -757,11 +770,20 @@ function coldHead(state: TransformSessionState, source: TransformPassSource): nu
     for (let slot = 0; slot < lead && leadFits; slot += 1) leadFits = fits(slot);
     while (leadFits && head > lead && fits(head - 1)) head -= 1;
     if (unmeasured || head === lead) return undefined;
-    head = Math.min(head, host.length - 1);
-    const id = host.idAt(head);
+    const start = windowStart(source, Math.min(head, host.length - 1), lead);
+    if (start === undefined) return undefined;
+    const id = host.idAt(start);
     if (id === undefined) return undefined;
     state.pinnedHead = id;
-    return head;
+    return start;
+}
+
+function windowStart(source: TransformPassSource, head: number, lead: number): number | undefined {
+    const starts = source.startsWindow;
+    if (!starts) return head;
+    for (let slot = head; slot < source.host.length; slot += 1) if (starts(slot)) return slot;
+    for (let slot = head - 1; slot > lead; slot -= 1) if (starts(slot)) return slot;
+    return undefined;
 }
 
 /** `source` with its host narrowed to the cold lead slots followed by the slots from `head`. */
@@ -797,7 +819,7 @@ function coldSource(source: TransformPassSource, head: number): TransformPassSou
         readWindow: read((start, end) => source.readWindow(start, end)),
         liveWindow: read((start, end) => source.liveWindow(start, end)),
         // The narrowed view is the cold window itself, so it measures nothing further.
-        sizeOf: undefined,
+        measure: undefined,
         coldLead: 0,
         publish: (values, window, boundaryIndex) =>
             source.publish(values, window, at(boundaryIndex)),
@@ -1499,30 +1521,23 @@ export function createTransformSessionClient(
                         ),
                 );
                 const candidate = application.values;
-                let applied: AppliedOutput | undefined;
-                try {
-                    // Only the charge is read here, so the per-unit escape scan is skipped.
-                    const inspection = inspectReferenceableMessages(
-                        candidate,
-                        lease.remainingBytes,
-                        0,
-                        false,
-                    );
-                    if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
-                        applied = {
-                            revision: application.outputRevision,
-                            values: candidate,
-                            lengths: application.lengths,
-                            capture: captureMessages(candidate, lease),
-                            charge:
-                                application.bytes +
-                                application.lengths.length * LENGTH_SLOT_BYTES +
-                                inspection.estimatedBytes,
-                        };
-                    }
-                } catch (error) {
-                    if (!(error instanceof CaptureBudgetExceeded)) throw error;
-                }
+                // The previous-output check above ran with no source code since, so values kept
+                // from the previous output reuse its snapshots.
+                const reserved = captureReserved(
+                    candidate,
+                    lease,
+                    response.previous_output_revision !== undefined ? previousApplied : undefined,
+                );
+                const applied: AppliedOutput | undefined = reserved && {
+                    revision: application.outputRevision,
+                    values: candidate,
+                    lengths: application.lengths,
+                    capture: reserved.capture,
+                    charge:
+                        application.bytes +
+                        application.lengths.length * LENGTH_SLOT_BYTES +
+                        reserved.bytes,
+                };
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     source.validateOutput?.(candidate, boundaryId);

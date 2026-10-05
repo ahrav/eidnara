@@ -1280,13 +1280,24 @@ manifest. The `scale-report` job in
 builds release binaries and runs the driver once per tier for the `scale_base`
 commit and then the dispatched commit, each run under `scale_budget_seconds`,
 and uploads rows, manifests, reports, and the tiers each arm could not finish as
-run artifacts. `scripts/scale-opencode-pass.ts` drives the OpenCode transform
+run artifacts. The budget bounds when a pass may start: a pass in flight at the
+deadline runs to the client's own ceilings (one unpaged send under
+`TRANSFORM_SEND_TIMEOUT_MS` after a discovery under `DISCOVERY_BUDGET_MS`, with
+one rediscovery at most) and its row counts, and the driver stops before the
+next pass. A tier whose every sample completed is complete; an arm whose driver
+exited before writing a manifest is skipped with a warning and its tiers stay
+listed as incomplete. Such a dispatch runs in a concurrency group of its own, so the
+runs of its ref neither wait on it nor cancel it.
+`scripts/scale-opencode-pass.ts` drives the OpenCode transform
 hook: every sample builds a fresh N-slot host array outside the timer (covered
 slots minimal, a 300-message window of the 5 KiB shape) and collects the
 garbage of the previous array before the timer starts. It times the whole
 `run` call of the transform hook: preflight, discovery, capture, IPC, recipe
 application, publication, and note delivery. Its first pass is `cold`, later
-passes are `replay`, and a pass after a fold is `warming`.
+passes are `replay`, and a pass after a fold is `warming`. A pass that throws a
+terminal `HostCallError`, which the daemon answered, is a `daemon_error`; any
+other thrown error is a `transport_error`; a pass the plugin declined with
+nothing thrown is `declined`.
 
 `src/scale-report/pi-tier.ts` writes the Pi session tiers: a seeded session
 file of N messages named `m1` to `mN` along one `parentId` chain, the ids

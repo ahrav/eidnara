@@ -29,7 +29,10 @@ function plainHost(count: number, from = 1): PlainHost {
     };
 }
 
-function source(host: PlainHost): TransformPassSource {
+function source(
+    host: PlainHost,
+    fields: Record<string, unknown> = { model_key: "test/model" },
+): TransformPassSource {
     return {
         serializerProfile: "pi",
         invocationProfile: "pi-heuristic",
@@ -49,7 +52,7 @@ function source(host: PlainHost): TransformPassSource {
         contextLimit: () => undefined,
         prepare: async () => ({
             encodeInput: () => [],
-            fields: { model_key: "test/model" },
+            fields,
         }),
         publicationRejection: () => null,
         publish(values) {
@@ -106,10 +109,11 @@ async function pass(
     client: ReturnType<typeof createTransformSessionClient>,
     admission: TransformCaptureAdmission,
     host: PlainHost,
+    fields?: Record<string, unknown>,
 ): Promise<TransformPassOutcome> {
     const admitted = admission.admit("ses");
     if (!("lease" in admitted)) throw new Error("admission declined");
-    return client.run("ses", admitted.lease, source(host));
+    return client.run("ses", admitted.lease, source(host, fields));
 }
 
 const ids = (values: unknown) => (values as { id: string }[]).map((value) => value.id);
@@ -194,6 +198,37 @@ describe("transform session client over plain data", () => {
         await pass(client, new TransformCaptureAdmission(), host);
         expect(host.windows).toEqual([[4, 8]]);
         expect(transport.calls.at(-1)?.body.boundary).toEqual({ mid: "m5", sequence: 4 });
+    });
+
+    it("sends protocol fields over any pass input of the same name", async () => {
+        const host = plainHost(6);
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [{ mid: "m3", sequence: 1 }] })],
+            transform: [
+                foldReply({ mid: "m3", sequence: 1 }),
+                foldReply({ mid: "m3", sequence: 1 }),
+            ],
+        });
+        const client = createTransformSessionClient({ moduleClient: transport.client });
+        const admission = new TransformCaptureAdmission();
+        const fields = {
+            model_key: "test/model",
+            method: "adapter",
+            session_id: "adapter",
+            previous_output_revision: "adapter-stale",
+        };
+
+        await pass(client, admission, host, fields);
+        const first = transport.calls.find((call) => call.method === "transform")?.body ?? {};
+        expect(first.method).toBe("transform");
+        expect(first.session_id).toBe("ses");
+        expect(first.model_key).toBe("test/model");
+        expect(Object.hasOwn(first, "previous_output_revision")).toBe(false);
+
+        host.values.push({ id: "m7", text: "message 7" });
+        await pass(client, admission, host, fields);
+        const second = transport.calls.at(-1)?.body ?? {};
+        expect(second.previous_output_revision).toBe(`out-${outputCounter - 1}`);
     });
 
     it("keeps the boundary and fails open when the daemon answers a busy session", async () => {
@@ -355,7 +390,7 @@ describe("transform session client over plain data", () => {
 describe("transform session client cold import", () => {
     /** A source whose every slot is one CK block; `lead` slots head every cold window. */
     function sizedSource(host: PlainHost, lead = 0): TransformPassSource {
-        return { ...source(host), sizeOf: () => ({ blocks: 1, bytes: 10 }), coldLead: lead };
+        return { ...source(host), measure: () => () => ({ blocks: 1, bytes: 10 }), coldLead: lead };
     }
 
     function coldReply(boundary: { mid: string; sequence: number } | null): Reply {
@@ -446,7 +481,7 @@ describe("transform session client cold import", () => {
         });
         const client = createTransformSessionClient({ moduleClient: transport.client });
         // Three blocks a message: 133 messages carry 399 blocks and a 134th would carry 402.
-        const threeBlocks = { ...source(host), sizeOf: () => ({ blocks: 3, bytes: 10 }) };
+        const threeBlocks = { ...source(host), measure: () => () => ({ blocks: 3, bytes: 10 }) };
         await coldPass(client, new TransformCaptureAdmission(), threeBlocks);
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
         const fit = Math.floor(HALF_CAP_BLOCKS / 3);
@@ -463,7 +498,7 @@ describe("transform session client cold import", () => {
         const client = createTransformSessionClient({ moduleClient: transport.client });
         const heavy = {
             ...source(host),
-            sizeOf: () => ({ blocks: 1, bytes: Math.floor(HALF_CAP_BYTES / 4) + 1 }),
+            measure: () => () => ({ blocks: 1, bytes: Math.floor(HALF_CAP_BYTES / 4) + 1 }),
         };
         await coldPass(client, new TransformCaptureAdmission(), heavy);
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
@@ -493,7 +528,7 @@ describe("transform session client cold import", () => {
         const unmeasured = HALF_CAP_BLOCKS * 3 - 10;
         const gap = {
             ...source(host),
-            sizeOf: (index: number) =>
+            measure: () => (index: number) =>
                 index === unmeasured ? undefined : { blocks: 1, bytes: 10 },
         };
         await coldPass(client, new TransformCaptureAdmission(), gap);
@@ -511,7 +546,7 @@ describe("transform session client cold import", () => {
         const client = createTransformSessionClient({ moduleClient: transport.client });
         const oversized = {
             ...source(host),
-            sizeOf: () => ({ blocks: HALF_CAP_BLOCKS + 1, bytes: 1 }),
+            measure: () => () => ({ blocks: HALF_CAP_BLOCKS + 1, bytes: 1 }),
         };
         await coldPass(client, new TransformCaptureAdmission(), oversized);
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
@@ -542,6 +577,38 @@ describe("transform session client cold import", () => {
         expect(host.published[1]?.map((value) => (value as { id: string }).id)).toEqual(
             ids(second.native_messages),
         );
+    });
+
+    it("moves a head `startsWindow` refuses to the nearest accepted slot, a later one first", async () => {
+        const firstSent = async (host: PlainHost, refused: (id: string) => boolean) => {
+            const transport = fakeTransport({
+                "transform.boundary": [() => ({ anchors: [] })],
+                transform: [coldReply(null)],
+            });
+            const client = createTransformSessionClient({ moduleClient: transport.client });
+            const refusing = {
+                ...sizedSource(host),
+                startsWindow: (index: number) => !refused(host.values[index]?.id ?? ""),
+            };
+            await coldPass(client, new TransformCaptureAdmission(), refusing);
+            const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
+            return { ids: ids(sent.native_messages), pinned: client.state("ses").pinnedHead };
+        };
+        const total = HALF_CAP_BLOCKS * 2;
+        const head = total - HALF_CAP_BLOCKS + 1;
+
+        const later = await firstSent(plainHost(total), (id) => id === `m${head}`);
+        expect(later.ids[0]).toBe(`m${head + 1}`);
+        expect(later.ids).toHaveLength(HALF_CAP_BLOCKS - 1);
+        expect(later.pinned).toBe(`m${head + 1}`);
+
+        const earlier = await firstSent(plainHost(total), (id) => Number(id.slice(1)) >= head);
+        expect(earlier.ids[0]).toBe(`m${head - 1}`);
+        expect(earlier.ids).toHaveLength(HALF_CAP_BLOCKS + 1);
+
+        const none = await firstSent(plainHost(total), (id) => id !== "m1");
+        expect(none.ids).toHaveLength(total);
+        expect(none.pinned).toBeUndefined();
     });
 
     it("sends the whole array below half the cap", async () => {

@@ -2749,6 +2749,8 @@ pub struct HandlerCore {
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     query_route: Mutex<Option<Arc<query_route::QueryRouteLimits>>>,
+    /// The verified composition the dense lane ranks through; absent, the lane runs the exhaustive producer.
+    dense_vectors: Mutex<Option<query_route::DenseVectors>>,
     edit_receipts: Mutex<Option<edit_receipts::ReceiptStore>>,
     capability_source: Mutex<Option<Arc<dyn context_capabilities::CapabilitySource>>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -3508,6 +3510,22 @@ impl Handler {
         (outcome, units.load(Ordering::SeqCst))
     }
 
+    /// `run_unit` counts submissions in `submitted`; each submitted unit waits in its own task for a permit from `gate` before it runs, and a closed gate refuses it.
+    pub async fn dispatch_value_for_test_gated(
+        &self,
+        route: RouteHandle,
+        request: Value,
+        gate: Arc<tokio::sync::Semaphore>,
+        submitted: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> PreparedOutcome {
+        let runner = transform_unit::DetachedRunner {
+            units: submitted,
+            gate: Some(gate),
+            ..Default::default()
+        };
+        self.dispatch_value_on(route, request, runner).await
+    }
+
     async fn dispatch_value_on(
         &self,
         route: RouteHandle,
@@ -3695,6 +3713,7 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            dense_vectors: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
@@ -4205,6 +4224,7 @@ impl Handler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             query_route: Mutex::new(None),
+            dense_vectors: Mutex::new(None),
             edit_receipts: Mutex::new(None),
             capability_source: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
@@ -4713,9 +4733,6 @@ impl HandlerCore {
             })
     }
 
-    /// Whether transform lineage for `session_id` exists under a root other than `project_root`:
-    /// an in-process root, a live transform route, or durable cache state with no record of this
-    /// root.
     fn session_lineage_on_another_root(&self, session_id: &str, project_root: &Path) -> bool {
         let canonical_project_root = canonical_root(project_root);
         let other = |root: &PathBuf| canonical_root(root) != canonical_project_root;
@@ -4741,11 +4758,9 @@ impl HandlerCore {
             return false;
         };
         store.has_cache_state(session_id).unwrap_or(false)
-            && !canonical_project_root.to_str().is_some_and(|root| {
-                store
-                    .knows_transform_session_root(session_id, root)
-                    .unwrap_or(false)
-            })
+            && store
+                .knows_transform_session_root_other_than(session_id, &canonical_project_root)
+                .unwrap_or(false)
     }
 
     /// Whether any transform lineage exists for `session_id` under any root: an in-process root,
@@ -8720,8 +8735,8 @@ impl HandlerCore {
                 Some(SerializerProfile::OpencodeAiSdk) => {}
                 Some(SerializerProfile::Pi) => {
                     let rows = parsed.native_messages.as_deref().unwrap_or_default();
-                    let mids = parsed.messages.iter().map(|message| message.mid.as_str());
-                    if let Err(decline) = codec::pi::check_pi_rows(rows, mids) {
+                    let messages = parsed.messages.iter().map(Arc::as_ref);
+                    if let Err(decline) = codec::pi::check_pi_rows(rows, messages) {
                         return invalid_params_error(decline.to_string());
                     }
                 }
@@ -14128,43 +14143,44 @@ fn attach_native_messages_with_tags(
     }
     let profile = SerializerProfile::parse(&request.serializer_profile);
     let native_input = request.native_messages.as_deref().unwrap_or_default();
-    let served_messages = response
-        .messages()
-        .iter()
-        .map(|message| message.deref().clone())
-        .collect::<Vec<_>>();
     let mutation_exempt_mids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let mut native_messages = match profile {
-        Some(SerializerProfile::Pi) => {
-            // Admission already checked every row, so the decode cannot decline here.
-            let sidecar = codec::pi::decode_pi_rows(native_input)
-                .map(|decoded| decoded.sidecar)
-                .unwrap_or_else(|_| codec::DecodeSidecar::new("pi"));
-            codec::pi::encode_pi_rows(&served_messages, &sidecar, &mutation_exempt_mids)
-        }
-        _ => codec::opencode::encode_opencode_with_session_exemptions(
-            &served_messages,
-            &codec::opencode::decode_opencode_shared(native_input).sidecar,
-            Some(&request.session_id),
+    let native_messages = match profile {
+        Some(SerializerProfile::Pi) => codec::pi::encode_pi_rows(
+            response.messages().iter().map(Deref::deref),
+            native_input,
             &mutation_exempt_mids,
         ),
+        _ => {
+            let served_messages = response
+                .messages()
+                .iter()
+                .map(|message| message.deref().clone())
+                .collect::<Vec<_>>();
+            let mut native_messages = codec::opencode::encode_opencode_with_session_exemptions(
+                &served_messages,
+                &codec::opencode::decode_opencode_shared(native_input).sidecar,
+                Some(&request.session_id),
+                &mutation_exempt_mids,
+            );
+            if let Some(profile) = profile {
+                transform::clear_served_native_reasoning_with_tags(
+                    profile,
+                    transform::request_accepts_empty_content(request),
+                    &mut native_messages,
+                    &served_messages,
+                    &request.messages,
+                    reasoning_watermark,
+                    request.mid_turn,
+                    tag_numbers,
+                );
+            }
+            native_messages.into_iter().map(Arc::new).collect()
+        }
     };
-    if let Some(profile) = profile {
-        transform::clear_served_native_reasoning_with_tags(
-            profile,
-            transform::request_accepts_empty_content(request),
-            &mut native_messages,
-            &served_messages,
-            &request.messages,
-            reasoning_watermark,
-            request.mid_turn,
-            tag_numbers,
-        );
-    }
-    response.native_messages = Some(native_messages.into_iter().map(Arc::new).collect());
+    response.native_messages = Some(native_messages);
 }
 
 /// The caller's previously applied native output, offered as the recipe's `previous` source only
@@ -29575,6 +29591,85 @@ mod tests {
             )
         );
         assert!(resolver.calls().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pruned_root_lineage_on_its_own_root_asks_the_resolver_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_home = dir.path().join("data");
+        std::fs::create_dir_all(&data_home).unwrap();
+        let root_a = dir.path().join("project-a");
+        std::fs::create_dir_all(&root_a).unwrap();
+        let descriptor = dev_descriptor_at(data_home.to_str().unwrap());
+        {
+            let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+            let handler = Handler::with_producer_factory_config_resolver(
+                Arc::new(TestProducerFactory {
+                    state: Arc::new(ProducerState::default()),
+                }),
+                default_test_config(),
+                Arc::new(MissingSessionResolver),
+            );
+            handler.install_store_for_test(Arc::clone(&store));
+            handler.bind_route(
+                test_route(7),
+                binding_with_harness(root_a.to_str().unwrap(), PI_HARNESS, "ses"),
+            );
+            let transformed =
+                call_transform_request_on_channel(&handler, 7, request(vec![ck("m0", 0, "a")]))
+                    .await;
+            assert_eq!(transformed["action"], "HARD");
+            // Setting both timestamps to 0 causes the next store open to prune the root
+            // observation while the cache state remains.
+            store
+                .with_fenced_conn_for_test(|conn| {
+                    conn.execute(
+                        "UPDATE transform_session_roots SET observed_at = 0 WHERE session_id = 'ses'",
+                        [],
+                    )?;
+                    conn.execute(
+                        "UPDATE cache_state SET last_activity_at = 0 WHERE session_id = 'ses'",
+                        [],
+                    )
+                })
+                .unwrap();
+        }
+
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::None)]);
+        let store = Arc::new(MemoryStore::open(&descriptor).unwrap());
+        assert!(store.has_cache_state("ses").unwrap());
+        assert!(
+            !store
+                .knows_transform_session_root("ses", root_a.to_str().unwrap())
+                .unwrap()
+        );
+        let handler = Handler::with_producer_factory_config_resolver(
+            Arc::new(TestProducerFactory {
+                state: Arc::new(ProducerState::default()),
+            }),
+            default_test_config(),
+            resolver.clone(),
+        );
+        handler.install_store_for_test(Arc::clone(&store));
+        handler.bind_route(
+            test_route(8),
+            binding_with_harness(root_a.to_str().unwrap(), PI_HARNESS, "ses"),
+        );
+        let note = call_facade_on_channel(
+            &handler,
+            8,
+            "eidnara_note",
+            json!({ "action": "write", "content": "same root" }),
+        )
+        .await;
+        assert_eq!(
+            error_frame(note),
+            (
+                "session_unresolved".to_string(),
+                SESSION_UNRESOLVED_MESSAGE.to_string()
+            )
+        );
+        assert_eq!(resolver.calls(), vec!["ses"]);
     }
 
     #[tokio::test(flavor = "current_thread")]

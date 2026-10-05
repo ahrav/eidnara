@@ -31,9 +31,12 @@ permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
-# `main` keeps every run.
+# `main` preserves in-progress runs; newer pending runs replace older pending
+# runs. Scale-driver dispatches run independently of other runs on their ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -1078,7 +1081,7 @@ jobs:
               if [ "$arm" = base ]; then driver_flags=("${base_flags[@]}")
               else driver_flags=("${measured_flags[@]}"); fi
               commit="$(git -C "$root" rev-parse HEAD)"
-              if ! bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
+              if ! bun "packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts" \
                 --out-dir "$out/$arm/$run" --tiers "$tiers" "${driver_flags[@]}" \
                 --plugin-root "$root/packages/$plugin" \
                 --fixture-bin "$root/target/release/examples/direct_host_fixture" \
@@ -1091,8 +1094,13 @@ jobs:
           done
           for arm in "${arms[@]}"; do
             cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl" || true
-            cp "$(ls "$out/$arm"/*/manifest.json | tail -n 1)" "$out/$arm/manifest.json"
             jq -s add "$out/$arm"/*/incomplete.json > "$out/$arm/incomplete.json"
+            manifests=("$out/$arm"/*/manifest.json)
+            if [ ! -f "${manifests[-1]}" ]; then
+              echo "::warning::$arm arm wrote no manifest; report skipped"
+              continue
+            fi
+            cp "${manifests[-1]}" "$out/$arm/manifest.json"
             # The Pi base arm writes no pass rows; its per-call figures are in
             # baseline.json. Any other arm without rows fails the job.
             if [ "$SCALE_DRIVER/$arm" = pi-pass/base ] && [ ! -s "$out/$arm/rows.jsonl" ]; then

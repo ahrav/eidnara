@@ -15,7 +15,7 @@ non-result.
   the batch candidate is allocated, and ends the batch at a row that does not
   fit; `Progress::hold` checks heap bytes before an eligible row moves in.
   Rows enter best first, so no entry is displaced.
-- `Stored::batch_slots` (`crates/retrieval/src/dense/oracle.rs:641`) caps the
+- `Stored::batch_slots` (`crates/retrieval/src/dense/oracle.rs:647`) caps the
   candidate and score slots a batch reserves at `batch_bytes /
   SELECTED_ROW_BYTES`, so the reservation fits inside the bound before any
   row of the batch is read.

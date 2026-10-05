@@ -19,6 +19,14 @@ function reservedPiId(role: string, entryId: string): string {
     return `${PI_RESERVED_ID_PREFIX}${role}:${entryId}`;
 }
 
+function rowEntry(id: string): { entryId: string; role?: string } | undefined {
+    if (!id.startsWith(PI_RESERVED_ID_PREFIX)) return { entryId: id };
+    const rest = id.slice(PI_RESERVED_ID_PREFIX.length);
+    const separator = rest.indexOf(":");
+    if (separator < 0) return undefined;
+    return { role: rest.slice(0, separator), entryId: rest.slice(separator + 1) };
+}
+
 /**
  * The id of the message `entry` contributes to Pi's context when `message` is that message,
  * `null` when it is another, and `undefined` when the entry contributes none. A live custom
@@ -83,19 +91,12 @@ export class PiAlignment {
     }
 
     holds(id: string): boolean {
-        let entryId = id;
-        let role: string | undefined;
-        if (id.startsWith(PI_RESERVED_ID_PREFIX)) {
-            const rest = id.slice(PI_RESERVED_ID_PREFIX.length);
-            const separator = rest.indexOf(":");
-            if (separator < 0) return false;
-            role = rest.slice(0, separator);
-            entryId = rest.slice(separator + 1);
-        }
-        const position = this.branch.indexOf(entryId);
+        const row = rowEntry(id);
+        if (!row) return false;
+        const position = this.branch.indexOf(row.entryId);
         if (position === undefined) return false;
         const compaction = this.branch.latestCompaction();
-        if (role === "compactionSummary") return position === compaction;
+        if (row.role === "compactionSummary") return position === compaction;
         if (compaction === undefined || position >= compaction) return true;
         const compactionId = this.branch.idAt(compaction);
         const entry = compactionId === undefined ? undefined : this.reader.getEntry(compactionId);
@@ -238,10 +239,13 @@ export function createPiTransform(options: PiTransformOptions) {
             },
             preflight: async () => inputs.projectRoot,
             readWindow: rows,
-            sizeOf: (index) => {
+            measure: () => (index) => {
                 const row = rows(index, index + 1)?.[0];
                 return row && piRowSize(row);
             },
+            // A `toolResult` row answers a `toolCall` in an earlier assistant row.
+            startsWindow: (index) =>
+                (inputs.messages[index] as Json | undefined)?.role !== "toolResult",
             // After a store reset the compaction summary heads a cold import as ordinary content.
             coldLead: inputs.messages[0]?.role === "compactionSummary" ? 1 : 0,
             idOf: (value) => (value as PiRow).id,
@@ -301,23 +305,28 @@ export function createPiTransform(options: PiTransformOptions) {
     ): PiEviction | undefined {
         const ack = acknowledged.get(sessionId);
         if (!ack) return undefined;
+        // Eviction keeps from `row.entryId`. A `compactionSummary` row names a compaction entry,
+        // so eviction requires a boundary on a message, custom message, or branch summary row.
+        const row = rowEntry(ack.boundary.mid);
+        if (!row || row.role === "compactionSummary") return undefined;
+        const kept = row.entryId;
         const branch = options.branchOf(sessionId);
         branch.sync(reader);
-        if (branch.indexOf(ack.boundary.mid) === undefined) return undefined;
+        const keptAt = branch.indexOf(kept);
+        if (keptAt === undefined) return undefined;
         const committed = latestCompaction(branch, reader);
         // A compaction that already evicted through this boundary, or one that keeps less, leaves nothing to evict.
         if (
             committed &&
-            ((committed.firstKeptEntryId === ack.boundary.mid &&
+            ((committed.firstKeptEntryId === kept &&
                 (committed.details as { sequence?: unknown } | undefined)?.sequence ===
                     ack.boundary.sequence) ||
-                (branch.indexOf(committed.firstKeptEntryId) ?? -1) >
-                    (branch.indexOf(ack.boundary.mid) ?? -1))
+                (branch.indexOf(committed.firstKeptEntryId) ?? -1) > keptAt)
         )
             return undefined;
         return {
             summary: ack.summary,
-            firstKeptEntryId: ack.boundary.mid,
+            firstKeptEntryId: kept,
             tokensBefore,
             details: { sequence: ack.boundary.sequence },
         };

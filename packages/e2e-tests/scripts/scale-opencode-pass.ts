@@ -9,9 +9,9 @@ import {
     command,
     exchangedBytes,
     hostManifest,
-    passOutcome,
     seedCoverage,
 } from "../src/scale-report/driver-common";
+import { classifyPass } from "../src/scale-report/pass-outcome";
 import { PassRowWriter, type ScaleTier, TIER_MESSAGES } from "../src/scale-report/rows";
 
 const { values: flags } = parseArgs({
@@ -45,11 +45,13 @@ const fixtureBin = resolve(need("fixture-bin"));
 const evalRunnerBin = resolve(need("eval-runner-bin"));
 const samples = Number(flags.samples);
 const windowSize = Number(flags.window);
+const bootstrapSeed = /^\d+$/.test(flags.seed as string) ? Number(flags.seed) : Number.NaN;
 const tiers = (flags.tiers as string).split(",") as ScaleTier[];
 for (const tier of tiers) if (!(tier in TIER_MESSAGES)) throw new Error(`unknown tier ${tier}`);
 if (!Number.isSafeInteger(samples) || samples < 2) throw new Error("--samples must be at least 2");
 if (!Number.isSafeInteger(windowSize) || windowSize < 4 || windowSize % 2 !== 0)
     throw new Error("--window must be an even count of at least 4");
+if (!Number.isSafeInteger(bootstrapSeed)) throw new Error("--seed must be a whole number");
 
 interface PluginUnderTest {
     createRustModeTransform: (
@@ -204,6 +206,7 @@ async function measureTier(tier: ScaleTier): Promise<number> {
             const boundary = JSON.stringify(state.boundary ?? null);
             const published = output.messages[turn === 0 ? 0 : covered] !== head;
             const ok = pass.status === "ok" && state.failureCount === failuresBefore && published;
+            const { outcome, refusal } = classifyPass({ ok, error: pass.error });
             writer.write({
                 harness: "opencode",
                 tier,
@@ -215,7 +218,8 @@ async function measureTier(tier: ScaleTier): Promise<number> {
                         : boundary === previousBoundary && pass.action !== "HARD"
                           ? "replay"
                           : "warming",
-                ...passOutcome({ published: ok, status: pass.status, error: pass.error }),
+                outcome,
+                refusal,
                 response_us: responseUs,
                 service_us: pass.totalMs === undefined ? null : Math.round(pass.totalMs * 1_000),
                 rss_bytes: process.memoryUsage.rss(),
@@ -259,7 +263,7 @@ writeFileSync(
             },
             host: hostManifest(),
             open_loop: null,
-            seed: Number(flags.seed),
+            seed: bootstrapSeed,
         },
         null,
         2,

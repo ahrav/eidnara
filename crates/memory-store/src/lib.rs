@@ -7893,6 +7893,23 @@ impl MemoryStore {
         project_root: &str,
     ) -> Result<bool, MemoryStoreError> {
         let candidate = canonical_root(project_root);
+        self.any_committed_transform_session_root(session_id, |root| root == candidate)
+    }
+
+    pub fn knows_transform_session_root_other_than(
+        &self,
+        session_id: &str,
+        project_root: &Path,
+    ) -> Result<bool, MemoryStoreError> {
+        let candidate = canonical_root(project_root);
+        self.any_committed_transform_session_root(session_id, |root| root != candidate)
+    }
+
+    fn any_committed_transform_session_root(
+        &self,
+        session_id: &str,
+        mut accept: impl FnMut(&Path) -> bool,
+    ) -> Result<bool, MemoryStoreError> {
         self.inner
             .with_conn(|conn| {
                 // Older stores may contain symlink spellings. Load the tiny per-session set and
@@ -7906,7 +7923,7 @@ impl MemoryStore {
                 let rows =
                     statement.query_map(params![session_id], |row| row.get::<_, String>(0))?;
                 for row in rows {
-                    if canonical_root(row?) == candidate {
+                    if accept(&canonical_root(row?)) {
                         return Ok(true);
                     }
                 }
@@ -21711,10 +21728,15 @@ mod tests {
         commit_root("refreshed", Some(1), now_ms);
         commit_root("idle-live", None, 1);
         commit_root("deleted", None, 1);
+        commit_root("pruned-idle", None, 1);
         store
             .inner
             .with_conn_unfenced(|conn| {
                 conn.execute("DELETE FROM cache_state WHERE session_id = 'deleted'", [])?;
+                conn.execute(
+                    "UPDATE cache_state SET last_activity_at = 1 WHERE session_id = 'pruned-idle'",
+                    [],
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -21733,6 +21755,16 @@ mod tests {
         );
         assert!(
             reopened
+                .knows_transform_session_root_other_than("refreshed", Path::new("/root-b"))
+                .unwrap()
+        );
+        assert!(
+            !reopened
+                .knows_transform_session_root_other_than("refreshed", Path::new("/root-a"))
+                .unwrap()
+        );
+        assert!(
+            reopened
                 .knows_transform_session_root("idle-live", "/root-a")
                 .unwrap()
         );
@@ -21743,6 +21775,19 @@ mod tests {
                 .unwrap()
         );
         assert!(!reopened.has_cache_state("deleted").unwrap());
+        assert!(reopened.has_cache_state("pruned-idle").unwrap());
+        for root in ["/root-a", "/root-b"] {
+            assert!(
+                !reopened
+                    .knows_transform_session_root("pruned-idle", root)
+                    .unwrap()
+            );
+            assert!(
+                !reopened
+                    .knows_transform_session_root_other_than("pruned-idle", Path::new(root))
+                    .unwrap()
+            );
+        }
     }
 
     /// The row stores the canonical root, so the canonical form is what must be scanned. A

@@ -7,15 +7,15 @@ RP2.6 R1 to R3 and #610 AC1 and AC3: a complete scan yields
 
 ## Evidence trail
 
-- `select_candidates` (`crates/retrieval/src/dense/candidates.rs:260`)
+- `select_candidates` (`crates/retrieval/src/dense/candidates.rs:263`)
   encodes the query under every layer's scales, resolves the layers, and walks
   the live required rows in rowid order through `ResolvedCodes`.
 - `ResolvedCodes::visit` finds each visited row's winner through
-  `Cursor::find` (`crates/retrieval/src/dense/layered.rs:135`) and marks it
+  `Cursor::find` (`crates/retrieval/src/dense/layered.rs:147`) and marks it
   live, so rows a newer layer superseded or masked have no winner, and only
   live winners are scored once the walk ends.
 - The pool's capacity is `CandidateCapacity::candidates`
-  (`candidates.rs:321`).
+  (`candidates.rs:324`).
 
 ## Failure scenario
 

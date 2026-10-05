@@ -2,8 +2,6 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 
-import type { PassOutcome, PassRow } from "./rows";
-
 export function seedCoverage(
     evalRunnerBin: string,
     dataDir: string,
@@ -52,27 +50,4 @@ export function exchangedBytes(exchanged: readonly unknown[]): number {
     let bytes = 0;
     for (const value of exchanged) bytes += Buffer.byteLength(JSON.stringify(value) ?? "");
     return bytes;
-}
-
-/** The transform call itself ran out of time, after its request may have been sent. */
-export function isDeadline(error: unknown): boolean {
-    if (!(error instanceof Error)) return false;
-    const code = (error as { code?: unknown }).code;
-    return (
-        (code === "ETIMEDOUT" && !/while queued/.test(error.message)) ||
-        /request deadline expired after a possible send/.test(error.message)
-    );
-}
-
-export function passOutcome(pass: { published: boolean; status?: unknown; error?: unknown }): {
-    outcome: PassOutcome;
-    refusal: PassRow["refusal"];
-} {
-    if (pass.published) return { outcome: "completed", refusal: null };
-    if (isDeadline(pass.error)) return { outcome: "censored", refusal: null };
-    if (pass.error !== undefined) return { outcome: "refused", refusal: "transport_error" };
-    return {
-        outcome: "refused",
-        refusal: pass.status === undefined || pass.status === "ok" ? "declined" : "daemon_error",
-    };
 }

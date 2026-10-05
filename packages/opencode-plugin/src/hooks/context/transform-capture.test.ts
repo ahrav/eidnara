@@ -7,7 +7,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory as captureHistoryWithLease,
-    captureMessages as captureWithLease,
+    captureReserved,
     defaultTransformCaptureAdmission,
     type HistoryDigest,
     historyDigestsEqual,
@@ -39,6 +39,17 @@ function reserveCapture(messages: unknown): CaptureLease {
     if (!captureLease.reserve(inspection.estimatedBytes))
         throw new CaptureBudgetExceeded("fixture");
     return captureLease;
+}
+
+function captureWithLease(messages: unknown, lease: CaptureLease): CapturedMessages {
+    const {
+        verified: _verified,
+        history: _history,
+        terminal: _terminal,
+        boundary: _boundary,
+        ...captured
+    } = captureHistoryWithLease(messages, lease);
+    return captured;
 }
 
 function captureMessages(messages: unknown): CapturedMessages {
@@ -951,14 +962,37 @@ describe("digest-verified prefix capture", () => {
         const chunk = 1 << 16;
         const dense = message("m1");
         dense.parts = [{ type: "numbers", values: Array.from({ length: 200_000 }, (_, i) => i) }];
-        const spy = spyOn(Hash.prototype, "update");
+        // The chain hashes through Bun's hasher under Bun and through `node:crypto` elsewhere.
+        const spies = [
+            spyOn(Hash.prototype, "update"),
+            spyOn(Bun.CryptoHasher.prototype, "update"),
+        ];
         try {
             digestOf(dense);
-            const longest = Math.max(...spy.mock.calls.map((call) => String(call[0]).length));
-            expect(longest).toBeLessThan(2 * chunk);
+            const sizes = spies.flatMap((spy) =>
+                spy.mock.calls.map(([input]) =>
+                    typeof input === "string" ? input.length * 2 : (input as Uint8Array).byteLength,
+                ),
+            );
+            // Hashing 200,000 number tokens takes many updates, each under two chunks of UTF-16.
+            expect(sizes.length).toBeGreaterThan(10);
+            expect(Math.max(...sizes)).toBeLessThan(2 * chunk * 2);
         } finally {
-            spy.mockRestore();
+            for (const spy of spies) spy.mockRestore();
         }
+    });
+
+    it("verifies members whose token text spans several pending flushes", () => {
+        // 1,500 short keys emit several times the token units one flush of pending text holds.
+        const wide = (edited?: number): Record<string, unknown> => {
+            const part: Record<string, unknown> = { type: "text" };
+            for (let key = 0; key < 1_500; key += 1) part[`k${key}`] = key === edited ? "y" : "x";
+            return { info: { id: "m1", role: "user", sessionID: "ses" }, parts: [part] };
+        };
+        const digest = digestOf(wide());
+        expect(verifiesAgainst(wide(), digest)).toBe(true);
+        for (const edited of [0, 750, 1_499])
+            expect(verifiesAgainst(wide(edited), digest)).toBe(false);
     });
 
     it("keeps snapshot-only captures free of history digests", () => {
@@ -991,6 +1025,9 @@ describe("tape digest encoding", () => {
             `u400:${"x".repeat(395)}`,
             "x".repeat(255),
             `${"\u00e9".repeat(200)}${"x".repeat(200)}`,
+            "x".repeat((1 << 16) - 1),
+            "x".repeat(1 << 16),
+            `${"x".repeat((1 << 16) - 1)}y`,
         ];
         const digests = texts.map(digestOf);
         for (let left = 0; left < digests.length; left += 1) {
@@ -1391,6 +1428,23 @@ describe("capture admission", () => {
 
 describe("bounded capture sizing", () => {
     it.each([
+        ["plain \u0020\u4e2d\ud7ff\ue000\uffff", 0],
+        ['"', 2],
+        ["\\", 2],
+        ["\b\t\n\f\r", 10],
+        ["\u000b", 10],
+        ["\u0000\u001f", 20],
+        ["\ud83d\ude00", 0],
+        ["\ud800", 10],
+        ["\udc00", 10],
+        ["\ud800\ud800", 20],
+    ])("adds the exact escape growth to a string's wire bound for %j", (text, growth) => {
+        const inspection = inspectReferenceableMessages([text]);
+        if (!inspection.ok) throw new Error("valid source rejected");
+        expect(inspection.messageWireBytes[0]).toBe(text.length * 2 + 4 + growth);
+    });
+
+    it.each([
         "plain",
         '"\\\b\t\n\f\r',
         "\u0000\u001f",
@@ -1440,6 +1494,91 @@ describe("bounded capture sizing", () => {
         Object.defineProperty(source[0], "parts", { get: counter.trap });
         expect(() => captureWithLease(source, lease)).toThrow("accessor");
         expect(counter.count).toBe(0);
+    });
+
+    it("reserves the inspection charge with the capture it walks, and reserves nothing when it refuses", () => {
+        const source = [message("m1"), message("m2", "x".repeat(4096))];
+        const inspection = inspectReferenceableMessages(source, undefined, 0, false);
+        if (!inspection.ok) throw new Error("valid source rejected");
+        const leaseWithin = (maxBytes: number): [TransformCaptureAdmission, CaptureLease] => {
+            const owner = new TransformCaptureAdmission({ maxPasses: 1, maxBytes });
+            const admitted = owner.admit("s");
+            if (!("lease" in admitted)) throw new Error("unexpected refusal");
+            return [owner, admitted.lease];
+        };
+
+        const [exactOwner, exact] = leaseWithin(inspection.estimatedBytes);
+        const reserved = captureReserved(source, exact);
+        expect(reserved?.bytes).toBe(inspection.estimatedBytes);
+        expect(exactOwner.chargedBytes).toBe(inspection.estimatedBytes);
+        expect(reserved && capturedMessagesUnchanged(source, reserved.capture)).toBe(true);
+        expect(reserved?.capture.members).toEqual(source);
+        exact.release();
+
+        const [shortOwner, short] = leaseWithin(inspection.estimatedBytes - 1);
+        expect(captureReserved(source, short)).toBeUndefined();
+        expect(shortOwner.chargedBytes).toBe(0);
+        short.release();
+
+        const [cancelledOwner, cancelled] = leaseWithin(inspection.estimatedBytes);
+        cancelled.requestCancel("cancelled");
+        expect(captureReserved(source, cancelled)).toBeUndefined();
+        expect(cancelledOwner.chargedBytes).toBe(0);
+        cancelled.release();
+
+        const counter = trapCounter();
+        const [rejectedOwner, rejected] = leaseWithin(inspection.estimatedBytes);
+        const hooked = [message("m1")];
+        Object.defineProperty(hooked[0], "parts", { get: counter.trap });
+        expect(captureReserved(hooked, rejected)).toBeUndefined();
+        expect(rejectedOwner.chargedBytes).toBe(0);
+        expect(counter.count).toBe(0);
+        rejected.release();
+    });
+
+    it("reuses an unchanged capture's snapshots and spends for the values it shares", () => {
+        const kept = [message("m1"), message("m2", "x".repeat(4096))];
+        const owner = new TransformCaptureAdmission();
+        const lease = (): CaptureLease => {
+            const admitted = owner.admit("s");
+            if (!("lease" in admitted)) throw new Error("unexpected refusal");
+            return admitted.lease;
+        };
+        const earlier = lease();
+        const previous = captureReserved(kept, earlier);
+        earlier.release();
+        if (!previous) throw new Error("capture refused");
+        const candidate = [message("m0"), ...kept];
+        const walked = lease();
+        const fresh = captureReserved(candidate, walked);
+        walked.release();
+        if (!fresh) throw new Error("capture refused");
+
+        const reusing = lease();
+        const unchanged = { values: kept, capture: previous.capture };
+        const reused = captureReserved(candidate, reusing, unchanged);
+        expect(reused?.bytes).toBe(fresh.bytes);
+        expect(owner.chargedBytes).toBe(fresh.bytes);
+        expect(reused?.capture.rootSnapshot).toEqual(fresh.capture.rootSnapshot);
+        expect(reused?.capture.snapshots).toEqual(fresh.capture.snapshots);
+        // Shared values take the earlier snapshots; the inserted value is walked.
+        expect(reused?.capture.snapshots[1]).toBe(previous.capture.snapshots[0]);
+        expect(reused?.capture.snapshots[2]).toBe(previous.capture.snapshots[1]);
+        expect(reused?.capture.snapshots[0]).not.toBe(fresh.capture.snapshots[0]);
+        expect(reused && capturedMessagesUnchanged(candidate, reused.capture)).toBe(true);
+        reusing.release();
+
+        // A reused spend counts against the headroom like a walked one.
+        const tight = new TransformCaptureAdmission({ maxPasses: 1, maxBytes: fresh.bytes - 1 });
+        const admitted = tight.admit("s");
+        if (!("lease" in admitted)) throw new Error("unexpected refusal");
+        expect(captureReserved(candidate, admitted.lease, unchanged)).toBeUndefined();
+        expect(tight.chargedBytes).toBe(0);
+        admitted.lease.release();
+
+        // The reused snapshots still record the content, so a later edit is caught.
+        (kept[1]?.parts as Array<{ text: string }>)[0].text = "edited";
+        expect(reused && capturedMessagesUnchanged(candidate, reused.capture)).toBe(false);
     });
 
     it("charges root metadata and every root and message tape slot", () => {
