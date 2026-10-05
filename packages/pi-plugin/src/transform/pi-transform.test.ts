@@ -501,3 +501,45 @@ describe("Pi cold import", () => {
         expect(sent).toHaveLength(calls.length + 1);
     });
 });
+
+describe("Pi eviction at a reserved boundary row", () => {
+    it.each([
+        [
+            "custom message",
+            (manager: SessionManager) => manager.appendCustomMessageEntry("note", "hint", true),
+            "custom",
+        ],
+        [
+            "branch summary",
+            (manager: SessionManager) => {
+                manager.branchWithSummary(manager.getLeafId() as string, "left a branch");
+                return manager.getLeafId() as string;
+            },
+            "branchSummary",
+        ],
+    ] as const)("evicts through a %s by its entry id", async (_, append, role) => {
+        const manager = SessionManager.inMemory("/project");
+        manager.appendMessage(user("one"));
+        manager.appendMessage(assistant("two"));
+        const entry = append(manager);
+        manager.appendMessage(user("now"));
+        const boundary = { mid: `eidnara:${role}:${entry}`, sequence: 3 };
+        const transport = fakeTransport({
+            "transform.boundary": [() => ({ anchors: [boundary] })],
+            transform: [foldReply(boundary)],
+        });
+        const pass = passOver(manager, agentMessages(manager));
+        const transform = transformOver(transport.client, pass.branch);
+        const result = await transform.run(pass);
+        expect(result.outcome).toEqual({ kind: "applied", boundary });
+
+        expect(transform.eviction("ses", manager, 42)).toEqual({
+            summary: "m0",
+            firstKeptEntryId: entry,
+            tokensBefore: 42,
+            details: { sequence: 3 },
+        });
+        manager.appendCompaction("m0", entry, 42, { sequence: 3 }, true);
+        expect(transform.eviction("ses", manager, 42)).toBeUndefined();
+    });
+});
