@@ -242,6 +242,9 @@ export function createPiTransform(options: PiTransformOptions) {
                 const row = rows(index, index + 1)?.[0];
                 return row && piRowSize(row);
             },
+            // A `toolResult` row answers a `toolCall` in an earlier assistant row.
+            startsWindow: (index) =>
+                (inputs.messages[index] as Json | undefined)?.role !== "toolResult",
             // After a store reset the compaction summary heads a cold import as ordinary content.
             coldLead: inputs.messages[0]?.role === "compactionSummary" ? 1 : 0,
             idOf: (value) => (value as PiRow).id,

@@ -619,6 +619,12 @@ export interface TransformPassSource {
      * cold import requires `measure`.
      */
     measure?(): (index: number) => TransformWindowSize | undefined;
+    /**
+     * Whether a cold import's suffix may start at host slot `index`: `false` for a slot that
+     * answers a tool call in an earlier slot, since a window headed by it carries the answer
+     * without its call. Every slot may start one when this is absent.
+     */
+    startsWindow?(index: number): boolean;
     /** Host slots a cold import sends ahead of its suffix, such as a summary that heads the array. */
     readonly coldLead?: number;
     /** `false` for a harness that keeps its own array on a failed pass instead of the last applied output. */
@@ -730,10 +736,12 @@ export function hostIdFilter(
  * The cold-import head (spec D8): the pinned head while it is still in the host; otherwise, for
  * a host past half the window cap, the oldest slot of the longest suffix that, with the cold lead
  * slots ahead of it, stays within half the cap as the daemon counts it. The newest slot is sent
- * alone when nothing older fits, and the daemon's window cap folds it. `undefined` sends the whole
- * array: a host within half the cap, or one with a slot `measure` cannot size, which is a slot
- * the source's capture refuses, so that pass declines. A head found here is pinned in `state`
- * until the first anchor exists.
+ * alone when nothing older fits, and the daemon's window cap folds it. A head `startsWindow`
+ * refuses moves to the nearest slot it accepts, a later one before an earlier one, so a refused
+ * head keeps the suffix within its measure unless every later slot is refused too. `undefined`
+ * sends the whole array: a host within half the cap, one with no accepted head after its lead
+ * slots, or one with a slot `measure` cannot size, which is a slot the source's capture refuses,
+ * so that pass declines. A head found here is pinned in `state` until the first anchor exists.
  */
 function coldHead(state: TransformSessionState, source: TransformPassSource): number | undefined {
     const { host } = source;
@@ -761,11 +769,20 @@ function coldHead(state: TransformSessionState, source: TransformPassSource): nu
     for (let slot = 0; slot < lead && leadFits; slot += 1) leadFits = fits(slot);
     while (leadFits && head > lead && fits(head - 1)) head -= 1;
     if (unmeasured || head === lead) return undefined;
-    head = Math.min(head, host.length - 1);
-    const id = host.idAt(head);
+    const start = windowStart(source, Math.min(head, host.length - 1), lead);
+    if (start === undefined) return undefined;
+    const id = host.idAt(start);
     if (id === undefined) return undefined;
     state.pinnedHead = id;
-    return head;
+    return start;
+}
+
+function windowStart(source: TransformPassSource, head: number, lead: number): number | undefined {
+    const starts = source.startsWindow;
+    if (!starts) return head;
+    for (let slot = head; slot < source.host.length; slot += 1) if (starts(slot)) return slot;
+    for (let slot = head - 1; slot > lead; slot -= 1) if (starts(slot)) return slot;
+    return undefined;
 }
 
 /** `source` with its host narrowed to the cold lead slots followed by the slots from `head`. */

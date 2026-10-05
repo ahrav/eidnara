@@ -544,6 +544,38 @@ describe("transform session client cold import", () => {
         );
     });
 
+    it("moves a head `startsWindow` refuses to the nearest accepted slot, a later one first", async () => {
+        const firstSent = async (host: PlainHost, refused: (id: string) => boolean) => {
+            const transport = fakeTransport({
+                "transform.boundary": [() => ({ anchors: [] })],
+                transform: [coldReply(null)],
+            });
+            const client = createTransformSessionClient({ moduleClient: transport.client });
+            const refusing = {
+                ...sizedSource(host),
+                startsWindow: (index: number) => !refused(host.values[index]?.id ?? ""),
+            };
+            await coldPass(client, new TransformCaptureAdmission(), refusing);
+            const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
+            return { ids: ids(sent.native_messages), pinned: client.state("ses").pinnedHead };
+        };
+        const total = HALF_CAP_BLOCKS * 2;
+        const head = total - HALF_CAP_BLOCKS + 1;
+
+        const later = await firstSent(plainHost(total), (id) => id === `m${head}`);
+        expect(later.ids[0]).toBe(`m${head + 1}`);
+        expect(later.ids).toHaveLength(HALF_CAP_BLOCKS - 1);
+        expect(later.pinned).toBe(`m${head + 1}`);
+
+        const earlier = await firstSent(plainHost(total), (id) => Number(id.slice(1)) >= head);
+        expect(earlier.ids[0]).toBe(`m${head - 1}`);
+        expect(earlier.ids).toHaveLength(HALF_CAP_BLOCKS + 1);
+
+        const none = await firstSent(plainHost(total), (id) => id !== "m1");
+        expect(none.ids).toHaveLength(total);
+        expect(none.pinned).toBeUndefined();
+    });
+
     it("sends the whole array below half the cap", async () => {
         const host = plainHost(HALF_CAP_BLOCKS - 1);
         const transport = fakeTransport({

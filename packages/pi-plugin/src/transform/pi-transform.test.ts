@@ -2,8 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { type SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { TransformCaptureAdmission } from "@eidnara/opencode/hooks/context/transform-capture";
 import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
+import { HALF_CAP_BLOCKS } from "@eidnara/opencode/hooks/context/window-cap";
 
 import { PiBranchIndex, type PiBranchReader } from "./pi-branch";
+import { type PiRow, piRowSize } from "./pi-ck";
 import { createPiTransform, PiAlignment } from "./pi-transform";
 
 type Json = Record<string, unknown>;
@@ -398,4 +400,104 @@ describe("Pi publication by return", () => {
         const sent = transport.calls.filter((call) => call.method === "transform").at(-1)?.body;
         expect((sent?.native_messages as { id: string }[])[0]?.id).toBe(older.mid);
     }, 60_000);
+});
+
+function branchOver(messages: readonly Json[]): PiBranchReader {
+    const entries = new Map<string, SessionEntry>();
+    let leaf: string | null = null;
+    for (const [index, message] of messages.entries()) {
+        const id = `e${index + 1}`;
+        entries.set(id, {
+            type: "message",
+            id,
+            parentId: leaf,
+            timestamp: new Date(index + 1).toISOString(),
+            message,
+        } as unknown as SessionEntry);
+        leaf = id;
+    }
+    return { getLeafId: () => leaf, getEntry: (id) => entries.get(id) };
+}
+
+const toolCall = (id: string) => ({
+    ...assistant(""),
+    content: [{ type: "toolCall", id, name: "read", arguments: { path: "a.ts" } }],
+    stopReason: "toolUse",
+});
+const toolResult = (id: string) => ({
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+    timestamp: clock++,
+});
+
+function rawReply(body: Json) {
+    return {
+        status: "ok",
+        action: "SOFT",
+        boundary: null,
+        base_revision: body.base_revision,
+        output_revision: `raw-${String(body.base_revision)}`,
+        operations: [
+            {
+                op: "keep",
+                source: "input",
+                start: 0,
+                count: (body.native_messages as unknown[]).length,
+            },
+        ],
+    };
+}
+
+async function coldWindow(messages: Json[]): Promise<{ id: string; role: unknown }[]> {
+    const transport = fakeTransport({
+        "transform.boundary": [() => ({ anchors: [] })],
+        transform: [rawReply],
+    });
+    const reader = branchOver(messages);
+    const pass = passOver(reader, messages);
+    const result = await transformOver(transport.client, pass.branch).run(pass);
+    expect(result.outcome?.kind).toBe("applied");
+    const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
+    return (sent.native_messages as PiRow[]).map((row) => ({
+        id: row.id,
+        role: row.message.role,
+    }));
+}
+
+describe("Pi cold import", () => {
+    it("starts its suffix after a tool result whose call the half cap leaves out", async () => {
+        const newest = Array.from({ length: HALF_CAP_BLOCKS - 1 }, (_, n) => user(`new ${n}`));
+        const result = toolResult("call-split");
+        const call = toolCall("call-split");
+        // The newest rows and the result fill the half cap exactly; the call would pass it.
+        for (const row of [...newest, result, call])
+            expect(piRowSize({ id: "x", message: row })?.blocks).toBe(1);
+        const older = Array.from({ length: 300 }, (_, n) => user(`old ${n}`));
+        const messages: Json[] = [...older, call, result, ...newest];
+
+        const sent = await coldWindow(messages);
+        expect(sent[0]?.role).not.toBe("toolResult");
+        expect(sent[0]?.id).toBe(`e${older.length + 3}`);
+        expect(sent).toHaveLength(newest.length);
+    });
+
+    it("keeps a newest run of tool results past half the cap with their call", async () => {
+        const calls = Array.from({ length: HALF_CAP_BLOCKS + 1 }, (_, n) => `call-${n}`);
+        const call = {
+            ...assistant(""),
+            content: calls.map((id) => ({ type: "toolCall", id, name: "read", arguments: {} })),
+            stopReason: "toolUse",
+        };
+        const messages: Json[] = [
+            ...Array.from({ length: 10 }, (_, n) => user(`m${n}`)),
+            call,
+            ...calls.map((id) => toolResult(id)),
+        ];
+        const sent = await coldWindow(messages);
+        expect(sent[0]).toEqual({ id: "e11", role: "assistant" });
+        expect(sent).toHaveLength(calls.length + 1);
+    });
 });
