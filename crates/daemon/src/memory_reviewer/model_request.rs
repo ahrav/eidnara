@@ -108,7 +108,7 @@ pub enum SendError {
     NotReady,
     #[error("transport")]
     Transport,
-    /// The provider answered with a non-success status; the body was read and discarded under the allowance.
+    /// The provider returned a non-success status.
     #[error("status {0}")]
     Status(u16),
     #[error("compressed")]
@@ -121,6 +121,19 @@ pub enum SendError {
     Decode(DecodeError),
     #[error("egress_check")]
     EgressCheck,
+}
+
+impl SendError {
+    pub fn refused_credential(&self) -> Option<u16> {
+        match self {
+            Self::Status(status) if refuses_credential(*status) => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+fn refuses_credential(status: u16) -> bool {
+    matches!(status, 401 | 403)
 }
 
 /// A startup credential: the deployment owner's identifier for it and the secret. The identifier is what an approval and an attempt marker name; the secret is rendered only into the authentication header, `Debug` never shows it, and its bytes are wiped when the last copy drops. Keeping both in one value means the credential a marker records is the one the header carries.
@@ -586,6 +599,8 @@ impl InFlight {
             .unwrap_or(usize::MAX)
             .min(MAX_RAW_RESPONSE_BYTES);
         let text_bound = usize::try_from(allowance.decoded_text_bytes).unwrap_or(usize::MAX);
+        // Set once a head refusing the credential arrives. A refused credential is the answer whatever the body then does, so its status replaces any later refusal or timeout, and a caller can end every further send on it; the accounting still records what the body consumed.
+        let mut refused = None;
         let exchange = async {
             // The connection may finish in the same poll that delivers the response; a finished connection is never polled again, and the response it already delivered is taken from the future.
             let mut connection_done = false;
@@ -608,6 +623,7 @@ impl InFlight {
                 }
             }?;
             let (head, body) = response.into_parts();
+            refused = Some(head.status.as_u16()).filter(|status| refuses_credential(*status));
             // Hyper refuses a head it cannot buffer; a head it could buffer is still held to the declared bound before anything else is read. The reason phrase is counted because it is the one head part outside the headers that a peer sizes freely.
             accounting.head_bytes = head
                 .headers
@@ -676,12 +692,13 @@ impl InFlight {
                 accounting: *accounting,
             })
         };
-        tokio::time::timeout_at(
+        let outcome = tokio::time::timeout_at(
             clamp(deadline, timing.completion_budget(max_tokens)),
             exchange,
         )
         .await
-        .map_err(|_| SendError::Deadline)?
+        .unwrap_or(Err(SendError::Deadline));
+        outcome.map_err(|error| refused.map_or(error, SendError::Status))
     }
 }
 

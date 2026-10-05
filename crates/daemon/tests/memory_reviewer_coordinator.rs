@@ -922,7 +922,7 @@ async fn a_rejected_credential_or_model_ends_the_run_after_one_charged_attempt()
         .unwrap()
         .replace(MODEL, "claude-canonical-2")
         .into_bytes();
-    let cases: [(Vec<u8>, Rejection); 4] = [
+    let cases: [(Vec<u8>, Rejection); 5] = [
         (
             json_response(
                 "401 Unauthorized",
@@ -930,6 +930,14 @@ async fn a_rejected_credential_or_model_ends_the_run_after_one_charged_attempt()
                 "",
             ),
             Rejection::Status(401),
+        ),
+        (
+            json_response(
+                "403 Forbidden",
+                r#"{"type":"error","error":{"type":"permission_error","message":"denied"}}"#,
+                "content-encoding: gzip\r\n",
+            ),
+            Rejection::Status(403),
         ),
         (
             json_response(

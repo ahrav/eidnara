@@ -321,6 +321,52 @@ async fn compressed_non_json_and_error_responses_are_refused() {
     assert_eq!(refused_with(oversized).await, SendError::ResponseTooLarge);
 }
 
+/// A 401 or a 403 takes precedence over an unsupported content encoding, a declared length past the remainder, and a frame-idle timeout; the accounting still records what the body consumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_credential_is_reported_whatever_its_body_does() {
+    let error_body =
+        r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+    for (status, code) in [("401 Unauthorized", 401), ("403 Forbidden", 403)] {
+        let (outcome, accounting) = exchange_within(
+            json_response(status, error_body, "content-encoding: gzip\r\n"),
+            ResponseAllowance::FULL,
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
+        assert_eq!(accounting.transport_bytes, 0, "{status}");
+
+        let (outcome, accounting) = exchange_within(
+            json_response(status, error_body, ""),
+            ResponseAllowance {
+                raw_response_bytes: 16,
+                decoded_text_bytes: ResponseAllowance::FULL.decoded_text_bytes,
+            },
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
+        assert_eq!(accounting.transport_bytes, 16, "{status}");
+
+        let mut peer = Peer::start().await;
+        let response = json_response(status, error_body, "");
+        peer.stall = Some((response.len() - 8, Duration::from_millis(600)));
+        let server = peer.serve(no_wait(), move |_| response);
+        let mut request = request();
+        request.max_tokens = 5_000;
+        let mut accounting = ResponseAccounting::default();
+        let outcome = sender_with(&peer, short_timing())
+            .connect(deadline())
+            .await
+            .unwrap()
+            .handoff(body_of(&request).unwrap())
+            .unwrap()
+            .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
+            .await;
+        assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
+        assert_eq!(accounting.transport_bytes, error_body.len() - 8, "{status}");
+        assert!(!server.await.unwrap().reconnected);
+    }
+}
+
 #[tokio::test]
 async fn decoding_and_egress_refusals_carry_host_codes() {
     assert_eq!(
