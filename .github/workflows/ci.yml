@@ -117,6 +117,8 @@ jobs:
               - 'packages/opencode-plugin/src/config/__fixtures__/fold-authority-parity.json'
               # `crates/daemon/src/fold_authority.rs` embeds the status fixture.
               - 'packages/opencode-plugin/src/shared/__fixtures__/fold-authority-status.json'
+              # The daemon's window-cap parity test embeds the plugin's size fixture.
+              - 'packages/opencode-plugin/src/hooks/context/__fixtures__/window-cap.json'
               - 'docs/properties/search-projection/*/fault-map.md'
               - 'docs/properties/search-projection/witness-matrix.md'
               - 'docs/properties/search-projection/spec-traceability.md'
