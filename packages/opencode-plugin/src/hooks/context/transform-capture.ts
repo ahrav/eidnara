@@ -490,8 +490,18 @@ const UTF8_HASH_MIN_UNITS = 256;
  * after a `u` token instead: UTF-8 is injective on well-formed text, and the UTF-16 length still
  * ends it. Symbols other than the tape markers cannot be hashed by identity, so they are kept in order.
  */
+interface Sha256 {
+    update(data: string, encoding: "utf8" | "utf16le"): void;
+    copy(): Sha256;
+    digest(encoding: "base64"): string;
+}
+
+function sha256(): Sha256 {
+    return typeof Bun === "undefined" ? createHash("sha256") : new Bun.CryptoHasher("sha256");
+}
+
 class TapeHasher {
-    private readonly hash = createHash("sha256");
+    private readonly hash = sha256();
     private text = "";
     private readonly symbols: symbol[] = Object.setPrototypeOf([], null);
     private count = 0;
