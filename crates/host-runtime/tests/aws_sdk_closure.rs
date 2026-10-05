@@ -12,17 +12,19 @@ const PINNED: &[(&str, &str)] = &[
     ("aws-smithy-runtime-api", "1.18.0"),
     ("aws-smithy-types", "1.8.1"),
     ("tokio", "1.53.1"),
+    ("aws-config", "1.12.0"),
+    ("aws-sdk-sts", "1.118.0"),
+    ("aws-sdk-sso", "1.113.0"),
+    ("aws-sdk-ssooidc", "1.115.0"),
+    ("aws-smithy-http-client", "1.4.2"),
 ];
+
+const AWS_CONFIG_FEATURES: &[&str] = &["default-https-client", "rt-tokio", "sso"];
 
 const FORBIDDEN_FEATURES: &[&str] = &["credentials-process", "credentials-login"];
 
-const NETWORK_CRATES: &[&str] = &[
-    "aws-config",
-    "aws-smithy-http-client",
-    "hyper",
-    "rustls",
-    "reqwest",
-];
+/// Crates that would add a model client, a login provider, or a second HTTP stack.
+const ABSENT_CRATES: &[&str] = &["aws-sdk-bedrockruntime", "aws-sdk-signin", "reqwest"];
 
 #[test]
 fn resolved_aws_closure_matches_the_pins() {
@@ -52,37 +54,21 @@ fn resolved_aws_closure_matches_the_pins() {
     for (name, version) in PINNED {
         assert_eq!(versions.get(name), Some(&vec![*version]), "{name}");
     }
-    let nodes = metadata["resolve"]["nodes"].as_array().expect("nodes");
-    let host_runtime = nodes
-        .iter()
-        .find(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.contains("host-runtime"))
-        })
-        .expect("host-runtime node");
-    let mut pending = vec![host_runtime];
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(node) = pending.pop() {
-        for dep in node["deps"].as_array().expect("deps") {
-            let normal = dep["dep_kinds"]
-                .as_array()
-                .expect("dep kinds")
-                .iter()
-                .any(|kind| kind["kind"].is_null());
-            let id = dep["pkg"].as_str().expect("pkg");
-            if normal && seen.insert(id) {
-                let name = dep["name"].as_str().expect("dep name").replace('_', "-");
-                assert!(
-                    !NETWORK_CRATES.contains(&name.as_str()),
-                    "host-runtime reaches {name}"
-                );
-                pending.push(nodes.iter().find(|n| n["id"] == id).expect("dep node"));
-            }
-        }
+    for name in ABSENT_CRATES {
+        assert!(!versions.contains_key(name), "{name} is in the closure");
     }
+    let nodes = metadata["resolve"]["nodes"].as_array().expect("nodes");
     for node in nodes {
         let id = node["id"].as_str().expect("id");
+        if id.ends_with("#aws-config@1.12.0") {
+            let features: Vec<_> = node["features"]
+                .as_array()
+                .expect("features")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_eq!(features, AWS_CONFIG_FEATURES, "unified aws-config features");
+        }
         if !id.contains("aws-") {
             continue;
         }
