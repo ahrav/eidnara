@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { Hash } from "node:crypto";
 import {
     CaptureBudgetExceeded,
     type CapturedHistory,
@@ -7,6 +6,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory as captureHistoryWithLease,
+    captureOutput,
     captureMessages as captureWithLease,
     defaultTransformCaptureAdmission,
     type HistoryDigest,
@@ -951,9 +951,10 @@ describe("digest-verified prefix capture", () => {
         const chunk = 1 << 16;
         const dense = message("m1");
         dense.parts = [{ type: "numbers", values: Array.from({ length: 200_000 }, (_, i) => i) }];
-        const spy = spyOn(Hash.prototype, "update");
+        const spy = spyOn(Bun.CryptoHasher.prototype, "update");
         try {
             digestOf(dense);
+            expect(spy.mock.calls.length).toBeGreaterThan(1);
             const longest = Math.max(...spy.mock.calls.map((call) => String(call[0]).length));
             expect(longest).toBeLessThan(2 * chunk);
         } finally {
@@ -965,10 +966,75 @@ describe("digest-verified prefix capture", () => {
         const source = [message("m1"), message("m2")];
         const snapshotOnly = captureMessages(source);
         const withHistory = captureHistory(source);
-        expect(Object.keys(snapshotOnly).sort()).toEqual(["members", "rootSnapshot", "snapshots"]);
+        expect(Object.keys(snapshotOnly).sort()).toEqual([
+            "memberBytes",
+            "members",
+            "rootSnapshot",
+            "snapshots",
+        ]);
         expect(snapshotOnly.snapshots).toEqual(withHistory.snapshots);
         expect(snapshotOnly.rootSnapshot).toEqual(withHistory.rootSnapshot);
         expect(capturedMessagesUnchanged(source, snapshotOnly)).toBe(true);
+    });
+});
+
+describe("output capture", () => {
+    function freshLease(): CaptureLease {
+        const admitted = new TransformCaptureAdmission().admit("output");
+        if (!("lease" in admitted)) throw new Error("fixture admission refused");
+        return admitted.lease;
+    }
+
+    it("reuses the tapes and charges of prior members and walks the rest", () => {
+        const kept = [message("m1"), message("m2"), message("m3")];
+        const prior = captureMessages(kept);
+        const inserted = message("m4", "inserted");
+        const output = [kept[2], inserted, kept[0]];
+        const fresh = freshLease();
+        const reference = captureOutput(output, fresh);
+        const lease = freshLease();
+        const descriptors = spyOn(Object, "getOwnPropertyDescriptor");
+        let reused: ReturnType<typeof captureOutput>;
+        try {
+            reused = captureOutput(output, lease, prior);
+        } finally {
+            descriptors.mockRestore();
+        }
+        if (!reference || !reused) throw new Error("output capture refused");
+        expect(reused.bytes).toBe(reference.bytes);
+        expect(lease.chargedBytes).toBe(fresh.chargedBytes);
+        expect(reused.capture.snapshots).toEqual(reference.capture.snapshots);
+        expect(reused.capture.rootSnapshot).toEqual(reference.capture.rootSnapshot);
+        expect(reused.capture.memberBytes).toEqual(reference.capture.memberBytes);
+        expect(reused.capture.snapshots[0]).toBe(prior.snapshots[2]);
+        expect(reused.capture.snapshots[2]).toBe(prior.snapshots[0]);
+        expect(reused.capture.snapshots[1]).not.toBe(reference.capture.snapshots[1]);
+        // Only the root array and the inserted member are walked, once to size and once to tape.
+        const walkedFresh = spyOn(Object, "getOwnPropertyDescriptor");
+        try {
+            captureOutput(output, freshLease());
+            expect(descriptors.mock.calls.length).toBeLessThan(walkedFresh.mock.calls.length);
+        } finally {
+            walkedFresh.mockRestore();
+        }
+        expect(capturedMessagesUnchanged(output, reused.capture)).toBe(true);
+        fresh.release();
+        lease.release();
+    });
+
+    it("refuses an unreferenceable member and throws past the remaining budget", () => {
+        const prior = captureMessages([message("m1")]);
+        const getter = message("m2");
+        Object.defineProperty(getter, "text", { get: () => "late", enumerable: true });
+        const lease = freshLease();
+        expect(captureOutput([prior.members[0], getter], lease, prior)).toBeUndefined();
+        expect(lease.chargedBytes).toBe(0);
+        lease.release();
+        const tight = new TransformCaptureAdmission({ maxPasses: 1, maxBytes: 64 }).admit("tight");
+        if (!("lease" in tight)) throw new Error("fixture admission refused");
+        expect(() => captureOutput([message("m3")], tight.lease)).toThrow(CaptureBudgetExceeded);
+        expect(tight.lease.chargedBytes).toBe(0);
+        tight.lease.release();
     });
 });
 

@@ -629,6 +629,8 @@ export interface CapturedMessages {
     /** Members covered by `verified` have no tape; their recheck walks the digest. */
     snapshots: readonly (MessageContentSnapshot | undefined)[];
     rootSnapshot: MessageContentSnapshot;
+    /** Each taped member's walk charge. */
+    memberBytes?: readonly (number | undefined)[];
     /** The prior digest the leading members matched, when the capture was given one. */
     verified?: HistoryDigest;
 }
@@ -646,6 +648,39 @@ const PREFIX_CHANGED = Symbol("prefix_changed");
 /** The caller reserves the inspection charge before allocating retained capture state. */
 export function captureMessages(messages: unknown, lease: CaptureLease): CapturedMessages {
     return walkCapture(messages, lease);
+}
+
+/**
+ * A member that is the same object as a taped member of `prior` keeps that member's snapshot
+ * and charge, so the caller must have checked `prior` unchanged since the last await. Every
+ * other member is walked. The reserved charge equals a fresh walk's. `undefined` when a member
+ * is not referenceable or the reservation is refused; a walk past the owner's remaining bytes
+ * throws {@link CaptureBudgetExceeded}.
+ */
+export function captureOutput(
+    messages: unknown,
+    lease: CaptureLease,
+    prior?: CapturedMessages,
+): { capture: CapturedMessages; bytes: number } | undefined {
+    const reused = new Map<unknown, { snapshot: MessageContentSnapshot; bytes: number }>();
+    for (let index = 0; prior && index < prior.members.length; index += 1) {
+        const snapshot = prior.snapshots[index];
+        const bytes = prior.memberBytes?.[index];
+        if (snapshot && bytes !== undefined) reused.set(prior.members[index], { snapshot, bytes });
+    }
+    const estimate = new ReferenceableWalk(lease.remainingBytes, false);
+    try {
+        estimate.members(messages, (slot, index) => {
+            const member = reused.get(slot.value);
+            if (member) estimate.spend(member.bytes);
+            else estimate.walk(slot.value, `/${index}`);
+        });
+    } catch (error) {
+        if (error instanceof SourceRejected) return undefined;
+        throw error;
+    }
+    if (!lease.reserve(estimate.bytes)) return undefined;
+    return { capture: walkCapture(messages, lease, undefined, reused), bytes: estimate.bytes };
 }
 
 /**
@@ -697,6 +732,7 @@ function walkCapture(
     messages: unknown,
     lease: CaptureLease,
     digest?: { taped: TapedMember[]; verifier?: PrefixVerifier },
+    reused?: ReadonlyMap<unknown, { snapshot: MessageContentSnapshot; bytes: number }>,
 ): CapturedMessages {
     if (lease.signal.aborted || lease.chargedBytes < ROOT_CAPTURE_BYTES)
         throw new CaptureBudgetExceeded("capture requires a live reservation");
@@ -708,9 +744,15 @@ function walkCapture(
     const verifiedCount = verifier?.expected.count ?? 0;
     const members: unknown[] = [];
     const snapshots: (MessageContentSnapshot | undefined)[] = [];
+    const memberBytes: (number | undefined)[] = [];
     const rootSnapshot = walker.recordOrCompare(() => {
         const count = walker.members(messages, (slot, index) => {
-            if (verifier && index < verifiedCount) {
+            const member = reused?.get(slot.value);
+            if (member) {
+                walker.spend(member.bytes);
+                defineSlot(snapshots, index, member.snapshot);
+                defineSlot(memberBytes, index, member.bytes);
+            } else if (verifier && index < verifiedCount) {
                 try {
                     verifier.walk(slot.value, index);
                 } catch (error) {
@@ -725,6 +767,7 @@ function walkCapture(
                 const before = walker.bytes;
                 const snapshot = walker.recordOrCompare(() => walker.walk(slot.value, `/${index}`));
                 defineSlot(snapshots, index, snapshot);
+                defineSlot(memberBytes, index, walker.bytes - before);
                 if (digest)
                     defineSlot(digest.taped, digest.taped.length, {
                         fields: snapshot.fields,
@@ -735,7 +778,7 @@ function walkCapture(
         });
         if (verifier && count <= verifiedCount) throw PREFIX_CHANGED;
     });
-    return { members, snapshots, rootSnapshot };
+    return { members, snapshots, rootSnapshot, memberBytes };
 }
 
 /** Membership is checked through own descriptors; an accessor or inherited slot cannot match. */

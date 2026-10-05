@@ -30,7 +30,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory,
-    captureMessages,
+    captureOutput,
     filterMayHold,
     fnv1a32,
     type HistoryDigest,
@@ -1398,23 +1398,24 @@ export function createTransformSessionClient(
                 const candidate = application.values;
                 let applied: AppliedOutput | undefined;
                 try {
-                    // Only the charge is read here, so the per-unit escape scan is skipped.
-                    const inspection = inspectReferenceableMessages(
+                    // Members kept from the previous output reuse the tapes just checked above.
+                    const output = captureOutput(
                         candidate,
-                        lease.remainingBytes,
-                        0,
-                        false,
+                        lease,
+                        response.previous_output_revision === undefined
+                            ? undefined
+                            : previousApplied?.capture,
                     );
-                    if (inspection.ok && lease.reserve(inspection.estimatedBytes)) {
+                    if (output) {
                         applied = {
                             revision: application.outputRevision,
                             values: candidate,
                             lengths: application.lengths,
-                            capture: captureMessages(candidate, lease),
+                            capture: output.capture,
                             charge:
                                 application.bytes +
                                 application.lengths.length * LENGTH_SLOT_BYTES +
-                                inspection.estimatedBytes,
+                                output.bytes,
                         };
                     }
                 } catch (error) {
