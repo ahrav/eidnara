@@ -48,6 +48,11 @@ fn sso_config(extra: &str) -> String {
 
 fn assert_round_trip(graph: &AdmittedGraph) {
     let emitted = graph.emit_config();
+    assert_eq!(
+        emitted.capacity(),
+        emitted.len(),
+        "emission is sized exactly"
+    );
     let reparsed = admit_config(&graph.identity().profile, &emitted).expect("emission admits");
     assert_eq!(reparsed.identity(), graph.identity());
     assert_eq!(*reparsed.emit_config(), *emitted);

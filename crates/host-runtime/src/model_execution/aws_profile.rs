@@ -182,30 +182,42 @@ impl AdmittedGraph {
     /// close the last emitted profile section, which is the root profile. The text
     /// carries the static secret when the root is static; zeroization covers this
     /// graph's owned secret and emission, while the SDK parser's internal copies drop
-    /// unwiped.
+    /// unwiped. The buffer is allocated at the emission's exact length, so it never
+    /// reallocates and leaves no unwiped copy behind.
     pub fn emit_config(&self) -> Zeroizing<String> {
-        let mut out = Zeroizing::new(String::with_capacity(4096));
+        let mut len = 0;
+        self.emit_lines(|prefix, value, suffix| len += prefix.len() + value.len() + suffix.len());
+        let mut out = Zeroizing::new(String::with_capacity(len));
+        self.emit_lines(|prefix, value, suffix| {
+            out.push_str(prefix);
+            out.push_str(value);
+            out.push_str(suffix);
+        });
+        out
+    }
+
+    /// Passes each emitted line to `line` as its prefix, value, and suffix.
+    fn emit_lines(&self, mut line: impl FnMut(&str, &str, &str)) {
         let GraphIdentity {
             region,
             roles,
             root,
             ..
         } = &self.identity;
-        let w = &mut *out;
         for e in roles {
-            emit(w, "[profile ", &e.profile, "]\n");
-            emit(w, "region = ", region, "\n");
-            emit(w, "role_arn = ", &e.role_arn, "\n");
-            emit(w, "source_profile = ", &e.source_profile, "\n");
-            emit(w, "role_session_name = ", &e.session_name, "\n");
+            line("[profile ", &e.profile, "]\n");
+            line("region = ", region, "\n");
+            line("role_arn = ", &e.role_arn, "\n");
+            line("source_profile = ", &e.source_profile, "\n");
+            line("role_session_name = ", &e.session_name, "\n");
             if let Some(external_id) = &e.external_id {
-                emit(w, "external_id = ", external_id, "\n");
+                line("external_id = ", external_id, "\n");
             }
         }
         let (RootIdentity::Sso { profile, .. } | RootIdentity::Static { profile, .. }) = root;
         if roles.last().is_none_or(|edge| edge.profile != *profile) {
-            emit(w, "[profile ", profile, "]\n");
-            emit(w, "region = ", region, "\n");
+            line("[profile ", profile, "]\n");
+            line("region = ", region, "\n");
         }
         match root {
             RootIdentity::Sso {
@@ -216,36 +228,21 @@ impl AdmittedGraph {
                 role_name,
                 ..
             } => {
-                emit(w, "sso_session = ", s, "\n");
-                emit(w, "sso_account_id = ", account_id, "\n");
-                emit(w, "sso_role_name = ", role_name, "\n");
-                emit(w, "[sso-session ", s, "]\n");
-                emit(w, "sso_region = ", sso_region, "\n");
-                emit(w, "sso_start_url = ", start_url, "\n");
-                emit(
-                    w,
-                    "sso_registration_scopes = ",
-                    SSO_ACCOUNT_ACCESS_SCOPE,
-                    "\n",
-                );
+                line("sso_session = ", s, "\n");
+                line("sso_account_id = ", account_id, "\n");
+                line("sso_role_name = ", role_name, "\n");
+                line("[sso-session ", s, "]\n");
+                line("sso_region = ", sso_region, "\n");
+                line("sso_start_url = ", start_url, "\n");
+                line("sso_registration_scopes = ", SSO_ACCOUNT_ACCESS_SCOPE, "\n");
             }
             RootIdentity::Static { access_key_id, .. } => {
                 let secret = self.static_secret.as_deref().map_or("", String::as_str);
-                emit(w, "aws_access_key_id = ", access_key_id, "\n");
-                emit(w, "aws_secret_access_key = ", secret, "\n");
+                line("aws_access_key_id = ", access_key_id, "\n");
+                line("aws_secret_access_key = ", secret, "\n");
             }
         }
-        out
     }
-}
-
-/// Reserves the whole line first. The secret is the last line emitted, so its buffer
-/// never reallocates and leaves a copy behind.
-fn emit(out: &mut String, prefix: &str, value: &str, suffix: &str) {
-    out.reserve(prefix.len() + value.len() + suffix.len());
-    out.push_str(prefix);
-    out.push_str(value);
-    out.push_str(suffix);
 }
 
 /// Admits the selected graph of `input` and proves its canonical emission reparses to
