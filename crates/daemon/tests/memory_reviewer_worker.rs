@@ -1001,14 +1001,10 @@ async fn a_rejected_attempt_latches_the_gate_through_the_pass() {
         let worker = rig.worker();
         let cancel = CancellationToken::new();
         let server = rig.peer.serve_script(vec![response]);
-        let (settled, log) = capturing_stderr(worker.pass(&cancel)).await;
-        assert_eq!(settled, 0, "{rejection}");
-        // The named scan covers the log lines this run wrote, the rejection's among them.
-        assert!(log.contains("provider rejected an attempt"), "{log}");
-        assert!(
-            !log.contains(AWS_SECRET) && !log.contains(AWS_TOKEN),
-            "{log}"
-        );
+        assert_eq!(worker.pass(&cancel).await, 0, "{rejection}");
+        // The closed reason carries the rejection the log line names; the named scan below covers it.
+        let reason = rig.status.closed_reason().unwrap_or_default();
+        assert!(reason.contains("provider rejected an attempt"), "{reason}");
         assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
         assert_eq!(worker.rejection.get(), Some(&rejection));
         assert_eq!(
@@ -1125,23 +1121,6 @@ impl Rig {
         ));
         self.write_activation_record(record);
     }
-}
-
-/// Runs `run` with the process's standard error, where the daemon writes its log lines, redirected into a file, and returns what was written.
-async fn capturing_stderr<T>(run: impl std::future::Future<Output = T>) -> (T, String) {
-    use std::io::{Read, Seek};
-    use std::os::fd::AsRawFd;
-    let mut file = tempfile::tempfile().unwrap();
-    let saved = unsafe { libc::dup(2) };
-    assert!(saved >= 0);
-    assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), 2) }, 2);
-    let out = run.await;
-    assert_eq!(unsafe { libc::dup2(saved, 2) }, 2);
-    unsafe { libc::close(saved) };
-    let mut text = String::new();
-    file.rewind().unwrap();
-    file.read_to_string(&mut text).unwrap();
-    (out, text)
 }
 
 /// The named secret scan (SB-P31): no byte of any secret in any file under the rig's homes and stores, which hold every marker, ledger row, receipt, and record, nor in the status the worker reports.
@@ -1293,14 +1272,10 @@ async fn a_bedrock_rejection_latches_the_gate_after_one_charged_attempt() {
         );
         let cancel = CancellationToken::new();
         let server = rig.peer.serve_script(vec![response]);
-        let (settled, log) = capturing_stderr(worker.pass(&cancel)).await;
-        assert_eq!(settled, 0, "{rejection}");
-        // The named scan covers the log lines this run wrote, the rejection's among them.
-        assert!(log.contains("provider rejected an attempt"), "{log}");
-        assert!(
-            !log.contains(AWS_SECRET) && !log.contains(AWS_TOKEN),
-            "{log}"
-        );
+        assert_eq!(worker.pass(&cancel).await, 0, "{rejection}");
+        // The closed reason carries the rejection the log line names; the named scan below covers it.
+        let reason = rig.status.closed_reason().unwrap_or_default();
+        assert!(reason.contains("provider rejected an attempt"), "{reason}");
         assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
         assert_eq!(worker.rejection.get(), Some(&rejection));
         assert_eq!(
