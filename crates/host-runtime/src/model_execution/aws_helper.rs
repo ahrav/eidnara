@@ -313,15 +313,20 @@ impl HttpClient for GuardedClient {
     ) -> SharedHttpConnector {
         SharedHttpConnector::new(GuardedConnector {
             guard: Arc::clone(&self.guard),
-            inner: self.inner.http_connector(settings, components),
+            inner: self.inner.clone(),
+            settings: settings.clone(),
+            components: components.clone(),
         })
     }
 }
 
+/// GuardedConnector creates the inner connector after the guard admits the destination.
 #[derive(Debug)]
 struct GuardedConnector {
     guard: Arc<Guard>,
-    inner: SharedHttpConnector,
+    inner: SharedHttpClient,
+    settings: HttpConnectorSettings,
+    components: RuntimeComponents,
 }
 
 impl HttpConnector for GuardedConnector {
@@ -354,7 +359,9 @@ impl HttpConnector for GuardedConnector {
                 return HttpConnectorFuture::ready(Err(refused));
             }
         }
-        self.inner.call(request)
+        self.inner
+            .http_connector(&self.settings, &self.components)
+            .call(request)
     }
 }
 
@@ -367,24 +374,28 @@ mod tests {
     #[derive(Debug)]
     struct Unreachable;
 
-    impl HttpConnector for Unreachable {
-        fn call(&self, _: HttpRequest) -> HttpConnectorFuture {
-            panic!("a refused destination reached the transport")
-        }
-    }
-
     impl HttpClient for Unreachable {
         fn http_connector(
             &self,
             _: &HttpConnectorSettings,
             _: &RuntimeComponents,
         ) -> SharedHttpConnector {
-            SharedHttpConnector::new(Unreachable)
+            panic!("a refused destination built the transport")
         }
     }
 
-    #[derive(Debug, Default)]
-    struct Recording(std::sync::Mutex<Vec<String>>);
+    #[derive(Clone, Debug, Default)]
+    struct Recording(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl HttpClient for Recording {
+        fn http_connector(
+            &self,
+            _: &HttpConnectorSettings,
+            _: &RuntimeComponents,
+        ) -> SharedHttpConnector {
+            SharedHttpConnector::new(self.clone())
+        }
+    }
 
     impl HttpConnector for Recording {
         fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
@@ -393,7 +404,7 @@ mod tests {
         }
     }
 
-    fn call(connector: &GuardedConnector, uri: &str) {
+    fn call(connector: &SharedHttpConnector, uri: &str) {
         let mut request = HttpRequest::new(SdkBody::empty());
         request.set_uri(uri).unwrap();
         let result = tokio::runtime::Builder::new_current_thread()
@@ -415,14 +426,15 @@ mod tests {
             })
         };
         let components = RuntimeComponentsBuilder::for_tests().build().unwrap();
-        let refusing = GuardedClient {
-            inner: SharedHttpClient::new(Unreachable),
-            guard: guard(),
+        let guarded = |inner: SharedHttpClient, guard: &Arc<Guard>| {
+            let client = GuardedClient {
+                inner,
+                guard: Arc::clone(guard),
+            };
+            client.http_connector(&HttpConnectorSettings::default(), &components)
         };
-        let connector = GuardedConnector {
-            guard: Arc::clone(&refusing.guard),
-            inner: refusing.http_connector(&HttpConnectorSettings::default(), &components),
-        };
+        let refusing = guard();
+        let connector = guarded(SharedHttpClient::new(Unreachable), &refusing);
         for uri in [
             "https://sts.amazonaws.com/",
             "https://sts.us-east-1.amazonaws.com/",
@@ -431,32 +443,21 @@ mod tests {
             "https://sts.us-west-2.amazonaws.com:8443/",
             "https://user@sts.us-west-2.amazonaws.com/",
         ] {
-            connector.guard.refused.store(false, Ordering::SeqCst);
+            refusing.refused.store(false, Ordering::SeqCst);
             call(&connector, uri);
-            assert!(connector.guard.refused.load(Ordering::SeqCst), "{uri}");
+            assert!(refusing.refused.load(Ordering::SeqCst), "{uri}");
         }
-        assert!(!connector.guard.renewal_started.load(Ordering::SeqCst));
+        assert!(!refusing.renewal_started.load(Ordering::SeqCst));
 
-        let recording = Arc::new(Recording::default());
-        let connector = GuardedConnector {
-            guard: guard(),
-            inner: SharedHttpConnector::new(RecordingRef(Arc::clone(&recording))),
-        };
+        let recording = Recording::default();
+        let admitting = guard();
+        let connector = guarded(SharedHttpClient::new(recording.clone()), &admitting);
         call(&connector, "https://sts.us-west-2.amazonaws.com/");
-        assert!(!connector.guard.renewal_started.load(Ordering::SeqCst));
+        assert!(!admitting.renewal_started.load(Ordering::SeqCst));
         call(&connector, "https://oidc.us-east-1.amazonaws.com/token");
-        assert!(connector.guard.renewal_started.load(Ordering::SeqCst));
-        assert!(!connector.guard.refused.load(Ordering::SeqCst));
+        assert!(admitting.renewal_started.load(Ordering::SeqCst));
+        assert!(!admitting.refused.load(Ordering::SeqCst));
         assert_eq!(recording.0.lock().unwrap().len(), 2);
-    }
-
-    #[derive(Debug)]
-    struct RecordingRef(Arc<Recording>);
-
-    impl HttpConnector for RecordingRef {
-        fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
-            self.0.call(request)
-        }
     }
 
     #[test]
