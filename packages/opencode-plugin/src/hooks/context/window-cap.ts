@@ -1,5 +1,6 @@
 import { isRecord } from "../../shared/record-type-guard";
 import cap from "./__fixtures__/window-cap.json";
+import { copyWindow, inspectReferenceableMessages } from "./transform-capture";
 
 /** Half the daemon's window cap in CK blocks: the most a cold import's suffix sends. */
 export const HALF_CAP_BLOCKS: number = cap.half_cap_blocks;
@@ -57,4 +58,48 @@ function openCodeBlocks(message: unknown): number {
 export function openCodeMessageSize(message: unknown, wireBytes: number): TransformWindowSize {
     const blocks = openCodeBlocks(message);
     return { blocks, bytes: blocks === 0 ? 0 : wireBytes + blocks * BLOCK_OVERHEAD_BYTES };
+}
+
+const MEASURED_RUN_SLOTS = 32;
+
+/**
+ * The sizes it returns hold until the caller awaits, since the host array can change across an
+ * await. A slot that its own inspection refuses, or throws on, does so when it is asked for.
+ */
+export function openCodeSlotSizes(
+    host: readonly unknown[],
+): (index: number) => TransformWindowSize | undefined {
+    const sizes = new Map<number, TransformWindowSize>();
+    let runs = true;
+    const alone = (index: number): TransformWindowSize | undefined => {
+        const message = copyWindow(host, index, index + 1);
+        const inspection = message && inspectReferenceableMessages(message);
+        if (!message || !inspection?.ok) return undefined;
+        return openCodeMessageSize(message[0], inspection.messageWireBytes[0] ?? 0);
+    };
+    return (index) => {
+        const known = sizes.get(index);
+        if (known || !runs) return known ?? alone(index);
+        const start = Math.max(0, index + 1 - MEASURED_RUN_SLOTS);
+        const run = copyWindow(host, start, index + 1);
+        let inspection: ReturnType<typeof inspectReferenceableMessages> | undefined;
+        try {
+            inspection = run && inspectReferenceableMessages(run);
+        } catch {
+            inspection = undefined;
+        }
+        if (!run || !inspection?.ok) {
+            runs = false;
+            return alone(index);
+        }
+        for (let slot = start; slot <= index; slot += 1)
+            sizes.set(
+                slot,
+                openCodeMessageSize(
+                    run[slot - start],
+                    inspection.messageWireBytes[slot - start] ?? 0,
+                ),
+            );
+        return sizes.get(index);
+    };
 }

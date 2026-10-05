@@ -614,8 +614,11 @@ export interface TransformPassSource {
     validateOutput?(values: readonly unknown[], boundaryId: string): void;
     /** Why publishing `slots` values would be refused, or `null`. */
     publicationRejection(slots: number): string | null;
-    /** The CK size of host slot `index`, which cold import measures; absent disables cold import. */
-    sizeOf?(index: number): TransformWindowSize | undefined;
+    /**
+     * The returned function provides CK sizes of host slots for one synchronous cold-import walk;
+     * cold import requires `measure`.
+     */
+    measure?(): (index: number) => TransformWindowSize | undefined;
     /** Host slots a cold import sends ahead of its suffix, such as a summary that heads the array. */
     readonly coldLead?: number;
     /** `false` for a harness that keeps its own array on a failed pass instead of the last applied output. */
@@ -728,19 +731,20 @@ export function hostIdFilter(
  * a host past half the window cap, the oldest slot of the longest suffix that, with the cold lead
  * slots ahead of it, stays within half the cap as the daemon counts it. The newest slot is sent
  * alone when nothing older fits, and the daemon's window cap folds it. `undefined` sends the whole
- * array: a host within half the cap, or one with a slot `sizeOf` cannot measure, which is a slot
+ * array: a host within half the cap, or one with a slot `measure` cannot size, which is a slot
  * the source's capture refuses, so that pass declines. A head found here is pinned in `state`
  * until the first anchor exists.
  */
 function coldHead(state: TransformSessionState, source: TransformPassSource): number | undefined {
-    const { host, sizeOf } = source;
+    const { host } = source;
     const lead = source.coldLead ?? 0;
     if (state.pinnedHead !== undefined) {
         const pinned = scanHostIds(host, (id) => id === state.pinnedHead);
         if (pinned >= lead) return pinned;
         state.pinnedHead = undefined;
     }
-    if (!sizeOf || host.length <= lead) return undefined;
+    const sizeOf = host.length > lead ? source.measure?.() : undefined;
+    if (!sizeOf) return undefined;
     const size: TransformWindowSize = { blocks: 0, bytes: 0 };
     let unmeasured = false;
     const fits = (index: number): boolean => {
@@ -797,7 +801,7 @@ function coldSource(source: TransformPassSource, head: number): TransformPassSou
         readWindow: read((start, end) => source.readWindow(start, end)),
         liveWindow: read((start, end) => source.liveWindow(start, end)),
         // The narrowed view is the cold window itself, so it measures nothing further.
-        sizeOf: undefined,
+        measure: undefined,
         coldLead: 0,
         publish: (values, window, boundaryIndex) =>
             source.publish(values, window, at(boundaryIndex)),

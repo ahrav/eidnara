@@ -355,7 +355,7 @@ describe("transform session client over plain data", () => {
 describe("transform session client cold import", () => {
     /** A source whose every slot is one CK block; `lead` slots head every cold window. */
     function sizedSource(host: PlainHost, lead = 0): TransformPassSource {
-        return { ...source(host), sizeOf: () => ({ blocks: 1, bytes: 10 }), coldLead: lead };
+        return { ...source(host), measure: () => () => ({ blocks: 1, bytes: 10 }), coldLead: lead };
     }
 
     function coldReply(boundary: { mid: string; sequence: number } | null): Reply {
@@ -446,7 +446,7 @@ describe("transform session client cold import", () => {
         });
         const client = createTransformSessionClient({ moduleClient: transport.client });
         // Three blocks a message: 133 messages carry 399 blocks and a 134th would carry 402.
-        const threeBlocks = { ...source(host), sizeOf: () => ({ blocks: 3, bytes: 10 }) };
+        const threeBlocks = { ...source(host), measure: () => () => ({ blocks: 3, bytes: 10 }) };
         await coldPass(client, new TransformCaptureAdmission(), threeBlocks);
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
         const fit = Math.floor(HALF_CAP_BLOCKS / 3);
@@ -463,7 +463,7 @@ describe("transform session client cold import", () => {
         const client = createTransformSessionClient({ moduleClient: transport.client });
         const heavy = {
             ...source(host),
-            sizeOf: () => ({ blocks: 1, bytes: Math.floor(HALF_CAP_BYTES / 4) + 1 }),
+            measure: () => () => ({ blocks: 1, bytes: Math.floor(HALF_CAP_BYTES / 4) + 1 }),
         };
         await coldPass(client, new TransformCaptureAdmission(), heavy);
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};
@@ -493,7 +493,7 @@ describe("transform session client cold import", () => {
         const unmeasured = HALF_CAP_BLOCKS * 3 - 10;
         const gap = {
             ...source(host),
-            sizeOf: (index: number) =>
+            measure: () => (index: number) =>
                 index === unmeasured ? undefined : { blocks: 1, bytes: 10 },
         };
         await coldPass(client, new TransformCaptureAdmission(), gap);
@@ -511,7 +511,7 @@ describe("transform session client cold import", () => {
         const client = createTransformSessionClient({ moduleClient: transport.client });
         const oversized = {
             ...source(host),
-            sizeOf: () => ({ blocks: HALF_CAP_BLOCKS + 1, bytes: 1 }),
+            measure: () => () => ({ blocks: HALF_CAP_BLOCKS + 1, bytes: 1 }),
         };
         await coldPass(client, new TransformCaptureAdmission(), oversized);
         const sent = transport.calls.find((call) => call.method === "transform")?.body ?? {};

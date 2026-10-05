@@ -43,7 +43,6 @@ import type { MessageLike } from "./tag-content-primitives";
 import {
     copyWindow,
     defaultTransformCaptureAdmission,
-    inspectReferenceableMessages,
     messageId,
     readOwnDataProperty,
     rootArrayRejection,
@@ -73,7 +72,7 @@ import {
     type TransformPassSource,
     type TransformSessionState,
 } from "./transform-session-client";
-import { openCodeMessageSize } from "./window-cap";
+import { openCodeSlotSizes } from "./window-cap";
 
 export type { RustModeModuleClient, TransformBoundary };
 
@@ -372,14 +371,7 @@ export function createRustModeTransform(
                 return directory;
             },
             readWindow: (start, end) => copyWindow(target, start, end),
-            // The inspection reads own data only and refuses a proxy or accessor without running
-            // it, which leaves the whole array to the capture's refusal.
-            sizeOf: (index) => {
-                const message = copyWindow(target, index, index + 1);
-                const inspection = message && inspectReferenceableMessages(message);
-                if (!message || !inspection?.ok) return undefined;
-                return openCodeMessageSize(message[0], inspection.messageWireBytes[0] ?? 0);
-            },
+            measure: () => openCodeSlotSizes(target),
             idOf: messageId,
             liveWindow: (start, end) =>
                 readOwnDataProperty(output, "messages") === target &&

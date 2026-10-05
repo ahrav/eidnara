@@ -238,7 +238,7 @@ export function createPiTransform(options: PiTransformOptions) {
             },
             preflight: async () => inputs.projectRoot,
             readWindow: rows,
-            sizeOf: (index) => {
+            measure: () => (index) => {
                 const row = rows(index, index + 1)?.[0];
                 return row && piRowSize(row);
             },
