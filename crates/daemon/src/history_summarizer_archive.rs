@@ -17,6 +17,15 @@ pub const WINDOW_CAP_BLOCKS: usize = 800;
 pub const WINDOW_CAP_BYTES: usize = 32 * 1024 * 1024;
 pub const HALF_CAP_BLOCKS: usize = WINDOW_CAP_BLOCKS / 2;
 pub const HALF_CAP_BYTES: usize = WINDOW_CAP_BYTES / 2;
+const HALF_CAP: WindowSize = WindowSize {
+    blocks: HALF_CAP_BLOCKS,
+    bytes: HALF_CAP_BYTES,
+};
+/// A cold first pass keeps the newest quarter of the cap and folds the span before it.
+const COLD_IMPORT_KEEP: WindowSize = WindowSize {
+    blocks: HALF_CAP_BLOCKS / 2,
+    bytes: HALF_CAP_BYTES / 2,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WindowSize {
@@ -59,8 +68,12 @@ impl WindowSize {
         self.blocks >= WINDOW_CAP_BLOCKS || self.bytes >= WINDOW_CAP_BYTES
     }
 
-    fn within_half_cap(self) -> bool {
-        self.blocks <= HALF_CAP_BLOCKS && self.bytes <= HALF_CAP_BYTES
+    pub fn at_half_cap(self) -> bool {
+        self.blocks >= HALF_CAP_BLOCKS || self.bytes >= HALF_CAP_BYTES
+    }
+
+    fn within(self, limit: WindowSize) -> bool {
+        self.blocks <= limit.blocks && self.bytes <= limit.bytes
     }
 }
 
@@ -125,6 +138,24 @@ pub fn archive_cut(
     covered_end: Option<u64>,
     persisted: impl Fn(&str) -> bool,
 ) -> Option<ArchiveCut> {
+    cut_keeping(projection, covered_end, persisted, HALF_CAP)
+}
+
+/// The cut a cold first pass folds through: the edge before its newest quarter of the cap,
+/// moved by the same identity and tool-arc rules as [`archive_cut`].
+pub fn cold_import_cut(
+    projection: &FlatProjection,
+    persisted: impl Fn(&str) -> bool,
+) -> Option<ArchiveCut> {
+    cut_keeping(projection, None, persisted, COLD_IMPORT_KEEP)
+}
+
+fn cut_keeping(
+    projection: &FlatProjection,
+    covered_end: Option<u64>,
+    persisted: impl Fn(&str) -> bool,
+    keep: WindowSize,
+) -> Option<ArchiveCut> {
     let messages = window_messages(projection);
     let newest = messages.len().checked_sub(1)?;
     let first = messages
@@ -132,7 +163,7 @@ pub fn archive_cut(
         .position(|message| covered_end.is_none_or(|end| message.ordinal > end))?;
     let mut kept = messages[newest].size;
     let mut kept_from = newest;
-    while kept_from > 0 && (kept + messages[kept_from - 1].size).within_half_cap() {
+    while kept_from > 0 && (kept + messages[kept_from - 1].size).within(keep) {
         kept_from -= 1;
         kept = kept + messages[kept_from].size;
     }
@@ -285,6 +316,81 @@ mod tests {
     use crate::transform::tests::{assistant_tool_call, item, tool_result, wire_item};
     use crate::wire::{IngressMessage, project_messages};
 
+    const WINDOW_CAP_FIXTURE: &str = include_str!(
+        "../../../packages/opencode-plugin/src/hooks/context/__fixtures__/window-cap.json"
+    );
+
+    /// The plugins' cold import reads half the cap from `window-cap.json`; it is the daemon's.
+    #[test]
+    fn the_plugins_read_the_daemons_half_cap() {
+        let cap: serde_json::Value = serde_json::from_str(WINDOW_CAP_FIXTURE).unwrap();
+        assert_eq!(cap["half_cap_blocks"], HALF_CAP_BLOCKS);
+        assert_eq!(cap["half_cap_bytes"], HALF_CAP_BYTES);
+    }
+
+    #[test]
+    fn half_the_cap_is_reached_in_blocks_or_in_bytes() {
+        let size = |blocks, bytes| WindowSize { blocks, bytes };
+        assert!(size(HALF_CAP_BLOCKS, 0).at_half_cap());
+        assert!(size(1, HALF_CAP_BYTES).at_half_cap());
+        assert!(!size(HALF_CAP_BLOCKS - 1, HALF_CAP_BYTES - 1).at_half_cap());
+    }
+
+    /// A cold cut keeps the newest quarter of the cap and folds every message before it.
+    #[test]
+    fn a_cold_cut_keeps_the_newest_quarter_of_the_cap() {
+        let window = window_with(HALF_CAP_BLOCKS as u64, |_| None);
+        let cut = cold_import_cut(&window, |_| true).unwrap();
+        assert_eq!((cut.start, cut.end), (1, (HALF_CAP_BLOCKS / 2) as u64));
+        assert!(window_after(&window, cut.end).within(COLD_IMPORT_KEEP));
+        assert!(!window_after(&window, cut.end - 1).within(COLD_IMPORT_KEEP));
+    }
+
+    #[test]
+    fn the_window_cap_parity_cases_carry_the_daemons_sizes() {
+        let cap: serde_json::Value = serde_json::from_str(WINDOW_CAP_FIXTURE).unwrap();
+        for harness in ["opencode", "pi"] {
+            let cases = cap["parity"][harness].as_array().unwrap();
+            let ingress: Vec<Arc<IngressMessage>> = match harness {
+                "opencode" => cases
+                    .iter()
+                    .enumerate()
+                    .map(|(index, case)| {
+                        let mut message: IngressMessage =
+                            serde_json::from_value(case["ingress"].clone()).unwrap();
+                        message.ordinal = index as u64 + 1;
+                        Arc::new(message)
+                    })
+                    .collect(),
+                _ => {
+                    let rows: Vec<Arc<serde_json::Value>> = cases
+                        .iter()
+                        .map(|case| Arc::new(case["message"].clone()))
+                        .collect();
+                    crate::codec::pi::decode_pi_rows(&rows)
+                        .unwrap()
+                        .messages
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect()
+                }
+            };
+            let projection = project_messages(&ingress).unwrap();
+            let mut sizes: BTreeMap<u64, WindowSize> = BTreeMap::new();
+            for message in window_messages(&projection) {
+                sizes.insert(message.ordinal, message.size);
+            }
+            for (index, case) in cases.iter().enumerate() {
+                let size = sizes.get(&(index as u64 + 1)).copied().unwrap_or_default();
+                assert_eq!(
+                    (case["blocks"].as_u64(), case["bytes"].as_u64()),
+                    (Some(size.blocks as u64), Some(size.bytes as u64)),
+                    "{harness} parity message {index}"
+                );
+            }
+        }
+    }
+
     const NOW: i64 = 10_000_000;
 
     fn text(ordinal: u64) -> IngressMessage {
@@ -361,7 +467,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(cut_of(&arc, None), Some((1, call + 1)));
-        assert!(window_after(&arc, call + 1).within_half_cap());
+        assert!(window_after(&arc, call + 1).within(HALF_CAP));
 
         let live_open = window_with(LAST, |ordinal| {
             (ordinal == LAST_ARCHIVED)
@@ -427,8 +533,8 @@ mod tests {
         assert!(!uncovered.at_cap(), "{uncovered:?}");
         let (start, end) = cut_of(&window, None).unwrap();
         assert_eq!((start, end), (1, 4));
-        assert!(window_after(&window, end).within_half_cap());
-        assert!(!window_after(&window, end - 1).within_half_cap());
+        assert!(window_after(&window, end).within(HALF_CAP));
+        assert!(!window_after(&window, end - 1).within(HALF_CAP));
     }
 
     #[test]

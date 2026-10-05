@@ -5541,6 +5541,49 @@ impl HandlerCore {
         );
         let execute_threshold_percentage = scheduler_execute_threshold(parsed, &binding.config);
         let trigger_eval_started_at = Instant::now();
+        // A cap or cold-import cut ends on a persisted message; the identities are read once,
+        // only when either cut applies, and a failed read leaves this pass without a forced
+        // cut for the next pass to evaluate again.
+        let at_cap = history_summarizer_archive::WindowSize::after(
+            projection,
+            last_history_segment_end_ordinal,
+        )
+        .at_cap();
+        let cold = last_history_segment_end_ordinal.is_none()
+            && parsed.coverage.as_deref().is_some_and(|coverage| {
+                coverage.resolved.resolution == window_coverage::Resolution::FirstPass
+            })
+            && history_summarizer_archive::WindowSize::after(projection, None).at_half_cap();
+        let durable = (at_cap || cold)
+            .then(|| {
+                history_summarizer_archive::persisted_mids(&store, &parsed.session_id, projection)
+                    .inspect_err(|error| {
+                        eprintln!(
+                            "daemon: history_summarizer forced-cut identity read failed session={}: {error}",
+                            parsed.session_id
+                        );
+                    })
+                    .ok()
+            })
+            .flatten();
+        let window_cap_cut = durable
+            .as_ref()
+            .filter(|_| at_cap)
+            .and_then(|durable| {
+                history_summarizer_archive::archive_cut(
+                    projection,
+                    last_history_segment_end_ordinal,
+                    |mid| durable.contains(mid),
+                )
+            })
+            .map(|cut| cut.end);
+        let cold_import_cut = durable
+            .as_ref()
+            .filter(|_| cold)
+            .and_then(|durable| {
+                history_summarizer_archive::cold_import_cut(projection, |mid| durable.contains(mid))
+            })
+            .map(|cut| cut.end);
         let trigger = {
             let mut formatted_token_estimator =
                 |bytes: &str| token_cache_snapshot.formatted_token_count(bytes);
@@ -5565,36 +5608,8 @@ impl HandlerCore {
                         != HistorySummarizerPhase::Idle,
                     commit_cluster_trigger_enabled: DEFAULT_COMMIT_CLUSTER_TRIGGER_ENABLED,
                     min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS,
-                    window_cap_cut: history_summarizer_archive::WindowSize::after(
-                        projection,
-                        last_history_segment_end_ordinal,
-                    )
-                    .at_cap()
-                    .then(|| {
-                        // A failed identity read leaves this pass without a cap cut; the
-                        // next pass evaluates it again.
-                        let durable = match history_summarizer_archive::persisted_mids(
-                            &store,
-                            &parsed.session_id,
-                            projection,
-                        ) {
-                            Ok(durable) => durable,
-                            Err(error) => {
-                                eprintln!(
-                                    "daemon: history_summarizer cap-cut identity read failed session={}: {error}",
-                                    parsed.session_id
-                                );
-                                return None;
-                            }
-                        };
-                        history_summarizer_archive::archive_cut(
-                            projection,
-                            last_history_segment_end_ordinal,
-                            |mid| durable.contains(mid),
-                        )
-                    })
-                    .flatten()
-                    .map(|cut| cut.end),
+                    window_cap_cut,
+                    cold_import_cut,
                 },
                 &mut formatted_token_estimator,
             )
@@ -19140,6 +19155,7 @@ mod tests {
                     commit_cluster_trigger_enabled: true,
                     min_commit_clusters: 2,
                     window_cap_cut: None,
+                    cold_import_cut: None,
                 };
                 let mut reference_context = context.clone();
                 reference_context.projected_post_drop_percentage = reference_projection;
@@ -19215,6 +19231,7 @@ mod tests {
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: 2,
             window_cap_cut: None,
+            cold_import_cut: None,
         };
         let mut before_cold = Vec::new();
         let mut before_warm = Vec::new();
@@ -19417,6 +19434,7 @@ mod tests {
             commit_cluster_trigger_enabled: false,
             min_commit_clusters: 2,
             window_cap_cut: None,
+            cold_import_cut: None,
         };
         let initial = boundary::check_history_segment_trigger(&messages, &context);
         assert!(initial.fire, "initial trigger decision: {initial:?}");

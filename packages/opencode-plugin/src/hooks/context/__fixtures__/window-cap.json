@@ -1,0 +1,284 @@
+{
+    "description": "The daemon's window cap, halved: the most a cold import's suffix sends (crates/daemon/src/history_summarizer_archive.rs HALF_CAP_BLOCKS and HALF_CAP_BYTES pin the same values). Each parity window lists host messages with the non-synthetic CK blocks and canonical block bytes the daemon counts for each; an OpenCode case's `ingress` is the CK message a transform request carries for it. The plugins count the same blocks and bound the bytes from above.",
+    "half_cap_blocks": 400,
+    "half_cap_bytes": 16777216,
+    "parity": {
+        "opencode": [
+            {
+                "message": {
+                    "info": { "id": "msg_u1", "role": "user", "sessionID": "ses_parity" },
+                    "parts": [
+                        { "id": "prt_u1a", "type": "text", "text": "Read the config file." },
+                        {
+                            "id": "prt_u1b",
+                            "type": "text",
+                            "text": "an ignored note",
+                            "ignored": true
+                        },
+                        { "id": "prt_u1c", "type": "snapshot", "snapshot": "4b825dc6" }
+                    ]
+                },
+                "ingress": {
+                    "mid": "msg_u1",
+                    "ck": {
+                        "role": "user",
+                        "content": [
+                            { "kind": { "type": "text", "text": "Read the config file." } },
+                            {
+                                "kind": {
+                                    "type": "opaque",
+                                    "source": { "type": "harness", "harness": "opencode" },
+                                    "kind": "text",
+                                    "raw": {
+                                        "id": "prt_u1b",
+                                        "type": "text",
+                                        "text": "an ignored note",
+                                        "ignored": true
+                                    }
+                                }
+                            }
+                        ],
+                        "meta": {
+                            "harness_id": "msg_u1",
+                            "synthetic": false,
+                            "summary": false,
+                            "errored": false
+                        }
+                    }
+                },
+                "blocks": 2,
+                "bytes": 221
+            },
+            {
+                "message": {
+                    "info": { "id": "msg_a1", "role": "assistant", "sessionID": "ses_parity" },
+                    "parts": [
+                        { "id": "prt_a1a", "type": "step-start" },
+                        {
+                            "id": "prt_a1b",
+                            "type": "reasoning",
+                            "text": "The config names the port."
+                        },
+                        { "id": "prt_a1c", "type": "text", "text": "Reading it now, café ☕." },
+                        {
+                            "id": "prt_a1d",
+                            "type": "tool",
+                            "callID": "call_read",
+                            "tool": "read",
+                            "state": {
+                                "status": "completed",
+                                "input": { "filePath": "/repo/config.json" },
+                                "output": "{\"port\": 8080}"
+                            }
+                        },
+                        {
+                            "id": "prt_a1e",
+                            "type": "tool",
+                            "callID": "call_ls",
+                            "tool": "bash",
+                            "state": { "status": "running", "input": { "command": "ls" } }
+                        },
+                        { "id": "prt_a1f", "type": "patch", "hash": "4b825dc6", "files": [] },
+                        { "id": "prt_a1g", "type": "step-finish", "reason": "tool-calls" }
+                    ]
+                },
+                "ingress": {
+                    "mid": "msg_a1",
+                    "ck": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "kind": {
+                                    "type": "opaque",
+                                    "source": { "type": "harness", "harness": "opencode" },
+                                    "kind": "step-start",
+                                    "raw": { "id": "prt_a1a", "type": "step-start" }
+                                }
+                            },
+                            {
+                                "kind": {
+                                    "type": "reasoning",
+                                    "text": "The config names the port."
+                                }
+                            },
+                            { "kind": { "type": "text", "text": "Reading it now, café ☕." } },
+                            {
+                                "kind": {
+                                    "type": "tool_call",
+                                    "id": "call_read",
+                                    "name": "read",
+                                    "input": { "filePath": "/repo/config.json" }
+                                }
+                            },
+                            {
+                                "kind": {
+                                    "type": "tool_result",
+                                    "id": "call_read",
+                                    "tool_name": "read",
+                                    "output": {
+                                        "kind": { "type": "text", "text": "{\"port\": 8080}" }
+                                    }
+                                }
+                            },
+                            {
+                                "kind": {
+                                    "type": "tool_call",
+                                    "id": "call_ls",
+                                    "name": "bash",
+                                    "input": { "command": "ls" }
+                                }
+                            },
+                            {
+                                "kind": {
+                                    "type": "opaque",
+                                    "source": { "type": "harness", "harness": "opencode" },
+                                    "kind": "step-finish",
+                                    "raw": {
+                                        "id": "prt_a1g",
+                                        "type": "step-finish",
+                                        "reason": "tool-calls"
+                                    }
+                                }
+                            }
+                        ],
+                        "meta": {
+                            "harness_id": "msg_a1",
+                            "synthetic": false,
+                            "summary": false,
+                            "errored": false
+                        }
+                    }
+                },
+                "blocks": 7,
+                "bytes": 736
+            },
+            {
+                "message": {
+                    "info": { "id": "msg_s1", "role": "user", "sessionID": "ses_parity" },
+                    "parts": [
+                        {
+                            "id": "prt_s1a",
+                            "type": "text",
+                            "text": "A synthetic reminder.",
+                            "synthetic": true
+                        }
+                    ]
+                },
+                "ingress": {
+                    "mid": "msg_s1",
+                    "ck": {
+                        "role": "user",
+                        "content": [
+                            { "kind": { "type": "text", "text": "A synthetic reminder." } }
+                        ],
+                        "meta": {
+                            "harness_id": "msg_s1",
+                            "synthetic": true,
+                            "summary": false,
+                            "errored": false
+                        }
+                    }
+                },
+                "blocks": 0,
+                "bytes": 0
+            }
+        ],
+        "pi": [
+            {
+                "message": {
+                    "id": "eidnara:compaction",
+                    "message": {
+                        "role": "compactionSummary",
+                        "summary": "The user asked to fix the parser.",
+                        "tokensBefore": 1200,
+                        "timestamp": 1
+                    }
+                },
+                "blocks": 1,
+                "bytes": 336
+            },
+            {
+                "message": {
+                    "id": "a1b2c3d4",
+                    "message": {
+                        "role": "user",
+                        "content": "Fix the failing test.",
+                        "timestamp": 2
+                    }
+                },
+                "blocks": 1,
+                "bytes": 213
+            },
+            {
+                "message": {
+                    "id": "a1b2c3d5",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            { "type": "thinking", "thinking": "Run the suite first." },
+                            { "type": "text", "text": "Running the tests, naïvely." },
+                            {
+                                "type": "toolCall",
+                                "id": "call_test",
+                                "name": "bash",
+                                "arguments": { "command": "bun test" }
+                            }
+                        ],
+                        "stopReason": "toolUse",
+                        "timestamp": 3
+                    }
+                },
+                "blocks": 3,
+                "bytes": 724
+            },
+            {
+                "message": {
+                    "id": "a1b2c3d6",
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": "call_test",
+                        "toolName": "bash",
+                        "content": [{ "type": "text", "text": "1 pass" }],
+                        "isError": false,
+                        "timestamp": 4
+                    }
+                },
+                "blocks": 1,
+                "bytes": 275
+            },
+            {
+                "message": {
+                    "id": "a1b2c3d7",
+                    "message": {
+                        "role": "bashExecution",
+                        "command": "ls",
+                        "output": "src",
+                        "exitCode": 0,
+                        "cancelled": false,
+                        "truncated": false,
+                        "excludeFromContext": true,
+                        "timestamp": 5
+                    }
+                },
+                "blocks": 0,
+                "bytes": 0
+            },
+            {
+                "message": {
+                    "id": "a1b2c3d8",
+                    "message": {
+                        "role": "bashExecution",
+                        "command": "git status",
+                        "output": "clean",
+                        "exitCode": 0,
+                        "cancelled": false,
+                        "truncated": false,
+                        "timestamp": 6
+                    }
+                },
+                "blocks": 1,
+                "bytes": 225
+            }
+        ]
+    }
+}

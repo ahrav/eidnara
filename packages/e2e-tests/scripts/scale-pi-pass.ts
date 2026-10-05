@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -112,6 +113,9 @@ interface CallMarks {
     lengthOut?: number;
     seen?: unknown;
     replaced?: boolean;
+    firstRole?: unknown;
+    /** SHA-256 of the first sent message's text: m0 on a published pass, Pi's summary otherwise. */
+    firstTextSha?: string;
     agentEndStart?: number;
     agentEndEnd?: number;
 }
@@ -174,6 +178,21 @@ function bracket(position: "before" | "after") {
                 marks.afterPlugin = now;
                 marks.lengthOut = messages.length;
                 marks.replaced = messages !== marks.seen;
+                const first = messages[0] as
+                    | { role?: unknown; summary?: unknown; content?: unknown }
+                    | undefined;
+                marks.firstRole = first?.role;
+                const text =
+                    typeof first?.summary === "string"
+                        ? first.summary
+                        : Array.isArray(first?.content)
+                          ? first.content
+                                .map((part: { text?: unknown }) =>
+                                    typeof part.text === "string" ? part.text : "",
+                                )
+                                .join("")
+                          : String(first?.content ?? "");
+                marks.firstTextSha = createHash("sha256").update(text).digest("hex");
             }
             return undefined;
         });
@@ -223,8 +242,10 @@ const minus = (whole: number | null, part: number | null) =>
 
 const rowsPath = join(outDir, "rows.jsonl");
 const callsPath = join(outDir, "calls.jsonl");
+const outagesPath = join(outDir, "outages.jsonl");
 writeFileSync(rowsPath, "");
 writeFileSync(callsPath, "");
+writeFileSync(outagesPath, "");
 const writer = new PassRowWriter(rowsPath);
 const incomplete: string[] = [];
 const loads: Json[] = [];
@@ -272,7 +293,8 @@ async function measureSession(
     const loadStartedAt = performance.now();
     const sessionManager = pi.SessionManager.open(file, undefined, project);
     const loadMs = performance.now() - loadStartedAt;
-    const settingsManager = pi.SettingsManager.inMemory({ compaction: { enabled: false } });
+    // Pi's compaction settings stay at their defaults, as a Pi user's do.
+    const settingsManager = pi.SettingsManager.inMemory({});
     const authStorage = pi.AuthStorage.inMemory();
     authStorage.setRuntimeApiKey("faux", "scale-key");
     plugin.__test?.clearPiEidnaraActive?.();
@@ -327,6 +349,16 @@ async function measureSession(
     let folded = false;
     let steadyPasses = 0;
     let completed = 0;
+    let evictions = 0;
+    // The m0 texts the published passes rendered; a declined pass after an eviction shows one.
+    const m0Seen = new Set<string>();
+    const showsM0 = () =>
+        evictions === 0 || marks.replaced || marks.firstRole !== "compactionSummary"
+            ? null
+            : m0Seen.has(marks.firstTextSha ?? "");
+    session.subscribe((event: { type: string; result?: unknown }) => {
+        if (event.type === "compaction_end" && event.result) evictions += 1;
+    });
     try {
         for (let turn = 0; turn < samples; turn += 1) {
             if (performance.now() >= deadline) break;
@@ -335,8 +367,12 @@ async function measureSession(
             marks = {};
             pass = { exchanged: [] };
             await session.prompt(`scale turn ${turn} ${PROMPT_TEXT}`);
+            // An eviction the plugin starts once the agent is idle finishes before the next
+            // sample, as it would before a user's next prompt.
+            await Bun.sleep(0);
+            while (session.isCompacting) await Bun.sleep(2);
             const rss = process.memoryUsage.rss();
-            const call = {
+            const call: Json = {
                 tier,
                 session: sessionId,
                 turn,
@@ -351,11 +387,19 @@ async function measureSession(
                 length_in: marks.lengthIn ?? null,
                 length_out: marks.lengthOut ?? null,
                 rss_bytes: rss,
+                evictions,
+                // After an eviction, Pi sends its own array on a pass the plugin declined.
+                first_role_sent: marks.replaced ? null : (marks.firstRole ?? null),
+                shows_m0: showsM0(),
+                boundary_state: null,
             };
-            writeFileSync(callsPath, `${JSON.stringify(call)}\n`, { flag: "a" });
             completed += 1;
-            if (!transformArm) continue;
+            if (!transformArm) {
+                writeFileSync(callsPath, `${JSON.stringify(call)}\n`, { flag: "a" });
+                continue;
+            }
             const published = pass.status === "ok" && marks.replaced === true;
+            if (published && marks.firstTextSha) m0Seen.add(marks.firstTextSha);
             const acknowledged = JSON.stringify(pass.boundary ?? null);
             const moved = published && boundary !== undefined && acknowledged !== boundary;
             if (published) {
@@ -373,6 +417,8 @@ async function measureSession(
             const { outcome, refusal } = classifyPass({ ok: published, error: pass.error });
             if (state === "steady" && outcome === "completed") steadyPasses += 1;
             if (published) boundary = acknowledged;
+            call.boundary_state = state;
+            writeFileSync(callsPath, `${JSON.stringify(call)}\n`, { flag: "a" });
             writer.write({
                 harness: "pi",
                 tier,
@@ -386,6 +432,26 @@ async function measureSession(
                 rss_bytes: rss,
                 ipc_bytes: exchangedBytes(pass.exchanged),
             });
+        }
+        if (transformArm) {
+            // With the daemon down, the plugin declines and Pi sends its own array, which
+            // leads with the m0 text of its latest eviction.
+            const outage: Json = { tier, session: sessionId, evictions };
+            if (evictions === 0) outage.skipped = "no_eviction";
+            else {
+                try {
+                    await stack.stop();
+                    marks = {};
+                    pass = { exchanged: [] };
+                    await session.prompt(`scale outage ${PROMPT_TEXT}`);
+                    outage.first_role_sent = marks.replaced ? null : (marks.firstRole ?? null);
+                    outage.shows_m0 = showsM0();
+                    outage.length_in = marks.lengthIn ?? null;
+                } catch (error) {
+                    outage.error = String(error);
+                }
+            }
+            writeFileSync(outagesPath, `${JSON.stringify(outage)}\n`, { flag: "a" });
         }
     } finally {
         await runner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => undefined);
@@ -417,6 +483,104 @@ for (let index = 0; index < sessions; index += 1) {
 }
 writer.close();
 
+/**
+ * Per session, the least-squares growth of Pi's `context` array length across the steady span,
+ * read as the report reads RSS flatness: growth across the span at most a tenth of the first
+ * point's length. Each point is the longest array a steady call saw between two evictions. The
+ * trailing interval, cut short by the end of the run, counts once it has run as many turns as
+ * the longest completed interval or peaked above the point before it, so a session whose
+ * evictions stop shows its growth. Fewer than two points does not pass.
+ */
+function lengthFlatness(rows: Json[]): Json[] {
+    const sessions = new Map<string, Json[]>();
+    for (const row of rows) {
+        const calls = sessions.get(String(row.session)) ?? [];
+        calls.push(row);
+        sessions.set(String(row.session), calls);
+    }
+    return [...sessions].map(([session, calls]) => {
+        // A call's `evictions` includes the eviction at its own `agent_end`, so its pass ran in
+        // the interval the previous call's count names.
+        const intervals = new Map<number, { turn: number; length: number }>();
+        let entry: number | undefined;
+        let first: number | undefined;
+        let last: number | undefined;
+        let lastInterval: number | undefined;
+        const evictedAt: number[] = [];
+        calls.forEach((row, index) => {
+            const before = Number(calls[index - 1]?.evictions ?? 0);
+            if (Number(row.evictions) > before) evictedAt.push(Number(row.turn));
+            if (row.boundary_state !== "steady" || typeof row.length_in !== "number") return;
+            entry ??= row.length_in;
+            first ??= Number(row.turn);
+            last = Number(row.turn);
+            lastInterval = before;
+            const point = intervals.get(before);
+            if (!point || row.length_in > point.length)
+                intervals.set(before, { turn: Number(row.turn), length: row.length_in });
+        });
+        // Completed intervals end at an eviction at or before the last steady call; the trailing
+        // one, which the last steady call ran in, is open when that call did not evict.
+        const closed = evictedAt.filter((turn) => last !== undefined && turn <= last);
+        let completedGap = 0;
+        for (let index = 1; index < closed.length; index += 1)
+            completedGap = Math.max(completedGap, (closed[index] ?? 0) - (closed[index - 1] ?? 0));
+        const lastClosed = closed.at(-1);
+        const trailingOpen = last !== undefined && lastClosed !== last;
+        const trailingGap =
+            trailingOpen && lastClosed !== undefined && last !== undefined ? last - lastClosed : 0;
+        const points = [...intervals.values()];
+        const trailing =
+            trailingOpen && lastInterval !== undefined ? intervals.get(lastInterval) : undefined;
+        const previous = points.at(-2);
+        const trailingIncluded =
+            trailing === undefined ||
+            trailingGap >= completedGap ||
+            (previous !== undefined && trailing.length > previous.length);
+        if (!trailingIncluded) points.pop();
+        const n = points.length;
+        // The reference is the first peak, on the same phase of the sawtooth as every point.
+        const reference = points[0]?.length;
+        const summary = {
+            session,
+            intervals: n,
+            steady_entry_length: entry ?? null,
+            reference_length: reference ?? null,
+            longest_turns_between_evictions: Math.max(completedGap, trailingGap),
+            trailing_included: trailingIncluded,
+        };
+        if (n < 2 || reference === undefined) return { ...summary, growth: null, passes: false };
+        const mx = points.reduce((sum, point) => sum + point.turn, 0) / n;
+        const my = points.reduce((sum, point) => sum + point.length, 0) / n;
+        let sxy = 0;
+        let sxx = 0;
+        for (const point of points) {
+            sxy += (point.turn - mx) * (point.length - my);
+            sxx += (point.turn - mx) ** 2;
+        }
+        const span = (last ?? 0) - (first ?? 0);
+        const growth = sxx > 0 ? (sxy / sxx) * span : 0;
+        return { ...summary, growth, passes: growth <= reference / 10 };
+    });
+}
+
+/** Per tier, the outage passes: how many ran, how many were skipped, and how many showed m0. */
+function outageSummary(tier: string): Json {
+    const rows = existsSync(outagesPath)
+        ? readFileSync(outagesPath, "utf8")
+              .split("\n")
+              .filter((line) => line.length > 0)
+              .map((line) => JSON.parse(line) as Json)
+              .filter((row) => row.tier === tier)
+        : [];
+    return {
+        sessions: rows.length,
+        skipped: rows.filter((row) => row.skipped !== undefined).length,
+        failed: rows.filter((row) => row.error !== undefined).length,
+        showing_m0: rows.filter((row) => row.shows_m0 === true).length,
+    };
+}
+
 function baseline(): Json {
     const calls = readFileSync(callsPath, "utf8")
         .split("\n")
@@ -437,6 +601,16 @@ function baseline(): Json {
         };
         out[tier] = {
             calls: rows.length,
+            max_session_evictions: Math.max(0, ...rows.map((row) => Number(row.evictions ?? 0))),
+            length_flatness: transformArm ? lengthFlatness(rows) : null,
+            declined_after_eviction: rows.filter((row, index) => {
+                const before = Number(
+                    rows[index - 1]?.session === row.session ? rows[index - 1]?.evictions : 0,
+                );
+                return before > 0 && row.first_role_sent !== null;
+            }).length,
+            declined_after_eviction_showing_m0: rows.filter((row) => row.shows_m0 === true).length,
+            outages: outageSummary(tier),
             context_event_us: figure("context_event_us"),
             pi_clone_us: figure("pi_clone_us"),
             forced_gc_us: figure("forced_gc_us"),

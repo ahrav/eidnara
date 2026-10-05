@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { encodePiRowsToCk, type PiRow } from "./pi-ck";
+import cap from "@eidnara/opencode/hooks/context/__fixtures__/window-cap.json";
+
+import { encodePiRowsToCk, type PiRow, piRowSize } from "./pi-ck";
 
 const fixture = JSON.parse(
     readFileSync(join(import.meta.dir, "__fixtures__", "pi-codec-parity.json"), "utf8"),
@@ -36,5 +38,19 @@ describe("Pi CK encoder", () => {
         expect(() =>
             encodePiRowsToCk([{ id: "a1", message: { role: "systemNotice", content: "x" } }]),
         ).toThrow("systemNotice");
+    });
+});
+
+describe("Pi window-cap size", () => {
+    it("counts the daemon's blocks and bounds its bytes for every parity row", () => {
+        for (const [index, parity] of cap.parity.pi.entries()) {
+            const size = piRowSize(parity.message as PiRow);
+            expect({ index, blocks: size?.blocks }).toEqual({ index, blocks: parity.blocks });
+            expect(size?.bytes ?? -1).toBeGreaterThanOrEqual(parity.bytes);
+        }
+    });
+
+    it("has no size for a row outside the closed role set", () => {
+        expect(piRowSize({ id: "a1", message: { role: "system", content: "x" } })).toBeUndefined();
     });
 });

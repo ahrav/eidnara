@@ -1335,7 +1335,28 @@ sessions interleave with the 10k control: three sessions per tier of up to 700
 calls until 310 completed steady passes on the measured arm, and one session of
 330 calls on the Pi base arm, whose baseline needs no ratio claim. No drift
 check confirms steady-state entry, and `rss_bytes` is the whole process, Pi's
-session included.
+session included. Pi's compaction settings stay at their defaults, and a sample
+waits for an eviction the plugin starts at an idle `agent_end` before the next
+prompt, outside every timer. Each call records the evictions committed so far,
+and `baseline.json` adds, per session, the flatness of Pi's `context` array
+length over the steady calls, read as the report reads RSS: least-squares growth
+across the steady span at most a tenth of the first point. Each point is the
+longest array a steady call saw between two evictions, a peak of the array's
+sawtooth. The trailing interval, cut short by the end of the run, counts once it
+has run as many turns as the longest completed interval or peaked above the
+point before it, so a session whose evictions stop fails once its open interval
+outlasts the completed ones; fewer than two points fails too, and the longest
+run of turns between evictions is recorded. The base arm records no flatness;
+its `max_session_evictions` shows any compaction Pi ran on its own.
+`rss_bytes` is sampled after the eviction wait, at the trough of the array's
+sawtooth. A call on a pass the plugin declined after an eviction records whether
+Pi's first message carries the m0 text of a pass published earlier in the
+session (`shows_m0`). After its last sample each session with an eviction makes
+one more pass with the daemon stopped; `outages.jsonl` records it, or the skip
+of a session with no eviction, and `baseline.json` counts both per tier. The
+driver records each session's flatness verdict (`passes`) and gates nothing on
+it; the gate, and the comparison across `s3_100k` and `s4_1m`, are the report's
+reading of the two tiers' rows.
 
 ## Paired worlds
 

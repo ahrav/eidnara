@@ -35,6 +35,14 @@
             ]
         },
         {
+            "path": "tests/pi-rust-eviction.test.ts",
+            "tier": "pi-rust",
+            "rationale": "Pi eviction and cold import against the direct-host fixture: an idle eviction keeps the rendered boundary's end entry and m0 bytes; with the daemon down Pi sends m0 text; after a store reset the summary is sent once as content; navigation before the compaction restores full history and refolds keeping the prefix; cold 1M-message Pi and OpenCode sessions upload one half-cap suffix and fire the summarizer",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
             "path": "tests/pi-rust-folding.test.ts",
             "tier": "pi-rust",
             "rationale": "Pi context folding against the direct-host fixture: equal m0, m1, and tail to an equivalent OpenCode session; the same entry ids and no inferred revert after a plugin restart; navigation across the rendered boundary keeps every surviving segment; the Pi RPC process folds through the daemon and a cross-root facade call takes the D32 refusal; after a /cd the first pass forms lineage on the new root",

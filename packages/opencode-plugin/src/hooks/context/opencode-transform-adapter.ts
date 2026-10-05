@@ -72,6 +72,7 @@ import {
     type TransformPassSource,
     type TransformSessionState,
 } from "./transform-session-client";
+import { openCodeSlotSizes } from "./window-cap";
 
 export type { RustModeModuleClient, TransformBoundary };
 
@@ -370,6 +371,7 @@ export function createRustModeTransform(
                 return directory;
             },
             readWindow: (start, end) => copyWindow(target, start, end),
+            measure: () => openCodeSlotSizes(target),
             idOf: messageId,
             liveWindow: (start, end) =>
                 readOwnDataProperty(output, "messages") === target &&

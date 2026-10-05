@@ -38,6 +38,7 @@ import {
     inspectReferenceableMessages,
 } from "./transform-capture";
 import { logTransformTiming } from "./transform-stage-logger";
+import { type TransformWindowSize, withinHalfCap } from "./window-cap";
 
 export interface RustModeModuleClient {
     call(args: {
@@ -246,6 +247,11 @@ export interface TransformSessionState {
     passCount: number;
     /** The declared anchor: `null` sends the whole array, `undefined` is not yet discovered. */
     boundary: TransformBoundary | null | undefined;
+    /**
+     * The head message of a cold import (spec D8): with no anchor, an array past half the
+     * window cap sends the suffix from this message until the first anchor exists.
+     */
+    pinnedHead?: string;
     failureCount: number;
     routeRoot: string | null;
 }
@@ -609,6 +615,19 @@ export interface TransformPassSource {
     validateOutput?(values: readonly unknown[], boundaryId: string): void;
     /** Why publishing `slots` values would be refused, or `null`. */
     publicationRejection(slots: number): string | null;
+    /**
+     * The returned function provides CK sizes of host slots for one synchronous cold-import walk;
+     * cold import requires `measure`.
+     */
+    measure?(): (index: number) => TransformWindowSize | undefined;
+    /**
+     * Whether a cold import's suffix may start at host slot `index`: `false` for a slot that
+     * answers a tool call in an earlier slot, since a window headed by it carries the answer
+     * without its call. Every slot may start one when this is absent.
+     */
+    startsWindow?(index: number): boolean;
+    /** Host slots a cold import sends ahead of its suffix, such as a summary that heads the array. */
+    readonly coldLead?: number;
     /** `false` for a harness that keeps its own array on a failed pass instead of the last applied output. */
     readonly failOpen?: boolean;
     /** Publishes `values` over the captured `window` at `boundaryIndex`; a failure names its cause. */
@@ -714,6 +733,99 @@ export function hostIdFilter(
     return hashes.subarray(0, count).sort();
 }
 
+/**
+ * The cold-import head (spec D8): the pinned head while it is still in the host; otherwise, for
+ * a host past half the window cap, the oldest slot of the longest suffix that, with the cold lead
+ * slots ahead of it, stays within half the cap as the daemon counts it. The newest slot is sent
+ * alone when nothing older fits, and the daemon's window cap folds it. A head `startsWindow`
+ * refuses moves to the nearest slot it accepts, a later one before an earlier one, so a refused
+ * head keeps the suffix within its measure unless every later slot is refused too. `undefined`
+ * sends the whole array: a host within half the cap, one with no accepted head after its lead
+ * slots, or one with a slot `measure` cannot size, which is a slot the source's capture refuses,
+ * so that pass declines. A head found here is pinned in `state` until the first anchor exists.
+ */
+function coldHead(state: TransformSessionState, source: TransformPassSource): number | undefined {
+    const { host } = source;
+    const lead = source.coldLead ?? 0;
+    if (state.pinnedHead !== undefined) {
+        const pinned = scanHostIds(host, (id) => id === state.pinnedHead);
+        if (pinned >= lead) return pinned;
+        state.pinnedHead = undefined;
+    }
+    const sizeOf = host.length > lead ? source.measure?.() : undefined;
+    if (!sizeOf) return undefined;
+    const size: TransformWindowSize = { blocks: 0, bytes: 0 };
+    let unmeasured = false;
+    const fits = (index: number): boolean => {
+        const slot = sizeOf(index);
+        if (!slot) unmeasured = true;
+        else {
+            size.blocks += slot.blocks;
+            size.bytes += slot.bytes;
+        }
+        return slot !== undefined && withinHalfCap(size);
+    };
+    let head = host.length;
+    let leadFits = true;
+    for (let slot = 0; slot < lead && leadFits; slot += 1) leadFits = fits(slot);
+    while (leadFits && head > lead && fits(head - 1)) head -= 1;
+    if (unmeasured || head === lead) return undefined;
+    const start = windowStart(source, Math.min(head, host.length - 1), lead);
+    if (start === undefined) return undefined;
+    const id = host.idAt(start);
+    if (id === undefined) return undefined;
+    state.pinnedHead = id;
+    return start;
+}
+
+function windowStart(source: TransformPassSource, head: number, lead: number): number | undefined {
+    const starts = source.startsWindow;
+    if (!starts) return head;
+    for (let slot = head; slot < source.host.length; slot += 1) if (starts(slot)) return slot;
+    for (let slot = head - 1; slot > lead; slot -= 1) if (starts(slot)) return slot;
+    return undefined;
+}
+
+/** `source` with its host narrowed to the cold lead slots followed by the slots from `head`. */
+function coldSource(source: TransformPassSource, head: number): TransformPassSource {
+    const lead = source.coldLead ?? 0;
+    const at = (index: number) => (index < lead ? index : head + index - lead);
+    const ranges = (start: number, end: number): [number, number][] => {
+        const out: [number, number][] = [];
+        if (start < lead) out.push([start, Math.min(end, lead)]);
+        if (end > lead) out.push([at(Math.max(start, lead)), at(end - 1) + 1]);
+        return out;
+    };
+    const read =
+        (copy: (start: number, end: number) => unknown[] | undefined) =>
+        (start: number, end: number): unknown[] | undefined => {
+            const values: unknown[] = [];
+            for (const [from, to] of ranges(start, end)) {
+                const part = copy(from, to);
+                if (!part) return undefined;
+                values.push(...part);
+            }
+            return values;
+        };
+    const base = source.host;
+    return {
+        ...source,
+        host: {
+            get length() {
+                return lead + base.length - head;
+            },
+            idAt: (index) => base.idAt(at(index)),
+        },
+        readWindow: read((start, end) => source.readWindow(start, end)),
+        liveWindow: read((start, end) => source.liveWindow(start, end)),
+        // The narrowed view is the cold window itself, so it measures nothing further.
+        measure: undefined,
+        coldLead: 0,
+        publish: (values, window, boundaryIndex) =>
+            source.publish(values, window, at(boundaryIndex)),
+    };
+}
+
 export function createTransformSessionClient(
     options: TransformSessionClientOptions,
 ): TransformSessionClient {
@@ -767,7 +879,7 @@ export function createTransformSessionClient(
     /** `rerun` resumes a pass on its validated root after its anchor drew `boundary_unknown`. */
     const execute = async (
         sessionId: string,
-        source: TransformPassSource,
+        hostSource: TransformPassSource,
         lease: CaptureLease,
         rerun?: {
             deliveries: DeliveryPlan;
@@ -783,7 +895,9 @@ export function createTransformSessionClient(
             applied: new Set(),
             outcome: { kind: "declined", servedLastApplied: false },
         };
-        const host = source.host;
+        // A cold import narrows the source to its suffix once discovery finds no anchor.
+        let source = hostSource;
+        let host = source.host;
         const state = ensureState(states, sessionId);
         const timings = rerun?.timings ?? emptyRustPassTimings();
         let inputCount = 0;
@@ -1097,6 +1211,16 @@ export function createTransformSessionClient(
                 boundary = discovered.boundary;
                 boundaryIndex = discovered.index;
             }
+            // An anchor ends a cold import whether or not this pass applies.
+            if (boundary !== null) state.pinnedHead = undefined;
+            else {
+                const head = coldHead(state, source);
+                if (head !== undefined) {
+                    source = coldSource(source, head);
+                    host = source.host;
+                    boundaryIndex = 0;
+                }
+            }
             // The window is copied, inspected, and taped in one synchronous section.
             const prefixGuardStartedAt = performance.now();
             const previous = retainedOutputs.get(sessionId);
@@ -1362,7 +1486,7 @@ export function createTransformSessionClient(
                 // Nothing of this attempt is kept, so the rerun pays only for its own capture. The
                 // `return` is not awaited: this frame, its window, and its capture are gone before the rerun captures.
                 lease.refund();
-                return execute(sessionId, source, lease, {
+                return execute(sessionId, hostSource, lease, {
                     deliveries,
                     timings,
                     startedAt: passStartedAt,
@@ -1463,6 +1587,7 @@ export function createTransformSessionClient(
                 retainedOutputs.retain(sessionId, record);
                 timings.retainedBytes = record.charge;
                 state.boundary = nextBoundary;
+                if (nextBoundary) state.pinnedHead = undefined;
                 state.initialized = true;
                 state.consecutiveFailures = 0;
                 deliveries.applied = appliedDeliveryPassIds;

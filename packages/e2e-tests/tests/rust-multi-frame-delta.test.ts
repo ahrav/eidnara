@@ -5,9 +5,9 @@ import { rustPrereqs } from "../src/rust-scenario-support";
 /** About 400 KB of prose: large, yet under the store's 512 KiB durable text limit. */
 const TAIL_TOKENS = 100_000;
 const TAIL_BYTES_FLOOR = 350_000;
-/** Below the daemon's 800-block window cap, which would fire the summarizer and cover the head. */
-const HISTORY_MESSAGES = 700;
-const HISTORY_TEXT_BYTES = 1_536;
+/** Below half the daemon's window cap, where a pass with no coverage sends the whole array. */
+const HISTORY_MESSAGES = 350;
+const HISTORY_TEXT_BYTES = 3_072;
 
 describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large tail", () => {
     let h: RustTestHarness;
@@ -28,8 +28,8 @@ describe.skipIf(!rustPrereqs.ok)("rust transport: whole-array sends with a large
 
     // The tail stays under the memory store's 512 KiB MAX_DURABLE_TEXT_BYTES (a 160k-token tail is refused
     // with InputLimit and served raw). With no coverage every pass sends the whole array, and a body under
-    // the daemon's 32 MiB transform limit travels as one unpaged request. The history stays under the
-    // window cap, so no pass fires the summarizer or archives the head.
+    // the daemon's 32 MiB transform limit travels as one unpaged request. The history stays under
+    // half the window cap, so no pass is a cold import, fires the summarizer, or archives the head.
     it("sends the whole array unpaged while preserving a large provider-visible tail", async () => {
         const sessionId = await h.createSession();
         await h.sendPrompt(sessionId, "establish the initial module snapshot");

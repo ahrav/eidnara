@@ -284,6 +284,9 @@ pub struct TriggerContext {
     /// The last ordinal of the half-cap cut, set only when the messages after the last history
     /// segment reach the window cap.
     pub window_cap_cut: Option<u64>,
+    /// The last ordinal a cold first pass folds through, set only on a first pass whose window
+    /// reaches half the cap; it fires regardless of pressure.
+    pub cold_import_cut: Option<u64>,
 }
 
 impl Default for TriggerContext {
@@ -295,6 +298,7 @@ impl Default for TriggerContext {
             commit_cluster_trigger_enabled: true,
             min_commit_clusters: DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER,
             window_cap_cut: None,
+            cold_import_cut: None,
         }
     }
 }
@@ -312,6 +316,9 @@ pub enum TriggerReason {
     /// `WindowCap` fires when the messages after the last history segment reach the block or
     /// byte cap.
     WindowCap,
+    /// `ColdImport` fires on a first pass whose window reaches half the cap: a session with no
+    /// coverage submitted its newest half-cap suffix, and its oldest span folds at once.
+    ColdImport,
 }
 
 impl TriggerReason {
@@ -322,6 +329,7 @@ impl TriggerReason {
             TriggerReason::CommitClusters => "commit_clusters",
             TriggerReason::TailSize => "tail_size",
             TriggerReason::WindowCap => "window_cap",
+            TriggerReason::ColdImport => "cold_import",
         }
     }
 
@@ -331,7 +339,7 @@ impl TriggerReason {
             TriggerReason::ForceBand => Some(FiringTriggerReason::ForceBand),
             TriggerReason::CommitClusters => Some(FiringTriggerReason::CommitClusters),
             TriggerReason::TailSize => Some(FiringTriggerReason::TailSize),
-            TriggerReason::WindowCap => None,
+            TriggerReason::WindowCap | TriggerReason::ColdImport => None,
         }
     }
 }
@@ -836,17 +844,22 @@ fn check_history_segment_trigger_with_index(
     let relative_post_drop_target =
         ctx.boundary.execute_threshold_percentage * POST_DROP_TARGET_RATIO;
 
-    if let Some(cut) = ctx
-        .window_cap_cut
-        .filter(|cut| *cut >= boundary.eligible_head.start)
-    {
-        let mut capped = boundary;
-        if capped.eligible_head.end <= cut {
-            capped.eligible_head.end = cut + 1;
-            capped.protected_start_ordinal = cut + 1;
-            capped.boundary_reason = "window_cap".to_string();
+    // A forced cut fires whatever the pressure; the window cap's precedes a cold import's.
+    let forced = [
+        (ctx.window_cap_cut, TriggerReason::WindowCap),
+        (ctx.cold_import_cut, TriggerReason::ColdImport),
+    ];
+    if let Some((cut, reason)) = forced.into_iter().find_map(|(cut, reason)| {
+        cut.filter(|cut| *cut >= boundary.eligible_head.start)
+            .map(|cut| (cut, reason))
+    }) {
+        let mut forced = boundary;
+        if forced.eligible_head.end <= cut {
+            forced.eligible_head.end = cut + 1;
+            forced.protected_start_ordinal = cut + 1;
+            forced.boundary_reason = reason.as_str().to_string();
         }
-        return fire_with_progress(TriggerReason::WindowCap, &capped, progress);
+        return fire_with_progress(reason, &forced, progress);
     }
 
     let force_materialization_percentage =
@@ -2205,6 +2218,7 @@ mod tests {
                 commit_cluster_trigger_enabled: case.ctx.commit_cluster_trigger_enabled,
                 min_commit_clusters: case.ctx.min_commit_clusters,
                 window_cap_cut: None,
+                cold_import_cut: None,
             };
             let got = check_history_segment_trigger(&msgs, &ctx);
             assert_eq!(got.fire, case.expected.fire, "fire in {}", case.label);

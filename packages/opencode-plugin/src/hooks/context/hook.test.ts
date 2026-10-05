@@ -1045,11 +1045,17 @@ describe("eidnara hook", () => {
             createEidnaraHook(createDeps({ client, rustModeModuleClient: fake.client })),
         );
         const sessionId = "ses-byte-budget";
-        // Forty two-MiB strings charge more than the 64 MiB owner can grant.
-        const messages = Array.from({ length: 40 }, (_, index) => ({
-            info: { id: `m-${index}`, role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: "x".repeat(2 ** 21) }],
-        }));
+        // Forty two-MiB parts charge more than the 64 MiB owner can grant. They share one
+        // message, which a cold import sends whole although it passes half the window cap.
+        const messages = [
+            {
+                info: { id: "m-0", role: "user", sessionID: sessionId },
+                parts: Array.from({ length: 40 }, () => ({
+                    type: "text",
+                    text: "x".repeat(2 ** 21),
+                })),
+            },
+        ];
         const warn = spyOn(logger.sessionLog, "warn");
         try {
             await hook["experimental.chat.messages.transform"]({}, { messages });
@@ -1092,9 +1098,10 @@ describe("eidnara hook", () => {
         }
         expect(fake.calls.map((call) => call.method)).toEqual(["transform"]);
         expect(messages[0]).toBe(approved);
-        // One window copy and one member slot at capture, then one window copy per recheck
-        // (wire build and publication); the source itself is taped once.
-        expect(memberSlotDefinitions).toBe(4);
+        // One slot copy for the cold-import measure, one window copy and one member slot at
+        // capture, then one window copy per recheck (wire build and publication); the source
+        // itself is taped once.
+        expect(memberSlotDefinitions).toBe(5);
     });
 
     it("rejects source mutation during hook directory lookup before direct transform", async () => {
