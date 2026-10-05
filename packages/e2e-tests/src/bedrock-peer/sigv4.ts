@@ -99,3 +99,32 @@ export function expectedSignature(
     }
     return hmac(key, toSign).toString("hex");
 }
+
+export interface BedrockCredentials {
+    accessKeyId: string;
+    secretAccessKey: string;
+    sessionToken?: string;
+    region: string;
+}
+
+/** The scope names `credentials`, the signature covers the host, the body digest, and any session token, and it matches under the secret. */
+export function verifySigned(
+    request: SignedRequest,
+    authorization: Authorization,
+    credentials: BedrockCredentials,
+): boolean {
+    const payloadHash = request.headers["x-amz-content-sha256"];
+    const signed = new Set(authorization.signedHeaders);
+    return (
+        authorization.accessKeyId === credentials.accessKeyId &&
+        authorization.region === credentials.region &&
+        authorization.service === "bedrock" &&
+        (signed.has("host") || signed.has(":authority")) &&
+        (payloadHash === undefined || payloadHash === sha256Hex(request.body)) &&
+        (credentials.sessionToken === undefined ||
+            (signed.has("x-amz-security-token") &&
+                request.headers["x-amz-security-token"] === credentials.sessionToken)) &&
+        expectedSignature(request, authorization, credentials.secretAccessKey) ===
+            authorization.signature
+    );
+}

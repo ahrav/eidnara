@@ -51,11 +51,7 @@ async function memoryObjectIds(host: HermeticHostStack, identity: BindIdentity):
         surface: "explicit_search",
         gated: false,
     });
-    const rows = (read.rows ??
-        (read.result as { rows?: unknown } | undefined)?.rows ??
-        []) as Array<{
-        token?: { object_id?: unknown };
-    }>;
+    const rows = (read.rows ?? []) as Array<{ token?: { object_id?: unknown } }>;
     return rows.flatMap((row) =>
         typeof row.token?.object_id === "string" ? [row.token.object_id] : [],
     );

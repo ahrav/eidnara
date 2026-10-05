@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { BedrockCredentials } from "./server";
+import type { BedrockCredentials } from "./sigv4";
 
 const REPO_ROOT = join(import.meta.dir, "../../../..");
 const OPENCODE_MANIFEST = join(
@@ -100,7 +100,7 @@ export function ensurePiInstall(): string {
     const entrypoint = pinnedNode(pi, pi.entrypoint as string);
     const cli = join(root, entrypoint.source_path);
     if (existsSync(cli) && sha256File(cli) === entrypoint.sha256) return root;
-    mkdirSync(root, { recursive: true });
+    mkdirSync(root, { recursive: true, mode: 0o700 });
     const installed = spawnSync(
         "npm",
         [
@@ -125,8 +125,8 @@ export function ensurePiInstall(): string {
 /**
  * Writes a `--harness-runtime` file for `direct_host_fixture`: both release closures verbatim,
  * except that the Pi closure gains one provider extension pointing `amazon-bedrock` at the
- * peer's HTTP/2 listener. OpenCode reaches the peer's HTTP/1.1 listener through its inline
- * config. The backends see only `credentials` as envelope rows.
+ * peer's HTTP/2 listener and `anthropic` at the sentinel. OpenCode's inline config names the
+ * same two endpoints. The backends see only `credentials` as envelope rows.
  */
 export function writeHarnessRuntime(args: {
     dir: string;
@@ -134,6 +134,8 @@ export function writeHarnessRuntime(args: {
     piInstall: string;
     opencodeBaseUrl: string;
     piBaseUrl: string;
+    /** `anthropicSentinelUrl` receives any Anthropic request either closure makes. */
+    anthropicSentinelUrl: string;
     credentials: BedrockCredentials;
 }): string {
     const redirectRoot = join(args.dir, "redirect");
@@ -141,7 +143,7 @@ export function writeHarnessRuntime(args: {
     const extensionFile = join(redirectRoot, "bedrock-redirect.mjs");
     writeFileSync(
         extensionFile,
-        `export default function (pi) {\n    pi.registerProvider("amazon-bedrock", { baseUrl: ${JSON.stringify(args.piBaseUrl)} });\n}\n`,
+        `export default function (pi) {\n    pi.registerProvider("amazon-bedrock", { baseUrl: ${JSON.stringify(args.piBaseUrl)} });\n    pi.registerProvider("anthropic", { baseUrl: ${JSON.stringify(args.anthropicSentinelUrl)} });\n}\n`,
         { mode: 0o600 },
     );
     const extensionBytes = readFileSync(extensionFile);
@@ -185,7 +187,10 @@ export function writeHarnessRuntime(args: {
                     runtime: args.sources.nodeRoot,
                 },
             },
-            opencode_provider_base_urls: { "amazon-bedrock": args.opencodeBaseUrl },
+            opencode_provider_base_urls: {
+                "amazon-bedrock": args.opencodeBaseUrl,
+                anthropic: args.anthropicSentinelUrl,
+            },
             credentials,
         }),
         { mode: 0o600 },

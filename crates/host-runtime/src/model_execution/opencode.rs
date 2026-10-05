@@ -38,7 +38,7 @@ pub struct OpenCodeBackend {
     env: EnvSnapshot,
     state_root: StateRoot,
     /// The base URL each named provider's requests go to, written into the inline config as that provider's `options.baseURL`; production backends name none, so every provider dials its own endpoint.
-    provider_base_urls: Arc<BTreeMap<String, String>>,
+    provider_base_urls: BTreeMap<String, String>,
 }
 
 impl OpenCodeBackend {
@@ -57,7 +57,7 @@ impl OpenCodeBackend {
             limits,
             env,
             state_root,
-            provider_base_urls: Arc::default(),
+            provider_base_urls: BTreeMap::new(),
         }
     }
 
@@ -65,7 +65,7 @@ impl OpenCodeBackend {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_provider_base_url(mut self, provider: &str, base_url: &str) -> Self {
-        Arc::make_mut(&mut self.provider_base_urls)
+        self.provider_base_urls
             .insert(provider.to_owned(), base_url.to_owned());
         self
     }

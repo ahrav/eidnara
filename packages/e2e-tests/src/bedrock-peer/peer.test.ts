@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CAPTURED_FACT, callerOf, captureAnswer, classifyAnswer, scriptedSummary } from "./answers";
 import { decodeMessages, encodeEvent } from "./eventstream";
+import { completedWrapupRounds, isWrapupResult } from "./scenario";
 import { BedrockPeer } from "./server";
-import { canonicalRequest, expectedSignature, parseAuthorization } from "./sigv4";
+import { canonicalRequest, expectedSignature, parseAuthorization, verifySigned } from "./sigv4";
 
 const VECTOR = JSON.parse(
     readFileSync(
@@ -41,6 +42,30 @@ describe("bedrock peer", () => {
         expect(expectedSignature(request, authorization, VECTOR.secret_access_key as string)).toBe(
             VECTOR.signature as string,
         );
+        const credentials = {
+            accessKeyId: "AKIDEXAMPLE",
+            secretAccessKey: VECTOR.secret_access_key as string,
+            sessionToken: VECTOR.session_token as string,
+            region: "us-east-1",
+        };
+        expect(verifySigned(request, authorization, credentials)).toBe(true);
+        expect(
+            verifySigned(
+                { ...request, body: Buffer.from(`${VECTOR.body} `) },
+                authorization,
+                credentials,
+            ),
+        ).toBe(false);
+        expect(
+            verifySigned(request, authorization, { ...credentials, sessionToken: "another" }),
+        ).toBe(false);
+        const unsignedToken = {
+            ...authorization,
+            signedHeaders: authorization.signedHeaders.filter(
+                (name) => name !== "x-amz-security-token",
+            ),
+        };
+        expect(verifySigned(request, unsignedToken, credentials)).toBe(false);
         expect(expectedSignature(request, authorization, "another secret")).not.toBe(
             VECTOR.signature as string,
         );
@@ -108,6 +133,20 @@ describe("bedrock peer", () => {
         ).toBe(
             '<output><history_segments><history_segment start="1" end="2" title="messages 1 to 2" episode_type="feature" importance="50"><p1>hello world; hi</p1><p2>hello world; hi</p2><p3>messages 1 to 2</p3><p4 /></history_segment></history_segments><meta><unprocessed_from>3</unprocessed_from></meta></output>',
         );
+    });
+
+    it("counts only a completed wrapup's rounds", () => {
+        expect(completedWrapupRounds("## Eidnara Wrapup\n\ncompacted 4 messages (2 rounds)")).toBe(
+            2,
+        );
+        expect(completedWrapupRounds("## Eidnara Wrapup  compacted 1 message (1 round)")).toBe(1);
+        expect(
+            completedWrapupRounds("## Eidnara Wrapup — Partial\n\nstopped (1 round)"),
+        ).toBeUndefined();
+        expect(completedWrapupRounds("## Eidnara Wrapup\n\nStarting wrapup…")).toBeUndefined();
+        expect(completedWrapupRounds("## Eidnara Wrapup\n\nNothing to compact.")).toBeUndefined();
+        expect(isWrapupResult("## Eidnara Wrapup  Starting wrapup…")).toBe(false);
+        expect(isWrapupResult("## Eidnara Wrapup — Failed\n\nx")).toBe(true);
     });
 
     it("refuses an unsigned request and records it", async () => {

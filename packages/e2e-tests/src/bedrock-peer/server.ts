@@ -12,14 +12,9 @@ import {
 import type { AddressInfo } from "node:net";
 import { answer, type Caller, type ConverseRequest, callerOf } from "./answers";
 import { encodeEvent } from "./eventstream";
-import { expectedSignature, parseAuthorization } from "./sigv4";
+import { type BedrockCredentials, parseAuthorization, verifySigned } from "./sigv4";
 
-export interface BedrockCredentials {
-    accessKeyId: string;
-    secretAccessKey: string;
-    sessionToken?: string;
-    region: string;
-}
+export type { BedrockCredentials } from "./sigv4";
 
 export interface CapturedBedrockRequest {
     transport: "http1" | "h2";
@@ -50,7 +45,7 @@ interface Reply {
     body: Buffer;
 }
 
-const ROUTE = /^\/model\/([^/]+)\/(converse-stream|converse)$/;
+const ROUTE = /^\/model\/([^/]+)\/converse-stream$/;
 
 function flatHeaders(headers: IncomingHttpHeaders | Http2Headers): Record<string, string> {
     const flat: Record<string, string> = {};
@@ -165,19 +160,18 @@ export class BedrockPeer {
         const route = ROUTE.exec(received.path.split("?", 1)[0] as string);
         const authorization = parseAuthorization(received.headers.authorization);
         const signatureValid =
-            authorization !== undefined &&
-            authorization.accessKeyId === this.credentials.accessKeyId &&
-            authorization.region === this.credentials.region &&
-            authorization.service === "bedrock" &&
-            (authorization.signedHeaders.includes("host") ||
-                authorization.signedHeaders.includes(":authority")) &&
-            expectedSignature(received, authorization, this.credentials.secretAccessKey) ===
-                authorization.signature;
+            authorization !== undefined && verifySigned(received, authorization, this.credentials);
+        let modelId: string | undefined;
+        try {
+            modelId = route ? decodeURIComponent(route[1] as string) : undefined;
+        } catch {
+            modelId = undefined;
+        }
         const capture: CapturedBedrockRequest = {
             transport,
             method: received.method,
             path: received.path,
-            modelId: route ? decodeURIComponent(route[1] as string) : undefined,
+            modelId,
             caller: undefined,
             accessKeyId: authorization?.accessKeyId,
             signatureValid,
@@ -190,7 +184,7 @@ export class BedrockPeer {
         };
         this.requests.push(capture);
         const reply = ((): Reply => {
-            if (!route || received.method !== "POST") {
+            if (!route || modelId === undefined || received.method !== "POST") {
                 return errorReply(404, "UnknownOperationException", "unknown operation");
             }
             if (!signatureValid) {
@@ -208,10 +202,11 @@ export class BedrockPeer {
             const text = answer(capture.caller, request);
             const inputTokens =
                 capture.caller === "conversation" ? this.conversationInputTokens : 10;
-            const usage = { inputTokens, outputTokens: 10, totalTokens: inputTokens + 10 };
-            return route[2] === "converse-stream"
-                ? streamReply(text, usage)
-                : unaryReply(text, usage);
+            return streamReply(text, {
+                inputTokens,
+                outputTokens: 10,
+                totalTokens: inputTokens + 10,
+            });
         })();
         capture.status = reply.status;
         return reply;
@@ -235,20 +230,5 @@ function streamReply(text: string, usage: Usage): Reply {
             encodeEvent("messageStop", { stopReason: "end_turn" }),
             encodeEvent("metadata", { usage, metrics: { latencyMs: 1 } }),
         ]),
-    };
-}
-
-function unaryReply(text: string, usage: Usage): Reply {
-    return {
-        status: 200,
-        headers: { "content-type": "application/json" },
-        body: Buffer.from(
-            JSON.stringify({
-                output: { message: { role: "assistant", content: [{ text }] } },
-                stopReason: "end_turn",
-                usage,
-                metrics: { latencyMs: 1 },
-            }),
-        ),
     };
 }

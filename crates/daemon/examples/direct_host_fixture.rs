@@ -987,7 +987,8 @@ mod unix {
     /// closure is materialized and revalidated as `eidnara-host` does, the backends see only
     /// `credentials` as the startup envelope's rows, and OpenCode's inline config points each
     /// provider in `opencode_provider_base_urls` at its base URL. Pi reaches a peer through a
-    /// provider extension its closure carries.
+    /// provider extension its closure carries. The fixture owns its store alone: a fresh root, one
+    /// process, Linux, so materialization runs without the launcher's transaction lock.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct HarnessRuntime {
@@ -1052,17 +1053,23 @@ mod unix {
         }
 
         let pi = materialize(spec.pi, "pi")?;
-        let manifest = pi.manifest().clone();
+        let interpreter_node = pi
+            .manifest()
+            .interpreter
+            .clone()
+            .ok_or("pi closure names no interpreter")?;
+        let entrypoint_node = pi
+            .manifest()
+            .entrypoint
+            .clone()
+            .ok_or("pi closure names no entrypoint")?;
+        let provider_extension_nodes = pi.manifest().extensions.clone();
         let pi = PiBackend::new(
             PiRuntimeDescriptor {
                 closure: pi,
-                interpreter_node: manifest
-                    .interpreter
-                    .ok_or("pi closure names no interpreter")?,
-                entrypoint_node: manifest
-                    .entrypoint
-                    .ok_or("pi closure names no entrypoint")?,
-                provider_extension_nodes: manifest.extensions,
+                interpreter_node,
+                entrypoint_node,
+                provider_extension_nodes,
             },
             env.clone(),
             state_root.clone(),

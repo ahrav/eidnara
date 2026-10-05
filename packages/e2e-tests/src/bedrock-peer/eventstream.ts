@@ -73,8 +73,12 @@ export function decodeMessages(stream: Uint8Array): DecodedMessage[] {
     const messages: DecodedMessage[] = [];
     let offset = 0;
     while (offset < bytes.length) {
+        if (offset + 12 > bytes.length) throw new Error("event stream prelude is truncated");
         const total = bytes.readUInt32BE(offset);
         const headersLength = bytes.readUInt32BE(offset + 4);
+        if (total < 16 || offset + total > bytes.length || headersLength > total - 16) {
+            throw new Error("event stream message length is out of bounds");
+        }
         const message = bytes.subarray(offset, offset + total);
         if (message.readUInt32BE(8) !== crc32(message.subarray(0, 8))) {
             throw new Error("event stream prelude checksum mismatch");

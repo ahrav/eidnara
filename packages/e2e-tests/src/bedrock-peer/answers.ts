@@ -17,6 +17,8 @@ export const RESEARCHER_ANSWER = "Project memory: the build listens on port 4242
 export const CONVERSATION_ANSWER = "bedrock peer answer";
 
 export function callerOf(request: ConverseRequest): Caller {
+    // OpenCode titles every new session, a ModelExecution run's included, from its first prompt.
+    if (request.system.includes("You are a title generator")) return "conversation";
     if (
         request.system.includes("Extract durable project memory") &&
         request.lastUser.includes('"existing_memories"')
