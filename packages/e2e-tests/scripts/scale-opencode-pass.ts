@@ -41,11 +41,14 @@ const fixtureBin = resolve(need("fixture-bin"));
 const evalRunnerBin = resolve(need("eval-runner-bin"));
 const samples = Number(flags.samples);
 const windowSize = Number(flags.window);
+const bootstrapSeed = Number(flags.seed);
 const tiers = (flags.tiers as string).split(",") as ScaleTier[];
 for (const tier of tiers) if (!(tier in TIER_MESSAGES)) throw new Error(`unknown tier ${tier}`);
 if (!Number.isSafeInteger(samples) || samples < 2) throw new Error("--samples must be at least 2");
 if (!Number.isSafeInteger(windowSize) || windowSize < 4 || windowSize % 2 !== 0)
     throw new Error("--window must be an even count of at least 4");
+if (!Number.isSafeInteger(bootstrapSeed) || bootstrapSeed < 0)
+    throw new Error("--seed must be a whole number");
 
 interface PluginUnderTest {
     createRustModeTransform: (
@@ -302,7 +305,7 @@ writeFileSync(
             },
             host: hostManifest(),
             open_loop: null,
-            seed: Number(flags.seed),
+            seed: bootstrapSeed,
         },
         null,
         2,

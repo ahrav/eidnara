@@ -1066,7 +1066,7 @@ jobs:
             for arm in "${arms[@]}"; do
               root="$(root_of "$arm")"
               commit="$(git -C "$root" rev-parse HEAD)"
-              if ! bun packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts \
+              if ! bun "packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts" \
                 --out-dir "$out/$arm/$tier" --tiers "$tier" --samples 330 \
                 --plugin-root "$root/packages/opencode-plugin" \
                 --fixture-bin "$root/target/release/examples/direct_host_fixture" \
@@ -1079,8 +1079,13 @@ jobs:
           done
           for arm in "${arms[@]}"; do
             cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl" || true
-            cp "$(ls "$out/$arm"/*/manifest.json | tail -n 1)" "$out/$arm/manifest.json"
             jq -s add "$out/$arm"/*/incomplete.json > "$out/$arm/incomplete.json"
+            manifests=("$out/$arm"/*/manifest.json)
+            if [ ! -f "${manifests[-1]}" ]; then
+              echo "::warning::$arm arm wrote no manifest; report skipped"
+              continue
+            fi
+            cp "${manifests[-1]}" "$out/$arm/manifest.json"
             "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
               --manifest "$out/$arm/manifest.json" \
               --out "$out/$arm/report.json" | tee "$out/$arm/summary.json"
