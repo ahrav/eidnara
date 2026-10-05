@@ -14,6 +14,8 @@ use super::steps::STEP_VERSION;
 pub const ACTIVATION_DIR: &str = "memory_reviewer-activation";
 pub const IDENTITY_RECORD: &str = "runtime-identity.json";
 pub const IDENTITY_SCHEMA: u32 = 1;
+/// The schema of a record naming Bedrock: schema 1's fields plus the `model_id` the request path invokes.
+pub const BEDROCK_IDENTITY_SCHEMA: u32 = 2;
 /// Longest attestation field kept; the record is the owner's, so the surface only needs to identify it.
 const MAX_ATTESTATION_FIELD_BYTES: usize = 256;
 
@@ -32,8 +34,11 @@ pub struct RuntimeIdentityRecord {
     pub memstore_baseline_digest: String,
     pub kernel_incarnation: String,
     pub memstore_incarnation: String,
-    /// `<host>/v1/messages@<version>`, as the sender identifies itself.
+    /// `<host>/v1/messages@<version>` for Anthropic, `<host>/model/<model id>/invoke@<version>` for Bedrock, as the sender identifies itself.
     pub provider: String,
+    /// The Bedrock model id or inference profile the request path invokes; present exactly in a schema 2 record.
+    #[serde(default)]
+    pub model_id: Option<String>,
     /// The startup-envelope credential name the sender dials with.
     pub credential: String,
     /// The credential's identity as the harness selection file stores it under `credential_identities`; rotating its secret requires re-attestation.
@@ -97,10 +102,52 @@ pub enum Closed {
     Unacknowledged,
     #[error("activation record names a credential the startup envelope does not carry")]
     UnknownCredential,
+    /// The record names a provider this deployment cannot dial, such as Bedrock with no valid startup region; the term is named, never its value.
+    #[error("activation record names a provider the deployment cannot dial: {0}")]
+    Undialable(&'static str),
 }
 
-/// Reads the record under `home` and evaluates it against `live`.
-pub fn read_gate(home: &Path, live: &LiveIdentity) -> Result<Activation, Closed> {
+const BEDROCK_CREDENTIAL_DOMAIN: &[u8] = b"eidnara-bedrock-credential-identity-v1";
+
+/// The identity a schema 2 record names for Bedrock credentials: a length-framed HMAC over exactly the region and the access key id, under a Bedrock-specific key derived from the start's connection key. The secret and the session token never enter it, so rotating them keeps the identity; a new key id, region, or start changes it.
+pub fn bedrock_credential_identity(
+    connection_key: &[u8; 32],
+    region: &str,
+    access_key_id: &str,
+) -> String {
+    use hmac::Mac;
+    let mac = |key: &[u8], segments: &[&[u8]]| -> [u8; 32] {
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+        for segment in segments {
+            mac.update(segment);
+        }
+        mac.finalize().into_bytes().into()
+    };
+    let derived = zeroize::Zeroizing::new(mac(connection_key, &[BEDROCK_CREDENTIAL_DOMAIN]));
+    let digest = mac(
+        derived.as_slice(),
+        &[
+            &(region.len() as u64).to_be_bytes(),
+            region.as_bytes(),
+            &(access_key_id.len() as u64).to_be_bytes(),
+            access_key_id.as_bytes(),
+        ],
+    );
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A schema 1 record names no model id; a schema 2 record names one that can be a Bedrock path segment; no other schema exists.
+fn schema_fields_fit(record: &RuntimeIdentityRecord) -> bool {
+    match (record.schema, &record.model_id) {
+        (IDENTITY_SCHEMA, None) => true,
+        (BEDROCK_IDENTITY_SCHEMA, Some(model_id)) => super::model_request::valid_model_id(model_id),
+        _ => false,
+    }
+}
+
+/// Reads the record under `home`; a schema 2 record names a model id, and every other schema none.
+pub fn read_record(home: &Path) -> Result<RuntimeIdentityRecord, Closed> {
     let bytes = match read_owner_only_record(&home.join(ACTIVATION_DIR), IDENTITY_RECORD) {
         Ok(RecordRead::Bytes(bytes)) => bytes,
         Ok(RecordRead::Absent) => return Err(Closed::Missing),
@@ -109,7 +156,15 @@ pub fn read_gate(home: &Path, live: &LiveIdentity) -> Result<Activation, Closed>
     };
     let record: RuntimeIdentityRecord =
         serde_json::from_slice(&bytes).map_err(|_| Closed::Malformed)?;
-    evaluate(&record, live)
+    if !schema_fields_fit(&record) {
+        return Err(Closed::Malformed);
+    }
+    Ok(record)
+}
+
+/// Reads the record under `home` and evaluates it against `live`.
+pub fn read_gate(home: &Path, live: &LiveIdentity) -> Result<Activation, Closed> {
+    evaluate(&read_record(home)?, live)
 }
 
 /// The identity terms a record must match, each with the live deployment's value, ordered as `evaluate` compares them.
@@ -159,7 +214,7 @@ fn recorded_terms(record: &RuntimeIdentityRecord) -> [String; 9] {
 
 /// The match every activation requires: schema, every identity term, an attestation with bounded fields, and a credential the envelope carries.
 pub fn evaluate(record: &RuntimeIdentityRecord, live: &LiveIdentity) -> Result<Activation, Closed> {
-    if record.schema != IDENTITY_SCHEMA {
+    if !schema_fields_fit(record) {
         return Err(Closed::Malformed);
     }
     let attestation = &record.provider_retention;
@@ -380,5 +435,65 @@ mod tests {
         // The record is read anew: restoring it reopens the gate without a restart.
         write(home.path(), &record(), 0o600);
         assert!(read_gate(home.path(), &live()).is_ok());
+    }
+
+    /// A schema 2 record names Bedrock with the model id its path invokes; a schema 1 record naming a model id, a schema 2 record without one, and an unknown schema are malformed.
+    #[test]
+    fn a_schema_2_record_opens_for_bedrock_and_each_schema_keeps_its_fields() {
+        let home = tempfile::tempdir().unwrap();
+        let bedrock = LiveIdentity {
+            provider: "bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.claude-x-v1:0/invoke@bedrock-2023-05-31".into(),
+            credentials: vec![("AWS_ACCESS_KEY_ID".into(), "fp-aws".into())],
+            ..live()
+        };
+        let mut record = record();
+        record["schema"] = serde_json::json!(BEDROCK_IDENTITY_SCHEMA);
+        record["model_id"] = serde_json::json!("us.anthropic.claude-x-v1:0");
+        record["provider"] = serde_json::json!(bedrock.provider);
+        record["credential"] = serde_json::json!("AWS_ACCESS_KEY_ID");
+        record["credential_fingerprint"] = serde_json::json!("fp-aws");
+        write(home.path(), &record, 0o600);
+        let activation = read_gate(home.path(), &bedrock).unwrap();
+        assert_eq!(activation.credential, "AWS_ACCESS_KEY_ID");
+        assert_eq!(activation.approval.credential_id, "fp-aws");
+        assert_eq!(
+            read_record(home.path()).unwrap().model_id.as_deref(),
+            Some("us.anthropic.claude-x-v1:0")
+        );
+
+        let mut missing_id = record.clone();
+        missing_id.as_object_mut().unwrap().remove("model_id");
+        let mut anthropic_with_id = super::tests::record();
+        anthropic_with_id["model_id"] = serde_json::json!("us.anthropic.claude-x-v1:0");
+        let mut unknown = record.clone();
+        unknown["schema"] = serde_json::json!(3);
+        let mut empty_id = record.clone();
+        empty_id["model_id"] = serde_json::json!("");
+        let mut dot_id = record.clone();
+        dot_id["model_id"] = serde_json::json!("..");
+        for malformed in [missing_id, anthropic_with_id, unknown, empty_id, dot_id] {
+            write(home.path(), &malformed, 0o600);
+            assert_eq!(read_gate(home.path(), &bedrock), Err(Closed::Malformed));
+        }
+    }
+
+    /// The Bedrock identity reads exactly the region and the access key id under the connection key: the same inputs give the same identity, and any one changed gives another.
+    #[test]
+    fn the_bedrock_identity_is_the_region_and_key_id_under_the_connection_key() {
+        let key = [3; 32];
+        let identity = bedrock_credential_identity(&key, "us-east-1", "AKID");
+        // An independent derivation (Python `hmac`) of the domain key and the framed inputs.
+        assert_eq!(
+            identity,
+            "79d1908607eba62aae150d7349eff775eedcef56c6fa9c7282454e73b6a33c7e"
+        );
+        for other in [
+            bedrock_credential_identity(&[4; 32], "us-east-1", "AKID"),
+            bedrock_credential_identity(&key, "us-west-2", "AKID"),
+            bedrock_credential_identity(&key, "us-east-1", "AKID2"),
+            bedrock_credential_identity(&key, "us-east-1A", "KID"),
+        ] {
+            assert_ne!(identity, other);
+        }
     }
 }

@@ -3896,6 +3896,12 @@ impl HandlerCore {
                             let kernel_source = Arc::clone(&kernel);
                             let project_store = Arc::clone(&store);
                             let project_bindings = Arc::clone(&bindings);
+                            // One startup region names Bedrock's host, server name, and signing scope; an invalid one leaves Bedrock undialable.
+                            let providers = memory_reviewer::model_request::Providers::production(
+                                host.credentials
+                                    .get("AWS_REGION")
+                                    .map(|region| region.as_str()),
+                            );
                             task_admission.spawn(memory_reviewer::worker::run(
                                 Arc::new(memory_reviewer::worker::Worker {
                                     host,
@@ -3912,7 +3918,7 @@ impl HandlerCore {
                                     }),
                                     status: Arc::clone(&memory_reviewer_status),
                                     permits: memory_reviewer_permits,
-                                    provider: memory_reviewer::model_request::Provider::anthropic(),
+                                    providers,
                                     rejection: Default::default(),
                                 }),
                                 cancel.clone(),

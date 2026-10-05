@@ -96,6 +96,9 @@ const CALIBRATION_TABLE: CalibrationEntry[] = [
 
 const NEUTRAL: ModelCalibration = { systemRatio: 1.0, toolsRatio: 1.0 };
 
+/** A Bedrock Claude id: an optional geo or `global.` inference-profile prefix, `anthropic.`, then the Anthropic model id. */
+const BEDROCK_CLAUDE = /^amazon-bedrock\/(?:(?:us|eu|apac|global)\.)?anthropic\.(.+)$/;
+
 /**
  * Unknown models use 1.0 ratios, leaving local counts unchanged.
  */
@@ -104,7 +107,10 @@ export function resolveModelCalibration(
     modelId: string | undefined,
 ): ModelCalibration {
     if (!providerId || !modelId) return NEUTRAL;
-    const key = `${providerId}/${modelId}`.toLowerCase();
+    const raw = `${providerId}/${modelId}`.toLowerCase();
+    // A Bedrock Claude id reads the Anthropic family's rows.
+    const bedrock = BEDROCK_CLAUDE.exec(raw);
+    const key = bedrock ? `anthropic/${bedrock[1]}` : raw;
     let best: CalibrationEntry | null = null;
     for (const entry of CALIBRATION_TABLE) {
         const prefix = entry.prefix.toLowerCase();

@@ -370,6 +370,8 @@ pub enum DispatchOutcome<H> {
     /// The handoff consumed the prepared request. `attempt_deadline_ms` is the absolute bound the marker committed under; the caller bounds its network wait by it. `release` reports whether the store's read-only view was restored afterwards; a failure there cannot recall the handoff, but it means this store's connection may refuse later writes, so it is carried here rather than dropped.
     Handed {
         attempt_index: u32,
+        /// The clock reading the marker committed at.
+        committed_at_ms: i64,
         attempt_deadline_ms: i64,
         /// What the response may still consume; the collector and decoder charge against it.
         allowance: ResponseAllowance,
@@ -1319,6 +1321,7 @@ impl MemoryStore {
             ) => {
                 return Ok(DispatchOutcome::Handed {
                     attempt_index: committed.attempt.attempt_index,
+                    committed_at_ms: committed.attempt.committed_at_ms,
                     attempt_deadline_ms: committed.attempt.attempt_deadline_ms,
                     allowance: committed.allowance,
                     handoff,

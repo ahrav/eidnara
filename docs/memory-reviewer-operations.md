@@ -46,6 +46,25 @@ The status block reports only the closed kind (`identity_mismatch`), never which
 
 The credential is read from the startup envelope's credentials, never from the process environment. The host always hands the daemon its Model Execution supervisor and the envelope's credentials; a record naming a credential the sender does not dial with closes the gate as `unknown_credential`. Until the daemon has committed its harness selection for this start, no credential identity exists and the gate reports `unreadable`.
 
+### Bedrock: schema 2
+
+A deployment whose model credential is the `amazon-bedrock` row activates the reviewer with a schema 2 record. The sender then calls `InvokeModel` on `bedrock-runtime.<region>.amazonaws.com` with the Anthropic Messages body (`"anthropic_version": "bedrock-2023-05-31"`, no `model` and no `stream`) and signs each request with SigV4 (service `bedrock`) after the connection is open and before its attempt marker commits; nothing on this path reads `ANTHROPIC_API_KEY`. The record carries every schema 1 field with these values:
+
+| Field | Meaning |
+| --- | --- |
+| `schema` | `2`. |
+| `model_id` | The Bedrock model id or inference profile the request path invokes, such as `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Only a schema 2 record has it. |
+| `model` | The model the response must report, compared exactly. Derive it from `model_id` by removing a geo or `global.` prefix (`us.`, `eu.`, `apac.`, `global.`), then `anthropic.`, then the `-vN:M` suffix: `anthropic.claude-3-sonnet-20240229-v1:0` reports `claude-3-sonnet-20240229`. A response reporting another model releases no text and closes the gate as below, and the log names the reported value, so the owner can correct the record. |
+| `provider` | `bedrock-runtime.<region>.amazonaws.com/model/<model_id>/invoke@bedrock-2023-05-31`, the region coming from the startup envelope's `AWS_REGION`. |
+| `credential` | `AWS_ACCESS_KEY_ID`. The secret and the optional `AWS_SESSION_TOKEN` sign the request; the secret never reaches the wire, and the token appears only in its header. |
+| `credential_fingerprint` | The identity the selection file records under `credential_identities.AWS_ACCESS_KEY_ID`: an HMAC over exactly the region and the access key id under this start's connection key and a Bedrock-specific domain, never the secret or the token. |
+
+One validated region feeds the host, the TLS server name, the signing scope, and the fingerprint. An `AWS_REGION` outside `[a-z0-9-]` leaves Bedrock undialable for the life of the process: a schema 2 record closes the reviewer gate as `unavailable`, and the log names the region term once; host start, the harnesses, and the History Summarizer are unaffected. A schema 1 Anthropic record keeps its meaning.
+
+Rotating AWS credentials: refresh and export the new credentials, run `eidnara daemon restart`, rewrite the record's `credential_fingerprint` from the new selection file (the connection key is fresh at every start, so every start needs this), and renew `provider_retention` only if the access key id changed. A rotated secret under the same key id keeps the same identity within a start; a new key id closes the gate as `identity_mismatch` until the record names it. The selection's Bedrock entry is excluded from the restart comparisons, so rotated AWS credentials never refuse a restart.
+
+Downgrade: a binary from before this release parses the selection file but refuses a restart whose previous map names a credential it does not derive, which the `AWS_ACCESS_KEY_ID` entry is. Run `eidnara daemon stop`, which clears the active selection, then `eidnara daemon start` under the older binary, and write a schema 1 record if the reviewer should run.
+
 ### A rejected attempt closes the gate until restart
 
 A 401 or a 403 from the provider, or a response reporting another model than the record's `model`, ends that attempt charged with no text released and closes the gate as `unavailable` for the rest of the process. The worker checks this before it reads the record, and every later pass reports `unavailable` again, claims nothing, and sends nothing, so a refused credential or a wrong model spends one attempt rather than one per job. The daemon log records the rejection once: `daemon: memory_reviewer provider rejected an attempt (status 401); the gate stays closed until the daemon restarts`, or, for a model, `(reported model "<id>" for "<model>")`, with the reported id cut to 128 characters and escaped; no response content is logged. The owner corrects the credential or the record's `model` and restarts the daemon, which clears the latch; every start already needs a refreshed record. A 429 or a 5xx spends the attempt as before, and the job's remaining budget decides whether another is made.

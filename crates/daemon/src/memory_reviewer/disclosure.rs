@@ -24,8 +24,8 @@ use super::broker::{
     check_render, hold_refusal,
 };
 use super::model_request::{
-    AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role, SendError,
-    Sender,
+    AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role,
+    SIGNED_REQUEST_WINDOW_MS, SendError, Sender, Signed,
 };
 
 /// The complete API and model profile of one request: the requested canonical model id and the exact sampling values or their omission. It is serialized into the body before dispatch and bound to the marker through the body digest; nothing resolves an alias or asks the provider what it means.
@@ -251,6 +251,16 @@ pub fn prepare_body(
     })
 }
 
+/// Whether a request signed at `signed_at_ms` may be sent under a marker committed at `committed_at_ms` with `attempt_deadline_ms`: signed no later than the commit, and no longer than [`SIGNED_REQUEST_WINDOW_MS`] before the attempt deadline, so the provider never sees a request time outside its skew window.
+pub fn signing_window_admits(
+    signed_at_ms: i64,
+    committed_at_ms: i64,
+    attempt_deadline_ms: i64,
+) -> bool {
+    signed_at_ms <= committed_at_ms
+        && attempt_deadline_ms.saturating_sub(signed_at_ms) <= SIGNED_REQUEST_WINDOW_MS
+}
+
 impl Disclosure<'_> {
     /// Runs one attempt end to end. `deadline` bounds the connection and the network wait; the ledger's own attempt deadline, cutoff, claim, and job deadline bound the commit and the handoff, and the committed attempt deadline also caps the network wait.
     pub async fn disclose(
@@ -301,8 +311,15 @@ impl Disclosure<'_> {
             credential_id: self.sender.credential_id().to_string(),
             policy_union_digest: prepared.policy_union_digest.clone(),
         };
-        // Copied before the ledger is entered so the handoff allocates nothing while the connection is owned.
-        let body = prepared.body.clone();
+        // Signed before the ledger is entered, at the attempt's clock, so the handoff builds nothing while the connection is owned; a refused commit drops the signed request unsent.
+        let signed_at_ms = (self.now_ms)();
+        let signed = connected
+            .sign(prepared.body.clone(), &prepared.body_digest, signed_at_ms)
+            .map_err(|error| DisclosureRefusal::Send {
+                attempt_index: None,
+                error,
+                sent: false,
+            })?;
         let hold = &self.broker.binding().hold;
         let outcome = self
             .ledger
@@ -313,9 +330,9 @@ impl Disclosure<'_> {
                 self.claim_id,
                 &hold.kernel_incarnation,
                 &marker,
-                (connected, body),
+                signed,
                 self.now_ms,
-                |(connected, body)| connected.handoff(body),
+                Signed::handoff,
             )
             .map_err(|error| match error {
                 MemoryReviewerLedgerError::Refused(reason) => DisclosureRefusal::Ledger(reason),
@@ -343,6 +360,7 @@ impl Disclosure<'_> {
             }
             DispatchOutcome::Handed {
                 attempt_index,
+                committed_at_ms,
                 handoff,
                 attempt_deadline_ms,
                 allowance,
@@ -356,6 +374,20 @@ impl Disclosure<'_> {
                         MemoryReviewerAttemptTerminal::Failed,
                         ResponseUsage::NONE,
                         DisclosureRefusal::Store(error.to_string()),
+                    ));
+                }
+                // The request was signed at the attempt's clock: never after the commit, and never so long before the attempt deadline that the provider would judge its time stale. A request outside that window is dropped unwritten.
+                if !signing_window_admits(signed_at_ms, committed_at_ms, attempt_deadline_ms) {
+                    drop(handoff);
+                    return Err(self.end(
+                        attempt_index,
+                        MemoryReviewerAttemptTerminal::Failed,
+                        ResponseUsage::NONE,
+                        DisclosureRefusal::Send {
+                            attempt_index: Some(attempt_index),
+                            error: SendError::SignTime,
+                            sent: false,
+                        },
                     ));
                 }
                 match handoff {

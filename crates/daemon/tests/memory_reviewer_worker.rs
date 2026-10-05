@@ -8,12 +8,13 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use daemon::memory_reviewer::activation::{
-    ACTIVATION_DIR, IDENTITY_RECORD, IDENTITY_SCHEMA, LiveIdentity,
+    ACTIVATION_DIR, BEDROCK_IDENTITY_SCHEMA, IDENTITY_RECORD, IDENTITY_SCHEMA, LiveIdentity,
+    bedrock_credential_identity,
 };
 use daemon::memory_reviewer::coordinator::{InvestigationPermits, Rejection};
 use daemon::memory_reviewer::handoff::review_binding;
 use daemon::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
-use daemon::memory_reviewer::model_request::{Endpoint, Provider};
+use daemon::memory_reviewer::model_request::{Endpoint, Providers};
 use daemon::memory_reviewer::steps::STEP_VERSION;
 use daemon::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
 use host_runtime::model_execution::backend::LlmExecutionBackend;
@@ -25,6 +26,7 @@ use memory_store::memory_reviewer_jobs::{
     ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
+use sha2::Digest;
 use support::tls_peer::{Peer, json_response, text_response};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -32,6 +34,7 @@ use zeroize::Zeroizing;
 const PROJECT: &str = "git:proj";
 const PROJECT_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CREDENTIAL: &str = "ANTHROPIC_API_KEY";
+const REGION: &str = "us-east-1";
 const SECRET: &str = "sk-test-credential";
 /// The keyed identity the host's selection file would record for `CREDENTIAL`.
 const CREDENTIAL_IDENTITY: &str = "hmac-of-credential-under-the-incarnation-key";
@@ -140,10 +143,13 @@ impl Rig {
         }
     }
 
-    fn provider(&self) -> Provider {
-        Provider::anthropic_at(
-            Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap(),
-        )
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap()
+    }
+
+    /// Both providers on the rig's peer; Bedrock signs for `us-east-1`.
+    fn providers(&self) -> Providers {
+        Providers::at(self.endpoint(), self.endpoint(), REGION)
     }
 
     fn worker(&self) -> Arc<Worker> {
@@ -226,7 +232,7 @@ impl Rig {
             projects: Arc::new(move || projects.clone()),
             status: Arc::clone(&self.status),
             permits: Arc::new(InvestigationPermits::default()),
-            provider: self.provider(),
+            providers: self.providers(),
             rejection: Default::default(),
         })
     }
@@ -995,7 +1001,14 @@ async fn a_rejected_attempt_latches_the_gate_through_the_pass() {
         let worker = rig.worker();
         let cancel = CancellationToken::new();
         let server = rig.peer.serve_script(vec![response]);
-        assert_eq!(worker.pass(&cancel).await, 0, "{rejection}");
+        let (settled, log) = capturing_stderr(worker.pass(&cancel)).await;
+        assert_eq!(settled, 0, "{rejection}");
+        // The named scan covers the log lines this run wrote, the rejection's among them.
+        assert!(log.contains("provider rejected an attempt"), "{log}");
+        assert!(
+            !log.contains(AWS_SECRET) && !log.contains(AWS_TOKEN),
+            "{log}"
+        );
         assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
         assert_eq!(worker.rejection.get(), Some(&rejection));
         assert_eq!(
@@ -1071,5 +1084,383 @@ async fn a_rejected_attempt_latches_the_gate_through_the_pass() {
             ActivationState::Open,
             "{rejection}"
         );
+        assert_no_secret_at_rest(&rig, &[SECRET]);
     }
+}
+
+const AWS_KEY_ID: &str = "AKIDEXAMPLE";
+const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+const AWS_TOKEN: &str = "session-token-example";
+const BEDROCK_MODEL_ID: &str = "us.anthropic.claude-test-v1:0";
+const CONNECTION_KEY: [u8; 32] = [7; 32];
+
+impl Rig {
+    /// A host whose envelope carries only the Bedrock row, with the identity the selection file records for it under `CONNECTION_KEY`.
+    fn bedrock_host(&self, access_key_id: &str, secret: &str) -> Arc<MemoryReviewerHost> {
+        let host = self.host_with(&[
+            ("AWS_ACCESS_KEY_ID", access_key_id),
+            ("AWS_SECRET_ACCESS_KEY", secret),
+            ("AWS_SESSION_TOKEN", AWS_TOKEN),
+            ("AWS_REGION", REGION),
+        ]);
+        host.credential_identities
+            .set(BTreeMap::from([(
+                "AWS_ACCESS_KEY_ID".to_string(),
+                bedrock_credential_identity(&CONNECTION_KEY, REGION, access_key_id),
+            )]))
+            .unwrap();
+        host
+    }
+
+    /// The owner's schema 2 record naming Bedrock on the rig's peer for `access_key_id`.
+    fn write_bedrock_activation(&self, access_key_id: &str) {
+        let mut record = self.activation_record_naming(
+            "AWS_ACCESS_KEY_ID",
+            &bedrock_credential_identity(&CONNECTION_KEY, REGION, access_key_id),
+        );
+        record["schema"] = serde_json::json!(BEDROCK_IDENTITY_SCHEMA);
+        record["model_id"] = serde_json::json!(BEDROCK_MODEL_ID);
+        record["provider"] = serde_json::json!(format!(
+            "localhost/model/{BEDROCK_MODEL_ID}/invoke@bedrock-2023-05-31"
+        ));
+        self.write_activation_record(record);
+    }
+}
+
+/// Runs `run` with the process's standard error, where the daemon writes its log lines, redirected into a file, and returns what was written.
+async fn capturing_stderr<T>(run: impl std::future::Future<Output = T>) -> (T, String) {
+    use std::io::{Read, Seek};
+    use std::os::fd::AsRawFd;
+    let mut file = tempfile::tempfile().unwrap();
+    let saved = unsafe { libc::dup(2) };
+    assert!(saved >= 0);
+    assert_eq!(unsafe { libc::dup2(file.as_raw_fd(), 2) }, 2);
+    let out = run.await;
+    assert_eq!(unsafe { libc::dup2(saved, 2) }, 2);
+    unsafe { libc::close(saved) };
+    let mut text = String::new();
+    file.rewind().unwrap();
+    file.read_to_string(&mut text).unwrap();
+    (out, text)
+}
+
+/// The named secret scan (SB-P31): no byte of any secret in any file under the rig's homes and stores, which hold every marker, ledger row, receipt, and record, nor in the status the worker reports.
+fn assert_no_secret_at_rest(rig: &Rig, secrets: &[&str]) {
+    fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for dir in &rig._dirs {
+        walk(dir.path(), &mut files);
+    }
+    assert!(!files.is_empty());
+    for file in files {
+        let bytes = std::fs::read(&file).unwrap_or_default();
+        for secret in secrets {
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+                "{} holds a secret",
+                file.display()
+            );
+        }
+    }
+    let status = format!(
+        "{:?}{:?}",
+        rig.status.reported(),
+        rig.status.closed_reason()
+    );
+    for secret in secrets {
+        assert!(!status.contains(secret), "the status names a secret");
+    }
+}
+
+/// A response reporting `model` whose text is an abstain step, so the run settles after one send.
+fn abstaining_as(model: &str) -> Vec<u8> {
+    let body = format!(
+        r#"{{"id":"msg_1","type":"message","role":"assistant","model":"{model}","content":[{{"type":"text","text":"{{\"v\":1,\"step\":{{\"kind\":\"abstain\",\"reason\":\"enough\"}}}}"}}],"stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":4}}}}"#
+    );
+    json_response("200 OK", &body, "")
+}
+
+/// With only the Bedrock row in the envelope and a schema 2 record, the gate opens and a review completes through a signed `InvokeModel`; nothing reads an Anthropic key, and the AWS secret never reaches the wire. A Bedrock 401 latches the gate after its one charged attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bedrock_only_deployment_completes_a_review_through_invoke_model() {
+    let mut rig = Rig::open().await;
+    let now = now_ms();
+    let first = rig.ready_memory_job(now, "bun builds the workspace");
+    rig.write_bedrock_activation(AWS_KEY_ID);
+    let worker = rig.worker_for(
+        rig.bedrock_host(AWS_KEY_ID, AWS_SECRET),
+        vec![rig.root("project", PROJECT_DIGEST)],
+    );
+    let cancel = CancellationToken::new();
+    let server = rig.peer.serve_script(vec![abstaining_as("claude-test")]);
+    assert_eq!(worker.pass(&cancel).await, 1);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Open
+    );
+    let observed = server.await.unwrap();
+    assert_eq!(observed.len(), 1);
+    let head = observed[0].head.to_ascii_lowercase();
+    assert!(
+        observed[0]
+            .head
+            .starts_with("POST /model/us.anthropic.claude-test-v1%3A0/invoke HTTP/1.1\r\n"),
+        "{}",
+        observed[0].head
+    );
+    assert!(head.contains("authorization: aws4-hmac-sha256 credential=akidexample/"));
+    assert!(head.contains(&format!("x-amz-security-token: {AWS_TOKEN}")));
+    assert!(!head.contains("x-api-key"));
+    let wire = format!(
+        "{}{}",
+        observed[0].head,
+        String::from_utf8_lossy(&observed[0].body)
+    );
+    assert!(!wire.contains(AWS_SECRET));
+    let attempts = rig
+        .store
+        .list_memory_reviewer_attempts(PROJECT, &first)
+        .unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].marker.provider,
+        format!("localhost/model/{BEDROCK_MODEL_ID}/invoke@bedrock-2023-05-31")
+    );
+    assert_eq!(
+        attempts[0].marker.credential_id,
+        bedrock_credential_identity(&CONNECTION_KEY, REGION, AWS_KEY_ID)
+    );
+
+    // The signed digest is the marker's digest of the bytes sent.
+    let content_sha = observed[0]
+        .head
+        .split("\r\n")
+        .find_map(|line| line.strip_prefix("x-amz-content-sha256: "))
+        .unwrap()
+        .to_string();
+    assert_eq!(content_sha, attempts[0].marker.body_digest);
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(&observed[0].body)),
+        content_sha
+    );
+    assert_no_secret_at_rest(&rig, &[AWS_SECRET, AWS_TOKEN]);
+}
+
+/// A Bedrock 401, 403, another reported model, or none latches the gate after one charged attempt, with no secret at rest anywhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bedrock_rejection_latches_the_gate_after_one_charged_attempt() {
+    let cases = [
+        (
+            json_response(
+                "401 Unauthorized",
+                r#"{"message":"The security token included in the request is invalid."}"#,
+                "",
+            ),
+            Rejection::Status(401),
+        ),
+        (
+            json_response("403 Forbidden", r#"{"message":"denied"}"#, ""),
+            Rejection::Status(403),
+        ),
+        (
+            abstaining_as("claude-3-sonnet-20240229"),
+            Rejection::ModelMismatch {
+                reported: Some("claude-3-sonnet-20240229".to_string()),
+                expected: "claude-test".to_string(),
+            },
+        ),
+    ];
+    for (response, rejection) in cases {
+        let mut rig = Rig::open().await;
+        let now = now_ms();
+        let first = rig.ready_memory_job(now, "bun builds the workspace");
+        let second = rig.ready_memory_job(now, "cargo builds the daemon crate");
+        rig.write_bedrock_activation(AWS_KEY_ID);
+        let worker = rig.worker_for(
+            rig.bedrock_host(AWS_KEY_ID, AWS_SECRET),
+            vec![rig.root("project", PROJECT_DIGEST)],
+        );
+        let cancel = CancellationToken::new();
+        let server = rig.peer.serve_script(vec![response]);
+        let (settled, log) = capturing_stderr(worker.pass(&cancel)).await;
+        assert_eq!(settled, 0, "{rejection}");
+        // The named scan covers the log lines this run wrote, the rejection's among them.
+        assert!(log.contains("provider rejected an attempt"), "{log}");
+        assert!(
+            !log.contains(AWS_SECRET) && !log.contains(AWS_TOKEN),
+            "{log}"
+        );
+        assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
+        assert_eq!(worker.rejection.get(), Some(&rejection));
+        assert_eq!(
+            rig.status.reported().activation_state.0,
+            ActivationState::Closed("unavailable")
+        );
+        let charged: usize = [&first, &second]
+            .iter()
+            .map(|identity| {
+                rig.store
+                    .list_memory_reviewer_attempts(PROJECT, identity)
+                    .unwrap()
+                    .len()
+            })
+            .sum();
+        assert_eq!(charged, 1, "{rejection}");
+        assert_eq!(worker.pass(&cancel).await, 0);
+        assert_eq!(
+            rig.peer.connections.load(Ordering::SeqCst),
+            1,
+            "{rejection}"
+        );
+        assert_no_secret_at_rest(&rig, &[AWS_SECRET, AWS_TOKEN]);
+        let error = format!("{:?} {rejection}", worker.rejection.get());
+        assert!(!error.contains(AWS_SECRET) && !error.contains(AWS_TOKEN));
+        rig.peer = Peer::start().await;
+    }
+}
+
+/// An envelope with both rows pairs each record with its own provider: a schema 2 record signs with AWS keys and sends no `x-api-key`; a schema 1 record sends the Anthropic key and nothing of AWS's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_envelope_with_both_rows_sends_each_provider_only_its_own_credential() {
+    for bedrock in [true, false] {
+        let mut rig = Rig::open().await;
+        let now = now_ms();
+        rig.ready_memory_job(now, "bun builds the workspace");
+        let host = rig.host_with(&[
+            (CREDENTIAL, SECRET),
+            ("AWS_ACCESS_KEY_ID", AWS_KEY_ID),
+            ("AWS_SECRET_ACCESS_KEY", AWS_SECRET),
+            ("AWS_SESSION_TOKEN", AWS_TOKEN),
+            ("AWS_REGION", REGION),
+        ]);
+        host.credential_identities
+            .set(BTreeMap::from([
+                (CREDENTIAL.to_string(), CREDENTIAL_IDENTITY.to_string()),
+                (
+                    "AWS_ACCESS_KEY_ID".to_string(),
+                    bedrock_credential_identity(&CONNECTION_KEY, REGION, AWS_KEY_ID),
+                ),
+            ]))
+            .unwrap();
+        if bedrock {
+            rig.write_bedrock_activation(AWS_KEY_ID);
+        } else {
+            rig.write_activation();
+        }
+        let worker = rig.worker_for(host, vec![rig.root("project", PROJECT_DIGEST)]);
+        let server = rig.peer.serve_script(vec![abstaining_as("claude-test")]);
+        assert_eq!(worker.pass(&CancellationToken::new()).await, 1, "{bedrock}");
+        let observed = server.await.unwrap();
+        let head = observed[0].head.to_ascii_lowercase();
+        let wire = format!(
+            "{}{}",
+            observed[0].head,
+            String::from_utf8_lossy(&observed[0].body)
+        );
+        assert!(!wire.contains(AWS_SECRET));
+        if bedrock {
+            assert!(
+                !head.contains("x-api-key") && !wire.contains(SECRET),
+                "{head}"
+            );
+            assert!(head.contains("authorization: aws4-hmac-sha256"));
+        } else {
+            assert!(
+                !head.contains("authorization") && !head.contains("x-amz-"),
+                "{head}"
+            );
+            assert!(!wire.contains(AWS_TOKEN) && !wire.contains(AWS_KEY_ID));
+            assert!(head.contains(&format!("x-api-key: {SECRET}")));
+        }
+        rig.peer = Peer::start().await;
+    }
+}
+
+/// A schema 2 record whose `model_id` names another model than its `provider` term closes the gate as an identity mismatch and dials nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_schema_2_record_whose_model_id_differs_from_its_provider_term_stays_closed() {
+    let rig = Rig::open().await;
+    rig.ready_memory_job(now_ms(), "bun builds the workspace");
+    let mut record = rig.activation_record_naming(
+        "AWS_ACCESS_KEY_ID",
+        &bedrock_credential_identity(&CONNECTION_KEY, REGION, AWS_KEY_ID),
+    );
+    record["schema"] = serde_json::json!(BEDROCK_IDENTITY_SCHEMA);
+    record["model_id"] = serde_json::json!("us.anthropic.claude-other-v1:0");
+    record["provider"] = serde_json::json!(format!(
+        "localhost/model/{BEDROCK_MODEL_ID}/invoke@bedrock-2023-05-31"
+    ));
+    rig.write_activation_record(record);
+    let worker = rig.worker_for(
+        rig.bedrock_host(AWS_KEY_ID, AWS_SECRET),
+        vec![rig.root("project", PROJECT_DIGEST)],
+    );
+    assert_eq!(worker.pass(&CancellationToken::new()).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("identity_mismatch")
+    );
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+}
+
+/// The Bedrock identity is the region and access key id under the start's connection key: a rotated secret keeps the gate open, a rotated key id closes it as an identity mismatch, and a region outside `[a-z0-9-]` leaves Bedrock undialable, closing only the reviewer gate as `unavailable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bedrock_identity_follows_the_key_id_and_region() {
+    let rig = Rig::open().await;
+    rig.write_bedrock_activation(AWS_KEY_ID);
+    let cancel = CancellationToken::new();
+    let rotated_secret = rig.worker_for(
+        rig.bedrock_host(AWS_KEY_ID, "a-rotated-secret"),
+        vec![rig.root("project", PROJECT_DIGEST)],
+    );
+    assert_eq!(rotated_secret.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Open
+    );
+
+    let rotated_key = rig.worker_for(
+        rig.bedrock_host("AKIDROTATED", AWS_SECRET),
+        vec![rig.root("project", PROJECT_DIGEST)],
+    );
+    assert_eq!(rotated_key.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("identity_mismatch")
+    );
+
+    let invalid_region = Arc::new(Worker {
+        providers: Providers::at(rig.endpoint(), rig.endpoint(), "US_EAST_1"),
+        ..Arc::into_inner(rig.worker_for(
+            rig.bedrock_host(AWS_KEY_ID, AWS_SECRET),
+            vec![rig.root("project", PROJECT_DIGEST)],
+        ))
+        .unwrap()
+    });
+    assert_eq!(invalid_region.pass(&cancel).await, 0);
+    assert_eq!(
+        rig.status.reported().activation_state.0,
+        ActivationState::Closed("unavailable")
+    );
+    assert_eq!(rig.peer.connections.load(Ordering::SeqCst), 0);
+    // The derivation reads exactly the region and the key id.
+    assert_ne!(
+        bedrock_credential_identity(&CONNECTION_KEY, "us-west-2", AWS_KEY_ID),
+        bedrock_credential_identity(&CONNECTION_KEY, REGION, AWS_KEY_ID)
+    );
+    assert_ne!(
+        bedrock_credential_identity(&[8; 32], REGION, AWS_KEY_ID),
+        bedrock_credential_identity(&CONNECTION_KEY, REGION, AWS_KEY_ID)
+    );
 }

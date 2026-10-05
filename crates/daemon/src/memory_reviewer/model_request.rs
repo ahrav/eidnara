@@ -17,6 +17,7 @@ use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use serde::Serialize;
+use sha2::Digest;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
@@ -36,6 +37,22 @@ pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// The one startup-envelope credential this protocol may write into `x-api-key`; another provider's secret never reaches this host.
 pub const CREDENTIAL_NAME: &str = "ANTHROPIC_API_KEY";
+/// The Bedrock credential an activation record names: the access key id, whose secret and optional session token sign the request.
+pub const BEDROCK_CREDENTIAL_NAME: &str = "AWS_ACCESS_KEY_ID";
+/// The Anthropic Messages version Bedrock's `InvokeModel` body carries.
+pub const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
+pub const BEDROCK_PORT: u16 = 443;
+/// The SigV4 service name Bedrock signs under.
+pub const BEDROCK_SERVICE: &str = "bedrock";
+/// How long a signed request stays within the provider's clock-skew window: a request is signed at most this long before its attempt deadline, so the provider never judges a stale request time.
+pub const SIGNED_REQUEST_WINDOW_MS: i64 = 5 * 60 * 1000;
+const _: () = assert!(
+    memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_ATTEMPT_MAX_MS < SIGNED_REQUEST_WINDOW_MS
+);
+/// Longest region name accepted: one DNS label of the runtime host.
+pub const MAX_REGION_BYTES: usize = 63;
+/// Longest Bedrock model id or inference profile accepted.
+pub const MAX_MODEL_ID_BYTES: usize = 256;
 /// Serialized request bytes a send may carry.
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// Output tokens a request may ask for.
@@ -121,36 +138,86 @@ pub enum SendError {
     Decode(DecodeError),
     #[error("egress_check")]
     EgressCheck,
+    /// The region or model id cannot name a Bedrock endpoint.
+    #[error("endpoint")]
+    Endpoint,
+    /// The body handed for signing is not the body the marker's digest names, or another provider shaped it.
+    #[error("body_digest")]
+    BodyDigest,
+    /// The request time cannot be signed: outside the representable range, after the commit, or too far before the attempt deadline.
+    #[error("sign_time")]
+    SignTime,
 }
 
-/// A startup credential: the deployment owner's identifier for it and the secret. The identifier is what an approval and an attempt marker name; the secret is rendered only into the authentication header, `Debug` never shows it, and its bytes are wiped when the last copy drops. Keeping both in one value means the credential a marker records is the one the header carries.
+/// A startup credential: the deployment owner's identifier for it and its secret material. The identifier is what an approval and an attempt marker name; an API key is rendered only into its authentication header, and an AWS secret only into the signing key derivation, never onto the wire. `Debug` never shows the material, and its bytes are wiped when the last copy drops. Keeping both in one value means the credential a marker records is the one the request carries.
 #[derive(Clone)]
 pub struct Credential {
     id: String,
-    secret: Zeroizing<String>,
+    material: Material,
+}
+
+#[derive(Clone)]
+enum Material {
+    ApiKey(Zeroizing<String>),
+    Aws {
+        access_key_id: String,
+        secret_access_key: Zeroizing<String>,
+        session_token: Option<Zeroizing<String>>,
+    },
 }
 
 impl Credential {
-    /// Refuses an empty identifier or a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
+    /// An API key. Refuses an empty identifier or a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
     pub fn new(id: String, secret: String) -> Result<Self, SendError> {
         let secret = Zeroizing::new(secret);
         if id.is_empty() {
             return Err(SendError::Credential);
         }
         HeaderValue::from_str(&secret).map_err(|_| SendError::Credential)?;
-        Ok(Self { id, secret })
+        Ok(Self {
+            id,
+            material: Material::ApiKey(secret),
+        })
+    }
+
+    /// Static AWS credentials. Refuses an empty identifier, key id, or secret, and a key id or session token that cannot be a header value.
+    pub fn aws(
+        id: String,
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+    ) -> Result<Self, SendError> {
+        let secret_access_key = Zeroizing::new(secret_access_key);
+        // An empty token is no token: it is neither signed nor sent.
+        let session_token = session_token
+            .filter(|token| !token.is_empty())
+            .map(Zeroizing::new);
+        if id.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
+            return Err(SendError::Credential);
+        }
+        HeaderValue::from_str(&access_key_id).map_err(|_| SendError::Credential)?;
+        if let Some(token) = &session_token {
+            HeaderValue::from_str(token).map_err(|_| SendError::Credential)?;
+        }
+        Ok(Self {
+            id,
+            material: Material::Aws {
+                access_key_id,
+                secret_access_key,
+                session_token,
+            },
+        })
     }
 
     pub fn id(&self) -> &str {
         &self.id
     }
+}
 
-    fn header(&self) -> HeaderValue {
-        let mut value = HeaderValue::from_str(&self.secret)
-            .expect("Credential::new admits only a valid header value");
-        value.set_sensitive(true);
-        value
-    }
+fn sensitive(value: &str) -> Result<HeaderValue, SendError> {
+    let mut value = HeaderValue::from_str(value).map_err(|_| SendError::Credential)?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 impl std::fmt::Debug for Credential {
@@ -181,6 +248,17 @@ impl Endpoint {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(ANTHROPIC_HOST, ANTHROPIC_PORT, roots)
             .expect("the production host name is a valid server name")
+    }
+
+    /// The production Bedrock runtime endpoint of `region` over the webpki roots.
+    fn bedrock(region: &str) -> Result<Self, SendError> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Self::with_roots(
+            &format!("bedrock-runtime.{region}.amazonaws.com"),
+            BEDROCK_PORT,
+            roots,
+        )
     }
 
     /// A local peer for the sender proof; the roots are the test's own authority. Compiled only for tests.
@@ -229,6 +307,114 @@ pub struct Provider(ProviderKind);
 enum ProviderKind {
     /// Anthropic Messages on the fixed production host, or a test peer standing in for it.
     Anthropic(Arc<Endpoint>),
+    /// Bedrock `InvokeModel` for one model id in one region, signed with SigV4.
+    Bedrock(Bedrock),
+}
+
+#[derive(Debug, Clone)]
+struct Bedrock {
+    endpoint: Arc<Endpoint>,
+    region: String,
+    model_id: String,
+    /// The `InvokeModel` path with the model id encoded as one segment, as the wire carries it.
+    path: String,
+}
+
+/// Whether `region` can name a Bedrock region: one DNS label of lowercase letters, digits, and inner `-`.
+pub fn valid_region(region: &str) -> bool {
+    !region.is_empty()
+        && region.len() <= MAX_REGION_BYTES
+        && !region.starts_with('-')
+        && !region.ends_with('-')
+        && region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Whether `model_id` can name a Bedrock model or inference profile as one path segment: printable ASCII, at most [`MAX_MODEL_ID_BYTES`], and neither `.` nor `..`.
+pub fn valid_model_id(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id != "."
+        && model_id != ".."
+        && model_id.len() <= MAX_MODEL_ID_BYTES
+        && model_id
+            .bytes()
+            .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
+}
+
+/// `/model/<model id>/invoke` with every byte of the model id outside the unreserved set percent-encoded, so `:` and `/` stay inside the one segment.
+fn invoke_path(model_id: &str) -> Result<String, SendError> {
+    if !valid_model_id(model_id) {
+        return Err(SendError::Endpoint);
+    }
+    Ok(format!(
+        "/model/{}/invoke",
+        super::sigv4::canonical_uri(model_id).replace('/', "%2F")
+    ))
+}
+
+/// The providers a deployment can dial: Anthropic, and Bedrock in the region the startup envelope names, once an activation record names the model id it invokes. A region outside [`valid_region`] leaves Bedrock undialable for the life of the process.
+#[derive(Debug, Clone)]
+pub struct Providers {
+    anthropic: Provider,
+    bedrock: Option<(Arc<Endpoint>, String)>,
+}
+
+impl Providers {
+    /// The production endpoints, with Bedrock in `region` when it is valid.
+    pub fn production(region: Option<&str>) -> Self {
+        Self {
+            anthropic: Provider::anthropic(),
+            bedrock: region
+                .filter(|region| valid_region(region))
+                .and_then(|region| {
+                    Some((
+                        Arc::new(Endpoint::bedrock(region).ok()?),
+                        region.to_string(),
+                    ))
+                }),
+        }
+    }
+
+    /// Both providers on local peers for the sender proof; `region` is signed for as given. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn at(anthropic: Endpoint, bedrock: Endpoint, region: &str) -> Self {
+        Self {
+            anthropic: Provider::anthropic_at(anthropic),
+            bedrock: valid_region(region).then(|| (Arc::new(bedrock), region.to_string())),
+        }
+    }
+
+    pub fn anthropic(&self) -> &Provider {
+        &self.anthropic
+    }
+
+    /// Bedrock invoking `model_id`; refused when the startup region was invalid or absent, or the model id cannot be a path segment.
+    pub fn bedrock(&self, model_id: &str) -> Result<Provider, SendError> {
+        let (endpoint, region) = self.bedrock.as_ref().ok_or(SendError::Endpoint)?;
+        Provider::bedrock_with(endpoint.clone(), region, model_id)
+    }
+}
+
+impl Provider {
+    /// The credential this provider's requests carry, read from the startup envelope's rows by `row` and identified as `id`: the API key for Anthropic; the access key id, secret, and optional session token for Bedrock.
+    pub fn credential(
+        &self,
+        id: String,
+        row: impl Fn(&str) -> Option<String>,
+    ) -> Result<Credential, SendError> {
+        match &self.0 {
+            ProviderKind::Anthropic(_) => {
+                Credential::new(id, row(CREDENTIAL_NAME).ok_or(SendError::Credential)?)
+            }
+            ProviderKind::Bedrock(_) => Credential::aws(
+                id,
+                row(BEDROCK_CREDENTIAL_NAME).ok_or(SendError::Credential)?,
+                row("AWS_SECRET_ACCESS_KEY").ok_or(SendError::Credential)?,
+                row("AWS_SESSION_TOKEN"),
+            ),
+        }
+    }
 }
 
 impl Provider {
@@ -243,14 +429,37 @@ impl Provider {
         Self(ProviderKind::Anthropic(Arc::new(endpoint)))
     }
 
+    /// Bedrock on a local peer for the sender proof. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bedrock_at(endpoint: Endpoint, region: &str, model_id: &str) -> Result<Self, SendError> {
+        if !valid_region(region) {
+            return Err(SendError::Endpoint);
+        }
+        Self::bedrock_with(Arc::new(endpoint), region, model_id)
+    }
+
+    fn bedrock_with(
+        endpoint: Arc<Endpoint>,
+        region: &str,
+        model_id: &str,
+    ) -> Result<Self, SendError> {
+        Ok(Self(ProviderKind::Bedrock(Bedrock {
+            endpoint,
+            region: region.to_string(),
+            model_id: model_id.to_string(),
+            path: invoke_path(model_id)?,
+        })))
+    }
+
     fn endpoint(&self) -> &Endpoint {
         match &self.0 {
             ProviderKind::Anthropic(endpoint) => endpoint,
+            ProviderKind::Bedrock(bedrock) => &bedrock.endpoint,
         }
     }
 
     /// The provider identity a disclosure marker and an approval record: the host this provider
-    /// dials, the API surface, and the API version it speaks.
+    /// dials, the API surface (for Bedrock, the model id it invokes), and the API version it speaks.
     pub fn identity(&self) -> String {
         match &self.0 {
             ProviderKind::Anthropic(endpoint) => [
@@ -260,29 +469,39 @@ impl Provider {
                 ANTHROPIC_VERSION,
             ]
             .concat(),
+            ProviderKind::Bedrock(bedrock) => [
+                bedrock.endpoint.host.as_str(),
+                "/model/",
+                bedrock.model_id.as_str(),
+                "/invoke@",
+                BEDROCK_ANTHROPIC_VERSION,
+            ]
+            .concat(),
         }
     }
 
-    /// The one startup-envelope credential this provider's protocol carries; another
+    /// The one startup-envelope credential an activation record names for this provider; another
     /// provider's secret never reaches its host.
     pub fn credential_name(&self) -> &'static str {
         match &self.0 {
             ProviderKind::Anthropic(_) => CREDENTIAL_NAME,
+            ProviderKind::Bedrock(_) => BEDROCK_CREDENTIAL_NAME,
         }
     }
 
-    /// The model a response must report for its text to be released when `requested` was asked
-    /// for. Anthropic reports the requested model id itself.
+    /// The model a response must report for its text to be released when `requested`, the
+    /// record's `model`, was asked for. Both providers report it: Anthropic the model id the body
+    /// names, and Bedrock the base model behind the path's model id.
     pub fn expected_model<'a>(&self, requested: &'a str) -> &'a str {
         match &self.0 {
-            ProviderKind::Anthropic(_) => requested,
+            ProviderKind::Anthropic(_) | ProviderKind::Bedrock(_) => requested,
         }
     }
 
     /// The serialized body this provider accepts for `request`, refused when it asks for more
     /// output than [`MAX_OUTPUT_TOKENS`], exceeds [`MAX_REQUEST_BYTES`], or carries a temperature
     /// JSON cannot represent exactly (non-finite) or the provider does not accept (outside
-    /// `0.0..=1.0`).
+    /// `0.0..=1.0`). Bedrock's body names no model and no stream; its path names the model.
     fn body(&self, request: &MessagesRequest) -> Result<RequestBody, SendError> {
         if request.max_tokens == 0 || request.max_tokens > MAX_OUTPUT_TOKENS {
             return Err(SendError::OutputTokens);
@@ -302,6 +521,13 @@ impl Provider {
                 temperature: request.temperature,
                 stream: false,
             }),
+            ProviderKind::Bedrock(_) => serde_json::to_vec(&BedrockWireRequest {
+                anthropic_version: BEDROCK_ANTHROPIC_VERSION,
+                system: request.system.as_deref(),
+                messages: &request.messages,
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+            }),
         }
         .map_err(|_| SendError::RequestTooLarge)?;
         if body.len() > MAX_REQUEST_BYTES {
@@ -310,35 +536,102 @@ impl Provider {
         Ok(RequestBody {
             bytes: body,
             max_tokens: request.max_tokens,
+            bedrock: matches!(self.0, ProviderKind::Bedrock(_)),
         })
     }
 
-    /// The one request carrying `body`, with this provider's host, authentication, and version
-    /// headers; the credential is written into its authentication header and nowhere else.
+    /// The one request carrying `body`, signed or authenticated as this provider requires at
+    /// `at_ms`. An API key is written into `x-api-key` and nowhere else; AWS credentials sign
+    /// the method, the path, `content-type`, `host`, `x-amz-content-sha256` (the body's digest,
+    /// which must equal `body_digest`), `x-amz-date`, and the session token when there is one,
+    /// and only the access key id and the signature reach the wire. A credential of another
+    /// provider's kind is refused.
     fn request(
         &self,
         body: RequestBody,
+        body_digest: &str,
+        at_ms: i64,
         credential: &Credential,
     ) -> Result<Request<Body>, SendError> {
-        let builder = Request::post(Uri::from_static(MESSAGES_PATH))
-            .header(header::HOST, self.endpoint().host.as_str())
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )
+        if format!("{:x}", sha2::Sha256::digest(&body.bytes)) != body_digest
+            || body.bedrock != matches!(self.0, ProviderKind::Bedrock(_))
+        {
+            return Err(SendError::BodyDigest);
+        }
+        let host = self.endpoint().host.as_str();
+        let uri = match &self.0 {
+            ProviderKind::Anthropic(_) => Uri::from_static(MESSAGES_PATH),
+            ProviderKind::Bedrock(bedrock) => {
+                Uri::try_from(bedrock.path.as_str()).map_err(|_| SendError::Endpoint)?
+            }
+        };
+        let builder = Request::post(uri)
             .header(header::ACCEPT, HeaderValue::from_static("application/json"))
             .header(
                 header::ACCEPT_ENCODING,
                 HeaderValue::from_static("identity"),
             )
             .header(header::CONNECTION, HeaderValue::from_static("close"));
-        let builder = match &self.0 {
-            ProviderKind::Anthropic(_) => builder
-                .header(HeaderName::from_static("x-api-key"), credential.header())
+        let builder = match (&self.0, &credential.material) {
+            (ProviderKind::Anthropic(_), Material::ApiKey(key)) => builder
+                .header(header::HOST, host)
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )
+                .header(HeaderName::from_static("x-api-key"), sensitive(key)?)
                 .header(
                     HeaderName::from_static("anthropic-version"),
                     HeaderValue::from_static(ANTHROPIC_VERSION),
                 ),
+            (
+                ProviderKind::Bedrock(bedrock),
+                Material::Aws {
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                },
+            ) => {
+                let time = super::sigv4::RequestTime::at(at_ms).ok_or(SendError::SignTime)?;
+                // The one list of signed headers: the signature covers it, and the request carries it.
+                let mut signed = vec![
+                    ("content-type", "application/json"),
+                    ("host", host),
+                    ("x-amz-content-sha256", body_digest),
+                    ("x-amz-date", time.amz_date.as_str()),
+                ];
+                if let Some(token) = session_token {
+                    signed.push(("x-amz-security-token", token.as_str()));
+                }
+                let uri = super::sigv4::canonical_uri(&bedrock.path);
+                let (canonical, signed_headers) = super::sigv4::Request {
+                    method: "POST",
+                    canonical_uri: &uri,
+                    canonical_query: "",
+                    headers: &signed,
+                    payload_sha256: body_digest,
+                }
+                .canonical();
+                let scope = super::sigv4::Scope {
+                    date: time.date(),
+                    region: &bedrock.region,
+                    service: BEDROCK_SERVICE,
+                };
+                let to_sign = super::sigv4::string_to_sign(&time, &scope, &canonical);
+                let signature = super::sigv4::signature(secret_access_key, &scope, &to_sign);
+                let authorization =
+                    super::sigv4::authorization(access_key_id, &scope, &signed_headers, &signature);
+                let mut builder = builder.header(header::AUTHORIZATION, sensitive(&authorization)?);
+                for (name, value) in signed {
+                    builder = if name == "x-amz-security-token" {
+                        builder.header(name, sensitive(value)?)
+                    } else {
+                        builder.header(name, value)
+                    };
+                }
+                builder
+            }
+            _ => return Err(SendError::Credential),
         };
         builder
             .body(Full::new(Bytes::from(body.bytes)))
@@ -381,11 +674,24 @@ struct WireRequest<'a> {
     stream: bool,
 }
 
+#[derive(Serialize)]
+struct BedrockWireRequest<'a> {
+    anthropic_version: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a str>,
+    messages: &'a [Message],
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+}
+
 /// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with the `max_tokens` the bytes ask for, which sizes the completion budget. Only [`Sender::body`] produces one, so a handoff cannot carry bytes the bounds never saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestBody {
     bytes: Vec<u8>,
     max_tokens: u32,
+    /// Whether a Bedrock provider shaped the bytes; a body is sent only by a provider of its own shape.
+    bedrock: bool,
 }
 
 impl RequestBody {
@@ -528,47 +834,99 @@ impl std::fmt::Debug for Connected {
 }
 
 impl Connected {
-    /// The one-shot handoff: synchronously moves the already serialized `body` into the connection's dispatch queue and returns the in-flight send. The caller serializes and bounds the body beforehand ([`Sender::body`]), so the bytes it hashed are the bytes sent and nothing is encoded here. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
-    pub fn handoff(mut self, body: RequestBody) -> Result<InFlight, SendError> {
+    /// Builds the one request this connection will carry: `body`, whose SHA-256 must be `body_digest`, authenticated or signed as the provider requires at `at_ms`. Every header is computed here and nothing is written to the peer; a signed request that is never handed off is dropped with the connection.
+    pub fn sign(
+        self,
+        body: RequestBody,
+        body_digest: &str,
+        at_ms: i64,
+    ) -> Result<Signed, SendError> {
         let max_tokens = body.max_tokens;
-        let wire = self.provider.request(body, &self.credential)?;
-        // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
-        let response = Box::pin(self.send.try_send_request(wire));
-        Ok(InFlight {
+        let request = self
+            .provider
+            .request(body, body_digest, at_ms, &self.credential)?;
+        Ok(Signed {
+            send: self.send,
             connection: self.connection,
-            response,
+            request,
+            signed_at_ms: at_ms,
             timing: self.timing,
             max_tokens,
         })
     }
 }
 
-type ResponseFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<
-                    Response<Incoming>,
-                    hyper::client::conn::TrySendError<Request<Body>>,
-                >,
-            > + Send,
-    >,
->;
+impl Connected {
+    /// [`Self::sign`] over `body`'s own digest at the wall clock, for the sender proof. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sign_now(self, body: RequestBody) -> Result<Signed, SendError> {
+        let digest = format!("{:x}", sha2::Sha256::digest(body.as_bytes()));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            });
+        self.sign(body, &digest, now_ms)
+    }
+}
 
-/// A request the connection holds but has not yet written.
-pub struct InFlight {
+/// A connection and the request it will carry, signed but not yet handed off.
+pub struct Signed {
+    send: SendRequest<Body>,
     connection: Connection<Transport, Body>,
-    response: ResponseFuture,
+    request: Request<Body>,
+    signed_at_ms: i64,
     timing: Timing,
     max_tokens: u32,
 }
 
-impl std::fmt::Debug for InFlight {
+impl std::fmt::Debug for Signed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Signed(at {})", self.signed_at_ms)
+    }
+}
+
+impl Signed {
+    /// The one-shot handoff: synchronously moves the signed request into the connection's dispatch queue and returns the in-flight send. Signing computed every header and the body was bounded beforehand ([`Sender::body`]), so the handoff encodes and builds nothing. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
+    pub fn handoff(
+        mut self,
+    ) -> Result<
+        InFlight<
+            impl std::future::Future<Output = Result<Response<Incoming>, TrySendError>> + Send,
+        >,
+        SendError,
+    > {
+        // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
+        let response = self.send.try_send_request(self.request);
+        Ok(InFlight {
+            connection: self.connection,
+            response,
+            timing: self.timing,
+            max_tokens: self.max_tokens,
+        })
+    }
+}
+
+type TrySendError = hyper::client::conn::TrySendError<Request<Body>>;
+
+/// A request the connection holds but has not yet written.
+pub struct InFlight<F> {
+    connection: Connection<Transport, Body>,
+    response: F,
+    timing: Timing,
+    max_tokens: u32,
+}
+
+impl<F> std::fmt::Debug for InFlight<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("InFlight")
     }
 }
 
-impl InFlight {
+impl<F> InFlight<F>
+where
+    F: std::future::Future<Output = Result<Response<Incoming>, TrySendError>>,
+{
     /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`Timing::completion_budget`] for the request's `max_tokens`, with at most [`Timing::frame_idle`] between body frames. The connection is dropped afterwards whatever the outcome; there is no second attempt. The body is charged against `allowance` chunk by chunk before it is kept and the text against it before it is allocated; `accounting` is the caller's and holds what was consumed whether the exchange completes, refuses, times out, or is dropped.
     pub async fn complete(
         self,
@@ -578,10 +936,11 @@ impl InFlight {
     ) -> Result<AssistantText, SendError> {
         let InFlight {
             mut connection,
-            mut response,
+            response,
             timing,
             max_tokens,
         } = self;
+        let mut response = std::pin::pin!(response);
         let raw_bound = usize::try_from(allowance.raw_response_bytes)
             .unwrap_or(usize::MAX)
             .min(MAX_RAW_RESPONSE_BYTES);
@@ -589,7 +948,7 @@ impl InFlight {
         let exchange = async {
             // The connection may finish in the same poll that delivers the response; a finished connection is never polled again, and the response it already delivered is taken from the future.
             let mut connection_done = false;
-            let unsent = |error: hyper::client::conn::TrySendError<Request<Body>>| {
+            let unsent = |error: TrySendError| {
                 let mut error = error;
                 if error.take_message().is_some() {
                     SendError::NotReady

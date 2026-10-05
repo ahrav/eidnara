@@ -371,7 +371,8 @@ async fn send(sender: &Sender, request: &MessagesRequest) -> Result<String, Send
     sender
         .connect(deadline)
         .await?
-        .handoff(sender.body(request)?)?
+        .sign_now(sender.body(request)?)?
+        .handoff()?
         .complete(
             deadline,
             ResponseAllowance::FULL,

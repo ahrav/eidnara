@@ -28,7 +28,7 @@ use super::coordinator::{
 };
 use super::disclosure::ModelProfile;
 use super::lifecycle::{ActivationState, MemoryReviewerStatus};
-use super::model_request::{Credential, Provider, Sender};
+use super::model_request::{Provider, Providers, Sender};
 use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use super::settlement::TaskClaim;
 
@@ -93,7 +93,7 @@ pub struct Worker {
     pub projects: Arc<dyn Fn() -> Vec<ProjectRoute> + Send + Sync>,
     pub status: Arc<MemoryReviewerStatus>,
     pub permits: Arc<InvestigationPermits>,
-    pub provider: Provider,
+    pub providers: Providers,
     pub rejection: RejectionLatch,
 }
 
@@ -151,7 +151,11 @@ pub(crate) fn ready_kernel(kernel: &KernelOpenCoordinator) -> Option<Arc<kernel:
 }
 
 impl Worker {
-    fn live_identity(&self, kernel: &kernel::KernelStore) -> Option<LiveIdentity> {
+    fn live_identity(
+        &self,
+        kernel: &kernel::KernelStore,
+        provider: &Provider,
+    ) -> Option<LiveIdentity> {
         let budget = kernel::applicability::EvalBudget::new(
             Some(std::time::Instant::now() + Duration::from_secs(5)),
             Arc::default(),
@@ -163,7 +167,7 @@ impl Worker {
             memstore_baseline_digest: memory_store::baseline_digest(),
             kernel_incarnation,
             memstore_incarnation,
-            provider: self.provider.identity(),
+            provider: provider.identity(),
             // Only the credential the provider's protocol carries can vouch for it; a record naming another provider's secret reads as an unknown credential.
             credentials: self
                 .host
@@ -171,20 +175,35 @@ impl Worker {
                 .get()?
                 .iter()
                 .filter(|(name, _)| {
-                    *name == self.provider.credential_name()
-                        && self.host.credentials.contains_key(*name)
+                    *name == provider.credential_name() && self.host.credentials.contains_key(*name)
                 })
                 .map(|(name, identity)| (name.clone(), identity.clone()))
                 .collect(),
         })
     }
 
-    fn gate(&self, kernel: &kernel::KernelStore) -> Result<Activation, Closed> {
-        let live = self.live_identity(kernel);
-        let gate = match &live {
-            Some(live) => activation::read_gate(&self.home, live),
-            None => Err(Closed::Unreadable("store identity".to_string())),
-        };
+    /// The provider a record names: Anthropic for schema 1, and Bedrock invoking the record's model id in the startup region for schema 2.
+    fn provider_for(&self, record: &activation::RuntimeIdentityRecord) -> Result<Provider, Closed> {
+        match &record.model_id {
+            None => Ok(self.providers.anthropic().clone()),
+            Some(model_id) => self
+                .providers
+                .bedrock(model_id)
+                .map_err(|_| Closed::Undialable("bedrock region or model id")),
+        }
+    }
+
+    fn gate(&self, kernel: &kernel::KernelStore) -> Result<(Activation, Provider), Closed> {
+        let mut live = None;
+        let gate = activation::read_record(&self.home).and_then(|record| {
+            let provider = self.provider_for(&record)?;
+            let identity = self
+                .live_identity(kernel, &provider)
+                .ok_or_else(|| Closed::Unreadable("store identity".to_string()))?;
+            let activation = activation::evaluate(&record, &identity);
+            live = Some(identity);
+            Ok((activation?, provider))
+        });
         match &gate {
             Ok(_) => self.status.set_activation(ActivationState::Open),
             Err(closed) => {
@@ -204,7 +223,7 @@ impl Worker {
     async fn gate_off_runtime(
         self: &Arc<Self>,
         kernel: &Arc<kernel::KernelStore>,
-    ) -> Result<Activation, Closed> {
+    ) -> Result<(Activation, Provider), Closed> {
         let worker = Arc::clone(self);
         let kernel = Arc::clone(kernel);
         tokio::task::spawn_blocking(move || worker.gate(&kernel))
@@ -242,19 +261,18 @@ impl Worker {
             self.status.set_activation(ActivationState::Closed("store"));
             return 0;
         };
-        let activation = match self.gate_off_runtime(&kernel).await {
-            Ok(activation) => activation,
+        let (activation, provider) = match self.gate_off_runtime(&kernel).await {
+            Ok(gate) => gate,
             Err(_) => return 0,
         };
-        let Some(secret) = self.host.credentials.get(&activation.credential) else {
-            self.status
-                .set_activation(ActivationState::Closed("unknown_credential"));
-            return 0;
-        };
-        let Ok(credential) = Credential::new(
-            activation.approval.credential_id.clone(),
-            secret.to_string(),
-        ) else {
+        let Ok(credential) =
+            provider.credential(activation.approval.credential_id.clone(), |name| {
+                self.host
+                    .credentials
+                    .get(name)
+                    .map(|value| value.to_string())
+            })
+        else {
             self.status
                 .set_activation(ActivationState::Closed("unknown_credential"));
             return 0;
@@ -263,7 +281,7 @@ impl Worker {
             store: Arc::clone(&kernel),
             ledger: Arc::clone(&self.store),
             supervisor: Arc::clone(&self.host.supervisor),
-            sender: Arc::new(Sender::new(self.provider.clone(), credential)),
+            sender: Arc::new(Sender::new(provider, credential)),
             approval: Some(activation.approval.clone()),
             profile: ModelProfile {
                 model: activation.approval.model.clone(),
@@ -311,7 +329,13 @@ impl Worker {
                     break;
                 }
                 // The owner can withdraw the record between jobs; a gate that closed or changed since the pass began admits no further run under the pass's approval.
-                if self.gate_off_runtime(&kernel).await.as_ref() != Ok(&activation) {
+                if self
+                    .gate_off_runtime(&kernel)
+                    .await
+                    .map(|(current, _)| current)
+                    .as_ref()
+                    != Ok(&activation)
+                {
                     return settled;
                 }
                 let outcome = self

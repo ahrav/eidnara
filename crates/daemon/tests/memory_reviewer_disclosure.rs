@@ -15,9 +15,11 @@ use daemon::memory_reviewer::broker::{
 };
 use daemon::memory_reviewer::disclosure::{
     Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, PreparedBody, prepare_body,
+    signing_window_admits,
 };
 use daemon::memory_reviewer::model_request::{
-    ANTHROPIC_VERSION, Credential, MESSAGES_PATH, Provider, SendError, Sender,
+    ANTHROPIC_VERSION, Credential, MESSAGES_PATH, Provider, SIGNED_REQUEST_WINDOW_MS, SendError,
+    Sender,
 };
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
@@ -1564,4 +1566,88 @@ fn the_system_buffer_must_be_host_authored() {
         prepare_body(&broker, &shaper(), &profile(), evidence, Vec::new()).unwrap_err(),
         DisclosureRefusal::SystemNotHostAuthored
     );
+}
+
+/// A clock that reads `base` plus its call count, shifted by `shift` from call `from` on, so a test can step it at the commit.
+fn stepping_clock(base: i64, from: usize, shift: i64) -> impl Fn() -> i64 + Sync {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    move || {
+        let call = calls.fetch_add(1, Ordering::SeqCst);
+        let at = base + i64::try_from(call).unwrap();
+        if call >= from { at + shift } else { at }
+    }
+}
+
+/// The request is signed at the attempt's clock just before the commit. A clock that steps backward at the commit, so the commit reads earlier than the signature, withholds the signed request unwritten and ends the attempt charged. A forward step large enough to carry the attempt deadline past the skew window first outlives the claim's lease, which the commit refuses; the window itself is checked on the predicate.
+#[tokio::test]
+async fn a_signature_outside_the_commit_window_is_dropped_unwritten() {
+    let fixture = Fixture::open();
+    let (broker, turn) = fixture.broker();
+    let prepared = fixture.prepared(&broker, turn);
+    let base = fixture.now + 10;
+    // A probe attempt under a clock that counts its calls finds the call the commit reads.
+    let mut peer = Peer::start().await;
+    let server = peer.serve(no_wait(), |_| answer(MODEL));
+    let probe = stepping_clock(base, usize::MAX, 0);
+    attempt(
+        &fixture,
+        &peer,
+        &broker,
+        &prepared,
+        Some(&fixture.approval()),
+        &probe,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+    let commit_call = usize::try_from(fixture.attempts()[0].committed_at_ms - base).unwrap();
+    for (run, shift) in [(1, -2), (2, -5)] {
+        let mut peer = Peer::start().await;
+        let server = peer.serve(no_wait(), |_| answer(MODEL));
+        let clock = stepping_clock(base + run * 1_000, commit_call, shift);
+        let refusal = attempt(
+            &fixture,
+            &peer,
+            &broker,
+            &prepared,
+            Some(&fixture.approval()),
+            &clock,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                refusal,
+                DisclosureRefusal::Send {
+                    error: SendError::SignTime,
+                    sent: false,
+                    ..
+                }
+            ),
+            "{shift}: {refusal:?}"
+        );
+        let observed = server.await.unwrap();
+        assert!(
+            observed.head.is_empty(),
+            "{shift}: nothing reached the peer"
+        );
+        assert_eq!(
+            fixture
+                .attempts()
+                .last()
+                .unwrap()
+                .terminal
+                .map(|(terminal, _)| terminal),
+            Some(MemoryReviewerAttemptTerminal::Failed)
+        );
+    }
+    assert!(signing_window_admits(10, 10, 10 + SIGNED_REQUEST_WINDOW_MS));
+    assert!(!signing_window_admits(11, 10, 20));
+    assert!(!signing_window_admits(
+        10,
+        10,
+        11 + SIGNED_REQUEST_WINDOW_MS
+    ));
 }

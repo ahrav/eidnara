@@ -15,6 +15,7 @@ pub mod project_text;
 pub mod related_memories;
 pub mod selection;
 pub mod settlement;
+pub mod sigv4;
 pub mod steps;
 pub(crate) mod wire;
 pub mod worker;

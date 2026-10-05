@@ -14,6 +14,8 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use daemon::memory_reviewer::activation::bedrock_credential_identity;
+use daemon::memory_reviewer::model_request::{BEDROCK_CREDENTIAL_NAME, valid_region};
 use hmac::{Hmac, Mac};
 use host_runtime::generation::{GenerationStore, ValidatedGeneration};
 use host_runtime::harness_closure::{
@@ -355,17 +357,25 @@ fn merge_selection(
     if let Some(pi) = pi {
         selection.pi = Some(pi);
     }
+    // The Bedrock identity follows the access key id, which rotates, so neither comparison reads it.
+    let compared = |identities: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+        identities
+            .iter()
+            .filter(|(name, _)| name.as_str() != BEDROCK_CREDENTIAL_NAME)
+            .map(|(name, identity)| (name.clone(), identity.clone()))
+            .collect()
+    };
+    let current = compared(&credential_identities);
     let changed = selection.opencode != previous.opencode
         || selection.pi != previous.pi
-        || credential_identities != previous.credential_identities;
+        || current != compared(&previous.credential_identities);
     if require_previous_credentials && changed {
         return Err("restart cannot change the active harness selection");
     }
     if changed
-        && previous
-            .credential_identities
+        && compared(&previous.credential_identities)
             .iter()
-            .any(|(name, identity)| credential_identities.get(name) != Some(identity))
+            .any(|(name, identity)| current.get(name) != Some(identity))
     {
         return Err("new owner cannot preserve the active credential source");
     }
@@ -385,6 +395,17 @@ fn credential_identities(
     connection_key: &[u8; 32],
 ) -> BTreeMap<String, String> {
     let derived = hmac_sha256(connection_key, &[ACTIVE_SELECTION_CREDENTIAL_DOMAIN]);
+    // The Bedrock entry an activation record names: region and access key id under the Bedrock domain.
+    let bedrock = match (
+        credentials.get(BEDROCK_CREDENTIAL_NAME),
+        credentials.get("AWS_REGION"),
+    ) {
+        (Some(access_key_id), Some(region)) if valid_region(region) => Some((
+            BEDROCK_CREDENTIAL_NAME.to_string(),
+            bedrock_credential_identity(connection_key, region, access_key_id),
+        )),
+        _ => None,
+    };
     credentials
         .iter()
         // Static AWS credentials rotate; keying on them would refuse a start with rotated values.
@@ -404,6 +425,7 @@ fn credential_identities(
             }
             (name.clone(), identity)
         })
+        .chain(bedrock)
         .collect()
 }
 
@@ -1474,7 +1496,7 @@ mod tests {
         );
     }
 
-    /// AWS credentials do not identify a running daemon because they can rotate.
+    /// Rotating AWS credentials never changes the selection a running daemon compares: the selection records the Bedrock identity an activation record names, region and access key id under the start's key, and neither restart comparison reads it.
     #[test]
     fn rotating_static_credentials_do_not_enter_the_active_selection_identity() {
         let key = [13; 32];
@@ -1489,8 +1511,13 @@ mod tests {
         let identities = credential_identities(&previous_credentials, &key);
         assert_eq!(
             identities.keys().collect::<Vec<_>>(),
-            ["ANTHROPIC_API_KEY"],
-            "only direct API keys form the daemon's identity"
+            ["ANTHROPIC_API_KEY", "AWS_ACCESS_KEY_ID"],
+            "direct API keys and the Bedrock identity are recorded"
+        );
+        assert_eq!(
+            identities["AWS_ACCESS_KEY_ID"],
+            bedrock_credential_identity(&key, "us-west-2", "ASIA-first"),
+            "the Bedrock identity reads the region and key id, never the secret or token"
         );
         let previous = HarnessSelection {
             schema: 1,
@@ -1517,7 +1544,19 @@ mod tests {
             !changed,
             "rotated AWS credentials are not a selection change"
         );
-        assert_eq!(merged.credential_identities, previous.credential_identities);
+        assert_eq!(
+            merged.credential_identities,
+            credential_identities(&rotated, &key),
+            "the selection records the identity of the credentials this start carries"
+        );
+        merge_selection(
+            &previous,
+            None,
+            None,
+            credential_identities(&rotated, &key),
+            true,
+        )
+        .expect("a restart with rotated AWS credentials keeps the selection");
         let without_aws = BTreeMap::from([owned("ANTHROPIC_API_KEY", "shared-secret")]);
         let (_, changed) = merge_selection(
             &previous,
@@ -1540,6 +1579,44 @@ mod tests {
             .is_err(),
             "a changed direct API key is still refused"
         );
+    }
+
+    /// The Bedrock entry exists exactly when the region is valid, and a restart merges whether the previous selection, as an older binary wrote it, lacks the entry or the new start drops it.
+    #[test]
+    fn the_bedrock_entry_follows_a_valid_region_and_never_refuses_a_restart() {
+        let key = [17; 32];
+        let owned = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+        let with_region = |region: &str| {
+            BTreeMap::from([
+                owned("ANTHROPIC_API_KEY", "shared-secret"),
+                owned("AWS_ACCESS_KEY_ID", "AKID"),
+                owned("AWS_SECRET_ACCESS_KEY", "secret"),
+                owned("AWS_REGION", region),
+            ])
+        };
+        assert!(
+            !credential_identities(&with_region("US_EAST_1"), &key)
+                .contains_key(BEDROCK_CREDENTIAL_NAME),
+            "an invalid region leaves no Bedrock entry"
+        );
+        let current = credential_identities(&with_region("us-east-1"), &key);
+        assert!(current.contains_key(BEDROCK_CREDENTIAL_NAME));
+        let older = BTreeMap::from([(
+            "ANTHROPIC_API_KEY".to_owned(),
+            current["ANTHROPIC_API_KEY"].clone(),
+        )]);
+        for (previous, next) in [(older.clone(), current.clone()), (current, older)] {
+            let selection = HarnessSelection {
+                schema: 1,
+                opencode: Some("a".repeat(64)),
+                pi: None,
+                credential_identities: previous,
+            };
+            let (merged, changed) = merge_selection(&selection, None, None, next.clone(), true)
+                .expect("the Bedrock entry never refuses a restart");
+            assert!(!changed);
+            assert_eq!(merged.credential_identities, next);
+        }
     }
 
     #[test]

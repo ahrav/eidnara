@@ -58,6 +58,7 @@ impl From<&super::activation::Closed> for ActivationState {
             Closed::IdentityMismatch(_) => "identity_mismatch",
             Closed::Unacknowledged => "unacknowledged",
             Closed::UnknownCredential => "unknown_credential",
+            Closed::Undialable(_) => "unavailable",
         })
     }
 }
