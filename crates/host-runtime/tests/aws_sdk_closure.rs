@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -52,35 +52,13 @@ fn resolved_aws_closure_matches_the_pins() {
     for (name, version) in PINNED {
         assert_eq!(versions.get(name), Some(&vec![*version]), "{name}");
     }
-    let nodes = metadata["resolve"]["nodes"].as_array().expect("nodes");
-    let host_runtime = nodes
-        .iter()
-        .find(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.contains("host-runtime"))
-        })
-        .expect("host-runtime node");
-    let mut pending = vec![host_runtime];
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(node) = pending.pop() {
-        for dep in node["deps"].as_array().expect("deps") {
-            let normal = dep["dep_kinds"]
-                .as_array()
-                .expect("dep kinds")
-                .iter()
-                .any(|kind| kind["kind"].is_null());
-            let id = dep["pkg"].as_str().expect("pkg");
-            if normal && seen.insert(id) {
-                let name = dep["name"].as_str().expect("dep name").replace('_', "-");
-                assert!(
-                    !NETWORK_CRATES.contains(&name.as_str()),
-                    "host-runtime reaches {name}"
-                );
-                pending.push(nodes.iter().find(|n| n["id"] == id).expect("dep node"));
-            }
-        }
+    for name in normal_closure(&metadata, "host-runtime") {
+        assert!(
+            !NETWORK_CRATES.contains(&name.as_str()),
+            "host-runtime reaches {name}"
+        );
     }
+    let nodes = metadata["resolve"]["nodes"].as_array().expect("nodes");
     for node in nodes {
         let id = node["id"].as_str().expect("id");
         if !id.contains("aws-") {
@@ -94,4 +72,63 @@ fn resolved_aws_closure_matches_the_pins() {
             );
         }
     }
+}
+
+/// A dependency entry's `name` is the depending crate's alias, so package names come
+/// from `packages` by id.
+fn normal_closure(metadata: &Value, root: &str) -> Vec<String> {
+    let package_names: BTreeMap<&str, &str> = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .map(|package| {
+            let id = package["id"].as_str().expect("package id");
+            (id, package["name"].as_str().expect("package name"))
+        })
+        .collect();
+    let nodes = metadata["resolve"]["nodes"].as_array().expect("nodes");
+    let root = nodes
+        .iter()
+        .find(|node| node["id"].as_str().is_some_and(|id| id.contains(root)))
+        .expect("root node");
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut names = Vec::new();
+    while let Some(node) = pending.pop() {
+        for dep in node["deps"].as_array().expect("deps") {
+            let normal = dep["dep_kinds"]
+                .as_array()
+                .expect("dep kinds")
+                .iter()
+                .any(|kind| kind["kind"].is_null());
+            let id = dep["pkg"].as_str().expect("pkg");
+            if normal && seen.insert(id) {
+                names.push(package_names[id].to_owned());
+                pending.push(nodes.iter().find(|n| n["id"] == id).expect("dep node"));
+            }
+        }
+    }
+    names
+}
+
+#[test]
+fn closure_names_renamed_dependencies_by_package() {
+    let metadata = serde_json::json!({
+        "packages": [
+            { "id": "path+file:///w/crates/host-runtime#0.1.0", "name": "host-runtime" },
+            { "id": "registry+https://x#hyper@1.0.0", "name": "hyper" },
+        ],
+        "resolve": { "nodes": [
+            {
+                "id": "path+file:///w/crates/host-runtime#0.1.0",
+                "deps": [{
+                    "name": "net_client",
+                    "pkg": "registry+https://x#hyper@1.0.0",
+                    "dep_kinds": [{ "kind": null }],
+                }],
+            },
+            { "id": "registry+https://x#hyper@1.0.0", "deps": [] },
+        ] },
+    });
+    assert_eq!(normal_closure(&metadata, "host-runtime"), ["hyper"]);
 }
