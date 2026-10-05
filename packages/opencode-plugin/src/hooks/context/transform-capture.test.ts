@@ -302,27 +302,6 @@ describe("referenceable JSON domain guard", () => {
         expect(bare.messageWireBytes[1]).toBe(full.messageWireBytes[1]);
     });
 
-    it("bounds each message's UTF-8 JSON length, three-byte text and keys included", () => {
-        const wide = {
-            ...message("m1"),
-            text: `\u6f22\u5b57 ${"\u4e2d".repeat(1_000)} \u20ac \u00e9 \ud83d\ude00 "q" \n`,
-            "\u540d\u524d": "\u30c6\u30b9\u30c8",
-        };
-        const source = [wide, message("m2")];
-        const result = inspectReferenceableMessages(source);
-        if (!result.ok) throw new Error("fixture rejected");
-        for (const [index, value] of source.entries()) {
-            const utf8 = Buffer.byteLength(JSON.stringify(value));
-            expect(result.messageUtf8Bytes[index] ?? 0).toBeGreaterThanOrEqual(utf8);
-            expect(result.messageUtf8Bytes[index] ?? 0).toBeGreaterThanOrEqual(
-                result.messageWireBytes[index] ?? 0,
-            );
-        }
-        expect(result.messageWireBytes[0] ?? 0).toBeLessThan(
-            Buffer.byteLength(JSON.stringify(wide)),
-        );
-    });
-
     it("rejects an accessor without invoking it", () => {
         const counter = trapCounter();
         const hooked = message("m1");

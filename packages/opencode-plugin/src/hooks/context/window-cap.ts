@@ -27,19 +27,19 @@ export function withinHalfCap(size: TransformWindowSize): boolean {
  * The CK blocks the daemon counts for one OpenCode message: the request carries the blocks
  * `encodeOpenCodeMessagesToCk` builds, and a synthetic message's blocks are not counted.
  */
-function openCodeBlocks(message: unknown): number {
+function openCodeBlocks(message: unknown): unknown[] {
     const [encoded] = encodeOpenCodeMessagesToCk([message]);
     const ck = encoded?.ck as { content: unknown[]; meta: { synthetic: boolean } } | undefined;
-    return !ck || ck.meta.synthetic ? 0 : ck.content.length;
+    return !ck || ck.meta.synthetic ? [] : ck.content;
 }
 
-/**
- * An OpenCode message's size against the cap: the daemon's block count, and its canonical bytes
- * bounded from above by the message's UTF-8 JSON bytes plus each block's overhead.
- */
-export function openCodeMessageSize(message: unknown, utf8Bytes: number): TransformWindowSize {
+export function openCodeMessageSize(message: unknown): TransformWindowSize {
     const blocks = openCodeBlocks(message);
-    return { blocks, bytes: blocks === 0 ? 0 : utf8Bytes + blocks * BLOCK_OVERHEAD_BYTES };
+    if (blocks.length === 0) return { blocks: 0, bytes: 0 };
+    return {
+        blocks: blocks.length,
+        bytes: Buffer.byteLength(JSON.stringify(blocks)) + blocks.length * BLOCK_OVERHEAD_BYTES,
+    };
 }
 
 const MEASURED_RUN_SLOTS = 32;
@@ -57,7 +57,7 @@ export function openCodeSlotSizes(
         const message = copyWindow(host, index, index + 1);
         const inspection = message && inspectReferenceableMessages(message);
         if (!message || !inspection?.ok) return undefined;
-        return openCodeMessageSize(message[0], inspection.messageUtf8Bytes[0] ?? 0);
+        return openCodeMessageSize(message[0]);
     };
     return (index) => {
         const known = sizes.get(index);
@@ -75,13 +75,7 @@ export function openCodeSlotSizes(
             return alone(index);
         }
         for (let slot = start; slot <= index; slot += 1)
-            sizes.set(
-                slot,
-                openCodeMessageSize(
-                    run[slot - start],
-                    inspection.messageUtf8Bytes[slot - start] ?? 0,
-                ),
-            );
+            sizes.set(slot, openCodeMessageSize(run[slot - start]));
         return sizes.get(index);
     };
 }

@@ -192,11 +192,6 @@ class ReferenceableWalk {
     bytes = 0;
     /** Upper bound on the canonical JSON length of the walked values, in two-byte units for strings. */
     wireBytes = 0;
-    /**
-     * String units from U+0800 that UTF-8 encodes in three bytes against the two `wireBytes`
-     * charges; `wireBytes + utf8Excess` bounds the canonical JSON's UTF-8 length.
-     */
-    utf8Excess = 0;
     private field?: (value: SnapshotField) => void;
     private readonly ancestors = new Set<object>();
 
@@ -224,30 +219,24 @@ class ReferenceableWalk {
                   : 0;
         this.spend(TAPE_SLOT_BYTES + retained);
         if (typeof value === "string" && wireBytes > 0 && this.estimateWire) {
-            let excess = 0;
             for (let index = 0; index < value.length; index += 1) {
                 const unit = value.charCodeAt(index);
-                if (unit < 0x80) {
-                    if (unit >= 0x20) {
-                        if (unit === 0x22 || unit === 0x5c) wireBytes += 2;
-                    } else if (unit >= 0x08 && unit <= 0x0d && unit !== 0x0b) {
-                        wireBytes += 2;
-                    } else {
-                        wireBytes += 10;
-                    }
-                } else if (unit >= 0x800) {
-                    if (unit >= 0xd800 && unit <= 0xdbff) {
-                        const next = value.charCodeAt(index + 1);
-                        if (next >= 0xdc00 && next <= 0xdfff) index += 1;
-                        else wireBytes += 10;
-                    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-                        wireBytes += 10;
-                    } else {
-                        excess += 1;
-                    }
+                if (
+                    unit === 0x22 ||
+                    unit === 0x5c ||
+                    (unit >= 0x08 && unit <= 0x0d && unit !== 0x0b)
+                ) {
+                    wireBytes += 2;
+                } else if (unit < 0x20) {
+                    wireBytes += 10;
+                } else if (unit >= 0xd800 && unit <= 0xdbff) {
+                    const next = value.charCodeAt(index + 1);
+                    if (next >= 0xdc00 && next <= 0xdfff) index += 1;
+                    else wireBytes += 10;
+                } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+                    wireBytes += 10;
                 }
             }
-            this.utf8Excess += excess;
         }
         this.wire(wireBytes);
         this.field?.(value);
@@ -440,8 +429,6 @@ export interface ReferenceableInspection {
     ok: true;
     /** Per-message upper bounds for JSON escaping, not retained heap charges. */
     messageWireBytes: number[];
-    /** Per-message upper bounds on the canonical JSON's UTF-8 length, read only with `estimateWire`. */
-    messageUtf8Bytes: number[];
     estimatedBytes: number;
 }
 
@@ -458,27 +445,22 @@ export function inspectReferenceableMessages(
 ): ReferenceableInspection | { ok: false; rejection: ReferenceableRejection } {
     const walker = new ReferenceableWalk(maxBytes, estimateWire);
     const messageWireBytes: number[] = [];
-    const messageUtf8Bytes: number[] = [];
     try {
         walker.members(messages, (slot, index) => {
             if (index < skip) {
                 defineSlot(messageWireBytes, index, 0);
-                defineSlot(messageUtf8Bytes, index, 0);
                 return;
             }
             const wireBefore = walker.wireBytes;
-            const excessBefore = walker.utf8Excess;
             walker.walk(slot.value, `/${index}`);
-            const wire = walker.wireBytes - wireBefore;
-            defineSlot(messageWireBytes, index, wire);
-            defineSlot(messageUtf8Bytes, index, wire + walker.utf8Excess - excessBefore);
+            defineSlot(messageWireBytes, index, walker.wireBytes - wireBefore);
         });
     } catch (error) {
         if (error instanceof SourceRejected)
             return { ok: false, rejection: { reason: error.reason, path: error.path } };
         throw error;
     }
-    return { ok: true, estimatedBytes: walker.bytes, messageWireBytes, messageUtf8Bytes };
+    return { ok: true, estimatedBytes: walker.bytes, messageWireBytes };
 }
 
 export function snapshotFieldsEqual(

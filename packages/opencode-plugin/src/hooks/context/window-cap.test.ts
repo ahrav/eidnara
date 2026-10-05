@@ -9,7 +9,7 @@ function sizeAlone(host: readonly unknown[], index: number): TransformWindowSize
     const message = copyWindow(host, index, index + 1);
     const inspection = message && inspectReferenceableMessages(message);
     if (!message || !inspection?.ok) return undefined;
-    return openCodeMessageSize(message[0], inspection.messageUtf8Bytes[0] ?? 0);
+    return openCodeMessageSize(message[0]);
 }
 
 /** Parity messages repeated across several measured runs, each with escaped and multi-byte text. */
@@ -30,9 +30,7 @@ describe("OpenCode window-cap size", () => {
     it("counts the daemon's blocks and bounds its bytes for every parity message", () => {
         for (const [index, parity] of cap.parity.opencode.entries()) {
             expect(encodeOpenCodeMessagesToCk([parity.message])[0]).toEqual(parity.ingress);
-            const inspection = inspectReferenceableMessages([parity.message]);
-            if (!inspection.ok) throw new Error(`parity message ${index} is not inspectable`);
-            const size = openCodeMessageSize(parity.message, inspection.messageUtf8Bytes[0] ?? 0);
+            const size = openCodeMessageSize(parity.message);
             expect({ index, blocks: size.blocks }).toEqual({ index, blocks: parity.blocks });
             expect(size.bytes).toBeGreaterThanOrEqual(parity.bytes);
         }
@@ -67,8 +65,30 @@ describe("OpenCode window-cap size", () => {
                 { id: "p2", type: "text", text: "\u4e2d".repeat(5_000), ignored: true },
             ],
         ],
+        [
+            "a reasoning part whose metadata signature is three-byte text",
+            [
+                {
+                    id: "p1",
+                    type: "reasoning",
+                    text: "thinking",
+                    metadata: { signature: "\u6f22".repeat(4_000) },
+                },
+            ],
+        ],
+        [
+            "a redacted reasoning part whose metadata carries four-byte data",
+            [
+                {
+                    id: "p1",
+                    type: "reasoning",
+                    text: "",
+                    metadata: { redacted: "\u{1f600}".repeat(2_000) },
+                },
+            ],
+        ],
     ])("bounds the encoded CK of %s", (_, parts) => {
-        const message = { info: { id: "msg_1", role: "user", sessionID: "ses" }, parts };
+        const message = { info: { id: "msg_1", role: "assistant", sessionID: "ses" }, parts };
         const size = openCodeSlotSizes([message])(0);
         const [encoded] = encodeOpenCodeMessagesToCk([message]);
         const blocks = (encoded?.ck.content ?? []) as unknown[];
