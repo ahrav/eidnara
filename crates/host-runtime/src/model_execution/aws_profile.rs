@@ -58,7 +58,8 @@ const FORBIDDEN_SESSION_OPTIONS: &[&str] = &[
 /// field names, never captured values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
-    /// A captured file exceeds [`MAX_CONFIG_FILE_BYTES`].
+    /// A captured file or the section and property names copied into its sub-property
+    /// keys exceed [`MAX_CONFIG_FILE_BYTES`].
     FileTooLarge,
     /// A captured file is not UTF-8 or the pinned parser rejected it.
     Unparseable,
@@ -72,7 +73,8 @@ pub enum AdmissionError {
     GraphTooLarge,
     /// A visited section sets an unsupported option.
     ForbiddenOption(&'static str),
-    /// A visited profile holds fields of two credential sources.
+    /// A visited profile holds fields of two credential sources, or a visited section
+    /// appears under two header spellings that normalize to one name.
     AmbiguousProfile,
     /// A role edge lacks `source_profile`, or a root lacks a required field.
     IncompleteSource,
@@ -182,30 +184,42 @@ impl AdmittedGraph {
     /// close the last emitted profile section, which is the root profile. The text
     /// carries the static secret when the root is static; zeroization covers this
     /// graph's owned secret and emission, while the SDK parser's internal copies drop
-    /// unwiped.
+    /// unwiped. The buffer is allocated at the emission's exact length, so it never
+    /// reallocates and leaves no unwiped copy behind.
     pub fn emit_config(&self) -> Zeroizing<String> {
-        let mut out = Zeroizing::new(String::with_capacity(4096));
+        let mut len = 0;
+        self.emit_lines(|prefix, value, suffix| len += prefix.len() + value.len() + suffix.len());
+        let mut out = Zeroizing::new(String::with_capacity(len));
+        self.emit_lines(|prefix, value, suffix| {
+            out.push_str(prefix);
+            out.push_str(value);
+            out.push_str(suffix);
+        });
+        out
+    }
+
+    /// Passes each emitted line to `line` as its prefix, value, and suffix.
+    fn emit_lines(&self, mut line: impl FnMut(&str, &str, &str)) {
         let GraphIdentity {
             region,
             roles,
             root,
             ..
         } = &self.identity;
-        let w = &mut *out;
         for e in roles {
-            emit(w, "[profile ", &e.profile, "]\n");
-            emit(w, "region = ", region, "\n");
-            emit(w, "role_arn = ", &e.role_arn, "\n");
-            emit(w, "source_profile = ", &e.source_profile, "\n");
-            emit(w, "role_session_name = ", &e.session_name, "\n");
+            line("[profile ", &e.profile, "]\n");
+            line("region = ", region, "\n");
+            line("role_arn = ", &e.role_arn, "\n");
+            line("source_profile = ", &e.source_profile, "\n");
+            line("role_session_name = ", &e.session_name, "\n");
             if let Some(external_id) = &e.external_id {
-                emit(w, "external_id = ", external_id, "\n");
+                line("external_id = ", external_id, "\n");
             }
         }
         let (RootIdentity::Sso { profile, .. } | RootIdentity::Static { profile, .. }) = root;
         if roles.last().is_none_or(|edge| edge.profile != *profile) {
-            emit(w, "[profile ", profile, "]\n");
-            emit(w, "region = ", region, "\n");
+            line("[profile ", profile, "]\n");
+            line("region = ", region, "\n");
         }
         match root {
             RootIdentity::Sso {
@@ -216,36 +230,21 @@ impl AdmittedGraph {
                 role_name,
                 ..
             } => {
-                emit(w, "sso_session = ", s, "\n");
-                emit(w, "sso_account_id = ", account_id, "\n");
-                emit(w, "sso_role_name = ", role_name, "\n");
-                emit(w, "[sso-session ", s, "]\n");
-                emit(w, "sso_region = ", sso_region, "\n");
-                emit(w, "sso_start_url = ", start_url, "\n");
-                emit(
-                    w,
-                    "sso_registration_scopes = ",
-                    SSO_ACCOUNT_ACCESS_SCOPE,
-                    "\n",
-                );
+                line("sso_session = ", s, "\n");
+                line("sso_account_id = ", account_id, "\n");
+                line("sso_role_name = ", role_name, "\n");
+                line("[sso-session ", s, "]\n");
+                line("sso_region = ", sso_region, "\n");
+                line("sso_start_url = ", start_url, "\n");
+                line("sso_registration_scopes = ", SSO_ACCOUNT_ACCESS_SCOPE, "\n");
             }
             RootIdentity::Static { access_key_id, .. } => {
                 let secret = self.static_secret.as_deref().map_or("", String::as_str);
-                emit(w, "aws_access_key_id = ", access_key_id, "\n");
-                emit(w, "aws_secret_access_key = ", secret, "\n");
+                line("aws_access_key_id = ", access_key_id, "\n");
+                line("aws_secret_access_key = ", secret, "\n");
             }
         }
-        out
     }
-}
-
-/// Reserves the whole line first. The secret is the last line emitted, so its buffer
-/// never reallocates and leaves a copy behind.
-fn emit(out: &mut String, prefix: &str, value: &str, suffix: &str) {
-    out.reserve(prefix.len() + value.len() + suffix.len());
-    out.push_str(prefix);
-    out.push_str(value);
-    out.push_str(suffix);
 }
 
 /// Admits the selected graph of `input` and proves its canonical emission reparses to
@@ -257,7 +256,13 @@ pub fn admit(input: CapturedProfileInput<'_>) -> Result<AdmittedGraph, Admission
     }
     let text = |file| std::str::from_utf8(file).map_err(|_| AdmissionError::Unparseable);
     let (config, credentials) = (text(input.config)?, text(input.credentials)?);
+    let mut aliased = Vec::new();
+    scan_sections(config, EnvConfigFileKind::Config, &mut aliased)?;
+    scan_sections(credentials, EnvConfigFileKind::Credentials, &mut aliased)?;
     let graph = admit_text(input.profile, input.region, config, credentials)?;
+    if visits_aliased_section(&graph.identity, &aliased) {
+        return Err(AdmissionError::AmbiguousProfile);
+    }
     let reparsed = admit_text(input.profile, input.region, &graph.emit_config(), "")?;
     if reparsed.identity != graph.identity {
         return Err(AdmissionError::RoundTripMismatch);
@@ -286,6 +291,164 @@ fn admit_text(
     loaded.profile = Cow::Owned(profile.to_owned());
     let sections = EnvConfigSections::parse(loaded).map_err(|_| AdmissionError::Unparseable)?;
     resolve(&sections, profile, region)
+}
+
+/// A normalized section header: its prefix word, if any, and its name.
+type SectionKey<'a> = (Option<&'a str>, &'a str);
+
+/// Checks one captured file's raw section headers, which normalization discards.
+///
+/// Headers with different raw text and the same [`SectionKey`] can assign conflicting
+/// values to one profile or `sso-session`; each such key is appended to `aliased`. In a
+/// config file, each sub-property in a generic prefixed section such as `services` is
+/// keyed by copies of the section and property names; `scan_sections` rejects the file
+/// when those copies, counted from raw lengths as an upper bound, exceed
+/// [`MAX_CONFIG_FILE_BYTES`].
+fn scan_sections<'a>(
+    contents: &'a str,
+    kind: EnvConfigFileKind,
+    aliased: &mut Vec<SectionKey<'a>>,
+) -> Result<(), AdmissionError> {
+    let config = matches!(kind, EnvConfigFileKind::Config);
+    let mut irregular = false;
+    let (mut copied, mut section_bytes, mut property_bytes) = (0usize, 0, 0);
+    let mut rest = contents;
+    while !rest.is_empty() {
+        if section_bytes == 0 && !rest.starts_with('[') {
+            // Outside generic sections only header lines carry state.
+            match next_header(rest) {
+                Some(at) => rest = &rest[at..],
+                None => break,
+            }
+        }
+        let line;
+        (line, rest) = match rest.split_once('\n') {
+            Some((line, next)) => (line.strip_suffix('\r').unwrap_or(line), next),
+            None => (rest, ""),
+        };
+        let value = match line.as_bytes().first() {
+            Some(b'[') => {
+                (section_bytes, property_bytes) = (0, 0);
+                if let Some((key, raw)) = section_header(line) {
+                    if merged_section(key, config) {
+                        irregular |= !canonical_header(key, raw);
+                    } else if config && key.0.is_some() {
+                        section_bytes = raw.len();
+                    }
+                }
+                continue;
+            }
+            Some(b' ' | b'\t') => line,
+            Some(b'#' | b';') | None => continue,
+            Some(_) => {
+                let (name, value) = line.split_once('=').unwrap_or((line, ""));
+                property_bytes = name.len();
+                value
+            }
+        };
+        if value.contains('=') {
+            copied += section_bytes + property_bytes;
+            if copied > MAX_CONFIG_FILE_BYTES {
+                return Err(AdmissionError::FileTooLarge);
+            }
+        }
+    }
+    if irregular {
+        let mut headers: Vec<_> = contents
+            .lines()
+            .filter(|line| line.starts_with('['))
+            .filter_map(section_header)
+            .filter(|&(key, _)| merged_section(key, config))
+            .collect();
+        headers.sort_unstable();
+        headers.dedup();
+        let spellings = headers.windows(2).filter(|pair| pair[0].0 == pair[1].0);
+        aliased.extend(spellings.map(|pair| pair[0].0));
+    }
+    Ok(())
+}
+
+fn next_header(text: &str) -> Option<usize> {
+    let mut from = 0;
+    loop {
+        let at = from + text[from..].find('[')?;
+        if at > 0 && text.as_bytes()[at - 1] == b'\n' {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+}
+
+fn section_header(line: &str) -> Option<(SectionKey<'_>, &str)> {
+    let end = line.bytes().position(|b| b == b'#' || b == b';');
+    let text = trim_blank(end.map_or(line, |end| &line[..end]));
+    let raw = text.strip_prefix('[')?.strip_suffix(']')?;
+    let trimmed = trim_blank(raw);
+    let key = match trimmed.bytes().position(|b| b == b' ' || b == b'\t') {
+        Some(at) => (
+            Some(trim_unicode(&trimmed[..at])),
+            trim_unicode(&trimmed[at + 1..]),
+        ),
+        None => (None, trim_unicode(trimmed)),
+    };
+    Some((key, raw))
+}
+
+fn trim_blank(text: &str) -> &str {
+    let blank = |b: &u8| matches!(b, b' ' | b'\t');
+    let bytes = text.as_bytes();
+    let start = bytes.iter().position(|b| !blank(b)).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !blank(b))
+        .map_or(start, |i| i + 1);
+    &text[start..end]
+}
+
+/// Matches [`str::trim`]; printable ASCII at both ends guarantees trimming leaves the
+/// string unchanged.
+fn trim_unicode(text: &str) -> &str {
+    let printable = |b: Option<&u8>| b.is_some_and(|&b| b > b' ' && b < 0x80);
+    let bytes = text.as_bytes();
+    if printable(bytes.first()) && printable(bytes.last()) {
+        text
+    } else {
+        text.trim()
+    }
+}
+
+fn merged_section(key: SectionKey<'_>, config: bool) -> bool {
+    match key {
+        (None, name) => !config || name == "default",
+        (Some(prefix), _) => config && matches!(prefix, "profile" | "sso-session"),
+    }
+}
+
+/// A canonical header is `[prefix name]` with one space, or `[name]`, so its key
+/// determines its text and two canonical headers with one key are the same text.
+fn canonical_header(key: SectionKey<'_>, raw: &str) -> bool {
+    match key {
+        (None, name) => raw.len() == name.len(),
+        (Some(prefix), name) => {
+            raw.len() == prefix.len() + 1 + name.len() && raw.as_bytes()[prefix.len()] == b' '
+        }
+    }
+}
+
+fn visits_aliased_section(identity: &GraphIdentity, aliased: &[SectionKey<'_>]) -> bool {
+    let (root, session) = match &identity.root {
+        RootIdentity::Sso {
+            profile,
+            session_name,
+            ..
+        } => (profile, Some(session_name.as_str())),
+        RootIdentity::Static { profile, .. } => (profile, None),
+    };
+    let visited = |name: &str| name == root || identity.roles.iter().any(|e| e.profile == name);
+    aliased.iter().any(|&(prefix, name)| match prefix {
+        Some("sso-session") => session == Some(name),
+        _ => visited(name),
+    })
 }
 
 /// Polls a future once. Loading in-memory contents never suspends, so a pending
@@ -475,9 +638,16 @@ fn static_root(profile: &Profile) -> Result<Root, AdmissionError> {
     let (Some(access_key_id), Some(secret)) = keys else {
         return Err(AdmissionError::IncompleteSource);
     };
-    charset(access_key_id, "aws_access_key_id", 16, 128, b"")?;
     if access_key_id.starts_with("ASIA") {
         return Err(AdmissionError::TemporaryStaticRoot);
+    }
+    let long_term = access_key_id.len() == 20
+        && access_key_id.starts_with("AKIA")
+        && access_key_id
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    if !long_term {
+        return Err(AdmissionError::InvalidValue("aws_access_key_id"));
     }
     charset(secret, "aws_secret_access_key", 16, 128, b"/+=")?;
     let root = RootIdentity::Static {
@@ -523,13 +693,14 @@ fn digits(value: &str, field: &'static str) -> Result<(), AdmissionError> {
 /// partition's region pattern and no GovCloud word.
 fn validate_region(region: &str, field: &'static str) -> Result<(), AdmissionError> {
     const AREAS: &[&str] = &["us", "eu", "ap", "sa", "ca", "me", "af", "il", "mx"];
-    let parts: Vec<&str> = region.split('-').collect();
+    let mut parts = region.split('-');
     let valid = region.len() <= MAX_REGION_BYTES
-        && matches!(parts.as_slice(), [area, word, number]
-            if AREAS.contains(area)
+        && matches!((parts.next(), parts.next(), parts.next(), parts.next()),
+            (Some(area), Some(word), Some(number), None)
+            if AREAS.contains(&area)
                 && !word.is_empty()
                 && word.bytes().all(|b| b.is_ascii_lowercase())
-                && *word != "gov"
+                && word != "gov"
                 && (1..=3).contains(&number.len())
                 && number.bytes().all(|b| b.is_ascii_digit()));
     if valid {

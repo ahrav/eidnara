@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 
 const REGION: &str = "us-west-2";
 
+const STATIC_SECRET: &str = "staticsecret0000";
+
 const SSO_SESSION: &str = "\
 [sso-session corp]
 sso_region = us-east-1
@@ -48,6 +50,11 @@ fn sso_config(extra: &str) -> String {
 
 fn assert_round_trip(graph: &AdmittedGraph) {
     let emitted = graph.emit_config();
+    assert_eq!(
+        emitted.capacity(),
+        emitted.len(),
+        "emission is sized exactly"
+    );
     let reparsed = admit_config(&graph.identity().profile, &emitted).expect("emission admits");
     assert_eq!(reparsed.identity(), graph.identity());
     assert_eq!(*reparsed.emit_config(), *emitted);
@@ -157,8 +164,10 @@ fn static_root_feeding_a_role_admits_from_either_file() {
 
 #[test]
 fn self_referencing_role_uses_its_own_root() {
-    let config = "[profile app]\nrole_arn = arn:aws:iam::444455556666:role/path/to/app\nsource_profile = app\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n";
-    let graph = admit_config("app", config).expect("self reference admits");
+    let config = format!(
+        "[profile app]\nrole_arn = arn:aws:iam::444455556666:role/path/to/app\nsource_profile = app\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n"
+    );
+    let graph = admit_config("app", &config).expect("self reference admits");
     assert_eq!(graph.identity().roles.len(), 1);
     assert!(matches!(graph.identity().root, RootIdentity::Static { .. }));
     assert_round_trip(&graph);
@@ -174,13 +183,15 @@ fn self_referencing_role_uses_its_own_root() {
 
 #[test]
 fn unsupported_roots_are_refused() {
-    let static_only = "[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n";
+    let static_only = format!(
+        "[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n"
+    );
     assert_eq!(
-        admit_config("keys", static_only).unwrap_err(),
+        admit_config("keys", &static_only).unwrap_err(),
         AdmissionError::StaticRootWithoutRole
     );
     let session_key = format!(
-        "{}[profile keys]\naws_access_key_id = ASIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n",
+        "{}[profile keys]\naws_access_key_id = ASIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n",
         role_profile("app", "keys")
     );
     assert_eq!(
@@ -284,7 +295,7 @@ fn forbidden_options_on_selected_sections_are_refused() {
 #[test]
 fn ambiguous_profiles_are_refused() {
     let sso_and_static = format!(
-        "{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n{SSO_SESSION}",
+        "{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n{SSO_SESSION}",
         sso_profile("dev")
     );
     assert_eq!(
@@ -300,7 +311,7 @@ fn ambiguous_profiles_are_refused() {
         AdmissionError::AmbiguousProfile
     );
     let source_with_keys_and_role = format!(
-        "{}{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n",
+        "{}{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n",
         role_profile("app", "mid"),
         role_profile("mid", "mid")
     );
@@ -377,6 +388,7 @@ fn regions_must_agree_and_stay_commercial() {
         "us-west",
         "",
         "US-WEST-2",
+        &"us-".repeat(30),
     ] {
         let result = admit(CapturedProfileInput {
             profile: "dev",
@@ -541,6 +553,71 @@ fn duplicate_sections_follow_sdk_merge_semantics() {
     assert_eq!(graph.identity().roles[0].source_profile, "dev");
 }
 
+/// Distinct header spellings can assign conflicting values to the same visited section.
+#[test]
+fn visited_sections_under_two_header_spellings_are_refused() {
+    let aliased_edge = format!(
+        "{}[profile  app]\nrole_arn = arn:aws:iam::444455556666:role/other-role\n{}",
+        role_profile("app", "dev"),
+        sso_config("")
+    );
+    let aliased_root = format!(
+        "{}{}[ profile dev ]\nsso_account_id = 999999999999\n",
+        role_profile("app", "dev"),
+        sso_config("")
+    );
+    let aliased_session = format!(
+        "{}{}[sso-session\tcorp]\nsso_start_url = https://d-0987654321.awsapps.com/start\n",
+        role_profile("app", "dev"),
+        sso_config("")
+    );
+    for (case, config) in [
+        ("role edge", aliased_edge),
+        ("sso root", aliased_root),
+        ("sso session", aliased_session),
+    ] {
+        assert_eq!(
+            admit_config("app", &config).unwrap_err(),
+            AdmissionError::AmbiguousProfile,
+            "{case}"
+        );
+    }
+    let aliased_credentials = "[keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = firstsecret00000\n[ keys ]\naws_secret_access_key = secondsecret0000\n";
+    assert_eq!(
+        admit_files("app", &role_profile("app", "keys"), aliased_credentials).unwrap_err(),
+        AdmissionError::AmbiguousProfile
+    );
+
+    let commented = sso_config("[profile dev] ; same header text\nregion = us-west-2\n");
+    admit_config("dev", &commented).expect("one header text with a comment admits");
+    let unselected =
+        sso_config("[profile other]\noutput = json\n[profile  other]\noutput = text\n");
+    admit_config("dev", &unselected).expect("aliases outside the graph stay unselected");
+}
+
+#[test]
+fn sub_property_expansion_beyond_the_file_bound_is_refused() {
+    let lines: String = (0..300).map(|i| format!("  k{i} = v\n")).collect();
+    let long_section = format!("[services {}]\ns3 =\n{lines}", "n".repeat(1024));
+    let long_property = format!("[services custom]\n{} =\n{lines}", "g".repeat(1024));
+    let crlf = long_section.replace('\n', "\r\n");
+    for (case, expanding) in [
+        ("section name", long_section),
+        ("property name", long_property),
+        ("crlf lines", crlf),
+    ] {
+        assert_eq!(
+            admit_config("dev", &sso_config(&expanding)).unwrap_err(),
+            AdmissionError::FileTooLarge,
+            "{case}"
+        );
+    }
+    let services: String = (0..300)
+        .map(|i| format!("[services s{i}]\ns3 =\n  endpoint_url = https://s3.example\n"))
+        .collect();
+    admit_config("dev", &sso_config(&services)).expect("ordinary services sections admit");
+}
+
 #[test]
 fn diagnostics_carry_no_captured_values() {
     let config = format!(
@@ -564,7 +641,7 @@ fn diagnostics_carry_no_captured_values() {
 #[test]
 fn line_breaks_in_wide_fields_are_refused() {
     let secret = format!(
-        "{}[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENG\n  [profile x]\n",
+        "{}[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n  [profile x]\n",
         role_profile("app", "keys")
     );
     assert_eq!(
@@ -660,6 +737,33 @@ fn static_secrets_follow_the_aws_secret_alphabet() {
                 result.unwrap_err(),
                 AdmissionError::InvalidValue("aws_secret_access_key"),
                 "{secret}"
+            );
+        }
+    }
+}
+
+#[test]
+fn static_access_key_ids_are_twenty_byte_long_term_ids() {
+    for (access_key_id, admitted) in [
+        ("AKIAIOSFODNN7EXAMPLE", true),
+        ("AKIAIOSFODNN7EXAMPL", false),
+        ("AKIAIOSFODNN7EXAMPLE0", false),
+        ("abcdefghijklmnopqrst", false),
+        ("abcdefghijklmnop", false),
+        ("AKIA____________ABCD", false),
+        ("AKIAiosfodnn7example", false),
+    ] {
+        let credentials = format!(
+            "[keys]\naws_access_key_id = {access_key_id}\naws_secret_access_key = {STATIC_SECRET}\n"
+        );
+        let result = admit_files("app", &role_profile("app", "keys"), &credentials);
+        if admitted {
+            result.expect("access key id admits");
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                AdmissionError::InvalidValue("aws_access_key_id"),
+                "{access_key_id}"
             );
         }
     }
