@@ -388,6 +388,7 @@ fn regions_must_agree_and_stay_commercial() {
         "us-west",
         "",
         "US-WEST-2",
+        &"us-".repeat(30),
     ] {
         let result = admit(CapturedProfileInput {
             profile: "dev",
@@ -736,6 +737,31 @@ fn static_secrets_follow_the_aws_secret_alphabet() {
                 result.unwrap_err(),
                 AdmissionError::InvalidValue("aws_secret_access_key"),
                 "{secret}"
+            );
+        }
+    }
+}
+
+#[test]
+fn static_access_key_ids_are_twenty_byte_long_term_ids() {
+    for (access_key_id, admitted) in [
+        ("AKIAIOSFODNN7EXAMPLE", true),
+        ("AKIAIOSFODNN7EXAMPL", false),
+        ("AKIAIOSFODNN7EXAMPLE0", false),
+        ("abcdefghijklmnopqrst", false),
+        ("abcdefghijklmnop", false),
+    ] {
+        let credentials = format!(
+            "[keys]\naws_access_key_id = {access_key_id}\naws_secret_access_key = {STATIC_SECRET}\n"
+        );
+        let result = admit_files("app", &role_profile("app", "keys"), &credentials);
+        if admitted {
+            result.expect("access key id admits");
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                AdmissionError::InvalidValue("aws_access_key_id"),
+                "{access_key_id}"
             );
         }
     }

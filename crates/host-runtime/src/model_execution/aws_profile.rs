@@ -638,9 +638,13 @@ fn static_root(profile: &Profile) -> Result<Root, AdmissionError> {
     let (Some(access_key_id), Some(secret)) = keys else {
         return Err(AdmissionError::IncompleteSource);
     };
-    charset(access_key_id, "aws_access_key_id", 16, 128, b"")?;
     if access_key_id.starts_with("ASIA") {
         return Err(AdmissionError::TemporaryStaticRoot);
+    }
+    // Long-term access key ids are twenty bytes with the `AKIA` prefix.
+    charset(access_key_id, "aws_access_key_id", 20, 20, b"")?;
+    if !access_key_id.starts_with("AKIA") {
+        return Err(AdmissionError::InvalidValue("aws_access_key_id"));
     }
     charset(secret, "aws_secret_access_key", 16, 128, b"/+=")?;
     let root = RootIdentity::Static {
@@ -686,13 +690,14 @@ fn digits(value: &str, field: &'static str) -> Result<(), AdmissionError> {
 /// partition's region pattern and no GovCloud word.
 fn validate_region(region: &str, field: &'static str) -> Result<(), AdmissionError> {
     const AREAS: &[&str] = &["us", "eu", "ap", "sa", "ca", "me", "af", "il", "mx"];
-    let parts: Vec<&str> = region.split('-').collect();
+    let mut parts = region.split('-');
     let valid = region.len() <= MAX_REGION_BYTES
-        && matches!(parts.as_slice(), [area, word, number]
-            if AREAS.contains(area)
+        && matches!((parts.next(), parts.next(), parts.next(), parts.next()),
+            (Some(area), Some(word), Some(number), None)
+            if AREAS.contains(&area)
                 && !word.is_empty()
                 && word.bytes().all(|b| b.is_ascii_lowercase())
-                && *word != "gov"
+                && word != "gov"
                 && (1..=3).contains(&number.len())
                 && number.bytes().all(|b| b.is_ascii_digit()));
     if valid {
