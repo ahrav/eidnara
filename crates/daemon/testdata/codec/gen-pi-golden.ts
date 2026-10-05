@@ -24,14 +24,56 @@ const requiredClasses = [
   "tool_result_details",
   "custom_message",
   "compaction",
+  "branch_summary",
+  "bash_execution",
   "aborted_assistant",
-  "response_id_mid",
-  "timestamp_fallback_mid",
 ] as const;
+
+/** Prefix of the reserved ids the plugin gives rows built from non-message entries. */
+const RESERVED_ID_PREFIX = "eidnara:";
 
 type RequiredClass = (typeof requiredClasses)[number];
 
 type CapturedEntry = { path: string; entry: any };
+
+/** Path label of the authored entries below. */
+const AUTHORED = "authored";
+
+/**
+ * Entries for classes the captured sessions may lack, each written in Pi 0.80.2's session-entry
+ * shape. One is used only when no captured entry covers its class.
+ */
+const authoredEntries: CapturedEntry[] = [
+  {
+    path: AUTHORED,
+    entry: {
+      type: "message",
+      id: "c3d4e5f6",
+      parentId: "ad9f3999",
+      timestamp: "2026-05-01T17:00:00.000Z",
+      message: {
+        role: "bashExecution",
+        command: "git status",
+        output: "clean",
+        exitCode: 0,
+        cancelled: false,
+        truncated: false,
+        timestamp: 1777654800000,
+      },
+    },
+  },
+  {
+    path: AUTHORED,
+    entry: {
+      type: "branch_summary",
+      id: "d4e5f607",
+      parentId: "c3d4e5f6",
+      timestamp: "2026-05-01T17:01:00.000Z",
+      fromId: "781a4cd4",
+      summary: "Explored an alternate fix and returned.",
+    },
+  },
+];
 
 if (check) {
   const golden = JSON.parse(readFileSync(outPath, "utf8"));
@@ -41,23 +83,29 @@ if (check) {
 
 const files = sessionFiles();
 const selected = selectEntries(files);
-const entries = selected.entries.map(({ entry }) => sanitizeEntry(entry));
+const rows = selected.entries.map(({ entry }) => rowFromEntry(sanitizeEntry(entry)));
 const golden = {
   projection_oracle: {
     status: "todo",
     reason:
-      "The Pi provider serializer entry points are not vendored in the Rust workspace test closure; these goldens assert AgentMessage/session-entry round-trip identity for non-compaction entries. TODO: replace this fallback with provider serializer byte projection when the Pi SDK is available to the generator.",
+      "The Pi provider serializer entry points are not vendored in the Rust workspace test closure; these goldens assert round-trip identity of the {id, message} AgentMessage rows the plugin builds from session entries.",
   },
   generated_from: {
-    session_files: [...new Set(selected.entries.map((entry) => entry.path))].sort(),
-    selection: "JSONL session-entry feature scan over captured Pi session files",
+    session_files: [
+      ...new Set(selected.entries.map((entry) => entry.path).filter((path) => path !== AUTHORED)),
+    ].sort(),
+    authored_entries: selected.entries
+      .filter((entry) => entry.path === AUTHORED)
+      .map((entry) => entry.entry.id),
+    selection:
+      "JSONL session-entry feature scan over captured Pi session files, then authored entries for classes no captured entry covers",
   },
   coverage: selected.coverage,
   missing_capture_classes: selected.missing,
   cases: [
     {
-      name: "captured-pi-feature-entries",
-      entries,
+      name: "captured-pi-feature-rows",
+      rows,
     },
   ],
 };
@@ -111,6 +159,12 @@ function selectEntries(files: string[]): {
     }
   }
 
+  for (const authored of authoredEntries) {
+    for (const klass of classify(authored.entry)) {
+      if (wanted.has(klass) && !byClass.has(klass)) byClass.set(klass, authored);
+    }
+  }
+
   const unique = new Map<string, CapturedEntry>();
   const coverage: RequiredClass[] = [];
   const missing: RequiredClass[] = [];
@@ -126,14 +180,61 @@ function selectEntries(files: string[]): {
   return { entries: [...unique.values()], coverage, missing };
 }
 
+/**
+ * Builds the row the plugin sends for one session entry, as Pi 0.80.2's `buildSessionContext`
+ * builds its `AgentMessage`: a message entry keeps its entry id; a compaction, branch summary, or
+ * custom message entry takes a reserved id derived from its entry id.
+ */
+function rowFromEntry(entry: any): { id: string; message: unknown } {
+  const timestamp = (value: string) => new Date(value).getTime();
+  switch (entry.type) {
+    case "message":
+      return { id: entry.id, message: entry.message };
+    case "compaction":
+      return {
+        id: `${RESERVED_ID_PREFIX}compactionSummary:${entry.id}`,
+        message: {
+          role: "compactionSummary",
+          summary: entry.summary,
+          tokensBefore: entry.tokensBefore,
+          timestamp: timestamp(entry.timestamp),
+        },
+      };
+    case "branch_summary":
+      return {
+        id: `${RESERVED_ID_PREFIX}branchSummary:${entry.id}`,
+        message: {
+          role: "branchSummary",
+          summary: entry.summary,
+          fromId: entry.fromId,
+          timestamp: timestamp(entry.timestamp),
+        },
+      };
+    case "custom_message":
+      return {
+        id: `${RESERVED_ID_PREFIX}custom:${entry.id}`,
+        message: {
+          role: "custom",
+          customType: entry.customType,
+          content: entry.content,
+          display: entry.display,
+          details: entry.details,
+          timestamp: timestamp(entry.timestamp),
+        },
+      };
+    default:
+      throw new Error(`entry type ${entry.type} builds no AgentMessage`);
+  }
+}
+
 function classify(entry: any): RequiredClass[] {
   const out: RequiredClass[] = [];
   if (entry?.type === "custom_message") out.push("custom_message");
   if (entry?.type === "compaction") out.push("compaction");
+  if (entry?.type === "branch_summary" && entry.summary) out.push("branch_summary");
   const message = entry?.type === "message" ? entry.message : undefined;
   if (!message) return out;
-  if (typeof message.responseId === "string" && message.responseId.length > 0) out.push("response_id_mid");
-  if (message.responseId === undefined && typeof message.timestamp === "number") out.push("timestamp_fallback_mid");
+  if (message.role === "bashExecution") out.push("bash_execution");
   if (message.role === "assistant" && message.stopReason === "aborted" && Array.isArray(message.content) && message.content.length === 0) {
     out.push("aborted_assistant");
   }
@@ -171,7 +272,7 @@ function sanitize(value: unknown, path: string[]): unknown {
 
 function sanitizeString(key: string, text: string): string {
   if (text.length === 0) return text;
-  if (new Set(["text", "thinking", "summary", "content", "errorMessage"]).has(key)) {
+  if (new Set(["text", "thinking", "summary", "content", "errorMessage", "output"]).has(key)) {
     return sameLength(text, key);
   }
   if (key === "data") return sameLength(text, "base64");
@@ -193,13 +294,16 @@ function assertInternalConsistency(golden: any): void {
   const cases = golden.cases ?? [];
   if (!Array.isArray(cases) || cases.length === 0) throw new Error("Pi golden has no cases");
   for (const testCase of cases) {
-    if (!Array.isArray(testCase.entries) || testCase.entries.length === 0) {
-      throw new Error(`Pi case ${testCase.name ?? "<unnamed>"} has no entries`);
+    if (!Array.isArray(testCase.rows) || testCase.rows.length === 0) {
+      throw new Error(`Pi case ${testCase.name ?? "<unnamed>"} has no rows`);
     }
-    for (const entry of testCase.entries) {
-      if (typeof entry?.type !== "string") throw new Error("Pi fixture entry lacks type");
-      if (entry.type === "message" && (!entry.id || !entry.message?.role)) {
-        throw new Error("Pi message fixture lacks session-entry envelope or AgentMessage role");
+    for (const row of testCase.rows) {
+      if (typeof row?.id !== "string" || typeof row.message?.role !== "string") {
+        throw new Error("Pi fixture row lacks an id or an AgentMessage role");
+      }
+      const reserved = ["custom", "branchSummary", "compactionSummary"].includes(row.message.role);
+      if (reserved !== row.id.startsWith(RESERVED_ID_PREFIX)) {
+        throw new Error(`Pi fixture row ${row.id} is in the wrong id space for ${row.message.role}`);
       }
     }
   }
