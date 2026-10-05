@@ -8689,8 +8689,8 @@ impl HandlerCore {
                 Some(SerializerProfile::OpencodeAiSdk) => {}
                 Some(SerializerProfile::Pi) => {
                     let rows = parsed.native_messages.as_deref().unwrap_or_default();
-                    let mids = parsed.messages.iter().map(|message| message.mid.as_str());
-                    if let Err(decline) = codec::pi::check_pi_rows(rows, mids) {
+                    let messages = parsed.messages.iter().map(Arc::as_ref);
+                    if let Err(decline) = codec::pi::check_pi_rows(rows, messages) {
                         return invalid_params_error(decline.to_string());
                     }
                 }

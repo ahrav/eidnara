@@ -19,11 +19,11 @@ use serde_json::{Value, json};
 use super::json::{media_kind, opaque_arc, set_string, set_value, string_field, synth_tool_id};
 use crate::injection::SYNTHETIC_TIMESTAMP;
 use crate::wire::{
-    BlockKind, MediaBlock, MediaKind, OpaqueBlock, OutputKind, ProviderExtras, ResultBlock,
-    ResultBlockKind, ToolOutput, WireBlock, WireMessage,
+    BlockKind, IngressMessage, MediaBlock, MediaKind, OpaqueBlock, OutputKind, ProviderExtras,
+    ResultBlock, ResultBlockKind, ToolOutput, WireBlock, WireMessage,
 };
 #[cfg(test)]
-use crate::wire::{HarnessMeta, IngressMessage, MessageOrigin};
+use crate::wire::{HarnessMeta, MessageOrigin};
 
 use super::sidecar::{
     BLOCK_IDENTITY_NAMESPACE, BlockMeta, MatchedBlockMetas, MetaContent, block_is_unchanged,
@@ -129,15 +129,31 @@ impl PiRole {
 pub(crate) enum PiDecline {
     /// The row is not an object with a non-empty string `id` and an object `message` whose
     /// `role` is a string.
-    MalformedRow { index: usize },
+    MalformedRow {
+        index: usize,
+    },
     /// The row's role is outside the closed set.
-    UnknownRole { index: usize, role: String },
+    UnknownRole {
+        index: usize,
+        role: String,
+    },
     /// A host-message row carries a reserved id, or a synthetic-entry row carries a host id.
-    IdSpace { index: usize, role: PiRole },
+    IdSpace {
+        index: usize,
+        role: PiRole,
+    },
     /// The row's id is not the `mid` of the CK message at its position.
-    IdMismatch { index: usize },
+    IdMismatch {
+        index: usize,
+    },
+    HarnessIdMismatch {
+        index: usize,
+    },
     /// The native window and the CK window hold different message counts.
-    LengthMismatch { rows: usize, messages: usize },
+    LengthMismatch {
+        rows: usize,
+        messages: usize,
+    },
 }
 
 impl std::error::Error for PiDecline {}
@@ -168,6 +184,10 @@ impl fmt::Display for PiDecline {
             Self::IdMismatch { index } => write!(
                 f,
                 "pi native message {index} does not carry the mid of messages[{index}]"
+            ),
+            Self::HarnessIdMismatch { index } => write!(
+                f,
+                "messages[{index}].ck.meta.harness_id is not the message's mid"
             ),
             Self::LengthMismatch { rows, messages } => write!(
                 f,
@@ -308,26 +328,27 @@ fn decode_content(message: &Value, role: PiRole, ordinal: u64) -> (Vec<WireBlock
     (content, block_metas)
 }
 
-/// Validates every row of a window against the CK window's mids, without decoding its blocks.
 pub(crate) fn check_pi_rows<'a>(
     rows: &[Arc<Value>],
-    mids: impl ExactSizeIterator<Item = &'a str>,
+    messages: impl ExactSizeIterator<Item = &'a IngressMessage>,
 ) -> Result<(), PiDecline> {
-    if rows.len() != mids.len() {
+    if rows.len() != messages.len() {
         return Err(PiDecline::LengthMismatch {
             rows: rows.len(),
-            messages: mids.len(),
+            messages: messages.len(),
         });
     }
     rows.iter()
-        .zip(mids)
+        .zip(messages)
         .enumerate()
-        .try_for_each(|(index, (row, mid))| {
+        .try_for_each(|(index, (row, message))| {
             let (id, _, _) = classify_row(index, row)?;
-            if id == mid {
-                Ok(())
-            } else {
+            if id != message.mid {
                 Err(PiDecline::IdMismatch { index })
+            } else if message.ck.meta.harness_id.as_deref() != Some(id) {
+                Err(PiDecline::HarnessIdMismatch { index })
+            } else {
+                Ok(())
             }
         })
 }
@@ -2079,18 +2100,27 @@ mod tests {
                 role: "system".to_string()
             })
         );
-        let mids: Vec<String> = window
-            .iter()
-            .map(|row| row_id(row).unwrap().to_string())
-            .collect();
+        let messages = decode_pi_rows_stamped(&window[..7]).unwrap().messages;
+        let mut window_messages = messages.clone();
+        window_messages.push(messages[0].clone());
         assert_eq!(
-            check_pi_rows(&window, mids.iter().map(String::as_str)),
+            check_pi_rows(&window, window_messages.iter()),
             decode_pi_rows_stamped(&window).map(drop)
         );
+        let mut other_mid = messages[0].clone();
+        other_mid.mid = "other".to_string();
         assert_eq!(
-            check_pi_rows(&window[..1], ["other"].into_iter()),
+            check_pi_rows(&window[..1], [&other_mid].into_iter()),
             Err(PiDecline::IdMismatch { index: 0 })
         );
+        for harness_id in [None, Some("other".to_string())] {
+            let mut unlinked = messages[0].clone();
+            unlinked.ck.meta.harness_id = harness_id;
+            assert_eq!(
+                check_pi_rows(&window[..1], [&unlinked].into_iter()),
+                Err(PiDecline::HarnessIdMismatch { index: 0 })
+            );
+        }
         assert_eq!(
             check_pi_rows(&window[..1], std::iter::empty()),
             Err(PiDecline::LengthMismatch {

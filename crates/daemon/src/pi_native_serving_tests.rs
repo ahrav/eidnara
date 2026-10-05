@@ -383,13 +383,26 @@ async fn a_pi_window_with_an_unknown_role_declines_with_no_state_change() {
     reserved[0]["id"] = json!("eidnara:user:1a2b3c4d");
     let mut renamed = pi_rows(&messages);
     renamed[1]["id"] = json!("3c4d5e6f");
-    for (rows, expected) in [
-        (unknown, "\"systemNotice\""),
-        (reserved, "must carry a host entry id"),
-        (renamed, "does not carry the mid"),
+    let mut unlinked = messages.clone();
+    unlinked[1].ck.meta.harness_id = None;
+    let mut relinked = messages.clone();
+    relinked[0].ck.meta.harness_id = Some("another-id".to_string());
+    for (window, rows, expected) in [
+        (messages.clone(), unknown, "\"systemNotice\""),
+        (messages.clone(), reserved, "must carry a host entry id"),
+        (messages.clone(), renamed, "does not carry the mid"),
+        (
+            unlinked,
+            pi_rows(&messages),
+            "messages[1].ck.meta.harness_id",
+        ),
+        (
+            relinked,
+            pi_rows(&messages),
+            "messages[0].ck.meta.harness_id",
+        ),
     ] {
-        let outcome =
-            call_transform_outcome(&handler, native_request("pi", messages.clone(), rows)).await;
+        let outcome = call_transform_outcome(&handler, native_request("pi", window, rows)).await;
         let (code, message) = error_frame(outcome);
         assert_eq!(code, "invalid_params");
         assert!(message.contains(expected), "{message}");
