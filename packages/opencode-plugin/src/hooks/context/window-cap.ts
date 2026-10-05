@@ -1,5 +1,5 @@
-import { isRecord } from "../../shared/record-type-guard";
 import cap from "./__fixtures__/window-cap.json";
+import { encodeOpenCodeMessagesToCk } from "./module-wire";
 import { copyWindow, inspectReferenceableMessages } from "./transform-capture";
 
 /** Half the daemon's window cap in CK blocks: the most a cold import's suffix sends. */
@@ -23,41 +23,23 @@ export function withinHalfCap(size: TransformWindowSize): boolean {
     return size.blocks <= HALF_CAP_BLOCKS && size.bytes <= HALF_CAP_BYTES;
 }
 
-/** Part types the daemon's OpenCode codec decodes to no block. */
-const OPENCODE_BLOCKLESS_PARTS = new Set(["compaction", "snapshot", "patch", "agent", "retry"]);
-
-function isSyntheticPart(part: unknown): boolean {
-    return isRecord(part) && (part.synthetic === true || part.syntheticTodoMarker === true);
-}
-
-/** The CK blocks `decode_opencode_shared` gives one OpenCode message: a part is one block, a finished tool part two. */
+/**
+ * The CK blocks the daemon counts for one OpenCode message: the request carries the blocks
+ * `encodeOpenCodeMessagesToCk` builds, and a synthetic message's blocks are not counted.
+ */
 function openCodeBlocks(message: unknown): number {
-    const parts = isRecord(message) && Array.isArray(message.parts) ? message.parts : [];
-    if (parts.length > 0 && parts.every(isSyntheticPart)) return 0;
-    let blocks = 0;
-    for (const part of parts) {
-        if (!isRecord(part) || typeof part.type !== "string") {
-            blocks += 1;
-        } else if (part.type === "text") {
-            blocks += part.ignored === true ? 0 : 1;
-        } else if (part.type === "tool") {
-            const state = isRecord(part.state) ? part.state : undefined;
-            const status = typeof state?.status === "string" ? state.status : part.status;
-            blocks += status === "completed" || status === "error" ? 2 : 1;
-        } else if (!OPENCODE_BLOCKLESS_PARTS.has(part.type)) {
-            blocks += 1;
-        }
-    }
-    return blocks;
+    const [encoded] = encodeOpenCodeMessagesToCk([message]);
+    const ck = encoded?.ck as { content: unknown[]; meta: { synthetic: boolean } } | undefined;
+    return !ck || ck.meta.synthetic ? 0 : ck.content.length;
 }
 
 /**
- * An OpenCode message's size against the cap: the daemon's block count exactly, and its canonical
- * bytes bounded from above by the message's wire bytes plus each block's overhead.
+ * An OpenCode message's size against the cap: the daemon's block count, and its canonical bytes
+ * bounded from above by the message's UTF-8 JSON bytes plus each block's overhead.
  */
-export function openCodeMessageSize(message: unknown, wireBytes: number): TransformWindowSize {
+export function openCodeMessageSize(message: unknown, utf8Bytes: number): TransformWindowSize {
     const blocks = openCodeBlocks(message);
-    return { blocks, bytes: blocks === 0 ? 0 : wireBytes + blocks * BLOCK_OVERHEAD_BYTES };
+    return { blocks, bytes: blocks === 0 ? 0 : utf8Bytes + blocks * BLOCK_OVERHEAD_BYTES };
 }
 
 const MEASURED_RUN_SLOTS = 32;
@@ -75,7 +57,7 @@ export function openCodeSlotSizes(
         const message = copyWindow(host, index, index + 1);
         const inspection = message && inspectReferenceableMessages(message);
         if (!message || !inspection?.ok) return undefined;
-        return openCodeMessageSize(message[0], inspection.messageWireBytes[0] ?? 0);
+        return openCodeMessageSize(message[0], inspection.messageUtf8Bytes[0] ?? 0);
     };
     return (index) => {
         const known = sizes.get(index);
@@ -97,7 +79,7 @@ export function openCodeSlotSizes(
                 slot,
                 openCodeMessageSize(
                     run[slot - start],
-                    inspection.messageWireBytes[slot - start] ?? 0,
+                    inspection.messageUtf8Bytes[slot - start] ?? 0,
                 ),
             );
         return sizes.get(index);
