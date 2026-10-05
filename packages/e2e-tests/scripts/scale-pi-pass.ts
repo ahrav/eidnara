@@ -242,8 +242,10 @@ const minus = (whole: number | null, part: number | null) =>
 
 const rowsPath = join(outDir, "rows.jsonl");
 const callsPath = join(outDir, "calls.jsonl");
+const outagesPath = join(outDir, "outages.jsonl");
 writeFileSync(rowsPath, "");
 writeFileSync(callsPath, "");
+writeFileSync(outagesPath, "");
 const writer = new PassRowWriter(rowsPath);
 const incomplete: string[] = [];
 const loads: Json[] = [];
@@ -453,9 +455,7 @@ async function measureSession(
                     outage.error = String(error);
                 }
             }
-            writeFileSync(join(outDir, "outages.jsonl"), `${JSON.stringify(outage)}\n`, {
-                flag: "a",
-            });
+            writeFileSync(outagesPath, `${JSON.stringify(outage)}\n`, { flag: "a" });
         }
     } finally {
         await runner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => undefined);
@@ -570,9 +570,8 @@ function lengthFlatness(rows: Json[]): Json[] {
 
 /** Per tier, the outage passes: how many ran, how many were skipped, and how many showed m0. */
 function outageSummary(tier: string): Json {
-    const path = join(outDir, "outages.jsonl");
-    const rows = existsSync(path)
-        ? readFileSync(path, "utf8")
+    const rows = existsSync(outagesPath)
+        ? readFileSync(outagesPath, "utf8")
               .split("\n")
               .filter((line) => line.length > 0)
               .map((line) => JSON.parse(line) as Json)
