@@ -3,6 +3,22 @@
     "header": "Every entry runs under `--mode rust`. Tier `rust-only` runs through the rust-mode direct-host fixture and skips itself when Cargo or the fixture is unavailable; tier `pi-smoke` runs the Pi RPC process under Node and skips itself when Pi, node, or the built extension is unavailable, unless `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure; tier `pi-rust` runs Pi against the rust-mode direct-host fixture, in process under `createAgentSession` and as the Pi RPC process, and skips itself when either tier's prerequisites are unavailable, under the same `EIDNARA_E2E_REQUIRE_PI=1` rule. An entry whose every test is skipped carries `quarantined` with the reason; `validate-mode-manifest` refuses a fully skipped file without it and a marked file with live tests, and lists the quarantines it validated.",
     "entries": [
         {
+            "path": "tests/bedrock-only-opencode.test.ts",
+            "tier": "rust-only",
+            "rationale": "Bedrock-only deployment (#849): memory capture, the context researcher, the Memory Classifier, the History Summarizer, and Wrapup complete in OpenCode with only the amazon-bedrock row, the live session and the pinned ModelExecution closure both reaching the SigV4-verifying Bedrock peer through configuration",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
+            "path": "tests/bedrock-only-pi.test.ts",
+            "tier": "pi-rust",
+            "rationale": "Bedrock-only deployment (#849): memory capture, the context researcher, the Memory Classifier, the History Summarizer, and Wrapup complete in Pi with only the amazon-bedrock row, the live session through models.json and the pinned ModelExecution closure through a provider extension",
+            "contract_refs": [
+                "U5-PORT"
+            ]
+        },
+        {
             "path": "tests/cache-invariants.test.ts",
             "tier": "rust-only",
             "rationale": "replay-class prefix stability: pure-defer growth (A1), defer passes after an execute pass (A2), and aged eidnara_reduce survival (A3) through the incident-pool verifiers",

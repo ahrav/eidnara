@@ -1,6 +1,7 @@
 //!
 //! Each run uses a private per-run `OPENCODE_DB`, inline zero-tool-agent config, disabled project config, the ModelExecution-child guard, and a stdin prompt; it never accesses the user's database or project-controlled config.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::Arc;
 
@@ -36,6 +37,8 @@ pub struct OpenCodeBackend {
     limits: SubprocessLimits,
     env: EnvSnapshot,
     state_root: StateRoot,
+    /// The base URL each named provider's requests go to, written into the inline config as that provider's `options.baseURL`; production backends name none, so every provider dials its own endpoint.
+    provider_base_urls: BTreeMap<String, String>,
 }
 
 impl OpenCodeBackend {
@@ -54,7 +57,17 @@ impl OpenCodeBackend {
             limits,
             env,
             state_root,
+            provider_base_urls: BTreeMap::new(),
         }
+    }
+
+    /// Sends `provider`'s requests to `base_url`, the way a scenario points a pinned OpenCode at a scripted provider peer through its own configuration. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_provider_base_url(mut self, provider: &str, base_url: &str) -> Self {
+        self.provider_base_urls
+            .insert(provider.to_owned(), base_url.to_owned());
+        self
     }
 }
 
@@ -77,13 +90,19 @@ impl LlmExecutionBackend for OpenCodeBackend {
             let terminal = backend::dispatch_closed(Harness::OpenCode);
             return Box::pin(async move { terminal });
         }
-        let runtime = self.runtime.clone();
-        let limits = self.limits.clone();
-        let env = self.env.clone();
-        let state_root = self.state_root.clone();
-        Box::pin(run_opencode(
-            runtime, limits, env, state_root, request, events, cancel,
-        ))
+        let launch = Launch {
+            runtime: self.runtime.clone(),
+            limits: self.limits.clone(),
+            env: self.env.clone(),
+            state_root: self.state_root.clone(),
+            config_content: inline_config(
+                &request,
+                self.provider_base_urls
+                    .get(&request.provider)
+                    .map(String::as_str),
+            ),
+        };
+        Box::pin(run_opencode(launch, request, events, cancel))
     }
 
     fn context_capabilities(&self, harness: Harness) -> ContextCapabilities {
@@ -114,7 +133,7 @@ impl LlmExecutionBackend for OpenCodeBackend {
 /// the provider still enforces the model's real limit.
 const OPENCODE_INLINE_CONTEXT_LIMIT: u64 = 1_000_000;
 
-fn inline_config(request: &BackendRequest) -> String {
+fn inline_config(request: &BackendRequest, base_url: Option<&str>) -> String {
     let mut agent = serde_json::json!({
         "mode": "primary",
         // zero-tool contract.
@@ -126,23 +145,25 @@ fn inline_config(request: &BackendRequest) -> String {
     if let Some(system) = &request.system {
         agent["prompt"] = serde_json::Value::String(system.clone());
     }
+    let mut provider = serde_json::json!({
+        "models": {
+            &request.model: {
+                "limit": {
+                    "context": OPENCODE_INLINE_CONTEXT_LIMIT,
+                    "output": request.max_output_tokens,
+                },
+            },
+        },
+    });
+    if let Some(base_url) = base_url {
+        provider["options"] = serde_json::json!({ "baseURL": base_url });
+    }
     let config = serde_json::json!({
         "agent": { OPENCODE_MODEL_EXECUTION_AGENT: agent },
         // The single run must never compact or prune its own prompt; the transcript parser
         // accepts only the zero-tool step, text, and finish events.
         "compaction": { "auto": false, "prune": false },
-        "provider": {
-            &request.provider: {
-                "models": {
-                    &request.model: {
-                        "limit": {
-                            "context": OPENCODE_INLINE_CONTEXT_LIMIT,
-                            "output": request.max_output_tokens,
-                        },
-                    },
-                },
-            },
-        },
+        "provider": { &request.provider: provider },
     });
     let serialized = serde_json::to_string(&config).expect("inline config serializes");
     // Neutralize OpenCode's `{env:..}`/`{file:..}` config substitution tokens in caller text.
@@ -152,22 +173,34 @@ fn inline_config(request: &BackendRequest) -> String {
         .replace("{file:", "\\u007bfile:")
 }
 
-async fn run_opencode(
+/// What one OpenCode run launches with: the backend's runtime, limits, envelope, and state root, and the inline config built for its request.
+struct Launch {
     runtime: OpenCodeRuntime,
-    mut limits: SubprocessLimits,
+    limits: SubprocessLimits,
     env: EnvSnapshot,
     state_root: StateRoot,
+    config_content: String,
+}
+
+async fn run_opencode(
+    launch: Launch,
     request: BackendRequest,
     events: EventSink,
     cancel: CancellationToken,
 ) -> BackendTerminal {
+    let Launch {
+        runtime,
+        mut limits,
+        env,
+        state_root,
+        config_content,
+    } = launch;
     let mut child_env = match env.provider_row("opencode", &request.provider) {
         Ok(row) => row,
         Err(error) => {
             return subprocess::credential_failure(Harness::OpenCode, error);
         }
     };
-    let config_content = inline_config(&request);
     // Reject configurations over `MAX_OPENCODE_CONFIG_BYTES` before spawning because Linux limits one environment string to `MAX_ARG_STRLEN` (~128 KiB), and exceeding that limit makes `exec(2)` fail with `E2BIG`.
     if config_content.len() > MAX_OPENCODE_CONFIG_BYTES {
         return BackendTerminal::Failed(BackendError {
@@ -458,7 +491,7 @@ mod tests {
             session: String::new(),
             run_id: String::new(),
         };
-        let raw = inline_config(&request);
+        let raw = inline_config(&request, None);
         assert!(!raw.contains("{env:") && !raw.contains("{file:"), "{raw}");
         // The escape is JSON-transparent: decoding restores the caller text verbatim.
         let decoded: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
@@ -472,6 +505,39 @@ mod tests {
         assert_eq!(limit["output"], 1);
         assert_eq!(limit["context"], OPENCODE_INLINE_CONTEXT_LIMIT);
         assert_eq!(decoded["compaction"]["auto"], false);
+        // Production names no base URL, so the provider dials its own endpoint.
+        assert!(decoded["provider"]["{env:P}"].get("options").is_none());
+    }
+
+    #[test]
+    fn a_provider_base_url_reaches_only_that_providers_options() {
+        let request = BackendRequest {
+            prompt: String::new(),
+            system: None,
+            provider: "amazon-bedrock".into(),
+            model: "us.anthropic.claude-sonnet-4-5-20250929-v1:0".into(),
+            max_output_tokens: 64,
+            temperature: None,
+            harness: Harness::OpenCode,
+            session: String::new(),
+            run_id: String::new(),
+        };
+        let decoded: serde_json::Value =
+            serde_json::from_str(&inline_config(&request, Some("http://127.0.0.1:9")))
+                .expect("valid json");
+        let provider = &decoded["provider"]["amazon-bedrock"];
+        assert_eq!(
+            provider["options"],
+            serde_json::json!({"baseURL": "http://127.0.0.1:9"})
+        );
+        assert_eq!(
+            provider["models"]["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]["limit"]["output"],
+            64
+        );
+        assert_eq!(
+            decoded["provider"].as_object().map(|map| map.len()),
+            Some(1)
+        );
     }
 
     #[test]

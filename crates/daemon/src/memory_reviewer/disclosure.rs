@@ -15,7 +15,6 @@ use memory_store::memory_reviewer_ledger::{
     AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerError,
     MemoryReviewerLedgerRefusal, ResponseUsage,
 };
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -24,8 +23,8 @@ use super::broker::{
     check_render, hold_refusal,
 };
 use super::model_request::{
-    AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role, SendError,
-    Sender,
+    AssistantText, Message, MessagesRequest, RequestBody, ResponseAccounting, Role,
+    SIGNED_REQUEST_WINDOW_MS, SendError, Sender, Signed,
 };
 
 /// The complete API and model profile of one request: the requested canonical model id and the exact sampling values or their omission. It is serialized into the body before dispatch and bound to the marker through the body digest; nothing resolves an alias or asks the provider what it means.
@@ -53,7 +52,6 @@ pub struct PreparedBody {
     model: String,
     tags: Vec<ProvenanceTag>,
     body: RequestBody,
-    body_digest: String,
     policy_union_digest: String,
     policy_union_canonical: String,
 }
@@ -79,7 +77,7 @@ impl PreparedBody {
     }
 
     pub fn body_digest(&self) -> &str {
-        &self.body_digest
+        self.body.digest()
     }
 
     pub fn policy_union_digest(&self) -> &str {
@@ -243,12 +241,21 @@ pub fn prepare_body(
     Ok(PreparedBody {
         broker: id,
         model: request.model,
-        body_digest: format!("{:x}", Sha256::digest(body.as_bytes())),
         tags,
         body,
         policy_union_digest: union.digest,
         policy_union_canonical: union.canonical,
     })
+}
+
+/// Whether a request signed at `signed_at_ms` may be sent under a marker committed at `committed_at_ms` with `attempt_deadline_ms`: signed no later than the commit, and no longer than [`SIGNED_REQUEST_WINDOW_MS`] before the attempt deadline, so the provider never sees a request time outside its skew window.
+pub fn signing_window_admits(
+    signed_at_ms: i64,
+    committed_at_ms: i64,
+    attempt_deadline_ms: i64,
+) -> bool {
+    signed_at_ms <= committed_at_ms
+        && attempt_deadline_ms.saturating_sub(signed_at_ms) <= SIGNED_REQUEST_WINDOW_MS
 }
 
 impl Disclosure<'_> {
@@ -288,7 +295,7 @@ impl Disclosure<'_> {
         let evidence = self.revalidate(prepared)?;
         self.guard(&evidence)?;
         let marker = AttemptMarker {
-            body_digest: prepared.body_digest.clone(),
+            body_digest: prepared.body_digest().to_string(),
             request_bytes: u64::try_from(prepared.body.len()).map_err(|_| {
                 DisclosureRefusal::Send {
                     attempt_index: None,
@@ -301,8 +308,15 @@ impl Disclosure<'_> {
             credential_id: self.sender.credential_id().to_string(),
             policy_union_digest: prepared.policy_union_digest.clone(),
         };
-        // Copied before the ledger is entered so the handoff allocates nothing while the connection is owned.
-        let body = prepared.body.clone();
+        // Signed before the ledger is entered, at the attempt's clock, so the handoff builds nothing while the connection is owned; a refused commit drops the signed request unsent.
+        let signed_at_ms = (self.now_ms)();
+        let signed = connected
+            .sign(prepared.body.clone(), prepared.body_digest(), signed_at_ms)
+            .map_err(|error| DisclosureRefusal::Send {
+                attempt_index: None,
+                error,
+                sent: false,
+            })?;
         let hold = &self.broker.binding().hold;
         let outcome = self
             .ledger
@@ -313,9 +327,9 @@ impl Disclosure<'_> {
                 self.claim_id,
                 &hold.kernel_incarnation,
                 &marker,
-                (connected, body),
+                signed,
                 self.now_ms,
-                |(connected, body)| connected.handoff(body),
+                Signed::handoff,
             )
             .map_err(|error| match error {
                 MemoryReviewerLedgerError::Refused(reason) => DisclosureRefusal::Ledger(reason),
@@ -343,6 +357,7 @@ impl Disclosure<'_> {
             }
             DispatchOutcome::Handed {
                 attempt_index,
+                committed_at_ms,
                 handoff,
                 attempt_deadline_ms,
                 allowance,
@@ -358,22 +373,21 @@ impl Disclosure<'_> {
                         DisclosureRefusal::Store(error.to_string()),
                     ));
                 }
-                match handoff {
-                    // The sender knows the connection never took the request, but `NotDispatched` is the ledger's proof of no disclosure and only the dispatch path may write it; the attempt is charged and ends `Failed`, and `sent: false` reports what the sender saw.
-                    Err(error) => {
-                        return Err(self.end(
-                            attempt_index,
-                            MemoryReviewerAttemptTerminal::Failed,
-                            ResponseUsage::NONE,
-                            DisclosureRefusal::Send {
-                                attempt_index: Some(attempt_index),
-                                error,
-                                sent: false,
-                            },
-                        ));
-                    }
-                    Ok(in_flight) => (attempt_index, in_flight, attempt_deadline_ms, allowance),
+                // The request was signed at the attempt's clock: never after the commit, and never so long before the attempt deadline that the provider would judge its time stale. A request outside that window is dropped unwritten.
+                if !signing_window_admits(signed_at_ms, committed_at_ms, attempt_deadline_ms) {
+                    drop(handoff);
+                    return Err(self.end(
+                        attempt_index,
+                        MemoryReviewerAttemptTerminal::Failed,
+                        ResponseUsage::NONE,
+                        DisclosureRefusal::Send {
+                            attempt_index: Some(attempt_index),
+                            error: SendError::SignTime,
+                            sent: false,
+                        },
+                    ));
                 }
+                (attempt_index, handoff, attempt_deadline_ms, allowance)
             }
         };
         // The ledger bounded the attempt when it committed the marker; a response after that bound is not this attempt's. The response may consume only what the job has left of its ceilings.

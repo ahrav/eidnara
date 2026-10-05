@@ -193,6 +193,17 @@ export interface PiRunnerOptions {
     eidnaraConfig?: Record<string, unknown>;
     piSettingsExtra?: Record<string, unknown>;
     modelContextLimit?: number;
+    /**
+     * `bedrock` makes `amazon-bedrock` the only credentialed provider: `models.json` points it at
+     * `baseUrl` and `anthropic` at `anthropicSentinelUrl`, `model` is the default, and the child
+     * gets `env` as its only `AWS_*` variables, with no `ANTHROPIC_API_KEY`.
+     */
+    bedrock?: {
+        baseUrl: string;
+        model: string;
+        env: Record<string, string>;
+        anthropicSentinelUrl: string;
+    };
 }
 
 export function createPiIsolatedEnv(): PiIsolatedEnv {
@@ -246,11 +257,14 @@ export function ensurePluginAvailable(env: PiIsolatedEnv): void {
 export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     ensurePluginAvailable(env);
 
+    const target = opts.bedrock
+        ? { provider: "amazon-bedrock", model: opts.bedrock.model }
+        : { provider: "anthropic", model: "claude-haiku-4-5" };
     const settings = {
         packages: [env.pluginDir],
-        defaultProvider: "anthropic",
-        defaultModel: "claude-haiku-4-5",
-        enabledModels: ["anthropic/claude-haiku-4-5"],
+        defaultProvider: target.provider,
+        defaultModel: target.model,
+        enabledModels: [`${target.provider}/${target.model}`],
         compaction: { enabled: false },
         retry: { enabled: false },
         quietStartup: true,
@@ -259,20 +273,26 @@ export function writeConfigs(env: PiIsolatedEnv, opts: PiRunnerOptions): void {
     };
     writeFileSync(join(env.agentDir, "settings.json"), JSON.stringify(settings, null, 2));
 
-    const models = {
-        providers: {
-            anthropic: {
-                baseUrl: opts.mockProviderURL,
-                apiKey: "test-key-not-real",
-                modelOverrides: {
-                    "claude-haiku-4-5": {
-                        contextWindow: opts.modelContextLimit ?? 200000,
-                        maxTokens: 8192,
-                        reasoning: false,
-                    },
-                },
-            },
+    const modelOverrides = {
+        [target.model]: {
+            contextWindow: opts.modelContextLimit ?? 200000,
+            maxTokens: 8192,
+            reasoning: false,
         },
+    };
+    const models = {
+        providers: opts.bedrock
+            ? {
+                  "amazon-bedrock": { baseUrl: opts.bedrock.baseUrl, modelOverrides },
+                  anthropic: { baseUrl: opts.bedrock.anthropicSentinelUrl },
+              }
+            : {
+                  anthropic: {
+                      baseUrl: opts.mockProviderURL,
+                      apiKey: "test-key-not-real",
+                      modelOverrides,
+                  },
+              },
     };
     writeFileSync(join(env.agentDir, "models.json"), JSON.stringify(models, null, 2));
 
@@ -307,12 +327,16 @@ const INHERITED_ROLE_MARKERS = new Set([
     "EIDNARA_LAUNCH_NONCE",
 ]);
 
-export function childEnv(env: PiIsolatedEnv): Record<string, string> {
+export function childEnv(
+    env: PiIsolatedEnv,
+    opts: Pick<PiRunnerOptions, "bedrock"> = {},
+): Record<string, string> {
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
         if (value === undefined) continue;
         if (key === "NODE_ENV") continue;
         if (INHERITED_ROLE_MARKERS.has(key)) continue;
+        if (opts.bedrock && key.startsWith("AWS_")) continue;
         result[key] = value;
     }
     result.PI_CODING_AGENT_DIR = env.agentDir;
@@ -323,7 +347,8 @@ export function childEnv(env: PiIsolatedEnv): Record<string, string> {
     // The plugin logger's default path is shared by Pi processes and survives `dispose()`;
     // a path under `baseDir` ties the log's lifetime to the isolated environment.
     result.EIDNARA_LOG_PATH = join(env.baseDir, "eidnara.log");
-    result.ANTHROPIC_API_KEY = "test-key-not-real";
+    if (opts.bedrock) Object.assign(result, opts.bedrock.env);
+    else result.ANTHROPIC_API_KEY = "test-key-not-real";
     result.PI_OFFLINE = "1";
     result.PI_SKIP_VERSION_CHECK = "1";
     return result;

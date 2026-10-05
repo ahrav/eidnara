@@ -90,6 +90,13 @@ export interface SpawnOptions {
      * allowSecretEnvOffLoopback permits non-loopback serving only for fake fixture credentials.
      */
     allowSecretEnvOffLoopback?: boolean;
+    /**
+     * `bedrock` makes `amazon-bedrock` the only credentialed provider: it is pointed at
+     * `baseURL`, the built-in `anthropic` provider at `anthropicSentinelURL`, the mock Anthropic
+     * provider is left out, and the child gets no `ANTHROPIC_API_KEY`. Its AWS credentials
+     * travel in `extraEnv`.
+     */
+    bedrock?: { baseURL: string; region: string; model: string; anthropicSentinelURL: string };
 }
 
 async function pickFreePort(): Promise<number> {
@@ -154,6 +161,44 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
     const extraWithoutProvider = { ...extra };
     delete extraWithoutProvider.provider;
 
+    const limit = { context: opts.modelContextLimit ?? 200000, output: 8192 };
+    const harnessProviders: Record<string, unknown> = opts.bedrock
+        ? {
+              "amazon-bedrock": {
+                  options: { baseURL: opts.bedrock.baseURL, region: opts.bedrock.region },
+                  models: { [opts.bedrock.model]: { limit } },
+              },
+              anthropic: { options: { baseURL: opts.bedrock.anthropicSentinelURL } },
+          }
+        : {
+              "mock-anthropic": {
+                  api: "@ai-sdk/anthropic",
+                  name: "Mock Anthropic",
+                  npm: "@ai-sdk/anthropic",
+                  env: [],
+                  options: {
+                      apiKey: "test-key-not-real",
+                      baseURL: mockProviderURL,
+                  },
+                  models: {
+                      "mock-sonnet": {
+                          id: "mock-sonnet",
+                          name: "Mock Sonnet",
+                          cost: { input: 0, output: 0 },
+                          limit,
+                          // The mock advertises image and PDF input so OpenCode preserves inline file parts.
+                          // OpenCode replaces inline file parts for unsupported inputs with text error messages.
+                          // The mock mirrors Sonnet's image and PDF input capabilities.
+                          modalities: {
+                              input: ["text", "image", "pdf"],
+                              output: ["text"],
+                          },
+                          options: {},
+                      },
+                  },
+              },
+          };
+
     const opencodeConfig: Record<string, unknown> = {
         $schema: "https://opencode.ai/config.json",
         plugin: [pluginSpec],
@@ -168,32 +213,7 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
             !Array.isArray(contributedProviders)
                 ? contributedProviders
                 : {}),
-            "mock-anthropic": {
-                api: "@ai-sdk/anthropic",
-                name: "Mock Anthropic",
-                npm: "@ai-sdk/anthropic",
-                env: [],
-                options: {
-                    apiKey: "test-key-not-real",
-                    baseURL: mockProviderURL,
-                },
-                models: {
-                    "mock-sonnet": {
-                        id: "mock-sonnet",
-                        name: "Mock Sonnet",
-                        cost: { input: 0, output: 0 },
-                        limit: { context: opts.modelContextLimit ?? 200000, output: 8192 },
-                        // The mock advertises image and PDF input so OpenCode preserves inline file parts.
-                        // OpenCode replaces inline file parts for unsupported inputs with text error messages.
-                        // The mock mirrors Sonnet's image and PDF input capabilities.
-                        modalities: {
-                            input: ["text", "image", "pdf"],
-                            output: ["text"],
-                        },
-                        options: {},
-                    },
-                },
-            },
+            ...harnessProviders,
         },
         ...extraWithoutProvider,
     };
@@ -583,7 +603,7 @@ async function spawnOpencodeWithProvision(
         childEnv.XDG_CONFIG_HOME = env.configDir;
         childEnv.XDG_DATA_HOME = env.dataDir;
         childEnv.XDG_CACHE_HOME = env.cacheDir;
-        childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
+        if (!resolvedOpts.bedrock) childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
         for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
             childEnv[key] = value;
         }

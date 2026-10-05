@@ -8,10 +8,14 @@ use std::time::Duration;
 use daemon::memory_reviewer::model_request::{
     ANTHROPIC_VERSION, AssistantText, Credential, Endpoint, MAX_OUTPUT_TOKENS,
     MAX_RAW_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_FRAMES, MAX_RESPONSE_HEAD_BYTES,
-    MAX_RESPONSE_HEADERS, Message, MessagesRequest, Provider, RequestBody, ResponseAccounting,
-    ResponseAllowance, Role, SendError, Sender, Timing,
+    MAX_RESPONSE_HEADERS, MESSAGES_PATH, Message, MessagesRequest, Provider, Providers,
+    RequestBody, ResponseAccounting, ResponseAllowance, Role, SendError, Sender, Timing,
 };
 use daemon::memory_reviewer::model_response::{DecodeError, StopReason};
+use daemon::memory_reviewer::sigv4::{
+    self, RequestTime, Scope, authorization, canonical_uri, signature, string_to_sign,
+};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::time::Instant;
@@ -57,8 +61,9 @@ async fn exchange_with(
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&request()).unwrap())
+        .sign_now(body_of(&request()).unwrap())
         .unwrap()
+        .handoff()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -96,7 +101,10 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     );
     let sender = peer.sender();
     let connected = sender.connect(deadline()).await.unwrap();
-    let in_flight = connected.handoff(body_of(&request()).unwrap()).unwrap();
+    let in_flight = connected
+        .sign_now(body_of(&request()).unwrap())
+        .unwrap()
+        .handoff();
     armed_tx.send(()).unwrap();
     // Give the peer its whole observation window before the connection is polled.
     tokio::time::sleep(OBSERVATION_WINDOW + Duration::from_millis(100)).await;
@@ -128,6 +136,7 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
         1
     );
     assert_eq!(headers.matches("sk-test-credential").count(), 1);
+    assert!(!headers.contains("authorization:") && !headers.contains("x-amz-"));
     assert!(headers.contains(&format!("anthropic-version: {ANTHROPIC_VERSION}\r\n")));
     assert!(headers.contains("accept-encoding: identity\r\n"));
     assert!(headers.contains("\r\naccept: application/json\r\n"));
@@ -173,8 +182,9 @@ async fn no_request_byte_reaches_the_peer_before_the_connection_is_polled() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&request()).unwrap())
-        .unwrap();
+        .sign_now(body_of(&request()).unwrap())
+        .unwrap()
+        .handoff();
     armed_tx.send(()).unwrap();
     let (after_handshake, after_handoff) = count_rx.await.unwrap();
     assert_eq!(
@@ -357,8 +367,9 @@ async fn a_refused_credential_is_reported_whatever_its_body_does() {
             .connect(deadline())
             .await
             .unwrap()
-            .handoff(body_of(&request).unwrap())
+            .sign_now(body_of(&request).unwrap())
             .unwrap()
+            .handoff()
             .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
             .await;
         assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
@@ -506,8 +517,9 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&request()).unwrap())
-        .unwrap();
+        .sign_now(body_of(&request()).unwrap())
+        .unwrap()
+        .handoff();
     let outcome = in_flight
         .complete(
             Instant::now() + Duration::from_millis(500),
@@ -558,8 +570,9 @@ async fn the_head_wait_is_bounded_by_the_completion_budget_not_the_frame_idle_li
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&request).unwrap())
+        .sign_now(body_of(&request).unwrap())
         .unwrap()
+        .handoff()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -585,8 +598,9 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&generous).unwrap())
+        .sign_now(body_of(&generous).unwrap())
         .unwrap()
+        .handoff()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -608,8 +622,9 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&terse).unwrap())
+        .sign_now(body_of(&terse).unwrap())
         .unwrap()
+        .handoff()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -638,8 +653,9 @@ async fn a_body_that_stalls_past_the_frame_idle_limit_is_a_deadline() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&request).unwrap())
+        .sign_now(body_of(&request).unwrap())
         .unwrap()
+        .handoff()
         .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
         .await;
     assert_eq!(outcome.unwrap_err(), SendError::Deadline);
@@ -664,8 +680,9 @@ async fn exchange_within(
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(body_of(&request()).unwrap())
+        .sign_now(body_of(&request()).unwrap())
         .unwrap()
+        .handoff()
         .complete(deadline(), allowance, &mut accounting)
         .await;
     server.await.unwrap();
@@ -803,4 +820,345 @@ async fn responses_are_charged_against_the_jobs_remaining_allowance_and_refusals
     .await;
     assert_eq!(outcome.unwrap_err(), SendError::ResponseTooLarge);
     assert_eq!(accounting.transport_bytes, MAX_RAW_RESPONSE_BYTES);
+}
+
+const AWS_KEY_ID: &str = "AKIDEXAMPLE";
+const AWS_SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+const AWS_TOKEN: &str = "session-token-example";
+const BEDROCK_MODEL_ID: &str = "anthropic.claude-3-sonnet-20240229-v1:0";
+
+fn bedrock_sender(peer: &Peer, token: Option<&str>) -> Sender {
+    Sender::new(
+        Provider::bedrock_at(
+            Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap(),
+            "us-east-1",
+            BEDROCK_MODEL_ID,
+        )
+        .unwrap(),
+        Credential::aws(
+            "fp-bedrock".to_string(),
+            AWS_KEY_ID.to_string(),
+            AWS_SECRET.to_string(),
+            token.map(str::to_string),
+        )
+        .unwrap(),
+    )
+}
+
+/// The header lines of a captured request head, lowercased names with their values.
+fn header_lines(head: &str) -> Vec<(String, String)> {
+    head.split("\r\n")
+        .skip(1)
+        .filter_map(|line| line.split_once(": "))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+        .collect()
+}
+
+/// A Bedrock request is `InvokeModel` on the model's path with `:` encoded once on the wire, a body naming no model and no stream, and a SigV4 `Authorization` over `content-type`, `host`, `x-amz-content-sha256` (the body's digest), `x-amz-date`, and the session token; no `x-api-key`, and the secret nowhere. The peer's recomputation from the captured request under the secret matches the signature it received.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bedrock_request_is_signed_invoke_model_and_carries_no_api_key() {
+    for token in [Some(AWS_TOKEN), None, Some("")] {
+        let mut peer = Peer::start().await;
+        let server = peer.serve(no_wait(), |_| {
+            json_response(
+                "200 OK",
+                &message("cargo builds it").replace(
+                    "\"model\":\"claude\",",
+                    "\"model\":\"claude-3-sonnet-20240229\",",
+                ),
+                "",
+            )
+        });
+        let sender = bedrock_sender(&peer, token);
+        let body = sender.body(&request()).unwrap();
+        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        assert_eq!(body.digest(), digest);
+        let signed_at = 1_440_938_160_000;
+        let answer = sender
+            .connect(deadline())
+            .await
+            .unwrap()
+            .sign(body, &digest, signed_at)
+            .unwrap()
+            .handoff()
+            .complete(
+                deadline(),
+                ResponseAllowance::FULL,
+                &mut ResponseAccounting::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.text, "cargo builds it");
+        assert_eq!(answer.model.as_deref(), Some("claude-3-sonnet-20240229"));
+        let observed = server.await.unwrap();
+        assert!(
+            observed.head.starts_with(
+                "POST /model/anthropic.claude-3-sonnet-20240229-v1%3A0/invoke HTTP/1.1\r\n"
+            ),
+            "{}",
+            observed.head
+        );
+        let raw = String::from_utf8_lossy(&observed.body).to_string() + &observed.head;
+        assert!(
+            !raw.contains(AWS_SECRET),
+            "the secret never reaches the wire"
+        );
+        assert!(!raw.to_ascii_lowercase().contains("x-api-key"));
+        let token = token.filter(|token| !token.is_empty());
+        assert_eq!(
+            raw.matches(AWS_TOKEN).count(),
+            usize::from(token.is_some()),
+            "the session token appears once, in its header, and an empty one not at all"
+        );
+        let headers = header_lines(&observed.head);
+        let get = |name: &str| {
+            headers
+                .iter()
+                .find(|(header, _)| header == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            get("x-amz-content-sha256").as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&observed.body)),
+            digest,
+            "the signed digest is the digest of the bytes sent"
+        );
+        assert_eq!(get("x-amz-date").as_deref(), Some("20150830T123600Z"));
+        assert_eq!(get("x-amz-security-token").as_deref(), token);
+        let body: serde_json::Value = serde_json::from_slice(&observed.body).unwrap();
+        assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");
+        assert!(body.get("model").is_none() && body.get("stream").is_none());
+        // The peer's own SigV4 recomputation over what it received.
+        let time = RequestTime::at(signed_at).unwrap();
+        let mut signed = vec![
+            ("content-type", "application/json"),
+            ("host", "localhost"),
+            ("x-amz-content-sha256", digest.as_str()),
+            ("x-amz-date", time.amz_date.as_str()),
+        ];
+        if let Some(token) = token {
+            signed.push(("x-amz-security-token", token));
+        }
+        let uri = canonical_uri("/model/anthropic.claude-3-sonnet-20240229-v1%3A0/invoke");
+        assert!(uri.contains("%253A0"));
+        let (canonical, signed_headers) = sigv4::Request {
+            method: "POST",
+            canonical_uri: &uri,
+            canonical_query: "",
+            headers: &signed,
+            payload_sha256: &digest,
+        }
+        .canonical();
+        let scope = Scope {
+            date: time.date(),
+            region: "us-east-1",
+            service: "bedrock",
+        };
+        let expected = authorization(
+            AWS_KEY_ID,
+            &scope,
+            &signed_headers,
+            &signature(
+                AWS_SECRET,
+                &scope,
+                &string_to_sign(&time, &scope, &canonical),
+            ),
+        );
+        assert_eq!(get("authorization").as_deref(), Some(expected.as_str()));
+    }
+}
+
+/// The provider and the credential are one closed pair: an API key never signs a Bedrock request, AWS keys never authenticate an Anthropic one, and a body other than the one the marker digest names is refused before anything is built.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mismatched_credential_or_body_is_refused_at_signing() {
+    let api_key = Credential::new("k".to_string(), "sk-anthropic".to_string()).unwrap();
+    let aws = Credential::aws(
+        "fp".to_string(),
+        AWS_KEY_ID.to_string(),
+        AWS_SECRET.to_string(),
+        None,
+    )
+    .unwrap();
+    for (bedrock, credential, digest, refusal) in [
+        (true, api_key, None, SendError::Credential),
+        (false, aws.clone(), None, SendError::Credential),
+        (
+            true,
+            aws.clone(),
+            Some("0".repeat(64)),
+            SendError::BodyDigest,
+        ),
+    ] {
+        let mut peer = Peer::start().await;
+        // The connection handshakes and never carries a request.
+        let server = peer.serve_script(vec![message("unused").into_bytes()]);
+        let endpoint = Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap();
+        let provider = if bedrock {
+            Provider::bedrock_at(endpoint, "us-east-1", BEDROCK_MODEL_ID).unwrap()
+        } else {
+            Provider::anthropic_at(endpoint)
+        };
+        let sender = Sender::new(provider, credential);
+        let body = sender.body(&request()).unwrap();
+        let digest = digest.unwrap_or_else(|| format!("{:x}", Sha256::digest(body.as_bytes())));
+        let refused = sender
+            .connect(deadline())
+            .await
+            .unwrap()
+            .sign(body, &digest, 0)
+            .unwrap_err();
+        assert_eq!(refused, refusal);
+        assert!(server.await.unwrap().is_empty(), "nothing reached the peer");
+    }
+    // An Anthropic-shaped body, which names its model, is never signed for Bedrock.
+    let mut peer = Peer::start().await;
+    let server = peer.serve_script(vec![message("unused").into_bytes()]);
+    let anthropic_body = Sender::new(
+        Provider::anthropic(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
+    )
+    .body(&request())
+    .unwrap();
+    let digest = format!("{:x}", Sha256::digest(anthropic_body.as_bytes()));
+    let bedrock = Sender::new(
+        Provider::bedrock_at(
+            Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap(),
+            "us-east-1",
+            BEDROCK_MODEL_ID,
+        )
+        .unwrap(),
+        aws,
+    );
+    let refused = bedrock
+        .connect(deadline())
+        .await
+        .unwrap()
+        .sign(anthropic_body, &digest, 0)
+        .unwrap_err();
+    assert_eq!(refused, SendError::BodyDigest);
+    assert!(server.await.unwrap().is_empty());
+}
+
+/// One validated startup region names the production host, the TLS server name, and the signing scope: the identity names `bedrock-runtime.<region>.amazonaws.com`, and a region outside `[a-z0-9-]` or past one 63-byte DNS label, like an absent one, leaves Bedrock undialable. A model id that cannot be one path segment is refused.
+#[test]
+fn the_startup_region_names_the_production_bedrock_host() {
+    let providers = Providers::production(Some("us-west-2"));
+    assert_eq!(
+        providers.bedrock(BEDROCK_MODEL_ID).unwrap().identity(),
+        format!(
+            "bedrock-runtime.us-west-2.amazonaws.com/model/{BEDROCK_MODEL_ID}/invoke@bedrock-2023-05-31"
+        )
+    );
+    assert_eq!(
+        providers.anthropic().identity(),
+        format!("api.anthropic.com{MESSAGES_PATH}@{ANTHROPIC_VERSION}")
+    );
+    let longest = "a".repeat(63);
+    assert!(Providers::production(Some(&longest)).bedrock("m").is_ok());
+    for region in [
+        None,
+        Some(""),
+        Some("US-EAST-1"),
+        Some("us_east_1"),
+        Some("us-east-1/../x"),
+        Some("us-east-1.evil.example"),
+        Some("-us-east-1"),
+        Some("us-east-1-"),
+        Some(&*"a".repeat(64)),
+    ] {
+        assert_eq!(
+            Providers::production(region)
+                .bedrock(BEDROCK_MODEL_ID)
+                .unwrap_err(),
+            SendError::Endpoint,
+            "{region:?}"
+        );
+    }
+    for model_id in ["", ".", "..", "a\nb", "modèle"] {
+        assert_eq!(
+            providers.bedrock(model_id).unwrap_err(),
+            SendError::Endpoint,
+            "{model_id:?}"
+        );
+    }
+    assert!(
+        providers
+            .bedrock("us.anthropic/claude-x")
+            .unwrap()
+            .identity()
+            .contains("us.anthropic/claude-x")
+    );
+}
+
+/// Bedrock provider construction enforces the ledger's provider bound on the complete identity, including the region and the model id.
+#[test]
+fn every_accepted_bedrock_identity_fits_the_ledger_provider_bound() {
+    use memory_store::memory_reviewer_ledger::MAX_PROVIDER_BYTES;
+    for region in ["us-east-1", "ap-southeast-2", &*"a".repeat(63)] {
+        let providers = Providers::production(Some(region));
+        let overhead = providers.bedrock("m").unwrap().identity().len() - 1;
+        let fits = "m".repeat(MAX_PROVIDER_BYTES - overhead);
+        assert_eq!(
+            providers.bedrock(&fits).unwrap().identity().len(),
+            MAX_PROVIDER_BYTES,
+            "{region}"
+        );
+        assert_eq!(
+            providers.bedrock(&format!("{fits}m")).unwrap_err(),
+            SendError::Endpoint,
+            "{region}"
+        );
+        assert_eq!(
+            providers
+                .bedrock(
+                    "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-x"
+                )
+                .unwrap_err(),
+            SendError::Endpoint,
+            "{region}"
+        );
+    }
+}
+
+/// Every Bedrock error class ends the send with its status after the one request; the sender never sends again on the connection or opens another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_bedrock_error_class_ends_the_send_without_a_resend() {
+    for (status, code) in [
+        ("400 Bad Request", 400),
+        ("401 Unauthorized", 401),
+        ("403 Forbidden", 403),
+        ("404 Not Found", 404),
+        ("408 Request Timeout", 408),
+        ("424 Failed Dependency", 424),
+        ("429 Too Many Requests", 429),
+        ("500 Internal Server Error", 500),
+        ("503 Service Unavailable", 503),
+    ] {
+        let mut peer = Peer::start().await;
+        let server = peer.serve(no_wait(), move |_| {
+            json_response(status, r#"{"message":"refused"}"#, "")
+        });
+        let sender = bedrock_sender(&peer, Some(AWS_TOKEN));
+        let refused = sender
+            .connect(deadline())
+            .await
+            .unwrap()
+            .sign_now(sender.body(&request()).unwrap())
+            .unwrap()
+            .handoff()
+            .complete(
+                deadline(),
+                ResponseAllowance::FULL,
+                &mut ResponseAccounting::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused, SendError::Status(code));
+        let observed = server.await.unwrap();
+        assert!(!observed.reconnected, "{status}");
+        assert_eq!(peer.connections.load(Ordering::SeqCst), 1, "{status}");
+    }
 }

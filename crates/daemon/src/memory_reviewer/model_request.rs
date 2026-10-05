@@ -12,11 +12,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::client::conn::http1::{Connection, SendRequest};
 use hyper::header::{self, HeaderName, HeaderValue};
-use hyper::{Request, Response, StatusCode, Uri};
+use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
 use serde::Serialize;
+use sha2::Digest;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tokio_rustls::TlsConnector;
@@ -36,6 +37,22 @@ pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// The one startup-envelope credential this protocol may write into `x-api-key`; another provider's secret never reaches this host.
 pub const CREDENTIAL_NAME: &str = "ANTHROPIC_API_KEY";
+/// The Bedrock credential an activation record names: the access key id, whose secret and optional session token sign the request.
+pub const BEDROCK_CREDENTIAL_NAME: &str = "AWS_ACCESS_KEY_ID";
+/// The Anthropic Messages version Bedrock's `InvokeModel` body carries.
+pub const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
+pub const BEDROCK_PORT: u16 = 443;
+/// The SigV4 service name Bedrock signs under.
+pub const BEDROCK_SERVICE: &str = "bedrock";
+/// How long a signed request stays within the provider's clock-skew window: a request is signed at most this long before its attempt deadline, so the provider never judges a stale request time.
+pub const SIGNED_REQUEST_WINDOW_MS: i64 = 5 * 60 * 1000;
+const _: () = assert!(
+    memory_store::memory_reviewer_ledger::MEMORY_REVIEWER_ATTEMPT_MAX_MS < SIGNED_REQUEST_WINDOW_MS
+);
+/// Longest region name accepted: one DNS label of the runtime host.
+pub const MAX_REGION_BYTES: usize = 63;
+/// Longest Bedrock model id or inference profile accepted.
+pub const MAX_MODEL_ID_BYTES: usize = 256;
 /// Serialized request bytes a send may carry.
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 /// Output tokens a request may ask for.
@@ -121,6 +138,15 @@ pub enum SendError {
     Decode(DecodeError),
     #[error("egress_check")]
     EgressCheck,
+    /// The region or model id cannot name a Bedrock endpoint.
+    #[error("endpoint")]
+    Endpoint,
+    /// The body handed for signing is not the body the marker's digest names, or another provider shaped it.
+    #[error("body_digest")]
+    BodyDigest,
+    /// The request time cannot be signed: outside the representable range, after the commit, or too far before the attempt deadline.
+    #[error("sign_time")]
+    SignTime,
 }
 
 impl SendError {
@@ -136,34 +162,93 @@ fn refuses_credential(status: u16) -> bool {
     matches!(status, 401 | 403)
 }
 
-/// A startup credential: the deployment owner's identifier for it and the secret. The identifier is what an approval and an attempt marker name; the secret is rendered only into the authentication header, `Debug` never shows it, and its bytes are wiped when the last copy drops. Keeping both in one value means the credential a marker records is the one the header carries.
+/// A startup credential: the deployment owner's identifier for it and its secret material. The identifier is what an approval and an attempt marker name; an API key is rendered only into its authentication header, and an AWS secret only into the signing key derivation, never onto the wire. `Debug` never shows the material. Clones share one copy of the material, and its bytes are wiped when the last clone drops. Keeping both in one value means the credential a marker records is the one the request carries.
 #[derive(Clone)]
 pub struct Credential {
     id: String,
-    secret: Zeroizing<String>,
+    material: Arc<Material>,
+}
+
+enum Material {
+    /// The API key as the `x-api-key` value each request carries.
+    ApiKey(HeaderValue),
+    Aws {
+        access_key_id: String,
+        secret_access_key: Zeroizing<String>,
+        /// The session token as the `x-amz-security-token` value each request carries and signs.
+        session_token: Option<HeaderValue>,
+    },
 }
 
 impl Credential {
-    /// Refuses an empty identifier or a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
+    /// An API key. Refuses an empty identifier or a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
     pub fn new(id: String, secret: String) -> Result<Self, SendError> {
-        let secret = Zeroizing::new(secret);
+        let secret = secret_header(secret)?;
         if id.is_empty() {
             return Err(SendError::Credential);
         }
-        HeaderValue::from_str(&secret).map_err(|_| SendError::Credential)?;
-        Ok(Self { id, secret })
+        Ok(Self {
+            id,
+            material: Arc::new(Material::ApiKey(secret)),
+        })
+    }
+
+    /// Static AWS credentials. Refuses an empty identifier, key id, or secret, and a key id or session token that cannot be a header value.
+    pub fn aws(
+        id: String,
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+    ) -> Result<Self, SendError> {
+        let secret_access_key = Zeroizing::new(secret_access_key);
+        // An empty token is no token: it is neither signed nor sent.
+        let session_token = session_token
+            .filter(|token| !token.is_empty())
+            .map(secret_header)
+            .transpose()?;
+        if id.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
+            return Err(SendError::Credential);
+        }
+        if !visible_ascii(&access_key_id) {
+            return Err(SendError::Credential);
+        }
+        Ok(Self {
+            id,
+            material: Arc::new(Material::Aws {
+                access_key_id,
+                secret_access_key,
+                session_token,
+            }),
+        })
     }
 
     pub fn id(&self) -> &str {
         &self.id
     }
+}
 
-    fn header(&self) -> HeaderValue {
-        let mut value = HeaderValue::from_str(&self.secret)
-            .expect("Credential::new admits only a valid header value");
-        value.set_sensitive(true);
-        value
+/// Whether `value` holds only the bytes [`HeaderValue::from_str`] accepts: visible ASCII, space, and tab.
+fn visible_ascii(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| (b' '..0x7f).contains(&byte) || byte == b'\t')
+}
+
+/// `secret` as a sensitive header value over one buffer that is wiped when the last clone drops; requests carry clones of it. Refuses a secret [`HeaderValue::from_str`] refuses.
+fn secret_header(secret: String) -> Result<HeaderValue, SendError> {
+    let owner = Zeroizing::new(secret.into_bytes());
+    if !std::str::from_utf8(&owner).is_ok_and(visible_ascii) {
+        return Err(SendError::Credential);
     }
+    let mut value = HeaderValue::from_maybe_shared(Bytes::from_owner(owner))
+        .map_err(|_| SendError::Credential)?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+/// The text of a header value this module built from visible ASCII.
+fn header_text(value: &HeaderValue) -> Result<&str, SendError> {
+    std::str::from_utf8(value.as_bytes()).map_err(|_| SendError::Credential)
 }
 
 impl std::fmt::Debug for Credential {
@@ -176,6 +261,8 @@ impl std::fmt::Debug for Credential {
 #[derive(Clone)]
 pub struct Endpoint {
     host: String,
+    /// `host` as the `host` header value each request carries.
+    host_header: HeaderValue,
     port: u16,
     server_name: ServerName<'static>,
     tls: Arc<ClientConfig>,
@@ -194,6 +281,17 @@ impl Endpoint {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(ANTHROPIC_HOST, ANTHROPIC_PORT, roots)
             .expect("the production host name is a valid server name")
+    }
+
+    /// The production Bedrock runtime endpoint of `region` over the webpki roots.
+    fn bedrock(region: &str) -> Result<Self, SendError> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Self::with_roots(
+            &format!("bedrock-runtime.{region}.amazonaws.com"),
+            BEDROCK_PORT,
+            roots,
+        )
     }
 
     /// A local peer for the sender proof; the roots are the test's own authority. Compiled only for tests.
@@ -216,6 +314,7 @@ impl Endpoint {
             .with_no_client_auth();
         tls.alpn_protocols = vec![ALPN_HTTP1.to_vec()];
         Ok(Self {
+            host_header: HeaderValue::from_str(host).map_err(|_| SendError::Tls)?,
             host: host.to_string(),
             port,
             server_name,
@@ -242,6 +341,117 @@ pub struct Provider(ProviderKind);
 enum ProviderKind {
     /// Anthropic Messages on the fixed production host, or a test peer standing in for it.
     Anthropic(Arc<Endpoint>),
+    /// Bedrock `InvokeModel` for one model id in one region, signed with SigV4.
+    Bedrock(Bedrock),
+}
+
+#[derive(Debug, Clone)]
+struct Bedrock {
+    endpoint: Arc<Endpoint>,
+    region: String,
+    /// The identity format is `<host>/model/<model id>/invoke@<version>`.
+    identity: String,
+    /// The `InvokeModel` path with the model id encoded as one segment, as the wire carries it.
+    uri: Uri,
+    /// The wire path encoded again, as SigV4 signs it.
+    canonical_uri: String,
+}
+
+/// Whether `region` can name a Bedrock region: one DNS label of lowercase letters, digits, and inner `-`.
+pub fn valid_region(region: &str) -> bool {
+    !region.is_empty()
+        && region.len() <= MAX_REGION_BYTES
+        && !region.starts_with('-')
+        && !region.ends_with('-')
+        && region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Whether `model_id` can name a Bedrock model or inference profile as one path segment: printable ASCII, at most [`MAX_MODEL_ID_BYTES`], and neither `.` nor `..`.
+pub fn valid_model_id(model_id: &str) -> bool {
+    !model_id.is_empty()
+        && model_id != "."
+        && model_id != ".."
+        && model_id.len() <= MAX_MODEL_ID_BYTES
+        && model_id
+            .bytes()
+            .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
+}
+
+/// `/model/<model id>/invoke` with every byte of the model id outside the unreserved set percent-encoded, so `:` and `/` stay inside the one segment.
+fn invoke_path(model_id: &str) -> Result<String, SendError> {
+    if !valid_model_id(model_id) {
+        return Err(SendError::Endpoint);
+    }
+    Ok(format!(
+        "/model/{}/invoke",
+        super::sigv4::canonical_uri(model_id).replace('/', "%2F")
+    ))
+}
+
+/// The providers a deployment can dial: Anthropic, and Bedrock in the region the startup envelope names, once an activation record names the model id it invokes. A region outside [`valid_region`] leaves Bedrock undialable for the life of the process.
+#[derive(Debug, Clone)]
+pub struct Providers {
+    anthropic: Provider,
+    bedrock: Option<(Arc<Endpoint>, String)>,
+}
+
+impl Providers {
+    /// The production endpoints, with Bedrock in `region` when it is valid.
+    pub fn production(region: Option<&str>) -> Self {
+        Self {
+            anthropic: Provider::anthropic(),
+            bedrock: region
+                .filter(|region| valid_region(region))
+                .and_then(|region| {
+                    Some((
+                        Arc::new(Endpoint::bedrock(region).ok()?),
+                        region.to_string(),
+                    ))
+                }),
+        }
+    }
+
+    /// Both providers on local peers for the sender proof; `region` is signed for as given. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn at(anthropic: Endpoint, bedrock: Endpoint, region: &str) -> Self {
+        Self {
+            anthropic: Provider::anthropic_at(anthropic),
+            bedrock: valid_region(region).then(|| (Arc::new(bedrock), region.to_string())),
+        }
+    }
+
+    pub fn anthropic(&self) -> &Provider {
+        &self.anthropic
+    }
+
+    /// Bedrock invoking `model_id` in the startup region. [`SendError::Endpoint`] names an invalid or absent region, a model id outside [`valid_model_id`], or an identity longer than the ledger's provider bound.
+    pub fn bedrock(&self, model_id: &str) -> Result<Provider, SendError> {
+        let (endpoint, region) = self.bedrock.as_ref().ok_or(SendError::Endpoint)?;
+        Provider::bedrock_with(endpoint.clone(), region, model_id)
+    }
+}
+
+impl Provider {
+    /// The credential this provider's requests carry, read from the startup envelope's rows by `row` and identified as `id`: the API key for Anthropic; the access key id, secret, and optional session token for Bedrock.
+    pub fn credential(
+        &self,
+        id: String,
+        row: impl Fn(&str) -> Option<String>,
+    ) -> Result<Credential, SendError> {
+        match &self.0 {
+            ProviderKind::Anthropic(_) => {
+                Credential::new(id, row(CREDENTIAL_NAME).ok_or(SendError::Credential)?)
+            }
+            ProviderKind::Bedrock(_) => Credential::aws(
+                id,
+                row(BEDROCK_CREDENTIAL_NAME).ok_or(SendError::Credential)?,
+                row("AWS_SECRET_ACCESS_KEY").ok_or(SendError::Credential)?,
+                row("AWS_SESSION_TOKEN"),
+            ),
+        }
+    }
 }
 
 impl Provider {
@@ -256,14 +466,54 @@ impl Provider {
         Self(ProviderKind::Anthropic(Arc::new(endpoint)))
     }
 
+    /// Bedrock on a local peer for the sender proof. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bedrock_at(endpoint: Endpoint, region: &str, model_id: &str) -> Result<Self, SendError> {
+        if !valid_region(region) {
+            return Err(SendError::Endpoint);
+        }
+        Self::bedrock_with(Arc::new(endpoint), region, model_id)
+    }
+
+    /// The [`MAX_PROVIDER_BYTES`] limit keeps the constructed provider's identity within the attempt-marker ledger's size bound.
+    ///
+    /// [`MAX_PROVIDER_BYTES`]: memory_store::memory_reviewer_ledger::MAX_PROVIDER_BYTES
+    fn bedrock_with(
+        endpoint: Arc<Endpoint>,
+        region: &str,
+        model_id: &str,
+    ) -> Result<Self, SendError> {
+        let path = invoke_path(model_id)?;
+        let identity = [
+            endpoint.host.as_str(),
+            "/model/",
+            model_id,
+            "/invoke@",
+            BEDROCK_ANTHROPIC_VERSION,
+        ]
+        .concat();
+        if identity.len() > memory_store::memory_reviewer_ledger::MAX_PROVIDER_BYTES {
+            return Err(SendError::Endpoint);
+        }
+        let canonical_uri = super::sigv4::canonical_uri(&path);
+        Ok(Self(ProviderKind::Bedrock(Bedrock {
+            endpoint,
+            region: region.to_string(),
+            identity,
+            uri: Uri::try_from(path).map_err(|_| SendError::Endpoint)?,
+            canonical_uri,
+        })))
+    }
+
     fn endpoint(&self) -> &Endpoint {
         match &self.0 {
             ProviderKind::Anthropic(endpoint) => endpoint,
+            ProviderKind::Bedrock(bedrock) => &bedrock.endpoint,
         }
     }
 
     /// The provider identity a disclosure marker and an approval record: the host this provider
-    /// dials, the API surface, and the API version it speaks.
+    /// dials, the API surface (for Bedrock, the model id it invokes), and the API version it speaks.
     pub fn identity(&self) -> String {
         match &self.0 {
             ProviderKind::Anthropic(endpoint) => [
@@ -273,29 +523,32 @@ impl Provider {
                 ANTHROPIC_VERSION,
             ]
             .concat(),
+            ProviderKind::Bedrock(bedrock) => bedrock.identity.clone(),
         }
     }
 
-    /// The one startup-envelope credential this provider's protocol carries; another
+    /// The one startup-envelope credential an activation record names for this provider; another
     /// provider's secret never reaches its host.
     pub fn credential_name(&self) -> &'static str {
         match &self.0 {
             ProviderKind::Anthropic(_) => CREDENTIAL_NAME,
+            ProviderKind::Bedrock(_) => BEDROCK_CREDENTIAL_NAME,
         }
     }
 
-    /// The model a response must report for its text to be released when `requested` was asked
-    /// for. Anthropic reports the requested model id itself.
+    /// The model a response must report for its text to be released when `requested`, the
+    /// record's `model`, was asked for. Both providers report it: Anthropic the model id the body
+    /// names, and Bedrock the base model behind the path's model id.
     pub fn expected_model<'a>(&self, requested: &'a str) -> &'a str {
         match &self.0 {
-            ProviderKind::Anthropic(_) => requested,
+            ProviderKind::Anthropic(_) | ProviderKind::Bedrock(_) => requested,
         }
     }
 
     /// The serialized body this provider accepts for `request`, refused when it asks for more
     /// output than [`MAX_OUTPUT_TOKENS`], exceeds [`MAX_REQUEST_BYTES`], or carries a temperature
     /// JSON cannot represent exactly (non-finite) or the provider does not accept (outside
-    /// `0.0..=1.0`).
+    /// `0.0..=1.0`). Bedrock's body names no model and no stream; its path names the model.
     fn body(&self, request: &MessagesRequest) -> Result<RequestBody, SendError> {
         if request.max_tokens == 0 || request.max_tokens > MAX_OUTPUT_TOKENS {
             return Err(SendError::OutputTokens);
@@ -306,56 +559,132 @@ impl Provider {
         {
             return Err(SendError::Temperature);
         }
-        let body = match &self.0 {
-            ProviderKind::Anthropic(_) => serde_json::to_vec(&WireRequest {
-                model: &request.model,
-                system: request.system.as_deref(),
-                messages: &request.messages,
-                max_tokens: request.max_tokens,
-                temperature: request.temperature,
-                stream: false,
-            }),
-        }
-        .map_err(|_| SendError::RequestTooLarge)?;
+        let body = write_body(request, matches!(self.0, ProviderKind::Bedrock(_)))?;
         if body.len() > MAX_REQUEST_BYTES {
             return Err(SendError::RequestTooLarge);
         }
         Ok(RequestBody {
-            bytes: body,
+            digest: super::sigv4::lower_hex(&sha2::Sha256::digest(&body)),
+            bytes: Bytes::from(body),
             max_tokens: request.max_tokens,
+            bedrock: matches!(self.0, ProviderKind::Bedrock(_)),
         })
     }
 
-    /// The one request carrying `body`, with this provider's host, authentication, and version
-    /// headers; the credential is written into its authentication header and nowhere else.
+    /// The one request carrying `body`, signed or authenticated as this provider requires at
+    /// `at_ms`. An API key is written into `x-api-key` and nowhere else; AWS credentials sign
+    /// the method, the path, `content-type`, `host`, `x-amz-content-sha256` (the body's digest,
+    /// which must equal `body_digest`), `x-amz-date`, and the session token when there is one,
+    /// and only the access key id and the signature reach the wire. A credential of another
+    /// provider's kind is refused.
     fn request(
         &self,
         body: RequestBody,
+        body_digest: &str,
+        at_ms: i64,
         credential: &Credential,
     ) -> Result<Request<Body>, SendError> {
-        let builder = Request::post(Uri::from_static(MESSAGES_PATH))
-            .header(header::HOST, self.endpoint().host.as_str())
-            .header(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            )
-            .header(header::ACCEPT, HeaderValue::from_static("application/json"))
-            .header(
-                header::ACCEPT_ENCODING,
-                HeaderValue::from_static("identity"),
-            )
-            .header(header::CONNECTION, HeaderValue::from_static("close"));
-        let builder = match &self.0 {
-            ProviderKind::Anthropic(_) => builder
-                .header(HeaderName::from_static("x-api-key"), credential.header())
-                .header(
+        if body.digest != body_digest || body.bedrock != matches!(self.0, ProviderKind::Bedrock(_))
+        {
+            return Err(SendError::BodyDigest);
+        }
+        let host = &self.endpoint().host_header;
+        let uri = match &self.0 {
+            ProviderKind::Anthropic(_) => Uri::from_static(MESSAGES_PATH),
+            ProviderKind::Bedrock(bedrock) => bedrock.uri.clone(),
+        };
+        let mut request = Request::new(Full::new(body.bytes));
+        *request.method_mut() = Method::POST;
+        *request.uri_mut() = uri;
+        let headers = request.headers_mut();
+        headers.reserve(10);
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+        match (&self.0, &*credential.material) {
+            (ProviderKind::Anthropic(_), Material::ApiKey(key)) => {
+                headers.insert(header::HOST, host.clone());
+                headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                headers.insert(HeaderName::from_static("x-api-key"), key.clone());
+                headers.insert(
                     HeaderName::from_static("anthropic-version"),
                     HeaderValue::from_static(ANTHROPIC_VERSION),
-                ),
-        };
-        builder
-            .body(Full::new(Bytes::from(body.bytes)))
-            .map_err(|_| SendError::RequestTooLarge)
+                );
+            }
+            (
+                ProviderKind::Bedrock(bedrock),
+                Material::Aws {
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                },
+            ) => {
+                let time = super::sigv4::RequestTime::at(at_ms).ok_or(SendError::SignTime)?;
+                let value = |text: &str| {
+                    HeaderValue::from_str(text).map_err(|_| SendError::RequestTooLarge)
+                };
+                // The one list of signed headers: the signature covers it, and the request carries it.
+                let signed = [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    ),
+                    (header::HOST, host.clone()),
+                    (
+                        HeaderName::from_static("x-amz-content-sha256"),
+                        value(body_digest)?,
+                    ),
+                    (
+                        HeaderName::from_static("x-amz-date"),
+                        value(&time.amz_date)?,
+                    ),
+                    (
+                        HeaderName::from_static("x-amz-security-token"),
+                        session_token
+                            .clone()
+                            .unwrap_or(HeaderValue::from_static("")),
+                    ),
+                ];
+                let count = signed.len() - usize::from(session_token.is_none());
+                let mut names = [("", ""); 5];
+                for (pair, (name, value)) in names.iter_mut().zip(&signed) {
+                    *pair = (name.as_str(), header_text(value)?);
+                }
+                let (canonical_digest, signed_headers) = super::sigv4::Request {
+                    method: "POST",
+                    canonical_uri: &bedrock.canonical_uri,
+                    canonical_query: "",
+                    headers: &names[..count],
+                    payload_sha256: body_digest,
+                }
+                .digest();
+                let scope = super::sigv4::Scope {
+                    date: time.date(),
+                    region: &bedrock.region,
+                    service: BEDROCK_SERVICE,
+                };
+                let to_sign =
+                    super::sigv4::string_to_sign_of_digest(&time, &scope, &canonical_digest);
+                let signature = super::sigv4::signature(secret_access_key, &scope, &to_sign);
+                let authorization =
+                    super::sigv4::authorization(access_key_id, &scope, &signed_headers, &signature);
+                let mut authorization = HeaderValue::from_maybe_shared(Bytes::from(authorization))
+                    .map_err(|_| SendError::Credential)?;
+                authorization.set_sensitive(true);
+                headers.insert(header::AUTHORIZATION, authorization);
+                for (name, value) in signed.into_iter().take(count) {
+                    headers.insert(name, value);
+                }
+            }
+            _ => return Err(SendError::Credential),
+        }
+        Ok(request)
     }
 }
 
@@ -382,28 +711,138 @@ pub struct MessagesRequest {
     pub temperature: Option<f64>,
 }
 
-#[derive(Serialize)]
-struct WireRequest<'a> {
-    model: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
-    messages: &'a [Message],
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
-    stream: bool,
+/// The Messages body for `request` as compact JSON, with the fields in this order: `model` (Anthropic) or `anthropic_version` (Bedrock), `system` when present, `messages`, `max_tokens`, `temperature` when present, and `stream: false` (Anthropic). Strings are escaped by [`push_json_string`] and numbers are written by `serde_json`, so the bytes are the ones `serde_json` writes for the same fields.
+fn write_body(request: &MessagesRequest, bedrock: bool) -> Result<Vec<u8>, SendError> {
+    // Escapes lengthen typical text by a few percent; an eighth more than the raw text holds most bodies without regrowing.
+    let text: usize = request
+        .messages
+        .iter()
+        .map(|message| message.content.len() + 40)
+        .sum::<usize>()
+        + request.system.as_ref().map_or(0, String::len)
+        + request.model.len();
+    let mut out = Vec::with_capacity(text + text / 8 + 128);
+    if bedrock {
+        out.extend_from_slice(b"{\"anthropic_version\":");
+        push_json_string(&mut out, BEDROCK_ANTHROPIC_VERSION);
+    } else {
+        out.extend_from_slice(b"{\"model\":");
+        push_json_string(&mut out, &request.model);
+    }
+    if let Some(system) = &request.system {
+        out.extend_from_slice(b",\"system\":");
+        push_json_string(&mut out, system);
+    }
+    out.extend_from_slice(b",\"messages\":[");
+    for (index, message) in request.messages.iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(match message.role {
+            Role::User => b"{\"role\":\"user\",\"content\":".as_slice(),
+            Role::Assistant => b"{\"role\":\"assistant\",\"content\":".as_slice(),
+        });
+        push_json_string(&mut out, &message.content);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"],\"max_tokens\":");
+    serde_json::to_writer(&mut out, &request.max_tokens).map_err(|_| SendError::RequestTooLarge)?;
+    if let Some(temperature) = request.temperature {
+        out.extend_from_slice(b",\"temperature\":");
+        serde_json::to_writer(&mut out, &temperature).map_err(|_| SendError::RequestTooLarge)?;
+    }
+    if !bedrock {
+        out.extend_from_slice(b",\"stream\":false");
+    }
+    out.push(b'}');
+    Ok(out)
 }
 
-/// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with the `max_tokens` the bytes ask for, which sizes the completion budget. Only [`Sender::body`] produces one, so a handoff cannot carry bytes the bounds never saw.
+/// Appends `value` to `out` as a JSON string escaped as `serde_json` escapes it: `"`, `\`, and every byte below 0x20, with the short forms `\b`, `\t`, `\n`, `\f`, and `\r` and `\u00xx` (lowercase hex) for the other controls; every other byte is copied. Eight bytes are tested at a time, and a word holding no escape is copied with its run.
+fn push_json_string(out: &mut Vec<u8>, value: &str) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let bytes = value.as_bytes();
+    out.push(b'"');
+    let mut run = 0;
+    let mut at = 0;
+    while let Some(chunk) = bytes.get(at..at + 8) {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap_or_default());
+        let quote = word ^ (ONES * u64::from(b'"'));
+        let backslash = word ^ (ONES * u64::from(b'\\'));
+        // The high bit of a byte is set where that byte is below 0x20, `"`, or `\`; the lowest set bit marks the first such byte exactly, since a borrow only reaches higher bytes.
+        let found = (word.wrapping_sub(ONES * 0x20)
+            | (quote.wrapping_sub(ONES) & !quote)
+            | (backslash.wrapping_sub(ONES) & !backslash))
+            & !word
+            & HIGH;
+        if found == 0 {
+            at += 8;
+            continue;
+        }
+        let escape = at + (found.trailing_zeros() / 8) as usize;
+        out.extend_from_slice(&bytes[run..escape]);
+        push_json_escape(out, bytes[escape]);
+        run = escape + 1;
+        at = run;
+    }
+    for (index, &byte) in bytes.iter().enumerate().skip(at) {
+        if byte < 0x20 || byte == b'"' || byte == b'\\' {
+            out.extend_from_slice(&bytes[run..index]);
+            push_json_escape(out, byte);
+            run = index + 1;
+        }
+    }
+    out.extend_from_slice(&bytes[run..]);
+    out.push(b'"');
+}
+
+/// The second byte of each two-byte JSON escape, indexed by the escaped byte; zero where the escape is `\u00xx`.
+const SHORT_ESCAPES: [u8; 0x60] = {
+    let mut table = [0; 0x60];
+    table[0x08] = b'b';
+    table[0x09] = b't';
+    table[0x0a] = b'n';
+    table[0x0c] = b'f';
+    table[0x0d] = b'r';
+    table[0x22] = b'"';
+    table[0x5c] = b'\\';
+    table
+};
+
+fn push_json_escape(out: &mut Vec<u8>, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    match SHORT_ESCAPES.get(usize::from(byte)) {
+        Some(&short) if short != 0 => out.extend_from_slice(&[b'\\', short]),
+        _ => out.extend_from_slice(&[
+            b'\\',
+            b'u',
+            b'0',
+            b'0',
+            HEX[usize::from(byte >> 4)],
+            HEX[usize::from(byte & 0x0f)],
+        ]),
+    }
+}
+
+/// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with their SHA-256 digest and the `max_tokens` the bytes ask for, which sizes the completion budget. [`Sender::body`] is the only constructor and the fields stay fixed afterwards, so a handoff carries bounded bytes and the digest names exactly those bytes. Clones share the byte storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestBody {
-    bytes: Vec<u8>,
+    bytes: Bytes,
+    digest: String,
     max_tokens: u32,
+    /// Whether a Bedrock provider shaped the bytes; a body is sent only by a provider of its own shape.
+    bedrock: bool,
 }
 
 impl RequestBody {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The lowercase hex SHA-256 of [`Self::as_bytes`].
+    pub fn digest(&self) -> &str {
+        &self.digest
     }
 
     pub fn len(&self) -> usize {
@@ -541,47 +980,95 @@ impl std::fmt::Debug for Connected {
 }
 
 impl Connected {
-    /// The one-shot handoff: synchronously moves the already serialized `body` into the connection's dispatch queue and returns the in-flight send. The caller serializes and bounds the body beforehand ([`Sender::body`]), so the bytes it hashed are the bytes sent and nothing is encoded here. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
-    pub fn handoff(mut self, body: RequestBody) -> Result<InFlight, SendError> {
+    /// Builds the one request this connection will carry: `body`, whose SHA-256 must be `body_digest`, authenticated or signed as the provider requires at `at_ms`. Every header is computed here and nothing is written to the peer; a signed request that is never handed off is dropped with the connection.
+    pub fn sign(
+        self,
+        body: RequestBody,
+        body_digest: &str,
+        at_ms: i64,
+    ) -> Result<Signed, SendError> {
         let max_tokens = body.max_tokens;
-        let wire = self.provider.request(body, &self.credential)?;
-        // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
-        let response = Box::pin(self.send.try_send_request(wire));
-        Ok(InFlight {
+        let request = self
+            .provider
+            .request(body, body_digest, at_ms, &self.credential)?;
+        Ok(Signed {
+            send: self.send,
             connection: self.connection,
-            response,
+            request,
+            signed_at_ms: at_ms,
             timing: self.timing,
             max_tokens,
         })
     }
 }
 
-type ResponseFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<
-                    Response<Incoming>,
-                    hyper::client::conn::TrySendError<Request<Body>>,
-                >,
-            > + Send,
-    >,
->;
+impl Connected {
+    /// [`Self::sign`] over `body`'s own digest at the wall clock, for the sender proof. Compiled only for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sign_now(self, body: RequestBody) -> Result<Signed, SendError> {
+        let digest = format!("{:x}", sha2::Sha256::digest(body.as_bytes()));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            });
+        self.sign(body, &digest, now_ms)
+    }
+}
 
-/// A request the connection holds but has not yet written.
-pub struct InFlight {
+/// A connection and the request it will carry, signed but not yet handed off.
+pub struct Signed {
+    send: SendRequest<Body>,
     connection: Connection<Transport, Body>,
-    response: ResponseFuture,
+    request: Request<Body>,
+    signed_at_ms: i64,
     timing: Timing,
     max_tokens: u32,
 }
 
-impl std::fmt::Debug for InFlight {
+impl std::fmt::Debug for Signed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Signed(at {})", self.signed_at_ms)
+    }
+}
+
+impl Signed {
+    /// The one-shot handoff: synchronously moves the signed request into the connection's dispatch queue and returns the in-flight send. Signing computed every header and the body was bounded beforehand ([`Sender::body`]), so the handoff encodes and builds nothing. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
+    pub fn handoff(
+        mut self,
+    ) -> InFlight<impl std::future::Future<Output = Result<Response<Incoming>, TrySendError>> + Send>
+    {
+        // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
+        let response = self.send.try_send_request(self.request);
+        InFlight {
+            connection: self.connection,
+            response,
+            timing: self.timing,
+            max_tokens: self.max_tokens,
+        }
+    }
+}
+
+type TrySendError = hyper::client::conn::TrySendError<Request<Body>>;
+
+/// A request the connection holds but has not yet written.
+pub struct InFlight<F> {
+    connection: Connection<Transport, Body>,
+    response: F,
+    timing: Timing,
+    max_tokens: u32,
+}
+
+impl<F> std::fmt::Debug for InFlight<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("InFlight")
     }
 }
 
-impl InFlight {
+impl<F> InFlight<F>
+where
+    F: std::future::Future<Output = Result<Response<Incoming>, TrySendError>>,
+{
     /// Polls the connection, so the request is written, and reads the one response by `deadline`, clamped to [`Timing::completion_budget`] for the request's `max_tokens`, with at most [`Timing::frame_idle`] between body frames. The connection is dropped afterwards whatever the outcome; there is no second attempt. The body is charged against `allowance` chunk by chunk before it is kept and the text against it before it is allocated; `accounting` is the caller's and holds what was consumed whether the exchange completes, refuses, times out, or is dropped.
     pub async fn complete(
         self,
@@ -591,10 +1078,11 @@ impl InFlight {
     ) -> Result<AssistantText, SendError> {
         let InFlight {
             mut connection,
-            mut response,
+            response,
             timing,
             max_tokens,
         } = self;
+        let mut response = std::pin::pin!(response);
         let raw_bound = usize::try_from(allowance.raw_response_bytes)
             .unwrap_or(usize::MAX)
             .min(MAX_RAW_RESPONSE_BYTES);
@@ -604,7 +1092,7 @@ impl InFlight {
         let exchange = async {
             // The connection may finish in the same poll that delivers the response; a finished connection is never polled again, and the response it already delivered is taken from the future.
             let mut connection_done = false;
-            let unsent = |error: hyper::client::conn::TrySendError<Request<Body>>| {
+            let unsent = |error: TrySendError| {
                 let mut error = error;
                 if error.take_message().is_some() {
                     SendError::NotReady
@@ -754,6 +1242,111 @@ async fn collect_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Messages body as `serde_json` writes it from the field definitions.
+    fn reference_body(request: &MessagesRequest, bedrock: bool) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Anthropic<'a> {
+            model: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            system: Option<&'a str>,
+            messages: &'a [Message],
+            max_tokens: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f64>,
+            stream: bool,
+        }
+        #[derive(Serialize)]
+        struct Bedrock<'a> {
+            anthropic_version: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            system: Option<&'a str>,
+            messages: &'a [Message],
+            max_tokens: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f64>,
+        }
+        if bedrock {
+            serde_json::to_vec(&Bedrock {
+                anthropic_version: BEDROCK_ANTHROPIC_VERSION,
+                system: request.system.as_deref(),
+                messages: &request.messages,
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+            })
+        } else {
+            serde_json::to_vec(&Anthropic {
+                model: &request.model,
+                system: request.system.as_deref(),
+                messages: &request.messages,
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+                stream: false,
+            })
+        }
+        .unwrap()
+    }
+
+    proptest::proptest! {
+        /// Every request, with strings over all of Unicode and every control byte, serializes to the bytes `serde_json` writes for the same fields.
+        #[test]
+        fn the_body_matches_serde_json_for_every_request(
+            model in "\\PC{0,12}|[\\x00-\\x7f]{0,12}",
+            system in proptest::option::of("\\PC{0,40}|[\\x00-\\x7f]{0,40}|[\"\\\\\\x00-\\x1f a]{0,40}"),
+            messages in proptest::collection::vec(
+                (proptest::bool::ANY, "\\PC{0,80}|[\\x00-\\x7f]{0,80}|[\"\\\\\\x00-\\x1f\\x7fé a]{0,80}"),
+                0..4,
+            ),
+            max_tokens in 1u32..=MAX_OUTPUT_TOKENS,
+            temperature in proptest::option::of(0.0f64..=1.0),
+        ) {
+            let request = MessagesRequest {
+                model,
+                system,
+                messages: messages
+                    .into_iter()
+                    .map(|(user, content)| Message {
+                        role: if user { Role::User } else { Role::Assistant },
+                        content,
+                    })
+                    .collect(),
+                max_tokens,
+                temperature,
+            };
+            for bedrock in [false, true] {
+                proptest::prop_assert_eq!(
+                    write_body(&request, bedrock).unwrap(),
+                    reference_body(&request, bedrock)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_byte_and_run_length_escapes_as_serde_json_does() {
+        let all: String = (0u32..0x800).filter_map(char::from_u32).collect();
+        for skip in 0..64 {
+            for take in 0..40 {
+                let value: String = all.chars().skip(skip).take(take).collect();
+                let mut out = Vec::new();
+                push_json_string(&mut out, &value);
+                assert_eq!(out, serde_json::to_vec(&value).unwrap(), "{value:?}");
+            }
+        }
+        for temperature in [0.0, 0.1, 0.25, 0.7, 1.0, 1e-7, 0.123_456_789_012_345_67] {
+            let request = MessagesRequest {
+                model: "m".to_string(),
+                system: None,
+                messages: Vec::new(),
+                max_tokens: 1,
+                temperature: Some(temperature),
+            };
+            assert_eq!(
+                write_body(&request, true).unwrap(),
+                reference_body(&request, true)
+            );
+        }
+    }
 
     #[test]
     fn the_production_completion_budget_covers_the_largest_request() {

@@ -1721,14 +1721,16 @@ pub(crate) fn classify_failure_text(text: &str) -> ErrorClass {
     let lower = text.to_ascii_lowercase();
     // Bedrock reports unrecognized and expired credentials as HTTP 403 exceptions.
     // `AccessDeniedException` is also a 403 but denies one model or inference profile; an auth class would block every model of the provider, so it is checked before the 403 rule.
-    const AUTH: [&str; 7] = [
+    // An expired or invalid Bedrock session token surfaces as `ExpiredToken` or names the security token.
+    const AUTH: [&str; 8] = [
         "api key",
         "unauthorized",
         "authentication",
         "credential",
         "forbidden",
         "unrecognizedclientexception",
-        "expiredtokenexception",
+        "expiredtoken",
+        "security token",
     ];
     const AUTH_CODES: [&str; 2] = ["401", "403"];
     const OVERFLOW: [&str; 20] = [
@@ -2781,6 +2783,15 @@ mod tests {
             ),
             (
                 "ExpiredTokenException: The security token included in the request is expired",
+                AuthRequired,
+            ),
+            // Pi's Bedrock client prints the exception code alone, or only the message.
+            (
+                "ExpiredToken: 400: request signature has expired",
+                AuthRequired,
+            ),
+            (
+                "The security token included in the request is invalid.",
                 AuthRequired,
             ),
             (

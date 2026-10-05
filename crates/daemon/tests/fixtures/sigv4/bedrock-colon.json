@@ -1,0 +1,24 @@
+{
+  "provenance": "botocore 1.42.97 SigV4Auth over this request",
+  "region": "us-east-1",
+  "service": "bedrock",
+  "timestamp": "2015-08-30T12:36:00Z",
+  "access_key_id": "AKIDEXAMPLE",
+  "secret_access_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+  "session_token": "session-token-example",
+  "method": "POST",
+  "host": "bedrock-runtime.us-east-1.amazonaws.com",
+  "wire_path": "/model/anthropic.claude-3-sonnet-20240229-v1%3A0/invoke",
+  "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+  "body": "{\"anthropic_version\":\"bedrock-2023-05-31\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+  "headers": [
+    [
+      "content-type",
+      "application/json"
+    ]
+  ],
+  "canonical_request": "POST\n/model/anthropic.claude-3-sonnet-20240229-v1%253A0/invoke\n\ncontent-type:application/json\nhost:bedrock-runtime.us-east-1.amazonaws.com\nx-amz-content-sha256:616eb59224eb795b641b4c541ad9ee8b939a1e8798f73b54fce66bb79ddbb992\nx-amz-date:20150830T123600Z\nx-amz-security-token:session-token-example\n\ncontent-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token\n616eb59224eb795b641b4c541ad9ee8b939a1e8798f73b54fce66bb79ddbb992",
+  "string_to_sign": "AWS4-HMAC-SHA256\n20150830T123600Z\n20150830/us-east-1/bedrock/aws4_request\n1666993b43f898babc35cd2e5f2abf2cb70b113057dfd33a59af2b7450b22207",
+  "signature": "cb9105ed995c285d13c91ef4ed728086289c668f6e600e3ca8438a8b5f300e2c",
+  "authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=cb9105ed995c285d13c91ef4ed728086289c668f6e600e3ca8438a8b5f300e2c"
+}

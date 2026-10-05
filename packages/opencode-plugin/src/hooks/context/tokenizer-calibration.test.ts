@@ -33,6 +33,28 @@ describe("resolveModelCalibration", () => {
         }
     });
 
+    it("reads the Anthropic family rows for Bedrock Claude ids with any profile prefix", () => {
+        // The Anthropic rows the Bedrock ids must read are calibrated rows, not the neutral fallback.
+        expect(resolveModelCalibration("anthropic", "claude-opus-4-7")).toMatchObject({
+            systemRatio: 1.51,
+            toolsRatio: 1.57,
+        });
+        for (const prefix of ["us.", "eu.", "apac.", "global.", ""]) {
+            for (const [model, family] of [
+                ["claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"],
+                ["claude-opus-4-7-v1:0", "claude-opus-4-7"],
+                ["claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"],
+            ] as const) {
+                expect(
+                    resolveModelCalibration("amazon-bedrock", `${prefix}anthropic.${model}`),
+                ).toEqual(resolveModelCalibration("anthropic", family));
+            }
+        }
+        for (const model of ["amazon.nova-pro-v1:0", "us.meta.llama3-1-70b-instruct-v1:0"]) {
+            expect(resolveModelCalibration("amazon-bedrock", model)).toEqual(NEUTRAL);
+        }
+    });
+
     it("matches GPT-5.x family across all variants", () => {
         const cases = ["gpt-5", "gpt-5.4", "gpt-5.4-codex", "gpt-5.5", "gpt-5.3-codex"];
         for (const model of cases) {

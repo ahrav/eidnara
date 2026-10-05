@@ -411,11 +411,13 @@ fn markers_commit_before_handoff_and_every_committed_attempt_stays_consumed() {
             outcome,
             DispatchOutcome::Handed {
                 attempt_index: 0,
+                committed_at_ms,
                 attempt_deadline_ms,
                 allowance: ResponseAllowance::FULL,
                 handoff: 6,
                 release: Ok(())
-            } if attempt_deadline_ms == T0 + 1 + MEMORY_REVIEWER_ATTEMPT_MAX_MS
+            } if committed_at_ms == T0 + 1
+                && attempt_deadline_ms == T0 + 1 + MEMORY_REVIEWER_ATTEMPT_MAX_MS
         ),
         "{outcome:?}"
     );
