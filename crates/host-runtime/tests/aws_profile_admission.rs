@@ -546,6 +546,71 @@ fn duplicate_sections_follow_sdk_merge_semantics() {
     assert_eq!(graph.identity().roles[0].source_profile, "dev");
 }
 
+/// Distinct header spellings can assign conflicting values to the same visited section.
+#[test]
+fn visited_sections_under_two_header_spellings_are_refused() {
+    let aliased_edge = format!(
+        "{}[profile  app]\nrole_arn = arn:aws:iam::444455556666:role/other-role\n{}",
+        role_profile("app", "dev"),
+        sso_config("")
+    );
+    let aliased_root = format!(
+        "{}{}[ profile dev ]\nsso_account_id = 999999999999\n",
+        role_profile("app", "dev"),
+        sso_config("")
+    );
+    let aliased_session = format!(
+        "{}{}[sso-session\tcorp]\nsso_start_url = https://d-0987654321.awsapps.com/start\n",
+        role_profile("app", "dev"),
+        sso_config("")
+    );
+    for (case, config) in [
+        ("role edge", aliased_edge),
+        ("sso root", aliased_root),
+        ("sso session", aliased_session),
+    ] {
+        assert_eq!(
+            admit_config("app", &config).unwrap_err(),
+            AdmissionError::AmbiguousProfile,
+            "{case}"
+        );
+    }
+    let aliased_credentials = "[keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = firstsecret00000\n[ keys ]\naws_secret_access_key = secondsecret0000\n";
+    assert_eq!(
+        admit_files("app", &role_profile("app", "keys"), aliased_credentials).unwrap_err(),
+        AdmissionError::AmbiguousProfile
+    );
+
+    let commented = sso_config("[profile dev] ; same header text\nregion = us-west-2\n");
+    admit_config("dev", &commented).expect("one header text with a comment admits");
+    let unselected =
+        sso_config("[profile other]\noutput = json\n[profile  other]\noutput = text\n");
+    admit_config("dev", &unselected).expect("aliases outside the graph stay unselected");
+}
+
+#[test]
+fn sub_property_expansion_beyond_the_file_bound_is_refused() {
+    let lines: String = (0..300).map(|i| format!("  k{i} = v\n")).collect();
+    let long_section = format!("[services {}]\ns3 =\n{lines}", "n".repeat(1024));
+    let long_property = format!("[services custom]\n{} =\n{lines}", "g".repeat(1024));
+    let crlf = long_section.replace('\n', "\r\n");
+    for (case, expanding) in [
+        ("section name", long_section),
+        ("property name", long_property),
+        ("crlf lines", crlf),
+    ] {
+        assert_eq!(
+            admit_config("dev", &sso_config(&expanding)).unwrap_err(),
+            AdmissionError::FileTooLarge,
+            "{case}"
+        );
+    }
+    let services: String = (0..300)
+        .map(|i| format!("[services s{i}]\ns3 =\n  endpoint_url = https://s3.example\n"))
+        .collect();
+    admit_config("dev", &sso_config(&services)).expect("ordinary services sections admit");
+}
+
 #[test]
 fn diagnostics_carry_no_captured_values() {
     let config = format!(
