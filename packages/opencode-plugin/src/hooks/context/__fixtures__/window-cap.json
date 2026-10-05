@@ -195,7 +195,7 @@
                     }
                 },
                 "blocks": 1,
-                "bytes": 336
+                "bytes": 178
             },
             {
                 "message": {
@@ -207,7 +207,7 @@
                     }
                 },
                 "blocks": 1,
-                "bytes": 213
+                "bytes": 55
             },
             {
                 "message": {
@@ -229,7 +229,7 @@
                     }
                 },
                 "blocks": 3,
-                "bytes": 724
+                "bytes": 270
             },
             {
                 "message": {
@@ -244,7 +244,7 @@
                     }
                 },
                 "blocks": 1,
-                "bytes": 275
+                "bytes": 117
             },
             {
                 "message": {
@@ -277,7 +277,7 @@
                     }
                 },
                 "blocks": 1,
-                "bytes": 225
+                "bytes": 67
             }
         ]
     }
