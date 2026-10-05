@@ -559,29 +559,12 @@ impl Provider {
         {
             return Err(SendError::Temperature);
         }
-        let body = match &self.0 {
-            ProviderKind::Anthropic(_) => serde_json::to_vec(&WireRequest {
-                model: &request.model,
-                system: request.system.as_deref(),
-                messages: &request.messages,
-                max_tokens: request.max_tokens,
-                temperature: request.temperature,
-                stream: false,
-            }),
-            ProviderKind::Bedrock(_) => serde_json::to_vec(&BedrockWireRequest {
-                anthropic_version: BEDROCK_ANTHROPIC_VERSION,
-                system: request.system.as_deref(),
-                messages: &request.messages,
-                max_tokens: request.max_tokens,
-                temperature: request.temperature,
-            }),
-        }
-        .map_err(|_| SendError::RequestTooLarge)?;
+        let body = write_body(request, matches!(self.0, ProviderKind::Bedrock(_)))?;
         if body.len() > MAX_REQUEST_BYTES {
             return Err(SendError::RequestTooLarge);
         }
         Ok(RequestBody {
-            digest: format!("{:x}", sha2::Sha256::digest(&body)),
+            digest: super::sigv4::lower_hex(&sha2::Sha256::digest(&body)),
             bytes: Bytes::from(body),
             max_tokens: request.max_tokens,
             bedrock: matches!(self.0, ProviderKind::Bedrock(_)),
@@ -728,27 +711,118 @@ pub struct MessagesRequest {
     pub temperature: Option<f64>,
 }
 
-#[derive(Serialize)]
-struct WireRequest<'a> {
-    model: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
-    messages: &'a [Message],
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
-    stream: bool,
+/// The Messages body for `request` as compact JSON, with the fields in this order: `model` (Anthropic) or `anthropic_version` (Bedrock), `system` when present, `messages`, `max_tokens`, `temperature` when present, and `stream: false` (Anthropic). Strings are escaped by [`push_json_string`] and numbers are written by `serde_json`, so the bytes are the ones `serde_json` writes for the same fields.
+fn write_body(request: &MessagesRequest, bedrock: bool) -> Result<Vec<u8>, SendError> {
+    // Escapes lengthen typical text by a few percent; an eighth more than the raw text holds most bodies without regrowing.
+    let text: usize = request
+        .messages
+        .iter()
+        .map(|message| message.content.len() + 40)
+        .sum::<usize>()
+        + request.system.as_ref().map_or(0, String::len)
+        + request.model.len();
+    let mut out = Vec::with_capacity(text + text / 8 + 128);
+    if bedrock {
+        out.extend_from_slice(b"{\"anthropic_version\":");
+        push_json_string(&mut out, BEDROCK_ANTHROPIC_VERSION);
+    } else {
+        out.extend_from_slice(b"{\"model\":");
+        push_json_string(&mut out, &request.model);
+    }
+    if let Some(system) = &request.system {
+        out.extend_from_slice(b",\"system\":");
+        push_json_string(&mut out, system);
+    }
+    out.extend_from_slice(b",\"messages\":[");
+    for (index, message) in request.messages.iter().enumerate() {
+        if index > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(match message.role {
+            Role::User => b"{\"role\":\"user\",\"content\":".as_slice(),
+            Role::Assistant => b"{\"role\":\"assistant\",\"content\":".as_slice(),
+        });
+        push_json_string(&mut out, &message.content);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"],\"max_tokens\":");
+    serde_json::to_writer(&mut out, &request.max_tokens).map_err(|_| SendError::RequestTooLarge)?;
+    if let Some(temperature) = request.temperature {
+        out.extend_from_slice(b",\"temperature\":");
+        serde_json::to_writer(&mut out, &temperature).map_err(|_| SendError::RequestTooLarge)?;
+    }
+    if !bedrock {
+        out.extend_from_slice(b",\"stream\":false");
+    }
+    out.push(b'}');
+    Ok(out)
 }
 
-#[derive(Serialize)]
-struct BedrockWireRequest<'a> {
-    anthropic_version: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<&'a str>,
-    messages: &'a [Message],
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
+/// Appends `value` to `out` as a JSON string escaped as `serde_json` escapes it: `"`, `\`, and every byte below 0x20, with the short forms `\b`, `\t`, `\n`, `\f`, and `\r` and `\u00xx` (lowercase hex) for the other controls; every other byte is copied. Eight bytes are tested at a time, and a word holding no escape is copied with its run.
+fn push_json_string(out: &mut Vec<u8>, value: &str) {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let bytes = value.as_bytes();
+    out.push(b'"');
+    let mut run = 0;
+    let mut at = 0;
+    while let Some(chunk) = bytes.get(at..at + 8) {
+        let word = u64::from_le_bytes(chunk.try_into().unwrap_or_default());
+        let quote = word ^ (ONES * u64::from(b'"'));
+        let backslash = word ^ (ONES * u64::from(b'\\'));
+        // The high bit of a byte is set where that byte is below 0x20, `"`, or `\`; the lowest set bit marks the first such byte exactly, since a borrow only reaches higher bytes.
+        let found = (word.wrapping_sub(ONES * 0x20)
+            | (quote.wrapping_sub(ONES) & !quote)
+            | (backslash.wrapping_sub(ONES) & !backslash))
+            & !word
+            & HIGH;
+        if found == 0 {
+            at += 8;
+            continue;
+        }
+        let escape = at + (found.trailing_zeros() / 8) as usize;
+        out.extend_from_slice(&bytes[run..escape]);
+        push_json_escape(out, bytes[escape]);
+        run = escape + 1;
+        at = run;
+    }
+    for (index, &byte) in bytes.iter().enumerate().skip(at) {
+        if byte < 0x20 || byte == b'"' || byte == b'\\' {
+            out.extend_from_slice(&bytes[run..index]);
+            push_json_escape(out, byte);
+            run = index + 1;
+        }
+    }
+    out.extend_from_slice(&bytes[run..]);
+    out.push(b'"');
+}
+
+/// The second byte of each two-byte JSON escape, indexed by the escaped byte; zero where the escape is `\u00xx`.
+const SHORT_ESCAPES: [u8; 0x60] = {
+    let mut table = [0; 0x60];
+    table[0x08] = b'b';
+    table[0x09] = b't';
+    table[0x0a] = b'n';
+    table[0x0c] = b'f';
+    table[0x0d] = b'r';
+    table[0x22] = b'"';
+    table[0x5c] = b'\\';
+    table
+};
+
+fn push_json_escape(out: &mut Vec<u8>, byte: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    match SHORT_ESCAPES.get(usize::from(byte)) {
+        Some(&short) if short != 0 => out.extend_from_slice(&[b'\\', short]),
+        _ => out.extend_from_slice(&[
+            b'\\',
+            b'u',
+            b'0',
+            b'0',
+            HEX[usize::from(byte >> 4)],
+            HEX[usize::from(byte & 0x0f)],
+        ]),
+    }
 }
 
 /// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with their SHA-256 digest and the `max_tokens` the bytes ask for, which sizes the completion budget. [`Sender::body`] is the only constructor and the fields stay fixed afterwards, so a handoff carries bounded bytes and the digest names exactly those bytes. Clones share the byte storage.
@@ -1168,6 +1242,111 @@ async fn collect_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Messages body as `serde_json` writes it from the field definitions.
+    fn reference_body(request: &MessagesRequest, bedrock: bool) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Anthropic<'a> {
+            model: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            system: Option<&'a str>,
+            messages: &'a [Message],
+            max_tokens: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f64>,
+            stream: bool,
+        }
+        #[derive(Serialize)]
+        struct Bedrock<'a> {
+            anthropic_version: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            system: Option<&'a str>,
+            messages: &'a [Message],
+            max_tokens: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            temperature: Option<f64>,
+        }
+        if bedrock {
+            serde_json::to_vec(&Bedrock {
+                anthropic_version: BEDROCK_ANTHROPIC_VERSION,
+                system: request.system.as_deref(),
+                messages: &request.messages,
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+            })
+        } else {
+            serde_json::to_vec(&Anthropic {
+                model: &request.model,
+                system: request.system.as_deref(),
+                messages: &request.messages,
+                max_tokens: request.max_tokens,
+                temperature: request.temperature,
+                stream: false,
+            })
+        }
+        .unwrap()
+    }
+
+    proptest::proptest! {
+        /// Every request, with strings over all of Unicode and every control byte, serializes to the bytes `serde_json` writes for the same fields.
+        #[test]
+        fn the_body_matches_serde_json_for_every_request(
+            model in "\\PC{0,12}|[\\x00-\\x7f]{0,12}",
+            system in proptest::option::of("\\PC{0,40}|[\\x00-\\x7f]{0,40}|[\"\\\\\\x00-\\x1f a]{0,40}"),
+            messages in proptest::collection::vec(
+                (proptest::bool::ANY, "\\PC{0,80}|[\\x00-\\x7f]{0,80}|[\"\\\\\\x00-\\x1f\\x7fé a]{0,80}"),
+                0..4,
+            ),
+            max_tokens in 1u32..=MAX_OUTPUT_TOKENS,
+            temperature in proptest::option::of(0.0f64..=1.0),
+        ) {
+            let request = MessagesRequest {
+                model,
+                system,
+                messages: messages
+                    .into_iter()
+                    .map(|(user, content)| Message {
+                        role: if user { Role::User } else { Role::Assistant },
+                        content,
+                    })
+                    .collect(),
+                max_tokens,
+                temperature,
+            };
+            for bedrock in [false, true] {
+                proptest::prop_assert_eq!(
+                    write_body(&request, bedrock).unwrap(),
+                    reference_body(&request, bedrock)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_byte_and_run_length_escapes_as_serde_json_does() {
+        let all: String = (0u32..0x800).filter_map(char::from_u32).collect();
+        for skip in 0..64 {
+            for take in 0..40 {
+                let value: String = all.chars().skip(skip).take(take).collect();
+                let mut out = Vec::new();
+                push_json_string(&mut out, &value);
+                assert_eq!(out, serde_json::to_vec(&value).unwrap(), "{value:?}");
+            }
+        }
+        for temperature in [0.0, 0.1, 0.25, 0.7, 1.0, 1e-7, 0.123_456_789_012_345_67] {
+            let request = MessagesRequest {
+                model: "m".to_string(),
+                system: None,
+                messages: Vec::new(),
+                max_tokens: 1,
+                temperature: Some(temperature),
+            };
+            assert_eq!(
+                write_body(&request, true).unwrap(),
+                reference_body(&request, true)
+            );
+        }
+    }
 
     #[test]
     fn the_production_completion_budget_covers_the_largest_request() {
