@@ -1,7 +1,7 @@
 //! Provider codec adapters and sidecar metadata.
 
 pub mod opencode;
-pub mod pi;
+pub(crate) mod pi;
 pub mod sidecar;
 
 mod json;
@@ -24,7 +24,7 @@ mod tests {
     use crate::injection::build_synthetic_todo_pair;
     use crate::wire::WireMessage;
 
-    use super::pi::{decode_pi_rows, encode_pi_rows};
+    use super::pi::{decode_pi_rows_stamped, encode_pi_rows, retained_rows_of};
     use super::{decode_opencode, encode_opencode, encode_opencode_with_session};
 
     #[derive(Deserialize)]
@@ -204,15 +204,16 @@ mod tests {
 
         for case in golden.cases {
             let rows: Vec<_> = case.rows.iter().cloned().map(std::sync::Arc::new).collect();
-            let decoded = decode_pi_rows(&rows).expect("golden rows use the closed role set");
-            let decoded_again = decode_pi_rows(&rows).unwrap();
+            let decoded =
+                decode_pi_rows_stamped(&rows).expect("golden rows use the closed role set");
+            let decoded_again = decode_pi_rows_stamped(&rows).unwrap();
             assert_eq!(decoded, decoded_again);
 
             let messages: Vec<_> = decoded.messages.iter().map(|msg| msg.ck.clone()).collect();
-            let encoded = encode_pi_rows(&messages, &decoded.sidecar, &[]);
-            let encoded_again = encode_pi_rows(&messages, &decoded.sidecar, &[]);
+            let encoded = encode_pi_rows(&messages, &retained_rows_of(&decoded), &[]);
+            let encoded_again = encode_pi_rows(&messages, &retained_rows_of(&decoded), &[]);
             assert_eq!(encoded, encoded_again);
-            assert_eq!(encoded, case.rows);
+            assert_eq!(encoded, rows);
         }
     }
 
@@ -246,11 +247,11 @@ mod tests {
             ],
             "timestamp": 1
         } }))];
-        let pi_decoded = decode_pi_rows(&pi_raw).unwrap();
+        let pi_decoded = decode_pi_rows_stamped(&pi_raw).unwrap();
         let mut pi_message = pi_decoded.messages[0].ck.clone();
         pi_message.content_mut().remove(0);
         assert_eq!(
-            encode_pi_rows(&[pi_message], &pi_decoded.sidecar, &[])[0]["message"]["content"],
+            encode_pi_rows(&[pi_message], &retained_rows_of(&pi_decoded), &[])[0]["message"]["content"],
             json!([{ "type": "text", "text": "survivor" }])
         );
     }

@@ -8,13 +8,13 @@ use std::num::NonZeroUsize;
 
 use kernel::EligibilityVerdict;
 use kernel::applicability::EvalBudget;
-use retrieval::dense::candidates::select_candidates_with_hook_for_test;
+use retrieval::dense::candidates::select_candidates_observed;
 use retrieval::dense::oracle::{HELD_SLOT_BYTES, held_bytes, selected_bytes};
 use retrieval::dense::scalar::{QueryRefusal, Scales, calibrate, encode};
 use retrieval::dense::{
     CandidateCapacity, CandidatePolicy, CandidatePool, CandidateQuery, CandidateRefusal,
     Completion, DenseCoverage, IncompleteReason, Layer, LayerCodes, LayeredRefusal, Metric,
-    OracleRefusal, ScanBounds, StorageBounds, Window,
+    OracleRefusal, RescoreRefusal, ScanBounds, StorageBounds, Window, WinnerRow, rescore_pool,
 };
 use retrieval::eligibility::OccurrenceCandidate;
 
@@ -127,7 +127,7 @@ fn select<'a>(
     fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -430,6 +430,55 @@ fn only_resolved_winners_are_scored_and_each_scores_under_its_own_layer() {
     assert_aligned(&coded, &pool);
 }
 
+/// Pages of three, eight, and sixteen rows put winners of both layers in one scoring block. The lanes of each layer score together under that layer's query, and a layer with one lane in the block scores it alone; every pool score still carries the restated formula's bits.
+#[test]
+fn a_block_of_winners_from_two_layers_scores_each_under_its_own_layer() {
+    let fixture = Fixture::all_admitted();
+    let query = unit([0.5, 0.3, 0.2, 0.4, 0.1, 0.3, 0.2, 0.1]);
+    let replacements = [
+        ("beta", unit([0.2, 0.7, 0.1, 0.0, 0.3, 0.0, 0.1, 0.0])),
+        ("delta", unit([0.6, 0.1, 0.0, 0.5, 0.2, 0.0, 0.0, 0.3])),
+        ("theta", unit([0.1, 0.2, 0.6, 0.0, 0.0, 0.4, 0.3, 0.2])),
+    ];
+    // One replaced row leaves the delta a single lane in its block; three give each layer several.
+    for replaced in [&replacements[1..2], &replacements[..]] {
+        let base = full_base(&fixture);
+        let delta = Coded::new(&fixture, 1, replaced, &[]);
+        assert_ne!(base.scales, delta.scales);
+        let coded = [base, delta];
+        let layers: Vec<Layer<'_>> = coded.iter().map(|c| c.layer.layer()).collect();
+        let codes: Vec<LayerCodes<'_>> = coded.iter().map(Coded::codes).collect();
+        let mut eligible = base_positions(&fixture, &coded[0]);
+        for (object, _) in replaced {
+            let id = fixture.id(object);
+            let row = coded[1].layer.ids.iter().position(|c| *c == id).unwrap();
+            eligible.insert(object, (1, row));
+        }
+        let expected = reference_pool(&fixture, &coded, &query, &eligible, 8);
+        assert_eq!(expected.len(), 8);
+        for page_rows in [3, 8, 16] {
+            let pool = select(
+                &fixture,
+                &layers,
+                &codes,
+                &query,
+                8,
+                roomy(page_rows),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(
+                pool_of(&pool),
+                expected,
+                "{} replaced, page {page_rows}",
+                replaced.len()
+            );
+            assert_aligned(&coded, &pool);
+            assert_eq!(pool.layers.superseded, replaced.len());
+        }
+    }
+}
+
 #[test]
 fn a_kernel_change_between_batches_discards_the_pool() {
     let fixture = Fixture::all_admitted();
@@ -720,7 +769,7 @@ fn an_ended_budget_returns_no_candidate() {
     let pool = fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -851,7 +900,7 @@ fn an_ended_budget_outranks_a_batch_bound_reached_in_the_same_flush() {
     let pool = fixture
         .store
         .with_conn(|conn| {
-            Ok(select_candidates_with_hook_for_test(
+            Ok(select_candidates_observed(
                 conn,
                 &fixture.kernel,
                 &request,
@@ -951,6 +1000,134 @@ fn a_reserved_stored_code_refuses_as_unreadable() {
         Err(CandidateRefusal::Layered(LayeredRefusal::Oracle(
             OracleRefusal::Unreadable { ref occurrence_id, .. }
         ))) if *occurrence_id == alpha
+    ));
+}
+
+/// A pool of `rows` in the given order, each its own winner row, with no stamps.
+fn synthetic_pool(ids: &[&str]) -> CandidatePool {
+    let candidates: Vec<OccurrenceCandidate> = ids
+        .iter()
+        .map(|id| {
+            OccurrenceCandidate::new(
+                (*id).to_owned(),
+                kernel::source_identity::OccurrenceClass::CanonicalClaims,
+                "object".to_owned(),
+                1,
+                DIGEST.to_owned(),
+            )
+        })
+        .collect();
+    CandidatePool {
+        ranking: retrieval::dense::ExhaustiveRanking {
+            ranked: candidates
+                .iter()
+                .map(|candidate| retrieval::dense::Ranked {
+                    occurrence_id: candidate.occurrence_id.clone(),
+                    class: candidate.class,
+                    score: 0.0,
+                })
+                .collect(),
+            candidates,
+            completion: Completion::Complete,
+            coverage: retrieval::dense::DenseCoverage::default(),
+            snapshot: None,
+            incarnation: None,
+            consumed: retrieval::dense::Consumed::default(),
+        },
+        layers: retrieval::dense::LayerAccount::default(),
+        winners: (0..ids.len())
+            .map(|row| WinnerRow { layer: 0, row })
+            .collect(),
+    }
+}
+
+#[test]
+fn the_rescore_reads_each_entry_once_in_pool_order_and_ranks_by_original_score_then_identifier() {
+    let ids = ["d", "b", "c", "a"];
+    let pool = synthetic_pool(&ids);
+    let rows = [
+        axis(1),
+        axis(0),
+        axis(0),
+        unit([0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ];
+    let mut reads = Vec::new();
+    let rescored = rescore_pool(
+        &pool,
+        &layout(),
+        &axis(0),
+        NonZeroUsize::new(3).unwrap(),
+        |winner, row| {
+            reads.push(winner.row);
+            row.clone_from(&rows[winner.row]);
+            Ok::<_, ()>(())
+        },
+    )
+    .unwrap();
+    assert_eq!(reads, [0, 1, 2, 3]);
+    let order: Vec<&str> = rescored
+        .ranked
+        .iter()
+        .map(|row| row.occurrence_id.as_str())
+        .collect();
+    assert_eq!(
+        order,
+        ["b", "c", "a"],
+        "equal scores keep identifier order; k cuts the rest"
+    );
+    assert_eq!(rescored.ranked[0].score, 1.0);
+    for (row, candidate) in rescored.ranked.iter().zip(&rescored.candidates) {
+        assert_eq!(row.occurrence_id, candidate.occurrence_id);
+    }
+}
+
+#[test]
+fn the_rescore_refuses_a_bad_query_before_any_read_and_stops_at_the_first_failed_or_malformed_row()
+{
+    let pool = synthetic_pool(&["a", "b", "c"]);
+    let k = NonZeroUsize::new(3).unwrap();
+    let mut reads = 0;
+    let zero = vec![0.0f32; 8];
+    assert_eq!(
+        rescore_pool(&pool, &layout(), &zero, k, |_, row| {
+            reads += 1;
+            *row = axis(0);
+            Ok::<_, ()>(())
+        }),
+        Err(RescoreRefusal::Query(
+            retrieval::dense::RowRejection::ZeroNorm
+        ))
+    );
+    assert_eq!(reads, 0);
+    let mut reads = 0;
+    let failed = rescore_pool(&pool, &layout(), &axis(0), k, |winner, row| {
+        reads += 1;
+        if winner.row == 1 {
+            return Err("torn");
+        }
+        *row = axis(0);
+        Ok(())
+    });
+    assert_eq!(
+        failed,
+        Err(RescoreRefusal::Read {
+            occurrence_id: "b".to_owned(),
+            winner: WinnerRow { layer: 0, row: 1 },
+            fault: "torn"
+        })
+    );
+    assert_eq!(reads, 2);
+    let malformed = rescore_pool(&pool, &layout(), &axis(0), k, |winner, row| {
+        *row = if winner.row == 2 {
+            vec![2.0; 8]
+        } else {
+            axis(0)
+        };
+        Ok::<_, ()>(())
+    });
+    assert!(matches!(
+        malformed,
+        Err(RescoreRefusal::Row { ref occurrence_id, winner: WinnerRow { row: 2, .. }, .. }) if occurrence_id == "c"
     ));
 }
 

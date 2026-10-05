@@ -321,6 +321,12 @@ pub enum OracleRefusal {
         occurrence_id: String,
         detail: String,
     },
+    /// A row source's read failed without showing the row missing or malformed; the row's bytes may be intact.
+    #[error("reading the vector of occurrence {occurrence_id} failed: {detail}")]
+    ReadFailed {
+        occurrence_id: String,
+        detail: String,
+    },
     #[error("the request's budget ended before any page was read")]
     BudgetExhausted,
     #[error(
@@ -581,6 +587,10 @@ pub(super) fn walk_ranked(
         }
     }
     if progress.ranking.completion == Completion::Complete {
+        // The budget check catches cancellation before scoring reads codes.
+        if budget.is_exhausted() {
+            return exhausted(progress.ranking);
+        }
         let mut scored = Vec::new();
         if !source.score(budget, &mut scored)? {
             return exhausted(progress.ranking);

@@ -61,24 +61,27 @@ impl LatencySummary {
             .iter()
             .map(|attempt| (attempt.duration_ms, attempt.censored.is_some()))
             .collect();
-        let n = observations.len();
         let censored = observations
             .iter()
             .filter(|(_, censored)| *censored)
             .count();
-        let mut percentiles = Vec::new();
-        if n > 0 {
-            percentiles.extend([50, 95].map(|p| censored_percentile(&observations, p)));
-            if n >= P99_MIN_RUNS {
-                percentiles.push(censored_percentile(&observations, 99));
-            }
-        }
         Self {
-            n: n as u32,
+            n: observations.len() as u32,
             censored: censored as u32,
-            percentiles,
+            percentiles: censored_percentiles(&observations),
         }
     }
+}
+
+pub(crate) fn censored_percentiles(observations: &[(u64, bool)]) -> Vec<Percentile> {
+    let mut percentiles = Vec::new();
+    if !observations.is_empty() {
+        percentiles.extend([50, 95].map(|p| censored_percentile(observations, p)));
+        if observations.len() >= P99_MIN_RUNS {
+            percentiles.push(censored_percentile(observations, 99));
+        }
+    }
+    percentiles
 }
 
 /// The nearest-rank `p`th percentile of `(value, censored)` observations, in the units the

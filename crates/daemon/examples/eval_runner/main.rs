@@ -665,7 +665,7 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         stale::WORLD_USAGE,
         stale::ARMS_USAGE,
@@ -673,6 +673,8 @@ fn campaign_usage() -> String {
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
+        scale::SEED_USAGE,
+        scale::REPORT_USAGE,
         shrink::USAGE,
         suite_d::USAGE
     )
@@ -680,7 +682,7 @@ fn campaign_usage() -> String {
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | shrink | suite-d (unix only)"
+    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | scale-seed | scale-report | shrink | suite-d (unix only)"
         .to_string()
 }
 

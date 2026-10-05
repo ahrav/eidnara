@@ -10,9 +10,9 @@ import {
     command,
     exchangedBytes,
     hostManifest,
-    passOutcome,
     seedCoverage,
 } from "../src/scale-report/driver-common";
+import { classifyPass } from "../src/scale-report/pass-outcome";
 import { retryPosition, writePiTier } from "../src/scale-report/pi-tier";
 import {
     type BoundaryState,
@@ -370,11 +370,7 @@ async function measureSession(
                       : published && !moved && pass.action !== "HARD"
                         ? "replay"
                         : "warming";
-            const { outcome, refusal } = passOutcome({
-                published,
-                status: pass.status,
-                error: pass.error,
-            });
+            const { outcome, refusal } = classifyPass({ ok: published, error: pass.error });
             if (state === "steady" && outcome === "completed") steadyPasses += 1;
             if (published) boundary = acknowledged;
             writer.write({

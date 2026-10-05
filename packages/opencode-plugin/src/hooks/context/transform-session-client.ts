@@ -30,7 +30,7 @@ import {
     type CaptureLease,
     capturedMessagesUnchanged,
     captureHistory,
-    captureOutput,
+    captureReserved,
     filterMayHold,
     fnv1a32,
     type HistoryDigest,
@@ -429,16 +429,17 @@ export interface TransformRequestCore {
     nativeMessages: readonly unknown[];
 }
 
-/**
- * A native-serving revision 3 transform body: the adapter's `fields`, then the protocol fields
- * and the window, so no pass input can replace a protocol field.
- */
 export function buildTransformRequest(
     core: TransformRequestCore,
     fields: Record<string, unknown>,
 ): Record<string, unknown> {
+    let passFields = fields;
+    if (Object.hasOwn(fields, "previous_output_revision")) {
+        const { previous_output_revision: _stripped, ...rest } = fields;
+        passFields = rest;
+    }
     return {
-        ...fields,
+        ...passFields,
         method: "transform",
         kind: "transform",
         v: 3,
@@ -1396,31 +1397,23 @@ export function createTransformSessionClient(
                         ),
                 );
                 const candidate = application.values;
-                let applied: AppliedOutput | undefined;
-                try {
-                    // Members kept from the previous output reuse the tapes just checked above.
-                    const output = captureOutput(
-                        candidate,
-                        lease,
-                        response.previous_output_revision === undefined
-                            ? undefined
-                            : previousApplied?.capture,
-                    );
-                    if (output) {
-                        applied = {
-                            revision: application.outputRevision,
-                            values: candidate,
-                            lengths: application.lengths,
-                            capture: output.capture,
-                            charge:
-                                application.bytes +
-                                application.lengths.length * LENGTH_SLOT_BYTES +
-                                output.bytes,
-                        };
-                    }
-                } catch (error) {
-                    if (!(error instanceof CaptureBudgetExceeded)) throw error;
-                }
+                // The previous-output check above ran with no source code since, so values kept
+                // from the previous output reuse its snapshots.
+                const reserved = captureReserved(
+                    candidate,
+                    lease,
+                    response.previous_output_revision !== undefined ? previousApplied : undefined,
+                );
+                const applied: AppliedOutput | undefined = reserved && {
+                    revision: application.outputRevision,
+                    values: candidate,
+                    lengths: application.lengths,
+                    capture: reserved.capture,
+                    charge:
+                        application.bytes +
+                        application.lengths.length * LENGTH_SLOT_BYTES +
+                        reserved.bytes,
+                };
                 const boundaryId = response.boundary_id;
                 if (typeof boundaryId === "string" && boundaryId.length > 0) {
                     source.validateOutput?.(candidate, boundaryId);

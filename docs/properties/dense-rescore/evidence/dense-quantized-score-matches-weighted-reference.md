@@ -12,6 +12,14 @@ dot, and an unweighted int8 dot is incompatible.
   adds each term to a `+0.0` accumulator in coordinate order.
 - `QuantizedQuery::score` (`scalar.rs`) calls `weighted_dot` with the scales
   the query was encoded under.
+- `weighted_dot_block` (`scalar.rs:655`) scores eight rows at once. Each lane
+  adds `w_j * (f64(c_query_j) * f64(c_doc_j))` to its own `+0.0` accumulator
+  in coordinate order. The product of two codes is an exact integer of at most
+  16129 in magnitude, so each term equals `weighted_dot`'s.
+- `Block::score` (`crates/retrieval/src/dense/candidates.rs`) scores the live
+  winners of one layer in blocks through `QuantizedQuery::score_block` under
+  that layer's query, and a block holding one lane through
+  `QuantizedQuery::score`.
 - `QuantizedQuery::term_table` (`scalar.rs:501`) forms, for every coordinate
   and every code byte, the weight times the integer product, which is exact in
   f64. Adding `+0.0` turns a `-0.0` zero product into the `+0.0` that

@@ -17,10 +17,8 @@ use memory_store::MemoryStore;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const SEED_USAGE: &str =
-    "usage: eval_runner scale-seed --state-root <dir> --session <id> --segments <n>";
-const REPORT_USAGE: &str =
-    "usage: eval_runner scale-report --rows <jsonl> --manifest <json> --out <report.json>";
+pub const SEED_USAGE: &str = "scale-seed --state-root <dir> --session <id> --segments <n>";
+pub const REPORT_USAGE: &str = "scale-report --rows <jsonl> --manifest <json> --out <report.json>";
 
 /// Seeds `--segments` synthetic history segments of two messages each into `--session` of the
 /// fixture store under `--state-root`, with the ordinal continuation base the newest segment

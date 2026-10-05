@@ -3233,6 +3233,36 @@ describe("bounded transform ownership", () => {
         expect(transform.getState(sessionId).boundary).toBeUndefined();
     });
 
+    it("keeps checking a previous-output value after passes that keep it", async () => {
+        const sessionId = `rust-kept-previous-edit-${Date.now()}`;
+        installRawRows(sessionId, rawRows(1));
+        const served = { info: { id: "served" }, parts: [{ type: "text", text: "served" }] };
+        const { client, bodies } = recordingClient((request, index) =>
+            index === 0
+                ? recipeResponse(request, [served])
+                : {
+                      boundary: null,
+                      base_revision: request.base_revision,
+                      output_revision: `out-kept-${index}`,
+                      previous_output_revision: request.previous_output_revision,
+                      operations: [{ op: "keep", source: "previous", start: 0, count: 1 }],
+                  },
+        );
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        for (let pass = 0; pass < 3; pass += 1) {
+            const output = { messages: [...rowMessages(sessionId, rawRows(1))] as unknown[] };
+            await transform.run(sessionId, output);
+            expect(output.messages).toEqual([served]);
+            expect(output.messages[0]).toBe(served);
+        }
+        // Each later pass kept the value from the output the pass before it applied.
+        expect(bodies[1]?.previous_output_revision).toBeDefined();
+        expect(bodies[2]?.previous_output_revision).toBe("out-kept-1");
+        served.parts[0].text = "edited in place";
+        await transform.run(sessionId, { messages: [...rowMessages(sessionId, rawRows(1))] });
+        expect(bodies[3]?.previous_output_revision).toBeUndefined();
+    });
+
     it("leaves exactly a shorter candidate in the original array object", async () => {
         const sessionId = `rust-shrink-success-${Date.now()}`;
         const rows = rawRows(5);

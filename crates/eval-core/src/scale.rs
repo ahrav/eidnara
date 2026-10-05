@@ -12,9 +12,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::censoring::{
-    BoundMethod, P99_MIN_RUNS, Percentile, PercentileBound, censored_percentile, failure_bound,
+    BoundMethod, P99_MIN_RUNS, Percentile, PercentileBound, censored_percentile,
+    censored_percentiles, failure_bound,
 };
-use crate::statistics::{MAX_BOOTSTRAP_DRAWS, Ratio, StatisticsError, bootstrap_draw};
+use crate::statistics::{
+    Ratio, StatisticsError, bootstrap_bounds, bootstrap_draw, check_bootstrap_draws,
+};
 
 pub const SCALE_REPORT_SCHEMA: &str = "eval-scale-report/v1";
 const SCALE_RESULT_DIGEST_PROTOCOL: &str = "eval-scale-report-result/v1";
@@ -489,26 +492,11 @@ fn state_summaries(rows: &[&PassRow]) -> Vec<StateSummary> {
                 uncensored: uncensored(&response),
                 response_us: Histogram::of(&response),
                 service_us: Histogram::of(&service),
-                response_percentiles: percentiles(&response),
-                service_percentiles: percentiles(&service),
+                response_percentiles: censored_percentiles(&response),
+                service_percentiles: censored_percentiles(&service),
             }
         })
         .collect()
-}
-
-/// p50 and p95 of any non-empty sample, and p99 once it holds [`P99_MIN_RUNS`] observations.
-fn percentiles(observations: &[(u64, bool)]) -> Vec<Percentile> {
-    if observations.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<Percentile> = [50, 95]
-        .into_iter()
-        .map(|p| censored_percentile(observations, p))
-        .collect();
-    if observations.len() >= P99_MIN_RUNS {
-        out.push(censored_percentile(observations, 99));
-    }
-    out
 }
 
 fn flatness(rows: &[&PassRow]) -> Result<Option<Flatness>, ScaleReportError> {
@@ -593,10 +581,7 @@ fn ratio_claim(
         _ => Ok(None),
     };
     let (kt, kc) = (tier.len() as u32, control.len() as u32);
-    let draws = u64::from(RATIO_REPLICATES) * u64::from(kt + kc);
-    if draws > MAX_BOOTSTRAP_DRAWS {
-        return Err(StatisticsError::TooManyDraws(draws).into());
-    }
+    check_bootstrap_draws(RATIO_REPLICATES, kt + kc)?;
     let whole_tier: Vec<&Observations> = tier.iter().collect();
     let whole_control: Vec<&Observations> = control.iter().collect();
     let Some(point) = ratio(&pooled(&whole_tier), &pooled(&whole_control))? else {
@@ -616,9 +601,8 @@ fn ratio_claim(
         replicates.push(value);
     }
     replicates.sort();
-    let b = RATIO_REPLICATES as usize;
     let gate = Ratio::try_new(i128::from(RATIO_GATE.0), i128::from(RATIO_GATE.1))?;
-    let upper = replicates[b - b / 40 - 1];
+    let (lower, upper) = bootstrap_bounds(&replicates);
     Ok(Some(RatioClaim {
         sessions: kt,
         control_sessions: kc,
@@ -630,7 +614,7 @@ fn ratio_claim(
             .unwrap_or(0),
         replicates: RATIO_REPLICATES,
         point,
-        lower: replicates[b.div_ceil(40) - 1],
+        lower,
         upper,
         gate,
         passes: upper <= gate,
