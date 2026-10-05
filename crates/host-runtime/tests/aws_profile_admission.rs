@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 
 const REGION: &str = "us-west-2";
 
+const STATIC_SECRET: &str = "staticsecret0000";
+
 const SSO_SESSION: &str = "\
 [sso-session corp]
 sso_region = us-east-1
@@ -162,8 +164,10 @@ fn static_root_feeding_a_role_admits_from_either_file() {
 
 #[test]
 fn self_referencing_role_uses_its_own_root() {
-    let config = "[profile app]\nrole_arn = arn:aws:iam::444455556666:role/path/to/app\nsource_profile = app\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n";
-    let graph = admit_config("app", config).expect("self reference admits");
+    let config = format!(
+        "[profile app]\nrole_arn = arn:aws:iam::444455556666:role/path/to/app\nsource_profile = app\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n"
+    );
+    let graph = admit_config("app", &config).expect("self reference admits");
     assert_eq!(graph.identity().roles.len(), 1);
     assert!(matches!(graph.identity().root, RootIdentity::Static { .. }));
     assert_round_trip(&graph);
@@ -179,13 +183,15 @@ fn self_referencing_role_uses_its_own_root() {
 
 #[test]
 fn unsupported_roots_are_refused() {
-    let static_only = "[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n";
+    let static_only = format!(
+        "[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n"
+    );
     assert_eq!(
-        admit_config("keys", static_only).unwrap_err(),
+        admit_config("keys", &static_only).unwrap_err(),
         AdmissionError::StaticRootWithoutRole
     );
     let session_key = format!(
-        "{}[profile keys]\naws_access_key_id = ASIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n",
+        "{}[profile keys]\naws_access_key_id = ASIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n",
         role_profile("app", "keys")
     );
     assert_eq!(
@@ -289,7 +295,7 @@ fn forbidden_options_on_selected_sections_are_refused() {
 #[test]
 fn ambiguous_profiles_are_refused() {
     let sso_and_static = format!(
-        "{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n{SSO_SESSION}",
+        "{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n{SSO_SESSION}",
         sso_profile("dev")
     );
     assert_eq!(
@@ -305,7 +311,7 @@ fn ambiguous_profiles_are_refused() {
         AdmissionError::AmbiguousProfile
     );
     let source_with_keys_and_role = format!(
-        "{}{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCY\n",
+        "{}{}aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n",
         role_profile("app", "mid"),
         role_profile("mid", "mid")
     );
@@ -634,7 +640,7 @@ fn diagnostics_carry_no_captured_values() {
 #[test]
 fn line_breaks_in_wide_fields_are_refused() {
     let secret = format!(
-        "{}[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMIK7MDENG\n  [profile x]\n",
+        "{}[profile keys]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {STATIC_SECRET}\n  [profile x]\n",
         role_profile("app", "keys")
     );
     assert_eq!(
