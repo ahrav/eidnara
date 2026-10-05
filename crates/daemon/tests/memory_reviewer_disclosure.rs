@@ -16,7 +16,9 @@ use daemon::memory_reviewer::broker::{
 use daemon::memory_reviewer::disclosure::{
     Disclosure, DisclosureApproval, DisclosureRefusal, ModelProfile, PreparedBody, prepare_body,
 };
-use daemon::memory_reviewer::model_request::{ANTHROPIC_VERSION, MESSAGES_PATH, SendError};
+use daemon::memory_reviewer::model_request::{
+    ANTHROPIC_VERSION, Credential, MESSAGES_PATH, Provider, SendError, Sender,
+};
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     CommitIntent, Dimension, DomainSpec, KernelStore, MemoryReviewerHoldBinding, ProviderEgress,
@@ -381,7 +383,7 @@ impl Fixture {
 
     fn prepared(&self, broker: &EvidenceBroker, turn: Vec<RenderedBuffer>) -> PreparedBody {
         let system = broker.render_host_text("Extract facts.").unwrap();
-        prepare_body(broker, &profile(), system, turn).unwrap()
+        prepare_body(broker, &shaper(), &profile(), system, turn).unwrap()
     }
 
     fn approval(&self) -> DisclosureApproval {
@@ -399,6 +401,14 @@ impl Fixture {
             .list_memory_reviewer_attempts(PROJECT, &self.identity)
             .unwrap()
     }
+}
+
+/// A sender whose provider shapes bodies as the Anthropic provider does for every peer.
+fn shaper() -> Sender {
+    Sender::new(
+        Provider::anthropic(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
+    )
 }
 
 fn profile() -> ModelProfile {
@@ -667,7 +677,7 @@ async fn a_buffer_or_body_judged_under_another_broker_is_refused_before_any_conn
     assert!(remote.aliases.resolve(alias.as_str()).is_ok());
     let system = remote.render_host_text("Extract facts.").unwrap();
     assert_eq!(
-        prepare_body(&remote, &profile(), system, local_turn).unwrap_err(),
+        prepare_body(&remote, &shaper(), &profile(), system, local_turn).unwrap_err(),
         DisclosureRefusal::BrokerMismatch,
         "a buffer judged for the local destination is not assembled under the remote broker"
     );
@@ -919,7 +929,11 @@ async fn provider_failure_and_a_mismatched_model_end_the_attempt_without_a_secon
     .unwrap_err();
     assert_eq!(
         refusal,
-        DisclosureRefusal::ModelMismatch { attempt_index: 1 }
+        DisclosureRefusal::ModelMismatch {
+            attempt_index: 1,
+            reported: Some("claude-substitute".to_string()),
+            expected: MODEL.to_string(),
+        }
     );
     server.await.unwrap();
     let attempts = fixture.attempts();
@@ -1358,14 +1372,14 @@ fn the_assembled_prompt_is_render_checked_across_buffer_boundaries() {
     let tail = broker.render_host_text("VWXYZ23456 more").unwrap();
     let system = broker.render_host_text("Extract facts.").unwrap();
     assert_eq!(
-        prepare_body(&broker, &profile(), system, vec![head, tail]).unwrap_err(),
+        prepare_body(&broker, &shaper(), &profile(), system, vec![head, tail]).unwrap_err(),
         DisclosureRefusal::RenderCheck
     );
     // The system text and the first turn buffer are scanned as one prompt too.
     let system = broker.render_host_text("token AKIAQ7RSTU").unwrap();
     let tail = broker.render_host_text("VWXYZ23456 more").unwrap();
     assert_eq!(
-        prepare_body(&broker, &profile(), system, vec![tail]).unwrap_err(),
+        prepare_body(&broker, &shaper(), &profile(), system, vec![tail]).unwrap_err(),
         DisclosureRefusal::RenderCheck
     );
 }
@@ -1547,7 +1561,7 @@ fn the_system_buffer_must_be_host_authored() {
     let evidence = turn.pop().unwrap();
     assert_eq!(evidence.tag().origin, OriginClass::NativeSource);
     assert_eq!(
-        prepare_body(&broker, &profile(), evidence, Vec::new()).unwrap_err(),
+        prepare_body(&broker, &shaper(), &profile(), evidence, Vec::new()).unwrap_err(),
         DisclosureRefusal::SystemNotHostAuthored
     );
 }

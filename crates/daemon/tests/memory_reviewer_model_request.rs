@@ -8,8 +8,8 @@ use std::time::Duration;
 use daemon::memory_reviewer::model_request::{
     ANTHROPIC_VERSION, AssistantText, Credential, Endpoint, MAX_OUTPUT_TOKENS,
     MAX_RAW_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_FRAMES, MAX_RESPONSE_HEAD_BYTES,
-    MAX_RESPONSE_HEADERS, Message, MessagesRequest, ResponseAccounting, ResponseAllowance, Role,
-    SendError, Sender, Timing,
+    MAX_RESPONSE_HEADERS, Message, MessagesRequest, Provider, RequestBody, ResponseAccounting,
+    ResponseAllowance, Role, SendError, Sender, Timing,
 };
 use daemon::memory_reviewer::model_response::{DecodeError, StopReason};
 use tokio::io::AsyncReadExt;
@@ -19,6 +19,15 @@ use tokio::time::Instant;
 use support::tls_peer::{
     OBSERVATION_WINDOW, Observed, Peer, chunked_response, json_response, message, no_wait,
 };
+
+/// The body the production Anthropic provider shapes for `request`.
+fn body_of(request: &MessagesRequest) -> Result<RequestBody, SendError> {
+    Sender::new(
+        Provider::anthropic(),
+        Credential::new("k".to_string(), "k".to_string()).unwrap(),
+    )
+    .body(request)
+}
 
 fn request() -> MessagesRequest {
     MessagesRequest {
@@ -48,7 +57,7 @@ async fn exchange_with(
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(request().body().unwrap())
+        .handoff(body_of(&request()).unwrap())
         .unwrap()
         .complete(
             deadline(),
@@ -87,7 +96,7 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     );
     let sender = peer.sender();
     let connected = sender.connect(deadline()).await.unwrap();
-    let in_flight = connected.handoff(request().body().unwrap()).unwrap();
+    let in_flight = connected.handoff(body_of(&request()).unwrap()).unwrap();
     armed_tx.send(()).unwrap();
     // Give the peer its whole observation window before the connection is polled.
     tokio::time::sleep(OBSERVATION_WINDOW + Duration::from_millis(100)).await;
@@ -121,6 +130,7 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     assert_eq!(headers.matches("sk-test-credential").count(), 1);
     assert!(headers.contains(&format!("anthropic-version: {ANTHROPIC_VERSION}\r\n")));
     assert!(headers.contains("accept-encoding: identity\r\n"));
+    assert!(headers.contains("\r\naccept: application/json\r\n"));
     assert!(headers.contains("connection: close\r\n"));
     assert!(headers.contains("content-type: application/json\r\n"));
     let body: serde_json::Value = serde_json::from_slice(&observed.body).unwrap();
@@ -163,7 +173,7 @@ async fn no_request_byte_reaches_the_peer_before_the_connection_is_polled() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(request().body().unwrap())
+        .handoff(body_of(&request()).unwrap())
         .unwrap();
     armed_tx.send(()).unwrap();
     let (after_handshake, after_handoff) = count_rx.await.unwrap();
@@ -191,7 +201,9 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let mut peer = Peer::start().await;
     let server = peer.serve(no_wait(), |_| Vec::new());
     let untrusted = Sender::new(
-        Endpoint::for_test("localhost", peer.port, rustls::RootCertStore::empty()).unwrap(),
+        Provider::anthropic_at(
+            Endpoint::for_test("localhost", peer.port, rustls::RootCertStore::empty()).unwrap(),
+        ),
         Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
@@ -204,7 +216,9 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let mut peer = Peer::start().await;
     let server = peer.serve(no_wait(), |_| Vec::new());
     let wrong_name = Sender::new(
-        Endpoint::for_test("127.0.0.1", peer.port, peer.roots.clone()).unwrap(),
+        Provider::anthropic_at(
+            Endpoint::for_test("127.0.0.1", peer.port, peer.roots.clone()).unwrap(),
+        ),
         Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
@@ -218,7 +232,7 @@ async fn the_transport_verifies_the_chain_and_the_hostname_without_retrying() {
     let port = closed.local_addr().unwrap().port();
     drop(closed);
     let nobody = Sender::new(
-        Endpoint::for_test("localhost", port, peer.roots.clone()).unwrap(),
+        Provider::anthropic_at(Endpoint::for_test("localhost", port, peer.roots.clone()).unwrap()),
         Credential::new("k".to_string(), "k".to_string()).unwrap(),
     );
     assert_eq!(
@@ -305,6 +319,52 @@ async fn compressed_non_json_and_error_responses_are_refused() {
         std::iter::repeat_n(piece, MAX_RAW_RESPONSE_BYTES / (64 * 1024) + 1),
     );
     assert_eq!(refused_with(oversized).await, SendError::ResponseTooLarge);
+}
+
+/// A 401 or a 403 takes precedence over an unsupported content encoding, a declared length past the remainder, and a frame-idle timeout; the accounting still records what the body consumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_credential_is_reported_whatever_its_body_does() {
+    let error_body =
+        r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
+    for (status, code) in [("401 Unauthorized", 401), ("403 Forbidden", 403)] {
+        let (outcome, accounting) = exchange_within(
+            json_response(status, error_body, "content-encoding: gzip\r\n"),
+            ResponseAllowance::FULL,
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
+        assert_eq!(accounting.transport_bytes, 0, "{status}");
+
+        let (outcome, accounting) = exchange_within(
+            json_response(status, error_body, ""),
+            ResponseAllowance {
+                raw_response_bytes: 16,
+                decoded_text_bytes: ResponseAllowance::FULL.decoded_text_bytes,
+            },
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
+        assert_eq!(accounting.transport_bytes, 16, "{status}");
+
+        let mut peer = Peer::start().await;
+        let response = json_response(status, error_body, "");
+        peer.stall = Some((response.len() - 8, Duration::from_millis(600)));
+        let server = peer.serve(no_wait(), move |_| response);
+        let mut request = request();
+        request.max_tokens = 5_000;
+        let mut accounting = ResponseAccounting::default();
+        let outcome = sender_with(&peer, short_timing())
+            .connect(deadline())
+            .await
+            .unwrap()
+            .handoff(body_of(&request).unwrap())
+            .unwrap()
+            .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
+            .await;
+        assert_eq!(outcome.unwrap_err(), SendError::Status(code), "{status}");
+        assert_eq!(accounting.transport_bytes, error_body.len() - 8, "{status}");
+        assert!(!server.await.unwrap().reconnected);
+    }
 }
 
 #[tokio::test]
@@ -400,15 +460,15 @@ async fn response_size_bounds_hold_for_declared_chunked_trickled_and_wide_heads(
 async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
     let mut oversized = request();
     oversized.max_tokens = MAX_OUTPUT_TOKENS + 1;
-    assert_eq!(oversized.body().unwrap_err(), SendError::OutputTokens);
+    assert_eq!(body_of(&oversized).unwrap_err(), SendError::OutputTokens);
     let mut huge = request();
     huge.messages[0].content = "x".repeat(MAX_REQUEST_BYTES);
-    assert_eq!(huge.body().unwrap_err(), SendError::RequestTooLarge);
+    assert_eq!(body_of(&huge).unwrap_err(), SendError::RequestTooLarge);
     let mut hot = request();
     hot.temperature = Some(1.5);
-    assert_eq!(hot.body().unwrap_err(), SendError::Temperature);
+    assert_eq!(body_of(&hot).unwrap_err(), SendError::Temperature);
     hot.temperature = Some(f64::NAN);
-    assert_eq!(hot.body().unwrap_err(), SendError::Temperature);
+    assert_eq!(body_of(&hot).unwrap_err(), SendError::Temperature);
     // A connection dropped without a handoff sends nothing: the peer's byte count does not move after the handshake.
     let mut peer = Peer::start().await;
     let (count_tx, count_rx) = tokio::sync::oneshot::channel::<(usize, usize)>();
@@ -446,7 +506,7 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(request().body().unwrap())
+        .handoff(body_of(&request()).unwrap())
         .unwrap();
     let outcome = in_flight
         .complete(
@@ -474,7 +534,9 @@ fn short_timing() -> Timing {
 
 fn sender_with(peer: &Peer, timing: Timing) -> Sender {
     Sender::with_timing(
-        Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap(),
+        Provider::anthropic_at(
+            Endpoint::for_test("localhost", peer.port, peer.roots.clone()).unwrap(),
+        ),
         Credential::new(
             "test-credential".to_string(),
             "sk-test-credential".to_string(),
@@ -496,7 +558,7 @@ async fn the_head_wait_is_bounded_by_the_completion_budget_not_the_frame_idle_li
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(request.body().unwrap())
+        .handoff(body_of(&request).unwrap())
         .unwrap()
         .complete(
             deadline(),
@@ -523,7 +585,7 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(generous.body().unwrap())
+        .handoff(body_of(&generous).unwrap())
         .unwrap()
         .complete(
             deadline(),
@@ -546,7 +608,7 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(terse.body().unwrap())
+        .handoff(body_of(&terse).unwrap())
         .unwrap()
         .complete(
             deadline(),
@@ -576,7 +638,7 @@ async fn a_body_that_stalls_past_the_frame_idle_limit_is_a_deadline() {
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(request.body().unwrap())
+        .handoff(body_of(&request).unwrap())
         .unwrap()
         .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
         .await;
@@ -602,7 +664,7 @@ async fn exchange_within(
         .connect(deadline())
         .await
         .unwrap()
-        .handoff(request().body().unwrap())
+        .handoff(body_of(&request()).unwrap())
         .unwrap()
         .complete(deadline(), allowance, &mut accounting)
         .await;

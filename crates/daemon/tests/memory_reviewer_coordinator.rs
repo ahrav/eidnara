@@ -11,7 +11,7 @@ use daemon::harness_sources::SourcePublisher;
 use daemon::memory_reviewer::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
 use daemon::memory_reviewer::coordinator::{
     Coordinator, InvestigationError, InvestigationPermits, JobContext, MAX_ACTIVE_PER_HOST,
-    MAX_ROUNDS,
+    MAX_ROUNDS, Rejection,
 };
 use daemon::memory_reviewer::disclosure::{DisclosureApproval, ModelProfile};
 use daemon::memory_reviewer::model_request::{ANTHROPIC_VERSION, MESSAGES_PATH};
@@ -912,6 +912,112 @@ async fn provider_failure_spends_a_round_and_the_cutoff_ends_the_run_without_a_r
         fixture.receipt().run_deadline_ms,
         fixture.receipt.run_deadline_ms
     );
+}
+
+/// A refused credential or another reported model ends the run after its one charged attempt, with the rejection the worker latches; no second request is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejected_credential_or_model_ends_the_run_after_one_charged_attempt() {
+    // A model id of the same length keeps the scripted response's declared length.
+    let substitute = String::from_utf8(text_response("unused"))
+        .unwrap()
+        .replace(MODEL, "claude-canonical-2")
+        .into_bytes();
+    let cases: [(Vec<u8>, Rejection); 5] = [
+        (
+            json_response(
+                "401 Unauthorized",
+                r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+                "",
+            ),
+            Rejection::Status(401),
+        ),
+        (
+            json_response(
+                "403 Forbidden",
+                r#"{"type":"error","error":{"type":"permission_error","message":"denied"}}"#,
+                "content-encoding: gzip\r\n",
+            ),
+            Rejection::Status(403),
+        ),
+        (
+            json_response(
+                "403 Forbidden",
+                r#"{"type":"error","error":{"type":"permission_error","message":"denied"}}"#,
+                "",
+            ),
+            Rejection::Status(403),
+        ),
+        (
+            substitute,
+            Rejection::ModelMismatch {
+                reported: Some("claude-canonical-2".to_string()),
+                expected: MODEL.to_string(),
+            },
+        ),
+        (
+            json_response(
+                "200 OK",
+                r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"unused"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":4}}"#,
+                "",
+            ),
+            Rejection::ModelMismatch {
+                reported: None,
+                expected: MODEL.to_string(),
+            },
+        ),
+    ];
+    for (response, rejection) in cases {
+        let fixture = Fixture::open(CASES[0].sources);
+        let mut peer = Peer::start().await;
+        let server = peer.serve_script(vec![response]);
+        let outcome = fixture
+            .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+            .await;
+        assert_eq!(
+            outcome,
+            Err(InvestigationError::Rejected(rejection.clone()))
+        );
+        assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
+        assert_eq!(peer.connections.load(Ordering::SeqCst), 1, "{rejection}");
+        let attempts = fixture.attempts();
+        assert_eq!(attempts.len(), 1, "{rejection}");
+        assert_eq!(
+            attempts[0].terminal.map(|(terminal, _)| terminal),
+            Some(MemoryReviewerAttemptTerminal::Failed),
+            "{rejection}"
+        );
+    }
+}
+
+/// A 429 or a 5xx spends the round as before, and the run goes on to its next request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_throttled_or_failed_provider_spends_the_round_and_the_run_goes_on() {
+    for (status, error) in [
+        ("429 Too Many Requests", "rate_limit_error"),
+        ("500 Internal Server Error", "api_error"),
+    ] {
+        let fixture = Fixture::open(CASES[0].sources);
+        let mut peer = Peer::start().await;
+        let server = peer.serve_script(vec![
+            json_response(
+                status,
+                &format!(r#"{{"type":"error","error":{{"type":"{error}","message":"later"}}}}"#),
+                "",
+            ),
+            text_response(r#"{"v":1,"step":{"kind":"abstain","reason":"enough"}}"#),
+        ]);
+        let settled = fixture
+            .run(&peer, Some(fixture.approval()), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            settled,
+            Settled::Abstained(AbstainReason::ModelDeclined),
+            "{status}"
+        );
+        assert_eq!(server.await.unwrap().len(), 2, "{status}");
+        assert_eq!(fixture.attempts().len(), 2, "{status}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

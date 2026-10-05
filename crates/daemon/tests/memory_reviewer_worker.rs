@@ -10,10 +10,10 @@ use std::sync::{Arc, OnceLock};
 use daemon::memory_reviewer::activation::{
     ACTIVATION_DIR, IDENTITY_RECORD, IDENTITY_SCHEMA, LiveIdentity,
 };
-use daemon::memory_reviewer::coordinator::InvestigationPermits;
+use daemon::memory_reviewer::coordinator::{InvestigationPermits, Rejection};
 use daemon::memory_reviewer::handoff::review_binding;
 use daemon::memory_reviewer::lifecycle::{ActivationState, MemoryReviewerStatus};
-use daemon::memory_reviewer::model_request::Endpoint;
+use daemon::memory_reviewer::model_request::{Endpoint, Provider};
 use daemon::memory_reviewer::steps::STEP_VERSION;
 use daemon::memory_reviewer::worker::{MemoryReviewerHost, ProjectRoute, RootScope, Worker};
 use host_runtime::model_execution::backend::LlmExecutionBackend;
@@ -25,7 +25,7 @@ use memory_store::memory_reviewer_jobs::{
     ProducerBinding, ReserveOutcome, ReviewTarget,
 };
 use memory_store::memory_reviewer_ledger::{AbstainReason, MemoryReviewerReceiptTerminal};
-use support::tls_peer::Peer;
+use support::tls_peer::{Peer, json_response, text_response};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -140,8 +140,10 @@ impl Rig {
         }
     }
 
-    fn endpoint(&self) -> Endpoint {
-        Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap()
+    fn provider(&self) -> Provider {
+        Provider::anthropic_at(
+            Endpoint::for_test("localhost", self.peer.port, self.peer.roots.clone()).unwrap(),
+        )
     }
 
     fn worker(&self) -> Arc<Worker> {
@@ -224,7 +226,8 @@ impl Rig {
             projects: Arc::new(move || projects.clone()),
             status: Arc::clone(&self.status),
             permits: Arc::new(InvestigationPermits::default()),
-            endpoint: self.endpoint(),
+            provider: self.provider(),
+            rejection: Default::default(),
         })
     }
 
@@ -285,6 +288,137 @@ impl Rig {
         let path = dir.join(IDENTITY_RECORD);
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// A Memory Classifier job whose subject is a Normal, remote-allowed commit published under this project's scope, so its run reaches the provider.
+    fn ready_memory_job(&self, now: i64, message: &str) -> String {
+        let scope = format!("project:{PROJECT_DIGEST}");
+        if self.kernel.tip().unwrap() < 2 {
+            self.kernel
+                .commit(
+                    kernel::CommitIntent {
+                        producer: "memory_reviewer-worker-test".to_string(),
+                        operation_key: "scope".to_string(),
+                        request_digest: "1".repeat(64),
+                        actor: "test".to_string(),
+                        cause: "fixture".to_string(),
+                    },
+                    |envelope| {
+                        envelope.insert_scope(kernel::ScopeSpec {
+                            scope_id: scope.clone(),
+                            object_id: scope.clone(),
+                            source_id: scope.clone(),
+                            domain_id: "memory".to_string(),
+                            source_kind: "kernel_route".to_string(),
+                            source_revision: 1,
+                            sensitivity: kernel::Sensitivity::Normal,
+                            terms: vec![kernel::ScopeTermSpec {
+                                dimension: kernel::Dimension::Project.as_str().to_string(),
+                                operator: "exact".to_string(),
+                                exact_value: Some(PROJECT_DIGEST.to_string()),
+                                ..kernel::ScopeTermSpec::default()
+                            }],
+                        })?;
+                        Ok(String::new())
+                    },
+                )
+                .unwrap();
+        }
+        let repo = self.home.join(format!("repo-{}", message.len()));
+        std::fs::create_dir_all(&repo).unwrap();
+        gix::init(&repo).unwrap();
+        let git = gix::open_opts(&repo, gix::open::Options::isolated()).unwrap();
+        let tree = git.write_object(gix::objs::Tree::empty()).unwrap().detach();
+        let signature = gix::actor::Signature {
+            name: "fixture".into(),
+            email: "fixture@example.com".into(),
+            time: gix::date::Time::new(1, 0),
+        };
+        let oid = git
+            .write_object(&gix::objs::Commit {
+                tree,
+                parents: Default::default(),
+                author: signature.clone(),
+                committer: signature,
+                encoding: None,
+                message: message.into(),
+                extra_headers: Vec::new(),
+            })
+            .unwrap()
+            .detach()
+            .to_string();
+        let selection = daemon::git_sources::read_selection(
+            &support::projection_gate::open_gate(),
+            &daemon::git_sources::RepositoryBinding {
+                repository_id: format!("repo-{}", message.len()),
+                path: repo.clone(),
+            },
+            std::slice::from_ref(&oid),
+            daemon::git_sources::GitReadBounds {
+                max_commits: std::num::NonZeroUsize::new(1).unwrap(),
+                max_object_bytes: std::num::NonZeroU64::new(8192).unwrap(),
+                max_total_object_bytes: std::num::NonZeroU64::new(8192).unwrap(),
+            },
+        )
+        .unwrap();
+        let published = daemon::harness_sources::SourcePublisher {
+            kernel: &self.kernel,
+            domain_id: "memory",
+            scope_id: Some(&scope),
+            egress: kernel::ProviderEgress::RemoteAllowed,
+            sensitivity: kernel::Sensitivity::Normal,
+        }
+        .publish(&selection.units[0], now)
+        .unwrap();
+        let tip = self.kernel.tip().unwrap();
+        let row = self
+            .kernel
+            .observation_for_object_as_of(&published.object_id, tip)
+            .unwrap()
+            .unwrap();
+        let detail: kernel::SourceDescriptorDetail =
+            serde_json::from_str(row.payload.detail.as_deref().unwrap()).unwrap();
+        let target = ReviewTarget::Memory {
+            object_id: published.object_id.clone(),
+            source_revision: detail.revision.parse().unwrap(),
+        };
+        let producer = ProducerBinding {
+            producer: "memory-classifier".to_string(),
+            firing_id: format!("firing-{}", message.len()),
+            ordinal: 0,
+        };
+        let ReserveOutcome::Reserved(job) = self
+            .store
+            .reserve_memory_reviewer_job(
+                PROJECT,
+                &producer,
+                &CausalInputs {
+                    target: target.clone(),
+                    question_template: "extracted_facts".to_string(),
+                    signals: vec![],
+                    required_evidence: vec![],
+                    policy_versions: BTreeMap::new(),
+                },
+                now,
+            )
+            .unwrap()
+        else {
+            panic!("fresh inputs reserve")
+        };
+        self.store
+            .activate_memory_reviewer_job(
+                PROJECT,
+                &job.causal_identity,
+                &producer,
+                &MemoryReviewerJobInput {
+                    subject: target,
+                    starting_references: vec![],
+                    question_template: "extracted_facts".to_string(),
+                },
+                now,
+            )
+            .unwrap();
+        job.causal_identity
     }
 
     /// A History Summarizer job as the handoff leaves it: a sealed staged subject, a reservation under the producer's identity, and activation with reference-only input.
@@ -824,4 +958,118 @@ async fn the_gate_stays_closed_until_the_host_has_derived_the_credential_identit
         rig.status.reported().activation_state.0,
         ActivationState::Open
     );
+}
+
+/// A scripted 401, 403, or another reported model ends its run after one charged attempt and latches the gate through the worker's own pass: the second Ready job is left unclaimed, a later pass under the still-valid record claims nothing, and passes with the status forced open and the record removed stay `unavailable` and connect to nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejected_attempt_latches_the_gate_through_the_pass() {
+    let unauthorized = json_response(
+        "401 Unauthorized",
+        r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+        "",
+    );
+    let forbidden = json_response(
+        "403 Forbidden",
+        r#"{"type":"error","error":{"type":"permission_error","message":"denied"}}"#,
+        "",
+    );
+    // The record names `claude-test`; the peer reports `claude-canonical-1`.
+    let substitute = text_response("unused");
+    let cases = [
+        (unauthorized, Rejection::Status(401)),
+        (forbidden, Rejection::Status(403)),
+        (
+            substitute,
+            Rejection::ModelMismatch {
+                reported: Some("claude-canonical-1".to_string()),
+                expected: "claude-test".to_string(),
+            },
+        ),
+    ];
+    for (response, rejection) in cases {
+        let mut rig = Rig::open().await;
+        let now = now_ms();
+        let first = rig.ready_memory_job(now, "bun builds the workspace");
+        let second = rig.ready_memory_job(now, "cargo builds the daemon crate");
+        rig.write_activation();
+        let worker = rig.worker();
+        let cancel = CancellationToken::new();
+        let server = rig.peer.serve_script(vec![response]);
+        assert_eq!(worker.pass(&cancel).await, 0, "{rejection}");
+        assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
+        assert_eq!(worker.rejection.get(), Some(&rejection));
+        assert_eq!(
+            rig.status.reported().activation_state.0,
+            ActivationState::Closed("unavailable")
+        );
+        let charged: Vec<_> = [&first, &second]
+            .iter()
+            .flat_map(|identity| {
+                rig.store
+                    .list_memory_reviewer_attempts(PROJECT, identity)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(charged.len(), 1, "{rejection}");
+        let untouched = [&first, &second]
+            .iter()
+            .filter(|identity| {
+                rig.store
+                    .lookup_memory_reviewer_receipt(PROJECT, identity)
+                    .unwrap()
+                    .is_none()
+            })
+            .count();
+        assert_eq!(untouched, 1, "{rejection}: the other job is left unclaimed");
+
+        // With the owner's record still valid, the latched pass claims nothing.
+        rig.status.set_activation(ActivationState::Open);
+        assert_eq!(worker.pass(&cancel).await, 0, "{rejection}");
+        assert_eq!(
+            rig.status.reported().activation_state.0,
+            ActivationState::Closed("unavailable")
+        );
+        let begun = [&first, &second]
+            .iter()
+            .filter(|identity| {
+                rig.store
+                    .lookup_memory_reviewer_receipt(PROJECT, identity)
+                    .unwrap()
+                    .is_some()
+            })
+            .count();
+        assert_eq!(begun, 1, "{rejection}: no further job is claimed");
+
+        std::fs::remove_file(rig.home.join(ACTIVATION_DIR).join(IDENTITY_RECORD)).unwrap();
+        for _ in 0..2 {
+            rig.status.set_activation(ActivationState::Open);
+            assert_eq!(worker.pass(&cancel).await, 0);
+            assert_eq!(
+                rig.status.reported().activation_state.0,
+                ActivationState::Closed("unavailable"),
+                "{rejection}: the latch is read before the record"
+            );
+        }
+        assert_eq!(
+            rig.peer.connections.load(Ordering::SeqCst),
+            1,
+            "{rejection}"
+        );
+
+        // A restarted worker reads the renewed record again and runs the jobs.
+        rig.peer = Peer::start().await;
+        rig.write_activation();
+        let body = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"{\"v\":1,\"step\":{\"kind\":\"abstain\",\"reason\":\"enough\"}}"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":4}}"#;
+        let server = rig
+            .peer
+            .serve_script(vec![json_response("200 OK", body, "")]);
+        let restarted = rig.worker();
+        assert!(restarted.pass(&cancel).await > 0, "{rejection}");
+        assert_eq!(server.await.unwrap().len(), 1, "{rejection}");
+        assert_eq!(
+            rig.status.reported().activation_state.0,
+            ActivationState::Open,
+            "{rejection}"
+        );
+    }
 }

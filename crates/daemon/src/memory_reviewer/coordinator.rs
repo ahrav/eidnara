@@ -44,6 +44,9 @@ use super::steps::{Operation, ProposedOutcome, SearchBy, Step};
 pub const MAX_ROUNDS: usize = 4;
 /// Active investigations per host; per project the bound is one.
 pub const MAX_ACTIVE_PER_HOST: usize = 4;
+// Reviewer runs hold fewer backend processes than ModelExecution starts, so the summarizer, the classifier, and wrapup always keep backend capacity (spec D31).
+const _: () =
+    assert!(MAX_ACTIVE_PER_HOST < host_runtime::model_execution::config::MAX_BACKEND_PROCESSES);
 /// The supervisor key's task kind for MemoryReviewer attempts.
 pub const MEMORY_REVIEWER_TASK_KIND: &str = "memory_reviewer_review";
 /// Retained supervisor keys one attempt probes past before launching under a colliding one.
@@ -117,6 +120,59 @@ pub struct JobContext<'a> {
     pub project_root: Option<&'a mut ProjectText>,
 }
 
+/// A provider answer that ends every review in this process: a 401 or a 403 refuses the credential, and a reported model other than the expected one would release text under an unapproved model (spec D28).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejection {
+    Status(u16),
+    /// `reported` is the provider's model id cut to [`MAX_REPORTED_MODEL_CHARS`] characters, or `None` when the response named none; it is never response content.
+    ModelMismatch {
+        reported: Option<String>,
+        expected: String,
+    },
+}
+
+/// Characters of a reported model id a rejection keeps for the operator's log.
+pub const MAX_REPORTED_MODEL_CHARS: usize = 128;
+
+impl Rejection {
+    /// The rejection a disclosure refusal carries, if any, including the cause behind an attempt whose terminal was not recorded.
+    fn of(refusal: &DisclosureRefusal) -> Option<Self> {
+        match refusal {
+            DisclosureRefusal::Send { error, .. } => error.refused_credential().map(Self::Status),
+            DisclosureRefusal::ModelMismatch {
+                reported, expected, ..
+            } => Some(Self::ModelMismatch {
+                reported: reported
+                    .as_deref()
+                    .map(|model| model.chars().take(MAX_REPORTED_MODEL_CHARS).collect()),
+                expected: expected.clone(),
+            }),
+            DisclosureRefusal::TerminalNotRecorded {
+                cause: Some(cause), ..
+            } => Self::of(cause),
+            _ => None,
+        }
+    }
+}
+
+/// Names the status, or both model ids quoted and escaped so a provider-chosen id cannot forge a log line.
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Status(status) => write!(formatter, "status {status}"),
+            Self::ModelMismatch { reported, expected } => {
+                match reported {
+                    Some(model) => {
+                        write!(formatter, "reported model \"{}\"", model.escape_debug())?
+                    }
+                    None => formatter.write_str("reported model none")?,
+                }
+                write!(formatter, " for \"{}\"", expected.escape_debug())
+            }
+        }
+    }
+}
+
 /// Why an investigation ended without a settlement. The receipt stays in progress for its lifecycle owner.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InvestigationError {
@@ -128,6 +184,9 @@ pub enum InvestigationError {
     /// No startup approval covers the sender; nothing was sent.
     #[error("unavailable")]
     Unavailable,
+    /// The provider rejected the credential or answered under another model; the attempt is charged and no further attempt may run in this process.
+    #[error("rejected {0}")]
+    Rejected(Rejection),
     /// The receipt is not this run's to settle.
     #[error("fenced")]
     Fenced,
@@ -595,6 +654,7 @@ impl Run<'_> {
                 .map_err(|refusal| InvestigationError::Kernel(refusal.code))?;
             match prepare_body(
                 &guard,
+                &coordinator.sender,
                 &coordinator.profile,
                 system,
                 self.transcript.iter().map(RenderedBuffer::resend).collect(),
@@ -713,8 +773,12 @@ impl Run<'_> {
         } else {
             self.broker.lock().await.accounting.refund_render(resend);
         }
-        // The supervisor's verdict comes first: text that arrives at the cutoff is not admitted, whatever the disclosure recorded for the attempt.
+        // Past a rejection, the supervisor's verdict comes first: text that arrives at the cutoff is not admitted, whatever the disclosure recorded for the attempt.
         match (settled, disclosed) {
+            // A refused credential or another model ends the attempt charged, and no other attempt may follow it in this process, whatever the supervisor's verdict and whether or not its terminal was recorded.
+            (_, Some(Err(refusal))) if let Some(rejection) = Rejection::of(&refusal) => {
+                Err(InvestigationError::Rejected(rejection))
+            }
             (InternalOutcome::Cutoff, _) => Ok(Attempt::Exhausted),
             (InternalOutcome::Shutdown | InternalOutcome::Cancelled, _) => {
                 Err(InvestigationError::Cancelled)
@@ -1395,5 +1459,47 @@ mod tests {
             "the model reasons over a truncated evidence set once the hold cannot take a reference"
         );
         assert_eq!(transcript.len(), 1);
+    }
+
+    /// The log names the reported model, cut and escaped, and the expected one; nothing else of the response reaches it.
+    #[test]
+    fn a_mismatch_names_the_reported_model_cut_and_escaped() {
+        let long = format!("evil\n{}", "m".repeat(400));
+        let mismatch = |reported: Option<String>| DisclosureRefusal::ModelMismatch {
+            attempt_index: 1,
+            reported,
+            expected: "claude-x".to_string(),
+        };
+        let rejection = Rejection::of(&mismatch(Some(long))).unwrap();
+        let text = rejection.to_string();
+        assert!(text.starts_with("reported model \"evil\\n"), "{text}");
+        assert!(!text.contains('\n'));
+        // The cut keeps 128 characters: "evil", the newline, and 123 m's; "model" adds one.
+        assert_eq!(
+            text.chars().filter(|c| *c == 'm').count(),
+            MAX_REPORTED_MODEL_CHARS - 5 + 1
+        );
+        assert!(text.ends_with(" for \"claude-x\""), "{text}");
+        assert_eq!(
+            Rejection::of(&mismatch(None)).unwrap().to_string(),
+            "reported model none for \"claude-x\""
+        );
+        // A rejection behind an unrecorded terminal is still the rejection.
+        let unrecorded = DisclosureRefusal::TerminalNotRecorded {
+            attempt_index: 1,
+            error: "store".to_string(),
+            cause: Some(Box::new(DisclosureRefusal::Send {
+                attempt_index: Some(1),
+                error: SendError::Status(401),
+                sent: true,
+            })),
+        };
+        assert_eq!(Rejection::of(&unrecorded), Some(Rejection::Status(401)));
+        let throttled = DisclosureRefusal::Send {
+            attempt_index: Some(1),
+            error: SendError::Status(429),
+            sent: true,
+        };
+        assert_eq!(Rejection::of(&throttled), None);
     }
 }

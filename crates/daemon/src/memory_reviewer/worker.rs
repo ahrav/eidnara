@@ -23,10 +23,12 @@ use crate::{MemoriesAuthority, RouteBindings, SessionBinding, memories_authority
 
 use super::activation::{self, Activation, Closed, LiveIdentity};
 use super::broker::{MAX_ISSUED_INSPECTIONS, QuestionTemplate};
-use super::coordinator::{Coordinator, InvestigationError, InvestigationPermits, JobContext};
+use super::coordinator::{
+    Coordinator, InvestigationError, InvestigationPermits, JobContext, Rejection,
+};
 use super::disclosure::ModelProfile;
 use super::lifecycle::{ActivationState, MemoryReviewerStatus};
-use super::model_request::{Credential, Endpoint, Sender};
+use super::model_request::{Credential, Provider, Sender};
 use super::project_text::{InspectionBinding, ProjectText, ProtectedLocations};
 use super::settlement::TaskClaim;
 
@@ -91,7 +93,18 @@ pub struct Worker {
     pub projects: Arc<dyn Fn() -> Vec<ProjectRoute> + Send + Sync>,
     pub status: Arc<MemoryReviewerStatus>,
     pub permits: Arc<InvestigationPermits>,
-    pub endpoint: Endpoint,
+    pub provider: Provider,
+    pub rejection: RejectionLatch,
+}
+
+/// The rejection that latched the gate closed for the rest of the process, once one has. Only the worker's own pass sets it; a new worker, as after a restart, starts unlatched.
+#[derive(Debug, Default)]
+pub struct RejectionLatch(OnceLock<Rejection>);
+
+impl RejectionLatch {
+    pub fn get(&self) -> Option<&Rejection> {
+        self.0.get()
+    }
 }
 
 /// MODULE-authority bound routes grouped by authority project, newest binding first within each project's roots.
@@ -145,24 +158,20 @@ impl Worker {
         );
         let kernel_incarnation = kernel.database_incarnation_id_within_budget(&budget).ok()?;
         let memstore_incarnation = self.store.memory_reviewer_store_incarnation().ok()?;
-        let probe = Sender::new(
-            self.endpoint.clone(),
-            Credential::new("probe".into(), "probe".into()).ok()?,
-        );
         Some(LiveIdentity {
             kernel_baseline_digest: kernel::kernel_baseline_digest().ok()?.to_string(),
             memstore_baseline_digest: memory_store::baseline_digest(),
             kernel_incarnation,
             memstore_incarnation,
-            provider: probe.provider_identity(),
-            // Only the credential the sender's protocol carries can vouch for this provider; a record naming another provider's secret reads as an unknown credential.
+            provider: self.provider.identity(),
+            // Only the credential the provider's protocol carries can vouch for it; a record naming another provider's secret reads as an unknown credential.
             credentials: self
                 .host
                 .credential_identities
                 .get()?
                 .iter()
                 .filter(|(name, _)| {
-                    *name == super::model_request::CREDENTIAL_NAME
+                    *name == self.provider.credential_name()
                         && self.host.credentials.contains_key(*name)
                 })
                 .map(|(name, identity)| (name.clone(), identity.clone()))
@@ -203,8 +212,32 @@ impl Worker {
             .unwrap_or_else(|_| Err(Closed::Unreadable("gate evaluation".to_string())))
     }
 
-    /// One pass: nothing runs unless the gate is open; then every Ready job of every MODULE project is claimed and investigated. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime.
+    /// Closes the gate as `unavailable` for the rest of the process after a provider rejected an attempt. The first rejection logs once, naming the status or the reported model and never any content.
+    fn latch(&self, rejection: Rejection) {
+        if self.rejection.0.set(rejection.clone()).is_ok() {
+            eprintln!(
+                "daemon: memory_reviewer provider rejected an attempt ({rejection}); the gate stays closed until the daemon restarts"
+            );
+        }
+        self.stamp_latched();
+    }
+
+    /// Records the latched gate as `unavailable` with the rejection as its reason.
+    fn stamp_latched(&self) {
+        if let Some(rejection) = self.rejection.get() {
+            self.status.set_closed(
+                ActivationState::Closed("unavailable"),
+                format!("provider rejected an attempt ({rejection})"),
+            );
+        }
+    }
+
+    /// One pass: nothing runs unless the gate is open; then every Ready job of every MODULE project is claimed and investigated. Returns how many runs settled. Store and filesystem work runs on the blocking pool; only the investigation itself is awaited on the runtime. A latched rejection closes the gate before the record is read, and every pass stamps it again.
     pub async fn pass(self: &Arc<Self>, cancel: &CancellationToken) -> usize {
+        if self.rejection.get().is_some() {
+            self.stamp_latched();
+            return 0;
+        }
         let Some(kernel) = (self.kernel)() else {
             self.status.set_activation(ActivationState::Closed("store"));
             return 0;
@@ -230,7 +263,7 @@ impl Worker {
             store: Arc::clone(&kernel),
             ledger: Arc::clone(&self.store),
             supervisor: Arc::clone(&self.host.supervisor),
-            sender: Arc::new(Sender::new(self.endpoint.clone(), credential)),
+            sender: Arc::new(Sender::new(self.provider.clone(), credential)),
             approval: Some(activation.approval.clone()),
             profile: ModelProfile {
                 model: activation.approval.model.clone(),
@@ -294,6 +327,10 @@ impl Worker {
                     Err(InvestigationError::Unavailable) => {
                         self.status
                             .set_activation(ActivationState::Closed("unavailable"));
+                        return settled;
+                    }
+                    Err(InvestigationError::Rejected(rejection)) => {
+                        self.latch(rejection);
                         return settled;
                     }
                     Err(InvestigationError::Cancelled) => return settled,
