@@ -11,8 +11,8 @@ use std::time::Duration;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::client::conn::http1::{Connection, SendRequest};
-use hyper::header::{self, HeaderValue};
-use hyper::{Request, Response, StatusCode};
+use hyper::header::{self, HeaderName, HeaderValue};
+use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -228,19 +228,19 @@ pub struct Provider(ProviderKind);
 #[derive(Debug, Clone)]
 enum ProviderKind {
     /// Anthropic Messages on the fixed production host, or a test peer standing in for it.
-    Anthropic(Endpoint),
+    Anthropic(Arc<Endpoint>),
 }
 
 impl Provider {
     /// Anthropic Messages on the production host over the webpki roots.
     pub fn anthropic() -> Self {
-        Self(ProviderKind::Anthropic(Endpoint::anthropic()))
+        Self(ProviderKind::Anthropic(Arc::new(Endpoint::anthropic())))
     }
 
     /// Anthropic Messages on a local peer for the sender proof. Compiled only for tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn anthropic_at(endpoint: Endpoint) -> Self {
-        Self(ProviderKind::Anthropic(endpoint))
+        Self(ProviderKind::Anthropic(Arc::new(endpoint)))
     }
 
     fn endpoint(&self) -> &Endpoint {
@@ -253,9 +253,13 @@ impl Provider {
     /// dials, the API surface, and the API version it speaks.
     pub fn identity(&self) -> String {
         match &self.0 {
-            ProviderKind::Anthropic(endpoint) => {
-                format!("{}{MESSAGES_PATH}@{ANTHROPIC_VERSION}", endpoint.host)
-            }
+            ProviderKind::Anthropic(endpoint) => [
+                endpoint.host.as_str(),
+                MESSAGES_PATH,
+                "@",
+                ANTHROPIC_VERSION,
+            ]
+            .concat(),
         }
     }
 
@@ -316,16 +320,25 @@ impl Provider {
         body: RequestBody,
         credential: &Credential,
     ) -> Result<Request<Body>, SendError> {
-        let builder = Request::post(MESSAGES_PATH)
+        let builder = Request::post(Uri::from_static(MESSAGES_PATH))
             .header(header::HOST, self.endpoint().host.as_str())
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .header(header::CONNECTION, "close");
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )
+            .header(header::ACCEPT, HeaderValue::from_static("application/json"))
+            .header(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            )
+            .header(header::CONNECTION, HeaderValue::from_static("close"));
         let builder = match &self.0 {
             ProviderKind::Anthropic(_) => builder
-                .header("x-api-key", credential.header())
-                .header("anthropic-version", ANTHROPIC_VERSION),
+                .header(HeaderName::from_static("x-api-key"), credential.header())
+                .header(
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderValue::from_static(ANTHROPIC_VERSION),
+                ),
         };
         builder
             .body(Full::new(Bytes::from(body.bytes)))

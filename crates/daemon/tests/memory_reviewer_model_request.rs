@@ -130,6 +130,7 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     assert_eq!(headers.matches("sk-test-credential").count(), 1);
     assert!(headers.contains(&format!("anthropic-version: {ANTHROPIC_VERSION}\r\n")));
     assert!(headers.contains("accept-encoding: identity\r\n"));
+    assert!(headers.contains("\r\naccept: application/json\r\n"));
     assert!(headers.contains("connection: close\r\n"));
     assert!(headers.contains("content-type: application/json\r\n"));
     let body: serde_json::Value = serde_json::from_slice(&observed.body).unwrap();
