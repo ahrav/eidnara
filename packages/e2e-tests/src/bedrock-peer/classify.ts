@@ -36,10 +36,10 @@ async function raiseMemoriesAuthority(
         generation,
     });
     const authority = acked.authority as { state?: unknown; generation?: unknown } | undefined;
-    if (authority?.state !== "MODULE") {
+    if (authority?.state !== "MODULE" || typeof authority.generation !== "number") {
         throw new Error(`memories authority did not reach MODULE: ${JSON.stringify(acked)}`);
     }
-    return Number(authority.generation);
+    return authority.generation;
 }
 
 async function memoryObjectIds(host: HermeticHostStack, identity: BindIdentity): Promise<string[]> {

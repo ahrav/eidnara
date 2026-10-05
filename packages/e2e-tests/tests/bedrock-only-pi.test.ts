@@ -87,7 +87,7 @@ describe.skipIf(!active)("bedrock-only callers: Pi", () => {
         return readFileSync(log, "utf8")
             .split(WRAPUP_MARKER)
             .slice(1)
-            .map((entry) => entry.replaceAll("\\n", "\n"));
+            .map((entry) => (entry.split("\n", 1)[0] as string).replaceAll("\\n", "\n"));
     }
 
     beforeAll(async () => {
@@ -227,6 +227,7 @@ describe.skipIf(!active)("bedrock-only callers: Pi", () => {
         await prompt(`wrapup ballast: ${"ballast words ".repeat(400)}`);
         const before = Number((await sessionStatus()).history_segment_count ?? 0);
         let rounds: number | undefined;
+        const results: string[] = [];
         for (let attempt = 1; rounds === undefined && attempt <= 3; attempt += 1) {
             const seen = wrapupResults().filter(isWrapupResult).length;
             await rpc.sendCommand(
@@ -241,6 +242,7 @@ describe.skipIf(!active)("bedrock-only callers: Pi", () => {
                 diagnostics,
             );
             // A retryable result asks for another run after the next message, as the command tells the user.
+            results.push(result);
             rounds = completedWrapupRounds(result);
             if (rounds === undefined) await prompt(`wrapup retry ${attempt}`);
             if (rounds === undefined && !result.startsWith("## Eidnara Wrapup — Partial")) {
@@ -249,7 +251,7 @@ describe.skipIf(!active)("bedrock-only callers: Pi", () => {
                 );
             }
         }
-        expect(rounds ?? 0).toBeGreaterThanOrEqual(1);
+        expect(rounds ?? 0, results.join("\n---\n")).toBeGreaterThanOrEqual(1);
         expect(Number((await sessionStatus()).history_segment_count ?? 0)).toBeGreaterThan(before);
     }, 420_000);
 

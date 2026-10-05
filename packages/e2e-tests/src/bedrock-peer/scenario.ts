@@ -82,7 +82,7 @@ export async function waitFor<T>(
 /** The rounds a completed `/eidnara-wrapup` result reports; a Partial, Skipped, Failed, starting, or nothing-to-compact result reports none. */
 export function completedWrapupRounds(text: string): number | undefined {
     const match =
-        /^## Eidnara Wrapup\s+(?!—|Starting wrapup|Nothing to compact)[^#]*?\((\d+) rounds?\)/.exec(
+        /^## Eidnara Wrapup\s+(?![\s—]|Starting wrapup|Nothing to compact)[^#]*?\((\d+) rounds?\)/.exec(
             text,
         );
     return match ? Number(match[1]) : undefined;
