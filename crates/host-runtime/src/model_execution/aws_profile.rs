@@ -641,9 +641,12 @@ fn static_root(profile: &Profile) -> Result<Root, AdmissionError> {
     if access_key_id.starts_with("ASIA") {
         return Err(AdmissionError::TemporaryStaticRoot);
     }
-    // Long-term access key ids are twenty bytes with the `AKIA` prefix.
-    charset(access_key_id, "aws_access_key_id", 20, 20, b"")?;
-    if !access_key_id.starts_with("AKIA") {
+    let long_term = access_key_id.len() == 20
+        && access_key_id.starts_with("AKIA")
+        && access_key_id
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    if !long_term {
         return Err(AdmissionError::InvalidValue("aws_access_key_id"));
     }
     charset(secret, "aws_secret_access_key", 16, 128, b"/+=")?;

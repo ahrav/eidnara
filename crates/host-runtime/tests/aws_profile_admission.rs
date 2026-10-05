@@ -750,6 +750,8 @@ fn static_access_key_ids_are_twenty_byte_long_term_ids() {
         ("AKIAIOSFODNN7EXAMPLE0", false),
         ("abcdefghijklmnopqrst", false),
         ("abcdefghijklmnop", false),
+        ("AKIA____________ABCD", false),
+        ("AKIAiosfodnn7example", false),
     ] {
         let credentials = format!(
             "[keys]\naws_access_key_id = {access_key_id}\naws_secret_access_key = {STATIC_SECRET}\n"
