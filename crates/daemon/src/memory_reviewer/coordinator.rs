@@ -138,10 +138,7 @@ impl Rejection {
     /// The rejection a disclosure refusal carries, if any, including the cause behind an attempt whose terminal was not recorded.
     fn of(refusal: &DisclosureRefusal) -> Option<Self> {
         match refusal {
-            DisclosureRefusal::Send {
-                error: SendError::Status(status @ (401 | 403)),
-                ..
-            } => Some(Self::Status(*status)),
+            DisclosureRefusal::Send { error, .. } => error.refused_credential().map(Self::Status),
             DisclosureRefusal::ModelMismatch {
                 reported, expected, ..
             } => Some(Self::ModelMismatch {
