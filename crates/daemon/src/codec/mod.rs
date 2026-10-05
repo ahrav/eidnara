@@ -1,7 +1,7 @@
 //! Provider codec adapters and sidecar metadata.
 
 pub mod opencode;
-pub mod pi;
+pub(crate) mod pi;
 pub mod sidecar;
 
 mod json;
