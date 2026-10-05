@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use daemon::memory_reviewer::sigv4::{
     Request, RequestTime, Scope, authorization, canonical_uri, signature, string_to_sign,
+    string_to_sign_of_digest,
 };
 use sha2::{Digest, Sha256};
 
@@ -164,14 +165,15 @@ fn every_pinned_aws_c_auth_header_case_signs_as_the_suite_expects() {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
-        let (canonical, signed) = Request {
+        let request = Request {
             method: &raw.method,
             canonical_uri: &uri,
             canonical_query: &query,
             headers: &pairs,
             payload_sha256: &payload,
-        }
-        .canonical();
+        };
+        let (canonical, signed) = request.canonical();
+        let (canonical_digest, digest_signed) = request.digest();
         assert_eq!(
             *canonical,
             read(&case, "header-canonical-request.txt"),
@@ -184,6 +186,12 @@ fn every_pinned_aws_c_auth_header_case_signs_as_the_suite_expects() {
         };
         let to_sign = string_to_sign(&time, &scope, &canonical);
         assert_eq!(to_sign, read(&case, "header-string-to-sign.txt"), "{name}");
+        assert_eq!(
+            string_to_sign_of_digest(&time, &scope, &canonical_digest),
+            to_sign,
+            "{name}: the digest path signs the same string"
+        );
+        assert_eq!(digest_signed, signed, "{name}");
         let secret = credentials["secret_access_key"].as_str().unwrap();
         let signed_value = signature(secret, &scope, &to_sign);
         assert_eq!(
@@ -234,14 +242,15 @@ fn a_bedrock_model_path_double_encodes_its_colon_as_botocore_does() {
     ];
     let uri = canonical_uri(&text("wire_path"));
     assert!(uri.contains("v1%253A0"), "{uri}");
-    let (canonical, signed) = Request {
+    let request = Request {
         method: "POST",
         canonical_uri: &uri,
         canonical_query: "",
         headers: &headers,
         payload_sha256: &payload,
-    }
-    .canonical();
+    };
+    let (canonical, signed) = request.canonical();
+    let (canonical_digest, digest_signed) = request.digest();
     assert_eq!(*canonical, text("canonical_request"));
     let scope = Scope {
         date: time.date(),
@@ -250,6 +259,11 @@ fn a_bedrock_model_path_double_encodes_its_colon_as_botocore_does() {
     };
     let to_sign = string_to_sign(&time, &scope, &canonical);
     assert_eq!(to_sign, text("string_to_sign"));
+    assert_eq!(
+        string_to_sign_of_digest(&time, &scope, &canonical_digest),
+        to_sign
+    );
+    assert_eq!(digest_signed, signed);
     let value = signature(&text("secret_access_key"), &scope, &to_sign);
     assert_eq!(value, text("signature"));
     assert_eq!(

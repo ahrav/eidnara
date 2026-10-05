@@ -12,7 +12,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::client::conn::http1::{Connection, SendRequest};
 use hyper::header::{self, HeaderName, HeaderValue};
-use hyper::{Request, Response, StatusCode, Uri};
+use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::ClientConfig;
 use rustls::pki_types::ServerName;
@@ -162,34 +162,34 @@ fn refuses_credential(status: u16) -> bool {
     matches!(status, 401 | 403)
 }
 
-/// A startup credential: the deployment owner's identifier for it and its secret material. The identifier is what an approval and an attempt marker name; an API key is rendered only into its authentication header, and an AWS secret only into the signing key derivation, never onto the wire. `Debug` never shows the material, and its bytes are wiped when the last copy drops. Keeping both in one value means the credential a marker records is the one the request carries.
+/// A startup credential: the deployment owner's identifier for it and its secret material. The identifier is what an approval and an attempt marker name; an API key is rendered only into its authentication header, and an AWS secret only into the signing key derivation, never onto the wire. `Debug` never shows the material. Clones share one copy of the material, and its bytes are wiped when the last clone drops. Keeping both in one value means the credential a marker records is the one the request carries.
 #[derive(Clone)]
 pub struct Credential {
     id: String,
-    material: Material,
+    material: Arc<Material>,
 }
 
-#[derive(Clone)]
 enum Material {
-    ApiKey(Zeroizing<String>),
+    /// The API key as the `x-api-key` value each request carries.
+    ApiKey(HeaderValue),
     Aws {
         access_key_id: String,
         secret_access_key: Zeroizing<String>,
-        session_token: Option<Zeroizing<String>>,
+        /// The session token as the `x-amz-security-token` value each request carries and signs.
+        session_token: Option<HeaderValue>,
     },
 }
 
 impl Credential {
     /// An API key. Refuses an empty identifier or a secret that cannot be a header value, so the refusal is named at startup rather than at the first send.
     pub fn new(id: String, secret: String) -> Result<Self, SendError> {
-        let secret = Zeroizing::new(secret);
+        let secret = secret_header(secret)?;
         if id.is_empty() {
             return Err(SendError::Credential);
         }
-        HeaderValue::from_str(&secret).map_err(|_| SendError::Credential)?;
         Ok(Self {
             id,
-            material: Material::ApiKey(secret),
+            material: Arc::new(Material::ApiKey(secret)),
         })
     }
 
@@ -204,21 +204,21 @@ impl Credential {
         // An empty token is no token: it is neither signed nor sent.
         let session_token = session_token
             .filter(|token| !token.is_empty())
-            .map(Zeroizing::new);
+            .map(secret_header)
+            .transpose()?;
         if id.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
             return Err(SendError::Credential);
         }
-        HeaderValue::from_str(&access_key_id).map_err(|_| SendError::Credential)?;
-        if let Some(token) = &session_token {
-            HeaderValue::from_str(token).map_err(|_| SendError::Credential)?;
+        if !visible_ascii(&access_key_id) {
+            return Err(SendError::Credential);
         }
         Ok(Self {
             id,
-            material: Material::Aws {
+            material: Arc::new(Material::Aws {
                 access_key_id,
                 secret_access_key,
                 session_token,
-            },
+            }),
         })
     }
 
@@ -227,10 +227,28 @@ impl Credential {
     }
 }
 
-fn sensitive(value: &str) -> Result<HeaderValue, SendError> {
-    let mut value = HeaderValue::from_str(value).map_err(|_| SendError::Credential)?;
+/// Whether `value` holds only the bytes [`HeaderValue::from_str`] accepts: visible ASCII, space, and tab.
+fn visible_ascii(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| (b' '..0x7f).contains(&byte) || byte == b'\t')
+}
+
+/// `secret` as a sensitive header value over one buffer that is wiped when the last clone drops; requests carry clones of it. Refuses a secret [`HeaderValue::from_str`] refuses.
+fn secret_header(secret: String) -> Result<HeaderValue, SendError> {
+    let owner = Zeroizing::new(secret.into_bytes());
+    if !std::str::from_utf8(&owner).is_ok_and(visible_ascii) {
+        return Err(SendError::Credential);
+    }
+    let mut value = HeaderValue::from_maybe_shared(Bytes::from_owner(owner))
+        .map_err(|_| SendError::Credential)?;
     value.set_sensitive(true);
     Ok(value)
+}
+
+/// The text of a header value this module built from visible ASCII.
+fn header_text(value: &HeaderValue) -> Result<&str, SendError> {
+    std::str::from_utf8(value.as_bytes()).map_err(|_| SendError::Credential)
 }
 
 impl std::fmt::Debug for Credential {
@@ -243,6 +261,8 @@ impl std::fmt::Debug for Credential {
 #[derive(Clone)]
 pub struct Endpoint {
     host: String,
+    /// `host` as the `host` header value each request carries.
+    host_header: HeaderValue,
     port: u16,
     server_name: ServerName<'static>,
     tls: Arc<ClientConfig>,
@@ -294,6 +314,7 @@ impl Endpoint {
             .with_no_client_auth();
         tls.alpn_protocols = vec![ALPN_HTTP1.to_vec()];
         Ok(Self {
+            host_header: HeaderValue::from_str(host).map_err(|_| SendError::Tls)?,
             host: host.to_string(),
             port,
             server_name,
@@ -584,30 +605,35 @@ impl Provider {
         {
             return Err(SendError::BodyDigest);
         }
-        let host = self.endpoint().host.as_str();
+        let host = &self.endpoint().host_header;
         let uri = match &self.0 {
             ProviderKind::Anthropic(_) => Uri::from_static(MESSAGES_PATH),
             ProviderKind::Bedrock(bedrock) => bedrock.uri.clone(),
         };
-        let builder = Request::post(uri)
-            .header(header::ACCEPT, HeaderValue::from_static("application/json"))
-            .header(
-                header::ACCEPT_ENCODING,
-                HeaderValue::from_static("identity"),
-            )
-            .header(header::CONNECTION, HeaderValue::from_static("close"));
-        let builder = match (&self.0, &credential.material) {
-            (ProviderKind::Anthropic(_), Material::ApiKey(key)) => builder
-                .header(header::HOST, host)
-                .header(
+        let mut request = Request::new(Full::new(body.bytes));
+        *request.method_mut() = Method::POST;
+        *request.uri_mut() = uri;
+        let headers = request.headers_mut();
+        headers.reserve(10);
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+        match (&self.0, &*credential.material) {
+            (ProviderKind::Anthropic(_), Material::ApiKey(key)) => {
+                headers.insert(header::HOST, host.clone());
+                headers.insert(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static("application/json"),
-                )
-                .header(HeaderName::from_static("x-api-key"), sensitive(key)?)
-                .header(
+                );
+                headers.insert(HeaderName::from_static("x-api-key"), key.clone());
+                headers.insert(
                     HeaderName::from_static("anthropic-version"),
                     HeaderValue::from_static(ANTHROPIC_VERSION),
-                ),
+                );
+            }
             (
                 ProviderKind::Bedrock(bedrock),
                 Material::Aws {
@@ -617,58 +643,65 @@ impl Provider {
                 },
             ) => {
                 let time = super::sigv4::RequestTime::at(at_ms).ok_or(SendError::SignTime)?;
+                let value = |text: &str| {
+                    HeaderValue::from_str(text).map_err(|_| SendError::RequestTooLarge)
+                };
                 // The one list of signed headers: the signature covers it, and the request carries it.
-                let mut signed = [
-                    (header::CONTENT_TYPE, "application/json"),
-                    (header::HOST, host),
-                    (HeaderName::from_static("x-amz-content-sha256"), body_digest),
+                let signed = [
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    ),
+                    (header::HOST, host.clone()),
+                    (
+                        HeaderName::from_static("x-amz-content-sha256"),
+                        value(body_digest)?,
+                    ),
                     (
                         HeaderName::from_static("x-amz-date"),
-                        time.amz_date.as_str(),
+                        value(&time.amz_date)?,
                     ),
-                    (HeaderName::from_static("x-amz-security-token"), ""),
+                    (
+                        HeaderName::from_static("x-amz-security-token"),
+                        session_token
+                            .clone()
+                            .unwrap_or(HeaderValue::from_static("")),
+                    ),
                 ];
-                let count = match session_token {
-                    Some(token) => {
-                        signed[4].1 = token.as_str();
-                        signed.len()
-                    }
-                    None => signed.len() - 1,
-                };
-                let names: [(&str, &str); 5] =
-                    std::array::from_fn(|index| (signed[index].0.as_str(), signed[index].1));
-                let (canonical, signed_headers) = super::sigv4::Request {
+                let count = signed.len() - usize::from(session_token.is_none());
+                let mut names = [("", ""); 5];
+                for (pair, (name, value)) in names.iter_mut().zip(&signed) {
+                    *pair = (name.as_str(), header_text(value)?);
+                }
+                let (canonical_digest, signed_headers) = super::sigv4::Request {
                     method: "POST",
                     canonical_uri: &bedrock.canonical_uri,
                     canonical_query: "",
                     headers: &names[..count],
                     payload_sha256: body_digest,
                 }
-                .canonical();
+                .digest();
                 let scope = super::sigv4::Scope {
                     date: time.date(),
                     region: &bedrock.region,
                     service: BEDROCK_SERVICE,
                 };
-                let to_sign = super::sigv4::string_to_sign(&time, &scope, &canonical);
+                let to_sign =
+                    super::sigv4::string_to_sign_of_digest(&time, &scope, &canonical_digest);
                 let signature = super::sigv4::signature(secret_access_key, &scope, &to_sign);
                 let authorization =
                     super::sigv4::authorization(access_key_id, &scope, &signed_headers, &signature);
-                let mut builder = builder.header(header::AUTHORIZATION, sensitive(&authorization)?);
+                let mut authorization = HeaderValue::from_maybe_shared(Bytes::from(authorization))
+                    .map_err(|_| SendError::Credential)?;
+                authorization.set_sensitive(true);
+                headers.insert(header::AUTHORIZATION, authorization);
                 for (name, value) in signed.into_iter().take(count) {
-                    builder = if name == "x-amz-security-token" {
-                        builder.header(name, sensitive(value)?)
-                    } else {
-                        builder.header(name, value)
-                    };
+                    headers.insert(name, value);
                 }
-                builder
             }
             _ => return Err(SendError::Credential),
-        };
-        builder
-            .body(Full::new(body.bytes))
-            .map_err(|_| SendError::RequestTooLarge)
+        }
+        Ok(request)
     }
 }
 
