@@ -26,6 +26,23 @@ const FORBIDDEN_FEATURES: &[&str] = &["credentials-process", "credentials-login"
 /// Crates that would add a model client, a login provider, or a second HTTP stack.
 const ABSENT_CRATES: &[&str] = &["aws-sdk-bedrockruntime", "aws-sdk-signin", "reqwest"];
 
+/// Unfiltered `cargo metadata` requires cached foreign-platform dependencies
+/// for offline resolution; a host build caches host-platform crates only.
+fn host_triple() -> String {
+    let output = Command::new(env!("CARGO"))
+        .arg("-vV")
+        .output()
+        .expect("cargo -vV runs");
+    assert!(output.status.success(), "cargo -vV failed");
+    let stdout = String::from_utf8(output.stdout).expect("cargo -vV is UTF-8");
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("cargo -vV reports a host")
+        .trim()
+        .to_owned()
+}
+
 #[test]
 fn resolved_aws_closure_matches_the_pins() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -37,11 +54,17 @@ fn resolved_aws_closure_matches_the_pins() {
             "--locked",
             "--offline",
             "--all-features",
+            "--filter-platform",
+            &host_triple(),
         ])
         .current_dir(&workspace)
         .output()
         .expect("cargo metadata runs");
-    assert!(output.status.success(), "cargo metadata failed");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata JSON");
     let mut versions: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for package in metadata["packages"].as_array().expect("packages") {
