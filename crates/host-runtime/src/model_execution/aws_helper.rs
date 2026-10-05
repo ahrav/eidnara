@@ -261,16 +261,18 @@ pub fn complete_row(row: &Credentials, now: SystemTime, renewal: Renewal) -> Hel
     let token = row.session_token().unwrap_or_default();
     let fields = [row.access_key_id(), row.secret_access_key(), token];
     let bounded = |field: &&str| !field.is_empty() && field.len() <= MAX_FIELD_BYTES;
+    let unix_seconds = |at: SystemTime| at.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+    let now_seconds = unix_seconds(now).unwrap_or(0);
     let expires = row
         .expiry()
-        .filter(|expiry| *expiry > now)
-        .and_then(|expiry| expiry.duration_since(UNIX_EPOCH).ok());
+        .and_then(unix_seconds)
+        .filter(|expires| *expires > now_seconds);
     match expires {
         Some(expires) if fields.iter().all(bounded) => HelperReport::Credentials {
             access_key_id: fields[0].to_owned(),
             secret_access_key: Zeroizing::new(fields[1].to_owned()),
             session_token: Zeroizing::new(token.to_owned()),
-            expires_at_unix_seconds: expires.as_secs(),
+            expires_at_unix_seconds: expires,
             renewal,
         },
         _ => HelperReport::failed(HelperFailure::Incomplete, renewal),
@@ -488,5 +490,29 @@ mod tests {
         assert!(!complete("A", "s", "t", None));
         let report = complete_row(&row("A", &max, &max, later), now, Renewal::Started);
         assert!(serde_json::to_vec(&report).unwrap().len() <= MAX_REPORT_BYTES);
+
+        // The reported whole-second expiry must be later than `now`.
+        let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
+        let report = |expiry| {
+            complete_row(
+                &row("A", "s", "t", Some(expiry)),
+                at(100_500),
+                Renewal::NotStarted,
+            )
+        };
+        assert!(matches!(
+            report(at(100_750)),
+            HelperReport::Failed {
+                failure: HelperFailure::Incomplete,
+                ..
+            }
+        ));
+        assert!(matches!(
+            report(at(101_000)),
+            HelperReport::Credentials {
+                expires_at_unix_seconds: 101,
+                ..
+            }
+        ));
     }
 }
