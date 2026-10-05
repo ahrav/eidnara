@@ -87,7 +87,7 @@ eval-runner = ["test-support"]
 # Exposes the request dispatcher and kernel lifecycle probes to integration
 # tests in `tests/`; enabled through the self dev-dependency below and by
 # `eval-runner`, never by a normal dependency.
-test-support = ["host-runtime/test-support"]
+test-support = ["host-runtime/test-support", "memory-store/test-support"]
 
 [dev-dependencies]
 storage = { workspace = true, features = ["test-support"] }

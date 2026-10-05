@@ -31,9 +31,9 @@ import { formatWindowDerivationLine } from "../../shared/window-geometry";
 import { TimeoutError } from "../../shared/with-timeout";
 import { resolveContextWindowGeometry } from "./event-resolvers";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "./module-transport";
-import type { RustModeModuleClient } from "./rust-mode-transform";
 import type { NotificationParams } from "./send-session-notification";
 import { sendUserPrompt } from "./send-session-notification";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 export interface PartialRecompRange {
     /** Inclusive raw message ordinal to start rebuilding from. */

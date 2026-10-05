@@ -39,7 +39,7 @@ import {
 import { defaultConnectionFilePath } from "../../shared/host-lifecycle/paths";
 import { isRecord } from "../../shared/record-type-guard";
 import type { ModuleMethod } from "./module-wire";
-import type { RustModeModuleClient } from "./rust-mode-transform";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 const DEFAULT_MODULE_ID = "context";
 const CONNECT_BACKOFF_INITIAL_MS = 1_000;

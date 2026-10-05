@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MAX_WRAPUP_REQUEST_BUDGET_MS } from "@eidnara/opencode/hooks/context/module-transport";
-import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "@eidnara/opencode/hooks/context/transform-session-client";
 import { createFakePi, fakeContext } from "../__tests__/test-utils";
 import { COMPACTION_OFF_COMMAND_UNAVAILABLE } from "./daemon-session-routes";
 import { registerCtxWrapupCommand } from "./eidnara-wrapup";

@@ -1,0 +1,6 @@
+{"harness":"opencode","tier":"10k","session":"opencode-10k-0","turn":0,"boundary_state":"cold","outcome":"completed","refusal":null,"response_us":41250,"service_us":18900,"rss_bytes":212336640,"ipc_bytes":1572864}
+{"harness":"opencode","tier":"s4_1m","session":"opencode-1m-0","turn":7,"boundary_state":"steady","outcome":"censored","refusal":null,"response_us":30000000,"service_us":null,"rss_bytes":905969664,"ipc_bytes":1605632}
+{"harness":"pi","tier":"s3_100k","session":"pi-100k-1","turn":3,"boundary_state":"warming","outcome":"refused","refusal":"declined","response_us":912,"service_us":null,"rss_bytes":301989888,"ipc_bytes":0}
+{"harness":"pi","tier":"s4_1m","session":"pi-1m-2","turn":1,"boundary_state":"after_restart","outcome":"completed","refusal":null,"response_us":77001,"service_us":50123,"rss_bytes":1073741824,"ipc_bytes":1638400}
+{"harness":"opencode","tier":"s3_100k","session":"opencode-100k-0","turn":12,"boundary_state":"replay","outcome":"refused","refusal":"daemon_error","response_us":3301,"service_us":2017,"rss_bytes":250609664,"ipc_bytes":1590112}
+{"harness":"pi","tier":"10k","session":"pi-10k-0","turn":40,"boundary_state":"steady","outcome":"refused","refusal":"transport_error","response_us":30000000,"service_us":null,"rss_bytes":180355072,"ipc_bytes":1548288}

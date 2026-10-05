@@ -32,6 +32,9 @@ mod fault;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod growth;
+/// The scale shell seeds a fixture store and builds scale reports for the scale drivers.
+#[cfg(unix)]
+mod scale;
 /// The shrink shell is shared with the daemon's shrink test the same way.
 #[cfg(unix)]
 #[allow(dead_code)]
@@ -632,6 +635,10 @@ fn main() {
         #[cfg(unix)]
         Some("growth") => run_growth(args),
         #[cfg(unix)]
+        Some("scale-seed") => scale::run_seed(args),
+        #[cfg(unix)]
+        Some("scale-report") => scale::run_report(args),
+        #[cfg(unix)]
         Some("shrink") => run_shrink(args),
         #[cfg(unix)]
         Some("shrink-child") => run_shrink_child(),
@@ -658,7 +665,7 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         stale::WORLD_USAGE,
         stale::ARMS_USAGE,
@@ -666,6 +673,8 @@ fn campaign_usage() -> String {
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
+        scale::SEED_USAGE,
+        scale::REPORT_USAGE,
         shrink::USAGE,
         suite_d::USAGE
     )
@@ -673,7 +682,7 @@ fn campaign_usage() -> String {
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | shrink | suite-d (unix only)"
+    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | scale-seed | scale-report | shrink | suite-d (unix only)"
         .to_string()
 }
 

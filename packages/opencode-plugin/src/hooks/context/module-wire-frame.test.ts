@@ -15,7 +15,7 @@ import {
 } from "./__tests__/serialized-transform-corpus";
 import { HostModuleTransport } from "./module-transport";
 import { buildPagedModuleTransformPayloads, MODULE_PAGE_MAX_BYTES } from "./module-wire";
-import type { RustModeModuleClient } from "./rust-mode-transform";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 let root: string;
 let daemon: FakeDaemon;

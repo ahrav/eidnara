@@ -7,14 +7,34 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
+    inputs:
+      scale_driver:
+        description: >-
+          Scale report driver to run on the reference host (opencode-pass);
+          empty runs no scale report
+        type: string
+        default: ""
+      scale_base:
+        description: >-
+          Commit whose plugin and daemon form the base arm; empty measures the
+          dispatched ref alone
+        type: string
+        default: ""
+      scale_budget_seconds:
+        description: Wall-clock budget for each driver run (one tier of one arm)
+        type: string
+        default: "1200"
 
 permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
-# `main` keeps every run.
+# `main` preserves in-progress runs; newer pending runs replace older pending
+# runs. Scale-driver dispatches run independently of other runs on their ref.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -974,6 +994,110 @@ jobs:
           bun run --cwd packages/e2e-tests test:fixture-contract
           bun run --cwd packages/e2e-tests validate-mode-manifest
           bun run --cwd packages/e2e-tests test:rust
+
+  # The scale report runs only when dispatched with a driver. A GitHub-hosted
+  # `ubuntu-latest` runner is the reference host (#825 D21); the report's
+  # host manifest records its CPU model. Reports and rows are uploaded as run
+  # artifacts and never committed.
+  scale-report:
+    name: scale report (dispatched)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    if: github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    env:
+      EIDNARA_SCALE_BUDGET_SECONDS: ${{ inputs.scale_budget_seconds }}
+      SCALE_DRIVER: ${{ inputs.scale_driver }}
+      SCALE_BASE: ${{ inputs.scale_base }}
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # oven-sh/setup-bun v2.2.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Build the measured arm
+        run: |
+          bun install --frozen-lockfile
+          bun run --cwd packages/shm-native build:native
+          bun run --cwd packages/shm-native build:js
+          cargo +1.98 build --release -p daemon --example direct_host_fixture \
+            --features direct-host-fixture --locked
+          cargo +1.98 build --release -p daemon --example eval_runner \
+            --features eval-runner --locked
+
+      - name: Build the base arm
+        if: env.SCALE_BASE != ''
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "$SCALE_BASE"
+          cd "$RUNNER_TEMP/base"
+          bun install --frozen-lockfile
+          bun run --cwd packages/shm-native build:native
+          bun run --cwd packages/shm-native build:js
+          cargo +1.98 build --release -p daemon --example direct_host_fixture \
+            --features direct-host-fixture --locked
+
+      - name: Run the driver
+        # Each tier runs on the base arm and then the measured arm before the
+        # next tier starts, so drift on the runner falls on both arms alike.
+        # Each arm runs on its own fixture build and plugin source; seeding and
+        # report building use the measured arm's eval runner. A tier the budget
+        # cuts short is listed in the arm's `incomplete.json`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$SCALE_DRIVER" in
+            opencode-pass) ;;
+            *) echo "unknown scale driver: $SCALE_DRIVER" >&2; exit 1 ;;
+          esac
+          out="$RUNNER_TEMP/scale"
+          runner="$PWD/target/release/examples/eval_runner"
+          arms=(measured)
+          if [ -n "$SCALE_BASE" ]; then arms=(base measured); fi
+          root_of() { [ "$1" = base ] && echo "$RUNNER_TEMP/base" || echo "$PWD"; }
+          for tier in 10k s3_100k s4_1m; do
+            for arm in "${arms[@]}"; do
+              root="$(root_of "$arm")"
+              commit="$(git -C "$root" rev-parse HEAD)"
+              if ! bun "packages/e2e-tests/scripts/scale-$SCALE_DRIVER.ts" \
+                --out-dir "$out/$arm/$tier" --tiers "$tier" --samples 330 \
+                --plugin-root "$root/packages/opencode-plugin" \
+                --fixture-bin "$root/target/release/examples/direct_host_fixture" \
+                --eval-runner-bin "$runner" \
+                --commit "$commit" --daemon-build "release $commit"; then
+                mkdir -p "$out/$arm/$tier"
+                echo "[\"$tier\"]" > "$out/$arm/$tier/incomplete.json"
+              fi
+            done
+          done
+          for arm in "${arms[@]}"; do
+            cat "$out/$arm"/*/rows.jsonl > "$out/$arm/rows.jsonl" || true
+            jq -s add "$out/$arm"/*/incomplete.json > "$out/$arm/incomplete.json"
+            manifests=("$out/$arm"/*/manifest.json)
+            if [ ! -f "${manifests[-1]}" ]; then
+              echo "::warning::$arm arm wrote no manifest; report skipped"
+              continue
+            fi
+            cp "${manifests[-1]}" "$out/$arm/manifest.json"
+            "$runner" scale-report --rows "$out/$arm/rows.jsonl" \
+              --manifest "$out/$arm/manifest.json" \
+              --out "$out/$arm/report.json" | tee "$out/$arm/summary.json"
+          done
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: scale-report-${{ inputs.scale_driver }}
+          path: ${{ runner.temp }}/scale
+          if-no-files-found: warn
 
   unlocked-deps:
     name: pinned toolchain with unlocked latest dependencies

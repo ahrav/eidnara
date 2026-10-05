@@ -3,7 +3,7 @@ import { DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE } from "../../config/schema/eidnar
 import { DEFAULT_PROTECTED_TAGS } from "../../features/context/defaults";
 import { createEidnaraHookAsync } from "../../hooks/context";
 import type { LiveSessionState } from "../../hooks/context/live-session-state";
-import type { RustModeModuleClient } from "../../hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "../../hooks/context/transform-session-client";
 import type { PluginFoldAuthority } from "../../shared/fold-authority-status";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { PluginContext } from "../types";

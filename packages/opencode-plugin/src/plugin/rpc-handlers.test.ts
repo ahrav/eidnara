@@ -10,7 +10,7 @@ import { createEventHook } from "../hooks/context/hook-handlers";
 import { resetKernelClientsForTest } from "../hooks/context/kernel-transport";
 import { createLiveSessionState } from "../hooks/context/live-session-state";
 import { closeReadOnlySessionDb } from "../hooks/context/read-session-db";
-import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
 import type { ConflictWarning } from "../shared/conflict-detector";
 import type { PluginFoldAuthority } from "../shared/fold-authority-status";

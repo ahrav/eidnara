@@ -47,14 +47,15 @@ import {
     MAX_LIVE_USAGE_SESSIONS,
 } from "./live-session-state";
 import { openCodeMemoryCaptureExecutor } from "./memory-capture-native";
+import { createRustModeTransform } from "./opencode-transform-adapter";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
-import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendIgnoredMessage } from "./send-session-notification";
 import { resolveSessionDirectory, type SessionDirectoryResolver } from "./session-directory";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-content-primitives";
 import { createTextCompleteHandler } from "./text-complete";
 import { readOwnDataProperty } from "./transform-capture";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
 

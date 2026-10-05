@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { deleteMessagesAfter, parseRustPassLine } from "./rust-harness";
 
-// One line in the exact shape `rust-mode-transform.ts` logs, so a format drift fails here
+// One line in the exact shape `transform-session-client.ts` logs, so a format drift fails here
 // instead of silently zeroing a timing the perf suite bounds.
 const PASS_LINE =
     "[eidnara] rust pass: decision=DEFER reason=steady served_from=transform in=12 out=12 " +

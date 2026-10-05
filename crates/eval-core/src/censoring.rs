@@ -57,46 +57,64 @@ pub struct LatencySummary {
 
 impl LatencySummary {
     pub fn of(attempts: &[Attempt]) -> Self {
-        let mut sorted: Vec<&Attempt> = attempts.iter().collect();
-        sorted.sort_by_key(|attempt| (attempt.duration_ms, attempt.censored.is_some()));
-        let n = sorted.len();
-        let censored = sorted.iter().filter(|a| a.censored.is_some()).count();
-        let percentile = |p: u8| {
-            // Nearest rank: the smallest rank r with r/n >= p/100.
-            let rank = (usize::from(p) * n).div_ceil(100);
-            let value = sorted[rank - 1].duration_ms;
-            // With every censored attempt pushed to infinity the order statistic is the
-            // rank-th completed duration, which is still `value` exactly when at least
-            // `rank` completions sit at or below it.
-            let settled = sorted
-                .iter()
-                .filter(|a| a.censored.is_none() && a.duration_ms <= value)
-                .count();
-            Percentile {
-                p,
-                value,
-                n: n as u32,
-                censored: censored as u32,
-                bound: if settled >= rank {
-                    PercentileBound::Point
-                } else {
-                    PercentileBound::Lower
-                },
-            }
-        };
-        let mut percentiles = Vec::new();
-        if n > 0 {
-            percentiles.push(percentile(50));
-            percentiles.push(percentile(95));
-            if n >= P99_MIN_RUNS {
-                percentiles.push(percentile(99));
-            }
-        }
+        let observations: Vec<(u64, bool)> = attempts
+            .iter()
+            .map(|attempt| (attempt.duration_ms, attempt.censored.is_some()))
+            .collect();
+        let censored = observations
+            .iter()
+            .filter(|(_, censored)| *censored)
+            .count();
         Self {
-            n: n as u32,
+            n: observations.len() as u32,
             censored: censored as u32,
-            percentiles,
+            percentiles: censored_percentiles(&observations),
         }
+    }
+}
+
+pub(crate) fn censored_percentiles(observations: &[(u64, bool)]) -> Vec<Percentile> {
+    let mut percentiles = Vec::new();
+    if !observations.is_empty() {
+        percentiles.extend([50, 95].map(|p| censored_percentile(observations, p)));
+        if observations.len() >= P99_MIN_RUNS {
+            percentiles.push(censored_percentile(observations, 99));
+        }
+    }
+    percentiles
+}
+
+/// The nearest-rank `p`th percentile of `(value, censored)` observations, in the units the
+/// values carry. Censored observations stay in the denominator, ordered by their censoring
+/// point and after a completed observation of equal value. Raising a censored value can only
+/// raise an order statistic, so the percentile is a point only when at least `rank` completed
+/// observations sit at or below the picked value; otherwise it is a lower bound. `observations`
+/// must not be empty.
+pub(crate) fn censored_percentile(observations: &[(u64, bool)], p: u8) -> Percentile {
+    let mut sorted = observations.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let censored = sorted.iter().filter(|(_, censored)| *censored).count();
+    // Nearest rank: the smallest rank r with r/n >= p/100.
+    let rank = (usize::from(p) * n).div_ceil(100).max(1);
+    let value = sorted[rank - 1].0;
+    // With every censored observation pushed to infinity the order statistic is the rank-th
+    // completed value, which is still `value` exactly when at least `rank` completions sit at
+    // or below it.
+    let settled = sorted
+        .iter()
+        .filter(|(observed, censored)| !censored && *observed <= value)
+        .count();
+    Percentile {
+        p,
+        value,
+        n: n as u32,
+        censored: censored as u32,
+        bound: if settled >= rank {
+            PercentileBound::Point
+        } else {
+            PercentileBound::Lower
+        },
     }
 }
 
@@ -152,32 +170,46 @@ pub enum BoundMethod {
 
 impl Counter {
     pub fn rate(&self) -> Result<FailureRate, StatisticsError> {
-        if self.n == 0 || self.failures > self.n {
-            return Err(StatisticsError::MalformedCounter {
-                n: self.n,
-                failures: self.failures,
-            });
-        }
-        let n = i128::from(self.n);
-        let failures = i128::from(self.failures);
-        let upper_bound_95 = Ratio::try_new(2 * failures + 3, n)?.min(Ratio::ONE);
-        Ok(if self.failures == 0 {
-            FailureRate::Bound {
+        let (rate, upper_bound_95, bound_method) = failure_bound(self.n, self.failures)?;
+        Ok(match rate {
+            None => FailureRate::Bound {
                 upper_bound_95,
-                bound_method: BoundMethod::RuleOfThree,
+                bound_method,
                 n: self.n,
                 unit: self.unit,
-            }
-        } else {
-            FailureRate::Observed {
-                rate: Ratio::try_new(failures, n)?,
+            },
+            Some(rate) => FailureRate::Observed {
+                rate,
                 upper_bound_95,
-                bound_method: BoundMethod::PoissonEnvelope,
+                bound_method,
                 n: self.n,
                 unit: self.unit,
-            }
+            },
         })
     }
+}
+
+/// The observed rate (`None` when nothing failed), its 95% upper bound, and the bound's method
+/// for `failures` out of `n` trials: the rule of three, `3/n`, at zero failures, and the Poisson
+/// envelope `(2 * failures + 3) / n` otherwise, each at most one.
+pub(crate) fn failure_bound(
+    n: u64,
+    failures: u64,
+) -> Result<(Option<Ratio>, Ratio, BoundMethod), StatisticsError> {
+    if n == 0 || failures > n {
+        return Err(StatisticsError::MalformedCounter { n, failures });
+    }
+    let (n, failures_count) = (i128::from(n), i128::from(failures));
+    let upper_bound_95 = Ratio::try_new(2 * failures_count + 3, n)?.min(Ratio::ONE);
+    Ok(if failures == 0 {
+        (None, upper_bound_95, BoundMethod::RuleOfThree)
+    } else {
+        (
+            Some(Ratio::try_new(failures_count, n)?),
+            upper_bound_95,
+            BoundMethod::PoissonEnvelope,
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

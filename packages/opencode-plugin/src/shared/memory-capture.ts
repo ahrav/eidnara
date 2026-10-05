@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
+import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
 import { HOST_SDK_READ_TIMEOUT_MS, withTimeout } from "./with-timeout";
 
 export interface CaptureMessage {

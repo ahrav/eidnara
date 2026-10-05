@@ -952,7 +952,8 @@ export function verifyThinkingImageSurvival(
     ]);
 }
 
-// A1 and A3 judge the prefix rendered by `transform.rs` and carried by `rust-mode-transform.ts`;
+// A1 and A3 judge the prefix rendered by `transform.rs` and carried by `transform-session-client.ts`
+// through `opencode-transform-adapter.ts`;
 // `cache-analysis.ts` determines `mainRequestCount` and `bustCount`, so it is part of the digest.
 // `scripted-tool-call.ts` supplies `DEFER_USAGE`, whose token counts decide whether each turn defers.
 const RUST_CACHE_IMPLEMENTATION_FILES = [
@@ -964,7 +965,8 @@ const RUST_CACHE_IMPLEMENTATION_FILES = [
     "packages/e2e-tests/src/cache-analysis.ts",
     "packages/e2e-tests/src/scripted-tool-call.ts",
     "packages/opencode-plugin/src/hooks/context/hook-handlers.ts",
-    "packages/opencode-plugin/src/hooks/context/rust-mode-transform.ts",
+    "packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts",
+    "packages/opencode-plugin/src/hooks/context/transform-session-client.ts",
     "crates/daemon/src/transform.rs",
 ];
 

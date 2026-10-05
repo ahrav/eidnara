@@ -27,12 +27,12 @@ import {
     sessionHasCompactionSummaryInOpenCodeDb,
     withReadOnlySessionDb,
 } from "../hooks/context/read-session-db";
-import type { RustModeModuleClient } from "../hooks/context/rust-mode-transform";
 import {
     resolveSessionDirectory,
     type SessionDirectoryDeps,
 } from "../hooks/context/session-directory";
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
+import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
     formatCompactionTimingLines,

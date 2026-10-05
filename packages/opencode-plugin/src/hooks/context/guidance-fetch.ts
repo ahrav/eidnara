@@ -5,9 +5,9 @@ import {
     promptSurfaceWireFields,
 } from "../../shared/prompt-surface-runtime";
 import { isRecord } from "../../shared/record-type-guard";
-import type { RustModeModuleClient } from "./rust-mode-transform";
 import type { SessionDirectoryResolver } from "./session-directory";
 import type { GuidanceFetchArgs } from "./system-prompt-hash";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 /** `GUIDANCE_FETCH_TIMEOUT_MS` matches `TRANSFORM_SEND_TIMEOUT_MS` in `module-transport.ts`. */
 const GUIDANCE_FETCH_TIMEOUT_MS = 5_000;

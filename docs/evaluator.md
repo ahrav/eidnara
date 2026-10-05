@@ -1213,6 +1213,90 @@ it envelopes (`1 - 0.05^(1/n)` at zero failures, bisection on the binomial CDF
 otherwise). `tests/censoring.rs` asserts equality on every latency, counter,
 and pass^k case in the golden.
 
+## Scale report `eval-scale-report/v1`
+
+`scale.rs` holds the report the scale budgets of #825 are measured with. A
+`PassRow` is one transform pass: `harness` (`opencode` or `pi`), `tier`
+(`10k`, the control, `s3_100k`, or `s4_1m`), `session`, `turn`,
+`boundary_state` (`cold`, `warming`, `steady`, `replay`, `after_restart`), `outcome`
+(`completed`, `censored`, `refused`), `refusal` (`declined`, `daemon_error`,
+`transport_error`, present exactly on a refused pass), `response_us` (the
+plugin's pass from handing its input to the client until the transformed array
+is published, which a driver may bound from above by timing the whole hook; a
+censored pass carries its censoring point), `service_us` (the daemon's own
+`total`), `rss_bytes` (the measured plugin process), and `ipc_bytes`. `steady` passes follow the
+contract's steady state: after the first HARD, once the window reached its fold
+size and the boundary moved three times, confirmed by a drift check. `replay`
+passes resend the previous pass's window at the same declared boundary with no
+fold in between, the fresh-host-array pass #824 measured. Every field is present
+on the wire, and `parse_pass_row` refuses a row that does not round-trip byte
+for byte, naming an absent optional field.
+
+`ScaleReport::build` derives every summary from the rows, the driver and
+artifact identities (commit, Bun version, daemon build), the host manifest (CPU
+model, core count, memory, kernel, glibc, disk), the optional open-loop counts
+(`completed <= sent <= offered`), and the bootstrap seed. Summaries never pool
+two boundary states. For each state a session reached it keeps mergeable
+histograms of response and service times (exact below 32 us, then 32 buckets
+per power of two; merge adds counts bucket by bucket) and censored percentiles
+through the same nearest-rank rule as `LatencySummary`, refused passes
+excluded. Per session it also keeps the flatness of RSS: the exact
+least-squares slope of RSS against turn over the steady passes times their
+span, which passes when that growth is at most a tenth of the RSS at
+steady-state entry. Per tier it pools each state's passes of every session for
+that state's percentiles, so a tier percentile is never a mean of session
+percentiles, and states refused passes of every state as `RefusalRate` through
+the `Counter` bound: zero refusals is a rule-of-three `bound`.
+
+A non-control tier carries a ratio claim only with at least three sessions in
+the tier and in the 10k control and at least `P99_MIN_RUNS` uncensored steady
+passes in every one of them; otherwise the ratio is `withheld`. A claim's
+interval is a session-level block bootstrap: each of 1,000 replicates draws the
+tier's and the control's sessions with replacement through the keyed bootstrap
+draw, pools their steady passes, and takes p99(tier) / p99(control) exactly; the
+bounds are the `ceil(B/40)`-th and `(B - floor(B/40))`-th smallest replicates,
+and the gate passes when the upper bound is at most `6/5`. A ratio whose pooled
+p99, of the whole sample or of any replicate, falls on a censored pass is only a
+lower bound and is `withheld` as `censored_p99`.
+
+`parse_scale_report` refuses a missing field by name, a value that does not
+round-trip, an integer outside the canonical range, and then rebuilds the
+report from its rows: an underpowered ratio claim, a zero refusal count stated
+other than as a rule-of-three bound, and pooled percentiles that differ from
+the pooled rows each have their own refusal, and any other summary drift is
+`SummaryMismatch`. `result_digest` covers identities, open-loop counts, the
+seed, and each row's place and outcome, and excludes every latency, RSS, and
+byte measurement and every summary derived from them.
+
+`packages/e2e-tests/src/scale-report/rows.ts` is the TypeScript row writer; its
+fixed fixture's output is committed as `testdata/scale/writer-rows.jsonl`,
+which `tests/scale.rs` parses and the writer's own test reproduces byte for
+byte. `eval_runner scale-seed` writes #826's synthetic history into a
+direct-host fixture's store, and `eval_runner scale-report` builds and prints a
+report from a driver's rows and manifest. The `scale-report` job in
+`.github/workflows/ci.yml` runs only when dispatched with `scale_driver`; it
+builds release binaries and runs the driver once per tier for the `scale_base`
+commit and then the dispatched commit, each run under `scale_budget_seconds`,
+and uploads rows, manifests, reports, and the tiers each arm could not finish as
+run artifacts. The budget bounds when a pass may start: a pass in flight at the
+deadline runs to the client's own ceilings (one unpaged send under
+`TRANSFORM_SEND_TIMEOUT_MS` after a discovery under `DISCOVERY_BUDGET_MS`, with
+one rediscovery at most) and its row counts, and the driver stops before the
+next pass. A tier whose every sample completed is complete; an arm whose driver
+exited before writing a manifest is skipped with a warning and its tiers stay
+listed as incomplete. Such a dispatch runs in a concurrency group of its own, so the
+runs of its ref neither wait on it nor cancel it.
+`scripts/scale-opencode-pass.ts` drives the OpenCode transform
+hook: every sample builds a fresh N-slot host array outside the timer (covered
+slots minimal, a 300-message window of the 5 KiB shape) and collects the
+garbage of the previous array before the timer starts. It times the whole
+`run` call of the transform hook: preflight, discovery, capture, IPC, recipe
+application, publication, and note delivery. Its first pass is `cold`, later
+passes are `replay`, and a pass after a fold is `warming`. A pass that throws a
+terminal `HostCallError`, which the daemon answered, is a `daemon_error`; any
+other thrown error is a `transport_error`; a pass the plugin declined with
+nothing thrown is `declined`.
+
 ## Paired worlds
 
 `pairs.rs` compiles one `Pair` per `Task` over one aged history. A task names

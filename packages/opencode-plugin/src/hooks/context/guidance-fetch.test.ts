@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { createGuidanceFetcher } from "./guidance-fetch";
-import type { RustModeModuleClient } from "./rust-mode-transform";
+import type { RustModeModuleClient } from "./transform-session-client";
 
 function fetcher(respond: (call: { method: string; body: unknown }) => unknown) {
     const calls: { method: string; body: unknown; signal?: AbortSignal }[] = [];
