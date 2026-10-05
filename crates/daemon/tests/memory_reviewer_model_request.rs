@@ -834,6 +834,7 @@ async fn a_bedrock_request_is_signed_invoke_model_and_carries_no_api_key() {
         let sender = bedrock_sender(&peer, token);
         let body = sender.body(&request()).unwrap();
         let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        assert_eq!(body.digest(), digest);
         let signed_at = 1_440_938_160_000;
         let answer = sender
             .connect(deadline())

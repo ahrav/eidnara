@@ -15,7 +15,6 @@ use memory_store::memory_reviewer_ledger::{
     AttemptMarker, DispatchOutcome, MemoryReviewerAttemptTerminal, MemoryReviewerLedgerError,
     MemoryReviewerLedgerRefusal, ResponseUsage,
 };
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -53,7 +52,6 @@ pub struct PreparedBody {
     model: String,
     tags: Vec<ProvenanceTag>,
     body: RequestBody,
-    body_digest: String,
     policy_union_digest: String,
     policy_union_canonical: String,
 }
@@ -79,7 +77,7 @@ impl PreparedBody {
     }
 
     pub fn body_digest(&self) -> &str {
-        &self.body_digest
+        self.body.digest()
     }
 
     pub fn policy_union_digest(&self) -> &str {
@@ -243,7 +241,6 @@ pub fn prepare_body(
     Ok(PreparedBody {
         broker: id,
         model: request.model,
-        body_digest: format!("{:x}", Sha256::digest(body.as_bytes())),
         tags,
         body,
         policy_union_digest: union.digest,
@@ -298,7 +295,7 @@ impl Disclosure<'_> {
         let evidence = self.revalidate(prepared)?;
         self.guard(&evidence)?;
         let marker = AttemptMarker {
-            body_digest: prepared.body_digest.clone(),
+            body_digest: prepared.body_digest().to_string(),
             request_bytes: u64::try_from(prepared.body.len()).map_err(|_| {
                 DisclosureRefusal::Send {
                     attempt_index: None,
@@ -314,7 +311,7 @@ impl Disclosure<'_> {
         // Signed before the ledger is entered, at the attempt's clock, so the handoff builds nothing while the connection is owned; a refused commit drops the signed request unsent.
         let signed_at_ms = (self.now_ms)();
         let signed = connected
-            .sign(prepared.body.clone(), &prepared.body_digest, signed_at_ms)
+            .sign(prepared.body.clone(), prepared.body_digest(), signed_at_ms)
             .map_err(|error| DisclosureRefusal::Send {
                 attempt_index: None,
                 error,

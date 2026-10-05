@@ -317,7 +317,9 @@ struct Bedrock {
     region: String,
     model_id: String,
     /// The `InvokeModel` path with the model id encoded as one segment, as the wire carries it.
-    path: String,
+    uri: Uri,
+    /// The wire path encoded again, as SigV4 signs it.
+    canonical_uri: String,
 }
 
 /// Whether `region` can name a Bedrock region: one DNS label of lowercase letters, digits, and inner `-`.
@@ -443,11 +445,14 @@ impl Provider {
         region: &str,
         model_id: &str,
     ) -> Result<Self, SendError> {
+        let path = invoke_path(model_id)?;
+        let canonical_uri = super::sigv4::canonical_uri(&path);
         Ok(Self(ProviderKind::Bedrock(Bedrock {
             endpoint,
             region: region.to_string(),
             model_id: model_id.to_string(),
-            path: invoke_path(model_id)?,
+            uri: Uri::try_from(path).map_err(|_| SendError::Endpoint)?,
+            canonical_uri,
         })))
     }
 
@@ -534,7 +539,8 @@ impl Provider {
             return Err(SendError::RequestTooLarge);
         }
         Ok(RequestBody {
-            bytes: body,
+            digest: format!("{:x}", sha2::Sha256::digest(&body)),
+            bytes: Bytes::from(body),
             max_tokens: request.max_tokens,
             bedrock: matches!(self.0, ProviderKind::Bedrock(_)),
         })
@@ -553,17 +559,14 @@ impl Provider {
         at_ms: i64,
         credential: &Credential,
     ) -> Result<Request<Body>, SendError> {
-        if format!("{:x}", sha2::Sha256::digest(&body.bytes)) != body_digest
-            || body.bedrock != matches!(self.0, ProviderKind::Bedrock(_))
+        if body.digest != body_digest || body.bedrock != matches!(self.0, ProviderKind::Bedrock(_))
         {
             return Err(SendError::BodyDigest);
         }
         let host = self.endpoint().host.as_str();
         let uri = match &self.0 {
             ProviderKind::Anthropic(_) => Uri::from_static(MESSAGES_PATH),
-            ProviderKind::Bedrock(bedrock) => {
-                Uri::try_from(bedrock.path.as_str()).map_err(|_| SendError::Endpoint)?
-            }
+            ProviderKind::Bedrock(bedrock) => bedrock.uri.clone(),
         };
         let builder = Request::post(uri)
             .header(header::ACCEPT, HeaderValue::from_static("application/json"))
@@ -594,21 +597,30 @@ impl Provider {
             ) => {
                 let time = super::sigv4::RequestTime::at(at_ms).ok_or(SendError::SignTime)?;
                 // The one list of signed headers: the signature covers it, and the request carries it.
-                let mut signed = vec![
-                    ("content-type", "application/json"),
-                    ("host", host),
-                    ("x-amz-content-sha256", body_digest),
-                    ("x-amz-date", time.amz_date.as_str()),
+                let mut signed = [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (header::HOST, host),
+                    (HeaderName::from_static("x-amz-content-sha256"), body_digest),
+                    (
+                        HeaderName::from_static("x-amz-date"),
+                        time.amz_date.as_str(),
+                    ),
+                    (HeaderName::from_static("x-amz-security-token"), ""),
                 ];
-                if let Some(token) = session_token {
-                    signed.push(("x-amz-security-token", token.as_str()));
-                }
-                let uri = super::sigv4::canonical_uri(&bedrock.path);
+                let count = match session_token {
+                    Some(token) => {
+                        signed[4].1 = token.as_str();
+                        signed.len()
+                    }
+                    None => signed.len() - 1,
+                };
+                let names: [(&str, &str); 5] =
+                    std::array::from_fn(|index| (signed[index].0.as_str(), signed[index].1));
                 let (canonical, signed_headers) = super::sigv4::Request {
                     method: "POST",
-                    canonical_uri: &uri,
+                    canonical_uri: &bedrock.canonical_uri,
                     canonical_query: "",
-                    headers: &signed,
+                    headers: &names[..count],
                     payload_sha256: body_digest,
                 }
                 .canonical();
@@ -622,7 +634,7 @@ impl Provider {
                 let authorization =
                     super::sigv4::authorization(access_key_id, &scope, &signed_headers, &signature);
                 let mut builder = builder.header(header::AUTHORIZATION, sensitive(&authorization)?);
-                for (name, value) in signed {
+                for (name, value) in signed.into_iter().take(count) {
                     builder = if name == "x-amz-security-token" {
                         builder.header(name, sensitive(value)?)
                     } else {
@@ -634,7 +646,7 @@ impl Provider {
             _ => return Err(SendError::Credential),
         };
         builder
-            .body(Full::new(Bytes::from(body.bytes)))
+            .body(Full::new(body.bytes))
             .map_err(|_| SendError::RequestTooLarge)
     }
 }
@@ -685,10 +697,11 @@ struct BedrockWireRequest<'a> {
     temperature: Option<f64>,
 }
 
-/// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with the `max_tokens` the bytes ask for, which sizes the completion budget. Only [`Sender::body`] produces one, so a handoff cannot carry bytes the bounds never saw.
+/// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with their SHA-256 digest and the `max_tokens` the bytes ask for, which sizes the completion budget. [`Sender::body`] is the only constructor and the fields stay fixed afterwards, so a handoff carries bounded bytes and the digest names exactly those bytes. Clones share the byte storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestBody {
-    bytes: Vec<u8>,
+    bytes: Bytes,
+    digest: String,
     max_tokens: u32,
     /// Whether a Bedrock provider shaped the bytes; a body is sent only by a provider of its own shape.
     bedrock: bool,
@@ -697,6 +710,11 @@ pub struct RequestBody {
 impl RequestBody {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// The lowercase hex SHA-256 of [`Self::as_bytes`].
+    pub fn digest(&self) -> &str {
+        &self.digest
     }
 
     pub fn len(&self) -> usize {
