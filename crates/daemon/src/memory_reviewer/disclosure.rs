@@ -387,22 +387,7 @@ impl Disclosure<'_> {
                         },
                     ));
                 }
-                match handoff {
-                    // The sender knows the connection never took the request, but `NotDispatched` is the ledger's proof of no disclosure and only the dispatch path may write it; the attempt is charged and ends `Failed`, and `sent: false` reports what the sender saw.
-                    Err(error) => {
-                        return Err(self.end(
-                            attempt_index,
-                            MemoryReviewerAttemptTerminal::Failed,
-                            ResponseUsage::NONE,
-                            DisclosureRefusal::Send {
-                                attempt_index: Some(attempt_index),
-                                error,
-                                sent: false,
-                            },
-                        ));
-                    }
-                    Ok(in_flight) => (attempt_index, in_flight, attempt_deadline_ms, allowance),
-                }
+                (attempt_index, handoff, attempt_deadline_ms, allowance)
             }
         };
         // The ledger bounded the attempt when it committed the marker; a response after that bound is not this attempt's. The response may consume only what the job has left of its ceilings.

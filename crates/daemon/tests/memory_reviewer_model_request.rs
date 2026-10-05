@@ -64,7 +64,6 @@ async fn exchange_with(
         .sign_now(body_of(&request()).unwrap())
         .unwrap()
         .handoff()
-        .unwrap()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -105,8 +104,7 @@ async fn the_handoff_writes_nothing_until_completion_and_the_connection_is_one_u
     let in_flight = connected
         .sign_now(body_of(&request()).unwrap())
         .unwrap()
-        .handoff()
-        .unwrap();
+        .handoff();
     armed_tx.send(()).unwrap();
     // Give the peer its whole observation window before the connection is polled.
     tokio::time::sleep(OBSERVATION_WINDOW + Duration::from_millis(100)).await;
@@ -186,8 +184,7 @@ async fn no_request_byte_reaches_the_peer_before_the_connection_is_polled() {
         .unwrap()
         .sign_now(body_of(&request()).unwrap())
         .unwrap()
-        .handoff()
-        .unwrap();
+        .handoff();
     armed_tx.send(()).unwrap();
     let (after_handshake, after_handoff) = count_rx.await.unwrap();
     assert_eq!(
@@ -475,8 +472,7 @@ async fn request_bounds_and_deadlines_are_enforced_by_the_sender() {
         .unwrap()
         .sign_now(body_of(&request()).unwrap())
         .unwrap()
-        .handoff()
-        .unwrap();
+        .handoff();
     let outcome = in_flight
         .complete(
             Instant::now() + Duration::from_millis(500),
@@ -530,7 +526,6 @@ async fn the_head_wait_is_bounded_by_the_completion_budget_not_the_frame_idle_li
         .sign_now(body_of(&request).unwrap())
         .unwrap()
         .handoff()
-        .unwrap()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -559,7 +554,6 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .sign_now(body_of(&generous).unwrap())
         .unwrap()
         .handoff()
-        .unwrap()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -584,7 +578,6 @@ async fn the_completion_budget_scales_with_the_requested_output_tokens() {
         .sign_now(body_of(&terse).unwrap())
         .unwrap()
         .handoff()
-        .unwrap()
         .complete(
             deadline(),
             ResponseAllowance::FULL,
@@ -616,7 +609,6 @@ async fn a_body_that_stalls_past_the_frame_idle_limit_is_a_deadline() {
         .sign_now(body_of(&request).unwrap())
         .unwrap()
         .handoff()
-        .unwrap()
         .complete(deadline(), ResponseAllowance::FULL, &mut accounting)
         .await;
     assert_eq!(outcome.unwrap_err(), SendError::Deadline);
@@ -644,7 +636,6 @@ async fn exchange_within(
         .sign_now(body_of(&request()).unwrap())
         .unwrap()
         .handoff()
-        .unwrap()
         .complete(deadline(), allowance, &mut accounting)
         .await;
     server.await.unwrap();
@@ -843,7 +834,6 @@ async fn a_bedrock_request_is_signed_invoke_model_and_carries_no_api_key() {
             .sign(body, &digest, signed_at)
             .unwrap()
             .handoff()
-            .unwrap()
             .complete(
                 deadline(),
                 ResponseAllowance::FULL,
@@ -1020,11 +1010,7 @@ fn the_startup_region_names_the_production_bedrock_host() {
         format!("api.anthropic.com{MESSAGES_PATH}@{ANTHROPIC_VERSION}")
     );
     let longest = "a".repeat(63);
-    assert!(
-        Providers::production(Some(&longest))
-            .bedrock(BEDROCK_MODEL_ID)
-            .is_ok()
-    );
+    assert!(Providers::production(Some(&longest)).bedrock("m").is_ok());
     for region in [
         None,
         Some(""),
@@ -1051,9 +1037,43 @@ fn the_startup_region_names_the_production_bedrock_host() {
             "{model_id:?}"
         );
     }
-    // An inference-profile ARN stays one path segment.
-    let arn = "arn:aws:bedrock:us-west-2:123456789012:inference-profile/us.anthropic.claude-x";
-    assert!(providers.bedrock(arn).unwrap().identity().contains(arn));
+    assert!(
+        providers
+            .bedrock("us.anthropic/claude-x")
+            .unwrap()
+            .identity()
+            .contains("us.anthropic/claude-x")
+    );
+}
+
+/// Bedrock provider construction enforces the ledger's provider bound on the complete identity, including the region and the model id.
+#[test]
+fn every_accepted_bedrock_identity_fits_the_ledger_provider_bound() {
+    use memory_store::memory_reviewer_ledger::MAX_PROVIDER_BYTES;
+    for region in ["us-east-1", "ap-southeast-2", &*"a".repeat(63)] {
+        let providers = Providers::production(Some(region));
+        let overhead = providers.bedrock("m").unwrap().identity().len() - 1;
+        let fits = "m".repeat(MAX_PROVIDER_BYTES - overhead);
+        assert_eq!(
+            providers.bedrock(&fits).unwrap().identity().len(),
+            MAX_PROVIDER_BYTES,
+            "{region}"
+        );
+        assert_eq!(
+            providers.bedrock(&format!("{fits}m")).unwrap_err(),
+            SendError::Endpoint,
+            "{region}"
+        );
+        assert_eq!(
+            providers
+                .bedrock(
+                    "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-x"
+                )
+                .unwrap_err(),
+            SendError::Endpoint,
+            "{region}"
+        );
+    }
 }
 
 /// Every Bedrock error class ends the send with its status after the one request; the sender never sends again on the connection or opens another.
@@ -1082,7 +1102,6 @@ async fn every_bedrock_error_class_ends_the_send_without_a_resend() {
             .sign_now(sender.body(&request()).unwrap())
             .unwrap()
             .handoff()
-            .unwrap()
             .complete(
                 deadline(),
                 ResponseAllowance::FULL,

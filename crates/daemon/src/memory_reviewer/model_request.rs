@@ -315,7 +315,8 @@ enum ProviderKind {
 struct Bedrock {
     endpoint: Arc<Endpoint>,
     region: String,
-    model_id: String,
+    /// The identity format is `<host>/model/<model id>/invoke@<version>`.
+    identity: String,
     /// The `InvokeModel` path with the model id encoded as one segment, as the wire carries it.
     uri: Uri,
     /// The wire path encoded again, as SigV4 signs it.
@@ -391,7 +392,7 @@ impl Providers {
         &self.anthropic
     }
 
-    /// Bedrock invoking `model_id`; refused when the startup region was invalid or absent, or the model id cannot be a path segment.
+    /// Bedrock invoking `model_id` in the startup region. [`SendError::Endpoint`] names an invalid or absent region, a model id outside [`valid_model_id`], or an identity longer than the ledger's provider bound.
     pub fn bedrock(&self, model_id: &str) -> Result<Provider, SendError> {
         let (endpoint, region) = self.bedrock.as_ref().ok_or(SendError::Endpoint)?;
         Provider::bedrock_with(endpoint.clone(), region, model_id)
@@ -440,17 +441,31 @@ impl Provider {
         Self::bedrock_with(Arc::new(endpoint), region, model_id)
     }
 
+    /// The [`MAX_PROVIDER_BYTES`] limit keeps the constructed provider's identity within the attempt-marker ledger's size bound.
+    ///
+    /// [`MAX_PROVIDER_BYTES`]: memory_store::memory_reviewer_ledger::MAX_PROVIDER_BYTES
     fn bedrock_with(
         endpoint: Arc<Endpoint>,
         region: &str,
         model_id: &str,
     ) -> Result<Self, SendError> {
         let path = invoke_path(model_id)?;
+        let identity = [
+            endpoint.host.as_str(),
+            "/model/",
+            model_id,
+            "/invoke@",
+            BEDROCK_ANTHROPIC_VERSION,
+        ]
+        .concat();
+        if identity.len() > memory_store::memory_reviewer_ledger::MAX_PROVIDER_BYTES {
+            return Err(SendError::Endpoint);
+        }
         let canonical_uri = super::sigv4::canonical_uri(&path);
         Ok(Self(ProviderKind::Bedrock(Bedrock {
             endpoint,
             region: region.to_string(),
-            model_id: model_id.to_string(),
+            identity,
             uri: Uri::try_from(path).map_err(|_| SendError::Endpoint)?,
             canonical_uri,
         })))
@@ -474,14 +489,7 @@ impl Provider {
                 ANTHROPIC_VERSION,
             ]
             .concat(),
-            ProviderKind::Bedrock(bedrock) => [
-                bedrock.endpoint.host.as_str(),
-                "/model/",
-                bedrock.model_id.as_str(),
-                "/invoke@",
-                BEDROCK_ANTHROPIC_VERSION,
-            ]
-            .concat(),
+            ProviderKind::Bedrock(bedrock) => bedrock.identity.clone(),
         }
     }
 
@@ -908,20 +916,16 @@ impl Signed {
     /// The one-shot handoff: synchronously moves the signed request into the connection's dispatch queue and returns the in-flight send. Signing computed every header and the body was bounded beforehand ([`Sender::body`]), so the handoff encodes and builds nothing. Nothing is written to the peer until [`InFlight::complete`] polls the connection; a connection that turns out unable to take the request reports `NotReady` there, with nothing sent.
     pub fn handoff(
         mut self,
-    ) -> Result<
-        InFlight<
-            impl std::future::Future<Output = Result<Response<Incoming>, TrySendError>> + Send,
-        >,
-        SendError,
-    > {
+    ) -> InFlight<impl std::future::Future<Output = Result<Response<Incoming>, TrySendError>> + Send>
+    {
         // `try_send_request` moves the request into the dispatch queue before it returns its future; a fresh connection admits exactly one request before it is polled.
         let response = self.send.try_send_request(self.request);
-        Ok(InFlight {
+        InFlight {
             connection: self.connection,
             response,
             timing: self.timing,
             max_tokens: self.max_tokens,
-        })
+        }
     }
 }
 
