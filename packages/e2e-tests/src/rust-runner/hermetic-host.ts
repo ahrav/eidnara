@@ -626,6 +626,12 @@ export interface HermeticHostOptions {
     startTimeoutMs?: number;
     /** Extra environment for the fixture daemon, such as the fixture-only preparation lead. */
     daemonEnv?: Record<string, string>;
+    /** `daemonConfig` replaces the daemon's user-tier `eidnara.jsonc`. */
+    daemonConfig?: Record<string, unknown>;
+    /** `harnessRuntime` names a `--harness-runtime` file, so ModelExecution runs the real harness closures it lists. */
+    harnessRuntime?: string;
+    /** `credentialSource` is the envelope the status client derives its route's credential fingerprints from, as a harness plugin does. */
+    credentialSource?: Record<string, string>;
 }
 
 /** The direct-host fixture starts no provider or module subprocess. */
@@ -636,6 +642,9 @@ export class HermeticHostStack {
     private readonly fixtureBin: string;
     private readonly startTimeoutMs: number;
     private readonly daemonEnv: Record<string, string>;
+    private readonly daemonConfig: Record<string, unknown>;
+    private readonly harnessRuntime: string | undefined;
+    private readonly credentialSource: Record<string, string> | undefined;
     private readonly fixtureConfigDir: string;
     private readonly logPath: string;
     private readonly pidFilePath: string;
@@ -647,11 +656,17 @@ export class HermeticHostStack {
     private stderr = "";
     private pidFileCreatedAtMs = 0;
 
-    private constructor(options: Required<HermeticHostOptions>) {
+    private constructor(
+        options: Required<Omit<HermeticHostOptions, "harnessRuntime" | "credentialSource">> &
+            Pick<HermeticHostOptions, "harnessRuntime" | "credentialSource">,
+    ) {
         this.dataDir = options.dataDir;
         this.fixtureBin = options.fixtureBin;
         this.startTimeoutMs = options.startTimeoutMs;
         this.daemonEnv = options.daemonEnv;
+        this.daemonConfig = options.daemonConfig;
+        this.harnessRuntime = options.harnessRuntime;
+        this.credentialSource = options.credentialSource;
         this.connectionFile = connectionFilePath(this.dataDir);
         this.controlPath = join(this.dataDir, CONTROL_FILE);
         this.fixtureConfigDir = join(this.dataDir, "fixture-config");
@@ -665,6 +680,11 @@ export class HermeticHostStack {
             ...options,
             startTimeoutMs: options.startTimeoutMs ?? 60_000,
             daemonEnv: options.daemonEnv ?? {},
+            daemonConfig: options.daemonConfig ?? {
+                history_summarizer: { module_model: "fixture/deterministic" },
+                // Unrelated background extraction must not consume a drill's next-call fault.
+                memory: { auto_capture: false },
+            },
         });
         try {
             await stack.startHost();
@@ -720,11 +740,17 @@ export class HermeticHostStack {
         method: "status" | "session.status" = "status",
         extra: Record<string, unknown> = {},
     ): Promise<Record<string, unknown>> {
-        const identity: BindIdentity = {
-            project_root: resolve(projectRoot),
-            harness: "opencode",
-            session: sessionId,
-        };
+        return this.contextRequest(
+            { project_root: resolve(projectRoot), harness: "opencode", session: sessionId },
+            { ...extra, method, v: 1, session_id: sessionId },
+        );
+    }
+
+    /** `contextRequest` sends `body` on a Context route bound to `identity`. */
+    async contextRequest(
+        identity: BindIdentity,
+        body: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> {
         const client = await this.ensureStatusClient(identity);
         let route: Awaited<ReturnType<HostClient["routeOpen"]>> | null = null;
         try {
@@ -732,12 +758,7 @@ export class HermeticHostStack {
                 { kind: "tool_provider", module_id: "context" },
                 identity,
             );
-            const response = await client.request(route, {
-                ...extra,
-                method,
-                v: 1,
-                session_id: sessionId,
-            });
+            const response = await client.request(route, body);
             return record(response) ?? {};
         } catch (error) {
             if (this.statusClient === client) this.statusClient = null;
@@ -856,15 +877,7 @@ export class HermeticHostStack {
         mkdirSync(fixtureConfigRoot, { recursive: true });
         chmodSync(this.fixtureConfigDir, 0o700);
         chmodSync(fixtureConfigRoot, 0o700);
-        writeFileSync(
-            fixtureConfigPath,
-            JSON.stringify({
-                history_summarizer: { module_model: "fixture/deterministic" },
-                // Unrelated background extraction must not consume a drill's next-call fault.
-                memory: { auto_capture: false },
-            }),
-            { mode: 0o600 },
-        );
+        writeFileSync(fixtureConfigPath, JSON.stringify(this.daemonConfig), { mode: 0o600 });
         chmodSync(fixtureConfigPath, 0o600);
         rmSync(this.logPath, { force: true });
         this.stdout = "";
@@ -872,7 +885,9 @@ export class HermeticHostStack {
         this.pidFileCreatedAtMs = Date.now();
         this.persistPidFile();
 
-        const child = spawn(this.fixtureBin, ["--state-root", this.dataDir], {
+        const args = ["--state-root", this.dataDir];
+        if (this.harnessRuntime !== undefined) args.push("--harness-runtime", this.harnessRuntime);
+        const child = spawn(this.fixtureBin, args, {
             cwd: REPO_ROOT,
             env: {
                 ...process.env,
@@ -1005,6 +1020,7 @@ export class HermeticHostStack {
                 connectionFile: this.connectionFile,
                 identity,
                 targetKind: "tool_provider",
+                ...(this.credentialSource ? { credentialSource: this.credentialSource } : {}),
             });
             this.statusClient = client;
             return client;

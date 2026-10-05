@@ -274,12 +274,15 @@ export class PiRpcClient {
                 "--no-skills",
                 "--no-prompt-templates",
                 "--no-themes",
-                "--model",
-                "anthropic/claude-haiku-4-5",
-                "--api-key",
-                "test-key-not-real",
+                ...(this.options.bedrock
+                    ? ["--model", `amazon-bedrock/${this.options.bedrock.model}`]
+                    : ["--model", "anthropic/claude-haiku-4-5", "--api-key", "test-key-not-real"]),
             ],
-            { cwd: this.env.workdir, env: childEnv(this.env), stdio: ["pipe", "pipe", "pipe"] },
+            {
+                cwd: this.env.workdir,
+                env: childEnv(this.env, this.options),
+                stdio: ["pipe", "pipe", "pipe"],
+            },
         );
         this.process = child;
 

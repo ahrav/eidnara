@@ -22,6 +22,19 @@ The package is private and never published.
 - **Mock provider.** `src/mock-provider/server.ts` serves the Anthropic
   Messages API shape (streaming and error bodies) so no test needs a real
   model.
+- **Bedrock-only callers.** `bedrock-only-opencode` and `bedrock-only-pi` run
+  a deployment whose only model credential is the `amazon-bedrock` row and
+  whose environments carry no `ANTHROPIC_*` variable. Memory capture, the
+  context researcher, the Memory Classifier, the History Summarizer, and
+  Wrapup each complete against `src/bedrock-peer/`, a loopback Bedrock
+  runtime that answers `converse-stream` over HTTP/1.1 and cleartext HTTP/2
+  only for requests whose SigV4 signature verifies under that row. The
+  fixture runs ModelExecution through the real OpenCode and Pi backends
+  (`--harness-runtime`): both release closures are materialized from the
+  pinned binaries, the Pi closure gains one provider extension that points
+  `amazon-bedrock` at the peer, and OpenCode's inline config names the peer
+  as that provider's `baseURL`. The live sessions reach the peer through
+  `opencode.json` and Pi's `models.json`.
 
 ## Retained suite
 
@@ -72,6 +85,14 @@ and the built Pi extension. With
 `EIDNARA_E2E_REQUIRE_PI=1` an unmet prerequisite fails the file instead of
 skipping it; the `gates` job sets it because it provides all three, so a skip
 there would mean a resolution or layout regression.
+
+The Bedrock-only files also need the pinned OpenCode (`opencode` on `PATH`
+resolving to the `opencode.exe` the OpenCode release closure pins), `node`
+on `PATH` matching the Pi closure's interpreter pin, and `npm` with registry
+access: the first run installs `@earendil-works/pi-coding-agent` at the
+pinned version under the system temp directory, and its shrinkwrap
+reproduces the release closure's files. A different binary skips both files,
+and `EIDNARA_E2E_REQUIRE_PI=1` turns that skip into a failure.
 
 ## Commands
 

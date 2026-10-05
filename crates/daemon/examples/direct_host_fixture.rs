@@ -968,20 +968,126 @@ mod unix {
     struct Args {
         root: PathBuf,
         cassette: CassetteMode,
+        harness_runtime: Option<PathBuf>,
     }
 
     const USAGE: &str = "usage: direct_host_fixture --state-root <path> \
-        [--cassette-record <file> | --cassette-replay <file>] [--cassette-namespace <ns>]";
+        [--cassette-record <file> | --cassette-replay <file>] [--cassette-namespace <ns>] \
+        [--harness-runtime <file>]";
+
+    /// One pinned harness closure: its manifest and the directories its source roots name.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ClosureSpec {
+        manifest: host_runtime::harness_closure::ClosureManifest,
+        source_roots: std::collections::BTreeMap<String, PathBuf>,
+    }
+
+    /// `--harness-runtime` runs ModelExecution through the real OpenCode and Pi backends: each
+    /// closure is materialized and revalidated as `eidnara-host` does, the backends see only
+    /// `credentials` as the startup envelope's rows, and OpenCode's inline config points each
+    /// provider in `opencode_provider_base_urls` at its base URL. Pi reaches a peer through a
+    /// provider extension its closure carries.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct HarnessRuntime {
+        opencode: ClosureSpec,
+        pi: ClosureSpec,
+        opencode_provider_base_urls: std::collections::BTreeMap<String, String>,
+        credentials: Vec<(String, String)>,
+    }
+
+    fn harness_runtime_component(
+        root: &Path,
+        spec: &Path,
+    ) -> Result<ModelExecutionComponent, Box<dyn Error + Send + Sync>> {
+        use host_runtime::harness_closure::{ClosureCandidate, HarnessClosureStore};
+        use host_runtime::model_execution::backend::HarnessDispatchBackend;
+        use host_runtime::model_execution::opencode::{OpenCodeBackend, OpenCodeRuntime};
+        use host_runtime::model_execution::pi::{PiBackend, PiRuntimeDescriptor};
+        use host_runtime::model_execution::subprocess::EnvSnapshot;
+        use host_runtime::model_execution::subprocess::group_registry::StateRoot;
+
+        let spec: HarnessRuntime = serde_json::from_slice(&std::fs::read(spec)?)?;
+        let store_root = root.join("harness-closures");
+        std::fs::create_dir_all(&store_root)?;
+        std::fs::set_permissions(&store_root, std::fs::Permissions::from_mode(0o700))?;
+        let store = HarnessClosureStore::open(&store_root)
+            .map_err(|error| format!("closure store: {}", error.detail()))?;
+        let materialize = |closure: ClosureSpec, harness: &str| {
+            store
+                .materialize(
+                    &ClosureCandidate {
+                        manifest: closure.manifest,
+                        source_roots: closure.source_roots,
+                    },
+                    &std::collections::BTreeSet::new(),
+                )
+                .map(Arc::new)
+                .map_err(|error| format!("{harness} closure: {}", error.detail()))
+        };
+        let env = EnvSnapshot::capture_from(
+            spec.credentials
+                .iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        )?;
+        let state_root = StateRoot::resolve(Some(root))?;
+
+        let opencode = materialize(spec.opencode, "opencode")?;
+        let executable_node = opencode
+            .manifest()
+            .executable
+            .clone()
+            .ok_or("opencode closure names no executable")?;
+        let mut opencode = OpenCodeBackend::new(
+            OpenCodeRuntime {
+                closure: opencode,
+                executable_node,
+            },
+            env.clone(),
+            state_root.clone(),
+        );
+        for (provider, base_url) in &spec.opencode_provider_base_urls {
+            opencode = opencode.with_provider_base_url(provider, base_url);
+        }
+
+        let pi = materialize(spec.pi, "pi")?;
+        let manifest = pi.manifest().clone();
+        let pi = PiBackend::new(
+            PiRuntimeDescriptor {
+                closure: pi,
+                interpreter_node: manifest
+                    .interpreter
+                    .ok_or("pi closure names no interpreter")?,
+                entrypoint_node: manifest
+                    .entrypoint
+                    .ok_or("pi closure names no entrypoint")?,
+                provider_extension_nodes: manifest.extensions,
+            },
+            env.clone(),
+            state_root.clone(),
+        );
+        Ok(ModelExecutionComponent::new_with_credentials(
+            Arc::new(HarnessDispatchBackend::new(
+                Arc::new(opencode),
+                Arc::new(pi),
+            )),
+            env,
+            state_root,
+        ))
+    }
 
     fn parse_args() -> Result<Args, Box<dyn Error + Send + Sync>> {
         let mut args = std::env::args_os().skip(1);
         let (mut root, mut record, mut replay, mut namespace) = (None, None, None, None);
+        let mut harness_runtime = None;
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(USAGE)?;
             match flag.to_str().ok_or(USAGE)? {
                 "--state-root" => root = Some(PathBuf::from(&value)),
                 "--cassette-record" => record = Some(PathBuf::from(&value)),
                 "--cassette-replay" => replay = Some(PathBuf::from(&value)),
+                "--harness-runtime" => harness_runtime = Some(PathBuf::from(&value)),
                 "--cassette-namespace" => {
                     namespace = Some(value.to_str().ok_or(USAGE)?.to_string())
                 }
@@ -995,11 +1101,22 @@ mod unix {
             (None, Some(path), Some(namespace)) => CassetteMode::Replay { path, namespace },
             _ => return Err(USAGE.into()),
         };
-        Ok(Args { root, cassette })
+        if harness_runtime.is_some() && cassette != CassetteMode::Off {
+            return Err(USAGE.into());
+        }
+        Ok(Args {
+            root,
+            cassette,
+            harness_runtime,
+        })
     }
 
     pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let Args { root, cassette } = parse_args()?;
+        let Args {
+            root,
+            cassette,
+            harness_runtime,
+        } = parse_args()?;
         prepare_state_root(&root)?;
         let shutdown = CancellationToken::new();
         let backend = ControlledBackend::new(shutdown.clone());
@@ -1064,12 +1181,15 @@ mod unix {
         let composite = StaticComposite::new(
             handler,
             local_embeddings,
-            ModelExecutionComponent::new(
-                model_backend,
-                host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
-                    Some(&root),
-                )?,
-            ),
+            match &harness_runtime {
+                Some(spec) => harness_runtime_component(&root, spec)?,
+                None => ModelExecutionComponent::new(
+                    model_backend,
+                    host_runtime::model_execution::subprocess::group_registry::StateRoot::resolve(
+                        Some(&root),
+                    )?,
+                ),
+            },
         )?;
         let config = HostConfig {
             data_dir: Some(root.clone()),
