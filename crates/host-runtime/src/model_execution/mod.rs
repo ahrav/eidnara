@@ -1,6 +1,7 @@
 //! (R3, R28).
 //!
 
+pub mod aws_profile;
 pub mod backend;
 pub mod config;
 pub mod opencode;
