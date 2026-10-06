@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::aws_profile::{MAX_PROFILE_NAME_BYTES, MAX_REGION_BYTES};
@@ -7,11 +10,37 @@ use super::subprocess::{CredentialMechanism, credential_variable_mechanism};
 
 const MAX_PATH_BYTES: usize = 4096;
 const SSO_CACHE_SUFFIX: &str = "/.aws/sso/cache";
+const KIND_NAMES: &[&str] = &["profile"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AwsSourceKind {
     Profile,
+}
+
+/// `AwsSourceKind` decodes only from a string, so a map-form tag such as
+/// `{"profile": null}` fails as a type error.
+impl<'de> Deserialize<'de> for AwsSourceKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct KindName;
+
+        impl Visitor<'_> for KindName {
+            type Value = AwsSourceKind;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("the string \"profile\"")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<AwsSourceKind, E> {
+                match value {
+                    "profile" => Ok(AwsSourceKind::Profile),
+                    other => Err(E::unknown_variant(other, KIND_NAMES)),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(KindName)
+    }
 }
 
 #[derive(Deserialize)]
@@ -25,9 +54,34 @@ struct RawAwsProfileSource {
     sso_cache_root: String,
 }
 
+/// `RawAwsProfileObject` restricts the derived struct decoder to map input, which enforces
+/// the object-shaped wire contract.
+struct RawAwsProfileObject(RawAwsProfileSource);
+
+impl<'de> Deserialize<'de> for RawAwsProfileObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectOnly;
+
+        impl<'de> Visitor<'de> for ObjectOnly {
+            type Value = RawAwsProfileObject;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an aws profile source object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                RawAwsProfileSource::deserialize(MapAccessDeserializer::new(map))
+                    .map(RawAwsProfileObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectOnly)
+    }
+}
+
 /// Decoding validates every field, so each value of this type satisfies the selector bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "RawAwsProfileSource")]
+#[serde(try_from = "RawAwsProfileObject")]
 pub struct AwsProfileSource {
     kind: AwsSourceKind,
     profile: String,
@@ -71,23 +125,8 @@ impl std::fmt::Display for AwsSourceError {
 
 impl std::error::Error for AwsSourceError {}
 
-pub fn lexically_normal(path: &str) -> Option<String> {
-    let rest = path.strip_prefix('/')?;
-    let mut parts: Vec<&str> = Vec::new();
-    for part in rest.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            part => parts.push(part),
-        }
-    }
-    Some(format!("/{}", parts.join("/")))
-}
-
-/// `is_lexically_normal` checks whether `lexically_normal(path)` leaves `path` unchanged
-/// using borrowed slices.
+/// Accepts `/` and absolute paths whose `/`-separated segments are all nonempty and other
+/// than `.` and `..`.
 fn is_lexically_normal(path: &str) -> bool {
     path == "/"
         || path
@@ -116,10 +155,10 @@ fn normal_path(field: &'static str, value: &str) -> Result<(), AwsSourceError> {
     Ok(())
 }
 
-impl TryFrom<RawAwsProfileSource> for AwsProfileSource {
+impl TryFrom<RawAwsProfileObject> for AwsProfileSource {
     type Error = AwsSourceError;
 
-    fn try_from(raw: RawAwsProfileSource) -> Result<Self, AwsSourceError> {
+    fn try_from(RawAwsProfileObject(raw): RawAwsProfileObject) -> Result<Self, AwsSourceError> {
         bounded("profile", &raw.profile, MAX_PROFILE_NAME_BYTES)?;
         bounded("region", &raw.region, MAX_REGION_BYTES)?;
         normal_path("config_file", &raw.config_file)?;
