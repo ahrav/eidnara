@@ -36,6 +36,7 @@ use crate::history_summarizer_validate::{
 use crate::memory_reviewer::handoff::{
     self, Handoff, HandoffError, HandoffRequest, HandoffTarget, PreparedActivation,
 };
+use host_runtime::model_execution::protocol::ErrorScope;
 
 /// `HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS` sets a 60-second cooldown after an abandoned history_summarizer firing.
 pub const HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS: i64 = 60_000;
@@ -415,10 +416,14 @@ pub fn is_chunk_failure(error: &HistorySummarizerDriveError) -> bool {
     if err.is_cross_incarnation_unknown() {
         return false;
     }
-    match err
-        .classification()
-        .map(|classification| classification.class)
+    let classification = err.classification();
+    // A credential-source failure reached no model, so it says nothing about the chunk.
+    if classification
+        .is_some_and(|classification| classification.scope == ErrorScope::CredentialSource)
     {
+        return false;
+    }
+    match classification.map(|classification| classification.class) {
         Some(ErrorClass::ContextOverflow) => true,
         Some(ErrorClass::Permanent) => matches!(
             err,
@@ -1653,7 +1658,7 @@ fn decide_producer_failure(
     err: &HistorySummarizerProducerError,
     model: &str,
     remaining_models: &[String],
-    auth_blocked_providers: &mut Vec<String>,
+    blocked_providers: &mut Vec<String>,
     all_failures_permanent: &mut bool,
     now_ms: i64,
     default_failure_backoff_at_ms: i64,
@@ -1667,12 +1672,23 @@ fn decide_producer_failure(
         };
     }
     if let Some(classification) = err.classification() {
+        if classification.scope == ErrorScope::CredentialSource {
+            return source_failure_decision(
+                classification,
+                model,
+                remaining_models,
+                blocked_providers,
+                all_failures_permanent,
+                now_ms,
+                default_failure_backoff_at_ms,
+            );
+        }
         // The producer owns classification.
         // The consumer branches only on the producer's class tag and structured retry-after value.
         // Provider codes and messages are diagnostic only; they do not override the producer's class tag.
         return match classification.class {
             ErrorClass::Permanent => {
-                let try_next = has_eligible_model(remaining_models, auth_blocked_providers);
+                let try_next = has_eligible_model(remaining_models, blocked_providers);
                 ProducerFailureDecision {
                     try_next_model: try_next,
                     failure_backoff_at_ms: default_failure_backoff_at_ms,
@@ -1682,7 +1698,7 @@ fn decide_producer_failure(
             }
             ErrorClass::Transient => {
                 *all_failures_permanent = false;
-                let try_next = has_eligible_model(remaining_models, auth_blocked_providers);
+                let try_next = has_eligible_model(remaining_models, blocked_providers);
                 ProducerFailureDecision {
                     try_next_model: try_next,
                     failure_backoff_at_ms: if try_next {
@@ -1699,8 +1715,8 @@ fn decide_producer_failure(
             }
             ErrorClass::AuthRequired => {
                 *all_failures_permanent = false;
-                add_auth_blocked_provider(auth_blocked_providers, provider_prefix(model));
-                let try_next = has_eligible_model(remaining_models, auth_blocked_providers);
+                block_provider(blocked_providers, provider_prefix(model));
+                let try_next = has_eligible_model(remaining_models, blocked_providers);
                 ProducerFailureDecision {
                     try_next_model: try_next,
                     failure_backoff_at_ms: default_failure_backoff_at_ms,
@@ -1733,11 +1749,41 @@ fn decide_producer_failure(
     let heuristic = err.deprecated_heuristic_decision();
     let try_next = heuristic.retryable_model_failure
         && !heuristic.abort_or_overflow
-        && has_eligible_model(remaining_models, auth_blocked_providers);
+        && has_eligible_model(remaining_models, blocked_providers);
     ProducerFailureDecision {
         try_next_model: try_next,
         failure_backoff_at_ms: default_failure_backoff_at_ms,
         detail_prefix: None,
+    }
+}
+
+/// A credential-source failure reached no model, so it is not a model verdict: it never
+/// marks the chain permanently exhausted. Every later model on the same provider would read
+/// the same source, so those models are skipped, and only a model on another provider may
+/// run. The firing's backoff honors the source's typed retry-after.
+fn source_failure_decision(
+    classification: ErrorClassification,
+    model: &str,
+    remaining_models: &[String],
+    blocked_providers: &mut Vec<String>,
+    all_failures_permanent: &mut bool,
+    now_ms: i64,
+    default_failure_backoff_at_ms: i64,
+) -> ProducerFailureDecision {
+    *all_failures_permanent = false;
+    block_provider(blocked_providers, provider_prefix(model));
+    let try_next = has_eligible_model(remaining_models, blocked_providers);
+    ProducerFailureDecision {
+        try_next_model: try_next,
+        // The source's retry holds even when a fallback is planned, because a fallback the
+        // firing cannot confirm safe ends the firing on this backoff.
+        failure_backoff_at_ms: classified_backoff_at_ms(
+            now_ms,
+            default_failure_backoff_at_ms,
+            classification,
+        ),
+        detail_prefix: (!try_next && classification.class == ErrorClass::AuthRequired)
+            .then_some(AUTH_REQUIRED_PREFIX),
     }
 }
 
@@ -1764,25 +1810,20 @@ fn classified_backoff_at_ms(
     now_ms.saturating_add(HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS.max(retry_after_ms))
 }
 
-fn has_eligible_model(models: &[String], auth_blocked_providers: &[String]) -> bool {
+fn has_eligible_model(models: &[String], blocked_providers: &[String]) -> bool {
     models
         .iter()
-        .any(|model| !provider_is_auth_blocked(auth_blocked_providers, model))
+        .any(|model| !provider_is_blocked(blocked_providers, model))
 }
 
-fn provider_is_auth_blocked(auth_blocked_providers: &[String], model: &str) -> bool {
+fn provider_is_blocked(blocked_providers: &[String], model: &str) -> bool {
     let provider = provider_prefix(model);
-    auth_blocked_providers
-        .iter()
-        .any(|blocked| blocked == provider)
+    blocked_providers.iter().any(|blocked| blocked == provider)
 }
 
-fn add_auth_blocked_provider(auth_blocked_providers: &mut Vec<String>, provider: &str) {
-    if !auth_blocked_providers
-        .iter()
-        .any(|blocked| blocked == provider)
-    {
-        auth_blocked_providers.push(provider.to_string());
+fn block_provider(blocked_providers: &mut Vec<String>, provider: &str) {
+    if !blocked_providers.iter().any(|blocked| blocked == provider) {
+        blocked_providers.push(provider.to_string());
     }
 }
 
@@ -1858,11 +1899,12 @@ where
         ));
     }
 
-    let mut auth_blocked_providers = Vec::new();
+    // Providers this firing skips after an `AuthRequired` verdict or a credential-source failure.
+    let mut blocked_providers = Vec::new();
     let mut all_failures_permanent = true;
 
     for (index, model) in request.model_chain.iter().enumerate() {
-        if provider_is_auth_blocked(&auth_blocked_providers, model) {
+        if provider_is_blocked(&blocked_providers, model) {
             continue;
         }
         verify_chunk_fingerprint(
@@ -1940,7 +1982,7 @@ where
                     &err,
                     model,
                     &request.model_chain[index + 1..],
-                    &mut auth_blocked_providers,
+                    &mut blocked_providers,
                     &mut all_failures_permanent,
                     completed_at_ms,
                     failure_backoff_at_ms,
@@ -2027,7 +2069,7 @@ where
                     &err,
                     model,
                     &request.model_chain[index + 1..],
-                    &mut auth_blocked_providers,
+                    &mut blocked_providers,
                     &mut all_failures_permanent,
                     completed_at_ms,
                     failure_backoff_at_ms,
@@ -2084,7 +2126,7 @@ where
         let row_version = match publish_result {
             Ok(row_version) => row_version,
             Err(HistorySummarizerDriveError::Validation(err)) => {
-                if has_eligible_model(&request.model_chain[index + 1..], &auth_blocked_providers) {
+                if has_eligible_model(&request.model_chain[index + 1..], &blocked_providers) {
                     let cleanup = producer.close_attempt().await;
                     log_cleanup_failure(request.session_id, "attempt close", &cleanup);
                     continue;
@@ -2216,7 +2258,9 @@ where
             let backoff_at_ms =
                 err.classification()
                     .map_or(failure_backoff_at_ms, |classification| {
-                        if classification.class == ErrorClass::Transient {
+                        if classification.class == ErrorClass::Transient
+                            || classification.scope == ErrorScope::CredentialSource
+                        {
                             classified_backoff_at_ms(
                                 completed_at_ms,
                                 failure_backoff_at_ms,
@@ -2864,6 +2908,7 @@ mod tests {
                 classification: Some(ErrorClassification {
                     class,
                     retry_after_secs: None,
+                    scope: ErrorScope::Model,
                 }),
                 class_field_present: true,
             })
@@ -4745,6 +4790,206 @@ mod tests {
         assert_eq!(producer.attempt_closes, 1);
         assert_eq!(producer.closes, 1);
         assert!(producer.connection_closed);
+    }
+
+    fn source_run_failure(class: ErrorClass) -> HistorySummarizerProducerError {
+        HistorySummarizerProducerError::RunFailed {
+            run_id: "run-1".to_owned(),
+            detail: "opencode AWS credential source is unavailable".to_owned(),
+            classification: Some(ErrorClassification {
+                class,
+                retry_after_secs: Some(120),
+                scope: ErrorScope::CredentialSource,
+            }),
+            class_field_present: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_source_failure_skips_same_provider_models_and_falls_back_to_another_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec![
+            "amazon-bedrock/model-a".to_owned(),
+            "amazon-bedrock/model-b".to_owned(),
+            "anthropic/model-c".to_owned(),
+        ];
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-1")))
+            .with_output(Err(source_run_failure(ErrorClass::Transient)))
+            .with_start(Ok(run_handle("run-2")))
+            .with_output(Ok(producer_output(history_summarizer_xml("other source"))));
+        let outcome = run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap();
+        let HistorySummarizerDriveOutcome::Completed(success) = outcome else {
+            panic!("expected the other source's model to publish");
+        };
+        assert_eq!(success.model, "anthropic/model-c");
+        assert_eq!(
+            producer.observed_starts.len(),
+            2,
+            "model-b shares the failed source"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_failure_with_no_other_source_waits_out_its_typed_retry() {
+        fn completed_at() -> i64 {
+            10_000
+        }
+        for class in [
+            ErrorClass::Transient,
+            ErrorClass::Permanent,
+            ErrorClass::AuthRequired,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_history_segment(&store);
+            let chunk = history_summarizer_chunk();
+            let prior = prior_ranges();
+            let models = vec![
+                "amazon-bedrock/model-a".to_owned(),
+                "amazon-bedrock/model-b".to_owned(),
+            ];
+            let mut producer = ScriptedProducer::default()
+                .with_start(Ok(run_handle("run-1")))
+                .with_output(Err(source_run_failure(class)));
+            let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+            request.completion_now_ms = completed_at;
+            let error = run_history_summarizer_firing(&mut producer, request)
+                .await
+                .unwrap_err();
+            assert!(!is_chunk_failure(&error), "{class:?}");
+            assert_eq!(producer.observed_starts.len(), 1, "{class:?}");
+            let state = store.load("ses").unwrap().meta.history_summarizer;
+            assert_eq!(
+                state.failure_backoff_at_ms,
+                Some(10_000 + 120_000),
+                "{class:?}: the typed retry-after holds the next firing"
+            );
+            assert!(
+                !state
+                    .last_failure
+                    .as_deref()
+                    .is_some_and(|detail| detail.starts_with(CHAIN_EXHAUSTED_PERMANENT_PREFIX)),
+                "{class:?}: a source failure is not a model verdict"
+            );
+            assert_eq!(
+                state
+                    .last_failure
+                    .as_deref()
+                    .is_some_and(|detail| detail.starts_with(AUTH_REQUIRED_PREFIX)),
+                class == ErrorClass::AuthRequired,
+                "{class:?}: only a login-required source names the login remediation"
+            );
+            assert_eq!(state.chunk_retry, None, "{class:?}");
+        }
+    }
+
+    fn provider_rejection(scope: ErrorScope) -> HistorySummarizerProducerError {
+        HistorySummarizerProducerError::RunFailed {
+            run_id: "run-1".to_owned(),
+            detail: "opencode provider reported an error (status 400)".to_owned(),
+            classification: Some(ErrorClassification {
+                class: ErrorClass::Permanent,
+                retry_after_secs: None,
+                scope,
+            }),
+            class_field_present: true,
+        }
+    }
+
+    #[test]
+    fn a_wrapped_source_failure_is_never_a_chunk_failure() {
+        let wrap = |primary| {
+            HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::CleanupFailed {
+                operation: "close",
+                primary: Some(Box::new(primary)),
+                cleanup: Box::new(HistorySummarizerProducerError::TimedOut),
+            })
+        };
+        assert!(is_chunk_failure(&HistorySummarizerDriveError::Producer(
+            provider_rejection(ErrorScope::Model)
+        )));
+        assert!(is_chunk_failure(&wrap(provider_rejection(
+            ErrorScope::Model
+        ))));
+        assert!(!is_chunk_failure(&HistorySummarizerDriveError::Producer(
+            provider_rejection(ErrorScope::CredentialSource)
+        )));
+        assert!(!is_chunk_failure(&wrap(provider_rejection(
+            ErrorScope::CredentialSource
+        ))));
+        let wrapped =
+            HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::CleanupFailed {
+                operation: "cancel",
+                primary: Some(Box::new(source_run_failure(ErrorClass::Permanent))),
+                cleanup: Box::new(HistorySummarizerProducerError::TimedOut),
+            });
+        assert!(!is_chunk_failure(&wrapped));
+        let overflow_scoped =
+            HistorySummarizerDriveError::Producer(HistorySummarizerProducerError::RunFailed {
+                run_id: "run-1".to_owned(),
+                detail: "opencode provider reported an error (status 400)".to_owned(),
+                classification: Some(ErrorClassification {
+                    class: ErrorClass::ContextOverflow,
+                    retry_after_secs: None,
+                    scope: ErrorScope::CredentialSource,
+                }),
+                class_field_present: true,
+            });
+        assert!(!is_chunk_failure(&overflow_scoped));
+    }
+
+    #[tokio::test]
+    async fn a_source_failure_whose_cancel_is_unproven_starts_no_further_model() {
+        for (cancel, fallback) in [
+            (Err(HistorySummarizerProducerError::TimedOut), false),
+            (Ok(()), true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_history_segment(&store);
+            let chunk = history_summarizer_chunk();
+            let prior = prior_ranges();
+            let models = vec![
+                "amazon-bedrock/model-a".to_owned(),
+                "anthropic/model-c".to_owned(),
+            ];
+            let mut producer = ScriptedProducer::default()
+                .with_start(Ok(run_handle("run-1")))
+                .with_output(Err(source_run_failure(ErrorClass::Transient)))
+                .with_cancel_result(cancel)
+                .with_start(Ok(run_handle("run-2")))
+                .with_output(Ok(producer_output(history_summarizer_xml("other source"))));
+            fn completed_at() -> i64 {
+                10_000
+            }
+            let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+            request.completion_now_ms = completed_at;
+            let result = run_history_summarizer_firing(&mut producer, request).await;
+            assert_eq!(result.is_ok(), fallback);
+            assert_eq!(
+                producer.observed_starts.len(),
+                if fallback { 2 } else { 1 },
+                "an unproven cancel leaves the first run's effect unknown"
+            );
+            if !fallback {
+                let state = store.load("ses").unwrap().meta.history_summarizer;
+                assert_eq!(
+                    state.failure_backoff_at_ms,
+                    Some(10_000 + 120_000),
+                    "the stopped fallback still honors the source's retry"
+                );
+            }
+        }
     }
 
     #[tokio::test]

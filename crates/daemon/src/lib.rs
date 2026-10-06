@@ -18263,6 +18263,8 @@ mod tests {
     mod revision_3;
     #[path = "transform/revision_goldens.rs"]
     mod revision_goldens;
+    #[path = "source_recovery_tests.rs"]
+    mod source_recovery_tests;
     #[path = "window_cap_tests.rs"]
     mod window_cap_tests;
     #[path = "window_coverage/dispatch_tests.rs"]
@@ -22446,6 +22448,7 @@ mod tests {
                     classification: Some(history_summarizer_producer::ErrorClassification {
                         class: history_summarizer_producer::ErrorClass::Permanent,
                         retry_after_secs: None,
+                        scope: host_runtime::model_execution::protocol::ErrorScope::Model,
                     }),
                     class_field_present: true,
                 });
