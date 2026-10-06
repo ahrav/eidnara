@@ -758,6 +758,45 @@ async fn unproven_scratch_cleanup_leaves_the_slot_unresolved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cancellation_during_the_helper_run_reports_cancelled() {
+    let _serial = SERIAL.lock().await;
+    let owner = Owner::new(SSO_CONFIG, "dev");
+    owner.write_token(&token_json("owner-access", Duration::from_secs(3600)));
+    let fake = Fake::start().await;
+    let _never = fake.held(Route::Portal, 200, &portal_ok());
+    let mut slot = TransactionSlot::default();
+    let cancel = CancellationToken::new();
+    let input = TransactionInput {
+        source: &owner.source,
+        predecessor: None,
+        executable: Path::new(BIN),
+        state_root: &owner.state,
+        budget: Duration::from_secs(30),
+        limits: HelperLimits::default(),
+        test_origin: Some(fake.origin.clone()),
+    };
+    let run = slot.run(input, &cancel);
+    let cancel_once_running = async {
+        while fake.seen().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cancel.cancel();
+    };
+    let started = Instant::now();
+    let (outcome, ()) = tokio::join!(run, cancel_once_running);
+    assert!(
+        started.elapsed() < HelperLimits::default().wall,
+        "cancellation ends the run before the wall limit: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(outcome.failure, Some(TransactionFailure::Cancelled));
+    assert!(outcome.row.is_none() && outcome.successor.is_none());
+    assert_eq!(owner.scratch_dirs(), 0);
+    assert!(!slot.is_unresolved());
+    assert_no_helper_processes(&owner);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn spawn_failure_and_cancellation_leave_the_slot_reusable() {
     let _serial = SERIAL.lock().await;
     let owner = Owner::new(SSO_CONFIG, "dev");

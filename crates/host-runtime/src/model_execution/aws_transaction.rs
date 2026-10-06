@@ -432,6 +432,9 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
         Some(HelperReport::Failed { failure, .. }) => Some(F::Helper(failure)),
         None if matches!(launch, Launch::Failed(_)) => Some(F::Spawn),
         None if matches!(launch, Launch::Expired) => Some(F::BudgetExhausted),
+        None if matches!(&launch, Launch::Ran(result) if result.end == SubprocessEnd::Cancelled) => {
+            Some(F::Cancelled)
+        }
         None => Some(F::HelperUnreported),
     };
     outcome
