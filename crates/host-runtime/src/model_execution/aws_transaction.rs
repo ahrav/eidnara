@@ -724,8 +724,9 @@ fn read_secure(
         return Err(Unsafe);
     }
     let mut file = std::fs::File::from(fd);
-    let mut bytes = Zeroizing::new(Vec::new());
     let cap = u64::try_from(limit).map_err(|_| Io)? + 1;
+    let reserve = usize::try_from(before.st_size).unwrap_or(0).min(limit) + 1;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(reserve));
     (&mut file)
         .take(cap)
         .read_to_end(&mut bytes)
