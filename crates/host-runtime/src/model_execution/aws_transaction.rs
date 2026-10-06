@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use rustix::fs::{Mode, OFlags, openat};
 use rustix::process::Resource;
-use serde::de::{MapAccess, Visitor};
+use serde::de::{self, IgnoredAny, MapAccess, Visitor};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Deserializer};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -55,6 +56,22 @@ const TOKEN_FIELDS: [&str; 8] = [
     "region",
     "startUrl",
 ];
+/// Slots in byte order of their key, so the canonical token is emitted with sorted
+/// keys.
+const EMIT_ORDER: [usize; 8] = [
+    ACCESS_TOKEN,
+    3,
+    4,
+    EXPIRES_AT,
+    2,
+    REGION,
+    REGISTRATION_EXPIRES_AT,
+    START_URL,
+];
+/// Bytes one emitted field adds beyond its key and value: four quotes, a colon, and
+/// a separating comma or closing brace.
+const FIELD_OVERHEAD: usize = 6;
+type TokenFields = [Option<Zeroizing<String>>; 8];
 
 /// The owner's selected source, with absolute file paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,23 +548,7 @@ impl SsoToken {
     /// are required, region and start URL must match the admitted session, and the
     /// refresh fields are all present or all absent.
     fn canonical(&self, bytes: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-        let Entries(entries) = serde_json::from_slice(bytes).ok()?;
-        let mut fields: [Option<Zeroizing<String>>; 8] = Default::default();
-        for (key, value) in entries {
-            let Some(slot) = TOKEN_FIELDS
-                .iter()
-                .position(|f| f.eq_ignore_ascii_case(&key))
-            else {
-                continue;
-            };
-            let serde_json::Value::String(value) = value else {
-                return None;
-            };
-            let valid = !value.is_empty() && value.len() <= aws_helper::MAX_FIELD_BYTES;
-            if !valid || fields[slot].replace(Zeroizing::new(value)).is_some() {
-                return None;
-            }
-        }
+        let Fields(fields) = serde_json::from_slice(bytes).ok()?;
         let text = |slot: usize| fields[slot].as_deref().map(String::as_str);
         let timestamp = |slot: usize| {
             text(slot).is_none_or(|value| {
@@ -570,35 +571,81 @@ impl SsoToken {
         if !valid {
             return None;
         }
-        let object: serde_json::Map<String, serde_json::Value> = TOKEN_FIELDS
+        // The present fields are serialized straight from their zeroizing slots into a
+        // buffer sized for the unescaped emission, so no plain copy of a secret is made.
+        let present = EMIT_ORDER
             .iter()
-            .zip(fields.iter())
-            .filter_map(|(key, value)| Some(((*key).to_owned(), value.as_deref()?.clone().into())))
-            .collect();
-        serde_json::to_vec(&object).ok().map(Zeroizing::new)
+            .filter_map(|slot| Some((TOKEN_FIELDS[*slot], text(*slot)?)));
+        let capacity = present
+            .clone()
+            .map(|(key, value)| key.len() + value.len() + FIELD_OVERHEAD)
+            .sum::<usize>()
+            + 1;
+        let mut out = Zeroizing::new(Vec::with_capacity(capacity));
+        let mut serializer = serde_json::Serializer::new(&mut *out);
+        let mut object = serializer.serialize_map(None).ok()?;
+        for (key, value) in present {
+            object.serialize_entry(key, value).ok()?;
+        }
+        object.end().ok()?;
+        Some(out)
     }
 }
 
-/// JSON object entries in document order, so repeated keys stay visible.
-struct Entries(Vec<(String, serde_json::Value)>);
+/// The recognized token fields of one JSON object. A recognized key that repeats,
+/// is not a string, is empty, or exceeds [`aws_helper::MAX_FIELD_BYTES`] fails the
+/// parse; unrecognized keys are skipped.
+struct Fields(TokenFields);
 
-impl<'de> Deserialize<'de> for Entries {
+impl<'de> Deserialize<'de> for Fields {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct EntriesVisitor;
-        impl<'de> Visitor<'de> for EntriesVisitor {
-            type Value = Entries;
+        struct FieldsVisitor;
+        impl<'de> Visitor<'de> for FieldsVisitor {
+            type Value = Fields;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a JSON object")
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Entries, A::Error> {
-                let mut entries = Vec::new();
-                while let Some(entry) = map.next_entry()? {
-                    entries.push(entry);
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Fields, A::Error> {
+                let mut fields = TokenFields::default();
+                while let Some(Slot(slot)) = map.next_key()? {
+                    let Some(slot) = slot else {
+                        map.next_value::<IgnoredAny>()?;
+                        continue;
+                    };
+                    let value: String = map.next_value()?;
+                    let valid = !value.is_empty() && value.len() <= aws_helper::MAX_FIELD_BYTES;
+                    if !valid || fields[slot].replace(Zeroizing::new(value)).is_some() {
+                        return Err(de::Error::custom("invalid or repeated token field"));
+                    }
                 }
-                Ok(Entries(entries))
+                Ok(Fields(fields))
             }
         }
-        deserializer.deserialize_map(EntriesVisitor)
+        deserializer.deserialize_map(FieldsVisitor)
+    }
+}
+
+/// The slot of one object key in [`TOKEN_FIELDS`], matched case-insensitively without
+/// copying the key; an unrecognized key is `None`.
+struct Slot(Option<usize>);
+
+impl<'de> Deserialize<'de> for Slot {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct SlotVisitor;
+        impl Visitor<'_> for SlotVisitor {
+            type Value = Slot;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an object key")
+            }
+            fn visit_str<E: de::Error>(self, key: &str) -> Result<Slot, E> {
+                Ok(Slot(
+                    TOKEN_FIELDS
+                        .iter()
+                        .position(|field| field.eq_ignore_ascii_case(key)),
+                ))
+            }
+        }
+        deserializer.deserialize_str(SlotVisitor)
     }
 }
 
@@ -731,6 +778,14 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
         assert!(value.get("extra").is_none());
         assert_eq!(value["accessToken"], "a");
+        let sorted: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&sorted).unwrap(),
+            *canonical,
+            "the emission is compact with sorted keys"
+        );
+        assert_eq!(canonical.capacity(), canonical.len());
         assert_eq!(
             session().canonical(&canonical).as_deref(),
             Some(&*canonical)
