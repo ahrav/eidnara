@@ -27,6 +27,10 @@ const PROVIDER_ROWS = {
     { order: readonly string[]; optional: readonly string[] }
 >;
 
+export const STATIC_AWS_CREDENTIAL_NAMES: readonly string[] = Object.freeze([
+    ...PROVIDER_ROWS["amazon-bedrock"].order,
+]);
+
 export const MODEL_EXECUTION_CREDENTIAL_NAMES = Object.freeze(
     Object.values(PROVIDER_ROWS).flatMap((row) => [...row.order]),
 );
