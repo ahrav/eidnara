@@ -354,11 +354,15 @@ pub fn run_finished_unit(run_id: &str, finish_reason: FinishReason) -> Vec<u8> {
 
 /// `error` is the classified in-band error terminal.
 /// `bounded` prevents provider messages from exceeding the diagnostic byte limit after JSON escaping.
-pub fn error_unit(run_id: &str, error: &BackendError) -> Vec<u8> {
+/// An absent `scope` means `model`, so only a credential-source error names its scope.
+pub fn error_unit(run_id: &str, error: &BackendError, scope: ErrorScope) -> Vec<u8> {
     let mut body = serde_json::json!({
         "class": error.class.as_wire_str(),
         "message": bounded(&error.message),
     });
+    if scope == ErrorScope::CredentialSource {
+        body["scope"] = scope.as_wire_str().into();
+    }
     if let Some(secs) = error.retry_after_secs {
         body["retry_after_secs"] = secs.into();
     }

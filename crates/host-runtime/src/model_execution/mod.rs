@@ -25,6 +25,7 @@ use crate::handler::{
     RequestOutcome, ResourceDeclaration, RouteClass, RouteHandle, RouteIdentity,
 };
 
+use aws_refresh::SourceOwner;
 use aws_source::AwsProfileSource;
 use backend::{Harness, LlmExecutionBackend};
 use protocol::{Request, RequestError};
@@ -43,6 +44,8 @@ pub struct ModelExecutionComponent {
     route_fingerprints: Arc<Mutex<HashMap<RouteHandle, BTreeMap<String, String>>>>,
     credential_verifier: Option<Arc<CredentialVerifier>>,
     source_health: SourceHealthCell,
+    /// The selected profile source's owner, closed and joined with the runs at shutdown.
+    aws_owner: Option<SourceOwner>,
     /// The same root the backends write crash-ownership records to; `initialize` sweeps it.
     state_root: StateRoot,
 }
@@ -83,6 +86,7 @@ impl ModelExecutionComponent {
             route_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             credential_verifier: None,
             source_health: SourceHealthCell::new(SourceObservation::unknown(SourceKind::None)),
+            aws_owner: None,
             state_root,
         }
     }
@@ -105,8 +109,20 @@ impl ModelExecutionComponent {
                 aws_source,
                 key: OnceLock::new(),
             })),
+            aws_owner: None,
             state_root,
         }
+    }
+
+    /// Reports a profile source owner's observation as this component's source health and
+    /// joins the owner's refresh at shutdown.
+    #[must_use]
+    pub fn with_source_owner(mut self, owner: Option<SourceOwner>) -> Self {
+        if let Some(owner) = &owner {
+            self.source_health = owner.health();
+        }
+        self.aws_owner = owner;
+        self
     }
 
     pub fn supervisor(&self) -> Arc<Supervisor> {
@@ -419,7 +435,18 @@ impl CompositeComponent for ModelExecutionComponent {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         // One run can leave several residue classes at once; suppressing any of them would hide
         // caller-private material or registry state, so all are aggregated into one error.
-        let unresolved = self.supervisor.shutdown().await;
+        // Closing the owner signals its refresh before either join begins; the supervisor
+        // cancels every run before it waits.
+        if let Some(owner) = &self.aws_owner {
+            owner.close();
+        }
+        let source = async {
+            match &self.aws_owner {
+                Some(owner) => owner.join().await,
+                None => true,
+            }
+        };
+        let (unresolved, source_settled) = tokio::join!(self.supervisor.shutdown(), source);
         self.routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -435,6 +462,11 @@ impl CompositeComponent for ModelExecutionComponent {
                 "{unresolved} run(s) ended without confirming harness \
                  process-group teardown; provider work may still be running"
             ));
+        }
+        if !source_settled {
+            failures.push(
+                "the AWS credential refresh ended without proving its helper teardown".to_owned(),
+            );
         }
         // Cleanup residue outranks a clean report: caller-private prompt material may remain on disk.
         let residue = self.supervisor.cleanup_unresolved_runs();

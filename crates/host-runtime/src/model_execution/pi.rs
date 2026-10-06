@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use super::aws_refresh::{self, AwsDispatch};
 use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
     ContextCapabilities, ErrorClass, EventSink, FinishReason, Harness, LlmExecutionBackend,
@@ -58,6 +59,7 @@ pub struct PiBackend {
     thinking_level: Option<String>,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    aws: Option<AwsDispatch>,
     state_root: StateRoot,
 }
 
@@ -84,8 +86,16 @@ impl PiBackend {
             thinking_level,
             limits,
             env,
+            aws: None,
             state_root,
         }
+    }
+
+    /// Answers Bedrock runs from the selected AWS profile source, when there is one.
+    #[must_use]
+    pub fn with_aws_source(mut self, aws: Option<AwsDispatch>) -> Self {
+        self.aws = aws;
+        self
     }
 }
 
@@ -120,6 +130,7 @@ impl LlmExecutionBackend for PiBackend {
                 thinking_level,
                 limits,
                 env,
+                aws: self.aws.clone(),
                 state_root,
                 deadline: None,
             },
@@ -179,6 +190,7 @@ struct PiRun {
     thinking_level: Option<String>,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    aws: Option<AwsDispatch>,
     state_root: StateRoot,
     /// The retry shares the first attempt's wall-clock budget, so it carries an absolute end instant rather than a duration that setup time would escape.
     deadline: Option<tokio::time::Instant>,
@@ -263,22 +275,19 @@ async fn run_pi(
         thinking_level,
         mut limits,
         env,
+        aws,
         state_root,
         deadline,
     } = run;
-    let mut child_env = match env.provider_row("pi", &request.provider) {
-        Ok(row) => row,
-        Err(error) => {
-            return subprocess::credential_failure(Harness::Pi, error);
-        }
-    };
+    // One deadline, anchored after the backend permit, covers credential acquisition,
+    // setup, and execution.
+    let setup_deadline =
+        deadline.unwrap_or_else(|| tokio::time::Instant::now() + limits.run_timeout);
     // The bound is checked before resolution so an oversized descriptor set opens no files.
     if descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
         return subprocess::harness_unavailable_failure(Harness::Pi, "extension_budget_exceeded");
     }
     // Setup races cancellation and `setup_deadline` so stalled closure-store or directory I/O cannot block cancellation before spawning a child.
-    let setup_deadline =
-        deadline.unwrap_or_else(|| tokio::time::Instant::now() + limits.run_timeout);
     // Closure resolution precedes the private directory so an unavailable harness never writes the caller-private system prompt to disk.
     // Resolution opens and stats every node, so it runs on the blocking pool in one hop rather than on a runtime worker.
     let closure = Arc::clone(&descriptor.closure);
@@ -307,6 +316,21 @@ async fn run_pi(
             return subprocess::harness_unavailable_failure(Harness::Pi, "closure_incomplete");
         }
         Err(err) => return subprocess::spawn_failure(Harness::Pi, &err),
+    };
+
+    // The source is acquired after every local refusal, so a request the host would refuse
+    // starts no refresh.
+    let credentials = aws_refresh::child_credentials(
+        &env,
+        aws.as_ref(),
+        Harness::Pi,
+        &request.provider,
+        setup_deadline,
+        &cancel,
+    );
+    let (mut child_env, lease) = match credentials.await {
+        Ok(credentials) => credentials,
+        Err(terminal) => return terminal,
     };
 
     let mut create = std::pin::pin!(PrivateDir::create_async(
@@ -463,6 +487,14 @@ async fn run_pi(
         );
     }
     limits.run_timeout = remaining;
+    if let Err(terminal) =
+        aws_refresh::recheck_before_spawn(lease.as_ref(), Harness::Pi, setup_deadline)
+    {
+        return subprocess::merge_cleanup(
+            terminal,
+            subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+        );
+    }
 
     let result = match subprocess::run(spec, &limits, &cancel, Some(pi_terminal_probe)).await {
         Ok(result) => result,

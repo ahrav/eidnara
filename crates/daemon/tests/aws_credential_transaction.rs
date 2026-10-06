@@ -1118,7 +1118,7 @@ async fn the_refresh_owner_runs_one_real_transaction_for_concurrent_demand_and_n
         waiters.spawn(async move { source.acquire(deadline, &CancellationToken::new()).await });
     }
     for row in waiters.join_all().await {
-        assert_eq!(row.expect("row").access_key_id, "ASIAPORTAL");
+        assert_eq!(row.expect("row").row.access_key_id, "ASIAPORTAL");
     }
     assert_eq!(fake.seen().len(), 1, "eight waiters share one helper run");
     source

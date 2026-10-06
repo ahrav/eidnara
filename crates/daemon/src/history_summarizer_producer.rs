@@ -2314,6 +2314,19 @@ mod tests {
             classification_from_object(&json!({"class": "permanent", "scope": "model"})),
             (permanent, true)
         );
+        assert_eq!(
+            classification_from_object(&json!({
+                "class": "transient", "scope": "credential_source", "retry_after_secs": 60,
+            })),
+            (
+                Some(ErrorClassification {
+                    class: ErrorClass::Transient,
+                    retry_after_secs: Some(60),
+                }),
+                true
+            ),
+            "a credential_source unit keeps its typed class and retry"
+        );
         for scope in [json!("bogus"), json!(7), json!(null)] {
             assert_eq!(
                 classification_from_object(&json!({"class": "permanent", "scope": scope})),

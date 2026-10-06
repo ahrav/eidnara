@@ -392,6 +392,7 @@ fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
             retry_after_secs: Some(u64::MAX),
             provider_code: Some(hostile),
         },
+        protocol::ErrorScope::CredentialSource,
     );
     let started = protocol::run_started_unit(&run_id);
     assert!(
@@ -965,4 +966,97 @@ async fn malformed_requests_over_the_host_create_no_run_state() {
     assert_eq!(backend.starts(), 0, "no backend may start");
     assert_eq!(supervisor.metrics(), baseline, "no state may exist");
     host.shutdown().await.expect("graceful shutdown");
+}
+
+/// Component shutdown signals the AWS refresh before it joins, waits for the refresh to
+/// settle physically, and reports an unproven helper teardown as a shutdown failure.
+#[tokio::test]
+async fn shutdown_signals_and_joins_the_aws_refresh_and_reports_unproven_teardown() {
+    use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
+    use host_runtime::model_execution::aws_refresh::{
+        Refresh, RefreshFuture, RefreshRequest, SourceOwner, SystemClock,
+    };
+    use host_runtime::model_execution::aws_transaction::{
+        RenewalEvidence, TransactionFailure, TransactionOutcome,
+    };
+    use host_runtime::model_execution::source_health::{
+        SourceHealthCell, SourceKind, SourceObservation,
+    };
+
+    struct Held {
+        cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl Refresh for Held {
+        fn refresh(&self, _: RefreshRequest, cancel: CancellationToken) -> RefreshFuture {
+            *self.cancel.lock().unwrap() = Some(cancel);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                release.notified().await;
+                TransactionOutcome {
+                    identity: None,
+                    row: None,
+                    successor: None,
+                    observation: None,
+                    renewal: RenewalEvidence::Unknown,
+                    lost_succession: false,
+                    record_retained: false,
+                    failure: Some(TransactionFailure::CleanupUnproven),
+                }
+            })
+        }
+    }
+    let identity = GraphIdentity {
+        profile: "dev".into(),
+        region: "us-west-2".into(),
+        roles: Vec::new(),
+        root: RootIdentity::Static {
+            profile: "base".into(),
+            access_key_id: "AKIA".into(),
+            secret_sha256: [0; 32],
+        },
+    };
+    let cancel = Arc::new(std::sync::Mutex::new(None));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = Held {
+        cancel: Arc::clone(&cancel),
+        release: Arc::clone(&release),
+    };
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(held, SystemClock, identity, health);
+    let component = ModelExecutionComponent::new(
+        Arc::clone(&ScriptedBackend::completing("out")) as Arc<_>,
+        support::model_execution::state_root(),
+    )
+    .with_source_owner(Some(owner.clone()));
+    let waiter = tokio::spawn({
+        let owner = owner.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            owner.acquire(deadline, &CancellationToken::new()).await
+        }
+    });
+    while cancel.lock().unwrap().is_none() {
+        tokio::task::yield_now().await;
+    }
+    let shutdown =
+        tokio::spawn(async move { host_runtime::CompositeComponent::shutdown(&component).await });
+    let token = cancel.lock().unwrap().clone().expect("refresh token");
+    tokio::time::timeout(Duration::from_secs(5), token.cancelled())
+        .await
+        .expect("shutdown signals the refresh before it joins");
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the refresh to settle"
+    );
+    release.notify_one();
+    let error = shutdown
+        .await
+        .unwrap()
+        .expect_err("unproven helper teardown fails shutdown");
+    assert!(
+        error.to_string().contains("AWS credential refresh"),
+        "{error}"
+    );
+    assert!(waiter.await.unwrap().is_err());
 }

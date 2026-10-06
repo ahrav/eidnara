@@ -1389,6 +1389,10 @@ pub fn merge_cleanup(
             error.message = format!("{}; additionally {failure}", error.message);
             BackendTerminal::Failed(error)
         }
+        BackendTerminal::SourceFailed(mut error) => {
+            error.message = format!("{}; additionally {failure}", error.message);
+            BackendTerminal::SourceFailed(error)
+        }
         // `merge_cleanup` must not downgrade an unresolved teardown failure.
         // Cancel and delete must not claim work stopped while teardown remains unresolved.
         BackendTerminal::FailedUnresolved(mut error) => {
@@ -1414,9 +1418,9 @@ pub(crate) fn terminal_reports_record_residue(terminal: &BackendTerminal) -> boo
 fn terminal_message(terminal: &BackendTerminal) -> Option<&str> {
     match terminal {
         BackendTerminal::Completed { .. } => None,
-        BackendTerminal::Failed(error) | BackendTerminal::FailedUnresolved(error) => {
-            Some(&error.message)
-        }
+        BackendTerminal::Failed(error)
+        | BackendTerminal::FailedUnresolved(error)
+        | BackendTerminal::SourceFailed(error) => Some(&error.message),
     }
 }
 
@@ -2024,6 +2028,10 @@ fn merge_record_retained(
         BackendTerminal::Failed(mut error) => {
             error.message = format!("{}; additionally {detail}", error.message);
             BackendTerminal::Failed(error)
+        }
+        BackendTerminal::SourceFailed(mut error) => {
+            error.message = format!("{}; additionally {detail}", error.message);
+            BackendTerminal::SourceFailed(error)
         }
         // A retained record does not downgrade an unresolved teardown failure.
         BackendTerminal::FailedUnresolved(mut error) => {

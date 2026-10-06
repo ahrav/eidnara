@@ -9,6 +9,7 @@
 //! refresh's epoch, the admitted graph identity is unchanged, and the transaction did not
 //! observe a withdrawal.
 
+use std::ffi::OsString;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -27,8 +28,10 @@ use super::aws_transaction::{
     TRANSACTION_BUDGET, TokenObservation, TransactionFailure, TransactionInput, TransactionOutcome,
     TransactionSlot, same_content,
 };
+use super::backend::{BackendError, BackendTerminal, ErrorClass, Harness};
+use super::source_claim;
 use super::source_health::{SourceHealthCell, SourceKind, SourceObservation, SourceState};
-use super::subprocess::group_registry::StateRoot;
+use super::subprocess::{self, EnvSnapshot, group_registry::StateRoot};
 
 /// A row is usable only when it expires strictly later than the model deadline plus
 /// this skew.
@@ -102,10 +105,16 @@ pub enum SourceError {
     InsufficientLifetime,
 }
 
-struct Cached {
-    row: Arc<CredentialRow>,
+/// A cached row with the two expiry bounds the lifetime predicate checks.
+#[derive(Clone)]
+pub struct Lease {
+    pub row: Arc<CredentialRow>,
     usable_until: Instant,
     expires_at_wall: Duration,
+}
+
+struct Cached {
+    lease: Lease,
     /// The owner token observation the row was minted under.
     basis: Option<TokenObservation>,
 }
@@ -165,7 +174,7 @@ impl SourceOwner {
         &self,
         deadline: Instant,
         cancel: &CancellationToken,
-    ) -> Result<Arc<CredentialRow>, SourceError> {
+    ) -> Result<Lease, SourceError> {
         let mut settled = {
             let mut state = self.0.lock();
             if let Some(found) = self.0.usable(&state, deadline) {
@@ -197,6 +206,11 @@ impl SourceOwner {
         self.0.usable(&state, deadline).unwrap_or(Err(state
             .failure
             .unwrap_or(SourceError::InsufficientLifetime)))
+    }
+
+    /// The cell this owner publishes its observation to.
+    pub fn health(&self) -> SourceHealthCell {
+        self.0.health.clone()
     }
 
     /// Discards the cached row and successor and fences any running refresh out of
@@ -279,25 +293,27 @@ impl Inner {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn usable(
-        &self,
-        state: &State,
-        deadline: Instant,
-    ) -> Option<Result<Arc<CredentialRow>, SourceError>> {
+    fn usable(&self, state: &State, deadline: Instant) -> Option<Result<Lease, SourceError>> {
         if state.closed {
             return Some(Err(SourceError::Shutdown));
         }
-        let cached = state.row.as_ref()?;
+        let lease = &state.row.as_ref()?.lease;
+        self.covers(lease, deadline).then(|| Ok(lease.clone()))
+    }
+
+    /// The lifetime predicate: `lease` expires strictly after `deadline` plus
+    /// [`EXPIRY_SKEW`] by both its monotonic bound and the current wall clock.
+    fn covers(&self, lease: &Lease, deadline: Instant) -> bool {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let monotonic = deadline
             .checked_add(EXPIRY_SKEW)
-            .is_some_and(|needed| cached.usable_until > needed);
+            .is_some_and(|needed| lease.usable_until > needed);
         let wall = self
             .clock
             .wall()
             .and_then(|wall| wall.checked_add(remaining)?.checked_add(EXPIRY_SKEW))
-            .is_some_and(|needed| cached.expires_at_wall > needed);
-        (monotonic && wall).then(|| Ok(Arc::clone(&cached.row)))
+            .is_some_and(|needed| lease.expires_at_wall > needed);
+        monotonic && wall
     }
 
     fn adopt(&self, epoch: u64, demand: Instant, mut outcome: TransactionOutcome) {
@@ -379,9 +395,11 @@ impl Inner {
         }
         let usable_until = Instant::now() + lifetime;
         state.row = Some(Cached {
-            row: Arc::new(row),
-            usable_until,
-            expires_at_wall: wall + lifetime,
+            lease: Lease {
+                row: Arc::new(row),
+                usable_until,
+                expires_at_wall: wall + lifetime,
+            },
             basis,
         });
         demand
@@ -392,7 +410,10 @@ impl Inner {
 
     fn publish(&self, state: &State) {
         let now = Instant::now();
-        let usable = state.row.as_ref().filter(|row| row.usable_until > now);
+        let usable = state
+            .row
+            .as_ref()
+            .filter(|row| row.lease.usable_until > now);
         let cooling = state.cooldown_until.filter(|until| *until > now);
         let condition = if state.closed {
             SourceState::Unknown
@@ -412,7 +433,7 @@ impl Inner {
         self.health.set(SourceObservation {
             kind: SourceKind::Profile,
             state: condition,
-            expires_at: usable.map(|row| row.usable_until),
+            expires_at: usable.map(|row| row.lease.usable_until),
             retry_at: cooling.filter(|_| condition == SourceState::Cooldown),
             consecutive_failures: state.failures,
         });
@@ -454,6 +475,132 @@ fn classify(failure: TransactionFailure) -> (SourceError, Authority) {
         | F::BudgetExhausted
         | F::Cancelled => (SourceError::Unavailable, Keep),
     }
+}
+
+/// The profile source as the model adapters use it: the shared owner and the selected
+/// region the child row carries.
+#[derive(Clone)]
+pub struct AwsDispatch {
+    owner: SourceOwner,
+    region: String,
+}
+
+impl AwsDispatch {
+    pub fn new(owner: SourceOwner, region: String) -> Self {
+        Self { owner, region }
+    }
+
+    pub fn owner(&self) -> &SourceOwner {
+        &self.owner
+    }
+}
+
+/// The lease one child's row came from, kept for the recheck immediately before spawn.
+pub(super) struct ChildLease {
+    lease: Lease,
+    owner: SourceOwner,
+}
+
+/// The child's credential row and, for a profile source, the lease to recheck before
+/// spawn. A selected profile source answers Bedrock; every other provider reads the
+/// startup environment row.
+pub(super) async fn child_credentials(
+    env: &EnvSnapshot,
+    aws: Option<&AwsDispatch>,
+    harness: Harness,
+    provider: &str,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<(Vec<(OsString, OsString)>, Option<ChildLease>), BackendTerminal> {
+    let canonical = subprocess::canonical_provider(harness.as_str(), provider);
+    let Some(aws) = aws.filter(|_| canonical == Ok(source_claim::PROFILE_PROVIDER)) else {
+        return env
+            .provider_row(harness.as_str(), provider)
+            .map(|row| (row, None))
+            .map_err(|error| subprocess::credential_failure(harness, error));
+    };
+    let lease = aws
+        .owner
+        .acquire(deadline, cancel)
+        .await
+        .map_err(|error| source_terminal(harness, error))?;
+    let row = &lease.row;
+    let env = vec![
+        (
+            "AWS_ACCESS_KEY_ID".into(),
+            row.access_key_id.as_str().into(),
+        ),
+        (
+            "AWS_SECRET_ACCESS_KEY".into(),
+            row.secret_access_key.as_str().into(),
+        ),
+        (
+            "AWS_SESSION_TOKEN".into(),
+            row.session_token.as_str().into(),
+        ),
+        ("AWS_REGION".into(), aws.region.as_str().into()),
+    ];
+    let owner = aws.owner.clone();
+    Ok((env, Some(ChildLease { lease, owner })))
+}
+
+/// The recheck immediately before a child spawns, under the same lifetime predicate and
+/// clock as acquisition.
+pub(super) fn recheck_before_spawn(
+    lease: Option<&ChildLease>,
+    harness: Harness,
+    deadline: Instant,
+) -> Result<(), BackendTerminal> {
+    match lease {
+        Some(child) if !child.owner.0.covers(&child.lease, deadline) => {
+            Err(source_terminal(harness, SourceError::InsufficientLifetime))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The accepted credential-source terminal for one acquisition failure. A cancelled run
+/// or a closing owner ends as a setup abort, which is not a source failure.
+fn source_terminal(harness: Harness, error: SourceError) -> BackendTerminal {
+    let (class, detail, retry_after_secs) = match error {
+        SourceError::Cancelled | SourceError::Shutdown => {
+            return subprocess::setup_aborted_terminal(harness, subprocess::SetupAbort::Cancelled);
+        }
+        SourceError::Cooldown { retry_in } => (
+            ErrorClass::Transient,
+            "is cooling down after a failed refresh",
+            Some(retry_in.as_secs().max(1)),
+        ),
+        SourceError::Unavailable | SourceError::Withdrawn => {
+            (ErrorClass::Transient, "is unavailable", None)
+        }
+        SourceError::DeadlineExceeded => (
+            ErrorClass::Transient,
+            "did not answer within the run budget",
+            None,
+        ),
+        SourceError::LoginRequired => (
+            ErrorClass::AuthRequired,
+            "needs a new `aws sso login`",
+            None,
+        ),
+        SourceError::Invalid => (
+            ErrorClass::Permanent,
+            "no longer matches its admitted configuration",
+            None,
+        ),
+        SourceError::InsufficientLifetime => (
+            ErrorClass::Permanent,
+            "has no row that outlives the run deadline",
+            None,
+        ),
+    };
+    BackendTerminal::SourceFailed(BackendError {
+        class,
+        message: format!("{} AWS credential source {detail}", harness.as_str()),
+        retry_after_secs,
+        provider_code: None,
+    })
 }
 
 /// The production [`Refresh`]: one [`TransactionSlot`] over the owner's files.
@@ -712,7 +859,7 @@ mod tests {
             self.outcome(None, Some(failure))
         }
 
-        async fn acquire_for(&self, model: Duration) -> Result<Arc<CredentialRow>, SourceError> {
+        async fn acquire_for(&self, model: Duration) -> Result<Lease, SourceError> {
             self.owner
                 .acquire(Instant::now() + model, &CancellationToken::new())
                 .await
@@ -738,10 +885,10 @@ mod tests {
         tokio::task::yield_now().await;
         let _ = release.send(());
         let rows = waiters.join_all().await;
-        assert!(
-            rows.iter()
-                .all(|row| row.as_ref().is_ok_and(|r| r.access_key_id == "ASIA3600"))
-        );
+        assert!(rows.iter().all(|row| {
+            row.as_ref()
+                .is_ok_and(|r| r.row.access_key_id == "ASIA3600")
+        }));
         assert_eq!(h.fake.calls(), 1, "32 waiters share one physical refresh");
         for _ in 0..100 {
             h.acquire_for(MODEL).await.expect("warm row");

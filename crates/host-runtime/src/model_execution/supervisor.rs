@@ -26,7 +26,7 @@ use super::backend::{
 use super::config::{
     KEY_META_OVERHEAD_BYTES, ModelExecutionLimits, SESSION_IDENTITY_COPIES, TERMINAL_HEADROOM_BYTES,
 };
-use super::protocol::{self, RequestError, SendRequest};
+use super::protocol::{self, ErrorScope, RequestError, SendRequest};
 use super::subprocess;
 use crate::wire::{ByteBudget, ByteCharge};
 
@@ -1350,13 +1350,21 @@ fn finish(inner: &Arc<Inner>, run: &Arc<Run>, outcome: TerminalOutcome) {
                 protocol::run_finished_unit(&run.run_id, *finish_reason),
                 Status::Completed,
             ),
-            TerminalOutcome::Backend(BackendTerminal::Failed(error)) => {
-                (protocol::error_unit(&run.run_id, error), Status::Failed)
-            }
+            TerminalOutcome::Backend(BackendTerminal::Failed(error)) => (
+                protocol::error_unit(&run.run_id, error, ErrorScope::Model),
+                Status::Failed,
+            ),
+            TerminalOutcome::Backend(BackendTerminal::SourceFailed(error)) => (
+                protocol::error_unit(&run.run_id, error, ErrorScope::CredentialSource),
+                Status::Failed,
+            ),
             // `work_unresolved` prevents cancel and delete from reporting success while backend work may still run.
             TerminalOutcome::Backend(BackendTerminal::FailedUnresolved(error)) => {
                 mark_unresolved(inner, &mut state);
-                (protocol::error_unit(&run.run_id, error), Status::Failed)
+                (
+                    protocol::error_unit(&run.run_id, error, ErrorScope::Model),
+                    Status::Failed,
+                )
             }
             TerminalOutcome::Cancelled { message } => (
                 protocol::error_unit(
@@ -1367,6 +1375,7 @@ fn finish(inner: &Arc<Inner>, run: &Arc<Run>, outcome: TerminalOutcome) {
                         retry_after_secs: None,
                         provider_code: None,
                     },
+                    ErrorScope::Model,
                 ),
                 Status::Cancelled,
             ),

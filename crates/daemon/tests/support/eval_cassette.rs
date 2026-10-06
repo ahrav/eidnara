@@ -114,6 +114,7 @@ enum WireTerminal {
     Completed { finish_reason: String },
     Failed(WireError),
     FailedUnresolved(WireError),
+    SourceFailed(WireError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +160,7 @@ impl From<&BackendTerminal> for WireTerminal {
             },
             BackendTerminal::Failed(error) => Self::Failed(error.into()),
             BackendTerminal::FailedUnresolved(error) => Self::FailedUnresolved(error.into()),
+            BackendTerminal::SourceFailed(error) => Self::SourceFailed(error.into()),
         }
     }
 }
@@ -244,6 +246,7 @@ impl TryFrom<WireTerminal> for BackendTerminal {
             },
             WireTerminal::Failed(error) => Self::Failed(error.try_into()?),
             WireTerminal::FailedUnresolved(error) => Self::FailedUnresolved(error.try_into()?),
+            WireTerminal::SourceFailed(error) => Self::SourceFailed(error.try_into()?),
         })
     }
 }
