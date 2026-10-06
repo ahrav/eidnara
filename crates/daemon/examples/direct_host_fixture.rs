@@ -27,7 +27,7 @@ mod unix {
     use std::io::{self, Write};
     use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -123,6 +123,9 @@ mod unix {
 
     struct ControlledBackend {
         next: Mutex<NextBehavior>,
+        /// While set, every call fails as a source outage would.
+        outage: AtomicBool,
+        latency: Option<Duration>,
         blocked: BlockedQueue,
         next_blocked_id: Arc<AtomicU64>,
         shutdown: CancellationToken,
@@ -133,6 +136,11 @@ mod unix {
         fn new(shutdown: CancellationToken) -> Arc<Self> {
             Arc::new(Self {
                 next: Mutex::new(NextBehavior::Success),
+                outage: AtomicBool::new(false),
+                latency: std::env::var(SUMMARIZER_LATENCY_ENV)
+                    .ok()
+                    .and_then(|ms| ms.parse::<u64>().ok())
+                    .map(Duration::from_millis),
                 blocked: Arc::new(Mutex::new(VecDeque::new())),
                 next_blocked_id: Arc::new(AtomicU64::new(0)),
                 shutdown,
@@ -307,6 +315,9 @@ mod unix {
     /// segments a real model wrote.
     const SUMMARIZER_COMMAND_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_COMMAND";
     const SUMMARIZER_DUMP_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_DUMP";
+    /// Milliseconds every model call waits before it answers, the qualification
+    /// campaign's fake-model latency.
+    const SUMMARIZER_LATENCY_ENV: &str = "EIDNARA_FIXTURE_SUMMARIZER_LATENCY_MS";
 
     /// Runs the configured summarizer command over one request as the leader
     /// of its own process group. Dropping this future before the command
@@ -377,10 +388,14 @@ mod unix {
             cancel: CancellationToken,
         ) -> BackendFuture {
             self.counters.started.fetch_add(1, Ordering::SeqCst);
-            let behavior = std::mem::replace(
-                &mut *self.next.lock().expect("fixture backend behavior mutex"),
-                NextBehavior::Success,
-            );
+            let behavior = if self.outage.load(Ordering::SeqCst) {
+                NextBehavior::Failure
+            } else {
+                std::mem::replace(
+                    &mut *self.next.lock().expect("fixture backend behavior mutex"),
+                    NextBehavior::Success,
+                )
+            };
             // A summarizer prompt is answered in the summarizer's format
             // whatever the scheduled behavior; the controls script transport
             // outcomes, not what a summary says.
@@ -425,7 +440,21 @@ mod unix {
             let next_blocked_id = Arc::clone(&self.next_blocked_id);
             let shutdown = self.shutdown.clone();
             let counters = Arc::clone(&self.counters);
+            let latency = self.latency;
             Box::pin(async move {
+                if let Some(latency) = latency {
+                    tokio::select! {
+                        () = tokio::time::sleep(latency) => {}
+                        () = shutdown.cancelled() => {
+                            counters.cancelled.fetch_add(1, Ordering::SeqCst);
+                            return ControlledBackend::terminal_error("fixture shutting down");
+                        }
+                        () = cancel.cancelled() => {
+                            counters.cancelled.fetch_add(1, Ordering::SeqCst);
+                            return ControlledBackend::terminal_error("fixture run cancelled");
+                        }
+                    }
+                }
                 if let Some(error) = undumped {
                     counters.failed.fetch_add(1, Ordering::SeqCst);
                     return ControlledBackend::terminal_error(&error);
@@ -593,6 +622,9 @@ mod unix {
         BlockNextCall,
         ReleaseBlockedCall,
         TypedFailure,
+        /// Every later call fails until `outage-end`.
+        OutageBegin,
+        OutageEnd,
         Counters,
         /// The newest native-serving pass's auto-search decision and its fate, as the host recorded it.
         UserHintOutcome,
@@ -735,6 +767,14 @@ mod unix {
                             ),
                             ControlCommand::TypedFailure => {
                                 backend.set_next(NextBehavior::Failure);
+                                (ControlResult::Ack { accepted: true }, false)
+                            }
+                            ControlCommand::OutageBegin => {
+                                backend.outage.store(true, Ordering::SeqCst);
+                                (ControlResult::Ack { accepted: true }, false)
+                            }
+                            ControlCommand::OutageEnd => {
+                                backend.outage.store(false, Ordering::SeqCst);
                                 (ControlResult::Ack { accepted: true }, false)
                             }
                             ControlCommand::Counters => {
@@ -1233,6 +1273,8 @@ mod unix {
                 "status": "ready",
                 "wire_version": 3,
                 "catalog": CATALOG,
+                "debug_assertions": cfg!(debug_assertions),
+                "model_workers": host_runtime::model_execution::config::MAX_BACKEND_PROCESSES,
             });
             let mut stdout = io::stdout().lock();
             serde_json::to_writer(&mut stdout, &record)?;

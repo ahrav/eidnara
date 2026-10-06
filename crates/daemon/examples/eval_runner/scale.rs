@@ -20,6 +20,19 @@ use serde_json::{Value, json};
 pub const SEED_USAGE: &str = "scale-seed --state-root <dir> --session <id> --segments <n>";
 pub const REPORT_USAGE: &str = "scale-report --rows <jsonl> --manifest <json> --out <report.json>";
 
+pub fn commit_anchor(store: &MemoryStore, session: &str, end: i64) -> io::Result<()> {
+    let loaded = store.load(session).map_err(io::Error::other)?;
+    let mut core = loaded.core.clone();
+    core.boundary_id = format!("m{end}#0");
+    let mut meta = loaded.meta.clone();
+    meta.ordinal_continuation_base = Some((end - 2) as u64);
+    meta.coverage_ordinal = Some(end as u64);
+    store
+        .commit(session, loaded.row_version, &core, &meta)
+        .map(drop)
+        .map_err(io::Error::other)
+}
+
 /// Seeds `--segments` synthetic history segments of two messages each into `--session` of the
 /// fixture store under `--state-root`, with the ordinal continuation base the newest segment
 /// ends on and that segment's end as the rendered boundary, so `transform.boundary` pages
@@ -41,15 +54,7 @@ pub fn run_seed(args: impl Iterator<Item = String>) -> io::Result<()> {
     let history = SyntheticHistory::mixed(segments);
     history.seed(&store, session);
     let end = history.span * segments as i64;
-    let loaded = store.load(session).map_err(io::Error::other)?;
-    let mut core = loaded.core.clone();
-    core.boundary_id = format!("m{end}#0");
-    let mut meta = loaded.meta.clone();
-    meta.ordinal_continuation_base = Some((end - 2) as u64);
-    meta.coverage_ordinal = Some(end as u64);
-    store
-        .commit(session, None, &core, &meta)
-        .map_err(io::Error::other)?;
+    commit_anchor(&store, session, end)?;
     println!(
         "{}",
         json!({

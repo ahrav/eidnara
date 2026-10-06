@@ -109,6 +109,8 @@ describe("direct host fixture contract", () => {
                 status: "ready",
                 wire_version: 3,
                 catalog: ["context", "local_embeddings", "model_execution"],
+                debug_assertions: true,
+                model_workers: 8,
             }),
         );
         expect(__hermeticHostTest.parseReadyRecord(valid).status).toBe("ready");
@@ -145,7 +147,7 @@ describe("direct host fixture contract", () => {
         const fixtureBin = join(root, "early-ready-fixture.sh");
         writeFileSync(
             fixtureBin,
-            `#!/bin/sh\nprintf '%s\\n' '{"status":"ready","wire_version":3,"catalog":["context","local_embeddings","model_execution"]}'\nsleep 1\nmkdir -p "$2/eidnara/run"\n: > "$2/direct-host-control.sock"\n: > "$2/eidnara/run/connection.json"\nsleep 60\n`,
+            `#!/bin/sh\nprintf '%s\\n' '{"status":"ready","wire_version":3,"catalog":["context","local_embeddings","model_execution"],"debug_assertions":true,"model_workers":8}'\nsleep 1\nmkdir -p "$2/eidnara/run"\n: > "$2/direct-host-control.sock"\n: > "$2/eidnara/run/connection.json"\nsleep 60\n`,
             { mode: 0o700 },
         );
 

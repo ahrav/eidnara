@@ -16391,7 +16391,7 @@ fn apply_note_evaluation_outcome(
 
 const MAX_FACADE_FRAME_BYTES: usize = 1024 * 1024;
 /// The 64 MiB transport frame ceiling permits a 32 MiB body cap while reserving envelope overhead.
-const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_TRANSFORM_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Default)]
 struct RequestEntryProbe {

@@ -432,7 +432,9 @@ const MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES: usize = 256 * 1024;
 const MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES: usize = 512 * 1024;
 const CHUNK_TRANSCRIPT_TRUNCATION_MARKER: &str =
     "\n[truncated: transcript exceeded the inflated-byte limit]";
-const MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES: i64 = 8 * 1024 * 1024;
+/// `evict_chunk_transcripts_tx` deletes a session's oldest transcripts until their compressed
+/// total is at most this many bytes.
+pub const MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES: i64 = 8 * 1024 * 1024;
 const PASS_SCHEDULER_HISTORY_CAP: usize = 256;
 const PASS_SCHEDULER_INTERESTING_HISTORY_CAP: usize = 256;
 /// The recency entry is at most 352 bytes: the longest decision, action, and reason, and every

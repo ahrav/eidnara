@@ -27,8 +27,13 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// `EIDNARA_DIRECT_HOST_FIXTURE_BIN` names a prebuilt fixture, such as a release build for a
+/// measurement campaign; otherwise the debug example is built.
 pub fn fixture_binary() -> PathBuf {
-    example_binary("direct_host_fixture", "direct-host-fixture")
+    match std::env::var_os("EIDNARA_DIRECT_HOST_FIXTURE_BIN") {
+        Some(path) => PathBuf::from(path),
+        None => example_binary("direct_host_fixture", "direct-host-fixture"),
+    }
 }
 
 /// Builds one of the daemon's examples under `features` and returns its
@@ -257,6 +262,11 @@ impl FixtureProcess {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The fixture process id, for sampling its resource counters.
+    pub fn pid(&self) -> u32 {
+        self.child.as_ref().expect("fixture child").id()
     }
 
     pub fn control_path(&self) -> PathBuf {

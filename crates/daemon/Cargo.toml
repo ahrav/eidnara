@@ -103,5 +103,7 @@ eval-core = { workspace = true }
 # The evaluator's shell reaches the retrieval fault seams only from tests.
 retrieval = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
+# The qualification campaign deflates seeded raw transcripts the way the store does.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 filetime = "0.2"
 rcgen = { workspace = true }
