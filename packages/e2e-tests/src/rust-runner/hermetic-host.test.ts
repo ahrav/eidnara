@@ -114,6 +114,33 @@ describe("direct host fixture contract", () => {
             }),
         );
         expect(__hermeticHostTest.parseReadyRecord(valid).status).toBe("ready");
+        const priorFixture = Buffer.from(
+            JSON.stringify({
+                status: "ready",
+                wire_version: 3,
+                catalog: ["context", "local_embeddings", "model_execution"],
+            }),
+        );
+        expect(__hermeticHostTest.parseReadyRecord(priorFixture).status).toBe("ready");
+        for (const partial of [
+            { debug_assertions: true },
+            { model_workers: 8 },
+            { debug_assertions: "yes", model_workers: 8 },
+            { debug_assertions: true, model_workers: 1.5 },
+        ]) {
+            expect(() =>
+                __hermeticHostTest.parseReadyRecord(
+                    Buffer.from(
+                        JSON.stringify({
+                            status: "ready",
+                            wire_version: 3,
+                            catalog: ["context", "local_embeddings", "model_execution"],
+                            ...partial,
+                        }),
+                    ),
+                ),
+            ).toThrow();
+        }
         expect(() =>
             __hermeticHostTest.parseReadyRecord(
                 Buffer.from('{"status":"ready","wire_version":3,"catalog":[],"key":"secret"}'),
