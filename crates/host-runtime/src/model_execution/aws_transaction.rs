@@ -491,7 +491,7 @@ fn helper_spec(input: &TransactionInput<'_>, dir: &PrivateDir, stdin: Vec<u8>) -
 }
 
 /// Creates `.aws/sso/cache` under the scratch `HOME` with `0700` directories and
-/// writes the supplied token as a fresh `0600` file.
+/// writes the supplied token as a fresh `0600` file, in one blocking step.
 async fn prepare_home(
     dir: &PrivateDir,
     sso: Option<&SsoToken>,
@@ -501,21 +501,19 @@ async fn prepare_home(
         return Ok(());
     };
     let home = dir.path().to_path_buf();
+    let name = format!(".aws/sso/cache/{}", sso.file_name);
+    let token = Zeroizing::new(token.to_vec());
     subprocess::off_runtime(move || {
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
-        let mut path = home;
+        let mut path = home.clone();
         for part in [".aws", "sso", "cache"] {
             path.push(part);
             builder.create(&path)?;
         }
-        Ok::<_, std::io::Error>(())
+        PrivateDir::write_private_at(&home, &name, &token).map(drop)
     })
-    .await??;
-    let name = format!(".aws/sso/cache/{}", sso.file_name);
-    dir.write_private_async(name, token.to_vec())
-        .await
-        .map(drop)
+    .await?
 }
 
 struct SsoToken {

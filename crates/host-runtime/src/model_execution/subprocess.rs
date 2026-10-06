@@ -1348,7 +1348,7 @@ impl PrivateDir {
         off_runtime(move || Self::write_private_at(&dir, &name, &bytes)).await?
     }
 
-    fn write_private_at(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    pub(crate) fn write_private_at(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         use std::io::Write;
         let path = dir.join(name);
         // `create_new` rejects existing entries and symlinks, so success uses a previously absent pathname.
