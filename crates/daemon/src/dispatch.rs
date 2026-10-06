@@ -99,9 +99,7 @@ impl PreparedSegment {
                 crate::edit_recipe::validate_json_nesting(value).is_ok_and(|depth| depth <= limit)
             }
             PreparedSegmentSource::Exact(bytes) => encoded_depth_within(bytes, limit),
-            PreparedSegmentSource::Served(message) => {
-                encoded_depth_within(message.canonical_bytes(), limit)
-            }
+            PreparedSegmentSource::Served(message) => message.nesting_depth() <= limit,
         }
     }
 
@@ -641,5 +639,74 @@ impl<W: Write> Write for BoundedWriter<'_, W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
+
+    /// A served message whose tool input nests `levels` arrays inside the block's own containers.
+    fn served_with_nested_input(levels: usize) -> PreparedSegment {
+        let mut input = serde_json::json!("leaf [brackets] {braces} \\\"quotes\\\"");
+        for _ in 0..levels {
+            input = serde_json::json!([input]);
+        }
+        let message = WireMessage::from_parts(
+            "assistant",
+            vec![WireBlock::bare(BlockKind::ToolCall {
+                id: "call-1".into(),
+                name: "read".into(),
+                input,
+                provider_executed: false,
+            })],
+            None,
+            ProviderExtras::new(),
+            HarnessMeta::default(),
+        );
+        PreparedSegment::served(crate::transform::served_message_for_test(message))
+    }
+
+    #[test]
+    fn served_segment_depth_agrees_with_the_byte_scan_at_the_recipe_limit() {
+        let limit = crate::edit_recipe::MAX_JSON_NESTING - 4;
+        let mut seen_both = (false, false);
+        for levels in 0..=limit {
+            let segment = served_with_nested_input(levels);
+            let PreparedSegmentSource::Served(message) = &segment.source else {
+                unreachable!("served segments keep their message");
+            };
+            let scanned = encoded_depth_within(message.canonical_bytes(), limit);
+            assert_eq!(
+                segment.fits_recipe_depth(),
+                scanned,
+                "{levels} nested levels, measured depth {}",
+                message.nesting_depth()
+            );
+            match scanned {
+                true => seen_both.0 = true,
+                false => seen_both.1 = true,
+            }
+        }
+        assert_eq!(seen_both, (true, true), "the sweep crosses the limit");
+    }
+
+    #[test]
+    fn served_segment_past_the_recipe_limit_is_refused() {
+        let limit = crate::edit_recipe::MAX_JSON_NESTING - 4;
+        let envelope = || serde_json::json!({"status": "ok", "operations": null});
+        let fitting = served_with_nested_input(limit.saturating_sub(4));
+        assert!(fitting.fits_recipe_depth());
+        PreparedOutput::transform_recipe(envelope(), vec![RecipeSegment::Insert(vec![fitting])])
+            .expect("a served message within the limit is accepted");
+        let too_deep = served_with_nested_input(limit);
+        assert!(matches!(
+            PreparedOutput::transform_recipe(
+                envelope(),
+                vec![RecipeSegment::Insert(vec![too_deep])]
+            ),
+            Err(PreparedOutputError::RecipeNestingTooDeep)
+        ));
     }
 }

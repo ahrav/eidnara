@@ -38,10 +38,32 @@ struct SpanFormatter<'a> {
     position: &'a Cell<usize>,
     objects: &'a mut Vec<ObjectSpans>,
     stack: Vec<usize>,
+    /// Open containers at the current write position.
+    depth: usize,
+    /// The deepest container nesting the document reaches; the root container is depth 1.
+    max_depth: &'a Cell<usize>,
+}
+
+impl SpanFormatter<'_> {
+    fn enter_container(&mut self) {
+        self.depth += 1;
+        self.max_depth.set(self.max_depth.get().max(self.depth));
+    }
 }
 
 impl Formatter for SpanFormatter<'_> {
+    fn begin_array<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        self.enter_container();
+        CompactFormatter.begin_array(writer)
+    }
+
+    fn end_array<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        self.depth -= 1;
+        CompactFormatter.end_array(writer)
+    }
+
     fn begin_object<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
+        self.enter_container();
         self.stack.push(self.objects.len());
         self.objects.push(ObjectSpans {
             bytes: self.position.get()..0,
@@ -52,6 +74,7 @@ impl Formatter for SpanFormatter<'_> {
 
     fn end_object<W: ?Sized + Write>(&mut self, writer: &mut W) -> io::Result<()> {
         CompactFormatter.end_object(writer)?;
+        self.depth -= 1;
         let index = self.stack.pop().expect("serde closes an open object");
         self.objects[index].bytes.end = self.position.get();
         Ok(())
@@ -109,14 +132,33 @@ fn copy_sorted_range(
     out.extend_from_slice(&bytes[position..range.end]);
 }
 
-/// Serializes a wire message once, preserving serde's scalar forms and field omissions.
-pub(crate) fn to_vec(message: &memory_store::WireMessage) -> serde_json::Result<Vec<u8>> {
-    encode(message)
+/// A message's canonical bytes together with the deepest container nesting they hold,
+/// measured during the one serialization pass; reordering fields moves whole spans and
+/// leaves the nesting unchanged.
+pub(crate) struct CanonicalMessage {
+    pub(crate) bytes: Vec<u8>,
+    /// The root object is depth 1, so a message with scalar-only blocks measures 3.
+    pub(crate) nesting_depth: usize,
+}
+
+/// Serializes a wire message once, preserving serde's scalar forms and field omissions, and
+/// reports the canonical bytes with their nesting depth.
+pub(crate) fn canonical_message(
+    message: &memory_store::WireMessage,
+) -> serde_json::Result<CanonicalMessage> {
+    let encoded = serialize_with_spans(message)?;
+    let nesting_depth = encoded.max_depth;
+    Ok(CanonicalMessage {
+        bytes: finalize(encoded),
+        nesting_depth,
+    })
 }
 
 #[cfg(feature = "test-support")]
 pub fn canonical_served_bytes_for_test(message: &memory_store::WireMessage) -> Vec<u8> {
-    to_vec(message).expect("CK wire message values must always serialize")
+    canonical_message(message)
+        .expect("CK wire message values must always serialize")
+        .bytes
 }
 
 /// The one canonical text of a block: projection identity, served fingerprint
@@ -147,6 +189,8 @@ pub fn canonical_block_bytes_for_test(block: &memory_store::WireBlock) -> String
 struct Encoded {
     bytes: Vec<u8>,
     objects: Vec<ObjectSpans>,
+    /// The deepest container nesting in `bytes`; 0 for a scalar document.
+    max_depth: usize,
 }
 
 #[cfg(test)]
@@ -160,6 +204,7 @@ fn encode(value: &impl Serialize) -> serde_json::Result<Vec<u8>> {
 
 fn serialize_with_spans(value: &impl Serialize) -> serde_json::Result<Encoded> {
     let position = Cell::new(0);
+    let max_depth = Cell::new(0);
     let mut objects = Vec::new();
     let writer = SpanWriter {
         bytes: Vec::new(),
@@ -169,12 +214,15 @@ fn serialize_with_spans(value: &impl Serialize) -> serde_json::Result<Encoded> {
         position: &position,
         objects: &mut objects,
         stack: Vec::new(),
+        depth: 0,
+        max_depth: &max_depth,
     };
     let mut serializer = serde_json::Serializer::with_formatter(writer, formatter);
     value.serialize(&mut serializer)?;
     Ok(Encoded {
         bytes: serializer.into_inner().bytes,
         objects,
+        max_depth: max_depth.get(),
     })
 }
 
@@ -307,6 +355,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nesting_depth_counts_arrays_and_objects_from_the_root_container() {
+        let depth = |value: &serde_json::Value| serialize_with_spans(value).unwrap().max_depth;
+        assert_eq!(depth(&serde_json::json!("scalar")), 0);
+        assert_eq!(depth(&serde_json::json!([])), 1);
+        assert_eq!(depth(&serde_json::json!({"a": 1})), 1);
+        assert_eq!(depth(&serde_json::json!({"a": [1, {"b": []}], "c": 2})), 4);
+        assert_eq!(depth(&serde_json::json!([[["[{\"]"]], [1]])), 3);
+    }
+
+    #[test]
+    fn canonical_message_depth_matches_a_scan_of_the_reordered_bytes() {
+        use memory_store::{BlockKind, HarnessMeta, ProviderExtras, WireBlock, WireMessage};
+        let message = WireMessage::from_parts(
+            "assistant",
+            vec![WireBlock::bare(BlockKind::ToolCall {
+                id: "call".into(),
+                name: "read".into(),
+                input: serde_json::json!({"z": [{"y": [["]}"]]}], "a": 1}),
+                provider_executed: false,
+            })],
+            None,
+            ProviderExtras::new(),
+            HarnessMeta::default(),
+        );
+        let canonical = canonical_message(&message).unwrap();
+        assert_eq!(canonical.bytes, encode(&message).unwrap());
+        let mut depth = 0usize;
+        let mut deepest = 0usize;
+        let mut quoted = false;
+        let mut escaped = false;
+        for &byte in &canonical.bytes {
+            match (quoted, escaped, byte) {
+                (true, true, _) => escaped = false,
+                (true, false, b'\\') => escaped = true,
+                (true, false, b'"') => quoted = false,
+                (true, false, _) => {}
+                (false, _, b'"') => quoted = true,
+                (false, _, b'[' | b'{') => {
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                (false, _, b']' | b'}') => depth -= 1,
+                _ => {}
+            }
+        }
+        assert_eq!(canonical.nesting_depth, deepest);
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            canonical.nesting_depth,
+            crate::edit_recipe::validate_json_nesting(&value).unwrap()
+        );
     }
 
     #[test]

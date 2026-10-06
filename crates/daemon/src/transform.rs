@@ -211,6 +211,8 @@ pub struct ServedMessage {
     canonical_bytes: Arc<[u8]>,
     block_fingerprints: Arc<[(String, usize)]>,
     retained_bytes: usize,
+    /// The deepest container nesting in `canonical_bytes`; the root object is depth 1.
+    nesting_depth: usize,
 }
 
 impl ServedMessage {
@@ -226,10 +228,10 @@ impl ServedMessage {
         // The canonicalizer may hand back its growth buffer with spare capacity;
         // converting to the exact-size `Arc` first keeps that slack from outliving
         // the block-receipt serialization below.
-        let canonical_bytes: Arc<[u8]> = Arc::from(
-            crate::served_json::to_vec(&message)
-                .expect("CK wire message values must always serialize"),
-        );
+        let canonical = crate::served_json::canonical_message(&message)
+            .expect("CK wire message values must always serialize");
+        let nesting_depth = canonical.nesting_depth;
+        let canonical_bytes: Arc<[u8]> = Arc::from(canonical.bytes);
         let mut by_index = HashMap::new();
         for flat in projected_blocks.into_iter().flatten().copied() {
             by_index.entry(flat.block_index).or_insert(flat);
@@ -275,6 +277,7 @@ impl ServedMessage {
             canonical_bytes,
             block_fingerprints,
             retained_bytes,
+            nesting_depth,
         }
     }
 
@@ -284,6 +287,10 @@ impl ServedMessage {
 
     pub(crate) fn canonical_bytes(&self) -> &[u8] {
         &self.canonical_bytes
+    }
+
+    pub(crate) fn nesting_depth(&self) -> usize {
+        self.nesting_depth
     }
 
     #[cfg(feature = "test-support")]
