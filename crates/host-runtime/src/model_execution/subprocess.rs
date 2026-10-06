@@ -22,6 +22,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use super::backend::{
     BackendError, BackendEvent, BackendTerminal, ErrorClass, EventSink, Harness, SinkStatus,
@@ -338,12 +339,14 @@ pub struct SubprocessSpec {
     /// The child uses `env_clear`; adapter-owned control variables follow snapshot variables and win collisions.
     pub env: Vec<(OsString, OsString)>,
     pub working_dir: PathBuf,
-    pub stdin: Vec<u8>,
+    /// `stdin` can contain secrets, so `Zeroizing` wipes its buffer on drop.
+    pub stdin: Zeroizing<Vec<u8>>,
     /// `inherit_fds` retains descriptors referenced by child path arguments.
     pub inherit_fds: Vec<RawFd>,
     /// The crash-ownership record for the child's process group is written here before the child execs.
     pub state_root: group_registry::StateRoot,
-    /// Resource limits applied to the leader before `exec`; descendants inherit them.
+    /// Each resource limit takes effect for the leader before `exec`, stays within its
+    /// inherited hard limit, and passes to descendants.
     pub rlimits: Vec<(rustix::process::Resource, u64)>,
 }
 
@@ -468,6 +471,15 @@ pub async fn run(
     let child_exec_barrier_read = exec_barrier_read.as_raw_fd();
     let child_pid_report_read = pid_report_read.as_raw_fd();
     let child_exec_barrier_write = exec_barrier_write.as_raw_fd();
+    // Raising a hard limit requires privilege, so each requested limit is capped at the
+    // inherited hard limit and the child keeps whichever bound is tighter.
+    let rlimits: Vec<_> = rlimits
+        .into_iter()
+        .map(|(resource, limit)| {
+            let hard = rustix::process::getrlimit(resource).maximum;
+            (resource, hard.map_or(limit, |hard| limit.min(hard)))
+        })
+        .collect();
     // SAFETY: `pre_exec` runs after `fork` and before `exec`, so its closure must avoid allocation and locking.
     // Every error is built from a raw errno; `io::Error::other` would allocate.
     #[allow(unsafe_code)]
@@ -1054,7 +1066,7 @@ pub(crate) async fn bounded_cleanup(
 
 /// Blocking filesystem and `/proc` jobs are admitted through this many slots, each held until the job actually returns rather than until its caller stops waiting.
 /// A caller that times out drops only its join handle; without the slot, repeated sends against a stalled filesystem would pile up detached jobs, their captured descriptors, and pool threads without bound.
-const BLOCKING_SLOTS: usize = 4 * super::config::MAX_BACKEND_PROCESSES;
+pub(crate) const BLOCKING_SLOTS: usize = 4 * super::config::MAX_BACKEND_PROCESSES;
 
 fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
     static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();

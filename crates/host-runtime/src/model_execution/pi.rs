@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
@@ -438,7 +439,7 @@ async fn run_pi(
         env: child_env,
         working_dir: dir.path().to_path_buf(),
         // The runner moves the prompt because no code reads it after spec construction.
-        stdin: request.prompt.into_bytes(),
+        stdin: Zeroizing::new(request.prompt.into_bytes()),
         // The child does not inherit the closure directory descriptor because no argument references it.
         // Inheriting the closure directory descriptor would give the harness a rename-immune handle.
         // The harness could write through that handle into the validated closure tree.

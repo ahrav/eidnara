@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
@@ -304,7 +305,7 @@ async fn run_opencode(
         args,
         env: child_env,
         working_dir: dir.path().to_path_buf(),
-        stdin: request.prompt.clone().into_bytes(),
+        stdin: Zeroizing::new(request.prompt.clone().into_bytes()),
         // The closure directory descriptor is absent because no argument references it.
         // The harness receives a rename-immune handle for writing into the validated closure tree.
         inherit_fds: vec![executable_node.inherited_fd()],

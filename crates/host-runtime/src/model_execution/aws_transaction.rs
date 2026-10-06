@@ -10,7 +10,6 @@
 
 use std::ffi::OsString;
 use std::io::Read;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -32,6 +31,7 @@ use crate::instance::{
     HARDENED_DIR_FLAGS, S_IFMT, S_IFREG, hex, is_owner_only_dir, is_safe_ancestor, mode_bits,
     normal_components, open_safe_anchor, owner_uid,
 };
+use crate::store_fs::create_owned_dir;
 
 /// Upper bound on the captured owner SSO token and on the private successor.
 pub const MAX_TOKEN_BYTES: usize = 64 * 1024;
@@ -106,7 +106,7 @@ pub struct PrivateToken {
 
 /// Helper process limits. [`Default`] holds the fixed production values, which
 /// release builds always use.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelperLimits {
     pub address_space_bytes: u64,
     pub stack_bytes: u64,
@@ -314,12 +314,8 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
             return outcome;
         }
     }
-    // The helper wall leaves room for TERM, KILL and reap, and the successor read.
-    let helper_wall = deadline
-        .saturating_duration_since(Instant::now())
-        .saturating_sub(3 * GRACE)
-        .min(input.limits.wall);
-    if cancel.is_cancelled() || helper_wall.is_zero() {
+    let limits = launch_limits(&input.limits, !cfg!(debug_assertions));
+    if cancel.is_cancelled() || launch_wall(deadline, &limits).is_zero() {
         outcome.failure = Some(if cancel.is_cancelled() {
             F::Cancelled
         } else {
@@ -332,22 +328,26 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
         return outcome;
     };
     let prepared = prepare_home(&dir, sso.as_ref(), supplied.as_deref().map(Vec::as_slice)).await;
-    let request = serde_json::to_vec(&HelperRequest::from_graph(&graph)).map(Zeroizing::new);
+    let request = helper_request(&graph);
     let mut launch = match (prepared, request) {
-        (Ok(()), Ok(mut request)) => {
-            let spec = helper_spec(&input, &dir, std::mem::take(&mut *request));
-            let limits = SubprocessLimits {
-                run_timeout: helper_wall,
-                termination_grace: GRACE,
-                drain_grace: GRACE,
-                max_stdout_bytes: aws_helper::MAX_REPORT_BYTES,
-                max_stderr_bytes: MAX_STDERR_BYTES,
-            };
-            match subprocess::run(spec, &limits, cancel, None).await {
-                Ok(result) => Launch::Ran(result),
-                Err(error) => Launch::Failed(subprocess::spawn_error_residue(&error)),
+        // The launch deadline includes time spent preparing the scratch directory.
+        (Ok(()), Ok(request)) => match launch_wall(deadline, &limits) {
+            Duration::ZERO => Launch::Expired,
+            helper_wall => {
+                let spec = helper_spec(&input, &dir, &limits, request);
+                let run_limits = SubprocessLimits {
+                    run_timeout: helper_wall,
+                    termination_grace: GRACE,
+                    drain_grace: GRACE,
+                    max_stdout_bytes: aws_helper::MAX_REPORT_BYTES,
+                    max_stderr_bytes: MAX_STDERR_BYTES,
+                };
+                match subprocess::run(spec, &run_limits, cancel, None).await {
+                    Ok(result) => Launch::Ran(result),
+                    Err(error) => Launch::Failed(subprocess::spawn_error_residue(&error)),
+                }
             }
-        }
+        },
         _ => Launch::Failed((false, false)),
     };
     let (group_gone, report) = match &mut launch {
@@ -363,9 +363,11 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
             outcome.record_retained = *record_retained;
             (!*teardown_unproven, None)
         }
+        Launch::Expired => (true, None),
     };
-    let successor = match &sso {
-        Some(sso) if group_gone => {
+    // Only an executed helper can have saved a successor.
+    let successor = match (&sso, &launch) {
+        (Some(sso), Launch::Ran(_)) if group_gone => {
             let path = dir.path().join(".aws/sso/cache").join(&sso.file_name);
             let read = subprocess::off_runtime(move || read_secure(&path, MAX_TOKEN_BYTES, true));
             let bytes = read.await.ok().and_then(Result::ok).flatten();
@@ -429,6 +431,7 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
         }
         Some(HelperReport::Failed { failure, .. }) => Some(F::Helper(failure)),
         None if matches!(launch, Launch::Failed(_)) => Some(F::Spawn),
+        None if matches!(launch, Launch::Expired) => Some(F::BudgetExhausted),
         None => Some(F::HelperUnreported),
     };
     outcome
@@ -447,13 +450,56 @@ fn same_content(a: &TokenObservation, b: &TokenObservation) -> bool {
     }
 }
 
+/// The counting pass reserves exact space for the serialized request, keeping the
+/// static secret it can carry in the one allocation that `Zeroizing` wipes on drop.
+fn helper_request(graph: &aws_profile::AdmittedGraph) -> serde_json::Result<Zeroizing<Vec<u8>>> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let request = HelperRequest::from_graph(graph);
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, &request)?;
+    let mut out = Zeroizing::new(Vec::with_capacity(counter.0));
+    serde_json::to_writer(&mut *out, &request)?;
+    Ok(out)
+}
+
+fn launch_limits(requested: &HelperLimits, release: bool) -> HelperLimits {
+    if release {
+        HelperLimits::default()
+    } else {
+        requested.clone()
+    }
+}
+
+fn launch_wall(deadline: Instant, limits: &HelperLimits) -> Duration {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .saturating_sub(3 * GRACE)
+        .min(limits.wall)
+}
+
 enum Launch {
     Ran(subprocess::SubprocessResult),
     /// No helper ran; the flags report unproven teardown and a retained crash record.
     Failed((bool, bool)),
+    /// The budget expired before helper launch.
+    Expired,
 }
 
-fn helper_spec(input: &TransactionInput<'_>, dir: &PrivateDir, stdin: Vec<u8>) -> SubprocessSpec {
+fn helper_spec(
+    input: &TransactionInput<'_>,
+    dir: &PrivateDir,
+    limits: &HelperLimits,
+    stdin: Zeroizing<Vec<u8>>,
+) -> SubprocessSpec {
     let mut env = vec![(OsString::from("HOME"), dir.path().as_os_str().to_owned())];
     if let Some(origin) = input
         .test_origin
@@ -462,14 +508,10 @@ fn helper_spec(input: &TransactionInput<'_>, dir: &PrivateDir, stdin: Vec<u8>) -
     {
         env.push((aws_helper::TEST_ORIGIN_ENV.into(), origin.into()));
     }
-    // Release builds always launch the running executable with the fixed limits.
-    let release = !cfg!(debug_assertions);
-    let defaults = HelperLimits::default();
-    let limits = if release { &defaults } else { &input.limits };
-    let executable = if release {
-        Path::new("/proc/self/exe")
-    } else {
+    let executable = if cfg!(debug_assertions) {
         input.executable
+    } else {
+        Path::new("/proc/self/exe")
     };
     SubprocessSpec {
         executable: executable.to_path_buf(),
@@ -504,12 +546,9 @@ async fn prepare_home(
     let name = format!(".aws/sso/cache/{}", sso.file_name);
     let token = Zeroizing::new(token.to_vec());
     subprocess::off_runtime(move || {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.mode(0o700);
-        let mut path = home.clone();
+        let mut parent = openat(rustix::fs::CWD, &home, HARDENED_DIR_FLAGS, Mode::empty())?;
         for part in [".aws", "sso", "cache"] {
-            path.push(part);
-            builder.create(&path)?;
+            parent = create_owned_dir(&parent, part)?;
         }
         PrivateDir::write_private_at(&home, &name, &token).map(drop)
     })
@@ -758,6 +797,8 @@ fn read_secure(
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn session() -> SsoToken {
@@ -835,5 +876,137 @@ mod tests {
         let outcome = slot.run(input, &CancellationToken::new()).await;
         assert_eq!(outcome.failure, Some(TransactionFailure::CleanupUnproven));
         assert!(slot.is_unresolved());
+    }
+
+    /// `STATIC_ROLE` feeds a self-referencing role from a static root, so the helper
+    /// request carries the static secret.
+    const STATIC_ROLE: &str = "[profile app]\nrole_arn = arn:aws:iam::444455556666:role/app\nsource_profile = app\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = staticsecret0000\n";
+
+    fn static_owner(dir: &Path) -> OwnerSource {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config_file = dir.join("config");
+        PrivateDir::write_private_at(dir, "config", STATIC_ROLE.as_bytes()).unwrap();
+        OwnerSource {
+            profile: "app".into(),
+            region: "us-west-2".into(),
+            config_file,
+            credentials_file: dir.join("credentials"),
+            sso_cache_root: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn release_launches_use_every_default_limit() {
+        let requested = HelperLimits {
+            address_space_bytes: 1,
+            stack_bytes: 2,
+            open_files: 3,
+            cpu_seconds: 4,
+            file_size_bytes: 5,
+            wall: Duration::from_secs(60),
+        };
+        assert_eq!(launch_limits(&requested, true), HelperLimits::default());
+        assert_eq!(launch_limits(&requested, false), requested);
+    }
+
+    #[test]
+    fn the_helper_request_is_serialized_without_reallocation() {
+        let config = STATIC_ROLE.as_bytes();
+        let graph = aws_profile::admit(CapturedProfileInput {
+            profile: "app",
+            region: "us-west-2",
+            config,
+            credentials: b"",
+        })
+        .expect("static role admits");
+        let request = helper_request(&graph).unwrap();
+        assert_eq!(
+            request.capacity(),
+            request.len(),
+            "a grown buffer leaves unwiped copies of the static secret"
+        );
+        let parsed: HelperRequest = serde_json::from_slice(&request).unwrap();
+        assert_eq!(parsed.config, graph.emit_config());
+    }
+
+    async fn hold_slot() -> std::sync::mpsc::Sender<()> {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, holding) = tokio::sync::oneshot::channel();
+        tokio::spawn(subprocess::off_runtime(move || {
+            let _ = held.send(());
+            let _ = released.recv();
+        }));
+        holding.await.unwrap();
+        release
+    }
+
+    #[tokio::test]
+    async fn a_budget_spent_waiting_for_scratch_launches_no_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = static_owner(dir.path());
+        let state = StateRoot::resolve(Some(dir.path())).unwrap();
+        let mut held = Vec::new();
+        for _ in 0..subprocess::BLOCKING_SLOTS {
+            held.push(hold_slot().await);
+        }
+        let mut slot = TransactionSlot::default();
+        let input = TransactionInput {
+            source: &source,
+            predecessor: None,
+            executable: Path::new("/nonexistent/eidnara-host"),
+            state_root: &state,
+            budget: 3 * GRACE + Duration::from_secs(1),
+            limits: HelperLimits::default(),
+            test_origin: None,
+        };
+        let cancel = CancellationToken::new();
+        let run = slot.run(input, &cancel);
+        let stall_scratch = async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Tokio's semaphore is fair, so this holder, queued after the capture,
+            // receives the slot the capture releases.
+            let (late_release, late_released) = std::sync::mpsc::channel::<()>();
+            tokio::spawn(subprocess::off_runtime(move || {
+                let _ = late_released.recv();
+            }));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(held.pop());
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            drop(late_release);
+            held.clear();
+        };
+        let (outcome, ()) = tokio::join!(run, stall_scratch);
+        assert_eq!(outcome.failure, Some(TransactionFailure::BudgetExhausted));
+        assert_eq!(outcome.renewal, RenewalEvidence::NotStarted);
+        assert!(!slot.is_unresolved());
+        assert_eq!(
+            std::fs::read_dir(state.run_root().unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn scratch_home_directories_are_owner_only_under_any_umask() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateRoot::resolve(Some(dir.path())).unwrap();
+        let home = PrivateDir::create_async(state, "aws-helper").await.unwrap();
+        let sso = SsoToken {
+            file_name: "token.json".into(),
+            ..session()
+        };
+        let previous = rustix::process::umask(Mode::from_raw_mode(0o777));
+        let prepared = prepare_home(&home, Some(&sso), Some(b"{}")).await;
+        rustix::process::umask(previous);
+        prepared.expect("an owner-bit-clearing umask still prepares the scratch HOME");
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        let mut path = home.path().to_path_buf();
+        for part in [".aws", "sso", "cache"] {
+            path.push(part);
+            assert_eq!(mode(&path), 0o700, "{part}");
+        }
+        assert_eq!(mode(&path.join("token.json")), 0o600);
+        home.cleanup().unwrap();
     }
 }
