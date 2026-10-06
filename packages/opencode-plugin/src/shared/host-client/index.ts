@@ -54,6 +54,7 @@ export {
     resetProcessHostClientsForTest,
 } from "./owner";
 export { RouteHandle, StaleRouteHandleError } from "./route-handle";
+export { sourceClaims, sourceClaimVersion } from "./source-claim";
 export {
     AdmissionClass,
     type AuthenticatedPeer,

@@ -10,6 +10,7 @@ pub mod config;
 pub mod opencode;
 pub mod pi;
 pub mod protocol;
+pub mod source_claim;
 pub mod subprocess;
 pub mod supervisor;
 

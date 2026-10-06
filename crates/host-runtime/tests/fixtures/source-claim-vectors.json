@@ -1,0 +1,280 @@
+{
+  "domain": "eidnara-model-execution-credential-v4",
+  "canonicalization": "harness-provider-source/2",
+  "vectors": [
+    {
+      "name": "anthropic env",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "anthropic",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "ANTHROPIC_API_KEY",
+            "secret"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/28:opencode9:anthropic3:env17:ANTHROPIC_API_KEY1:66:secret",
+      "claim": "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218"
+    },
+    {
+      "name": "google env",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "pi",
+      "provider": "google",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "GEMINI_API_KEY",
+            "g-key"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/22:pi6:google3:env14:GEMINI_API_KEY1:55:g-key",
+      "claim": "695e9e9b72344347e39f065448fb2ec75fea562f3cd4dd9b68605c9ce86c258d"
+    },
+    {
+      "name": "bedrock env with token",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "pi",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "AWS_ACCESS_KEY_ID",
+            "ASIA1"
+          ],
+          [
+            "AWS_SECRET_ACCESS_KEY",
+            "s3cr3t"
+          ],
+          [
+            "AWS_SESSION_TOKEN",
+            "tok"
+          ],
+          [
+            "AWS_REGION",
+            "us-east-1"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/22:pi14:amazon-bedrock3:env17:AWS_ACCESS_KEY_ID1:55:ASIA121:AWS_SECRET_ACCESS_KEY1:66:s3cr3t17:AWS_SESSION_TOKEN1:33:tok10:AWS_REGION1:99:us-east-1",
+      "claim": "7f5ff3a096e7c623e600a97209de06cd6f906921cf318d5e5855adec4942f387"
+    },
+    {
+      "name": "bedrock env without token",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "pi",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "AWS_ACCESS_KEY_ID",
+            "AKIA1"
+          ],
+          [
+            "AWS_SECRET_ACCESS_KEY",
+            "s3cr3t"
+          ],
+          [
+            "AWS_REGION",
+            "us-east-1"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/22:pi14:amazon-bedrock3:env17:AWS_ACCESS_KEY_ID1:55:AKIA121:AWS_SECRET_ACCESS_KEY1:66:s3cr3t10:AWS_REGION1:99:us-east-1",
+      "claim": "b89eafbc61e3cff07055989d2ff8d63b6eadf44de59f62771b09efde620baae2"
+    },
+    {
+      "name": "bedrock profile",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "pi",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "aws_profile",
+        "profile": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      },
+      "preimage": "25:harness-provider-source/22:pi14:amazon-bedrock11:aws_profile4:corp9:us-east-119:/home/u/.aws/config24:/home/u/.aws/credentials22:/home/u/.aws/sso/cache",
+      "claim": "b37833b14b6823bc8d9e38525c0d9b527cf983558293a125ed30ea771708372c"
+    },
+    {
+      "name": "bedrock profile under another bearer",
+      "key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "harness": "pi",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "aws_profile",
+        "profile": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      },
+      "preimage": "25:harness-provider-source/22:pi14:amazon-bedrock11:aws_profile4:corp9:us-east-119:/home/u/.aws/config24:/home/u/.aws/credentials22:/home/u/.aws/sso/cache",
+      "claim": "f0941c2bc2f3b9ac9a7d2af8a4ed146772116d6e9560dceed465e03ce31b51d6"
+    },
+    {
+      "name": "bedrock profile for opencode",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "aws_profile",
+        "profile": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      },
+      "preimage": "25:harness-provider-source/28:opencode14:amazon-bedrock11:aws_profile4:corp9:us-east-119:/home/u/.aws/config24:/home/u/.aws/credentials22:/home/u/.aws/sso/cache",
+      "claim": "3963da4d5317dbb5d2120088aa81fd694846e8ef0f7ec871e3be46a2aa31517c"
+    },
+    {
+      "name": "multibyte profile and paths",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "aws_profile",
+        "profile": {
+          "kind": "profile",
+          "profile": "é-corp",
+          "region": "us-east-1",
+          "config_file": "/home/ü/.aws/config",
+          "credentials_file": "/home/ü/.aws/credentials",
+          "sso_cache_root": "/home/ü/.aws/sso/cache"
+        }
+      },
+      "preimage": "25:harness-provider-source/28:opencode14:amazon-bedrock11:aws_profile7:é-corp9:us-east-120:/home/ü/.aws/config25:/home/ü/.aws/credentials23:/home/ü/.aws/sso/cache",
+      "claim": "3e671d993b3b945f7a2e4e69b592252fd5b17374d25e20e5a60cf707713b895d"
+    },
+    {
+      "name": "openai env for opencode",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "openai",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "OPENAI_API_KEY",
+            "o-key"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/28:opencode6:openai3:env14:OPENAI_API_KEY1:55:o-key",
+      "claim": "63aa1ed5359046cd7914f91495d30ba9959e200419335fe81441d20398e293f1"
+    },
+    {
+      "name": "openai env for pi",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "pi",
+      "provider": "openai",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "OPENAI_API_KEY",
+            "o-key"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/22:pi6:openai3:env14:OPENAI_API_KEY1:55:o-key",
+      "claim": "ec840a109083368334b9fc5a62e98e4faa970ac1731aaff0cbc997bf20f9be11"
+    },
+    {
+      "name": "anthropic env for pi",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "pi",
+      "provider": "anthropic",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "ANTHROPIC_API_KEY",
+            "secret"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/22:pi9:anthropic3:env17:ANTHROPIC_API_KEY1:66:secret",
+      "claim": "5e9b7d9d34524dc4c8f545ee94369404fd893e64e3e0c7a42107a0b01127d0ab"
+    },
+    {
+      "name": "google env for opencode",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "google",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "GEMINI_API_KEY",
+            "g-key"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/28:opencode6:google3:env14:GEMINI_API_KEY1:55:g-key",
+      "claim": "c209ffe3aca4aee88217d4a2b08ff090061cecfbe8e18c65577b4cc26c00a9ad"
+    },
+    {
+      "name": "bedrock env for opencode",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "amazon-bedrock",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "AWS_ACCESS_KEY_ID",
+            "AKIA1"
+          ],
+          [
+            "AWS_SECRET_ACCESS_KEY",
+            "s3cr3t"
+          ],
+          [
+            "AWS_REGION",
+            "us-east-1"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/28:opencode14:amazon-bedrock3:env17:AWS_ACCESS_KEY_ID1:55:AKIA121:AWS_SECRET_ACCESS_KEY1:66:s3cr3t10:AWS_REGION1:99:us-east-1",
+      "claim": "7527bd15cb200b09d3b37e3cb46f4be327937d987978dd31fcada35566563554"
+    },
+    {
+      "name": "multibyte env value",
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "harness": "opencode",
+      "provider": "anthropic",
+      "source": {
+        "kind": "env",
+        "entries": [
+          [
+            "ANTHROPIC_API_KEY",
+            "kéy—π"
+          ]
+        ]
+      },
+      "preimage": "25:harness-provider-source/28:opencode9:anthropic3:env17:ANTHROPIC_API_KEY1:99:kéy—π",
+      "claim": "fe4015f6fa54f878f5ad19466a5538fc2d5673bc9a67d5dd49638e751911c140"
+    }
+  ]
+}

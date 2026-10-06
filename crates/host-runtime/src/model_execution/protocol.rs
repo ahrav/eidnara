@@ -372,6 +372,39 @@ pub fn error_unit(run_id: &str, error: &BackendError) -> Vec<u8> {
     }))
 }
 
+/// The origin an `error` unit's `scope` names. An absent `scope` is `Model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorScope {
+    Model,
+    CredentialSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownErrorScope(pub serde_json::Value);
+
+impl ErrorScope {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::CredentialSource => "credential_source",
+        }
+    }
+
+    pub fn decode(error_body: &serde_json::Value) -> Result<Self, UnknownErrorScope> {
+        let Some(body) = error_body.as_object() else {
+            return Err(UnknownErrorScope(error_body.clone()));
+        };
+        let Some(scope) = body.get("scope") else {
+            return Ok(Self::Model);
+        };
+        match scope.as_str() {
+            Some("model") => Ok(Self::Model),
+            Some("credential_source") => Ok(Self::CredentialSource),
+            _ => Err(UnknownErrorScope(scope.clone())),
+        }
+    }
+}
+
 /// `bounded` counts JSON-escaped bytes before truncating diagnostics.
 /// `bounded` charges two bytes for `"`, `\\`, and short JSON escapes.
 /// Other ASCII control characters require six JSON-escaped bytes.

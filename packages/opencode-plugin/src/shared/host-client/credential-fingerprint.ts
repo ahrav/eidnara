@@ -61,29 +61,33 @@ export function credentialFingerprints(
     }
     const derivedKey = createHmac("sha256", connectionKey).update(DOMAIN).digest();
     const fingerprints: Partial<Record<ModelExecutionProvider, string>> = {};
-    for (const [provider, row] of Object.entries(PROVIDER_ROWS) as [
-        ModelExecutionProvider,
-        { order: readonly string[]; optional: readonly string[] },
-    ][]) {
-        const entries: [string, string][] = [];
-        let complete = true;
-        for (const name of row.order) {
-            const value = source[name];
-            // An unqualified value drops only this provider's row, matching the host's per-provider `provider_row` in `crates/host-runtime/src/model_execution/subprocess.rs`.
-            if (value === undefined || value.length === 0) {
-                if (row.optional.includes(name)) continue;
-                complete = false;
-                break;
-            }
-            if (Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES) {
-                complete = false;
-                break;
-            }
-            entries.push([name, value]);
-        }
-        if (!complete) continue;
+    for (const provider of MODEL_EXECUTION_PROVIDERS) {
+        const entries = providerRowEntries(provider, source);
+        if (entries === undefined) continue;
         const message = canonicalCredentialRowEncoding(harness, provider, entries);
         fingerprints[provider] = createHmac("sha256", derivedKey).update(message).digest("hex");
     }
     return Object.freeze(fingerprints);
+}
+
+export const MODEL_EXECUTION_PROVIDERS = Object.freeze(
+    Object.keys(PROVIDER_ROWS) as ModelExecutionProvider[],
+);
+
+export function providerRowEntries(
+    provider: ModelExecutionProvider,
+    source: Readonly<Record<string, string | undefined>>,
+): [string, string][] | undefined {
+    const row: { order: readonly string[]; optional: readonly string[] } = PROVIDER_ROWS[provider];
+    const entries: [string, string][] = [];
+    for (const name of row.order) {
+        const value = source[name];
+        if (value === undefined || value.length === 0) {
+            if (row.optional.includes(name)) continue;
+            return undefined;
+        }
+        if (Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES) return undefined;
+        entries.push([name, value]);
+    }
+    return entries;
 }
