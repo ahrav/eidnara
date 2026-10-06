@@ -309,6 +309,7 @@ async fn run_opencode(
         // The harness receives a rename-immune handle for writing into the validated closure tree.
         inherit_fds: vec![executable_node.inherited_fd()],
         state_root,
+        rlimits: Vec::new(),
     };
 
     // The OpenCode CLI closes its streams and exits when the run finishes, so EOF and the drain grace bound the tail without a terminal probe.

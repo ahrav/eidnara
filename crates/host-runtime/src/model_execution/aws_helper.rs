@@ -47,7 +47,7 @@ pub const MAX_FIELD_BYTES: usize = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Debug builds redirect admitted destinations to this loopback port for tests.
-const TEST_ORIGIN_ENV: &str = "EIDNARA_HOST_TEST_AWS_ORIGIN";
+pub(crate) const TEST_ORIGIN_ENV: &str = "EIDNARA_HOST_TEST_AWS_ORIGIN";
 
 /// Canonical admitted graph sent by the parent on stdin.
 #[derive(Serialize, Deserialize)]

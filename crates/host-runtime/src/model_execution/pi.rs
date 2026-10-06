@@ -451,6 +451,7 @@ async fn run_pi(
             )
             .collect(),
         state_root,
+        rlimits: Vec::new(),
     };
 
     // The subprocess receives only the budget remaining after setup, so setup plus execution stay within one attempt budget for first attempts and retries alike.

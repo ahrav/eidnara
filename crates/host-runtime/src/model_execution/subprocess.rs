@@ -343,6 +343,8 @@ pub struct SubprocessSpec {
     pub inherit_fds: Vec<RawFd>,
     /// The crash-ownership record for the child's process group is written here before the child execs.
     pub state_root: group_registry::StateRoot,
+    /// Resource limits applied to the leader before `exec`; descendants inherit them.
+    pub rlimits: Vec<(rustix::process::Resource, u64)>,
 }
 
 /// child output.
@@ -410,6 +412,7 @@ pub async fn run(
         stdin: prompt,
         inherit_fds,
         state_root,
+        rlimits,
     } = spec;
     // The budget is anchored before spawn and registration: a slow crash-record publication
     // consumes this run's budget rather than granting the child a stale full remainder measured
@@ -476,6 +479,18 @@ pub async fn run(
             if parent != Some(host_pid) {
                 // The host exited before spawn completed.
                 return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            for (resource, limit) in &rlimits {
+                let limit = rustix::process::Rlimit {
+                    current: Some(*limit),
+                    maximum: Some(*limit),
+                };
+                rustix::process::setrlimit(*resource, limit)?;
+                // An ignored SIGXFSZ turns a write past the file-size limit into
+                // `EFBIG`, so the child reports the failure instead of dying.
+                if *resource == rustix::process::Resource::Fsize {
+                    libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                }
             }
             for fd in &child_inherit_fds {
                 if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
@@ -1531,6 +1546,15 @@ pub(crate) fn budget_exhausted_failure(harness: Harness) -> BackendTerminal {
         retry_after_secs: None,
         provider_code: None,
     })
+}
+
+/// Whether a `run` error leaves the process group or its crash record unresolved.
+pub(crate) fn spawn_error_residue(err: &io::Error) -> (bool, bool) {
+    let inner = err.get_ref();
+    (
+        inner.is_some_and(|inner| inner.is::<RegistrationTeardownUnproven>()),
+        inner.is_some_and(|inner| inner.is::<SpawnRecordRetained>()),
+    )
 }
 
 pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTerminal {
