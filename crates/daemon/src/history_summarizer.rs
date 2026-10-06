@@ -1830,6 +1830,13 @@ fn cancellation_confirmed_stopped(result: &Result<(), HistorySummarizerProducerE
     result.is_ok()
 }
 
+/// A start failure proves its model did not run only through a `NotSent` or `Terminal` send
+/// outcome. Any other start failure may still bill, so the firing starts no further model.
+fn start_effect_proven(err: &HistorySummarizerProducerError) -> bool {
+    use crate::history_summarizer_producer::HistorySummarizerSendOutcome::{NotSent, Terminal};
+    matches!(err.send_outcome(), Some(NotSent | Terminal))
+}
+
 pub async fn run_history_summarizer_firing<P>(
     producer: &mut P,
     request: HistorySummarizerFireRequest<'_>,
@@ -1951,7 +1958,7 @@ where
                         AbandonClass::ProducerFailed,
                     ),
                 )?;
-                if decision.try_next_model {
+                if decision.try_next_model && start_effect_proven(&err) {
                     let cleanup = producer.close_attempt().await;
                     log_cleanup_failure(request.session_id, "attempt close", &cleanup);
                     continue;
@@ -4524,6 +4531,145 @@ mod tests {
         let history_summarizer = store.load("ses").unwrap().meta.history_summarizer;
         assert_eq!(history_summarizer.state, HistorySummarizerPhase::Idle);
         assert_eq!(history_summarizer.failure_backoff_at_ms, Some(10_876));
+    }
+
+    async fn unproven_start_failure_witness(
+        error: HistorySummarizerProducerError,
+    ) -> (
+        HistorySummarizerDriveError,
+        ScriptedProducer,
+        HistorySummarizerDurableState,
+    ) {
+        fn completed_at() -> i64 {
+            10_000
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_owned(), "prov/model-b".to_owned()];
+        let mut producer = ScriptedProducer::default()
+            .with_start(Err(error))
+            .with_start(Ok(run_handle("run-2")))
+            .with_output(Ok(producer_output(history_summarizer_xml(
+                "unsafe fallback",
+            ))));
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.completion_now_ms = completed_at;
+        let error = run_history_summarizer_firing(&mut producer, request)
+            .await
+            .unwrap_err();
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        (error, producer, state)
+    }
+
+    #[tokio::test]
+    async fn a_start_failure_with_an_unproven_effect_starts_no_second_model() {
+        use crate::history_summarizer_producer::{
+            HistorySummarizerCallFailure, HistorySummarizerSendOutcome,
+        };
+        let retry_looking =
+            HistorySummarizerProducerError::Call(HistorySummarizerCallFailure::untagged(
+                HistorySummarizerSendOutcome::OutcomeUnknown,
+                "provider_unavailable",
+                "transient rate_limit, retry later",
+            ));
+        for error in [retry_looking, HistorySummarizerProducerError::MissingRunId] {
+            let label = format!("{error:?}");
+            let (returned, producer, state) = unproven_start_failure_witness(error).await;
+            assert!(
+                matches!(returned, HistorySummarizerDriveError::Producer(_)),
+                "{label}"
+            );
+            assert!(
+                !is_chunk_failure(&returned),
+                "{label}: no chunk failure counted"
+            );
+            assert_eq!(
+                producer.observed_starts.len(),
+                1,
+                "{label}: no second model"
+            );
+            assert_eq!(producer.observed_starts[0].1, "prov/model-a", "{label}");
+            assert_eq!(state.state, HistorySummarizerPhase::Idle, "{label}");
+            assert_eq!(state.failure_backoff_at_ms, Some(10_876), "{label}");
+        }
+    }
+
+    #[test]
+    fn only_a_not_sent_or_terminal_start_outcome_proves_the_model_did_not_run() {
+        use crate::history_summarizer_producer::{
+            HistorySummarizerCallFailure, HistorySummarizerSendOutcome,
+        };
+        let call = |outcome| {
+            HistorySummarizerProducerError::Call(HistorySummarizerCallFailure::untagged(
+                outcome,
+                "provider_unavailable",
+                "retry later",
+            ))
+        };
+        let wrapped = |primary| HistorySummarizerProducerError::CleanupFailed {
+            operation: "close",
+            primary: Some(Box::new(primary)),
+            cleanup: Box::new(HistorySummarizerProducerError::TimedOut),
+        };
+        assert!(start_effect_proven(&call(
+            HistorySummarizerSendOutcome::NotSent
+        )));
+        assert!(start_effect_proven(&call(
+            HistorySummarizerSendOutcome::Terminal
+        )));
+        assert!(!start_effect_proven(&call(
+            HistorySummarizerSendOutcome::OutcomeUnknown
+        )));
+        assert!(!start_effect_proven(
+            &HistorySummarizerProducerError::MissingRunId
+        ));
+        assert!(start_effect_proven(&wrapped(call(
+            HistorySummarizerSendOutcome::NotSent
+        ))));
+        assert!(!start_effect_proven(&wrapped(call(
+            HistorySummarizerSendOutcome::OutcomeUnknown
+        ))));
+    }
+
+    #[tokio::test]
+    async fn a_not_sent_start_failure_with_the_same_text_falls_back() {
+        use crate::history_summarizer_producer::{
+            HistorySummarizerCallFailure, HistorySummarizerSendOutcome,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec!["prov/model-a".to_owned(), "prov/model-b".to_owned()];
+        let mut producer = ScriptedProducer::default()
+            .with_start(Err(HistorySummarizerProducerError::Call(
+                HistorySummarizerCallFailure::untagged(
+                    HistorySummarizerSendOutcome::NotSent,
+                    "provider_unavailable",
+                    "transient rate_limit, retry later",
+                ),
+            )))
+            .with_start(Ok(run_handle("run-2")))
+            .with_output(Ok(producer_output(history_summarizer_xml("safe fallback"))));
+        let outcome = run_history_summarizer_firing(
+            &mut producer,
+            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            HistorySummarizerDriveOutcome::Completed(_)
+        ));
+        assert_eq!(
+            producer.observed_starts.len(),
+            2,
+            "a proven NotSent start falls back"
+        );
     }
 
     #[tokio::test]
