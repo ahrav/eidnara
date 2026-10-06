@@ -470,10 +470,13 @@ fn dir_bytes(path: &Path) -> u64 {
         .sum()
 }
 
+const OUTAGE_PASS_MESSAGES: u64 = 16_000;
+
 /// One outage-run pass: the window from the current anchor through the newest arrived
 /// message, with context pressure high enough to fold.
 fn arrival_request(session: &str, anchor: Anchor, newest: u64, turn: u64) -> Value {
-    let messages: Vec<Value> = (anchor.end..=newest)
+    let last = newest.min(anchor.end + OUTAGE_PASS_MESSAGES);
+    let messages: Vec<Value> = (anchor.end..=last)
         .map(|ordinal| window_message(Shape::Mixed, ordinal))
         .collect();
     let mut request = transform(session, anchor, format!("outage-{turn}"), messages);
@@ -899,6 +902,25 @@ mod tests {
             let bytes = serde_json::to_vec(&window_request(&case, "s", anchor, 7)).unwrap();
             assert!(bytes.len() <= daemon::MAX_TRANSFORM_FRAME_BYTES);
             assert!(bytes.len() + LARGEST_HEADROOM_BYTES >= daemon::MAX_TRANSFORM_FRAME_BYTES);
+        }
+    }
+
+    #[test]
+    fn an_outage_pass_fits_the_transform_frame_cap_for_any_backlog() {
+        let anchor = Anchor {
+            end: 99_999_000,
+            sequence: 5_000,
+        };
+        for backlog in [ACTIVE_WINDOW, 17_856, 100_000] {
+            let body = arrival_request("outage", anchor, anchor.end + backlog, 3);
+            let carried = body["messages"].as_array().unwrap().len() as u64;
+            assert_eq!(carried, backlog.min(OUTAGE_PASS_MESSAGES) + 1);
+            let bytes = serde_json::to_vec(&body).unwrap();
+            assert!(
+                bytes.len() <= daemon::MAX_TRANSFORM_FRAME_BYTES,
+                "backlog {backlog}: {} bytes",
+                bytes.len()
+            );
         }
     }
 
