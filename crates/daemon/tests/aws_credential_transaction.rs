@@ -8,9 +8,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use host_runtime::CancellationToken;
 use host_runtime::model_execution::aws_helper::HelperFailure;
+use host_runtime::model_execution::aws_refresh::{SourceOwner, SystemClock, TransactionRefresh};
 use host_runtime::model_execution::aws_transaction::{
     CaptureFailure, HelperLimits, OwnerSource, PrivateToken, RenewalEvidence, TransactionFailure,
-    TransactionInput, TransactionOutcome, TransactionSlot,
+    TransactionInput, TransactionOutcome, TransactionSlot, admit_owner_source,
+};
+use host_runtime::model_execution::source_health::{
+    SourceHealthCell, SourceKind, SourceObservation,
 };
 use host_runtime::model_execution::subprocess::group_registry::{self, StateRoot};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -270,6 +274,7 @@ impl Owner {
         let input = TransactionInput {
             source: &self.source,
             predecessor,
+            superseded: None,
             executable: Path::new(BIN),
             state_root: &self.state,
             budget: Duration::from_secs(30),
@@ -473,6 +478,47 @@ async fn a_helper_killed_before_saving_reports_lost_succession() {
     );
     assert_eq!(owner.scratch_dirs(), 0);
     assert!(!slot.is_unresolved());
+    assert_no_helper_processes(&owner);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_superseded_owner_token_needs_a_changed_login_before_any_helper() {
+    let _serial = SERIAL.lock().await;
+    let owner = Owner::new(SSO_CONFIG, "dev");
+    owner.write_token(&token_json("owner-access", Duration::from_secs(3600)));
+    let fake = Fake::start().await;
+    fake.reply(Route::Portal, 200, &portal_ok());
+    let mut slot = TransactionSlot::default();
+    let first = owner
+        .run(&mut slot, &fake, None, HelperLimits::default())
+        .await;
+    let superseded = first.observation.expect("observation");
+    let input = || TransactionInput {
+        source: &owner.source,
+        predecessor: None,
+        superseded: Some(&superseded),
+        executable: Path::new(BIN),
+        state_root: &owner.state,
+        budget: Duration::from_secs(30),
+        limits: HelperLimits::default(),
+        test_origin: Some(fake.origin.clone()),
+    };
+    let cancel = CancellationToken::new();
+    let refused = slot.run(input(), &cancel).await;
+    assert_eq!(refused.failure, Some(TransactionFailure::LoginRequired));
+    assert!(refused.row.is_none());
+    assert_eq!(
+        fake.seen().len(),
+        1,
+        "no helper ran for the superseded token"
+    );
+
+    owner.write_token(&token_json("relogin-access", Duration::from_secs(3600)));
+    fake.reply(Route::Portal, 200, &portal_ok());
+    let renewed = slot.run(input(), &cancel).await;
+    assert_eq!(renewed.failure, None);
+    assert!(renewed.row.is_some());
+    assert_eq!(fake.seen().last().unwrap().1, "relogin-access");
     assert_no_helper_processes(&owner);
 }
 
@@ -733,6 +779,7 @@ async fn spawn_failure_and_cancellation_leave_the_slot_reusable() {
     let input = TransactionInput {
         source: &owner.source,
         predecessor: None,
+        superseded: None,
         executable: Path::new("/nonexistent/eidnara-host"),
         state_root: &owner.state,
         budget: Duration::from_secs(30),
@@ -749,6 +796,7 @@ async fn spawn_failure_and_cancellation_leave_the_slot_reusable() {
     let input = TransactionInput {
         source: &owner.source,
         predecessor: None,
+        superseded: None,
         executable: Path::new(BIN),
         state_root: &owner.state,
         budget: Duration::from_secs(30),
@@ -1044,4 +1092,45 @@ async fn abandoned_scratch_is_cleanup_debt_never_a_restart_credential() {
     let removed = group_registry::sweep_orphaned_run_dirs(&owner.state).unwrap();
     assert_eq!(removed, 3, "the startup sweep removes abandoned scratch");
     assert_eq!(owner.scratch_dirs(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_refresh_owner_runs_one_real_transaction_for_concurrent_demand_and_none_when_warm() {
+    let _serial = SERIAL.lock().await;
+    let owner = Owner::new(SSO_CONFIG, "dev");
+    owner.write_token(&token_json("owner-access", Duration::from_secs(3600)));
+    let fake = Fake::start().await;
+    fake.reply(Route::Portal, 200, &portal_ok());
+    let admitted = admit_owner_source(&owner.source).expect("admitted graph");
+    let refresh = TransactionRefresh::new(
+        owner.source.clone(),
+        PathBuf::from(BIN),
+        owner.state.clone(),
+        HelperLimits::default(),
+        Some(fake.origin.clone()),
+    );
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let source = SourceOwner::new(refresh, SystemClock, admitted, health);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut waiters = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let source = source.clone();
+        waiters.spawn(async move { source.acquire(deadline, &CancellationToken::new()).await });
+    }
+    for row in waiters.join_all().await {
+        assert_eq!(row.expect("row").access_key_id, "ASIAPORTAL");
+    }
+    assert_eq!(fake.seen().len(), 1, "eight waiters share one helper run");
+    source
+        .acquire(deadline, &CancellationToken::new())
+        .await
+        .expect("warm row");
+    assert_eq!(fake.seen().len(), 1, "a warm acquisition makes no request");
+    source.close();
+    assert!(
+        source.join().await,
+        "the settled transaction proved its cleanup"
+    );
+    assert_eq!(owner.scratch_dirs(), 0);
+    assert_no_helper_processes(&owner);
 }

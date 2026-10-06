@@ -3,6 +3,7 @@
 
 pub mod aws_helper;
 pub mod aws_profile;
+pub mod aws_refresh;
 pub mod aws_source;
 pub mod aws_transaction;
 pub mod backend;

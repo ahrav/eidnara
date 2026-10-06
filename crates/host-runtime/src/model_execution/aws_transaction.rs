@@ -88,6 +88,20 @@ pub struct PrivateToken {
     basis: TokenObservation,
 }
 
+#[cfg(test)]
+impl PrivateToken {
+    pub(crate) fn for_test(token: &[u8], basis: TokenObservation) -> Self {
+        Self {
+            token: Zeroizing::new(token.to_vec()),
+            basis,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.token
+    }
+}
+
 /// Helper process limits. [`Default`] holds the fixed production values, which
 /// release builds always use.
 #[derive(Clone, Debug)]
@@ -120,6 +134,10 @@ pub struct TransactionInput<'a> {
     pub source: &'a OwnerSource,
     /// The newest private successor from an earlier transaction of this incarnation.
     pub predecessor: Option<&'a PrivateToken>,
+    /// An owner token observation that can no longer renew, such as one whose rotation
+    /// was lost. An owner token with the same content ends the transaction as
+    /// [`TransactionFailure::LoginRequired`] before the helper runs.
+    pub superseded: Option<&'a TokenObservation>,
     /// The host executable to launch in debug builds; release builds launch
     /// `/proc/self/exe`.
     pub executable: &'a Path,
@@ -291,6 +309,12 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
             Some(private) if same_content(&private.basis, &observation) => {
                 sso.canonical(&private.token)
             }
+            _ if input
+                .superseded
+                .is_some_and(|superseded| same_content(superseded, &observation)) =>
+            {
+                None
+            }
             _ => owner_token.and_then(|bytes| sso.canonical(&bytes)),
         };
         if supplied.is_none() {
@@ -421,7 +445,7 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
 /// Two observations of the owner's token agree when both hold the same content, or
 /// when both are absent or unusable. A metadata-only change, such as `touch` or
 /// `chmod`, keeps the observation.
-fn same_content(a: &TokenObservation, b: &TokenObservation) -> bool {
+pub(super) fn same_content(a: &TokenObservation, b: &TokenObservation) -> bool {
     match (a, b) {
         (
             TokenObservation::Present { sha256: a, .. },
@@ -603,7 +627,8 @@ impl<'de> Deserialize<'de> for Entries {
     }
 }
 
-pub fn admit_owner_source(source: &OwnerSource) -> Result<(), TransactionFailure> {
+/// Captures and admits the owner's selected graph, returning its identity.
+pub fn admit_owner_source(source: &OwnerSource) -> Result<GraphIdentity, TransactionFailure> {
     let [config, credentials] = capture_files(source).map_err(TransactionFailure::Capture)?;
     aws_profile::admit(CapturedProfileInput {
         profile: &source.profile,
@@ -611,7 +636,7 @@ pub fn admit_owner_source(source: &OwnerSource) -> Result<(), TransactionFailure
         config: &config,
         credentials: &credentials,
     })
-    .map(drop)
+    .map(|graph| graph.identity().clone())
     .map_err(TransactionFailure::Admission)
 }
 
@@ -797,6 +822,7 @@ mod tests {
         let input = TransactionInput {
             source: &source,
             predecessor: None,
+            superseded: None,
             executable: Path::new("/nonexistent"),
             state_root: &state,
             budget: TRANSACTION_BUDGET,
