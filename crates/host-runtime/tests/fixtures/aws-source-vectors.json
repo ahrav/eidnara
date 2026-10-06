@@ -1,0 +1,773 @@
+{
+  "selector": [
+    {
+      "name": "absent profile is environment mode",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_ACCESS_KEY_ID": "AKIA",
+        "AWS_SECRET_ACCESS_KEY": "s"
+      },
+      "expect": {
+        "mode": "environment"
+      }
+    },
+    {
+      "name": "absent profile ignores a relative HOME",
+      "env": {
+        "HOME": "rel"
+      },
+      "expect": {
+        "mode": "environment"
+      }
+    },
+    {
+      "name": "defaults derive from HOME",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "mode": "profile",
+        "source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      }
+    },
+    {
+      "name": "HOME is normalized lexically",
+      "env": {
+        "HOME": "/home//u/./x/../",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "mode": "profile",
+        "source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      }
+    },
+    {
+      "name": "root HOME",
+      "env": {
+        "HOME": "/",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "mode": "profile",
+        "source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/.aws/config",
+          "credentials_file": "/.aws/credentials",
+          "sso_cache_root": "/.aws/sso/cache"
+        }
+      }
+    },
+    {
+      "name": "overrides are normalized lexically",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1",
+        "AWS_CONFIG_FILE": "/etc//aws/./cfg/../config",
+        "AWS_SHARED_CREDENTIALS_FILE": "/srv/creds/"
+      },
+      "expect": {
+        "mode": "profile",
+        "source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/etc/aws/config",
+          "credentials_file": "/srv/creds",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      }
+    },
+    {
+      "name": "a different spelling of one target is a different selector",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1",
+        "AWS_CONFIG_FILE": "/home/u/.aws/../.aws/cfg"
+      },
+      "expect": {
+        "mode": "profile",
+        "source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/cfg",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      }
+    },
+    {
+      "name": "multibyte profile at its byte bound",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "mode": "profile",
+        "source": {
+          "kind": "profile",
+          "profile": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      }
+    },
+    {
+      "name": "empty profile",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "error": "empty"
+      }
+    },
+    {
+      "name": "missing region",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp"
+      },
+      "expect": {
+        "error": "missing"
+      }
+    },
+    {
+      "name": "empty region",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": ""
+      },
+      "expect": {
+        "error": "empty"
+      }
+    },
+    {
+      "name": "region over its byte bound",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      },
+      "expect": {
+        "error": "too_long"
+      }
+    },
+    {
+      "name": "profile over its byte bound",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "error": "too_long"
+      }
+    },
+    {
+      "name": "profile with NUL",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "co\u0000rp",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "error": "contains_nul"
+      }
+    },
+    {
+      "name": "relative config override",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1",
+        "AWS_CONFIG_FILE": "aws/config"
+      },
+      "expect": {
+        "error": "path_not_normal"
+      }
+    },
+    {
+      "name": "empty credentials override",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1",
+        "AWS_SHARED_CREDENTIALS_FILE": ""
+      },
+      "expect": {
+        "error": "empty"
+      }
+    },
+    {
+      "name": "relative HOME",
+      "env": {
+        "HOME": "home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "error": "home_not_absolute"
+      }
+    },
+    {
+      "name": "missing HOME",
+      "env": {
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1"
+      },
+      "expect": {
+        "error": "missing"
+      }
+    },
+    {
+      "name": "config override over its byte bound",
+      "env": {
+        "HOME": "/home/u",
+        "AWS_PROFILE": "corp",
+        "AWS_REGION": "us-east-1",
+        "AWS_CONFIG_FILE": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expect": {
+        "error": "too_long"
+      }
+    }
+  ],
+  "dto": [
+    {
+      "name": "canonical",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": true
+    },
+    {
+      "name": "path at its byte bound",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": true
+    },
+    {
+      "name": "root sso cache",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/.aws/sso/cache"
+      },
+      "valid": true
+    },
+    {
+      "name": "null",
+      "value": null,
+      "valid": false,
+      "error": "not_an_object"
+    },
+    {
+      "name": "array",
+      "value": [],
+      "valid": false,
+      "error": "not_an_object"
+    },
+    {
+      "name": "string",
+      "value": "corp",
+      "valid": false,
+      "error": "not_an_object"
+    },
+    {
+      "name": "missing field",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "missing"
+    },
+    {
+      "name": "unknown field",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache",
+        "sso_start_url": "https://x"
+      },
+      "valid": false,
+      "error": "unknown_field"
+    },
+    {
+      "name": "environment kind",
+      "value": {
+        "kind": "env",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "invalid_type"
+    },
+    {
+      "name": "null profile",
+      "value": {
+        "kind": "profile",
+        "profile": null,
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "invalid_type"
+    },
+    {
+      "name": "numeric region",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": 1,
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "invalid_type"
+    },
+    {
+      "name": "empty region",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "empty"
+    },
+    {
+      "name": "region over its byte bound",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "too_long"
+    },
+    {
+      "name": "profile over its byte bound",
+      "value": {
+        "kind": "profile",
+        "profile": "ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "too_long"
+    },
+    {
+      "name": "profile with NUL",
+      "value": {
+        "kind": "profile",
+        "profile": "a\u0000b",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "contains_nul"
+    },
+    {
+      "name": "relative path",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "path_not_normal"
+    },
+    {
+      "name": "dot component",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/./.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "path_not_normal"
+    },
+    {
+      "name": "trailing slash",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials/",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "path_not_normal"
+    },
+    {
+      "name": "parent component",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/../u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "path_not_normal"
+    },
+    {
+      "name": "path over its byte bound",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "too_long"
+    },
+    {
+      "name": "sso cache root elsewhere",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso"
+      },
+      "valid": false,
+      "error": "sso_cache_root"
+    },
+    {
+      "name": "multibyte profile at its byte bound",
+      "value": {
+        "kind": "profile",
+        "profile": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": true
+    },
+    {
+      "name": "multibyte profile over its byte bound within its character count",
+      "value": {
+        "kind": "profile",
+        "profile": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "too_long"
+    },
+    {
+      "name": "multibyte region over its byte bound within its character count",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "ééééééééééééééééééééééééééééééééé",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "too_long"
+    },
+    {
+      "name": "multibyte path over its byte bound within its character count",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "too_long"
+    },
+    {
+      "name": "empty path",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "empty"
+    },
+    {
+      "name": "path with NUL",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/cred\u0000entials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "contains_nul"
+    },
+    {
+      "name": "null path",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": null
+      },
+      "valid": false,
+      "error": "invalid_type"
+    },
+    {
+      "name": "sso suffix without its separator",
+      "value": {
+        "kind": "profile",
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "sso_cache_root"
+    },
+    {
+      "name": "missing kind",
+      "value": {
+        "profile": "corp",
+        "region": "us-east-1",
+        "config_file": "/home/u/.aws/config",
+        "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache"
+      },
+      "valid": false,
+      "error": "missing"
+    }
+  ],
+  "binding": [
+    {
+      "name": "environment keeps the legacy map",
+      "binding": {
+        "credentials": {
+          "AWS_ACCESS_KEY_ID": "AKIA",
+          "AWS_SECRET_ACCESS_KEY": "s",
+          "AWS_REGION": "us-east-1"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "profile with a direct key",
+      "binding": {
+        "aws_source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        },
+        "credentials": {
+          "ANTHROPIC_API_KEY": "k"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "profile with an empty map",
+      "binding": {
+        "aws_source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "profile with a static access key",
+      "binding": {
+        "aws_source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        },
+        "credentials": {
+          "AWS_ACCESS_KEY_ID": "AKIA"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "profile with a legacy region",
+      "binding": {
+        "aws_source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        },
+        "credentials": {
+          "AWS_REGION": "us-east-1"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "profile with a session token",
+      "binding": {
+        "aws_source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "us-east-1",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        },
+        "credentials": {
+          "AWS_SESSION_TOKEN": "t"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "null source",
+      "binding": {
+        "aws_source": null
+      },
+      "valid": false
+    },
+    {
+      "name": "invalid source",
+      "binding": {
+        "aws_source": {
+          "kind": "profile",
+          "profile": "corp",
+          "region": "",
+          "config_file": "/home/u/.aws/config",
+          "credentials_file": "/home/u/.aws/credentials",
+          "sso_cache_root": "/home/u/.aws/sso/cache"
+        }
+      },
+      "valid": false
+    }
+  ],
+  "strip": [
+    {
+      "name": "profile mode strips every static AWS variable and keeps each direct key",
+      "credentials": {
+        "ANTHROPIC_API_KEY": "a",
+        "GEMINI_API_KEY": "g",
+        "OPENAI_API_KEY": "o",
+        "AWS_ACCESS_KEY_ID": "AKIA",
+        "AWS_SECRET_ACCESS_KEY": "s",
+        "AWS_SESSION_TOKEN": "t",
+        "AWS_REGION": "us-east-1"
+      },
+      "kept": {
+        "ANTHROPIC_API_KEY": "a",
+        "GEMINI_API_KEY": "g",
+        "OPENAI_API_KEY": "o"
+      }
+    },
+    {
+      "name": "profile mode with only static AWS variables keeps an empty map",
+      "credentials": {
+        "AWS_ACCESS_KEY_ID": "AKIA",
+        "AWS_SECRET_ACCESS_KEY": "s",
+        "AWS_REGION": "us-east-1"
+      },
+      "kept": {}
+    }
+  ]
+}

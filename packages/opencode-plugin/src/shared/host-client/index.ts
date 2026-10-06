@@ -1,4 +1,14 @@
 export {
+    type AwsProfileSource,
+    AwsSourceError,
+    type AwsSourceErrorCode,
+    type AwsSourceSelection,
+    captureAwsSource,
+    parseAwsProfileSource,
+    selectAwsSource,
+    sourceBinding,
+} from "./aws-source";
+export {
     connectionFileExists,
     HostClient,
     type HostClientOptions,

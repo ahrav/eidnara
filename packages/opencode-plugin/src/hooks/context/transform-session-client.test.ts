@@ -651,6 +651,7 @@ const CLIENT_MODULES = [
     "shared/atomic-file.ts",
     "shared/data-path.ts",
     "shared/harness.ts",
+    "shared/host-client/aws-source.ts",
     "shared/host-client/bytes.ts",
     "shared/host-client/client.ts",
     "shared/host-client/connection-file.ts",
