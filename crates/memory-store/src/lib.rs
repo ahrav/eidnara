@@ -432,7 +432,9 @@ const MAX_CHUNK_TRANSCRIPT_COMPRESSED_BYTES: usize = 256 * 1024;
 const MAX_CHUNK_TRANSCRIPT_INFLATED_BYTES: usize = 512 * 1024;
 const CHUNK_TRANSCRIPT_TRUNCATION_MARKER: &str =
     "\n[truncated: transcript exceeded the inflated-byte limit]";
-const MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES: i64 = 8 * 1024 * 1024;
+/// `evict_chunk_transcripts_tx` deletes a session's oldest transcripts until their compressed
+/// total is at most this many bytes.
+pub const MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES: i64 = 8 * 1024 * 1024;
 const PASS_SCHEDULER_HISTORY_CAP: usize = 256;
 const PASS_SCHEDULER_INTERESTING_HISTORY_CAP: usize = 256;
 /// The recency entry is at most 352 bytes: the longest decision, action, and reason, and every
@@ -11935,38 +11937,52 @@ impl MemoryStore {
 
     /// Returns a stored `history_segment` range that violates strict order, or `None`.
     /// Rows must have non-negative, strictly increasing, non-overlapping ranges by sequence.
-    /// This reads two integers per row of the session, so callers run it once per session and
-    /// record a pass in [`ModuleMeta::history_segments_ordered`]; store writers preserve the
-    /// order from then on.
+    /// This reads the session's rows once, so callers run it once per session and record a
+    /// pass in [`ModuleMeta::history_segments_ordered`]; store writers preserve the order
+    /// from then on.
     pub fn history_segment_order_violation(
         &self,
         session_id: &str,
     ) -> Result<Option<String>, MemoryStoreError> {
+        Ok(self.history_segment_order_scan(session_id)?.err())
+    }
+
+    /// Checks the session's `history_segment` ranges as [`Self::history_segment_order_violation`]
+    /// does and, when they are in strict order, returns every legacy row's sequence in
+    /// ascending order.
+    pub fn history_segment_order_scan(
+        &self,
+        session_id: &str,
+    ) -> Result<Result<Vec<i64>, String>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
-                "SELECT sequence, start_message, end_message FROM history_segments
+                "SELECT sequence, start_message, end_message, legacy FROM history_segments
                   WHERE session_id = ?1 ORDER BY sequence ASC",
             )?;
             let mut rows = stmt.query(params![session_id])?;
             let mut previous: Option<(i64, i64)> = None;
+            let mut legacy_seqs = Vec::new();
             while let Some(row) = rows.next()? {
                 let (sequence, start, end): (i64, i64, i64) =
                     (row.get(0)?, row.get(1)?, row.get(2)?);
                 if start < 0 || end < start {
-                    return Ok(Some(format!(
+                    return Ok(Err(format!(
                         "history_segment {sequence} range {start}..={end} is invalid; ordinals must be non-negative and end must not precede start"
                     )));
                 }
                 if let Some((previous_sequence, previous_end)) = previous
                     && start <= previous_end
                 {
-                    return Ok(Some(format!(
+                    return Ok(Err(format!(
                         "history_segment coverage overlap: history_segment {previous_sequence} ends at ordinal {previous_end} but history_segment {sequence} starts at {start}; ranges must be strictly increasing"
                     )));
                 }
+                if row.get::<_, i32>(3)? == 1 {
+                    legacy_seqs.push(sequence);
+                }
                 previous = Some((sequence, end));
             }
-            Ok(None)
+            Ok(Ok(legacy_seqs))
         })?)
     }
 

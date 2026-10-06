@@ -1943,7 +1943,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn command(program: &str, args: &[&str]) -> String {
+pub(super) fn command(program: &str, args: &[&str]) -> String {
     let output = std::process::Command::new(program)
         .args(args)
         .current_dir(super::support::direct_host::workspace_root())

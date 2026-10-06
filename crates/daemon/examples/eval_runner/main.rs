@@ -32,6 +32,9 @@ mod fault;
 #[cfg(unix)]
 #[allow(dead_code)]
 mod growth;
+/// The qualification shell runs the retained-history and outage campaign.
+#[cfg(unix)]
+mod qualification;
 /// The scale shell seeds a fixture store and builds scale reports for the scale drivers.
 #[cfg(unix)]
 mod scale;
@@ -542,6 +545,22 @@ fn run_growth(args: impl Iterator<Item = String>) -> io::Result<()> {
     Ok(())
 }
 
+/// Runs the qualification campaign and prints its verdicts.
+#[cfg(unix)]
+fn run_qualification(args: impl Iterator<Item = String>) -> io::Result<()> {
+    let config = qualification::config_from_args(args).map_err(io::Error::other)?;
+    let report = qualification::run(&config)?;
+    let summary = json!({
+        "report": config.out,
+        "qualified": report.qualified,
+        "host_shortfalls": report.host_shortfalls,
+        "gates": report.gates,
+        "outage_failures": report.outage_failures,
+    });
+    println!("{summary}");
+    Ok(())
+}
+
 /// The shrink campaign's replays re-execute this binary as `shrink-child`.
 #[cfg(unix)]
 fn spawn_shrink_child(_: &shrink::ChildArgs) -> std::process::Command {
@@ -635,6 +654,8 @@ fn main() {
         #[cfg(unix)]
         Some("growth") => run_growth(args),
         #[cfg(unix)]
+        Some("qualification") => run_qualification(args),
+        #[cfg(unix)]
         Some("scale-seed") => scale::run_seed(args),
         #[cfg(unix)]
         Some("scale-report") => scale::run_report(args),
@@ -665,7 +686,7 @@ fn main() {
 #[cfg(unix)]
 fn campaign_usage() -> String {
     format!(
-        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
+        "{} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {} | eval_runner {}",
         campaign::USAGE,
         stale::WORLD_USAGE,
         stale::ARMS_USAGE,
@@ -673,6 +694,7 @@ fn campaign_usage() -> String {
         aging::USAGE,
         fault::USAGE,
         growth::USAGE,
+        qualification::USAGE,
         scale::SEED_USAGE,
         scale::REPORT_USAGE,
         shrink::USAGE,
@@ -682,7 +704,7 @@ fn campaign_usage() -> String {
 
 #[cfg(not(unix))]
 fn campaign_usage() -> String {
-    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | scale-seed | scale-report | shrink | suite-d (unix only)"
+    "campaign | stale-world | stale-arms | stale-merge | aging | fault | growth | qualification | scale-seed | scale-report | shrink | suite-d (unix only)"
         .to_string()
 }
 

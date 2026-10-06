@@ -43,6 +43,7 @@ mod manifest;
 mod markers;
 mod occurrence;
 mod pairs;
+mod qualification;
 mod reducer;
 mod render;
 mod report;
@@ -159,6 +160,12 @@ pub use pairs::{
     NATURAL_FRESH_ENTITY_TAG, PAIRING_POLICY_VERSION, Pair, PairError, PairSet, PairSetInput,
     RECENCY_BASELINE_VERSION, StopCondition, Suite, Task, TaskRole, check_recency_baseline,
     compile_pair_set, recency_bound,
+};
+pub use qualification::{
+    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, Environment, FAKE_MODEL_LATENCY_MS,
+    GateFailure, HostShortfall, LineageViolation, MESSAGE_TOKENS, OutageRun, OutageSchedule, Phase,
+    Publication, QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape,
+    StoreObservation, audit_lineage, catalog, frozen_arrival,
 };
 pub use reducer::*;
 pub use render::*;

@@ -352,10 +352,26 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
         throw new Error("fixture readiness record was malformed");
     }
     const object = record(parsed);
-    if (!object || !exactKeys(object, ["catalog", "status", "wire_version"])) {
+    const priorFields = ["catalog", "status", "wire_version"];
+    const measuredFields = [
+        "catalog",
+        "debug_assertions",
+        "model_workers",
+        "status",
+        "wire_version",
+    ];
+    if (!object || !(exactKeys(object, priorFields) || exactKeys(object, measuredFields))) {
         throw new Error("fixture readiness record had unknown fields");
     }
-    if (object.status !== "ready" || object.wire_version !== 3 || !Array.isArray(object.catalog)) {
+    const measured = "debug_assertions" in object;
+    if (
+        object.status !== "ready" ||
+        object.wire_version !== 3 ||
+        !Array.isArray(object.catalog) ||
+        (measured &&
+            (typeof object.debug_assertions !== "boolean" ||
+                !Number.isSafeInteger(object.model_workers)))
+    ) {
         throw new Error("fixture readiness record was invalid");
     }
     if (
