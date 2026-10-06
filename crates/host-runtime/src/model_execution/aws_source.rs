@@ -86,6 +86,15 @@ pub fn lexically_normal(path: &str) -> Option<String> {
     Some(format!("/{}", parts.join("/")))
 }
 
+/// `is_lexically_normal` checks whether `lexically_normal(path)` leaves `path` unchanged
+/// using borrowed slices.
+fn is_lexically_normal(path: &str) -> bool {
+    path == "/"
+        || path
+            .strip_prefix('/')
+            .is_some_and(|rest| rest.split('/').all(|part| !matches!(part, "" | "." | "..")))
+}
+
 fn bounded(field: &'static str, value: &str, max: usize) -> Result<(), AwsSourceError> {
     if value.is_empty() {
         return Err(AwsSourceError::Empty(field));
@@ -101,7 +110,7 @@ fn bounded(field: &'static str, value: &str, max: usize) -> Result<(), AwsSource
 
 fn normal_path(field: &'static str, value: &str) -> Result<(), AwsSourceError> {
     bounded(field, value, MAX_PATH_BYTES)?;
-    if lexically_normal(value).as_deref() != Some(value) {
+    if !is_lexically_normal(value) {
         return Err(AwsSourceError::PathNotNormal(field));
     }
     Ok(())
