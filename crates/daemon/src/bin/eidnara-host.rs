@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use daemon::release_contract;
 use host_runtime::generation::{GenerationError, GenerationStore, SourceSpec, StageMeta};
+use host_runtime::model_execution::aws_helper;
 use host_runtime::{
     Client, InstanceError, LifecycleProbe, LifecycleState, LifecycleTransactionLock,
     NamespaceAnchor, ProbeFreshness, SendOutcome,
@@ -1941,6 +1942,10 @@ fn emit(result: DaemonResult) -> i32 {
 
 fn real_main() -> i32 {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // Helper mode runs before any host, runtime, or storage initialization.
+    if args.len() == 1 && args[0] == aws_helper::HELPER_ARG {
+        return aws_helper::run(std::io::stdin().lock(), std::io::stdout().lock());
+    }
     let command = match parse_args(&args) {
         Ok(command) => command,
         Err(message) => {
