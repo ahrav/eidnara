@@ -339,6 +339,7 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain(
                 "- HistorySummarizer publish health: ok (0 consecutive publish failures)",
             );
+            expect(text).toContain("- AWS credentials: unknown");
             expect(text).toContain("- Passes: 12 received, 0 rejected");
             expect(text).toContain(`- Daemon: ${STATUS_RESPONSE.summary}`);
             expect(text).not.toContain("### Tail Hygiene");
@@ -357,6 +358,12 @@ describe("createEidnaraCommandHandler", () => {
                     consecutive_publish_failures: 4,
                     publish_health_degraded: true,
                 },
+                aws_credentials: {
+                    kind: "profile",
+                    state: "login_required",
+                    next_retry_in_seconds: 30,
+                    consecutive_failures: 2,
+                },
                 pass_trace: {
                     receive_count: 20,
                     reject_count: 2,
@@ -371,6 +378,9 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain("- Wrapup: running (3 rounds complete)");
             expect(text).toContain(
                 "- HistorySummarizer publish health: degraded (4 consecutive publish failures)",
+            );
+            expect(text).toContain(
+                "- AWS credentials: profile login_required, retry in 30s, 2 consecutive failures",
             );
             expect(text).toContain(
                 "- Passes: 20 received, 2 rejected; last reject: snapshot stale ",

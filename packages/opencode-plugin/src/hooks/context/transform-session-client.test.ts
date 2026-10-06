@@ -682,6 +682,7 @@ const CLIENT_MODULES = [
     "shared/host-release-layout.ts",
     "shared/logger.ts",
     "shared/record-type-guard.ts",
+    "shared/source-health.ts",
     "shared/stable-json.ts",
     "shared/write-all.ts",
 ];

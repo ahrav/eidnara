@@ -7,6 +7,7 @@
 import { lstatSync } from "node:fs";
 import * as path from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
+import { type AwsCredentialsHealth, parseAwsCredentialsBlock } from "../source-health";
 import type {
     CheckId,
     CheckStatus,
@@ -183,6 +184,8 @@ export interface DaemonResultV1 {
     remediation: Remediation | null;
     effects: RestartEffects | null;
     readiness: DaemonReadiness | null;
+    /** An advisory cached observation; it never authorizes dispatch. */
+    aws_credentials?: AwsCredentialsHealth;
     checks: DaemonCheck[];
     versions: DaemonVersions;
 }
@@ -340,7 +343,13 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
     // `crates/daemon/src/bin/eidnara-host.rs` serializes no `readiness` field: component readiness is a `host.status` observation, not a CLI verdict. A result that carries the key is still validated in full.
     if ("readiness" in record) resultKeys.push("readiness");
     if ("shared_memory" in record) resultKeys.push("shared_memory");
+    if ("aws_credentials" in record) resultKeys.push("aws_credentials");
     requireExactKeys(record, resultKeys, "result");
+    const awsCredentials =
+        record.aws_credentials === undefined
+            ? undefined
+            : (parseAwsCredentialsBlock(record.aws_credentials) ??
+              fail("aws_credentials is outside its closed shape"));
     if (record.schema !== DAEMON_RESULT_SCHEMA) fail("schema is not eidnara.daemon/v1");
     if (record.shared_memory !== undefined && record.shared_memory !== null) {
         fail("shared_memory diagnostics are not supported by this release");
@@ -535,6 +544,7 @@ export function parseDaemonResult(stdoutText: string): DaemonResultV1 {
         remediation: (remediation as Remediation | null) ?? null,
         effects,
         readiness,
+        ...(awsCredentials === undefined ? {} : { aws_credentials: awsCredentials }),
         checks,
         versions,
     };

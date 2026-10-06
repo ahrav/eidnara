@@ -403,6 +403,71 @@ fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
     );
 }
 
+#[tokio::test]
+async fn health_reports_the_cached_source_observation_for_each_mode() {
+    let fifos = tempfile::tempdir().expect("tempdir");
+    let fifo = |name: &str| {
+        let path = fifos.path().join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("fifo");
+        path
+    };
+    let source: AwsProfileSource = serde_json::from_value(serde_json::json!({
+        "kind": "profile", "profile": "corp", "region": "us-east-1",
+        "config_file": fifo(".aws/config"), "credentials_file": fifo(".aws/credentials"),
+        "sso_cache_root": fifo(".aws/sso/cache"),
+    }))
+    .expect("selector");
+    let row = EnvSnapshot::capture_from(vec![
+        (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("AKIA")),
+        (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("s")),
+        (OsString::from("AWS_REGION"), OsString::from("us-east-1")),
+    ])
+    .expect("row");
+    let block = |component: ModelExecutionComponent| async move {
+        let report = tokio::time::timeout(Duration::from_secs(1), component.health())
+            .await
+            .expect("health completes with selector paths that block any blocking open");
+        let metrics = report.metrics.expect("metrics");
+        assert!(metrics["model_execution_state"].is_string());
+        metrics["aws_credentials"].clone()
+    };
+    let backend = || Arc::clone(&ScriptedBackend::completing("out")) as Arc<_>;
+    let state_root = support::model_execution::state_root;
+    assert_eq!(
+        block(ModelExecutionComponent::new(backend(), state_root())).await,
+        serde_json::json!({"kind": "none", "state": "unknown", "consecutive_failures": 0})
+    );
+    assert_eq!(
+        block(ModelExecutionComponent::new_with_credentials(
+            backend(),
+            row.clone(),
+            None,
+            state_root()
+        ))
+        .await,
+        serde_json::json!({"kind": "environment", "state": "ready", "consecutive_failures": 0})
+    );
+    assert_eq!(
+        block(ModelExecutionComponent::new_with_credentials(
+            backend(),
+            row,
+            Some(source),
+            state_root()
+        ))
+        .await,
+        serde_json::json!({"kind": "profile", "state": "unknown", "consecutive_failures": 0}),
+        "a selected profile outranks an environment row and stays unknown until observed"
+    );
+}
+
 /// `model_execution_state` follows backend availability: `ready` while any harness can run, `unavailable` when none can.
 #[tokio::test]
 async fn health_reports_unavailable_when_no_harness_can_run() {

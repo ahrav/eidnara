@@ -7,6 +7,10 @@ import {
     sensitiveRootsFor,
 } from "@eidnara/opencode/shared/host-lifecycle";
 import { sanitizeDiagnosticText } from "@eidnara/opencode/shared/redaction";
+import {
+    formatAwsCredentialsHealth,
+    UNKNOWN_AWS_CREDENTIALS,
+} from "@eidnara/opencode/shared/source-health";
 import { TERMINAL_CONTROL_CHARS } from "../lib/terminal-text";
 
 const ACTIONS = new Set<LifecycleCommand>(["start", "stop", "restart", "status", "doctor"]);
@@ -131,6 +135,9 @@ export function renderDaemonHuman(result: DaemonResultV1): string {
                 lines.push(`Readiness ${component}: ${readiness.state} (${readiness.reason})`);
             }
         }
+        lines.push(
+            `AWS credentials: ${formatAwsCredentialsHealth(result.aws_credentials ?? UNKNOWN_AWS_CREDENTIALS)}`,
+        );
         // Unobserved kernel readiness renders as `unknown` so the line is never omitted.
         const kernel = result.readiness.kernel;
         lines.push(

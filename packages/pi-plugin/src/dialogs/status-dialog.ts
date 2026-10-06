@@ -31,6 +31,11 @@ import {
 } from "@eidnara/opencode/shared/kernel-client";
 import type { TailHygieneStatus } from "@eidnara/opencode/shared/rpc-types";
 import {
+    type AwsCredentialsView,
+    awsCredentialsHealth,
+    formatAwsCredentialsHealth,
+} from "@eidnara/opencode/shared/source-health";
+import {
     formatTailHygiene,
     resolveTailHygieneStatus,
 } from "@eidnara/opencode/shared/tail-hygiene-status";
@@ -88,6 +93,7 @@ interface StatusDialogDetail {
     readyConditionalNoteCount: number;
     pendingOpsCount: number;
     history_summarizerRunning: boolean;
+    awsCredentials: AwsCredentialsView;
     lastTransformError: string | null;
     isSubagent: boolean;
     contextLimit: number;
@@ -364,6 +370,7 @@ function renderInner(s: StatusDialogDetail, theme: Theme, innerWidth: number): s
         }`,
     );
     lines.push(`Pending drops: ${s.pendingOpsCount}`);
+    lines.push(`AWS credentials: ${formatAwsCredentialsHealth(s.awsCredentials)}`);
     lines.push("");
 
     lines.push(theme.fg("muted", "Context"));
@@ -533,6 +540,7 @@ export function buildPiStatusDetail(
         readyConditionalNoteCount: 0,
         pendingOpsCount,
         history_summarizerRunning,
+        awsCredentials: awsCredentialsHealth(daemonStatus?.aws_credentials),
         lastTransformError: null,
         isSubagent: false,
         contextLimit,

@@ -8,6 +8,7 @@ import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
 import { evaluateCompatibility } from "./compatibility";
 import {
+    awsCredentialsObservation,
     type CompatibilityProbeResult,
     createManagedLifecyclePolicy,
     kernelReadiness,
@@ -888,5 +889,25 @@ describe("local_embeddings readiness from host.status metrics", () => {
                 }),
             ),
         ).toEqual({ state: "degraded", reason: "local_embeddings_degraded" });
+    });
+});
+
+describe("managed AWS credential observation", () => {
+    const metrics = (aws_credentials: unknown) => ({
+        components: { model_execution: { status: "ok", metrics: { aws_credentials } } },
+    });
+
+    test("a closed block passes through and any other block is omitted, never fabricated", () => {
+        const block = { kind: "profile", state: "cooldown", consecutive_failures: 1 };
+        expect(awsCredentialsObservation(metrics(block))).toEqual(block as never);
+        for (const value of [
+            undefined,
+            null,
+            { ...block, profile: "canary" },
+            { state: "unknown" },
+        ]) {
+            expect(awsCredentialsObservation(metrics(value))).toBeUndefined();
+        }
+        expect(awsCredentialsObservation({})).toBeUndefined();
     });
 });

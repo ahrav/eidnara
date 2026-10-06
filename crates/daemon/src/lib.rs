@@ -2791,6 +2791,7 @@ pub struct HandlerCore {
     local_embeddings: Mutex<Option<host_runtime::local_embeddings::LocalEmbeddingsComponent>>,
     /// The Model Execution supervisor and startup credentials MemoryReviewer runs use; without them the worker never starts and accepted candidates stay recorded as not admitted.
     memory_reviewer_host: Mutex<Option<Arc<memory_reviewer::worker::MemoryReviewerHost>>>,
+    source_health: Mutex<Option<host_runtime::model_execution::source_health::SourceHealthCell>>,
     memory_reviewer_permits: Arc<memory_reviewer::coordinator::InvestigationPermits>,
     /// The host state-sync payload carries the legacy per-project evaluator flag for wire compatibility; conditioned-write gating reads live protocol-v2 registrations because state sync is not a liveness signal.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
@@ -3661,6 +3662,19 @@ impl Handler {
         self
     }
 
+    /// Attaches the model-execution component's cached credential-source observation,
+    /// which `session.status` reports as advisory health.
+    pub fn with_source_health(
+        self,
+        cell: host_runtime::model_execution::source_health::SourceHealthCell,
+    ) -> Self {
+        *self
+            .source_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cell);
+        self
+    }
+
     pub fn new_with_connection_file(connection_file: Option<PathBuf>) -> Self {
         let cancel = CancellationToken::new();
         let producer_factory: Arc<dyn HistorySummarizerProducerFactory> = match connection_file {
@@ -3679,6 +3693,7 @@ impl Handler {
             kernel: Arc::clone(&kernel),
             memory_reviewer_status: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
+            source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
@@ -4191,6 +4206,7 @@ impl Handler {
             kernel: Arc::clone(&kernel),
             memory_reviewer_status: Arc::default(),
             memory_reviewer_host: Mutex::new(None),
+            source_health: Mutex::new(None),
             memory_reviewer_permits: Arc::default(),
             pending_storage: Mutex::new(None),
             spawn_gate: Arc::new(Mutex::new(())),
@@ -7073,6 +7089,14 @@ impl HandlerCore {
             },
             "tail_hygiene": tail_hygiene,
         });
+        let source_health = self
+            .source_health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(cell) = source_health {
+            response["aws_credentials"] = cell.get().to_json();
+        }
         if let Some(page) = history_segment_page {
             let history_segments = page
                 .history_segments
@@ -36130,6 +36154,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn session_status_reflects_the_shared_source_cell() {
+        use host_runtime::model_execution::source_health::{
+            SourceHealthCell, SourceKind, SourceObservation, SourceState,
+        };
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, _project) = handler_with_store(producer, default_test_config());
+        call_transform_request(&handler, request(vec![ck("m1", 1, "hello")])).await;
+        let status = |handler: &Handler| {
+            tool_body(handler.handle_session_status_value(
+                test_route(7),
+                &json!({ "method": "session.status", "v": 1, "session_id": "ses" }),
+            ))
+        };
+        assert!(status(&handler).get("aws_credentials").is_none());
+        let cell = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+        let handler = handler.with_source_health(cell.clone());
+        assert_eq!(
+            status(&handler)["aws_credentials"],
+            json!({"kind": "profile", "state": "unknown", "consecutive_failures": 0})
+        );
+        tokio::time::pause();
+        cell.set(SourceObservation {
+            state: SourceState::Cooldown,
+            retry_at: Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30)),
+            consecutive_failures: 2,
+            ..SourceObservation::unknown(SourceKind::Profile)
+        });
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        assert_eq!(
+            status(&handler)["aws_credentials"],
+            json!({
+                "kind": "profile", "state": "cooldown",
+                "next_retry_in_seconds": 20, "consecutive_failures": 2,
+            }),
+            "each read reports the time remaining at that read"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn session_status_preserves_zero_valued_tail_hygiene_fields() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
@@ -41675,11 +41738,11 @@ mod release_contract_tests {
     fn rust_embedding_decodes_to_the_canonical_contract_and_digest() {
         assert_eq!(
             release_contract::release_contract_sha256(),
-            "9a4030244c6ea1b60c43ff2265839b9f0bbd27acb1a83d6b9c81fac938b0aac5"
+            "27ff180f3ae5eddaaece60ef0d22768d5fefe958fd975f0dbe17015e1c8376f3"
         );
         assert_eq!(
             production_inputs::production_inputs_lock_sha256(),
-            "2f07eb36b8bf54822328d2fba1d79bfb457526d8b9b722986b3427ddd0ec2c58"
+            "3c800a42b034241a516537b5805095683a11d2970b8bf503819228c7b7386710"
         );
         let contract = contract();
         assert_eq!(contract["schema"], json!("eidnara.host-release/v1"));

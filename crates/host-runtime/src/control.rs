@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::handler::{ManifestSnapshot, RouteClass, RouteIdentity, RouteTarget, TargetKind};
+use crate::model_execution::source_health;
 
 pub const CODE_INVALID_CONTROL_REQUEST: &str = "invalid_control_request";
 pub const CODE_UNSUPPORTED_OPERATION: &str = "unsupported_operation";
@@ -506,6 +507,7 @@ pub fn route_open_response_json(channel: u16, epoch: u32) -> Vec<u8> {
 
 /// Component key whose metrics carry the render epochs and the kernel health block.
 const CONTEXT_COMPONENT: &str = "context";
+const MODEL_EXECUTION_COMPONENT: &str = "model_execution";
 pub(crate) const KERNEL_KEY: &str = "kernel";
 pub(crate) const KERNEL_STATE_KEY: &str = "kernel_state";
 pub(crate) const STORAGE_STATE_KEY: &str = "storage_state";
@@ -774,7 +776,7 @@ pub fn host_status_response_json(
             &["ready", STATE_STARTING, "degraded", "unsupported"][..],
         ),
         (
-            "model_execution",
+            MODEL_EXECUTION_COMPONENT,
             "model_execution_state",
             &["ready", STATE_UNAVAILABLE][..],
         ),
@@ -805,6 +807,16 @@ pub fn host_status_response_json(
         }
         if module == CONTEXT_COMPONENT {
             sanitize_context_metrics(metrics, &mut sanitized_metrics);
+        }
+        if module == MODEL_EXECUTION_COMPONENT
+            && let Some(aws_credentials) = metrics
+                .and_then(|metrics| metrics.get(source_health::AWS_CREDENTIALS_KEY))
+                .and_then(source_health::sanitize)
+        {
+            sanitized_metrics.insert(
+                source_health::AWS_CREDENTIALS_KEY.to_owned(),
+                aws_credentials,
+            );
         }
         components.insert(
             module.to_owned(),
@@ -1324,6 +1336,41 @@ mod tests {
             .contains("secret detail"),
             "handler detail is tainted and never exposed"
         );
+    }
+
+    #[test]
+    fn host_status_keeps_only_a_closed_aws_credentials_block() {
+        let status = |aws_credentials: serde_json::Value| {
+            let report = crate::handler::HealthReport {
+                status: crate::handler::HealthStatus::Ok,
+                detail: None,
+                metrics: Some(serde_json::json!({
+                    "components": {"model_execution": {"status": "ok", "metrics": {
+                        "model_execution_state": "ready",
+                        "aws_credentials": aws_credentials,
+                    }}}
+                })),
+            };
+            let response: serde_json::Value = serde_json::from_slice(&host_status_response_json(
+                &report,
+                serde_json::json!({"state": "healthy"}),
+            ))
+            .expect("status JSON");
+            response["metrics"]["components"]["model_execution"]["metrics"].clone()
+        };
+        let block = serde_json::json!({
+            "kind": "profile", "state": "login_required",
+            "next_retry_in_seconds": 30, "consecutive_failures": 2,
+        });
+        assert_eq!(status(block.clone())["aws_credentials"], block);
+        let canary = serde_json::json!({
+            "kind": "profile", "state": "ready", "consecutive_failures": 0,
+            "profile": "canary-profile",
+        });
+        let metrics = status(canary);
+        assert!(metrics.get("aws_credentials").is_none());
+        assert!(!metrics.to_string().contains("canary-profile"));
+        assert_eq!(metrics["model_execution_state"], "ready");
     }
 
     #[test]

@@ -197,6 +197,7 @@ export interface RustSessionStatus {
     wrapup_rounds?: number | null;
     pass_trace?: { last_reject_error?: string | null; scheduler_history?: unknown } | null;
     history_summarizer?: Record<string, unknown>;
+    aws_credentials?: unknown;
     summary?: string;
 }
 const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(

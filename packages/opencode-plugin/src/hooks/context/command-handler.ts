@@ -22,6 +22,7 @@ import {
     runMemoryMarkCommand,
 } from "../../shared/memory-mark-command";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
+import { awsCredentialsHealth, formatAwsCredentialsHealth } from "../../shared/source-health";
 import {
     formatTailHygiene,
     resolveTailHygieneStatus,
@@ -271,6 +272,7 @@ function formatRustStatusText(value: Record<string, unknown>): string {
         `- Pending: ${plural(pendingDrops, "drop")}, ${plural(tags, "tag")}, m1 delta ${pendingM1}`,
         `- Wrapup: ${wrapup}`,
         `- HistorySummarizer publish health: ${publishHealth}`,
+        `- AWS credentials: ${formatAwsCredentialsHealth(awsCredentialsHealth(value.aws_credentials))}`,
     ];
     if (value.pass_trace && typeof value.pass_trace === "object") {
         lines.push(

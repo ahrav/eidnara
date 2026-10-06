@@ -1,4 +1,21 @@
 {
+  "aws_credentials": {
+    "kinds": [
+      "none",
+      "environment",
+      "profile"
+    ],
+    "max_expires_in_seconds": 86400,
+    "max_next_retry_in_seconds": 300,
+    "states": [
+      "unknown",
+      "ready",
+      "refreshing",
+      "cooldown",
+      "login_required",
+      "invalid"
+    ]
+  },
   "cli": {
     "check_ids": [
       "artifact.bootstrap",
