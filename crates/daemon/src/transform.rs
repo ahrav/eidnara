@@ -3871,6 +3871,7 @@ fn apply_once(
             store,
             &req.session_id,
             &mut loaded.meta.history_segments_ordered,
+            &mut loaded.meta.legacy_history_segment_seqs,
         )?
         .map(|(_, end)| end);
         coverage_advance_covers_new_system(req, loaded.meta.coverage_ordinal, new_coverage)
@@ -4350,6 +4351,7 @@ fn apply_once(
                     store,
                     &req.session_id,
                     &mut meta.history_segments_ordered,
+                    &mut meta.legacy_history_segment_seqs,
                 )?;
                 let covered_system_messages = record_covered_systems(
                     &mut covered_systems,
@@ -4431,6 +4433,7 @@ fn apply_once(
                                 store,
                                 &req.session_id,
                                 &mut meta.history_segments_ordered,
+                                &mut meta.legacy_history_segment_seqs,
                             )?;
                             let recut_covered_system_messages = record_covered_systems(
                                 &mut covered_systems,
@@ -4624,6 +4627,7 @@ fn apply_once(
                         store,
                         &req.session_id,
                         &mut meta.history_segments_ordered,
+                        &mut meta.legacy_history_segment_seqs,
                     )?;
                     let covered_system_messages = record_covered_systems(
                         &mut covered_systems,
@@ -6311,15 +6315,18 @@ fn protected_tail_floor_ordinal(
 /// The two ends bound the set only when its ranges are in strict order, so a set out of
 /// order fails as a coverage gap instead of trimming the tail at the wrong ordinal. The
 /// order scan reads the session once: `ordered` is `ModuleMeta::history_segments_ordered`,
-/// set on a pass and committed with the pass's meta, so no restart repeats the scan.
+/// set on a pass and committed with the pass's meta, so later passes and restarts reuse
+/// the check.
 pub(crate) fn stored_coverage_bounds(
     store: &MemoryStore,
     session_id: &str,
     ordered: &mut bool,
+    legacy_seqs: &mut Option<Vec<i64>>,
 ) -> Result<Option<(u64, u64)>, TransformError> {
     if !*ordered {
-        if let Some(violation) = store.history_segment_order_violation(session_id)? {
-            return Err(TransformError::CoverageGap(violation));
+        match store.history_segment_order_scan(session_id)? {
+            Ok(scanned) => *legacy_seqs = Some(scanned),
+            Err(violation) => return Err(TransformError::CoverageGap(violation)),
         }
         *ordered = true;
     }
