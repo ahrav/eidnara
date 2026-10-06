@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
@@ -8,6 +7,7 @@ import {
     AdmissionClass,
     armExpiryTimer,
     type BindIdentity,
+    captureAwsSource,
     DAEMON_GENERATION_CHANGED_CODE,
     Deadline,
     evictProcessHostClient,
@@ -20,6 +20,7 @@ import {
     MODEL_EXECUTION_CREDENTIAL_NAMES,
     MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
     Priority,
+    processAwsSource,
     processHostClient,
     type RouteHandle,
     type RouteTarget,
@@ -27,6 +28,8 @@ import {
     SocketTimeoutError,
     StaleRouteHandleError,
     sameDaemonId,
+    sourceBinding,
+    sourceClaimVersion,
 } from "../../shared/host-client";
 import {
     type ConnectionOrigin,
@@ -99,13 +102,10 @@ function snapshotCredentialSource(
 }
 
 function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
-    const hash = createHash("sha256").update("eidnara-host-route-credentials-v1");
-    for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) {
-        const value = env[name] ?? "";
-        hash.update(`${Buffer.byteLength(name)}:${name}`);
-        hash.update(`${Buffer.byteLength(value)}:${value}`);
-    }
-    return hash.digest("hex");
+    const harness = getHarness();
+    return harness === "opencode" || harness === "pi"
+        ? sourceClaimVersion(harness, env, processAwsSource())
+        : "";
 }
 
 interface HarnessClosure {
@@ -214,10 +214,14 @@ export function buildManagedStartupEnvelope(
     entrypoint: string | undefined = process.argv[1],
     resolvePath: (path: string) => string = realpathSync.native,
 ): NativeStartupEnvelope {
-    const credentials: Record<string, string> = {};
+    const collected: Record<string, string> = {};
     for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) {
         const value = env[name];
-        if (value === undefined || value.length === 0) continue;
+        if (value !== undefined && value.length !== 0) collected[name] = value;
+    }
+    const selection = env === process.env ? processAwsSource() : captureAwsSource(env);
+    const binding = sourceBinding(selection, collected);
+    for (const value of Object.values(binding.credentials ?? {})) {
         if (Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES) {
             const error = new Error("managed credential value exceeds its size cap") as Error & {
                 code?: string;
@@ -225,7 +229,6 @@ export function buildManagedStartupEnvelope(
             error.code = "credential_value_too_large";
             throw error;
         }
-        credentials[name] = value;
     }
     const harness = harnessForParentPackage(parentPackageName);
     const candidate =
@@ -235,10 +238,10 @@ export function buildManagedStartupEnvelope(
     const opencode = harness === "opencode" ? candidate : undefined;
     const pi = harness === "pi" ? candidate : undefined;
     return {
-        schema: 1,
+        schema: 2,
         ...(opencode === undefined ? {} : { opencode }),
         ...(pi === undefined ? {} : { pi }),
-        ...(Object.keys(credentials).length === 0 ? {} : { credentials }),
+        ...binding,
     };
 }
 
@@ -1042,7 +1045,11 @@ export class HostModuleTransport {
                 const credentialSource = snapshotCredentialSource(process.env);
                 bindVersion = managedCredentialSourceVersion(credentialSource);
                 routeOpening.credentialSourceVersion = bindVersion;
-                const open = client.routeOpen(target, identity, { ...fence, credentialSource });
+                const open = client.routeOpen(target, identity, {
+                    ...fence,
+                    credentialSource,
+                    awsSource: processAwsSource(),
+                });
                 try {
                     route = await this.beforeDeadline(open, deadline, "opening the module route");
                     break;
@@ -1175,6 +1182,7 @@ export class HostModuleTransport {
             connectionFile: this.connectionFile,
             handshakeTimeoutMs,
             credentialSource: process.env,
+            awsSource: processAwsSource(),
         };
     }
 

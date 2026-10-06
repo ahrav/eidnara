@@ -1,7 +1,7 @@
 # `host-runtime` Wire Protocol and Handshake
 
 Status: normative direct-linked static three-target profile
-Wire version: 3
+Wire version: 4
 Connection-file schema: 2
 Lifecycle-record schema: 1
 Context-application protocol: 3
@@ -12,7 +12,7 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** ar
 
 This document is the direct-only wire authority. `host-runtime` owns the Rust wire, authentication, discovery, control, routing, and managed-client contracts. Repository implementations and conformance tests provide executable evidence; historical published-package behavior is provenance only and cannot enable a compatibility path.
 
-Canonical version-3 literals are part of this contract. In particular, `host_ops`, `connection.json`, `EIDNARA_MODULE_ID`, `EIDNARA_LAUNCH_NONCE`, `eidnara-server-v3`, and `eidnara-client-v3` MUST NOT be renamed without a separately versioned wire or lifecycle migration.
+Canonical literals are part of this contract. In particular, `host_ops`, `connection.json`, `EIDNARA_MODULE_ID`, `EIDNARA_LAUNCH_NONCE`, `eidnara-server-v3`, and `eidnara-client-v3` MUST NOT be renamed without a separately versioned wire or lifecycle migration. Version 4 keeps both proof domains; the wire version byte, the connection-file `wire_version`, the grant `wire_version`, and the credential claim domain carry the version change. Version 3 and version 4 peers refuse each other before routing: there is no mixed-version mode and no downgrade.
 
 ## 2. Profile, actors, and trust boundary
 
@@ -73,7 +73,7 @@ Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client conf
 ```json
 {
   "schema": 2,
-  "wire_version": 3,
+  "wire_version": 4,
   "setup_socket": "/home/user/.local/share/eidnara/run/setup.sock",
   "key": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
   "daemon_id": [96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111],
@@ -84,13 +84,13 @@ Clients MUST read `${dataDir}/eidnara/run/connection.json`. Host and client conf
 
 Example bytes are deterministic and non-secret. Real key and daemon-ID bytes MUST come from the OS CSPRNG.
 
-Writers MUST include numeric `wire_version: 3`. Clients MUST reject an absent, null, string, fractional, or non-3 value before dialing the setup socket. There is no omission default and no version downgrade.
+Writers MUST include numeric `wire_version: 4`. Clients MUST reject an absent, null, string, fractional, or non-4 value before dialing the setup socket. There is no omission default and no version downgrade.
 
 A client MUST:
 
 1. open the parent and connection file without following links, then take one descriptor-anchored regular-file snapshot capped at 65,536 bytes;
 2. reject a larger file before JSON parsing;
-3. require schema 2, numeric wire version 3, a nonempty absolute `setup_socket` path, exactly 32 key bytes, exactly 16 daemon-ID bytes, a numeric PID, and a nonempty daemon version;
+3. require schema 2, numeric wire version 4, a nonempty absolute `setup_socket` path, exactly 32 key bytes, exactly 16 daemon-ID bytes, a numeric PID, and a nonempty daemon version;
 4. verify owner-only regular-file metadata before and after the read and verify the directory entry still names the same file;
 5. dial `setup_socket` as a Unix stream socket;
 6. reject a relative `setup_socket`, since the host resolves it from its own data directory and a relative path names a different socket for a client with another working directory;
@@ -362,7 +362,7 @@ Required compact canonical request:
 {"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}
 ```
 
-Optional `consumer_identity` is `{module_id, launch_nonce}`. Optional `consumer_capabilities` is an array of strings. Optional `admission_facts` is any bounded JSON value. Managed callers may include `identity.credential_fingerprints`, a provider-to-HMAC map derived from the authenticated connection bearer and the current qualified credential row. The derived key is `HMAC-SHA256(connection_key, "eidnara-model-execution-credential-v3")`; each value is `HMAC-SHA256(derived_key, canonical_row_encoding)` rendered as 64 lowercase hex, where canonical row encoding is the U9 length-prefixed `harness-provider-name-length-value/1` contract. Values are protocol-internal and never credentials. Absence means no claim/capability/facts; it is not a denied claim. The bearer key remains authority.
+Optional `consumer_identity` is `{module_id, launch_nonce}`. Optional `consumer_capabilities` is an array of strings. Optional `admission_facts` is any bounded JSON value. Managed callers may include `identity.credential_fingerprints`, a provider-to-HMAC map derived from the authenticated connection bearer and the owner's selected credential source. The derived key is `HMAC-SHA256(connection_key, "eidnara-model-execution-credential-v4")`; each value is `HMAC-SHA256(derived_key, preimage)` rendered as 64 lowercase hex. The `harness-provider-source/2` preimage encodes every field as `<decimal UTF-8 byte length>:<bytes>`: the canonicalization tag, the harness, the canonical provider, and the source kind. Source kind `env` then appends each row entry in row order as name, value byte length as decimal text, and value, omitting an empty or absent optional token. Source kind `aws_profile`, used for `amazon-bedrock` when the owner selected an AWS profile, appends `profile`, `region`, `config_file`, `credentials_file`, and `sso_cache_root`; it carries no token, graph digest, or host-minted identifier, so token rotation keeps the claim and a bearer change replaces it. The host recomputes the claim per bearer and compares in constant time. Values are protocol-internal and never credentials. Absence means no claim/capability/facts; it is not a denied claim. The bearer key remains authority.
 
 Successful response MUST retain the tag:
 
@@ -692,7 +692,7 @@ Commit runs inside retained host work (the connection writer task), so cancellin
 
 ### 7.7 Mandatory payload-pool setup
 
-Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four connected `AF_UNIX` stream socketpair ends, profile `host-payload-pool-v1`, wire version 3, descriptor schema 4, one 126-byte grant per direction, and a one-use activation token. The client validates both grants against the sole profile's geometry, attaches both directions while they are fresh, then commits activation. Memfds carry pool metadata, descriptor slots, completion cells, and the fixed block arena. The socketpair ends are doorbells and carry coalesced data-ready and capacity-ready tokens only; an eventfd, datagram, seqpacket, or unconnected socket is rejected before traffic. The pool is the only application frame channel. `docs/payload-pool-protocol.md` is the normative low-level authority for the layout, descriptor, completion, wake, and access rules; this section links to it and does not restate them.
+Transport setup is complete before the application wire becomes active. The owner-only Unix setup socket authenticates the peer and transfers exactly two memfds plus four connected `AF_UNIX` stream socketpair ends, profile `host-payload-pool-v1`, wire version 4, descriptor schema 4, one 126-byte grant per direction, and a one-use activation token. The client validates both grants against the sole profile's geometry, attaches both directions while they are fresh, then commits activation. Memfds carry pool metadata, descriptor slots, completion cells, and the fixed block arena. The socketpair ends are doorbells and carry coalesced data-ready and capacity-ready tokens only; an eventfd, datagram, seqpacket, or unconnected socket is rejected before traffic. The pool is the only application frame channel. `docs/payload-pool-protocol.md` is the normative low-level authority for the layout, descriptor, completion, wake, and access rules; this section links to it and does not restate them.
 
 Missing native support, malformed ancillary data, duplicate or extra descriptors, identity mismatch, token mismatch, admission failure, attachment failure, timeout, or setup-socket loss retires the connection before application traffic. Runtime pool corruption or unexpected setup-socket EOF also retires the connection. No setup or runtime failure changes transport or replays an uncertain request.
 
@@ -1032,7 +1032,7 @@ sequenceDiagram
   C->>H: setup socket + three-message authentication
   H-->>C: ring descriptors, grant, activation token
   C->>C: attach both ring directions
-  C->>H: application v3 envelope traffic
+  C->>H: application v4 envelope traffic
 ```
 
 ### 8.2 Route allocation and bind
@@ -1214,7 +1214,7 @@ An authenticated `host.shutdown` (Section 7.6) initiates this same graceful orde
 
 ### 13.1 Startup, route, call, close
 
-1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes schema 2 with `wire_version: 3`.
+1. Host locks runtime state, creates fresh credentials, initializes directly linked components, binds the owner-only setup socket, and publishes schema 2 with `wire_version: 4`.
 2. Client validates one descriptor-anchored snapshot and completes all three auth messages.
 3. Client receives two memfds and four stream-socket doorbells, validates both grants, attaches, and commits activation.
 4. Client sends channel-0 `route.open` correlation 1 through the ring.
@@ -1246,13 +1246,21 @@ Client completes or may partially complete a request write, then deadline expire
 
 Old host fences connection-file removal by daemon ID, closes generations, and drops handler after route-gone. New host creates unrelated key/daemon ID and atomically publishes. Client invalidates old state, rereads file, authenticates, and opens new routes. Old credentials, route handles, correlations, and late frames cannot affect new generation.
 
+### 13.7 Source binding and generation upgrade
+
+The owner selects the model credential source once per client process. A nonempty process-owned `AWS_PROFILE` selects profile mode and requires `AWS_REGION`; an absent `AWS_PROFILE` selects the nonrefreshable environment mode; an empty one is invalid. The selector is the closed object `{"kind":"profile","profile","region","config_file","credentials_file","sso_cache_root"}`. `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` overrides are absolute; defaults and `sso_cache_root` derive from the owner's absolute `HOME`. Paths are normalized lexically, and project configuration never selects credentials.
+
+The launcher envelope (schema 2), the serve envelope (schema 3), and the active selection (schema 2) carry the selector as optional `aws_source`. Absence is environment mode, and `null` is invalid. Profile mode removes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` from the legacy credential map, and both native hops reject an envelope that carries both. The launcher captures and admits the selected profile graph before it starts a host; an inadmissible graph fails the start with `harness_unavailable`. A profile-mode host always verifies route claims, including when its legacy credential map is empty. A running host keeps its selector: an owner that supplies a different one is refused.
+
+Upgrade from version 3 quiesces version-3 clients, stops the host through its own launcher, confirms teardown, and starts the version-4 generation. A schema-1 selection a prior generation left is never read as source authority: it marks the running selection stale, `stop` keeps it, and the next fresh start moves it to `active-selection.v1.json` before committing schema 2. That record holds the most recent prior-generation selection; a later move replaces it. Rollback quiesces version-4 clients and stops the version-4 host through the version-4 launcher, which removes the schema-2 selection. The operator then moves `active-selection.v1.json` back to `active-selection.json`, where the prior generation's reader validates it as its own schema-1 record, and starts the prior generation. A prior-generation reader refuses a schema-2 selection as an unsupported state schema.
+
 ## 14. Conformance scenario matrix
 
 Every scenario has one required outcome. These are review vectors; executable fixtures belong to downstream tasks.
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
-| AE1 | Fresh authenticated call | Valid version-3 file, three-message auth, fixed payload-pool attachment, tagged route response, and matching terminal succeed |
+| AE1 | Fresh authenticated call | Valid version-4 file, three-message auth, fixed payload-pool attachment, tagged route response, and matching terminal succeed |
 | AE2 | Malformed envelope or setup | Unsupported frame version, type, flags, oversize, truncation, invalid descriptor, identity mismatch, or attachment failure closes the generation; no application dispatch or alternate transport |
 | AE3 | Caller-supplied identity | Key holder may select identity; fields scope handler state and add no authority |
 | AE4 | Temporarily unavailable module | Each `unknown_module` terminates one correlation; policy retry uses a new correlation and never sends body early |
@@ -1315,7 +1323,7 @@ Every scenario has one required outcome. These are review vectors; executable fi
 | V48 | Reserved-class saturation | Every reserved pending/task permit held through blocked settlement rejects the next reserved-class request `server_busy` while a general request still dispatches and settles; saturating the general class never consumes a reserved permit |
 | V49 | Declarations exceed configured limits | A reservation that leaves zero general pending slots, zero general task slots, or less than one maximum ingress body fails startup before publication |
 | V50 | Child shutdown failure | A ModelExecution shutdown panic or returned error still drains LocalEmbeddings and Eidnara; the incarnation reports one deterministic redacted non-graceful failure |
-| V51 | Missing, null, string, fractional, or non-3 `wire_version` | Client rejects before setup-socket dial |
+| V51 | Missing, null, string, fractional, or non-4 `wire_version` | Client rejects before setup-socket dial |
 | V52 | Setup socket receives an application envelope | Host retires setup; zero application dispatch |
 | V53 | Descriptor count, identity, token, or pool geometry is invalid | Client retires setup before mapping or application traffic |
 | V54 | Native addon, attachment, or pool operation fails | Connection fails terminally; no alternate transport or frame replay |
@@ -1329,7 +1337,7 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 
 | Consumer | Required contract | Verification owner |
 | --- | --- | --- |
-| `HostModuleTransport` | strict version-3 discovery, mandatory ring attachment, generation and epoch route cache, opaque bodies, close races, outcome-safe retry | direct host-client tests |
+| `HostModuleTransport` | strict version-4 discovery, mandatory ring attachment, generation and epoch route cache, opaque bodies, close races, outcome-safe retry | direct host-client tests |
 | LocalEmbeddings and wake-plane callers | managed calls, typed send outcomes, truthful catalog, and absent `wake.create` fail-open behavior | direct TypeScript caller tests |
 | `HistorySummarizerProducer` | `host_runtime::Client`, mandatory ring attachment, full route handles, streaming, Ping/Pong, same-incarnation exact-byte replay fence, and both-route cleanup | module history_summarizer and managed-client tests |
 | session resolver | local typed `session_unresolved` absence with zero resolver route attempts when no session is proven | module resolver tests |
@@ -1351,7 +1359,7 @@ Fixtures MUST use committed literal bytes and an independent decoder/oracle; imp
 
 ## 17. Scope boundaries
 
-This direct boundary owns secure connection-file primitives, version-3 wire and authentication, mandatory payload-pool attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
+This direct boundary owns secure connection-file primitives, version-4 wire and authentication, mandatory payload-pool attachment, host-owned Rust and TypeScript API names, static composition, route epochs, managed-client behavior, and focused direct-host fixture proof.
 
 The product daemon crate owns the production host executable and launcher, production connection-file orchestration during startup and teardown, user-facing configuration and doctor behavior, packaging, and distribution. This contract does not claim those lifecycle flows are delivered here.
 

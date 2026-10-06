@@ -18,6 +18,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import * as path from "node:path";
+import type { AwsProfileSource } from "../host-client/aws-source";
 import {
     ContractViolation,
     type DaemonResultV1,
@@ -114,10 +115,11 @@ export interface NativeHarnessCandidate {
 }
 
 export interface NativeStartupEnvelope {
-    schema: 1;
+    schema: 2;
     opencode?: NativeHarnessCandidate;
     pi?: NativeHarnessCandidate;
     credentials?: Record<string, string>;
+    aws_source?: AwsProfileSource;
 }
 
 const MAX_STDOUT_BYTES = 256 * 1024;

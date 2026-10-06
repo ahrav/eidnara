@@ -18,6 +18,7 @@ import {
     type HostClient,
     type HostClientOptions,
     MODEL_EXECUTION_CREDENTIAL_NAMES,
+    MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
     RouteHandle,
     StaleRouteHandleError,
     sameDaemonId,
@@ -1057,7 +1058,7 @@ describe("managed startup envelope harness closures", () => {
             resolveWithin("/opt/opencode"),
         );
         expect(envelope).toEqual({
-            schema: 1,
+            schema: 2,
             opencode: {
                 manifest_sha256: productionInputs.harnesses.opencode.closure.sha256,
                 source_roots: { runtime: "/opt/opencode" },
@@ -1078,8 +1079,43 @@ describe("managed startup envelope harness closures", () => {
                 undefined,
                 (path) => path,
             );
-            expect(envelope, parent).toEqual({ schema: 1 });
+            expect(envelope, parent).toEqual({ schema: 2 });
         }
+    });
+
+    test("a profile-mode owner sends its selector and no static AWS row, and only kept values meet the cap", () => {
+        const env = {
+            HOME: "/home/u",
+            AWS_PROFILE: "corp",
+            AWS_REGION: "us-east-1",
+            AWS_ACCESS_KEY_ID: "AKIA",
+            AWS_SECRET_ACCESS_KEY: "s",
+            AWS_SESSION_TOKEN: "t".repeat(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES + 1),
+            OPENAI_API_KEY: "secret",
+        };
+        expect(
+            buildManagedStartupEnvelope("@eidnara/cli", env, "/bin/x", undefined, (path) => path),
+        ).toEqual({
+            schema: 2,
+            credentials: { OPENAI_API_KEY: "secret" },
+            aws_source: {
+                kind: "profile",
+                profile: "corp",
+                region: "us-east-1",
+                config_file: "/home/u/.aws/config",
+                credentials_file: "/home/u/.aws/credentials",
+                sso_cache_root: "/home/u/.aws/sso/cache",
+            },
+        });
+        expect(() =>
+            buildManagedStartupEnvelope(
+                "@eidnara/cli",
+                { ...env, AWS_PROFILE: undefined },
+                "/bin/x",
+                undefined,
+                (path) => path,
+            ),
+        ).toThrow(/size cap/);
     });
 
     test("the lock's anchors name the manifest's executable, interpreter, or entrypoint node", () => {

@@ -44,6 +44,7 @@ function ownerKey(options: HostClientOptions): string {
                       : Object.entries(identity.credential_fingerprints).sort(),
               ],
         referenceKey(options.credentialSource),
+        referenceKey(options.awsSource),
         referenceKey(options.clock),
         referenceKey(options.sleep),
         referenceKey(options.diagnostics),

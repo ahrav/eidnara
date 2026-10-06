@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { getDataDir } from "../../../shared/data-path";
-import { HostClient } from "../../../shared/host-client";
+import { HostClient, processAwsSource } from "../../../shared/host-client";
 import { defaultConnectionFilePath } from "../../../shared/host-lifecycle/paths";
 
 /** `wake.create` indicates that scheduled wakes own condition evaluation. */
@@ -61,6 +61,7 @@ async function probeWakePlaneCatalog(connectionFile: string): Promise<readonly C
         connectionFile,
         handshakeTimeoutMs: WAKE_PLANE_HANDSHAKE_TIMEOUT_MS,
         credentialSource: process.env,
+        awsSource: processAwsSource(),
     });
     try {
         return await client.catalogList({ timeoutMs: WAKE_PLANE_CATALOG_TIMEOUT_MS });

@@ -56,7 +56,7 @@ use crate::backend::retained::{
 use crate::backend::sys;
 use crate::descriptor::{
     CompletionRecord, DESCRIPTOR_SCHEMA_VERSION, DescriptorError, Incarnation, PayloadIdentity,
-    PoolDescriptor, WIRE_V3_HEADER_BYTES, WIRE_V3_VERSION, check_wire_header,
+    PoolDescriptor, WIRE_V3_HEADER_BYTES, WIRE_VERSION, check_wire_header,
 };
 use crate::lease::{LeaseError, LeaseSpan, PayloadLease, copy_in, copy_out};
 use crate::pool::{
@@ -1943,7 +1943,7 @@ pub fn wire_v3_header(body_len: usize) -> Result<[u8; WIRE_V3_HEADER_BYTES], Pro
     }
     let mut header = [0u8; WIRE_V3_HEADER_BYTES];
     header[0..4].copy_from_slice(&body_len.to_le_bytes());
-    header[4] = WIRE_V3_VERSION;
+    header[4] = WIRE_VERSION;
     Ok(header)
 }
 

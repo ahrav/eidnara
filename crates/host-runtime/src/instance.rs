@@ -1294,7 +1294,7 @@ mod tests {
         let bytes = std::fs::read(published(&guard)).expect("read publication");
         let json: serde_json::Value = serde_json::from_slice(&bytes).expect("parse");
         assert_eq!(json["schema"], 2);
-        assert_eq!(json["wire_version"], 3);
+        assert_eq!(json["wire_version"], 4);
         assert_eq!(
             json["setup_socket"],
             guard

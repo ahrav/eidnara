@@ -7,7 +7,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 /// Wire version stamped into a grant and echoed by the activating peer; mismatch is fatal.
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Nonce bytes each side contributes.
 pub const NONCE_LEN: usize = 32;

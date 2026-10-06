@@ -22,12 +22,13 @@ import {
     ROUTE_EPOCH,
     writeConnectionFile,
 } from "./__tests__/fake-daemon";
+import { selectAwsSource } from "./aws-source";
 import { HostClient, type HostClientOptions, type HostDiagnosticsEvent } from "./client";
-import { credentialFingerprints } from "./credential-fingerprint";
 import { HostCallError, HostClientError } from "./errors";
 import { exactCount, exactI64, exactU64 } from "./exact-json";
 import { FrameType } from "./protocol";
 import { serializedJsonText, serializeJsonBody } from "./serialized-json-body";
+import { sourceClaims } from "./source-claim";
 import { AdmissionClass, type BindIdentity } from "./types";
 
 async function waitUntil(check: () => boolean, timeoutMs = 3_000): Promise<void> {
@@ -204,7 +205,7 @@ describe("HostClient", () => {
         const firstOpen = await daemon.acceptRouteOpen();
         const identity = firstOpen.identity as { credential_fingerprints?: Record<string, string> };
         expect(identity.credential_fingerprints).toEqual(
-            credentialFingerprints(KEY, "opencode", credentialSource),
+            sourceClaims(KEY, "opencode", credentialSource, selectAwsSource({})),
         );
         await daemon.answerRouted({ ok: true });
         await first;
@@ -217,6 +218,39 @@ describe("HostClient", () => {
         const secondOpen = await daemon.acceptRouteOpen();
         const reopened = secondOpen.identity as { credential_fingerprints?: unknown };
         expect(reopened.credential_fingerprints).toBeUndefined();
+        await daemon.answerRouted({ ok: true });
+        await second;
+    });
+
+    test("a captured profile source claims the selector and ignores a rotated static row", async () => {
+        const awsSource = selectAwsSource({
+            HOME: "/home/u",
+            AWS_PROFILE: "corp",
+            AWS_REGION: "us-east-1",
+        });
+        const credentialSource: Record<string, string | undefined> = {
+            AWS_ACCESS_KEY_ID: "ASIA1",
+            AWS_SECRET_ACCESS_KEY: "s1",
+            AWS_REGION: "us-east-1",
+        };
+        const { client, daemon } = await connected({ credentialSource, awsSource });
+        const first = client.call("mod", "ping");
+        const firstOpen = await daemon.acceptRouteOpen();
+        const claims = (firstOpen.identity as { credential_fingerprints?: unknown })
+            .credential_fingerprints;
+        expect(claims).toEqual(sourceClaims(KEY, "opencode", {}, awsSource));
+        await daemon.answerRouted({ ok: true });
+        await first;
+
+        daemon.send({ ty: FrameType.Goodbye, channel: 0, epoch: 0 });
+        await waitUntil(() => client.publication === null);
+        credentialSource.AWS_ACCESS_KEY_ID = "ASIA2";
+        credentialSource.AWS_SECRET_ACCESS_KEY = "s2";
+        const second = client.call("mod", "ping");
+        const secondOpen = await daemon.acceptRouteOpen();
+        expect(
+            (secondOpen.identity as { credential_fingerprints?: unknown }).credential_fingerprints,
+        ).toEqual(claims);
         await daemon.answerRouted({ ok: true });
         await second;
     });

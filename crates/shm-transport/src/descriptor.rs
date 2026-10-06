@@ -18,7 +18,7 @@ pub const SETUP_DESCRIPTOR_COUNT: usize = SETUP_MAPPING_COUNT + SETUP_DOORBELL_C
 /// Frozen application header length.
 pub const WIRE_V3_HEADER_BYTES: usize = 21;
 /// Version byte at `wire_header[4]`.
-pub const WIRE_V3_VERSION: u8 = 3;
+pub const WIRE_VERSION: u8 = 4;
 
 /// Shared by the producer's commit and the consumer's receive so both paths agree on which
 /// wire headers are admissible. Callers that must reject a header before consuming a
@@ -33,7 +33,7 @@ pub fn check_wire_header(
         wire_header[2],
         wire_header[3],
     ]);
-    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_V3_VERSION {
+    if u64::from(declared_len) != body_len || wire_header[4] != WIRE_VERSION {
         return Err(DescriptorError::WireHeaderMismatch);
     }
     Ok(())

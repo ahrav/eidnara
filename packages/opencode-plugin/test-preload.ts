@@ -27,6 +27,9 @@ process.env.XDG_DATA_HOME = isolatedDataHome;
 // OPENCODE_CONFIG_DIR to exercise the XDG fallback.
 process.env.XDG_CONFIG_HOME = isolatedConfigHome;
 process.env.OPENCODE_CONFIG_DIR = join(isolatedConfigHome, "opencode");
+delete process.env.AWS_PROFILE;
+delete process.env.AWS_CONFIG_FILE;
+delete process.env.AWS_SHARED_CREDENTIALS_FILE;
 
 // Bun does not run process `exit` listeners when it tears down test workers, so cleanup uses a
 // run-wide `afterAll` hook; hooks registered in a preload file run once for the whole invocation.

@@ -1,3 +1,4 @@
+import type { AwsSourceSelection } from "./aws-source";
 /**
  *
  * The wire-protocol definitions come from `docs/host-wire-protocol.md`.
@@ -117,6 +118,8 @@ export interface ConnectOptions {
     targetKind?: ManagedRouteKind;
     /** `credentialSource` contains current provider rows; only connection-keyed fingerprints leave the client. */
     credentialSource?: Record<string, string | undefined>;
+    /** The owner's captured AWS source; absent selects the environment mode. */
+    awsSource?: AwsSourceSelection;
 }
 
 /* */

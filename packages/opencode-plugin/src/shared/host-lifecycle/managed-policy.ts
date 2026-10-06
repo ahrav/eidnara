@@ -3,12 +3,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
     type AuthenticatedPeer,
+    AwsSourceError,
     type CatalogEntry,
+    captureAwsSource,
     HostClient,
     type HostClientOptions,
     type HostStatusSnapshot,
     MODEL_EXECUTION_CREDENTIAL_NAMES,
     sameDaemonId,
+    sourceBinding,
 } from "../host-client";
 import { BootstrapError, checkPlatform, type PlatformReaders } from "./bootstrap";
 import {
@@ -64,10 +67,18 @@ export function buildManagedCredentialEnvelope(
             return value === undefined || value.length === 0 ? [] : [[name, value]];
         }),
     );
-    return {
-        schema: 1,
-        ...(Object.keys(credentials).length === 0 ? {} : { credentials }),
-    };
+    return { schema: 2, ...sourceBinding(captureAwsSource(env), credentials) };
+}
+
+export function managedStartupDefaults(
+    env: Record<string, string | undefined>,
+): { defaultStartupEnvelope: NativeStartupEnvelope } | { startupRefusal: "harness_unavailable" } {
+    try {
+        return { defaultStartupEnvelope: buildManagedCredentialEnvelope(env) };
+    } catch (error) {
+        if (!(error instanceof AwsSourceError)) throw error;
+        return { startupRefusal: "harness_unavailable" };
+    }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -651,7 +662,7 @@ export function createManagedLifecyclePolicy(
             ...options,
             env,
             launchTarget: prepared,
-            defaultStartupEnvelope: buildManagedCredentialEnvelope(env),
+            ...managedStartupDefaults(env),
             storageProbe: options.storageProbe ?? probes.storageProbe,
             compatibilityProbe: options.compatibilityProbe ?? probes.compatibilityProbe,
             readinessProbe:

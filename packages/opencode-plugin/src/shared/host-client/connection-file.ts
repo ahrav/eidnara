@@ -25,8 +25,8 @@ export const MAX_CONNECTION_FILE_LEN = 65_536;
 export const CONNECTION_FILE_SCHEMA = 2;
 export const KEY_LEN = 32;
 export const DAEMON_ID_LEN = 16;
-/** The reader rejects every wire-version value other than 2. */
-export const WIRE_VERSION = 3;
+/** The reader rejects every wire-version value other than `WIRE_VERSION`. */
+export const WIRE_VERSION = 4;
 
 export type ConnectionFileErrorCode =
     | "unsupported_platform"

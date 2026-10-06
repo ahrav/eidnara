@@ -23,8 +23,8 @@ import {
 } from "./protocol";
 import { AdmissionClass, Priority } from "./types";
 
-const ROUTE_OPEN_HEADER_HEX = "a70000000300020000000000000100000000000000";
-const ROUTED_REQUEST_HEADER_HEX = "2c00000003000407004d0000000200000000000000";
+const ROUTE_OPEN_HEADER_HEX = "a70000000400020000000000000100000000000000";
+const ROUTED_REQUEST_HEADER_HEX = "2c00000004000407004d0000000200000000000000";
 /** The wire doc Section 7.2 compact canonical `route.open` request body. */
 const ROUTE_OPEN_CANONICAL_BODY =
     '{"op":"route.open","target":{"kind":"tool_provider","module_id":"context"},"identity":{"project_root":"/workspace/project","harness":"opencode","session":"session-1"}}';
@@ -106,7 +106,7 @@ describe("committed wire-doc Section 6.4 vectors", () => {
         for (const vector of vectors) {
             const header = decodeHex(vector.hex);
             expect(header.len).toBe(vector.len);
-            expect(header.ver).toBe(3);
+            expect(header.ver).toBe(4);
             expect(header.ty).toBe(FrameType.Request);
             expect(flagsBinary(header.flags)).toBe(false);
             expect(flagsPriority(header.flags)).toBe(vector.priority);

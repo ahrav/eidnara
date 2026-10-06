@@ -608,7 +608,7 @@ mod tests {
     fn grant_message_accepts_tagged_setup_envelope() {
         let message: GrantMessage = serde_json::from_value(serde_json::json!({
             "type": "grant",
-            "wire_version": 3,
+            "wire_version": 4,
             "descriptor_schema": shm_transport::descriptor::DESCRIPTOR_SCHEMA_VERSION,
             "activation_token": "token",
             "descriptor": {
@@ -620,7 +620,7 @@ mod tests {
         .expect("tagged grant envelope decodes");
 
         let GrantMessage::Grant { wire_version, .. } = message;
-        assert_eq!(wire_version, 3);
+        assert_eq!(wire_version, 4);
     }
 
     #[test]

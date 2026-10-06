@@ -3151,7 +3151,7 @@ fn provider_rows_exclude_ambient_credentials_and_enforce_caps() {
     let key = std::array::from_fn(|index| index as u8);
     let vector = EnvSnapshot::capture_from(vec![(os("ANTHROPIC_API_KEY"), os("secret"))])
         .expect("vector snapshot")
-        .credential_fingerprint(&key, "opencode", "anthropic")
+        .source_claim(&key, "opencode", "anthropic", None)
         .expect("fingerprint");
     assert_eq!(
         vector,

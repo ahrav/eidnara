@@ -160,13 +160,32 @@ export function captureAwsSource(
     return frozen;
 }
 
+let processCapture: { selection: AwsSourceSelection } | { error: unknown } | undefined;
+
+export function processAwsSource(): AwsSourceSelection {
+    if (processCapture === undefined) {
+        try {
+            processCapture = { selection: captureAwsSource(process.env) };
+        } catch (error) {
+            processCapture = { error };
+        }
+    }
+    if ("error" in processCapture) throw processCapture.error;
+    return processCapture.selection;
+}
+
 export function sourceBinding(
     selection: AwsSourceSelection,
     credentials: Readonly<Record<string, string>>,
-): { credentials: Record<string, string>; aws_source?: AwsProfileSource } {
-    if (selection.mode === "environment") return { credentials: { ...credentials } };
+): { credentials?: Record<string, string>; aws_source?: AwsProfileSource } {
     const kept = Object.fromEntries(
-        Object.entries(credentials).filter(([name]) => !STATIC_AWS_CREDENTIAL_NAMES.includes(name)),
+        Object.entries(credentials).filter(
+            ([name]) =>
+                selection.mode === "environment" || !STATIC_AWS_CREDENTIAL_NAMES.includes(name),
+        ),
     );
-    return { credentials: kept, aws_source: selection.source };
+    return {
+        ...(Object.keys(kept).length === 0 ? {} : { credentials: kept }),
+        ...(selection.mode === "profile" ? { aws_source: selection.source } : {}),
+    };
 }

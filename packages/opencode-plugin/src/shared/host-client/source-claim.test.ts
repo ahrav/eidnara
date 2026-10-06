@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../../../crates/host-runtime/tests/fixtures/source-claim-vectors.json";
 import { type AwsProfileSource, selectAwsSource } from "./aws-source";
-import { credentialFingerprints } from "./credential-fingerprint";
 import {
     type ClaimSource,
     SOURCE_CLAIM_CANONICALIZATION,
@@ -119,12 +118,13 @@ describe("source-bound credential claims", () => {
         );
     });
 
-    test("profile mode keeps the other providers' environment rows and never matches v3", () => {
+    test("profile mode keeps the other providers' environment rows", () => {
         const env = { ...PROFILE_ENV, ANTHROPIC_API_KEY: "k" };
         const claims = sourceClaims(KEY, "opencode", env, selectAwsSource(env));
         expect(Object.keys(claims).sort()).toEqual(["amazon-bedrock", "anthropic"]);
-        const legacy = credentialFingerprints(KEY, "opencode", env);
-        expect(claims.anthropic).not.toBe(legacy.anthropic);
+        expect(claims.anthropic).toBe(
+            sourceClaims(KEY, "opencode", env, selectAwsSource({})).anthropic,
+        );
         expect(() => sourceClaims(new Uint8Array(31), "pi", env, selectAwsSource({}))).toThrow(
             /exactly 32/,
         );

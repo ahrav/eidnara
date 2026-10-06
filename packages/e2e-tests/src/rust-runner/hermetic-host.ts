@@ -73,7 +73,7 @@ export interface BackendCounters {
 
 interface ReadyRecord {
     status: "ready";
-    wire_version: 3;
+    wire_version: 4;
     catalog: ["context", "local_embeddings", "model_execution"];
 }
 
@@ -366,7 +366,7 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
     }
     if (
         object.status !== "ready" ||
-        object.wire_version !== 3 ||
+        object.wire_version !== 4 ||
         !Array.isArray(object.catalog) ||
         typeof object.debug_assertions !== "boolean" ||
         !Number.isSafeInteger(object.model_workers)
@@ -381,7 +381,7 @@ function parseReadyRecord(line: Buffer): ReadyRecord {
     }
     return {
         status: "ready",
-        wire_version: 3,
+        wire_version: 4,
         catalog: ["context", "local_embeddings", "model_execution"],
     };
 }

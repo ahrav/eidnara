@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::{ffi::OsString, time::Duration};
 
 use host_runtime::CancellationToken;
+use host_runtime::model_execution::aws_source::AwsProfileSource;
 use host_runtime::model_execution::backend::{
     BackendFuture, BackendRequest, EventSink, Harness, LlmExecutionBackend,
 };
@@ -527,6 +528,7 @@ async fn credential_snapshot_must_match_before_backend_spawn() {
     let component = ModelExecutionComponent::new_with_credentials(
         Arc::clone(&backend) as Arc<_>,
         env.clone(),
+        None,
         support::model_execution::state_root(),
     );
     let host = start_model_execution_host(component).await;
@@ -547,7 +549,7 @@ async fn credential_snapshot_must_match_before_backend_spawn() {
 
     let key: [u8; 32] = host.info.key.clone().try_into().expect("32-byte key");
     let fingerprint = env
-        .credential_fingerprint(&key, "opencode", "anthropic")
+        .source_claim(&key, "opencode", "anthropic", None)
         .expect("fingerprint");
     let mut fingerprints = serde_json::Map::new();
     fingerprints.insert(
@@ -578,6 +580,102 @@ async fn credential_snapshot_must_match_before_backend_spawn() {
     while backend.starts() == 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    assert_eq!(backend.starts(), 1);
+    drop(client);
+    host.shutdown().await.expect("host shutdown");
+}
+
+#[tokio::test]
+async fn a_profile_only_host_admits_only_the_current_bearers_source_claim() {
+    let env = EnvSnapshot::capture_from(Vec::new()).expect("empty snapshot");
+    let source: AwsProfileSource = serde_json::from_value(serde_json::json!({
+        "kind": "profile", "profile": "corp", "region": "us-east-1",
+        "config_file": "/home/u/.aws/config", "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache",
+    }))
+    .expect("selector");
+    let backend = ScriptedBackend::completing("out");
+    let component = ModelExecutionComponent::new_with_credentials(
+        Arc::clone(&backend) as Arc<_>,
+        env.clone(),
+        Some(source.clone()),
+        support::model_execution::state_root(),
+    );
+    let host = start_model_execution_host(component).await;
+    let mut client = host.client().await;
+    let key: [u8; 32] = host.info.key.clone().try_into().expect("32-byte key");
+    let claim = |key: &[u8; 32]| {
+        env.source_claim(key, "pi", "amazon-bedrock", Some(&source))
+            .expect("profile claim")
+    };
+    let send = send_params("prompt", None, "amazon-bedrock/model");
+
+    let (bare_ch, bare_ep) = open_model_execution_route(&mut client, "pi", "bare").await;
+    let missing = call(&mut client, bare_ch, bare_ep, "session.send", send.clone()).await;
+    assert_eq!(missing.error_code(), "harness_unavailable");
+    let mut session = 0;
+    let mut run_id = None;
+    for presented in [claim(&[9u8; 32]), "0".repeat(64), claim(&key)] {
+        session += 1;
+        let (ch, ep) = client
+            .route_open_target_with_fingerprints(
+                "management_surface",
+                "model_execution",
+                support::model_execution::ROOT,
+                "pi",
+                &format!("claimed-{session}"),
+                serde_json::Map::from_iter([(
+                    "amazon-bedrock".to_owned(),
+                    serde_json::Value::String(presented),
+                )]),
+            )
+            .await
+            .expect("claim-bound route");
+        let outcome = call(&mut client, ch, ep, "session.send", send.clone()).await;
+        if session < 3 {
+            assert_eq!(outcome.error_code(), "harness_unavailable");
+            assert_eq!(
+                backend.starts(),
+                0,
+                "a stale or wrong claim precedes any spawn"
+            );
+        } else {
+            assert_eq!(outcome.ty, support::raw_client::TY_RESPONSE);
+            run_id = outcome.json()["run_id"].as_str().map(str::to_owned);
+        }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while backend.starts() == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(backend.starts(), 1);
+    let (stale_ch, stale_ep) = client
+        .route_open_target_with_fingerprints(
+            "management_surface",
+            "model_execution",
+            support::model_execution::ROOT,
+            "pi",
+            "claimed-3",
+            serde_json::Map::from_iter([(
+                "amazon-bedrock".to_owned(),
+                serde_json::Value::String(claim(&[9u8; 32])),
+            )]),
+        )
+        .await
+        .expect("stale-claim route");
+    let status = call(
+        &mut client,
+        stale_ch,
+        stale_ep,
+        "run.status",
+        serde_json::json!({ "run_id": run_id.expect("accepted run") }),
+    )
+    .await;
+    assert_eq!(
+        status.ty,
+        support::raw_client::TY_RESPONSE,
+        "an accepted run stays readable under a stale claim"
+    );
     assert_eq!(backend.starts(), 1);
     drop(client);
     host.shutdown().await.expect("host shutdown");

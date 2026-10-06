@@ -26,6 +26,10 @@ use host_runtime::local_embeddings::{
     LocalEmbeddingsComponent, LocalEmbeddingsConfig, LocalEmbeddingsLimits,
 };
 use host_runtime::model_execution::ModelExecutionComponent;
+use host_runtime::model_execution::aws_source::{
+    AwsProfileSource, deserialize_present, validate_source_binding,
+};
+use host_runtime::model_execution::aws_transaction::{OwnerSource, admit_owner_source};
 use host_runtime::model_execution::backend::{
     BackendError, BackendFuture, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
     HarnessDispatchBackend, LlmExecutionBackend,
@@ -71,6 +75,12 @@ pub struct StartupEnvelope {
     pub pi: Option<HarnessSnapshot>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub aws_source: Option<AwsProfileSource>,
 }
 
 /// The launcher receives parent input.
@@ -86,6 +96,12 @@ pub struct LauncherEnvelope {
     pub pi: Option<HarnessCandidate>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub credentials: BTreeMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub aws_source: Option<AwsProfileSource>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -121,7 +137,11 @@ impl HarnessUnavailableReason {
     }
 }
 
-pub const STARTUP_ENVELOPE_SCHEMA: u32 = 2;
+pub const STARTUP_ENVELOPE_SCHEMA: u32 = 3;
+pub const LAUNCHER_ENVELOPE_SCHEMA: u32 = 2;
+const ACTIVE_SELECTION_SCHEMA: u32 = 2;
+/// A fresh start preserves the replaced schema-1 selection under this name.
+const PRIOR_GENERATION_SELECTION: &str = "active-selection.v1.json";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +153,21 @@ struct HarnessSelection {
     pi: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     credential_identities: BTreeMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    aws_source: Option<AwsProfileSource>,
+}
+
+impl HarnessSelection {
+    fn empty() -> Self {
+        Self {
+            schema: ACTIVE_SELECTION_SCHEMA,
+            ..Self::default()
+        }
+    }
 }
 
 /// Validated launcher state ready to become a daemon startup envelope.
@@ -165,6 +200,7 @@ impl PreparedLauncherEnvelope {
             opencode: self.opencode.clone(),
             pi: self.pi.clone(),
             credentials: self.credentials.clone(),
+            aws_source: self.selection.aws_source.clone(),
         }
     }
 
@@ -199,27 +235,28 @@ impl StartupEnvelope {
         validate_snapshot(self.opencode.as_ref())?;
         validate_snapshot(self.pi.as_ref())?;
         validate_credentials(&self.credentials)?;
-        Ok(())
+        validate_source_binding(self.aws_source.as_ref(), &self.credentials)
+            .map_err(|_| "startup envelope source conflicts with its credentials")
     }
 }
 
 impl LauncherEnvelope {
-    /// Returns a schema-1 launcher envelope with no harnesses or credentials.
     pub fn empty() -> Self {
         Self {
-            schema: 1,
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
             ..Self::default()
         }
     }
 
-    /// Validates schema, candidate descriptor bounds, and credential bounds.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema != 1 {
+        if self.schema != LAUNCHER_ENVELOPE_SCHEMA {
             return Err("unsupported launcher envelope schema");
         }
         validate_candidate(self.opencode.as_ref())?;
         validate_candidate(self.pi.as_ref())?;
-        validate_credentials(&self.credentials)
+        validate_credentials(&self.credentials)?;
+        validate_source_binding(self.aws_source.as_ref(), &self.credentials)
+            .map_err(|_| "launcher envelope source conflicts with its credentials")
     }
 
     /// Materializes supplied closures and merges them with the active selection.
@@ -232,6 +269,10 @@ impl LauncherEnvelope {
         data_dir: PathBuf,
         mode: SelectionMode<'_>,
     ) -> Result<PreparedLauncherEnvelope, &'static str> {
+        if let Some(source) = &self.aws_source {
+            admit_owner_source(&OwnerSource::from_selector(source))
+                .map_err(|_| "aws profile source is not admissible")?;
+        }
         let closure_root = closure_root(&data_dir);
         let store = HarnessClosureStore::open(&closure_root)
             .map_err(|_| "harness closure root is insecure")?;
@@ -243,14 +284,7 @@ impl LauncherEnvelope {
         let (previous, mut credential_identities, require_previous_credentials) = match mode {
             SelectionMode::Fresh => {
                 read_selection_file(&closure_root)?;
-                (
-                    HarnessSelection {
-                        schema: 1,
-                        ..HarnessSelection::default()
-                    },
-                    BTreeMap::new(),
-                    false,
-                )
+                (HarnessSelection::empty(), BTreeMap::new(), false)
             }
             SelectionMode::Running {
                 credential_identity_key,
@@ -258,10 +292,7 @@ impl LauncherEnvelope {
             } => (
                 match read_selection(&closure_root, &mut validator)? {
                     SelectionState::Active(previous) => previous,
-                    SelectionState::Absent => HarnessSelection {
-                        schema: 1,
-                        ..HarnessSelection::default()
-                    },
+                    SelectionState::Absent => HarnessSelection::empty(),
                     // The validator rejects a committed selection whose closure this binary cannot qualify or validate.
                     // A committed selection cannot be merged when this binary cannot qualify or validate its closure.
                     // `stop` clears stale selections.
@@ -272,8 +303,14 @@ impl LauncherEnvelope {
                 require_previous_credentials,
             ),
         };
-        if running && !require_previous_credentials && self.credentials.is_empty() {
+        let mut aws_source = self.aws_source;
+        if running
+            && !require_previous_credentials
+            && self.credentials.is_empty()
+            && aws_source.is_none()
+        {
             credential_identities = previous.credential_identities.clone();
+            aws_source = previous.aws_source.clone();
         }
         let supplied_opencode = self.opencode.is_some();
         let supplied_pi = self.pi.is_some();
@@ -316,6 +353,7 @@ impl LauncherEnvelope {
             next_opencode,
             next_pi,
             credential_identities,
+            aws_source,
             require_previous_credentials,
         )?;
         let opencode = selected_snapshot(
@@ -353,6 +391,7 @@ fn merge_selection(
     opencode: Option<String>,
     pi: Option<String>,
     credential_identities: BTreeMap<String, String>,
+    aws_source: Option<AwsProfileSource>,
     require_previous_credentials: bool,
 ) -> Result<(HarnessSelection, bool), &'static str> {
     let mut selection = previous.clone();
@@ -364,19 +403,21 @@ fn merge_selection(
     }
     let changed = selection.opencode != previous.opencode
         || selection.pi != previous.pi
-        || credential_identities != previous.credential_identities;
+        || credential_identities != previous.credential_identities
+        || aws_source != previous.aws_source;
     if require_previous_credentials && changed {
         return Err("restart cannot change the active harness selection");
     }
-    if changed
-        && previous
-            .credential_identities
-            .iter()
-            .any(|(name, identity)| credential_identities.get(name) != Some(identity))
-    {
+    let identity_lost = previous
+        .credential_identities
+        .iter()
+        .any(|(name, identity)| credential_identities.get(name) != Some(identity));
+    let source_replaced = previous.aws_source.is_some() && aws_source != previous.aws_source;
+    if changed && (identity_lost || source_replaced) {
         return Err("new owner cannot preserve the active credential source");
     }
     selection.credential_identities = credential_identities;
+    selection.aws_source = aws_source;
     Ok((selection, changed))
 }
 
@@ -687,6 +728,8 @@ enum SelectionState {
 enum SelectionFile {
     Absent,
     Valid(HarnessSelection),
+    /// A schema-1 selection records harness digests and keyed credential identities.
+    PriorGeneration,
     Invalid,
 }
 
@@ -733,25 +776,37 @@ fn read_selection_file(closure_root: &Path) -> Result<SelectionFile, &'static st
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(SelectionFile::Invalid);
     };
-    // Only a recognized integer schema other than 1 is quarantined; an absent or non-integer `schema` is a malformed artifact this binary owns and may clear or replace.
-    match value.get("schema").and_then(serde_json::Value::as_u64) {
+    // Schema 2 is current and schema 1 is a prior generation's; any other integer schema is quarantined, and an absent or non-integer `schema` is a malformed artifact this binary owns and may clear or replace.
+    let schema = value.get("schema").and_then(serde_json::Value::as_u64);
+    match schema {
         Some(1) => {}
+        Some(current) if current == u64::from(ACTIVE_SELECTION_SCHEMA) => {}
         Some(_) => return Err(UNSUPPORTED_SELECTION_SCHEMA),
         None => return Ok(SelectionFile::Invalid),
     }
     let Ok(selection) = serde_json::from_value::<HarnessSelection>(value) else {
         return Ok(SelectionFile::Invalid);
     };
-    if selection.schema != 1
-        || selection
-            .credential_identities
-            .iter()
-            .any(|(name, identity)| {
-                !CREDENTIAL_VARIABLES.contains(&name.as_str())
-                    || !host_runtime::is_canonical_payload_digest(identity)
-            })
+    if selection
+        .credential_identities
+        .iter()
+        .any(|(name, identity)| {
+            !CREDENTIAL_VARIABLES.contains(&name.as_str())
+                || !host_runtime::is_canonical_payload_digest(identity)
+        })
     {
         return Ok(SelectionFile::Invalid);
+    }
+    if schema == Some(1) {
+        let canonical = [&selection.opencode, &selection.pi]
+            .into_iter()
+            .flatten()
+            .all(|digest| host_runtime::is_canonical_payload_digest(digest));
+        return Ok(if canonical && selection.aws_source.is_none() {
+            SelectionFile::PriorGeneration
+        } else {
+            SelectionFile::Invalid
+        });
     }
     Ok(SelectionFile::Valid(selection))
 }
@@ -763,6 +818,7 @@ fn read_selection(
 ) -> Result<SelectionState, &'static str> {
     let selection = match read_selection_file(closure_root)? {
         SelectionFile::Absent => return Ok(SelectionState::Absent),
+        SelectionFile::PriorGeneration => return Ok(SelectionState::Stale),
         SelectionFile::Invalid => return Err("active harness selection is invalid"),
         SelectionFile::Valid(selection) => selection,
     };
@@ -781,6 +837,16 @@ fn read_selection(
 
 fn write_selection(closure_root: &Path, selection: &HarnessSelection) -> Result<(), &'static str> {
     let bytes = serde_json::to_vec(selection).map_err(|_| "selection serialization failed")?;
+    if matches!(
+        read_selection_file(closure_root)?,
+        SelectionFile::PriorGeneration
+    ) {
+        std::fs::rename(
+            closure_root.join(ACTIVE_HARNESS_SELECTION),
+            closure_root.join(PRIOR_GENERATION_SELECTION),
+        )
+        .map_err(|_| "prior generation selection could not be kept")?;
+    }
     write_private_file(closure_root, ACTIVE_HARNESS_SELECTION, &bytes)
 }
 
@@ -832,16 +898,24 @@ pub fn clear_active_selection() -> Result<(), &'static str> {
     let data_dir = host_runtime::data_dir_path(None)
         .ok()
         .ok_or("active harness selection root is unavailable")?;
-    let closure_root = closure_root(&data_dir);
+    clear_selection_at(&closure_root(&data_dir))
+}
+
+fn clear_selection_at(closure_root: &Path) -> Result<(), &'static str> {
     let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err("active harness selection is unreadable"),
     }
-    HarnessClosureStore::open(&closure_root)
+    HarnessClosureStore::open(closure_root)
         .map_err(|_| "active harness selection root is unavailable")?;
-    read_selection_file(&closure_root)?;
+    if matches!(
+        read_selection_file(closure_root)?,
+        SelectionFile::PriorGeneration
+    ) {
+        return Ok(());
+    }
     #[cfg(debug_assertions)]
     if std::env::var_os("EIDNARA_HOST_TEST_FAIL_SELECTION_REMOVAL").is_some() {
         return Err("injected active selection removal failure");
@@ -980,6 +1054,10 @@ fn open_snapshot(
     }
 }
 
+fn verifies_claims(envelope: &StartupEnvelope) -> bool {
+    !envelope.credentials.is_empty() || envelope.aws_source.is_some()
+}
+
 fn read_envelope() -> Result<StartupEnvelope, &'static str> {
     let mut bytes = Vec::new();
     std::io::stdin()
@@ -1076,7 +1154,7 @@ pub fn read_launcher_envelope() -> Result<LauncherEnvelope, LauncherEnvelopeErro
     }
     let envelope: LauncherEnvelope =
         serde_json::from_slice(&bytes).map_err(|_| Unreadable("launcher envelope is malformed"))?;
-    if envelope.schema != 1 {
+    if envelope.schema != LAUNCHER_ENVELOPE_SCHEMA {
         return Err(Unreadable("unsupported launcher envelope schema"));
     }
     envelope
@@ -1193,18 +1271,23 @@ pub fn run() -> Result<(), &'static str> {
     let capability_source = Arc::new(daemon::context_capabilities::BackendDeclarations::new(
         &backend,
     ));
-    let model_execution = if envelope.credentials.is_empty() {
+    let model_execution = if !verifies_claims(&envelope) {
         ModelExecutionComponent::new(backend, model_execution_state)
     } else {
-        ModelExecutionComponent::new_with_credentials(backend, env.clone(), model_execution_state)
+        ModelExecutionComponent::new_with_credentials(
+            backend,
+            env.clone(),
+            envelope.aws_source.clone(),
+            model_execution_state,
+        )
     };
     // The daemon commits its own harness selection when the host hands it the bearer key, before publication, so a launcher killed after publication cannot leave a daemon serving harnesses that no selection on disk records. The launcher's later commit rewrites the same content.
     let selection_root = closure_root(&root);
     let selection = HarnessSelection {
-        schema: 1,
         opencode: ready_digest(envelope.opencode.as_ref()),
         pi: ready_digest(envelope.pi.as_ref()),
-        credential_identities: BTreeMap::new(),
+        aws_source: envelope.aws_source.clone(),
+        ..HarnessSelection::empty()
     };
     let selection_credentials = envelope.credentials.clone();
     let memory_reviewer_host = Arc::new(daemon::memory_reviewer::worker::MemoryReviewerHost {
@@ -1377,10 +1460,11 @@ mod tests {
         let credentials =
             BTreeMap::from([("OPENAI_API_KEY".to_owned(), "owner-secret".to_owned())]);
         let selection = HarnessSelection {
-            schema: 1,
+            schema: 2,
             opencode: Some(digest.clone()),
             pi: None,
             credential_identities: BTreeMap::new(),
+            aws_source: None,
         };
         let hook_root = closure_root.clone();
         let hook_credentials = credentials.clone();
@@ -1432,10 +1516,11 @@ mod tests {
         let previous_credentials =
             BTreeMap::from([("ANTHROPIC_API_KEY".to_owned(), "shared-secret".to_owned())]);
         let previous = HarnessSelection {
-            schema: 1,
+            schema: 2,
             opencode: Some("a".repeat(64)),
             pi: None,
             credential_identities: credential_identities(&previous_credentials, &key),
+            aws_source: None,
         };
         let credentials = BTreeMap::from([
             ("ANTHROPIC_API_KEY".to_owned(), "shared-secret".to_owned()),
@@ -1446,6 +1531,7 @@ mod tests {
             None,
             Some("b".repeat(64)),
             credential_identities(&credentials, &key),
+            None,
             false,
         )
         .expect("qualified second owner merges");
@@ -1466,10 +1552,11 @@ mod tests {
         let previous_credentials =
             BTreeMap::from([("ANTHROPIC_API_KEY".to_owned(), "first-secret".to_owned())]);
         let previous = HarnessSelection {
-            schema: 1,
+            schema: 2,
             opencode: Some("a".repeat(64)),
             pi: None,
             credential_identities: credential_identities(&previous_credentials, &key),
+            aws_source: None,
         };
         assert!(
             merge_selection(
@@ -1480,6 +1567,7 @@ mod tests {
                     &BTreeMap::from([("OPENAI_API_KEY".to_owned(), "other-secret".to_owned())]),
                     &key,
                 ),
+                None,
                 false,
             )
             .is_err()
@@ -1496,6 +1584,7 @@ mod tests {
                     )]),
                     &key,
                 ),
+                None,
                 true,
             )
             .is_err()
@@ -1508,10 +1597,11 @@ mod tests {
         let credentials =
             BTreeMap::from([("ANTHROPIC_API_KEY".to_owned(), "shared-secret".to_owned())]);
         let previous = HarnessSelection {
-            schema: 1,
+            schema: 2,
             opencode: Some("a".repeat(64)),
             pi: None,
             credential_identities: credential_identities(&credentials, &key),
+            aws_source: None,
         };
         assert!(
             merge_selection(
@@ -1519,6 +1609,7 @@ mod tests {
                 None,
                 Some("b".repeat(64)),
                 credential_identities(&credentials, &key),
+                None,
                 true,
             )
             .is_err()
@@ -1544,10 +1635,11 @@ mod tests {
             "only direct API keys form the daemon's identity"
         );
         let previous = HarnessSelection {
-            schema: 1,
+            schema: 2,
             opencode: Some("a".repeat(64)),
             pi: None,
             credential_identities: identities,
+            aws_source: None,
         };
         let rotated = BTreeMap::from([
             owned("ANTHROPIC_API_KEY", "shared-secret"),
@@ -1561,6 +1653,7 @@ mod tests {
             None,
             None,
             credential_identities(&rotated, &key),
+            None,
             false,
         )
         .expect("rotated AWS credentials merge with the running daemon");
@@ -1575,6 +1668,7 @@ mod tests {
             None,
             None,
             credential_identities(&without_aws, &key),
+            None,
             false,
         )
         .expect("dropping AWS credentials merges with the running daemon");
@@ -1586,6 +1680,7 @@ mod tests {
                 None,
                 None,
                 credential_identities(&rotated_api_key, &key),
+                None,
                 false,
             )
             .is_err(),
@@ -1623,10 +1718,11 @@ mod tests {
             let host = host_for(credentials);
             selection_commit_hook(
                 HarnessSelection {
-                    schema: 1,
+                    schema: 2,
                     opencode: None,
                     pi: None,
                     credential_identities: BTreeMap::new(),
+                    aws_source: None,
                 },
                 credentials.clone(),
                 root.path().to_path_buf(),
@@ -1708,10 +1804,11 @@ mod tests {
             "credential-value".to_owned(),
         )]);
         let selection = HarnessSelection {
-            schema: 1,
+            schema: 2,
             opencode: None,
             pi: None,
             credential_identities: credential_identities(&credentials, &[11; 32]),
+            aws_source: None,
         };
         write_selection(root.path(), &selection).expect("write selection");
         let loaded = match read_selection(root.path(), &mut ClosureValidator::new(Some(&store)))
@@ -1758,10 +1855,11 @@ mod tests {
         assert!(memory_reviewer_host.credential_identities.get().is_none());
         let hook = selection_commit_hook(
             HarnessSelection {
-                schema: 1,
+                schema: 2,
                 opencode: None,
                 pi: None,
                 credential_identities: BTreeMap::new(),
+                aws_source: None,
             },
             credentials.clone(),
             root.path().to_path_buf(),
@@ -1801,17 +1899,18 @@ mod tests {
         write_selection(
             closure_root,
             &HarnessSelection {
-                schema: 1,
+                schema: 2,
                 opencode: Some("f".repeat(64)),
                 pi: None,
                 credential_identities: BTreeMap::new(),
+                aws_source: None,
             },
         )
         .expect("write stale selection");
     }
 
     #[test]
-    fn selection_schema_quarantines_only_recognized_integers_other_than_one() {
+    fn selection_schema_quarantines_recognized_integers_and_keeps_a_prior_generation() {
         let root = tempfile::tempdir().expect("selection root");
         let data_dir = root.path().to_path_buf();
         let closure_root = closure_root(&data_dir);
@@ -1825,16 +1924,49 @@ mod tests {
                 .expect("selection mode");
         };
 
-        plant(b"{\"schema\":2,\"future\":true}");
+        plant(b"{\"schema\":3,\"future\":true}");
         assert_eq!(
             read_selection_file(&closure_root).err(),
             Some(UNSUPPORTED_SELECTION_SCHEMA)
         );
-        plant(b"{\"schema\":1}");
+        plant(b"{\"schema\":2}");
         assert!(matches!(
             read_selection_file(&closure_root),
             Ok(SelectionFile::Valid(_))
         ));
+        let prior = format!(
+            "{{\"schema\":1,\"opencode\":\"{}\",\"credential_identities\":{{\"OPENAI_API_KEY\":\"{}\"}}}}",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        plant(prior.as_bytes());
+        assert!(matches!(
+            read_selection_file(&closure_root),
+            Ok(SelectionFile::PriorGeneration)
+        ));
+        clear_selection_at(&closure_root).expect("stop leaves a prior selection");
+        assert_eq!(std::fs::read(&path).expect("prior kept"), prior.as_bytes());
+        write_selection(&closure_root, &HarnessSelection::empty()).expect("fresh commit");
+        assert_eq!(
+            std::fs::read(closure_root.join(PRIOR_GENERATION_SELECTION)).expect("prior record"),
+            prior.as_bytes()
+        );
+        assert!(matches!(
+            read_selection_file(&closure_root),
+            Ok(SelectionFile::Valid(selection)) if selection.aws_source.is_none()
+        ));
+        let with_source = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "aws_source": profile("corp", "/home/u/.aws/config"),
+        }))
+        .expect("schema-1 with a selector");
+        for not_prior in [&with_source[..], b"{\"schema\":1,\"opencode\":\"abc\"}"] {
+            plant(not_prior);
+            assert!(matches!(
+                read_selection_file(&closure_root),
+                Ok(SelectionFile::Invalid)
+            ));
+        }
         // An absent or non-integer schema is a malformed artifact, not a future one.
         for malformed in [
             &b"{}"[..],
@@ -1862,10 +1994,11 @@ mod tests {
             Some("active harness selection is a directory")
         );
         let envelope = LauncherEnvelope {
-            schema: 1,
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
             opencode: None,
             pi: None,
             credentials: BTreeMap::new(),
+            aws_source: None,
         };
         assert_eq!(
             envelope.prepare(data_dir, SelectionMode::Fresh).err(),
@@ -1887,6 +2020,167 @@ mod tests {
         ));
     }
 
+    fn profile(name: &str, config_file: &str) -> AwsProfileSource {
+        serde_json::from_value(serde_json::json!({
+            "kind": "profile", "profile": name, "region": "us-east-1",
+            "config_file": config_file, "credentials_file": "/home/u/.aws/credentials",
+            "sso_cache_root": "/home/u/.aws/sso/cache",
+        }))
+        .expect("selector")
+    }
+
+    #[test]
+    fn both_native_hops_refuse_conflicts_null_and_prior_schemas() {
+        let source = profile("corp", "/home/u/.aws/config");
+        let conflicting = BTreeMap::from([("AWS_ACCESS_KEY_ID".to_owned(), "AKIA".to_owned())]);
+        let launcher = |schema, credentials: BTreeMap<String, String>| LauncherEnvelope {
+            schema,
+            opencode: None,
+            pi: None,
+            credentials,
+            aws_source: Some(source.clone()),
+        };
+        assert_eq!(
+            launcher(LAUNCHER_ENVELOPE_SCHEMA, conflicting.clone())
+                .validate()
+                .err(),
+            Some("launcher envelope source conflicts with its credentials")
+        );
+        assert!(
+            launcher(LAUNCHER_ENVELOPE_SCHEMA, BTreeMap::new())
+                .validate()
+                .is_ok()
+        );
+        assert_eq!(
+            launcher(1, BTreeMap::new()).validate().err(),
+            Some("unsupported launcher envelope schema")
+        );
+        let startup = |schema, credentials, aws_source| StartupEnvelope {
+            schema,
+            data_dir: PathBuf::from("/data"),
+            payload_manifest_digest: "cd".repeat(32),
+            opencode: None,
+            pi: None,
+            credentials,
+            aws_source,
+        };
+        assert_eq!(
+            startup(STARTUP_ENVELOPE_SCHEMA, conflicting, Some(source.clone()))
+                .validate()
+                .err(),
+            Some("startup envelope source conflicts with its credentials")
+        );
+        assert_eq!(
+            startup(2, BTreeMap::new(), None).validate().err(),
+            Some("unsupported startup envelope schema")
+        );
+        assert!(verifies_claims(&startup(
+            STARTUP_ENVELOPE_SCHEMA,
+            BTreeMap::new(),
+            Some(source)
+        )));
+        assert!(!verifies_claims(&startup(
+            STARTUP_ENVELOPE_SCHEMA,
+            BTreeMap::new(),
+            None
+        )));
+        assert!(
+            serde_json::from_str::<LauncherEnvelope>(r#"{"schema":2,"aws_source":null}"#).is_err()
+        );
+        assert!(
+            serde_json::from_str::<HarnessSelection>(r#"{"schema":2,"aws_source":null}"#).is_err()
+        );
+        let startup_null = serde_json::json!({
+            "schema": STARTUP_ENVELOPE_SCHEMA, "data_dir": "/data",
+            "payload_manifest_digest": "cd".repeat(32), "aws_source": null,
+        });
+        assert!(serde_json::from_value::<StartupEnvelope>(startup_null).is_err());
+    }
+
+    #[test]
+    fn a_running_selection_refuses_a_different_source() {
+        let a = profile("a", "/home/u/.aws/config");
+        let b = profile("b", "/home/u/.aws/config");
+        let profile_host = HarnessSelection {
+            aws_source: Some(a.clone()),
+            ..HarnessSelection::empty()
+        };
+        let merge = |previous: &HarnessSelection, identities, source, restart| {
+            merge_selection(previous, None, None, identities, source, restart)
+        };
+        let (kept, changed) = merge(&profile_host, BTreeMap::new(), Some(a.clone()), false)
+            .expect("the same selector joins");
+        assert!(!changed);
+        assert_eq!(kept.aws_source, Some(a.clone()));
+        for (identities, source) in [
+            (BTreeMap::new(), Some(b.clone())),
+            (
+                BTreeMap::from([("OPENAI_API_KEY".to_owned(), "f".repeat(64))]),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                merge(&profile_host, identities, source, false).err(),
+                Some("new owner cannot preserve the active credential source")
+            );
+        }
+        assert_eq!(
+            merge(&profile_host, BTreeMap::new(), Some(b), true).err(),
+            Some("restart cannot change the active harness selection")
+        );
+        let (_, changed) = merge(&HarnessSelection::empty(), BTreeMap::new(), Some(a), false)
+            .expect("an environment selection reports the new source as a change");
+        assert!(changed);
+    }
+
+    #[test]
+    fn an_inadmissible_profile_refuses_prepare_before_any_selection() {
+        let root = tempfile::tempdir().expect("data root");
+        let missing = root.path().join("missing").join("config");
+        let envelope = LauncherEnvelope {
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
+            opencode: None,
+            pi: None,
+            credentials: BTreeMap::new(),
+            aws_source: Some(profile("corp", missing.to_str().expect("utf-8"))),
+        };
+        assert_eq!(
+            envelope
+                .prepare(root.path().to_path_buf(), SelectionMode::Fresh)
+                .err(),
+            Some("aws profile source is not admissible")
+        );
+        assert!(
+            !closure_root(root.path())
+                .join(ACTIVE_HARNESS_SELECTION)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_running_merge_reads_a_prior_generation_selection_as_stale() {
+        let root = tempfile::tempdir().expect("data root");
+        let data_dir = root.path().to_path_buf();
+        let closure_root = closure_root(&data_dir);
+        std::fs::create_dir_all(&closure_root).expect("closure root");
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
+            .expect("closure root mode");
+        let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
+        std::fs::write(&path, b"{\"schema\":1}").expect("prior selection");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("prior selection mode");
+        let envelope = LauncherEnvelope::empty();
+        let refused = envelope.prepare(
+            data_dir,
+            SelectionMode::Running {
+                credential_identity_key: &[3; 32],
+                require_previous_credentials: false,
+            },
+        );
+        assert_eq!(refused.err(), Some("active harness selection is stale"));
+        assert_eq!(std::fs::read(&path).expect("kept"), b"{\"schema\":1}");
+    }
+
     #[test]
     fn fresh_prepare_ignores_a_stale_selection_and_running_prepare_refuses_it() {
         let root = tempfile::tempdir().expect("data root");
@@ -1895,10 +2189,11 @@ mod tests {
         plant_stale_selection(&closure_root);
 
         let envelope = || LauncherEnvelope {
-            schema: 1,
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
             opencode: None,
             pi: None,
             credentials: BTreeMap::new(),
+            aws_source: None,
         };
         let prepared = envelope()
             .prepare(data_dir.clone(), SelectionMode::Fresh)
@@ -1930,10 +2225,11 @@ mod tests {
         );
 
         let envelope = || LauncherEnvelope {
-            schema: 1,
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
             opencode: None,
             pi: None,
             credentials: BTreeMap::new(),
+            aws_source: None,
         };
         for mode in [
             SelectionMode::Fresh,
