@@ -22,6 +22,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use super::backend::{
     BackendError, BackendEvent, BackendTerminal, ErrorClass, EventSink, Harness, SinkStatus,
@@ -338,11 +339,15 @@ pub struct SubprocessSpec {
     /// The child uses `env_clear`; adapter-owned control variables follow snapshot variables and win collisions.
     pub env: Vec<(OsString, OsString)>,
     pub working_dir: PathBuf,
-    pub stdin: Vec<u8>,
+    /// `stdin` can contain secrets, so `Zeroizing` wipes its buffer on drop.
+    pub stdin: Zeroizing<Vec<u8>>,
     /// `inherit_fds` retains descriptors referenced by child path arguments.
     pub inherit_fds: Vec<RawFd>,
     /// The crash-ownership record for the child's process group is written here before the child execs.
     pub state_root: group_registry::StateRoot,
+    /// Each resource limit takes effect for the leader before `exec`, stays within its
+    /// inherited hard limit, and passes to descendants.
+    pub rlimits: Vec<(rustix::process::Resource, u64)>,
 }
 
 /// child output.
@@ -410,6 +415,7 @@ pub async fn run(
         stdin: prompt,
         inherit_fds,
         state_root,
+        rlimits,
     } = spec;
     // The budget is anchored before spawn and registration: a slow crash-record publication
     // consumes this run's budget rather than granting the child a stale full remainder measured
@@ -465,6 +471,15 @@ pub async fn run(
     let child_exec_barrier_read = exec_barrier_read.as_raw_fd();
     let child_pid_report_read = pid_report_read.as_raw_fd();
     let child_exec_barrier_write = exec_barrier_write.as_raw_fd();
+    // Raising a hard limit requires privilege, so each requested limit is capped at the
+    // inherited hard limit and the child keeps whichever bound is tighter.
+    let rlimits: Vec<_> = rlimits
+        .into_iter()
+        .map(|(resource, limit)| {
+            let hard = rustix::process::getrlimit(resource).maximum;
+            (resource, hard.map_or(limit, |hard| limit.min(hard)))
+        })
+        .collect();
     // SAFETY: `pre_exec` runs after `fork` and before `exec`, so its closure must avoid allocation and locking.
     // Every error is built from a raw errno; `io::Error::other` would allocate.
     #[allow(unsafe_code)]
@@ -476,6 +491,18 @@ pub async fn run(
             if parent != Some(host_pid) {
                 // The host exited before spawn completed.
                 return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            for (resource, limit) in &rlimits {
+                let limit = rustix::process::Rlimit {
+                    current: Some(*limit),
+                    maximum: Some(*limit),
+                };
+                rustix::process::setrlimit(*resource, limit)?;
+                // An ignored SIGXFSZ turns a write past the file-size limit into
+                // `EFBIG`, so the child reports the failure instead of dying.
+                if *resource == rustix::process::Resource::Fsize {
+                    libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                }
             }
             for fd in &child_inherit_fds {
                 if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
@@ -1039,7 +1066,7 @@ pub(crate) async fn bounded_cleanup(
 
 /// Blocking filesystem and `/proc` jobs are admitted through this many slots, each held until the job actually returns rather than until its caller stops waiting.
 /// A caller that times out drops only its join handle; without the slot, repeated sends against a stalled filesystem would pile up detached jobs, their captured descriptors, and pool threads without bound.
-const BLOCKING_SLOTS: usize = 4 * super::config::MAX_BACKEND_PROCESSES;
+pub(crate) const BLOCKING_SLOTS: usize = 4 * super::config::MAX_BACKEND_PROCESSES;
 
 fn blocking_slots() -> &'static Arc<tokio::sync::Semaphore> {
     static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -1333,7 +1360,7 @@ impl PrivateDir {
         off_runtime(move || Self::write_private_at(&dir, &name, &bytes)).await?
     }
 
-    fn write_private_at(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    pub(crate) fn write_private_at(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
         use std::io::Write;
         let path = dir.join(name);
         // `create_new` rejects existing entries and symlinks, so success uses a previously absent pathname.
@@ -1531,6 +1558,15 @@ pub(crate) fn budget_exhausted_failure(harness: Harness) -> BackendTerminal {
         retry_after_secs: None,
         provider_code: None,
     })
+}
+
+/// Whether a `run` error leaves the process group or its crash record unresolved.
+pub(crate) fn spawn_error_residue(err: &io::Error) -> (bool, bool) {
+    let inner = err.get_ref();
+    (
+        inner.is_some_and(|inner| inner.is::<RegistrationTeardownUnproven>()),
+        inner.is_some_and(|inner| inner.is::<SpawnRecordRetained>()),
+    )
 }
 
 pub(crate) fn spawn_failure(harness: Harness, err: &io::Error) -> BackendTerminal {
