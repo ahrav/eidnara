@@ -218,7 +218,7 @@ impl Scheduler {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn waiting(&self) -> (usize, usize) {
         let state = self.lock();
         (state.queries.len(), state.background.len())
