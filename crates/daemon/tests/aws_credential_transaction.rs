@@ -8,7 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use host_runtime::CancellationToken;
 use host_runtime::model_execution::aws_helper::HelperFailure;
-use host_runtime::model_execution::aws_refresh::{SourceOwner, SystemClock, TransactionRefresh};
+use host_runtime::model_execution::aws_refresh::{
+    SourceError, SourceOwner, SystemClock, TransactionRefresh,
+};
 use host_runtime::model_execution::aws_transaction::{
     CaptureFailure, HelperLimits, OwnerSource, PrivateToken, RenewalEvidence, TransactionFailure,
     TransactionInput, TransactionOutcome, TransactionSlot, admit_owner_source,
@@ -273,6 +275,7 @@ impl Owner {
     ) -> TransactionOutcome {
         let input = TransactionInput {
             source: &self.source,
+            admitted: None,
             predecessor,
             superseded: None,
             executable: Path::new(BIN),
@@ -495,6 +498,7 @@ async fn a_superseded_owner_token_needs_a_changed_login_before_any_helper() {
     let superseded = first.observation.expect("observation");
     let input = || TransactionInput {
         source: &owner.source,
+        admitted: None,
         predecessor: None,
         superseded: Some(&superseded),
         executable: Path::new(BIN),
@@ -687,6 +691,7 @@ async fn a_deleted_owner_token_after_rotation_reports_lost_succession() {
     let _serial = SERIAL.lock().await;
     let owner = Owner::new(SSO_CONFIG, "dev");
     owner.write_token(&token_json("r1", Duration::from_secs(60)));
+    let r1 = owner.token_bytes();
     let fake = Fake::start().await;
     fake.reply(Route::Token, 200, &oidc_ok("r2"));
     let gate = fake.held(Route::Portal, 200, &portal_ok());
@@ -706,6 +711,31 @@ async fn a_deleted_owner_token_after_rotation_reports_lost_succession() {
         outcome.lost_succession,
         "a logout after rotation needs a new login"
     );
+
+    // The fence lands on the token whose renewal was lost, so restoring that same
+    // file needs a changed login before any helper runs.
+    let superseded = outcome.observation.expect("observation");
+    write_private(&owner.token_path(), std::str::from_utf8(&r1).unwrap());
+    let input = TransactionInput {
+        source: &owner.source,
+        admitted: None,
+        predecessor: None,
+        superseded: Some(&superseded),
+        executable: Path::new(BIN),
+        state_root: &owner.state,
+        budget: Duration::from_secs(30),
+        limits: HelperLimits::default(),
+        test_origin: Some(fake.origin.clone()),
+    };
+    let seen = fake.seen().len();
+    let refused = slot.run(input, &CancellationToken::new()).await;
+    assert_eq!(refused.failure, Some(TransactionFailure::LoginRequired));
+    assert_eq!(
+        fake.seen().len(),
+        seen,
+        "the restored token is fenced before any helper"
+    );
+    assert_no_helper_processes(&owner);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -778,6 +808,7 @@ async fn spawn_failure_and_cancellation_leave_the_slot_reusable() {
     let mut slot = TransactionSlot::default();
     let input = TransactionInput {
         source: &owner.source,
+        admitted: None,
         predecessor: None,
         superseded: None,
         executable: Path::new("/nonexistent/eidnara-host"),
@@ -795,6 +826,7 @@ async fn spawn_failure_and_cancellation_leave_the_slot_reusable() {
     cancelled.cancel();
     let input = TransactionInput {
         source: &owner.source,
+        admitted: None,
         predecessor: None,
         superseded: None,
         executable: Path::new(BIN),
@@ -1092,6 +1124,45 @@ async fn abandoned_scratch_is_cleanup_debt_never_a_restart_credential() {
     let removed = group_registry::sweep_orphaned_run_dirs(&owner.state).unwrap();
     assert_eq!(removed, 3, "the startup sweep removes abandoned scratch");
     assert_eq!(owner.scratch_dirs(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_graph_changed_after_admission_is_refused_before_any_helper() {
+    let _serial = SERIAL.lock().await;
+    let owner = Owner::new(SSO_CONFIG, "dev");
+    owner.write_token(&token_json("owner-access", Duration::from_secs(3600)));
+    let fake = Fake::start().await;
+    fake.reply(Route::Portal, 200, &portal_ok());
+    let admitted = admit_owner_source(&owner.source).expect("admitted graph");
+    let refresh = TransactionRefresh::new(
+        owner.source.clone(),
+        PathBuf::from(BIN),
+        owner.state.clone(),
+        HelperLimits::default(),
+        Some(fake.origin.clone()),
+    );
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let source = SourceOwner::new(refresh, SystemClock, admitted, health);
+    write_private(
+        &owner.source.config_file,
+        &SSO_CONFIG.replace("sso_role_name = Dev", "sso_role_name = Admin"),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    assert_eq!(
+        source
+            .acquire(deadline, &CancellationToken::new())
+            .await
+            .err(),
+        Some(SourceError::Invalid)
+    );
+    assert_eq!(
+        fake.seen().len(),
+        0,
+        "a changed graph never reaches the helper"
+    );
+    source.close();
+    assert!(source.join().await);
+    assert_no_helper_processes(&owner);
 }
 
 #[tokio::test(flavor = "multi_thread")]
