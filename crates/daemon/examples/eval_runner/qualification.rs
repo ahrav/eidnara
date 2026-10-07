@@ -362,6 +362,7 @@ fn counters(pid: u32) -> io::Result<ProcessCounters> {
 
 struct Interactive {
     cold_open_us: u64,
+    cold_read_bytes: u64,
     observations: Vec<(u64, bool)>,
     start: ProcessCounters,
     end: ProcessCounters,
@@ -401,16 +402,30 @@ fn repetition(
     let pid = fixture.pid();
     let measured = block_on(async {
         let client = fixture.client().await;
+        let launched = counters(pid)?;
         let mut routes = Vec::with_capacity(sessions.len());
         for session in &sessions {
             routes.push(open(&fixture, &client, session).await);
         }
+        // A session's first pass replays its retained history once: the store checks range
+        // order and captures legacy rows over every row, then records both in the session
+        // meta. That linear-byte work is cold replay, so it counts toward the cold open.
+        for (pick, session) in sessions.iter().enumerate() {
+            let body = window_request(case, session, anchors[pick], 0);
+            let response = request(&client, routes[pick], &body).await;
+            if !response.as_ref().is_ok_and(|r| r["status"] == "ok") {
+                return Err(io::Error::other(format!(
+                    "{session}: the cold pass failed: {response:?}"
+                )));
+            }
+        }
         let cold_open_us = cold.elapsed().as_micros() as u64;
         let start = counters(pid)?;
+        let cold_read_bytes = start.read_bytes.saturating_sub(launched.read_bytes);
         let mut observations = Vec::with_capacity(operations as usize);
         for turn in 0..operations {
             let pick = (turn % sessions.len() as u64) as usize;
-            let body = window_request(case, &sessions[pick], anchors[pick], turn);
+            let body = window_request(case, &sessions[pick], anchors[pick], turn + 1);
             let started = Instant::now();
             let response = request(&client, routes[pick], &body).await;
             let micros = started.elapsed().as_micros() as u64;
@@ -421,6 +436,7 @@ fn repetition(
         let _ = client.close().await;
         io::Result::Ok(Interactive {
             cold_open_us,
+            cold_read_bytes,
             observations,
             start,
             end,
@@ -441,6 +457,7 @@ fn repetition(
         seed_us,
         ingested_bytes,
         cold_open_us: measured.cold_open_us,
+        cold_read_bytes: measured.cold_read_bytes,
         operations,
         failed_operations: latency_us.censored,
         latency_us,

@@ -191,8 +191,12 @@ pub struct Repetition {
     /// The generator writing the retained history into the store.
     pub seed_us: u64,
     pub ingested_bytes: u64,
-    /// The daemon's cold open of that store until every session reports ready.
+    /// The daemon's cold open of that store: every session reports ready, then each
+    /// session's first pass replays its retained history once.
     pub cold_open_us: u64,
+    /// Bytes the daemon read (`rchar`) over the cold open, accounted apart from the
+    /// interactive phase.
+    pub cold_read_bytes: u64,
     pub operations: u64,
     pub failed_operations: u64,
     pub latency_us: Histogram,
@@ -940,6 +944,7 @@ mod tests {
             seed_us: 1,
             ingested_bytes: 1,
             cold_open_us: 1,
+            cold_read_bytes: 0,
             operations: 2_000,
             failed_operations: 0,
             latency_us: histogram(&vec![latency; 2_000]),
