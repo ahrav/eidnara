@@ -632,7 +632,8 @@ fn source_terminal(harness: Harness, error: SourceError) -> BackendTerminal {
         SourceError::Cooldown { retry_in } => (
             ErrorClass::Transient,
             "is cooling down after a failed refresh",
-            Some(retry_in.as_secs().max(1)),
+            // Rounding `retry_in` up keeps `retry_after_secs` covering the remaining cooldown.
+            Some((retry_in.as_secs() + u64::from(retry_in.subsec_nanos() > 0)).max(1)),
         ),
         SourceError::Unavailable | SourceError::Withdrawn => {
             (ErrorClass::Transient, "is unavailable", None)
@@ -1613,6 +1614,21 @@ mod tests {
         assert!(h.acquire_for(MODEL).await.is_err());
         let (predecessor, superseded, _) = h.fake.request(1);
         assert_eq!((predecessor, superseded), (None, Some(observed(1))));
+    }
+
+    #[test]
+    fn a_cooldown_retry_hint_covers_the_whole_remaining_cooldown() {
+        for (retry_in, secs) in [
+            (Duration::from_millis(1_500), 2),
+            (Duration::from_millis(400), 1),
+            (Duration::from_secs(60), 60),
+        ] {
+            let terminal = source_terminal(super::Harness::Pi, SourceError::Cooldown { retry_in });
+            let BackendTerminal::SourceFailed(error) = terminal else {
+                panic!("{retry_in:?}: {terminal:?}");
+            };
+            assert_eq!(error.retry_after_secs, Some(secs), "{retry_in:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]
