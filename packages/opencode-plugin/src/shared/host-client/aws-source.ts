@@ -184,6 +184,11 @@ export function processAwsSource(): AwsSourceSelection {
     return processCapture.selection;
 }
 
+/** Drops the process capture so a test can select its own source for the process environment it sets. */
+export function _resetProcessAwsSourceForTesting(): void {
+    processCapture = undefined;
+}
+
 export function sourceBinding(
     selection: AwsSourceSelection,
     credentials: Readonly<Record<string, string>>,

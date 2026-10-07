@@ -1,4 +1,5 @@
 export {
+    _resetProcessAwsSourceForTesting,
     type AwsProfileSource,
     AwsSourceError,
     type AwsSourceErrorCode,

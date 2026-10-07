@@ -119,10 +119,14 @@ function managedAwsSource(env: Record<string, string | undefined>): AwsSourceSel
     }
 }
 
-function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
+/**
+ * The owner source is selected once per process, so a route's version and its claims derive from
+ * that capture whichever credential snapshot `env` carries.
+ */
+export function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
     const harness = getHarness();
     return harness === "opencode" || harness === "pi"
-        ? sourceClaimVersion(harness, env, managedAwsSource(env))
+        ? sourceClaimVersion(harness, env, managedAwsSource(process.env))
         : "";
 }
 
