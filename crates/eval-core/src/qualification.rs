@@ -194,8 +194,8 @@ pub struct Repetition {
     /// The daemon's cold open of that store: every session reports ready, then each
     /// session's first pass replays its retained history once.
     pub cold_open_us: u64,
-    /// Bytes the daemon read (`rchar`) over the cold open, accounted apart from the
-    /// interactive phase.
+    /// Bytes the daemon read (`rchar`) from its launch through the cold open, accounted apart
+    /// from the interactive phase.
     pub cold_read_bytes: u64,
     pub operations: u64,
     pub failed_operations: u64,

@@ -362,10 +362,66 @@ fn counters(pid: u32) -> io::Result<ProcessCounters> {
 
 struct Interactive {
     cold_open_us: u64,
-    cold_read_bytes: u64,
     observations: Vec<(u64, bool)>,
     start: ProcessCounters,
     end: ProcessCounters,
+}
+
+impl Interactive {
+    /// Bytes read over the cold open, then over the interactive phase. The fixture launches
+    /// inside the cold-open interval, so the cold share is every byte it read before `start`.
+    fn read_phases(&self) -> (u64, u64) {
+        (
+            self.start.read_bytes,
+            self.end.read_bytes.saturating_sub(self.start.read_bytes),
+        )
+    }
+}
+
+async fn interactive(
+    fixture: &FixtureProcess,
+    case: &Case,
+    sessions: &[String],
+    anchors: &[Anchor],
+    operations: u64,
+    cold: Instant,
+) -> io::Result<Interactive> {
+    let pid = fixture.pid();
+    let client = fixture.client().await;
+    let mut routes = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        routes.push(open(fixture, &client, session).await);
+    }
+    // The cold-open measurements include each session's first window request.
+    for (pick, session) in sessions.iter().enumerate() {
+        let body = window_request(case, session, anchors[pick], 0);
+        let response = request(&client, routes[pick], &body).await;
+        if !response.as_ref().is_ok_and(|r| r["status"] == "ok") {
+            return Err(io::Error::other(format!(
+                "{session}: the cold pass failed: {response:?}"
+            )));
+        }
+    }
+    let cold_open_us = cold.elapsed().as_micros() as u64;
+    let start = counters(pid)?;
+    let mut observations = Vec::with_capacity(operations as usize);
+    for turn in 0..operations {
+        let pick = (turn % sessions.len() as u64) as usize;
+        let body = window_request(case, &sessions[pick], anchors[pick], turn + 1);
+        let started = Instant::now();
+        let response = request(&client, routes[pick], &body).await;
+        let micros = started.elapsed().as_micros() as u64;
+        let ok = response.as_ref().is_ok_and(|r| r["status"] == "ok");
+        observations.push((micros, !ok));
+    }
+    let end = counters(pid)?;
+    let _ = client.close().await;
+    Ok(Interactive {
+        cold_open_us,
+        observations,
+        start,
+        end,
+    })
 }
 
 fn repetition(
@@ -399,51 +455,12 @@ fn repetition(
     let ingested_bytes = dir_bytes(&root);
     let cold = Instant::now();
     let fixture = launch(&root, None);
-    let pid = fixture.pid();
-    let measured = block_on(async {
-        let client = fixture.client().await;
-        let launched = counters(pid)?;
-        let mut routes = Vec::with_capacity(sessions.len());
-        for session in &sessions {
-            routes.push(open(&fixture, &client, session).await);
-        }
-        // A session's first pass replays its retained history once: the store checks range
-        // order and captures legacy rows over every row, then records both in the session
-        // meta. That linear-byte work is cold replay, so it counts toward the cold open.
-        for (pick, session) in sessions.iter().enumerate() {
-            let body = window_request(case, session, anchors[pick], 0);
-            let response = request(&client, routes[pick], &body).await;
-            if !response.as_ref().is_ok_and(|r| r["status"] == "ok") {
-                return Err(io::Error::other(format!(
-                    "{session}: the cold pass failed: {response:?}"
-                )));
-            }
-        }
-        let cold_open_us = cold.elapsed().as_micros() as u64;
-        let start = counters(pid)?;
-        let cold_read_bytes = start.read_bytes.saturating_sub(launched.read_bytes);
-        let mut observations = Vec::with_capacity(operations as usize);
-        for turn in 0..operations {
-            let pick = (turn % sessions.len() as u64) as usize;
-            let body = window_request(case, &sessions[pick], anchors[pick], turn + 1);
-            let started = Instant::now();
-            let response = request(&client, routes[pick], &body).await;
-            let micros = started.elapsed().as_micros() as u64;
-            let ok = response.as_ref().is_ok_and(|r| r["status"] == "ok");
-            observations.push((micros, !ok));
-        }
-        let end = counters(pid)?;
-        let _ = client.close().await;
-        io::Result::Ok(Interactive {
-            cold_open_us,
-            cold_read_bytes,
-            observations,
-            start,
-            end,
-        })
-    });
+    let measured = block_on(interactive(
+        &fixture, case, &sessions, &anchors, operations, cold,
+    ));
     fixture.shutdown();
     let measured = measured?;
+    let (cold_read_bytes, read_bytes) = measured.read_phases();
     let store = open_store(&root)?;
     let mut lineage_violations = Vec::new();
     for (session, before) in sessions.iter().zip(&before) {
@@ -457,14 +474,11 @@ fn repetition(
         seed_us,
         ingested_bytes,
         cold_open_us: measured.cold_open_us,
-        cold_read_bytes: measured.cold_read_bytes,
+        cold_read_bytes,
         operations,
         failed_operations: latency_us.censored,
         latency_us,
-        read_bytes: measured
-            .end
-            .read_bytes
-            .saturating_sub(measured.start.read_bytes),
+        read_bytes,
         minor_faults: measured
             .end
             .minor_faults
@@ -943,6 +957,45 @@ mod tests {
         assert!(outage.samples.len() as u64 <= outage.schedule.total_seconds());
         assert!(outage.fold_tokens_per_second > 0, "calibration folded");
         assert_eq!(outage.lineage_violations, Vec::new());
+    }
+
+    #[test]
+    fn every_read_of_the_launched_daemon_lands_in_the_cold_open_or_the_interactive_phase() {
+        const SEGMENTS: usize = 4;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let generator = dir.path().join("generator.jsonl");
+        write_generator(&generator, 2 * SEGMENTS as u64).unwrap();
+        let sessions = ["phases".to_string()];
+        let anchors = [seed(
+            &open_store(&root).unwrap(),
+            &sessions[0],
+            SEGMENTS,
+            &generator,
+        )
+        .unwrap()];
+        let case = catalog().into_iter().next().unwrap();
+        let cold = Instant::now();
+        let fixture = launch(&root, None);
+        let measured = block_on(interactive(&fixture, &case, &sessions, &anchors, 2, cold));
+        fixture.shutdown();
+        let measured = measured.unwrap();
+        assert_eq!(
+            measured
+                .observations
+                .iter()
+                .filter(|(_, failed)| *failed)
+                .count(),
+            0
+        );
+        let (cold_reads, interactive_reads) = measured.read_phases();
+        assert!(interactive_reads > 0);
+        assert_eq!(
+            cold_reads + interactive_reads,
+            measured.end.read_bytes,
+            "{cold_reads} cold and {interactive_reads} interactive bytes"
+        );
     }
 
     fn backend_counter(fixture: &FixtureProcess, name: &str) -> u64 {
