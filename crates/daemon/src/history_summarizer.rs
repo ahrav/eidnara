@@ -360,7 +360,9 @@ pub fn abandon_with_detail(
     let mut next = HistorySummarizerDurableState {
         state: HistorySummarizerPhase::Idle,
         firing_seq: current.firing_seq,
-        failure_backoff_at_ms: Some(failure_backoff_at_ms),
+        failure_backoff_at_ms: Some(
+            failure_backoff_at_ms.max(current.source_retry_at_ms.unwrap_or(failure_backoff_at_ms)),
+        ),
         last_failure: detail
             .map(|detail| bounded_detail(&detail))
             .or_else(|| current.last_failure.clone()),
@@ -1963,6 +1965,7 @@ where
                         .map(classify_no_fire),
                 );
                 state.presented_token_budget = Some(request.presented_token_budget);
+                state.source_retry_at_ms = source_retry_at_ms;
                 state
             }
         };
@@ -2333,6 +2336,7 @@ where
         }
     };
 
+    let source_retry_at_ms = awaiting.source_retry_at_ms;
     let publish_result = publish_output_from_awaiting(PublishOutputRequest {
         store: request.store,
         session_id: request.session_id,
@@ -2348,7 +2352,9 @@ where
         validate_options: request.validate_options,
         created_at_ms: request.now_ms,
         failure_started_at_ms: request.now_ms,
-        failure_backoff_at_ms: request.failure_backoff_at_ms,
+        failure_backoff_at_ms: request
+            .failure_backoff_at_ms
+            .max(source_retry_at_ms.unwrap_or(request.failure_backoff_at_ms)),
         completion_now_ms: request.completion_now_ms,
         publication_fence: request.publication_fence,
         memory_reviewer_handoff: request.memory_reviewer_handoff,
@@ -3356,7 +3362,7 @@ mod tests {
         attempt_closes: usize,
         closes: usize,
         connection_closed: bool,
-        on_await_output: Option<Box<dyn FnOnce() + Send>>,
+        on_await_output: VecDeque<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl ScriptedProducer {
@@ -3391,8 +3397,15 @@ mod tests {
             self
         }
 
+        /// Runs `hook` at the `await_output` call matching this hook's position; pass
+        /// `with_await_output_passthrough` for calls before it.
         fn with_await_output_hook(mut self, hook: impl FnOnce() + Send + 'static) -> Self {
-            self.on_await_output = Some(Box::new(hook));
+            self.on_await_output.push_back(Some(Box::new(hook)));
+            self
+        }
+
+        fn with_await_output_passthrough(mut self) -> Self {
+            self.on_await_output.push_back(None);
             self
         }
     }
@@ -3436,7 +3449,7 @@ mod tests {
             run_id: &str,
         ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
             self.await_run_ids.push(run_id.to_string());
-            if let Some(hook) = self.on_await_output.take() {
+            if let Some(Some(hook)) = self.on_await_output.pop_front() {
                 hook();
             }
             self.outputs
@@ -3623,6 +3636,7 @@ mod tests {
             expected_revert_epoch: 0,
             history_segment_set_generation: HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
+            source_retry_at_ms: None,
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
@@ -5151,6 +5165,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reattached_fallback_keeps_the_source_retry_deadline() {
+        fn completed_at() -> i64 {
+            10_000
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(store(dir.path()));
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec![
+            "amazon-bedrock/model-a".to_owned(),
+            "anthropic/model-c".to_owned(),
+        ];
+        // The hook runs while the fallback is `AwaitingProducer`; the state it captures is
+        // what a daemon restart at that moment would reload.
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let capture = std::sync::Arc::clone(&captured);
+        let hook_store = std::sync::Arc::clone(&store);
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-1")))
+            .with_output(Err(source_run_failure(ErrorClass::Transient)))
+            .with_await_output_passthrough()
+            .with_start(Ok(run_handle("run-2")))
+            .with_await_output_hook(move || {
+                let state = hook_store.load("ses").unwrap().meta.history_summarizer;
+                *capture.lock().unwrap() = Some(state);
+            })
+            .with_output(Ok(producer_output(history_summarizer_xml("other source"))));
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.completion_now_ms = completed_at;
+        run_history_summarizer_firing(&mut producer, request)
+            .await
+            .unwrap();
+        let awaiting = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("awaiting state captured");
+        assert_eq!(awaiting.state, HistorySummarizerPhase::AwaitingProducer);
+
+        let loaded = store.load("ses").unwrap();
+        let mut meta = loaded.meta;
+        meta.history_summarizer = awaiting;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+        let mut reattach = ScriptedProducer::default().with_status(Ok(RunState::Missing {
+            detail: Some("gone".into()),
+        }));
+        let mut request = reattach_request(&store, &chunk, &prior);
+        request.completion_now_ms = completed_at;
+        let outcome = reattach_history_summarizer_producer(&mut reattach, request)
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            HistorySummarizerReattachOutcome::RefireEligible { .. }
+        ));
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert!(
+            state.failure_backoff_at_ms >= Some(10_000 + 120_000),
+            "the reattached fallback's failure holds the source's retry deadline, got {:?}",
+            state.failure_backoff_at_ms
+        );
+    }
+
+    #[tokio::test]
     async fn chain_exhausted_all_permanent_records_marker() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -6556,6 +6637,7 @@ mod tests {
             expected_revert_epoch: 0,
             history_segment_set_generation: HistorySegmentSetGeneration::new(1),
             failure_backoff_at_ms: None,
+            source_retry_at_ms: None,
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
