@@ -1654,11 +1654,11 @@ struct ProducerFailureDecision {
     detail_prefix: Option<&'static str>,
 }
 
-fn decide_producer_failure(
+fn decide_producer_failure<'m>(
     err: &HistorySummarizerProducerError,
-    model: &str,
+    model: &'m str,
     remaining_models: &[String],
-    blocked_providers: &mut Vec<String>,
+    blocked_providers: &mut Vec<&'m str>,
     all_failures_permanent: &mut bool,
     now_ms: i64,
     default_failure_backoff_at_ms: i64,
@@ -1761,11 +1761,11 @@ fn decide_producer_failure(
 /// marks the chain permanently exhausted. Every later model on the same provider would read
 /// the same source, so those models are skipped, and only a model on another provider may
 /// run. The firing's backoff honors the source's typed retry-after.
-fn source_failure_decision(
+fn source_failure_decision<'m>(
     classification: ErrorClassification,
-    model: &str,
+    model: &'m str,
     remaining_models: &[String],
-    blocked_providers: &mut Vec<String>,
+    blocked_providers: &mut Vec<&'m str>,
     all_failures_permanent: &mut bool,
     now_ms: i64,
     default_failure_backoff_at_ms: i64,
@@ -1810,20 +1810,20 @@ fn classified_backoff_at_ms(
     now_ms.saturating_add(HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS.max(retry_after_ms))
 }
 
-fn has_eligible_model(models: &[String], blocked_providers: &[String]) -> bool {
+fn has_eligible_model(models: &[String], blocked_providers: &[&str]) -> bool {
     models
         .iter()
         .any(|model| !provider_is_blocked(blocked_providers, model))
 }
 
-fn provider_is_blocked(blocked_providers: &[String], model: &str) -> bool {
-    let provider = provider_prefix(model);
-    blocked_providers.iter().any(|blocked| blocked == provider)
+fn provider_is_blocked(blocked_providers: &[&str], model: &str) -> bool {
+    blocked_providers.contains(&provider_prefix(model))
 }
 
-fn block_provider(blocked_providers: &mut Vec<String>, provider: &str) {
-    if !blocked_providers.iter().any(|blocked| blocked == provider) {
-        blocked_providers.push(provider.to_string());
+/// `blocked_providers` borrows provider prefixes from the firing's model chain.
+fn block_provider<'m>(blocked_providers: &mut Vec<&'m str>, provider: &'m str) {
+    if !blocked_providers.contains(&provider) {
+        blocked_providers.push(provider);
     }
 }
 
