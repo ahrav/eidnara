@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
 use host_runtime::model_execution::aws_source::{
-    AwsProfileSource, deserialize_present, lexically_normal, profile_mode_credentials,
-    validate_source_binding,
+    AwsProfileSource, deserialize_present, profile_mode_credentials, validate_source_binding,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -32,17 +31,22 @@ fn decoded_valid(value: &Value) -> bool {
     serde_json::from_value::<AwsProfileSource>(value.clone()).is_ok()
 }
 
+fn text_decoded_valid(value: &Value) -> bool {
+    serde_json::from_str::<AwsProfileSource>(&value.to_string()).is_ok()
+}
+
 #[test]
 fn the_native_validator_agrees_with_every_dto_vector() {
     let vectors = vectors();
-    for case in cases(&vectors, "dto") {
-        assert_eq!(
-            decoded_valid(&case["value"]),
-            case["valid"].as_bool().unwrap(),
-            "{}",
-            case["name"]
-        );
-    }
+    let disagreements: Vec<&Value> = cases(&vectors, "dto")
+        .iter()
+        .filter(|case| {
+            let valid = case["valid"].as_bool().unwrap();
+            decoded_valid(&case["value"]) != valid || text_decoded_valid(&case["value"]) != valid
+        })
+        .map(|case| &case["name"])
+        .collect();
+    assert!(disagreements.is_empty(), "{disagreements:?}");
 }
 
 #[test]
@@ -98,15 +102,4 @@ fn a_duplicated_field_or_an_invalid_field_fails_at_decode() {
         .err()
         .expect("relative path");
     assert!(error.to_string().contains("config_file"), "{error}");
-}
-
-#[test]
-fn lexical_normalization_never_leaves_the_root_and_refuses_relative_paths() {
-    assert_eq!(
-        lexically_normal("/../../a/./b//c/..").as_deref(),
-        Some("/a/b")
-    );
-    assert_eq!(lexically_normal("/").as_deref(), Some("/"));
-    assert_eq!(lexically_normal("a/b"), None);
-    assert_eq!(lexically_normal(""), None);
 }

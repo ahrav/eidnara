@@ -5,6 +5,8 @@ import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import {
     AdmissionClass,
+    AwsSourceError,
+    type AwsSourceSelection,
     armExpiryTimer,
     type BindIdentity,
     captureAwsSource,
@@ -101,10 +103,30 @@ function snapshotCredentialSource(
     return Object.freeze(snapshot);
 }
 
-function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
+/**
+ * The owner's AWS source for a managed route, failing as `harness_unavailable`, the same
+ * refusal the lifecycle policy answers for an inadmissible selector at startup.
+ */
+function managedAwsSource(env: Record<string, string | undefined>): AwsSourceSelection {
+    try {
+        return env === process.env ? processAwsSource() : captureAwsSource(env);
+    } catch (error) {
+        if (!(error instanceof AwsSourceError)) throw error;
+        throw Object.assign(new Error(`managed AWS source is inadmissible: ${error.message}`), {
+            code: "harness_unavailable",
+            cause: error,
+        });
+    }
+}
+
+/**
+ * The owner source is selected once per process, so a route's version and its claims derive from
+ * that capture whichever credential snapshot `env` carries.
+ */
+export function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
     const harness = getHarness();
     return harness === "opencode" || harness === "pi"
-        ? sourceClaimVersion(harness, env, processAwsSource())
+        ? sourceClaimVersion(harness, env, managedAwsSource(process.env))
         : "";
 }
 
@@ -219,7 +241,7 @@ export function buildManagedStartupEnvelope(
         const value = env[name];
         if (value !== undefined && value.length !== 0) collected[name] = value;
     }
-    const selection = env === process.env ? processAwsSource() : captureAwsSource(env);
+    const selection = managedAwsSource(env);
     const binding = sourceBinding(selection, collected);
     for (const value of Object.values(binding.credentials ?? {})) {
         if (Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES) {
@@ -1048,7 +1070,7 @@ export class HostModuleTransport {
                 const open = client.routeOpen(target, identity, {
                     ...fence,
                     credentialSource,
-                    awsSource: processAwsSource(),
+                    awsSource: managedAwsSource(process.env),
                 });
                 try {
                     route = await this.beforeDeadline(open, deadline, "opening the module route");
@@ -1182,7 +1204,7 @@ export class HostModuleTransport {
             connectionFile: this.connectionFile,
             handshakeTimeoutMs,
             credentialSource: process.env,
-            awsSource: processAwsSource(),
+            awsSource: managedAwsSource(process.env),
         };
     }
 

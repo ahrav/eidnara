@@ -241,7 +241,8 @@ async fn a_waiting_query_takes_the_slot_ahead_of_a_waiting_batch_text() {
 async fn a_multi_text_batch_yields_to_a_waiting_query_between_texts() {
     let engine = DeterministicEngine::new();
     let gate = engine.block_calls();
-    let host = LocalEmbeddingsHost::start(ready_component(engine.clone(), waiter_limits(1))).await;
+    let component = ready_component(engine.clone(), waiter_limits(1));
+    let host = LocalEmbeddingsHost::start(component.clone()).await;
     let (clock_running, clock_task) = keep_paused_clock_manual();
     let lane = test_lane();
 
@@ -261,9 +262,8 @@ async fn a_multi_text_batch_yields_to_a_waiting_query_between_texts() {
     assert!(batch.json()["result"]["job_id"].is_string());
     yield_until(|| engine.calls.load(std::sync::atomic::Ordering::SeqCst) == 1).await;
     let query = spawn_query(&host, &lane, "query-between", 30_000).await;
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
+    // The query's frame crosses a socket, so the gate opens only once the scheduler holds it as a waiter.
+    yield_until(|| component.waiting_queries_for_test() == 1).await;
 
     DeterministicEngine::release_calls(&gate);
     assert_eq!(

@@ -174,6 +174,22 @@
       "closed": null
     },
     {
+      "name": "missing kind",
+      "input": {
+        "state": "ready",
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
+      "name": "missing state",
+      "input": {
+        "kind": "profile",
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
       "name": "unknown state",
       "input": {
         "kind": "profile",

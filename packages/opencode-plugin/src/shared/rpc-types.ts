@@ -206,6 +206,7 @@ export interface StatusDetail extends SidebarSnapshot {
     /** The compaction-timing lines `/eidnara-status` prints, heading first; absent when the daemon reported no summarizer timeline. */
     compactionTiming?: string[];
     foldAuthorityLines?: string[];
+    awsCredentials: string;
 }
 
 export interface RpcNotificationMessage {

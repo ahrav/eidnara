@@ -738,6 +738,13 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
 
             <box marginTop={1} width="100%">
                 <text fg={t().text}>
+                    <b>Model Execution</b>
+                </text>
+                <R t={t()} l="AWS credentials" v={s().awsCredentials} fg={t().textMuted} />
+            </box>
+
+            <box marginTop={1} width="100%">
+                <text fg={t().text}>
                     <b>Logger</b>
                 </text>
                 <R
