@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
@@ -133,6 +133,41 @@ struct State {
     closed: bool,
 }
 
+impl State {
+    /// The fence persists across missing, unreadable, or same-content observations so
+    /// a superseded token still on disk stays fenced. A different present token clears
+    /// the fence when `renewal_lost` is false.
+    fn observe_fence(&mut self, observed: &TokenObservation, renewal_lost: bool) {
+        let present = matches!(observed, TokenObservation::Present { .. });
+        if renewal_lost {
+            if present || !self.fences_present_token() {
+                self.superseded = Some(observed.clone());
+            }
+        } else if present
+            && self
+                .superseded
+                .as_ref()
+                .is_none_or(|fenced| !same_content(fenced, observed))
+        {
+            self.superseded = None;
+        }
+    }
+
+    /// The successor's rotation consumed the owner token it was minted from, so
+    /// offering that token again would replay a rotated refresh token.
+    fn discard_successor(&mut self) {
+        if let Some(successor) = self.successor.take()
+            && !self.fences_present_token()
+        {
+            self.superseded = Some(successor.basis().clone());
+        }
+    }
+
+    fn fences_present_token(&self) -> bool {
+        matches!(self.superseded, Some(TokenObservation::Present { .. }))
+    }
+}
+
 struct Inner {
     refresh: Box<dyn Refresh>,
     clock: Box<dyn OwnerClock>,
@@ -140,7 +175,7 @@ struct Inner {
     health: SourceHealthCell,
     cancel: CancellationToken,
     tasks: TaskTracker,
-    state: Mutex<State>,
+    state: RwLock<State>,
 }
 
 /// A shared handle. Hosts call [`SourceOwner::close`] and [`SourceOwner::join`] at
@@ -163,7 +198,7 @@ impl SourceOwner {
             health,
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            state: Mutex::new(State::default()),
+            state: RwLock::new(State::default()),
         }))
     }
 
@@ -175,6 +210,11 @@ impl SourceOwner {
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<Lease, SourceError> {
+        // Warm hits share the read lock. A miss checks again under the exclusive lock
+        // before it joins or starts the refresh.
+        if let Some(found) = self.0.usable(&self.0.read(), deadline) {
+            return found;
+        }
         let mut settled = {
             let mut state = self.0.lock();
             if let Some(found) = self.0.usable(&state, deadline) {
@@ -202,7 +242,7 @@ impl SourceOwner {
             () = tokio::time::sleep_until(deadline) => return Err(SourceError::DeadlineExceeded),
             _ = settled.wait_for(|done| *done) => {}
         }
-        let state = self.0.lock();
+        let state = self.0.read();
         self.0.usable(&state, deadline).unwrap_or(Err(state
             .failure
             .unwrap_or(SourceError::InsufficientLifetime)))
@@ -219,7 +259,7 @@ impl SourceOwner {
         let mut state = self.0.lock();
         state.epoch += 1;
         state.row = None;
-        state.successor = None;
+        state.discard_successor();
         self.0.publish(&state);
     }
 
@@ -240,7 +280,7 @@ impl SourceOwner {
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
-        !self.0.lock().unresolved
+        !self.0.read().unresolved
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -289,8 +329,12 @@ enum Authority {
 }
 
 impl Inner {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> RwLockWriteGuard<'_, State> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn usable(&self, state: &State, deadline: Instant) -> Option<Result<Lease, SourceError>> {
@@ -337,7 +381,7 @@ impl Inner {
             outcome.lost_succession || ((stale || discard) && outcome.successor.is_some());
         let renewal_lost = rotated || login;
         if let Some(observed) = &outcome.observation {
-            state.superseded = renewal_lost.then(|| observed.clone());
+            state.observe_fence(observed, renewal_lost);
         }
         if stale {
             state.failure = Some(SourceError::Withdrawn);
@@ -350,12 +394,11 @@ impl Inner {
         if invalidated {
             state.row = None;
         }
-        state.successor = match (discard, outcome.successor.take()) {
-            (true, _) => None,
-            (false, Some(successor)) => Some(Arc::new(successor)),
-            (false, None) if invalidated || renewal_lost => None,
-            (false, None) => state.successor.take(),
-        };
+        match (discard, outcome.successor.take()) {
+            (false, Some(successor)) => state.successor = Some(Arc::new(successor)),
+            (false, None) if !invalidated && !renewal_lost => {}
+            _ => state.discard_successor(),
+        }
         let failure = match (verdict, outcome.row.take()) {
             (Some((error, _)), _) => Some(error),
             (None, None) => Some(SourceError::Unavailable),
@@ -660,6 +703,7 @@ impl Refresh for TransactionRefresh {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use tokio::sync::oneshot;
@@ -694,6 +738,8 @@ mod tests {
 
     /// The predecessor bytes, superseded observation, and cancellation one refresh received.
     type Seen = (Option<Vec<u8>>, Option<TokenObservation>, CancellationToken);
+
+    type Case<T> = (&'static str, fn(&Harness) -> T);
 
     struct Step {
         gate: Option<oneshot::Receiver<()>>,
@@ -1036,6 +1082,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_expired_cooldown_reads_from_the_cached_row_without_a_republish() {
+        let h = harness();
+        h.fake.push(h.ok(MODEL.as_secs()));
+        assert_eq!(
+            h.acquire_for(MODEL).await.err(),
+            Some(SourceError::InsufficientLifetime)
+        );
+        assert_eq!(h.health.get().state, SourceState::Cooldown);
+        tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+        h.acquire_for(Duration::from_secs(60))
+            .await
+            .expect("warm row for a short demand");
+        assert_eq!(h.fake.calls(), 1, "a warm hit starts no refresh");
+        let health = h.health.get();
+        assert_eq!(
+            (
+                health.state,
+                health.next_retry_in_seconds,
+                health.expires_in_seconds,
+                health.consecutive_failures
+            ),
+            (SourceState::Ready, None, Some(MODEL.as_secs() - 75), 1),
+            "an elapsed cooldown over a usable row reads ready at the health read"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_successor_survives_role_failure_and_feeds_the_next_refresh() {
         let h = harness();
         let mut first = h.ok(MODEL.as_secs() + 120);
@@ -1116,10 +1189,11 @@ mod tests {
             h.acquire_for(Duration::from_secs(1)).await.err(),
             Some(SourceError::Withdrawn)
         );
+        let (predecessor, superseded, _) = h.fake.request(1);
         assert_eq!(
-            h.fake.request(1).0,
-            None,
-            "withdraw discarded the successor"
+            (predecessor, superseded),
+            (None, Some(observed(1))),
+            "withdraw discarded the successor and fenced the owner token it rotated"
         );
 
         let release = h.fake.push_held(h.ok(HOUR));
@@ -1238,37 +1312,52 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_invalidating_refresh_failure_discards_the_row_and_successor() {
-        for (failure, error) in [
-            (TransactionFailure::Withdrawn, SourceError::Withdrawn),
-            (
-                TransactionFailure::Admission(AdmissionError::Unparseable),
-                SourceError::Invalid,
-            ),
-            (
-                TransactionFailure::Helper(HelperFailure::InvalidConfiguration),
-                SourceError::Invalid,
-            ),
-        ] {
+    async fn an_invalidating_refresh_discards_the_row_and_fences_the_successors_owner_token() {
+        let cases: [Case<(TransactionOutcome, SourceError)>; 4] = [
+            ("withdrawn", |h| {
+                (
+                    h.failed(TransactionFailure::Withdrawn),
+                    SourceError::Withdrawn,
+                )
+            }),
+            ("inadmissible", |h| {
+                let mut failed =
+                    h.failed(TransactionFailure::Admission(AdmissionError::Unparseable));
+                (failed.identity, failed.observation) = (None, None);
+                (failed, SourceError::Invalid)
+            }),
+            ("misconfigured", |h| {
+                let failure = TransactionFailure::Helper(HelperFailure::InvalidConfiguration);
+                (h.failed(failure), SourceError::Invalid)
+            }),
+            ("regraphed", |h| {
+                let mut edited = h.ok(HOUR);
+                edited.identity = Some(identity("222222222222"));
+                (edited, SourceError::Invalid)
+            }),
+        ];
+        for (name, case) in cases {
             let h = harness();
             let mut first = h.ok(MODEL.as_secs() + 120);
             first.successor = Some(PrivateToken::for_test(b"r2", observed(1)));
             h.fake.push(first);
             h.acquire_for(MODEL).await.expect("row");
             tokio::time::advance(Duration::from_secs(60)).await;
-            h.fake.push(h.failed(failure));
-            assert_eq!(h.acquire_for(MODEL).await.err(), Some(error));
+            let (outcome, error) = case(&h);
+            h.fake.push(outcome);
+            assert_eq!(h.acquire_for(MODEL).await.err(), Some(error), "{name}");
             tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
             h.fake.push(h.failed(TransactionFailure::Spawn));
             assert_eq!(
                 h.acquire_for(Duration::from_secs(1)).await.err(),
                 Some(SourceError::Unavailable),
-                "{failure:?} discarded the row"
+                "{name} discarded the row"
             );
+            let (predecessor, superseded, _) = h.fake.request(2);
             assert_eq!(
-                h.fake.request(2).0,
-                None,
-                "{failure:?} discarded the successor"
+                (predecessor, superseded),
+                (None, Some(observed(1))),
+                "{name} discarded the successor and fenced the owner token it rotated"
             );
         }
         let h = harness();
@@ -1354,6 +1443,45 @@ mod tests {
         assert!(h.acquire_for(MODEL).await.is_err());
         let superseded: Vec<_> = (1..4).map(|n| h.fake.request(n).1).collect();
         assert_eq!(superseded, [Some(observed(1)), Some(observed(1)), None]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unread_owner_token_or_a_graph_mismatch_never_lifts_the_superseded_fence() {
+        let cases: [Case<TransactionOutcome>; 3] = [
+            ("unusable", |h| {
+                let mut refused = h.failed(TransactionFailure::LoginRequired);
+                refused.observation = Some(TokenObservation::Unusable);
+                refused
+            }),
+            ("absent", |h| {
+                let mut refused = h.failed(TransactionFailure::LoginRequired);
+                refused.observation = Some(TokenObservation::Absent);
+                refused
+            }),
+            ("regraphed", |h| {
+                let mut refused = h.failed(TransactionFailure::LoginRequired);
+                refused.identity = Some(identity("222222222222"));
+                refused
+            }),
+        ];
+        for (name, intervening) in cases {
+            let h = harness();
+            let mut lost = h.failed(TransactionFailure::HelperUnreported);
+            lost.lost_succession = true;
+            h.fake.push(lost);
+            assert!(h.acquire_for(MODEL).await.is_err());
+            tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+            h.fake.push(intervening(&h));
+            assert!(h.acquire_for(MODEL).await.is_err(), "{name}");
+            tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+            h.fake.push(h.failed(TransactionFailure::LoginRequired));
+            assert!(h.acquire_for(MODEL).await.is_err(), "{name}");
+            assert_eq!(
+                h.fake.request(2).1,
+                Some(observed(1)),
+                "{name} kept the fence on the unchanged owner token"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
