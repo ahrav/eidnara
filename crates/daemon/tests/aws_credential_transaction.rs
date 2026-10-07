@@ -844,7 +844,9 @@ async fn cancellation_during_the_helper_run_reports_cancelled() {
     let cancel = CancellationToken::new();
     let input = TransactionInput {
         source: &owner.source,
+        admitted: None,
         predecessor: None,
+        superseded: None,
         executable: Path::new(BIN),
         state_root: &owner.state,
         budget: Duration::from_secs(30),
