@@ -518,6 +518,68 @@ async fn health_reports_unavailable_when_no_harness_can_run() {
 }
 
 #[tokio::test]
+async fn health_counts_an_attached_profile_owner_as_a_runnable_credential() {
+    use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
+    use host_runtime::model_execution::aws_refresh::{
+        Refresh, RefreshFuture, RefreshRequest, SourceOwner, SystemClock,
+    };
+    use host_runtime::model_execution::source_health::{
+        SourceHealthCell, SourceKind, SourceObservation,
+    };
+
+    struct NeverRefreshed;
+    impl Refresh for NeverRefreshed {
+        fn refresh(&self, _: RefreshRequest, _: CancellationToken) -> RefreshFuture {
+            unreachable!("health never refreshes the source")
+        }
+    }
+    let source: AwsProfileSource = serde_json::from_value(serde_json::json!({
+        "kind": "profile", "profile": "corp", "region": "us-east-1",
+        "config_file": "/home/u/.aws/config", "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache",
+    }))
+    .expect("selector");
+    let identity = GraphIdentity {
+        profile: "corp".into(),
+        region: "us-east-1".into(),
+        roles: Vec::new(),
+        root: RootIdentity::Static {
+            profile: "base".into(),
+            access_key_id: "AKIA".into(),
+            secret_sha256: [0; 32],
+        },
+    };
+    let profile_only = || {
+        ModelExecutionComponent::new_with_credentials(
+            Arc::clone(&ScriptedBackend::completing("out")) as Arc<_>,
+            EnvSnapshot::capture_from(Vec::new()).expect("empty snapshot"),
+            Some(source.clone()),
+            support::model_execution::state_root(),
+        )
+    };
+    let state = |component: ModelExecutionComponent| async move {
+        let report = component.health().await;
+        (
+            report.status,
+            report.metrics.expect("model_execution reports metrics")["model_execution_state"]
+                .clone(),
+        )
+    };
+    assert_eq!(
+        state(profile_only()).await,
+        (host_runtime::HealthStatus::Degraded, "unavailable".into()),
+        "a profile selection without an attached owner has no runnable credential"
+    );
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(NeverRefreshed, SystemClock, identity, health);
+    assert_eq!(
+        state(profile_only().with_source_owner(Some(owner))).await,
+        (host_runtime::HealthStatus::Ok, "ready".into()),
+        "the attached owner answers Bedrock for both harnesses"
+    );
+}
+
+#[tokio::test]
 async fn bind_requires_absolute_root_nonempty_session_and_supported_harness() {
     let component = ModelExecutionComponent::new(
         ScriptedBackend::completing("out"),

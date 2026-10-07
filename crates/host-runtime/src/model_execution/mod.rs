@@ -407,9 +407,10 @@ impl CompositeComponent for ModelExecutionComponent {
             .zip(descriptor_unavailable)
             .all(|(harness, descriptor_unavailable)| {
                 descriptor_unavailable
-                    || self.credential_verifier.as_ref().is_some_and(|verifier| {
-                        !verifier.env.any_credential_available(harness.as_str())
-                    })
+                    || (self.aws_owner.is_none()
+                        && self.credential_verifier.as_ref().is_some_and(|verifier| {
+                            !verifier.env.any_credential_available(harness.as_str())
+                        }))
             });
         let aws_credentials = self.source_health.get().to_json();
         if unavailable {
