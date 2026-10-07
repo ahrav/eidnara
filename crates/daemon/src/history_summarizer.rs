@@ -1888,11 +1888,17 @@ fn cancellation_confirmed_stopped(result: &Result<(), HistorySummarizerProducerE
     result.is_ok()
 }
 
-/// A start failure proves its model did not run only through a `NotSent` or `Terminal` send
-/// outcome. Any other start failure may still bill, so the firing starts no further model.
+/// A start failure proves its model did not run when the request never left the client
+/// (`NotSent`) or `err.is_host_terminal()` identifies a host rejection. A `Terminal` carrying
+/// a client-local code leaves the model's execution and billing status uncertain. The firing
+/// ends model selection when a start failure leaves execution or billing uncertain.
 fn start_effect_proven(err: &HistorySummarizerProducerError) -> bool {
     use crate::history_summarizer_producer::HistorySummarizerSendOutcome::{NotSent, Terminal};
-    matches!(err.send_outcome(), Some(NotSent | Terminal))
+    match err.send_outcome() {
+        Some(NotSent) => true,
+        Some(Terminal) => err.is_host_terminal(),
+        _ => false,
+    }
 }
 
 pub async fn run_history_summarizer_firing<P>(
@@ -3478,6 +3484,17 @@ mod tests {
         }
     }
 
+    fn host_rejected_start(message: &str) -> HistorySummarizerProducerError {
+        use crate::history_summarizer_producer::{
+            HistorySummarizerCallFailure, HistorySummarizerSendOutcome,
+        };
+        HistorySummarizerProducerError::Call(HistorySummarizerCallFailure::untagged(
+            HistorySummarizerSendOutcome::Terminal,
+            "host.provider_unavailable",
+            message,
+        ))
+    }
+
     fn producer_output(text: String) -> ProducerOutput {
         ProducerOutput {
             text,
@@ -4274,9 +4291,7 @@ mod tests {
         let prior = prior_ranges();
         let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
         let mut producer = ScriptedProducer::default()
-            .with_start(Err(
-                HistorySummarizerProducerError::retryable_model_failure("provider overloaded"),
-            ))
+            .with_start(Err(host_rejected_start("provider overloaded")))
             .with_start(Ok(run_handle("run-2")))
             .with_output(Ok(producer_output(history_summarizer_xml(
                 "fallback model summary",
@@ -4658,7 +4673,17 @@ mod tests {
                 "provider_unavailable",
                 "transient rate_limit, retry later",
             ));
-        for error in [retry_looking, HistorySummarizerProducerError::MissingRunId] {
+        let lost_response =
+            HistorySummarizerProducerError::Call(HistorySummarizerCallFailure::untagged(
+                HistorySummarizerSendOutcome::Terminal,
+                "response_retention_exhausted",
+                "retained response capacity exhausted, retry later",
+            ));
+        for error in [
+            retry_looking,
+            lost_response,
+            HistorySummarizerProducerError::MissingRunId,
+        ] {
             let label = format!("{error:?}");
             let (returned, producer, state) = unproven_start_failure_witness(error).await;
             assert!(
@@ -4681,14 +4706,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_not_sent_or_terminal_start_outcome_proves_the_model_did_not_run() {
+    fn only_a_not_sent_or_host_rejected_start_proves_the_model_did_not_run() {
         use crate::history_summarizer_producer::{
             HistorySummarizerCallFailure, HistorySummarizerSendOutcome,
         };
-        let call = |outcome| {
+        let call = |outcome, code| {
             HistorySummarizerProducerError::Call(HistorySummarizerCallFailure::untagged(
                 outcome,
-                "provider_unavailable",
+                code,
                 "retry later",
             ))
         };
@@ -4698,22 +4723,45 @@ mod tests {
             cleanup: Box::new(HistorySummarizerProducerError::TimedOut),
         };
         assert!(start_effect_proven(&call(
-            HistorySummarizerSendOutcome::NotSent
+            HistorySummarizerSendOutcome::NotSent,
+            "provider_unavailable"
         )));
         assert!(start_effect_proven(&call(
-            HistorySummarizerSendOutcome::Terminal
+            HistorySummarizerSendOutcome::Terminal,
+            "host.queue_full"
         )));
+        for local_code in [
+            "response_retention_exhausted",
+            "unexpected_stream",
+            "provider_unavailable",
+        ] {
+            assert!(
+                !start_effect_proven(&call(HistorySummarizerSendOutcome::Terminal, local_code)),
+                "{local_code}"
+            );
+        }
         assert!(!start_effect_proven(&call(
-            HistorySummarizerSendOutcome::OutcomeUnknown
+            HistorySummarizerSendOutcome::OutcomeUnknown,
+            "host.queue_full"
         )));
         assert!(!start_effect_proven(
             &HistorySummarizerProducerError::MissingRunId
         ));
         assert!(start_effect_proven(&wrapped(call(
-            HistorySummarizerSendOutcome::NotSent
+            HistorySummarizerSendOutcome::NotSent,
+            "provider_unavailable"
+        ))));
+        assert!(start_effect_proven(&wrapped(call(
+            HistorySummarizerSendOutcome::Terminal,
+            "host.queue_full"
         ))));
         assert!(!start_effect_proven(&wrapped(call(
-            HistorySummarizerSendOutcome::OutcomeUnknown
+            HistorySummarizerSendOutcome::Terminal,
+            "response_retention_exhausted"
+        ))));
+        assert!(!start_effect_proven(&wrapped(call(
+            HistorySummarizerSendOutcome::OutcomeUnknown,
+            "host.queue_full"
         ))));
     }
 
@@ -4765,7 +4813,7 @@ mod tests {
         let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
         let mut producer = ScriptedProducer::default()
             .with_start(Err(HistorySummarizerProducerError::tagged_call(
-                "provider_error",
+                "host.provider_error",
                 "model id does not exist",
                 ErrorClass::Permanent,
                 None,
@@ -5112,13 +5160,13 @@ mod tests {
         let models = vec!["prov/model-a".to_string(), "other/model-b".to_string()];
         let mut producer = ScriptedProducer::default()
             .with_start(Err(HistorySummarizerProducerError::tagged_call(
-                "provider_error",
+                "host.provider_error",
                 "model a is permanently unavailable",
                 ErrorClass::Permanent,
                 None,
             )))
             .with_start(Err(HistorySummarizerProducerError::tagged_call(
-                "provider_error",
+                "host.provider_error",
                 "model b is permanently unavailable",
                 ErrorClass::Permanent,
                 None,
@@ -5161,7 +5209,7 @@ mod tests {
             let models = vec!["prov/model-a".to_string()];
             let mut producer = ScriptedProducer::default().with_start(Err(
                 HistorySummarizerProducerError::tagged_call(
-                    "provider_error",
+                    "host.provider_error",
                     "rate limited",
                     ErrorClass::Transient,
                     Some(retry_after_secs),
@@ -5199,7 +5247,7 @@ mod tests {
         ];
         let mut producer = ScriptedProducer::default()
             .with_start(Err(HistorySummarizerProducerError::tagged_call(
-                "provider_error",
+                "host.provider_error",
                 "credential needs re-authentication",
                 ErrorClass::AuthRequired,
                 None,
@@ -5246,7 +5294,7 @@ mod tests {
         let models = vec!["openai/model-a".to_string(), "openai/model-b".to_string()];
         let mut producer = ScriptedProducer::default().with_start(Err(
             HistorySummarizerProducerError::tagged_call(
-                "provider_error",
+                "host.provider_error",
                 "credential needs re-authentication",
                 ErrorClass::AuthRequired,
                 None,
@@ -5283,7 +5331,7 @@ mod tests {
         let models = vec!["prov/model-a".to_string(), "other/model-b".to_string()];
         let mut producer = ScriptedProducer::default().with_start(Err(
             HistorySummarizerProducerError::tagged_call(
-                "provider_error",
+                "host.provider_error",
                 "context window exceeded",
                 ErrorClass::ContextOverflow,
                 None,
@@ -5311,9 +5359,7 @@ mod tests {
         let prior = prior_ranges();
         let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
         let mut producer = ScriptedProducer::default()
-            .with_start(Err(
-                HistorySummarizerProducerError::retryable_model_failure("provider overloaded"),
-            ))
+            .with_start(Err(host_rejected_start("provider overloaded")))
             .with_start(Ok(run_handle("run-2")))
             .with_output(Ok(producer_output(history_summarizer_xml(
                 "heuristic fallback",
@@ -5346,7 +5392,7 @@ mod tests {
         let models = vec!["prov/model-a".to_string(), "prov/model-b".to_string()];
         let mut producer = ScriptedProducer::default()
             .with_start(Err(HistorySummarizerProducerError::tagged_call(
-                "context_overflow",
+                "host.context_overflow",
                 "overflow text would block retry under the deprecated heuristic",
                 ErrorClass::Permanent,
                 None,

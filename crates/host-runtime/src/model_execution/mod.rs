@@ -402,16 +402,19 @@ impl CompositeComponent for ModelExecutionComponent {
         .ok()
         .and_then(Result::ok)
         .unwrap_or([true, true]);
+        let source = self.source_health.get();
+        let owner_runnable = self.aws_owner.is_some() && source.state != SourceState::Invalid;
         let unavailable = [Harness::OpenCode, Harness::Pi]
             .into_iter()
             .zip(descriptor_unavailable)
             .all(|(harness, descriptor_unavailable)| {
                 descriptor_unavailable
-                    || self.credential_verifier.as_ref().is_some_and(|verifier| {
-                        !verifier.env.any_credential_available(harness.as_str())
-                    })
+                    || (!owner_runnable
+                        && self.credential_verifier.as_ref().is_some_and(|verifier| {
+                            !verifier.env.any_credential_available(harness.as_str())
+                        }))
             });
-        let aws_credentials = self.source_health.get().to_json();
+        let aws_credentials = source.to_json();
         if unavailable {
             return HealthReport {
                 status: HealthStatus::Degraded,

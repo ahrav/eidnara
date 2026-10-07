@@ -428,9 +428,17 @@ mod bounded_read_tests {
         let oracle = resolve_coverage(&rows)
             .expect("valid ranges")
             .map(|c| (c.first_covered_ordinal, c.coverage_end_ordinal));
+        let mut legacy_seqs = None;
         let two_ends =
-            crate::transform::stored_coverage_bounds(store, SESSION, &mut false).expect("ends");
+            crate::transform::stored_coverage_bounds(store, SESSION, &mut false, &mut legacy_seqs)
+                .expect("ends");
         assert_eq!(two_ends, oracle, "{} rows", rows.len());
+        let legacy_oracle: Vec<i64> = rows
+            .iter()
+            .filter(|row| row.legacy == 1)
+            .map(|row| row.sequence)
+            .collect();
+        assert_eq!(legacy_seqs, Some(legacy_oracle), "{} rows", rows.len());
     }
 
     #[test]

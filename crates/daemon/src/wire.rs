@@ -6,7 +6,6 @@
 //! Projections hold `Arc` shells of the ingress messages, so an unreduced response serves them without rebuilding.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use memory_store::BlockIdentity;
@@ -585,11 +584,13 @@ fn extract_file_path(input: &Value) -> Option<String> {
 }
 
 pub(crate) fn fingerprint_digest(content_hash: &[u8; 32]) -> String {
-    let mut out = String::with_capacity(content_hash.len() * 2);
-    for byte in content_hash {
-        let _ = write!(&mut out, "{byte:02x}");
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(content_hash.len() * 2);
+    for &byte in content_hash {
+        out.push(HEX[usize::from(byte >> 4)]);
+        out.push(HEX[usize::from(byte & 0x0f)]);
     }
-    out
+    String::from_utf8(out).expect("hex digits are ASCII")
 }
 
 pub(crate) fn fingerprint(bytes: &str) -> String {
@@ -645,6 +646,25 @@ pub fn duplicate_ids(blocks: &[FlatBlock]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_digest_spells_every_byte_as_two_lower_case_hex_digits() {
+        let mut hash = [0u8; 32];
+        for (index, byte) in hash.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(37).wrapping_add(0xa5);
+        }
+        hash[0] = 0x00;
+        hash[1] = 0xff;
+        hash[2] = 0x0f;
+        hash[3] = 0xf0;
+        let expected: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(fingerprint_digest(&hash), expected);
+        assert_eq!(fingerprint_digest(&hash).len(), 64);
+        assert_eq!(
+            fingerprint(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
 
     fn text_msg(mid: &str, ordinal: u64, role: &str, text: &str) -> Arc<IngressMessage> {
         Arc::new(IngressMessage {

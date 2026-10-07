@@ -159,6 +159,38 @@ describe("registerRpcHandlers", () => {
         expect(detail.history_segmentCount).toBe(4);
     });
 
+    test("status-detail carries the daemon's AWS credential observation, unknown when absent or malformed", async () => {
+        const cases = [
+            ["absent", undefined, "unknown"],
+            [
+                "extra-key",
+                { kind: "profile", state: "ready", profile: "canary-profile" },
+                "unknown",
+            ],
+            [
+                "closed",
+                {
+                    kind: "profile",
+                    state: "login_required",
+                    next_retry_in_seconds: 30,
+                    consecutive_failures: 2,
+                },
+                "profile login_required, retry in 30s, 2 consecutive failures",
+            ],
+        ] as const;
+        for (const [name, aws_credentials, line] of cases) {
+            const { handlers } = register({}, { ...DAEMON_STATUS, aws_credentials });
+            const detail = (await handlers.get("status-detail")?.({
+                sessionId: `ses-handler-aws-${name}`,
+            })) as unknown as StatusDetail;
+            expect({ name, awsCredentials: detail.awsCredentials }).toEqual({
+                name,
+                awsCredentials: line,
+            });
+            expect(JSON.stringify(detail)).not.toContain("canary-profile");
+        }
+    });
+
     const USER_CONFIG = "/home/u/.config/eidnara/eidnara.jsonc";
     const statusWith = (summary: string): RustSessionStatus => ({ ...DAEMON_STATUS, summary });
     const foldAuthority = (

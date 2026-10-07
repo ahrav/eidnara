@@ -144,18 +144,20 @@ impl SourceHealthCell {
             .clone();
         let now = Instant::now();
         let live = observed.expires_at.filter(|at| *at > now);
-        let expired = observed.expires_at.is_some() && live.is_none();
+        let cooling = observed.retry_at.filter(|at| *at > now);
+        let state = match observed.state {
+            SourceState::Ready if observed.expires_at.is_some() && live.is_none() => {
+                SourceState::Unknown
+            }
+            SourceState::Cooldown if cooling.is_none() && live.is_some() => SourceState::Ready,
+            SourceState::Cooldown if cooling.is_none() => SourceState::Unknown,
+            state => state,
+        };
         SourceHealth {
             kind: observed.kind,
-            state: if expired && observed.state == SourceState::Ready {
-                SourceState::Unknown
-            } else {
-                observed.state
-            },
+            state,
             expires_in_seconds: live.map(|at| (at - now).as_secs()),
-            next_retry_in_seconds: observed
-                .retry_at
-                .map(|at| at.saturating_duration_since(now).as_secs()),
+            next_retry_in_seconds: cooling.map(|at| (at - now).as_secs()),
             consecutive_failures: observed.consecutive_failures,
         }
     }
@@ -168,29 +170,36 @@ impl SourceHealthCell {
 /// Parses one block. Any key outside [`FIELDS`], an out-of-set value, or a malformed
 /// field drops the whole block.
 pub fn parse(raw: &Value) -> Option<SourceHealth> {
-    let raw = raw.as_object()?;
-    if raw.keys().any(|key| !FIELDS.contains(&key.as_str())) {
-        return None;
+    let mut slots = [None; FIELDS.len()];
+    for (key, value) in raw.as_object()? {
+        let index = FIELDS.iter().position(|field| field == key)?;
+        slots[index] = Some(value);
     }
-    let text = |key: &str| raw.get(key).and_then(Value::as_str);
+    let [
+        kind,
+        state,
+        expires_in_seconds,
+        next_retry_in_seconds,
+        consecutive_failures,
+    ] = slots;
+    let (kind, state) = (kind?.as_str()?, state?.as_str()?);
     let kind = SourceKind::ALL
         .into_iter()
-        .find(|kind| text("kind") == Some(kind.as_str()))?;
+        .find(|candidate| candidate.as_str() == kind)?;
     let state = SourceState::ALL
         .into_iter()
-        .find(|state| text("state") == Some(state.as_str()))?;
-    let bounded = |key: &str, max: u64| match raw.get(key) {
+        .find(|candidate| candidate.as_str() == state)?;
+    let bounded = |value: Option<&Value>, max: u64| match value {
         None => Some(None),
         Some(value) => value.as_u64().filter(|n| *n <= max).map(Some),
     };
     Some(SourceHealth {
         kind,
         state,
-        expires_in_seconds: bounded("expires_in_seconds", MAX_EXPIRES_IN_SECONDS)?,
-        next_retry_in_seconds: bounded("next_retry_in_seconds", MAX_NEXT_RETRY_IN_SECONDS)?,
-        consecutive_failures: raw
-            .get("consecutive_failures")
-            .and_then(Value::as_u64)
+        expires_in_seconds: bounded(expires_in_seconds, MAX_EXPIRES_IN_SECONDS)?,
+        next_retry_in_seconds: bounded(next_retry_in_seconds, MAX_NEXT_RETRY_IN_SECONDS)?,
+        consecutive_failures: consecutive_failures?
+            .as_u64()
             .and_then(|n| u32::try_from(n).ok())?,
     })
 }
@@ -273,6 +282,31 @@ mod tests {
         });
         tokio::time::advance(Duration::from_secs(5)).await;
         assert_eq!(cell.get().next_retry_in_seconds, Some(70));
+        tokio::time::advance(Duration::from_secs(70)).await;
+        let elapsed = cell.get();
+        assert_eq!(
+            (elapsed.state, elapsed.next_retry_in_seconds),
+            (SourceState::Unknown, None),
+            "an elapsed cooldown without a usable row reads unknown"
+        );
+        cell.set(SourceObservation {
+            state: SourceState::Cooldown,
+            retry_at: Some(Instant::now()),
+            expires_at: Some(Instant::now() + Duration::from_secs(30)),
+            consecutive_failures: 2,
+            ..SourceObservation::unknown(SourceKind::Profile)
+        });
+        let elapsed = cell.get();
+        assert_eq!(
+            (
+                elapsed.state,
+                elapsed.next_retry_in_seconds,
+                elapsed.expires_in_seconds,
+                elapsed.consecutive_failures
+            ),
+            (SourceState::Ready, None, Some(30), 2),
+            "an elapsed cooldown over a usable row reads ready"
+        );
     }
 
     #[test]

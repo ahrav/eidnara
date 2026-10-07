@@ -267,7 +267,7 @@ describe("readiness dispatch", () => {
             const header = new Uint8Array(21);
             const view = new DataView(header.buffer);
             view.setUint32(0, 0, true);
-            view.setUint8(4, 3);
+            view.setUint8(4, 4);
             view.setUint8(5, 3);
             view.setUint16(7, 1, true);
             view.setUint32(9, 1, true);
@@ -401,7 +401,7 @@ describe("raw N-API descriptor boundary", () => {
                 `addon.watch(pair.second, onReady);\n` +
                 `const header = new Uint8Array(21);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true); view.setBigUint64(13, 7n, true);\n` +
                 `addon.produce(pair.first, header, 1, (segments) => { segments[0][0] = 7; return 1; }, () => {});\n` +
                 `const deadline = Date.now() + 2000;\n` +
@@ -466,7 +466,7 @@ describe("raw N-API descriptor boundary", () => {
                 `addon.watch(live.second, dispatch);\n` +
                 `const header = new Uint8Array(21);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
                 `const publish = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
@@ -523,7 +523,7 @@ describe("raw N-API descriptor boundary", () => {
                 `addon.watch(pair.second, onReady);\n` +
                 `const header = new Uint8Array(21);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
                 `const publish = (value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(pair.first, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const until = async (ready) => { const deadline = Date.now() + 2000; while (!ready() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 1)); };\n` +
@@ -578,7 +578,7 @@ describe("raw N-API descriptor boundary", () => {
                 `let trailingWake; let laterDelivered; let secondPollEmpty = null;\n` +
                 `const header = new Uint8Array(21);\n` +
                 `const view = new DataView(header.buffer);\n` +
-                `view.setUint32(0, 1, true); view.setUint8(4, 3); view.setUint8(5, 3);\n` +
+                `view.setUint32(0, 1, true); view.setUint8(4, 4); view.setUint8(5, 3);\n` +
                 `view.setUint16(7, 1, true); view.setUint32(9, 1, true);\n` +
                 `const publishTo = (channel, value) => { view.setBigUint64(13, BigInt(value), true); addon.produce(channel, header, 1, (s) => { s[0][0] = value; return 1; }, () => {}); };\n` +
                 `const onReady = () => {\n` +
@@ -641,7 +641,7 @@ describe("raw N-API descriptor boundary", () => {
         const header = new Uint8Array(21);
         const view = new DataView(header.buffer);
         view.setUint32(0, 1, true);
-        view.setUint8(4, 3);
+        view.setUint8(4, 4);
         view.setUint8(5, 3);
         view.setUint16(7, 1, true);
         view.setUint32(9, 1, true);
@@ -722,7 +722,7 @@ describe("raw N-API descriptor boundary", () => {
             const bytes = new Uint8Array(21);
             const view = new DataView(bytes.buffer);
             view.setUint32(0, 0, true);
-            view.setUint8(4, 3);
+            view.setUint8(4, 4);
             view.setUint8(5, ty);
             view.setUint16(7, channel, true);
             view.setUint32(9, 1, true);
@@ -784,7 +784,7 @@ describe("raw N-API descriptor boundary", () => {
                 `const addon = createRequire(import.meta.url)(${JSON.stringify(addonPath)});\n` +
                 `const DEPTH = ${GRANT_ORDINARY_DESCRIPTORS};\n` +
                 `const pair = addon.createTestPair();\n` +
-                `const header = (corr) => { const b = new Uint8Array(21); const v = new DataView(b.buffer); v.setUint32(0, 1, true); v.setUint8(4, 3); v.setUint16(7, 1, true); v.setUint32(9, 1, true); v.setBigUint64(13, BigInt(corr), true); return b; };\n` +
+                `const header = (corr) => { const b = new Uint8Array(21); const v = new DataView(b.buffer); v.setUint32(0, 1, true); v.setUint8(4, 4); v.setUint16(7, 1, true); v.setUint32(9, 1, true); v.setBigUint64(13, BigInt(corr), true); return b; };\n` +
                 `const publish = (corr) => addon.produce(pair.first, header(corr), 1, (s) => { s[0][0] = corr & 0xff; return 1; }, () => {});\n` +
                 `const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n` +
                 `const report = { wakes: 0 };\n` +
@@ -888,7 +888,7 @@ describe("raw N-API descriptor boundary", () => {
         const header = new Uint8Array(21);
         const view = new DataView(header.buffer);
         view.setUint32(0, 1, true);
-        view.setUint8(4, 3);
+        view.setUint8(4, 4);
         view.setUint8(5, 3);
         view.setUint16(7, 1, true);
         view.setUint32(9, 1, true);
@@ -983,7 +983,7 @@ describe("raw N-API descriptor boundary", () => {
         const view = new DataView(header.buffer);
         // Declared length 2, but the fill writes 1 byte.
         view.setUint32(0, 2, true);
-        view.setUint8(4, 3);
+        view.setUint8(4, 4);
         view.setUint8(5, 3);
         view.setUint16(7, 1, true);
         view.setUint32(9, 1, true);
@@ -1053,7 +1053,7 @@ describe("raw N-API descriptor boundary", () => {
             const header = new Uint8Array(21);
             const view = new DataView(header.buffer);
             view.setUint32(0, 1, true);
-            view.setUint8(4, 3);
+            view.setUint8(4, 4);
             view.setUint8(5, 3);
             view.setUint16(7, 1, true);
             view.setUint32(9, 1, true);

@@ -278,10 +278,6 @@ impl LauncherEnvelope {
         data_dir: PathBuf,
         mode: SelectionMode<'_>,
     ) -> Result<PreparedLauncherEnvelope, &'static str> {
-        if let Some(source) = &self.aws_source {
-            admit_owner_source(&OwnerSource::from_selector(source))
-                .map_err(|_| "aws profile source is not admissible")?;
-        }
         let closure_root = closure_root(&data_dir);
         let store = HarnessClosureStore::open(&closure_root)
             .map_err(|_| "harness closure root is insecure")?;
@@ -312,6 +308,15 @@ impl LauncherEnvelope {
                 require_previous_credentials,
             ),
         };
+        // Selection errors take precedence over profile admission errors, so a quarantined record
+        // reports `UNSUPPORTED_SELECTION_SCHEMA`. A join keeps the running incarnation; only a fresh
+        // start or a restart admits the selector.
+        if let Some(source) = &self.aws_source
+            && !(running && !require_previous_credentials)
+        {
+            admit_owner_source(&OwnerSource::from_selector(source))
+                .map_err(|_| "aws profile source is not admissible")?;
+        }
         let mut aws_source = self.aws_source;
         if running
             && !require_previous_credentials
@@ -2204,6 +2209,85 @@ mod tests {
             !closure_root(root.path())
                 .join(ACTIVE_HARNESS_SELECTION)
                 .exists()
+        );
+    }
+
+    #[test]
+    fn a_quarantined_selection_is_classified_before_profile_admission() {
+        let root = tempfile::tempdir().expect("data root");
+        let data_dir = root.path().to_path_buf();
+        let closure_root = closure_root(&data_dir);
+        std::fs::create_dir_all(&closure_root).expect("closure root");
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
+            .expect("closure root mode");
+        let path = closure_root.join(ACTIVE_HARNESS_SELECTION);
+        let unknown = b"{\"schema\":3,\"future\":\"preserve-me\"}";
+        std::fs::write(&path, unknown).expect("unknown selection");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("unknown selection mode");
+        let missing = root.path().join("missing").join("config");
+        let envelope = || LauncherEnvelope {
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
+            opencode: None,
+            pi: None,
+            credentials: BTreeMap::new(),
+            aws_source: Some(profile("corp", missing.to_str().expect("utf-8"))),
+        };
+        assert_eq!(
+            envelope()
+                .prepare(data_dir.clone(), SelectionMode::Fresh)
+                .err(),
+            Some(UNSUPPORTED_SELECTION_SCHEMA)
+        );
+        assert_eq!(
+            envelope()
+                .prepare(
+                    data_dir,
+                    SelectionMode::Running {
+                        credential_identity_key: &[3; 32],
+                        require_previous_credentials: true,
+                    },
+                )
+                .err(),
+            Some(UNSUPPORTED_SELECTION_SCHEMA)
+        );
+        assert_eq!(std::fs::read(&path).expect("kept"), unknown);
+    }
+
+    #[test]
+    fn a_running_join_keeps_its_selector_while_a_restart_readmits_it() {
+        let root = tempfile::tempdir().expect("data root");
+        let data_dir = root.path().to_path_buf();
+        let closure_root = closure_root(&data_dir);
+        std::fs::create_dir_all(&closure_root).expect("closure root");
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
+            .expect("closure root mode");
+        // The persisted selection models a running host whose admitted source config has been removed.
+        let missing = root.path().join("missing").join("config");
+        let source = profile("corp", missing.to_str().expect("utf-8"));
+        let running = HarnessSelection {
+            aws_source: Some(source.clone()),
+            ..HarnessSelection::empty()
+        };
+        write_selection(&closure_root, &running).expect("running selection");
+        let envelope = || LauncherEnvelope {
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
+            opencode: None,
+            pi: None,
+            credentials: BTreeMap::new(),
+            aws_source: Some(source.clone()),
+        };
+        let mode = |require_previous_credentials| SelectionMode::Running {
+            credential_identity_key: &[3; 32],
+            require_previous_credentials,
+        };
+        let joined = envelope()
+            .prepare(data_dir.clone(), mode(false))
+            .expect("an unchanged selector joins the running host");
+        assert!(!joined.changed);
+        assert_eq!(
+            envelope().prepare(data_dir, mode(true)).err(),
+            Some("aws profile source is not admissible")
         );
     }
 

@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
@@ -48,6 +48,7 @@ pub const MAX_ROW_LIFETIME: Duration = Duration::from_secs(86_400);
 
 /// What one physical refresh receives from the owner.
 pub struct RefreshRequest {
+    pub admitted: GraphIdentity,
     pub predecessor: Option<Arc<PrivateToken>>,
     pub superseded: Option<TokenObservation>,
 }
@@ -130,7 +131,44 @@ struct State {
     failure: Option<SourceError>,
     failures: u32,
     unresolved: bool,
+    /// A refresh retained its crash-ownership record.
+    record_retained: bool,
     closed: bool,
+}
+
+impl State {
+    /// The fence persists across missing, unreadable, or same-content observations so
+    /// a superseded token still on disk stays fenced. A different present token clears
+    /// the fence when `renewal_lost` is false.
+    fn observe_fence(&mut self, observed: &TokenObservation, renewal_lost: bool) {
+        let present = matches!(observed, TokenObservation::Present { .. });
+        if renewal_lost {
+            if present || !self.fences_present_token() {
+                self.superseded = Some(observed.clone());
+            }
+        } else if present
+            && self
+                .superseded
+                .as_ref()
+                .is_none_or(|fenced| !same_content(fenced, observed))
+        {
+            self.superseded = None;
+        }
+    }
+
+    /// The successor's rotation consumed the owner token it was minted from, so
+    /// offering that token again would replay a rotated refresh token.
+    fn discard_successor(&mut self) {
+        if let Some(successor) = self.successor.take()
+            && !self.fences_present_token()
+        {
+            self.superseded = Some(successor.basis().clone());
+        }
+    }
+
+    fn fences_present_token(&self) -> bool {
+        matches!(self.superseded, Some(TokenObservation::Present { .. }))
+    }
 }
 
 struct Inner {
@@ -140,7 +178,7 @@ struct Inner {
     health: SourceHealthCell,
     cancel: CancellationToken,
     tasks: TaskTracker,
-    state: Mutex<State>,
+    state: RwLock<State>,
 }
 
 /// A shared handle. Hosts call [`SourceOwner::close`] and [`SourceOwner::join`] at
@@ -163,7 +201,7 @@ impl SourceOwner {
             health,
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            state: Mutex::new(State::default()),
+            state: RwLock::new(State::default()),
         }))
     }
 
@@ -175,10 +213,23 @@ impl SourceOwner {
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<Lease, SourceError> {
+        // Warm hits share the read lock. A miss checks again under the exclusive lock
+        // before it joins or starts the refresh.
+        if let Some(found) = self.0.usable(&self.0.read(), deadline) {
+            return found;
+        }
         let mut settled = {
             let mut state = self.0.lock();
             if let Some(found) = self.0.usable(&state, deadline) {
                 return found;
+            }
+            // On a miss, cancellation or deadline expiry ends the demand before any
+            // credential I/O begins.
+            if cancel.is_cancelled() {
+                return Err(SourceError::Cancelled);
+            }
+            if deadline <= Instant::now() {
+                return Err(SourceError::DeadlineExceeded);
             }
             match &state.in_flight {
                 Some(settled) => settled.clone(),
@@ -202,7 +253,7 @@ impl SourceOwner {
             () = tokio::time::sleep_until(deadline) => return Err(SourceError::DeadlineExceeded),
             _ = settled.wait_for(|done| *done) => {}
         }
-        let state = self.0.lock();
+        let state = self.0.read();
         self.0.usable(&state, deadline).unwrap_or(Err(state
             .failure
             .unwrap_or(SourceError::InsufficientLifetime)))
@@ -219,7 +270,7 @@ impl SourceOwner {
         let mut state = self.0.lock();
         state.epoch += 1;
         state.row = None;
-        state.successor = None;
+        state.discard_successor();
         self.0.publish(&state);
     }
 
@@ -236,11 +287,12 @@ impl SourceOwner {
     }
 
     /// Closes the owner and waits for its refresh to settle physically. Returns whether
-    /// every refresh proved its cleanup.
+    /// every refresh proved its cleanup, including removal of its crash-ownership record.
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
-        !self.0.lock().unresolved
+        let state = self.0.read();
+        !(state.unresolved || state.record_retained)
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -251,6 +303,7 @@ impl SourceOwner {
         state.in_flight = Some(settled.clone());
         let epoch = state.epoch;
         let request = RefreshRequest {
+            admitted: self.0.admitted.clone(),
             predecessor: state.successor.clone(),
             superseded: state.superseded.clone(),
         };
@@ -289,8 +342,12 @@ enum Authority {
 }
 
 impl Inner {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> RwLockWriteGuard<'_, State> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn usable(&self, state: &State, deadline: Instant) -> Option<Result<Lease, SourceError>> {
@@ -320,6 +377,7 @@ impl Inner {
         let mut state = self.lock();
         state.in_flight = None;
         state.unresolved |= outcome.failure == Some(TransactionFailure::CleanupUnproven);
+        state.record_retained |= outcome.record_retained;
         let stale = epoch != state.epoch;
         let verdict = if outcome
             .identity
@@ -337,7 +395,7 @@ impl Inner {
             outcome.lost_succession || ((stale || discard) && outcome.successor.is_some());
         let renewal_lost = rotated || login;
         if let Some(observed) = &outcome.observation {
-            state.superseded = renewal_lost.then(|| observed.clone());
+            state.observe_fence(observed, renewal_lost);
         }
         if stale {
             state.failure = Some(SourceError::Withdrawn);
@@ -350,12 +408,11 @@ impl Inner {
         if invalidated {
             state.row = None;
         }
-        state.successor = match (discard, outcome.successor.take()) {
-            (true, _) => None,
-            (false, Some(successor)) => Some(Arc::new(successor)),
-            (false, None) if invalidated || renewal_lost => None,
-            (false, None) => state.successor.take(),
-        };
+        match (discard, outcome.successor.take()) {
+            (false, Some(successor)) => state.successor = Some(Arc::new(successor)),
+            (false, None) if !invalidated && !renewal_lost => {}
+            _ => state.discard_successor(),
+        }
         let failure = match (verdict, outcome.row.take()) {
             (Some((error, _)), _) => Some(error),
             (None, None) => Some(SourceError::Unavailable),
@@ -410,10 +467,13 @@ impl Inner {
 
     fn publish(&self, state: &State) {
         let now = Instant::now();
+        // A row serves demand only while `usable_until` exceeds the deadline plus the
+        // skew, so ready health ends `EXPIRY_SKEW` before `usable_until`.
         let usable = state
             .row
             .as_ref()
-            .filter(|row| row.lease.usable_until > now);
+            .and_then(|row| row.lease.usable_until.checked_sub(EXPIRY_SKEW))
+            .filter(|boundary| *boundary > now);
         let cooling = state.cooldown_until.filter(|until| *until > now);
         let condition = if state.closed {
             SourceState::Unknown
@@ -433,7 +493,7 @@ impl Inner {
         self.health.set(SourceObservation {
             kind: SourceKind::Profile,
             state: condition,
-            expires_at: usable.map(|row| row.lease.usable_until),
+            expires_at: usable,
             retry_at: cooling.filter(|_| condition == SourceState::Cooldown),
             consecutive_failures: state.failures,
         });
@@ -460,7 +520,7 @@ fn classify(failure: TransactionFailure) -> (SourceError, Authority) {
             (SourceError::LoginRequired, Keep)
         }
         F::Withdrawn => (SourceError::Withdrawn, Discard),
-        F::Admission(_) | F::Helper(HelperFailure::InvalidConfiguration) => {
+        F::GraphChanged | F::Admission(_) | F::Helper(HelperFailure::InvalidConfiguration) => {
             (SourceError::Invalid, Discard)
         }
         F::Capture(CaptureFailure::Missing | CaptureFailure::Unsafe | CaptureFailure::TooLarge)
@@ -480,38 +540,41 @@ fn classify(failure: TransactionFailure) -> (SourceError, Authority) {
 /// The profile source as the model adapters use it: the shared owner and the selected
 /// region the child row carries.
 #[derive(Clone)]
-pub struct AwsDispatch {
+pub struct AwsDispatch(Arc<Dispatch>);
+
+struct Dispatch {
     owner: SourceOwner,
     region: String,
 }
 
 impl AwsDispatch {
     pub fn new(owner: SourceOwner, region: String) -> Self {
-        Self { owner, region }
+        Self(Arc::new(Dispatch { owner, region }))
     }
 
     pub fn owner(&self) -> &SourceOwner {
-        &self.owner
+        &self.0.owner
     }
 }
 
-/// The lease one child's row came from, kept for the recheck immediately before spawn.
-pub(super) struct ChildLease {
+/// The lease one child's row came from and the dispatch's owner, kept for the recheck
+/// immediately before spawn.
+pub(super) struct ChildLease<'a> {
     lease: Lease,
-    owner: SourceOwner,
+    owner: &'a SourceOwner,
 }
 
 /// The child's credential row and, for a profile source, the lease to recheck before
 /// spawn. A selected profile source answers Bedrock; every other provider reads the
 /// startup environment row.
-pub(super) async fn child_credentials(
+pub(super) async fn child_credentials<'a>(
     env: &EnvSnapshot,
-    aws: Option<&AwsDispatch>,
+    aws: Option<&'a AwsDispatch>,
     harness: Harness,
     provider: &str,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<(Vec<(OsString, OsString)>, Option<ChildLease>), BackendTerminal> {
+) -> Result<(Vec<(OsString, OsString)>, Option<ChildLease<'a>>), BackendTerminal> {
     let canonical = subprocess::canonical_provider(harness.as_str(), provider);
     let Some(aws) = aws.filter(|_| canonical == Ok(source_claim::PROFILE_PROVIDER)) else {
         return env
@@ -520,7 +583,7 @@ pub(super) async fn child_credentials(
             .map_err(|error| subprocess::credential_failure(harness, error));
     };
     let lease = aws
-        .owner
+        .owner()
         .acquire(deadline, cancel)
         .await
         .map_err(|error| source_terminal(harness, error))?;
@@ -538,23 +601,28 @@ pub(super) async fn child_credentials(
             "AWS_SESSION_TOKEN".into(),
             row.session_token.as_str().into(),
         ),
-        ("AWS_REGION".into(), aws.region.as_str().into()),
+        ("AWS_REGION".into(), aws.0.region.as_str().into()),
     ];
-    let owner = aws.owner.clone();
+    let owner = aws.owner();
     Ok((env, Some(ChildLease { lease, owner })))
 }
 
 /// The recheck immediately before a child spawns, under the same lifetime predicate and
 /// clock as acquisition.
 pub(super) fn recheck_before_spawn(
-    lease: Option<&ChildLease>,
+    lease: Option<&ChildLease<'_>>,
     harness: Harness,
     deadline: Instant,
 ) -> Result<(), BackendTerminal> {
     match lease {
-        Some(child) if !child.owner.0.covers(&child.lease, deadline) => {
-            Err(source_terminal(harness, SourceError::InsufficientLifetime))
-        }
+        // A forward wall-clock jump during setup causes a transient failure when the lease
+        // stops covering the run deadline.
+        Some(child) if !child.owner.0.covers(&child.lease, deadline) => Err(source_failed(
+            harness,
+            ErrorClass::Transient,
+            "row stopped covering the run deadline before spawn",
+            None,
+        )),
         _ => Ok(()),
     }
 }
@@ -569,7 +637,8 @@ fn source_terminal(harness: Harness, error: SourceError) -> BackendTerminal {
         SourceError::Cooldown { retry_in } => (
             ErrorClass::Transient,
             "is cooling down after a failed refresh",
-            Some(retry_in.as_secs().max(1)),
+            // Rounding `retry_in` up keeps `retry_after_secs` covering the remaining cooldown.
+            Some((retry_in.as_secs() + u64::from(retry_in.subsec_nanos() > 0)).max(1)),
         ),
         SourceError::Unavailable | SourceError::Withdrawn => {
             (ErrorClass::Transient, "is unavailable", None)
@@ -595,6 +664,15 @@ fn source_terminal(harness: Harness, error: SourceError) -> BackendTerminal {
             None,
         ),
     };
+    source_failed(harness, class, detail, retry_after_secs)
+}
+
+fn source_failed(
+    harness: Harness,
+    class: ErrorClass,
+    detail: &str,
+    retry_after_secs: Option<u64>,
+) -> BackendTerminal {
     BackendTerminal::SourceFailed(BackendError {
         class,
         message: format!("{} AWS credential source {detail}", harness.as_str()),
@@ -641,6 +719,7 @@ impl Refresh for TransactionRefresh {
             let mut slot = context.slot.lock().await;
             let input = TransactionInput {
                 source: &context.source,
+                admitted: Some(&request.admitted),
                 predecessor: request.predecessor.as_deref(),
                 superseded: request.superseded.as_ref(),
                 executable: &context.executable,
@@ -657,6 +736,7 @@ impl Refresh for TransactionRefresh {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use tokio::sync::oneshot;
@@ -691,6 +771,8 @@ mod tests {
 
     /// The predecessor bytes, superseded observation, and cancellation one refresh received.
     type Seen = (Option<Vec<u8>>, Option<TokenObservation>, CancellationToken);
+
+    type Case<T> = (&'static str, fn(&Harness) -> T);
 
     struct Step {
         gate: Option<oneshot::Receiver<()>>,
@@ -895,7 +977,33 @@ mod tests {
         }
         assert_eq!(h.fake.calls(), 1, "a warm acquisition starts no refresh");
         assert_eq!(h.health.get().state, SourceState::Ready);
-        assert_eq!(h.health.get().expires_in_seconds, Some(HOUR));
+        assert_eq!(
+            h.health.get().expires_in_seconds,
+            Some(HOUR - EXPIRY_SKEW.as_secs())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_already_cancelled_or_expired_demand_starts_no_refresh() {
+        let h = harness();
+        h.fake.push(h.ok(HOUR));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            h.owner.acquire(Instant::now() + MODEL, &cancel).await.err(),
+            Some(SourceError::Cancelled)
+        );
+        let expired = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            h.owner.acquire(expired, &h.never).await.err(),
+            Some(SourceError::DeadlineExceeded)
+        );
+        assert_eq!(
+            h.fake.calls(),
+            0,
+            "an aborted demand starts no credential I/O"
+        );
+        assert_eq!(h.health.get().state, SourceState::Unknown);
     }
 
     #[tokio::test(start_paused = true)]
@@ -929,6 +1037,68 @@ mod tests {
             "no replacement refresh overlaps the stalled one"
         );
         assert_eq!(h.fake.0.overlapped.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_health_ends_where_the_row_stops_serving_demand() {
+        let h = harness();
+        h.fake.push(h.ok(HOUR));
+        h.acquire_for(MODEL).await.expect("row");
+        let skew = EXPIRY_SKEW.as_secs();
+        assert_eq!(h.health.get().expires_in_seconds, Some(HOUR - skew));
+        tokio::time::advance(Duration::from_secs(HOUR - skew - 1)).await;
+        let health = h.health.get();
+        assert_eq!(
+            (health.state, health.expires_in_seconds),
+            (SourceState::Ready, Some(1))
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let health = h.health.get();
+        assert_eq!(
+            (health.state, health.expires_in_seconds),
+            (SourceState::Unknown, None),
+            "a row inside the skew serves no demand"
+        );
+        assert_eq!(h.fake.calls(), 1, "the health read starts no refresh");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_dead_on_arrival_starts_no_refresh() {
+        let h = harness();
+        let _held = h.fake.push_held(h.ok(HOUR));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            h.owner.acquire(Instant::now() + MODEL, &cancel).await.err(),
+            Some(SourceError::Cancelled)
+        );
+        assert_eq!(
+            h.owner
+                .acquire(Instant::now() - Duration::from_secs(1), &h.never)
+                .await
+                .err(),
+            Some(SourceError::DeadlineExceeded)
+        );
+        assert_eq!(h.fake.calls(), 0, "dead demand starts no credential I/O");
+        assert_eq!(h.health.get().state, SourceState::Unknown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retained_crash_record_keeps_the_source_usable_and_fails_the_join() {
+        let h = harness();
+        let mut retained = h.ok(HOUR);
+        retained.record_retained = true;
+        h.fake.push(retained);
+        h.acquire_for(MODEL).await.expect("row");
+        h.acquire_for(MODEL)
+            .await
+            .expect("a retained record leaves the source usable");
+        assert_eq!(h.fake.calls(), 1);
+        assert!(
+            !h.owner.join().await,
+            "a retained crash record is cleanup debt at shutdown"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1033,6 +1203,38 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_expired_cooldown_reads_from_the_cached_row_without_a_republish() {
+        let h = harness();
+        h.fake.push(h.ok(MODEL.as_secs()));
+        assert_eq!(
+            h.acquire_for(MODEL).await.err(),
+            Some(SourceError::InsufficientLifetime)
+        );
+        assert_eq!(h.health.get().state, SourceState::Cooldown);
+        tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+        h.acquire_for(Duration::from_secs(60))
+            .await
+            .expect("warm row for a short demand");
+        assert_eq!(h.fake.calls(), 1, "a warm hit starts no refresh");
+        let health = h.health.get();
+        assert_eq!(
+            (
+                health.state,
+                health.next_retry_in_seconds,
+                health.expires_in_seconds,
+                health.consecutive_failures
+            ),
+            (
+                SourceState::Ready,
+                None,
+                Some(MODEL.as_secs() - 75 - EXPIRY_SKEW.as_secs()),
+                1
+            ),
+            "an elapsed cooldown over a usable row reads ready at the health read"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_successor_survives_role_failure_and_feeds_the_next_refresh() {
         let h = harness();
         let mut first = h.ok(MODEL.as_secs() + 120);
@@ -1113,10 +1315,11 @@ mod tests {
             h.acquire_for(Duration::from_secs(1)).await.err(),
             Some(SourceError::Withdrawn)
         );
+        let (predecessor, superseded, _) = h.fake.request(1);
         assert_eq!(
-            h.fake.request(1).0,
-            None,
-            "withdraw discarded the successor"
+            (predecessor, superseded),
+            (None, Some(observed(1))),
+            "withdraw discarded the successor and fenced the owner token it rotated"
         );
 
         let release = h.fake.push_held(h.ok(HOUR));
@@ -1235,37 +1438,52 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_invalidating_refresh_failure_discards_the_row_and_successor() {
-        for (failure, error) in [
-            (TransactionFailure::Withdrawn, SourceError::Withdrawn),
-            (
-                TransactionFailure::Admission(AdmissionError::Unparseable),
-                SourceError::Invalid,
-            ),
-            (
-                TransactionFailure::Helper(HelperFailure::InvalidConfiguration),
-                SourceError::Invalid,
-            ),
-        ] {
+    async fn an_invalidating_refresh_discards_the_row_and_fences_the_successors_owner_token() {
+        let cases: [Case<(TransactionOutcome, SourceError)>; 4] = [
+            ("withdrawn", |h| {
+                (
+                    h.failed(TransactionFailure::Withdrawn),
+                    SourceError::Withdrawn,
+                )
+            }),
+            ("inadmissible", |h| {
+                let mut failed =
+                    h.failed(TransactionFailure::Admission(AdmissionError::Unparseable));
+                (failed.identity, failed.observation) = (None, None);
+                (failed, SourceError::Invalid)
+            }),
+            ("misconfigured", |h| {
+                let failure = TransactionFailure::Helper(HelperFailure::InvalidConfiguration);
+                (h.failed(failure), SourceError::Invalid)
+            }),
+            ("regraphed", |h| {
+                let mut edited = h.ok(HOUR);
+                edited.identity = Some(identity("222222222222"));
+                (edited, SourceError::Invalid)
+            }),
+        ];
+        for (name, case) in cases {
             let h = harness();
             let mut first = h.ok(MODEL.as_secs() + 120);
             first.successor = Some(PrivateToken::for_test(b"r2", observed(1)));
             h.fake.push(first);
             h.acquire_for(MODEL).await.expect("row");
             tokio::time::advance(Duration::from_secs(60)).await;
-            h.fake.push(h.failed(failure));
-            assert_eq!(h.acquire_for(MODEL).await.err(), Some(error));
+            let (outcome, error) = case(&h);
+            h.fake.push(outcome);
+            assert_eq!(h.acquire_for(MODEL).await.err(), Some(error), "{name}");
             tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
             h.fake.push(h.failed(TransactionFailure::Spawn));
             assert_eq!(
                 h.acquire_for(Duration::from_secs(1)).await.err(),
                 Some(SourceError::Unavailable),
-                "{failure:?} discarded the row"
+                "{name} discarded the row"
             );
+            let (predecessor, superseded, _) = h.fake.request(2);
             assert_eq!(
-                h.fake.request(2).0,
-                None,
-                "{failure:?} discarded the successor"
+                (predecessor, superseded),
+                (None, Some(observed(1))),
+                "{name} discarded the successor and fenced the owner token it rotated"
             );
         }
         let h = harness();
@@ -1316,7 +1534,7 @@ mod tests {
         h.acquire_for(MODEL).await.expect("row");
         assert_eq!(
             h.health.get().expires_in_seconds,
-            Some(MAX_ROW_LIFETIME.as_secs())
+            Some((MAX_ROW_LIFETIME - EXPIRY_SKEW).as_secs())
         );
         h.clock.shift(-(WALL_BASE.as_secs() as i64) - 1);
         h.fake.push(h.failed(TransactionFailure::Spawn));
@@ -1354,6 +1572,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_unread_owner_token_or_a_graph_mismatch_never_lifts_the_superseded_fence() {
+        let cases: [Case<TransactionOutcome>; 3] = [
+            ("unusable", |h| {
+                let mut refused = h.failed(TransactionFailure::LoginRequired);
+                refused.observation = Some(TokenObservation::Unusable);
+                refused
+            }),
+            ("absent", |h| {
+                let mut refused = h.failed(TransactionFailure::LoginRequired);
+                refused.observation = Some(TokenObservation::Absent);
+                refused
+            }),
+            ("regraphed", |h| {
+                let mut refused = h.failed(TransactionFailure::LoginRequired);
+                refused.identity = Some(identity("222222222222"));
+                refused
+            }),
+        ];
+        for (name, intervening) in cases {
+            let h = harness();
+            let mut lost = h.failed(TransactionFailure::HelperUnreported);
+            lost.lost_succession = true;
+            h.fake.push(lost);
+            assert!(h.acquire_for(MODEL).await.is_err());
+            tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+            h.fake.push(intervening(&h));
+            assert!(h.acquire_for(MODEL).await.is_err(), "{name}");
+            tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+            h.fake.push(h.failed(TransactionFailure::LoginRequired));
+            assert!(h.acquire_for(MODEL).await.is_err(), "{name}");
+            assert_eq!(
+                h.fake.request(2).1,
+                Some(observed(1)),
+                "{name} kept the fence on the unchanged owner token"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_fenced_rotation_counts_as_lost_succession() {
         let h = harness();
         let mut rotated = h.ok(HOUR);
@@ -1371,6 +1628,45 @@ mod tests {
         assert!(h.acquire_for(MODEL).await.is_err());
         let (predecessor, superseded, _) = h.fake.request(1);
         assert_eq!((predecessor, superseded), (None, Some(observed(1))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wall_jump_before_spawn_is_a_transient_source_failure() {
+        let h = harness();
+        h.fake.push(h.ok(HOUR));
+        let deadline = Instant::now() + MODEL;
+        let lease = h.owner.acquire(deadline, &h.never).await.expect("row");
+        let child = ChildLease {
+            lease,
+            owner: &h.owner,
+        };
+        assert!(recheck_before_spawn(Some(&child), super::Harness::Pi, deadline).is_ok());
+        h.clock.shift(HOUR as i64);
+        let terminal = recheck_before_spawn(Some(&child), super::Harness::Pi, deadline)
+            .expect_err("a forward wall jump refuses the spawn");
+        let BackendTerminal::SourceFailed(error) = terminal else {
+            panic!("{terminal:?}");
+        };
+        assert_eq!(
+            error.class,
+            ErrorClass::Transient,
+            "the next run refreshes against the new clock"
+        );
+    }
+
+    #[test]
+    fn a_cooldown_retry_hint_covers_the_whole_remaining_cooldown() {
+        for (retry_in, secs) in [
+            (Duration::from_millis(1_500), 2),
+            (Duration::from_millis(400), 1),
+            (Duration::from_secs(60), 60),
+        ] {
+            let terminal = source_terminal(super::Harness::Pi, SourceError::Cooldown { retry_in });
+            let BackendTerminal::SourceFailed(error) = terminal else {
+                panic!("{retry_in:?}: {terminal:?}");
+            };
+            assert_eq!(error.retry_after_secs, Some(secs), "{retry_in:?}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

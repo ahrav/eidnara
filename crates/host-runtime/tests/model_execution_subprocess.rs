@@ -3219,9 +3219,28 @@ fn provider_rows_exclude_ambient_credentials_and_enforce_caps() {
         .source_claim(&key, "opencode", "anthropic", None)
         .expect("fingerprint");
     assert_eq!(
-        vector, "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218",
+        vector,
+        pinned_source_claim("anthropic env"),
         "the shared v4 `anthropic env` vector"
     );
+}
+
+fn pinned_source_claim(name: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/source-claim-vectors.json"
+    );
+    let vectors: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("source-claim vectors"))
+            .expect("source-claim vectors JSON");
+    vectors["vectors"]
+        .as_array()
+        .expect("vector list")
+        .iter()
+        .find(|vector| vector["name"] == name)
+        .and_then(|vector| vector["claim"].as_str())
+        .expect("named vector claim")
+        .to_owned()
 }
 
 /// The parser enforces the JSON node limit before building a DOM, so many small values cannot bypass the limit.
@@ -4123,7 +4142,7 @@ fn a_wall_jump_after_acquisition_refuses_the_spawn() {
         let BackendTerminal::SourceFailed(error) = &terminal else {
             panic!("{harness:?}: {terminal:?}");
         };
-        assert_eq!(error.class, ErrorClass::Permanent, "{harness:?}");
+        assert_eq!(error.class, ErrorClass::Transient, "{harness:?}");
         assert_eq!(
             health.get().state,
             SourceState::Ready,

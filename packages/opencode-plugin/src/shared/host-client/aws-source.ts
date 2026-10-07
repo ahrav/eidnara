@@ -61,6 +61,13 @@ function lexicallyNormal(path: string): string | null {
     return `/${parts.join("/")}`;
 }
 
+function isLexicallyNormal(path: string): boolean {
+    if (path === "/") return true;
+    if (!path.startsWith("/") || path.endsWith("/")) return false;
+    if (path.endsWith("/.") || path.endsWith("/..")) return false;
+    return !path.includes("//") && !path.includes("/./") && !path.includes("/../");
+}
+
 function bounded(field: string, value: unknown, maxBytes: number): string {
     if (value === undefined) throw new AwsSourceError("missing", field);
     if (typeof value !== "string") throw new AwsSourceError("invalid_type", field);
@@ -68,14 +75,17 @@ function bounded(field: string, value: unknown, maxBytes: number): string {
     if (!(value as string & { isWellFormed(): boolean }).isWellFormed()) {
         throw new AwsSourceError("not_utf8", field);
     }
-    if (Buffer.byteLength(value) > maxBytes) throw new AwsSourceError("too_long", field);
+    // A UTF-16 code unit encodes to at most 3 UTF-8 bytes, so short strings skip the byte count.
+    if (value.length * 3 > maxBytes && Buffer.byteLength(value) > maxBytes) {
+        throw new AwsSourceError("too_long", field);
+    }
     if (value.includes("\0")) throw new AwsSourceError("contains_nul", field);
     return value;
 }
 
 function normalPath(field: string, value: unknown): string {
     const path = bounded(field, value, AWS_PATH_MAX_BYTES);
-    if (lexicallyNormal(path) !== path) throw new AwsSourceError("path_not_normal", field);
+    if (!isLexicallyNormal(path)) throw new AwsSourceError("path_not_normal", field);
     return path;
 }
 
@@ -172,6 +182,11 @@ export function processAwsSource(): AwsSourceSelection {
     }
     if ("error" in processCapture) throw processCapture.error;
     return processCapture.selection;
+}
+
+/** Drops the process capture so a test can select its own source for the process environment it sets. */
+export function _resetProcessAwsSourceForTesting(): void {
+    processCapture = undefined;
 }
 
 export function sourceBinding(

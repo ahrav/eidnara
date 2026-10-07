@@ -23453,7 +23453,12 @@ mod tests {
             "the request is dropped while the sweep waits on the gate"
         );
         holder.join().unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let purge_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while handler.recomp_sessions.lock().unwrap().contains("ses")
+            && tokio::time::Instant::now() < purge_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
             !handler.recomp_sessions.lock().unwrap().contains("ses"),
             "the in-memory purge belongs to the durable deletion, not to the request future"

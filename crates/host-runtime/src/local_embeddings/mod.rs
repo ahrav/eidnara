@@ -352,6 +352,12 @@ impl LocalEmbeddingsComponent {
         })
     }
 
+    /// Queries waiting for the inference slot behind the running native call.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn waiting_queries_for_test(&self) -> usize {
+        self.inner.scheduler.waiting().0
+    }
+
     /// # Errors
     ///
     /// Returns `bundle::BundleError` when the replacement identity or serving limits are invalid.

@@ -65,13 +65,14 @@ export function parseAwsCredentialsBlock(value: unknown): AwsCredentialsHealth |
     const expires = optional("expires_in_seconds", VOCABULARY.max_expires_in_seconds);
     const retry = optional("next_retry_in_seconds", VOCABULARY.max_next_retry_in_seconds);
     if (expires === null || retry === null) return null;
-    return Object.freeze({
+    const block: { -readonly [K in keyof AwsCredentialsHealth]: AwsCredentialsHealth[K] } = {
         kind,
         state,
-        ...(expires === undefined ? {} : { expires_in_seconds: expires }),
-        ...(retry === undefined ? {} : { next_retry_in_seconds: retry }),
         consecutive_failures: failures,
-    });
+    };
+    if (expires !== undefined) block.expires_in_seconds = expires;
+    if (retry !== undefined) block.next_retry_in_seconds = retry;
+    return Object.freeze(block);
 }
 
 export function awsCredentialsHealth(value: unknown): AwsCredentialsView {
@@ -80,16 +81,16 @@ export function awsCredentialsHealth(value: unknown): AwsCredentialsView {
 
 export function formatAwsCredentialsHealth(view: AwsCredentialsView): string {
     if (!("kind" in view)) return view.state;
-    const parts: string[] = [`${view.kind} ${view.state}`];
+    let text = `${view.kind} ${view.state}`;
     if (view.expires_in_seconds !== undefined) {
-        parts.push(`expires in ${view.expires_in_seconds}s`);
+        text += `, expires in ${view.expires_in_seconds}s`;
     }
     if (view.next_retry_in_seconds !== undefined) {
-        parts.push(`retry in ${view.next_retry_in_seconds}s`);
+        text += `, retry in ${view.next_retry_in_seconds}s`;
     }
     if (view.consecutive_failures > 0) {
         const noun = view.consecutive_failures === 1 ? "failure" : "failures";
-        parts.push(`${view.consecutive_failures} consecutive ${noun}`);
+        text += `, ${view.consecutive_failures} consecutive ${noun}`;
     }
-    return parts.join(", ");
+    return text;
 }

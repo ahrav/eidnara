@@ -37,8 +37,8 @@ flowchart TB
   CF --> RC[Managed Rust clients]
   TS <-->|authenticate and receive descriptors| US[Owner-only Unix setup socket]
   RC <-->|authenticate and receive descriptors| US
-  TS <-->|v3 application frames| R[Shared-memory ring]
-  RC <-->|v3 application frames| R
+  TS <-->|v4 application frames| R[Shared-memory ring]
+  RC <-->|v4 application frames| R
   US --> H[host-runtime]
   R --> H
   H -->|initialize, bind, handle, route-gone, health| M[Linked Handler]
@@ -202,7 +202,7 @@ sequenceDiagram
   C->>H: ClientAuth {client_auth}
   Note over H: constant-time verify
   H-->>C: two ring descriptors + activation data
-  Note over C,H: validate current identity, attach, commit; v3 ring traffic enabled
+  Note over C,H: validate current identity, attach, commit; v4 ring traffic enabled
 ```
 
 Canonical JSON shapes:
@@ -238,12 +238,12 @@ Any malformed JSON, wrong array length, oversized message, nonce-generation fail
 
 ### 6.1 Header
 
-After authentication, peers exchange a fixed 21-byte v3 header followed by `len` opaque body bytes. Integers are little-endian.
+After authentication, peers exchange a fixed 21-byte v4 header followed by `len` opaque body bytes. Integers are little-endian.
 
 | Offset | Width | Field | Constraint |
 | ---: | ---: | --- | --- |
 | 0 | 4 | `len: u32` | `0..=67,108,864` |
-| 4 | 1 | `ver: u8` | exactly 3 |
+| 4 | 1 | `ver: u8` | exactly 4 |
 | 5 | 1 | `type: u8` | `0..=11` per table below |
 | 6 | 1 | `flags: u8` | valid bit fields below |
 | 7 | 2 | `channel: u16` | 0 is control; routed channels are nonzero |
@@ -304,7 +304,7 @@ Any structurally illegal channel, epoch, correlation, body, or direction closes 
 
 ### 6.3 Reading, limits, and corruption
 
-The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v3 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
+The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v4 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
 
 Aggregate resource policy takes effect between frames, before admitting more connections/work, or after a complete frame reaches a profile/application limit. For example, `Handler` may return terminal `invalid_params` for its 1 MiB facade or 32 MiB transform limits after transport framing accepts the body. Local limits never change header bytes.
 
@@ -319,16 +319,16 @@ Writers MUST verify header `len` equals body length, reserve one block from the 
 The compact canonical `route.open` request defined in Section 7.2 is 167 UTF-8 bytes. Its `Request` header uses Interactive/Normal flags, control channel, epoch 0, correlation 1:
 
 ```text
-a7 00 00 00  03 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
+a7 00 00 00  04 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
 |--- len ---| ver ty fl | ch  |--- epoch --|--------- corr ----------|
 ```
 
-Hex without spacing: `a70000000300020000000000000100000000000000`.
+Hex without spacing: `a70000000400020000000000000100000000000000`.
 
 A routed 44-byte Background/Normal request on channel 7, epoch 77, correlation 2 has header:
 
 ```text
-2c00000003000407004d0000000200000000000000
+2c00000004000407004d0000000200000000000000
 ```
 
 ## 7. Control and application messages
@@ -669,6 +669,32 @@ so `metadata_headroom_bytes` reaching zero means new review work is refused
 until a new incarnation; it is a safety ceiling, not a measured service
 lifetime.
 
+The `model_execution` component MAY also carry a sanitized
+`metrics.aws_credentials` object: the host's cached observation of the
+selected AWS credential source, read from a shared cell with no credential
+I/O. It is advisory and never authorizes dispatch. Unlike `kernel`, the block
+is sanitized all-or-nothing like `epochs`: any key outside the five below, any
+value outside its closed set or bound, or any malformed field drops the whole
+object from the response. A missing `aws_credentials` object means the source
+state is unknown. `ready` means a locally usable cached row, never remote
+permission or fold progress; every other state can still hold a
+lifetime-qualified row, so a consumer MUST NOT reduce it to unconditional
+readiness.
+
+| field | type | rule |
+| --- | --- | --- |
+| `kind` | `"none" \| "environment" \| "profile"` | required; which credential source the host selected at start |
+| `state` | `"unknown" \| "ready" \| "refreshing" \| "cooldown" \| "login_required" \| "invalid"` | required; a `ready` row past its expiry reads as `unknown` |
+| `expires_in_seconds` | unsigned integer, at most 86400 | present only while a live expiry is known; seconds remaining at the read, reported at the bound when larger |
+| `next_retry_in_seconds` | unsigned integer, at most 300 | present only while a retry is scheduled; seconds remaining at the read, reported at the bound when larger |
+| `consecutive_failures` | unsigned integer, at most `u32::MAX` | required; saturating count of consecutive source failures |
+
+No field carries a profile name, account, role, path, session, token, hash, or
+error text. The shared vectors in
+`crates/host-runtime/tests/fixtures/source-health-vectors.json` fix the field
+set, bounds, and drop cases, and the Rust sanitizer and TypeScript parser MUST
+agree on every case.
+
 `host.shutdown` is the authenticated host-global stop. Request and success response are both compact tagged objects; unknown request fields are ignored under the Section 7.1 bounds:
 
 ```json
@@ -899,7 +925,7 @@ answer.
 
 ### 7.10 Transform application revision 3
 
-Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v3 and the context application protocol (Section 7.8) stays 3. This section specifies the whole revision: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). Revision 3 is neither backward nor forward compatible with any earlier transform body: a daemon serves exactly this revision, and a consumer and daemon of one release speak it together.
+Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v4 and the context application protocol (Section 7.8) stays 3. This section specifies the whole revision: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). Revision 3 is neither backward nor forward compatible with any earlier transform body: a daemon serves exactly this revision, and a consumer and daemon of one release speak it together.
 
 #### 7.10.1 Per-session admission and `session_busy`
 
@@ -1252,7 +1278,7 @@ The owner selects the model credential source once per client process. A nonempt
 
 The launcher envelope (schema 2), the serve envelope (schema 3), and the active selection (schema 2) carry the selector as optional `aws_source`. Absence is environment mode, and `null` is invalid. Profile mode removes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `AWS_REGION` from the legacy credential map, and both native hops reject an envelope that carries both. The launcher captures and admits the selected profile graph before it starts a host; an inadmissible graph fails the start with `harness_unavailable`. A profile-mode host always verifies route claims, including when its legacy credential map is empty. A running host keeps its selector: an owner that supplies a different one is refused.
 
-Upgrade from version 3 quiesces version-3 clients, stops the host through its own launcher, confirms teardown, and starts the version-4 generation. A schema-1 selection a prior generation left is never read as source authority: it marks the running selection stale, `stop` keeps it, and the next fresh start moves it to `active-selection.v1.json` before committing schema 2. That record holds the most recent prior-generation selection; a later move replaces it. Rollback quiesces version-4 clients and stops the version-4 host through the version-4 launcher, which removes the schema-2 selection. The operator then moves `active-selection.v1.json` back to `active-selection.json`, where the prior generation's reader validates it as its own schema-1 record, and starts the prior generation. A prior-generation reader refuses a schema-2 selection as an unsupported state schema.
+Upgrade from version 3 quiesces version-3 clients, stops the host through its own launcher, confirms teardown, and starts the version-4 generation. The version-3 `stop` removes its schema-1 selection, so this path leaves no prior-generation record. A schema-1 selection remains only when a version-3 host ended without its launcher's `stop`. Version 4 never reads that file as source authority: it marks the running selection stale, `stop` keeps it, and the next fresh start moves it to `active-selection.v1.json` before committing schema 2. That record holds the most recent prior-generation selection; a later move replaces it. Rollback quiesces version-4 clients, stops the version-4 host through the version-4 launcher, which removes the schema-2 selection, and starts the prior generation from an absent selection, the same state its own `stop` leaves. When `active-selection.v1.json` exists, the operator may move it back to `active-selection.json` before that start; the prior generation's reader validates it as its own schema-1 record, and its fresh start replaces it. A prior-generation reader refuses a schema-2 selection as an unsupported state schema.
 
 ## 14. Conformance scenario matrix
 
