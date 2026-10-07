@@ -1025,6 +1025,9 @@ pub struct HistorySummarizerDurableState {
     pub history_segment_set_generation: HistorySegmentSetGeneration,
     #[serde(default)]
     pub failure_backoff_at_ms: Option<i64>,
+    /// `source_retry_at_ms` persists the credential-source retry deadline across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_retry_at_ms: Option<i64>,
     /// Human-readable detail of the most recent failed firing. The producer runs in a
     /// spawned task whose stderr a supervised deployment never captures, so the error
     /// must live in durable state to be diagnosable from a state dump. Cleared when a
@@ -1100,6 +1103,7 @@ impl Default for HistorySummarizerDurableState {
             expected_revert_epoch: 0,
             history_segment_set_generation: HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
+            source_retry_at_ms: None,
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
@@ -1132,6 +1136,7 @@ impl HistorySummarizerDurableState {
             expected_revert_epoch: _,
             history_segment_set_generation: _,
             failure_backoff_at_ms: _,
+            source_retry_at_ms: _,
             last_failure: _,
             last_no_fire: _,
             consecutive_publish_failures: _,
@@ -25886,6 +25891,7 @@ mod tests {
                 expected_revert_epoch: 0,
                 history_segment_set_generation: HistorySegmentSetGeneration::default(),
                 failure_backoff_at_ms: Some(456),
+                source_retry_at_ms: None,
                 last_failure: None,
                 last_no_fire: None,
                 consecutive_publish_failures: 0,

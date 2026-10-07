@@ -464,6 +464,7 @@ fn history_summarizer_bound() -> usize {
         expected_revert_epoch => INT;
         history_segment_set_generation => generation;
         failure_backoff_at_ms => INT;
+        source_retry_at_ms => INT;
         last_failure => detail;
         last_no_fire => detail;
         consecutive_publish_failures => U32;
@@ -535,6 +536,7 @@ fn worst_case_history_summarizer() -> memory_store::HistorySummarizerDurableStat
             count: i64::MIN,
         },
         failure_backoff_at_ms: Some(i64::MIN),
+        source_retry_at_ms: Some(i64::MIN),
         last_failure: Some(detail.clone()),
         last_no_fire: Some(detail),
         consecutive_publish_failures: u32::MAX,

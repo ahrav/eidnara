@@ -77,6 +77,9 @@ impl ErrorClass {
 pub struct ErrorClassification {
     pub class: ErrorClass,
     pub retry_after_secs: Option<u64>,
+    /// Whether the selected credential source, not the model, failed. A source failure
+    /// reached no model.
+    pub scope: ErrorScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +136,7 @@ impl HistorySummarizerCallFailure {
             classification: Some(ErrorClassification {
                 class,
                 retry_after_secs,
+                scope: ErrorScope::Model,
             }),
             class_field_present: true,
         }
@@ -1476,9 +1480,12 @@ fn classification_from_json_text(s: &str) -> Option<(Option<ErrorClassification>
 }
 
 fn classification_from_object(value: &Value) -> (Option<ErrorClassification>, bool) {
-    if value.is_object() && ErrorScope::decode(value).is_err() {
-        return (None, true);
+    if !value.is_object() {
+        return (None, false);
     }
+    let Ok(scope) = ErrorScope::decode(value) else {
+        return (None, true);
+    };
     let Some(class_value) = value.get("class") else {
         return (None, false);
     };
@@ -1491,6 +1498,7 @@ fn classification_from_object(value: &Value) -> (Option<ErrorClassification>, bo
             retry_after_secs: value
                 .get("retry_after_secs")
                 .and_then(retry_after_secs_from_value),
+            scope,
         }),
         true,
     )
@@ -2306,6 +2314,7 @@ mod tests {
         let permanent = Some(ErrorClassification {
             class: ErrorClass::Permanent,
             retry_after_secs: None,
+            scope: ErrorScope::Model,
         });
         assert_eq!(
             classification_from_object(&json!({"class": "permanent"})),
@@ -2323,10 +2332,11 @@ mod tests {
                 Some(ErrorClassification {
                     class: ErrorClass::Transient,
                     retry_after_secs: Some(60),
+                    scope: ErrorScope::CredentialSource,
                 }),
                 true
             ),
-            "a credential_source unit keeps its typed class and retry"
+            "a credential_source unit keeps its typed class, retry and scope"
         );
         for scope in [json!("bogus"), json!(7), json!(null)] {
             assert_eq!(
@@ -2498,6 +2508,7 @@ mod tests {
                         Some(ErrorClassification {
                             class: ErrorClass::Transient,
                             retry_after_secs: Some(4),
+                            scope: ErrorScope::Model,
                         })
                     );
                 }

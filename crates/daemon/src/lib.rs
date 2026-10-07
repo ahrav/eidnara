@@ -18263,6 +18263,8 @@ mod tests {
     mod revision_3;
     #[path = "transform/revision_goldens.rs"]
     mod revision_goldens;
+    #[path = "source_recovery_tests.rs"]
+    mod source_recovery_tests;
     #[path = "window_cap_tests.rs"]
     mod window_cap_tests;
     #[path = "window_coverage/dispatch_tests.rs"]
@@ -22446,6 +22448,7 @@ mod tests {
                     classification: Some(history_summarizer_producer::ErrorClassification {
                         class: history_summarizer_producer::ErrorClass::Permanent,
                         retry_after_secs: None,
+                        scope: host_runtime::model_execution::protocol::ErrorScope::Model,
                     }),
                     class_field_present: true,
                 });
@@ -40401,6 +40404,7 @@ mod tests {
             expected_revert_epoch: 0,
             history_segment_set_generation: memory_store::HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
+            source_retry_at_ms: None,
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
@@ -40445,6 +40449,7 @@ mod tests {
             expected_revert_epoch: 0,
             history_segment_set_generation: memory_store::HistorySegmentSetGeneration::default(),
             failure_backoff_at_ms: None,
+            source_retry_at_ms: None,
             last_failure: None,
             last_no_fire: None,
             consecutive_publish_failures: 0,
