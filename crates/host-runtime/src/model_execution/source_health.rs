@@ -168,29 +168,36 @@ impl SourceHealthCell {
 /// Parses one block. Any key outside [`FIELDS`], an out-of-set value, or a malformed
 /// field drops the whole block.
 pub fn parse(raw: &Value) -> Option<SourceHealth> {
-    let raw = raw.as_object()?;
-    if raw.keys().any(|key| !FIELDS.contains(&key.as_str())) {
-        return None;
+    let mut slots = [None; FIELDS.len()];
+    for (key, value) in raw.as_object()? {
+        let index = FIELDS.iter().position(|field| field == key)?;
+        slots[index] = Some(value);
     }
-    let text = |key: &str| raw.get(key).and_then(Value::as_str);
+    let [
+        kind,
+        state,
+        expires_in_seconds,
+        next_retry_in_seconds,
+        consecutive_failures,
+    ] = slots;
+    let (kind, state) = (kind?.as_str()?, state?.as_str()?);
     let kind = SourceKind::ALL
         .into_iter()
-        .find(|kind| text("kind") == Some(kind.as_str()))?;
+        .find(|candidate| candidate.as_str() == kind)?;
     let state = SourceState::ALL
         .into_iter()
-        .find(|state| text("state") == Some(state.as_str()))?;
-    let bounded = |key: &str, max: u64| match raw.get(key) {
+        .find(|candidate| candidate.as_str() == state)?;
+    let bounded = |value: Option<&Value>, max: u64| match value {
         None => Some(None),
         Some(value) => value.as_u64().filter(|n| *n <= max).map(Some),
     };
     Some(SourceHealth {
         kind,
         state,
-        expires_in_seconds: bounded("expires_in_seconds", MAX_EXPIRES_IN_SECONDS)?,
-        next_retry_in_seconds: bounded("next_retry_in_seconds", MAX_NEXT_RETRY_IN_SECONDS)?,
-        consecutive_failures: raw
-            .get("consecutive_failures")
-            .and_then(Value::as_u64)
+        expires_in_seconds: bounded(expires_in_seconds, MAX_EXPIRES_IN_SECONDS)?,
+        next_retry_in_seconds: bounded(next_retry_in_seconds, MAX_NEXT_RETRY_IN_SECONDS)?,
+        consecutive_failures: consecutive_failures?
+            .as_u64()
             .and_then(|n| u32::try_from(n).ok())?,
     })
 }

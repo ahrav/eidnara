@@ -52,6 +52,7 @@ describe("AWS credential source health", () => {
         expect(formatAwsCredentialsHealth(health)).toBe(
             "profile cooldown, expires in 86400s, retry in 300s, 4294967295 consecutive failures",
         );
+        expect(Object.isFrozen(health)).toBe(true);
         for (const [key, value] of [
             ["expires_in_seconds", 86_401],
             ["next_retry_in_seconds", 301],
