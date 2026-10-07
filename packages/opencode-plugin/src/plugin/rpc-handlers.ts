@@ -55,6 +55,7 @@ import {
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import type { EidnaraRpcServer } from "../shared/rpc-server";
 import type { SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
+import { awsCredentialsHealth, formatAwsCredentialsHealth } from "../shared/source-health";
 import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
@@ -666,6 +667,9 @@ export function buildStatusDetail(
         compressionUsage: null,
         toastDurationMs: 5000,
         loggerDiagnostics: getLoggerDiagnostics(),
+        awsCredentials: formatAwsCredentialsHealth(
+            awsCredentialsHealth(moduleStatus?.aws_credentials),
+        ),
     };
     const compactionTiming = formatCompactionTimingLines(
         summarizeCompactionTiming(sessionId, directory, moduleStatus),
