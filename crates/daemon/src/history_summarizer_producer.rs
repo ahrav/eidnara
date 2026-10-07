@@ -293,16 +293,9 @@ pub enum HistorySummarizerProducerError {
 impl HistorySummarizerProducerError {
     /// `host_runtime::Client` prefixes every host-supplied terminal code with `host.`;
     /// these are the two the daemon branches on.
+    pub(crate) const HOST_CODE_PREFIX: &'static str = "host.";
     pub(crate) const UNKNOWN_MODULE_CODE: &'static str = "host.unknown_module";
     pub(crate) const IDEMPOTENCY_CONFLICT_CODE: &'static str = "host.idempotency_conflict";
-
-    pub fn retryable_model_failure(message: impl Into<String>) -> Self {
-        Self::Call(HistorySummarizerCallFailure::untagged(
-            HistorySummarizerSendOutcome::Terminal,
-            "retryable_model_failure",
-            message,
-        ))
-    }
 
     pub fn context_overflow(message: impl Into<String>) -> Self {
         Self::Call(HistorySummarizerCallFailure::untagged(
@@ -394,6 +387,14 @@ impl HistorySummarizerProducerError {
 
     pub fn is_unknown_module(&self) -> bool {
         self.code() == Some(Self::UNKNOWN_MODULE_CODE)
+    }
+
+    /// The host answered the request with its own terminal error frame.
+    pub fn is_host_terminal(&self) -> bool {
+        self.send_outcome() == Some(HistorySummarizerSendOutcome::Terminal)
+            && self
+                .code()
+                .is_some_and(|code| code.starts_with(Self::HOST_CODE_PREFIX))
     }
 
     pub fn is_idempotency_conflict(&self) -> bool {
