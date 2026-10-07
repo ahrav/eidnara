@@ -6865,6 +6865,103 @@ const CACHE_STATE_META_SELECT: &str =
     "SELECT row_version, meta FROM cache_state WHERE session_id = ?1";
 const CACHE_STATE_FULL_SELECT: &str =
     "SELECT row_version, core_state, meta FROM cache_state WHERE session_id = ?1";
+/// The full row read of a committed-read load, with the memoized core's row version as `?2`.
+/// A row still at that version yields NULL for `core_state`, so SQLite never copies the
+/// column's bytes; `?2` is NULL when no core is memoized for the session.
+const CACHE_STATE_MEMO_SELECT: &str = "SELECT row_version, \
+     CASE WHEN row_version = ?2 THEN NULL ELSE core_state END, meta \
+     FROM cache_state WHERE session_id = ?1";
+/// The row version alone; it sits in the row's first page, so the read touches no
+/// `core_state` or `meta` overflow page.
+const CACHE_STATE_VERSION_SELECT: &str =
+    "SELECT row_version FROM cache_state WHERE session_id = ?1";
+
+/// Bytes [`MemoryStore`]'s session row memo may retain: one session id, its rendered-coverage
+/// scalars, and one decoded `core_state`. A row whose memo would exceed the bound keeps
+/// reading its core from SQLite on every load.
+pub const ROW_MEMO_RETAINED_BYTES_BOUND: usize = 4 * 1024 * 1024;
+
+/// What committed reads decoded from one `cache_state` row, keyed by session and row version.
+///
+/// Every write to a row sets `row_version` to the successor of the committed value, so while
+/// the row exists a matching version names the same `core_state` and `meta` bytes: the memo
+/// answers exactly what a fresh read of that version would. [`MemoryStore::delete_session`]
+/// clears the memo inside its write transaction, because a recreated row starts again at
+/// version 1. Only read-only callbacks fill it, while they hold the connection, and they see
+/// committed rows only, so no rolled-back or deleted version enters it.
+#[derive(Debug, Default)]
+struct RowMemo {
+    session_id: String,
+    row_version: u64,
+    coverage: Option<CoverageScalars>,
+    core: Option<CoreState>,
+}
+
+/// The `cache_state` fields [`rendered_coverage_tx`] reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CoverageScalars {
+    boundary_id: Option<String>,
+    coverage: Option<i64>,
+    continuation_base: Option<u64>,
+    reconcile_pending: bool,
+}
+
+enum SessionCore {
+    Memo(CoreState),
+    Text(String),
+}
+
+impl RowMemo {
+    fn at(&self, session_id: &str, row_version: u64) -> bool {
+        self.row_version == row_version && self.session_id == session_id
+    }
+
+    /// Heap and inline bytes the memo holds; strings and vectors count their capacity.
+    fn retained_bytes(&self) -> usize {
+        let unit = |unit: &FrozenUnit| {
+            unit.key.capacity()
+                + unit.kind.capacity()
+                + unit.frozen_payload.capacity()
+                + unit.reset_rule.capacity()
+        };
+        let core = self.core.as_ref().map_or(0, |core| {
+            core.boundary_id.capacity()
+                + (core.frozen_units.capacity() + core.pending_changes.capacity())
+                    * std::mem::size_of::<FrozenUnit>()
+                + core
+                    .frozen_units
+                    .iter()
+                    .chain(&core.pending_changes)
+                    .map(unit)
+                    .sum::<usize>()
+        });
+        let coverage = self
+            .coverage
+            .as_ref()
+            .and_then(|coverage| coverage.boundary_id.as_ref())
+            .map_or(0, String::capacity);
+        std::mem::size_of::<Self>() + self.session_id.capacity() + coverage + core
+    }
+
+    /// Records `update` against the memo for `session_id` at `row_version`, replacing a memo
+    /// of any other row or version, and keeps the result only within the retention bound.
+    fn record(&mut self, session_id: &str, row_version: u64, update: impl FnOnce(&mut Self)) {
+        if !self.at(session_id, row_version) {
+            *self = Self {
+                session_id: session_id.to_owned(),
+                row_version,
+                ..Self::default()
+            };
+        }
+        update(self);
+        if self.retained_bytes() > ROW_MEMO_RETAINED_BYTES_BOUND {
+            self.core = None;
+        }
+        if self.retained_bytes() > ROW_MEMO_RETAINED_BYTES_BOUND {
+            *self = Self::default();
+        }
+    }
+}
 
 /// Which `cache_state` row projection a statement-probe counter names.
 #[cfg(any(test, feature = "test-support"))]
@@ -6879,7 +6976,7 @@ impl CacheStateSelect {
     fn sql(self) -> &'static str {
         match self {
             Self::Meta => CACHE_STATE_META_SELECT,
-            Self::Full => CACHE_STATE_FULL_SELECT,
+            Self::Full => CACHE_STATE_MEMO_SELECT,
         }
     }
 }
@@ -7343,6 +7440,8 @@ pub struct MemoryStore {
     /// lock serializes scopes so one request cannot lend its authority identity to another.
     facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
     facade_mutation_lock: Mutex<()>,
+    /// See [`RowMemo`].
+    row_memo: Mutex<RowMemo>,
     /// Caller-clock instant at or after which the next capture enqueue prunes expired
     /// terminal identities; starts at zero so the first enqueue after open prunes.
     pub(crate) memory_capture_prune_due_ms: std::sync::atomic::AtomicI64,
@@ -7825,6 +7924,7 @@ impl MemoryStore {
             note_caller_project,
             facade_authority_scope,
             facade_mutation_lock: Mutex::new(()),
+            row_memo: Mutex::new(RowMemo::default()),
             memory_capture_prune_due_ms: std::sync::atomic::AtomicI64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             abandon_history_summarizer_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -8546,6 +8646,9 @@ impl MemoryStore {
         project_path: &str,
     ) -> Result<usize, MemoryStoreError> {
         self.with_note_conn_fenced(project_path, |tx| {
+            // A recreated row restarts at version 1; clearing the memo keeps a deleted row's
+            // state from answering for it.
+            *self.lock_row_memo() = RowMemo::default();
             let note_ids = {
                 let mut statement = tx.prepare_cached(
                     "SELECT id FROM notes
@@ -8623,15 +8726,15 @@ impl MemoryStore {
     /// error to prevent initialization over corrupted state.
     pub fn load(&self, session_id: &str) -> Result<LoadedState, MemoryStoreError> {
         let row = self.inner.with_conn(|conn| {
-            conn.prepare_cached(CACHE_STATE_FULL_SELECT)?
-                .query_row(params![session_id], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)? as u64,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })
-                .optional()
+            Ok(self
+                .read_session_row(conn, session_id)?
+                .map(|(rv, core, meta_json)| {
+                    (
+                        rv,
+                        self.decode_session_core(session_id, rv, core),
+                        meta_json,
+                    )
+                }))
         })?;
 
         match row {
@@ -8640,15 +8743,88 @@ impl MemoryStore {
                 meta: ModuleMeta::default(),
                 row_version: None,
             }),
-            Some((rv, core_json, meta_json)) => {
+            Some((rv, core, meta_json)) => {
                 let meta: ModuleMeta = serde_json::from_str(&meta_json)
                     .map_err(|e| MemoryStoreError::Serde(e.to_string()))?;
                 Ok(LoadedState {
-                    core: serde_json::from_str(&core_json)
-                        .map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
+                    core: core.map_err(|e| MemoryStoreError::Serde(e.to_string()))?,
                     meta,
                     row_version: Some(rv),
                 })
+            }
+        }
+    }
+
+    fn lock_row_memo(&self) -> std::sync::MutexGuard<'_, RowMemo> {
+        self.row_memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A row still at the memoized core's version yields NULL for `core_state`, and the memo
+    /// supplies the core.
+    fn read_session_row(
+        &self,
+        conn: &GuardedConn<'_>,
+        session_id: &str,
+    ) -> rusqlite::Result<Option<(u64, SessionCore, String)>> {
+        let memoized = {
+            let memo = self.lock_row_memo();
+            (memo.session_id == session_id && memo.core.is_some()).then_some(memo.row_version)
+        };
+        let probe = memoized.and_then(|version| i64::try_from(version).ok());
+        let row = conn
+            .prepare_cached(CACHE_STATE_MEMO_SELECT)?
+            .query_row(params![session_id, probe], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .optional()?;
+        let Some((row_version, core_json, meta_json)) = row else {
+            return Ok(None);
+        };
+        let core = match core_json {
+            Some(text) => SessionCore::Text(text),
+            None => {
+                let memo = self.lock_row_memo();
+                match memo
+                    .core
+                    .as_ref()
+                    .filter(|_| memo.at(session_id, row_version))
+                {
+                    Some(core) => SessionCore::Memo(core.clone()),
+                    None => {
+                        drop(memo);
+                        SessionCore::Text(conn.query_row(
+                            CACHE_STATE_FULL_SELECT,
+                            params![session_id],
+                            |r| r.get::<_, String>(1),
+                        )?)
+                    }
+                }
+            }
+        };
+        Ok(Some((row_version, core, meta_json)))
+    }
+
+    fn decode_session_core(
+        &self,
+        session_id: &str,
+        row_version: u64,
+        core: SessionCore,
+    ) -> Result<CoreState, serde_json::Error> {
+        match core {
+            SessionCore::Memo(core) => Ok(core),
+            SessionCore::Text(text) => {
+                let core: CoreState = serde_json::from_str(&text)?;
+                self.lock_row_memo()
+                    .record(session_id, row_version, |memo| {
+                        memo.core = Some(core.clone())
+                    });
+                Ok(core)
             }
         }
     }
@@ -8840,24 +9016,18 @@ impl MemoryStore {
         let block_ids = serde_json::to_string(block_ids).expect("a string array serializes");
         let snapshot = self.inner.with_conn(|transaction| {
             let cache_state_started_at = Instant::now();
-            let state = transaction
-                .query_row(CACHE_STATE_FULL_SELECT, params![session_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as u64,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .optional()?;
+            let state = self.read_session_row(transaction, session_id)?;
             let loaded = match state {
-                Some((row_version, core_json, meta_json)) => LoadedState {
-                    core: serde_json::from_str(&core_json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            1,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
+                Some((row_version, core, meta_json)) => LoadedState {
+                    core: self
+                        .decode_session_core(session_id, row_version, core)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                1,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                     meta: serde_json::from_str(&meta_json).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             2,
@@ -10031,11 +10201,19 @@ impl MemoryStore {
     /// writes. Production tag changes use the fenced transform transaction instead.
     #[cfg(any(test, feature = "test-support"))]
     pub fn execute_tag_sql_for_test(&self, sql: &str) -> Result<(), MemoryStoreError> {
-        self.inner.with_conn_unfenced(|conn| {
+        let result = self.inner.with_conn_unfenced(|conn| {
             conn.execute_batch(sql)?;
             Ok(())
-        })?;
+        });
+        self.forget_row_memo_for_test();
+        result?;
         Ok(())
+    }
+
+    /// Clears the session row memo, for a fixture that rewrites a row at its current version.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn forget_row_memo_for_test(&self) {
+        *self.lock_row_memo() = RowMemo::default();
     }
 
     /// Sum stored token counts for a caller-selected block-id set.
@@ -10328,7 +10506,10 @@ impl MemoryStore {
         &self,
         f: impl FnOnce(&storage::GuardedConn<'_>) -> rusqlite::Result<T>,
     ) -> Result<T, storage::StoreError> {
-        self.inner.with_conn_fenced(f)
+        let result = self.inner.with_conn_fenced(f);
+        // Fixture writes may rewrite a row at its current version.
+        self.forget_row_memo_for_test();
+        result
     }
 
     #[cfg(feature = "test-support")]
@@ -12031,7 +12212,7 @@ impl MemoryStore {
                 row_version,
                 continuation_base,
                 rendered,
-            } = rendered_coverage_tx(conn, session_id)?;
+            } = rendered_coverage_tx(conn, session_id, &self.row_memo)?;
             let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
             #[cfg(any(test, feature = "test-support"))]
             if let Some(hook) = self
@@ -12098,7 +12279,8 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<Vec<(i64, String)>, MemoryStoreError> {
         Ok(self.inner.with_conn(|conn| {
-            let Some(rendered) = rendered_coverage_tx(conn, session_id)?.rendered else {
+            let Some(rendered) = rendered_coverage_tx(conn, session_id, &self.row_memo)?.rendered
+            else {
                 return Ok(Vec::new());
             };
             let through = rendered.sequence.min(*sequences.end());
@@ -17819,10 +18001,35 @@ struct RenderedCoverage {
     rendered: Option<HistorySegmentEdge>,
 }
 
-fn rendered_coverage_tx(
+fn coverage_scalars_tx(
     conn: &GuardedConn<'_>,
     session_id: &str,
-) -> rusqlite::Result<RenderedCoverage> {
+    memo: &Mutex<RowMemo>,
+) -> rusqlite::Result<Option<(u64, CoverageScalars)>> {
+    let lock = || {
+        memo.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let memoized = {
+        let memo = lock();
+        memo.coverage
+            .clone()
+            .filter(|_| memo.session_id == session_id)
+            .map(|scalars| (memo.row_version, scalars))
+    };
+    if let Some((memo_version, scalars)) = memoized {
+        let current = conn
+            .prepare_cached(CACHE_STATE_VERSION_SELECT)?
+            .query_row(params![session_id], |row| row.get::<_, i64>(0))
+            .optional()?;
+        match current {
+            None => return Ok(None),
+            Some(current) if u64::try_from(current) == Ok(memo_version) => {
+                return Ok(Some((memo_version, scalars)));
+            }
+            Some(_) => {}
+        }
+    }
     let row = conn
         .prepare_cached(
             "SELECT row_version, json_extract(core_state, '$.boundary_id'),
@@ -17838,18 +18045,40 @@ fn rendered_coverage_tx(
             };
             Ok((
                 unsigned(0, row.get(0)?)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?
-                    .map(|base| unsigned(3, base))
-                    .transpose()?,
-                row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                CoverageScalars {
+                    boundary_id: row.get::<_, Option<String>>(1)?,
+                    coverage: row.get::<_, Option<i64>>(2)?,
+                    continuation_base: row
+                        .get::<_, Option<i64>>(3)?
+                        .map(|base| unsigned(3, base))
+                        .transpose()?,
+                    reconcile_pending: row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                },
             ))
         })
         .optional()?;
-    let Some((row_version, boundary_id, coverage, base, reconcile_pending)) = row else {
+    if let Some((row_version, scalars)) = &row {
+        lock().record(session_id, *row_version, |memo| {
+            memo.coverage = Some(scalars.clone());
+        });
+    }
+    Ok(row)
+}
+
+fn rendered_coverage_tx(
+    conn: &GuardedConn<'_>,
+    session_id: &str,
+    memo: &Mutex<RowMemo>,
+) -> rusqlite::Result<RenderedCoverage> {
+    let Some((row_version, scalars)) = coverage_scalars_tx(conn, session_id, memo)? else {
         return Ok(RenderedCoverage::default());
     };
+    let CoverageScalars {
+        boundary_id,
+        coverage,
+        continuation_base: base,
+        reconcile_pending,
+    } = scalars;
     let rendered = match (boundary_id, coverage) {
         (Some(boundary_id), Some(coverage)) if !boundary_id.is_empty() => {
             match history_segment_edge_tx(conn, session_id, EdgeAt::EndMessage(coverage))?
@@ -19372,6 +19601,188 @@ mod tests {
             1,
             "the cache of one re-created the full select between its runs"
         );
+    }
+
+    fn memo_core(boundary_id: &str, payload: &str) -> CoreState {
+        CoreState {
+            version: 1,
+            boundary_id: boundary_id.to_string(),
+            frozen_units: vec![FrozenUnit {
+                key: "m0".to_string(),
+                kind: "synthesized-region".to_string(),
+                frozen_payload: payload.to_string(),
+                durability_class: DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            }],
+            pending_changes: Vec::new(),
+            reconcile_pending: false,
+        }
+    }
+
+    fn memo_meta(coverage_ordinal: u64) -> ModuleMeta {
+        ModuleMeta {
+            coverage_ordinal: Some(coverage_ordinal),
+            ..ModuleMeta::default()
+        }
+    }
+
+    /// Two two-message segments ending at `m2#0` and `m4#0`.
+    fn seed_memo_segments(store: &MemoryStore) {
+        store
+            .with_fenced_conn_for_test(|tx| {
+                for (sequence, end) in [(1, 2), (2, 4)] {
+                    tx.execute(
+                        "INSERT INTO history_segments
+                           (session_id, sequence, start_message, end_message,
+                            start_message_id, end_message_id, title, content)
+                         VALUES ('ses', ?1, ?2, ?3, ?4, ?5, 't', 'c')",
+                        params![
+                            sequence,
+                            end - 1,
+                            end,
+                            format!("m{}#0", end - 1),
+                            format!("m{end}#0")
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Value bytes each run of the memoized full-row read returned.
+    fn memo_select_bytes(work: &[storage::StatementWork]) -> Vec<u64> {
+        work.iter()
+            .filter(|run| run.sql == CACHE_STATE_MEMO_SELECT.trim())
+            .map(|run| run.bytes)
+            .collect()
+    }
+
+    /// A load of an unchanged row takes the core from the memo, so its row read returns the
+    /// row version and `meta` alone; a coverage read of an unchanged row runs only the
+    /// version select. A commit advances the version, and the next load and coverage read
+    /// answer with the committed core and boundary.
+    #[test]
+    fn an_unchanged_row_is_read_from_the_memo_until_a_commit_advances_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        seed_memo_segments(&store);
+        let payload = "p".repeat(64 * 1024);
+        let first = memo_core("m2#0", &payload);
+        let first_version = store.commit("ses", None, &first, &memo_meta(2)).unwrap();
+        let meta_bytes: i64 = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT length(CAST(meta AS BLOB)) FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        let meta_bytes = meta_bytes as u64;
+
+        store.start_statement_work_ledger();
+        let cold = store.load("ses").unwrap();
+        let warm = store.load("ses").unwrap();
+        let read_coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
+        let memo_coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
+        let work = store.take_statement_work();
+
+        assert_eq!(cold.core, first);
+        assert_eq!((warm.core, warm.meta), (cold.core, cold.meta));
+        assert_eq!(warm.row_version, Some(first_version));
+        let [cold_bytes, warm_bytes] = memo_select_bytes(&work)[..] else {
+            panic!("two row reads, got {work:?}");
+        };
+        assert!(
+            cold_bytes > payload.len() as u64,
+            "the cold load reads the core"
+        );
+        assert_eq!(
+            warm_bytes,
+            8 + meta_bytes,
+            "the warm load returns no core bytes"
+        );
+        assert_eq!(read_coverage.rendered, memo_coverage.rendered);
+        assert_eq!(memo_coverage.rendered.map(|row| row.sequence), Some(1));
+        let extracts = work
+            .iter()
+            .filter(|run| run.sql.contains("json_extract(core_state"))
+            .count();
+        assert_eq!(extracts, 1, "only the first coverage read parses the core");
+
+        let second = memo_core("m4#0", "q");
+        let second_version = store
+            .commit("ses", Some(first_version), &second, &memo_meta(4))
+            .unwrap();
+        let reloaded = store.load("ses").unwrap();
+        assert_eq!(
+            (reloaded.core, reloaded.row_version),
+            (second, Some(second_version))
+        );
+        let coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
+        assert_eq!(coverage.row_version, Some(second_version));
+        assert_eq!(coverage.rendered.map(|row| row.sequence), Some(2));
+    }
+
+    /// A session deleted and committed again restarts at version 1, the version the memo
+    /// holds for the deleted row; the load and the coverage read return the new row.
+    #[test]
+    fn a_recreated_row_at_the_memoized_version_is_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = |base: u64| ModuleMeta {
+            ordinal_continuation_base: Some(base),
+            ..memo_meta(2)
+        };
+        let deleted = memo_core("m2#0", "deleted");
+        let version = store.commit("ses", None, &deleted, &meta(10)).unwrap();
+        assert_eq!(store.load("ses").unwrap().core, deleted);
+        let coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
+        assert_eq!(coverage.continuation_base, Some(10));
+
+        store.delete_session("ses", "/project").unwrap();
+        let recreated = memo_core("m4#0", "recreated");
+        assert_eq!(
+            store.commit("ses", None, &recreated, &meta(20)).unwrap(),
+            version
+        );
+
+        assert_eq!(store.load("ses").unwrap().core, recreated);
+        let coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
+        assert_eq!(coverage.continuation_base, Some(20));
+    }
+
+    /// The memo keeps the coverage scalars and drops a core that would take it past
+    /// `ROW_MEMO_RETAINED_BYTES_BOUND`; a core within the bound is kept with them.
+    #[test]
+    fn the_row_memo_keeps_a_core_only_within_its_retention_bound() {
+        let scalars = CoverageScalars {
+            boundary_id: Some("m2#0".to_string()),
+            coverage: Some(2),
+            continuation_base: None,
+            reconcile_pending: false,
+        };
+        let mut memo = RowMemo::default();
+        memo.record("ses", 3, |memo| memo.coverage = Some(scalars.clone()));
+        memo.record("ses", 3, |memo| {
+            memo.core = Some(memo_core(
+                "m2#0",
+                &"x".repeat(ROW_MEMO_RETAINED_BYTES_BOUND),
+            ));
+        });
+        assert!(memo.at("ses", 3));
+        assert_eq!(memo.coverage.as_ref(), Some(&scalars));
+        assert!(memo.core.is_none(), "an over-bound core is dropped");
+
+        let kept = memo_core("m2#0", "small");
+        memo.record("ses", 3, |memo| memo.core = Some(kept.clone()));
+        assert_eq!(memo.core.as_ref(), Some(&kept));
+        assert!(memo.retained_bytes() <= ROW_MEMO_RETAINED_BYTES_BOUND);
+
+        memo.record("ses", 4, |_| {});
+        assert!(memo.at("ses", 4));
+        assert!(memo.core.is_none() && memo.coverage.is_none());
     }
 
     #[test]
