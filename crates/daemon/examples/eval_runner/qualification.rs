@@ -470,10 +470,13 @@ fn dir_bytes(path: &Path) -> u64 {
         .sum()
 }
 
+const OUTAGE_PASS_MESSAGES: u64 = 16_000;
+
 /// One outage-run pass: the window from the current anchor through the newest arrived
 /// message, with context pressure high enough to fold.
 fn arrival_request(session: &str, anchor: Anchor, newest: u64, turn: u64) -> Value {
-    let messages: Vec<Value> = (anchor.end..=newest)
+    let last = newest.min(anchor.end + OUTAGE_PASS_MESSAGES);
+    let messages: Vec<Value> = (anchor.end..=last)
         .map(|ordinal| window_message(Shape::Mixed, ordinal))
         .collect();
     let mut request = transform(session, anchor, format!("outage-{turn}"), messages);
@@ -527,15 +530,14 @@ fn outage(scale: u64, parent: &Path) -> io::Result<OutageRun> {
             response["status"] == "ok"
         };
         let mut failed_passes = 0u64;
-        let calibration = Duration::from_secs(schedule.steady_seconds.max(10));
         let mut newest = anchor.end;
-        let started = Instant::now();
-        while started.elapsed() < calibration {
+        let calibration = paced(schedule.steady_seconds.max(10), async || {
             turn += 1;
             newest = newest.max(anchor.end + ACTIVE_WINDOW);
             failed_passes += u64::from(!pass(&mut anchor, newest, turn).await);
-        }
-        let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+        })
+        .await;
+        let elapsed_ms = calibration.as_millis().max(1) as u64;
         let fold_rate = (anchor.end - seeded.end) * tokens * 1000 / elapsed_ms;
         let arrival_rate = eval_core::frozen_arrival(fold_rate);
         let arrival_base = newest;
@@ -566,8 +568,7 @@ fn outage(scale: u64, parent: &Path) -> io::Result<OutageRun> {
                 elapsed_ms: clock.elapsed().as_millis() as u64,
                 tokens: (newest - anchor.end) * tokens,
             });
-            let target = clock + Duration::from_secs(second + 1);
-            tokio::time::sleep_until(tokio::time::Instant::from_std(target)).await;
+            next_second(clock, second).await;
         }
         let _ = client.close().await;
         io::Result::Ok((fold_rate, samples, failed_passes))
@@ -583,6 +584,25 @@ fn outage(scale: u64, parent: &Path) -> io::Result<OutageRun> {
         failed_passes,
         audit_lineage(&before, &after, &publications, RAW_CAP_BYTES),
     ))
+}
+
+async fn paced(seconds: u64, mut pass: impl AsyncFnMut()) -> Duration {
+    let clock = Instant::now();
+    loop {
+        let second = clock.elapsed().as_secs();
+        if second >= seconds {
+            return clock.elapsed();
+        }
+        pass().await;
+        next_second(clock, second).await;
+    }
+}
+
+/// Completes at the start of the run clock's next second, or immediately when the pass has
+/// already reached that deadline.
+async fn next_second(clock: Instant, second: u64) {
+    let target = clock + Duration::from_secs(second + 1);
+    tokio::time::sleep_until(tokio::time::Instant::from_std(target)).await;
 }
 
 fn acknowledged(fixture: &FixtureProcess, id: u64, command: &str) -> io::Result<()> {
@@ -886,6 +906,25 @@ mod tests {
     }
 
     #[test]
+    fn an_outage_pass_fits_the_transform_frame_cap_for_any_backlog() {
+        let anchor = Anchor {
+            end: 99_999_000,
+            sequence: 5_000,
+        };
+        for backlog in [ACTIVE_WINDOW, 17_856, 100_000] {
+            let body = arrival_request("outage", anchor, anchor.end + backlog, 3);
+            let carried = body["messages"].as_array().unwrap().len() as u64;
+            assert_eq!(carried, backlog.min(OUTAGE_PASS_MESSAGES) + 1);
+            let bytes = serde_json::to_vec(&body).unwrap();
+            assert!(
+                bytes.len() <= daemon::MAX_TRANSFORM_FRAME_BYTES,
+                "backlog {backlog}: {} bytes",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
     fn a_smoke_campaign_writes_a_report_that_does_not_qualify() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config {
@@ -1020,13 +1059,23 @@ mod tests {
                 store,
                 "INSERT INTO history_segments
                    (session_id, sequence, start_message, end_message, title, content)
-                 VALUES ('s', 11, 19, 21, 't', 'c')"
+                 VALUES ('s', 11, 19, 20, 't', 'c')"
             )),
             vec![LineageViolation::DuplicatePublication {
                 lineage: "segment-11".into(),
                 start: 19,
-                end: 21,
+                end: 20,
             }]
+        );
+        assert_eq!(
+            audit_after(|store| sql(
+                store,
+                "INSERT INTO history_segments
+                   (session_id, sequence, start_message, end_message, title, content)
+                 VALUES ('s', 11, 21, 22, 't', 'c')"
+            )),
+            vec![LineageViolation::RawHistoryLost { start: 21, end: 22 }],
+            "a publication whose transcript is gone while older ones remain lost raw history"
         );
         assert_eq!(
             audit_after(|store| {
@@ -1085,6 +1134,23 @@ mod tests {
         assert_eq!(
             before.raw.len() as u64,
             (2 * segments as u64 - oldest).div_ceil(2)
+        );
+    }
+
+    #[test]
+    fn calibration_drives_one_pass_per_second_like_the_measured_phases() {
+        let mut passes = 0u64;
+        let elapsed = block_on(paced(2, async || passes += 1));
+        assert_eq!(passes, 2, "one pass starts in each second of the window");
+        assert!(elapsed >= Duration::from_secs(2));
+        let mut slow = 0u64;
+        block_on(paced(2, async || {
+            slow += 1;
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+        }));
+        assert_eq!(
+            slow, 2,
+            "a pass that overruns its second starts the next at once"
         );
     }
 

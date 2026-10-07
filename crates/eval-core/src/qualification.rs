@@ -271,41 +271,93 @@ impl CaseResult {
 
     fn per_operation_work(&self) -> impl Iterator<Item = Work> + '_ {
         self.repetitions.iter().map(|r| Work {
-            read: per_operation(r.read_bytes, r.operations),
-            faults: per_operation(r.minor_faults, r.operations),
+            read: Rate::new(r.read_bytes, r.operations),
+            faults: Rate::new(r.minor_faults, r.operations),
         })
     }
 
     fn work_against(&self, control: &Self) -> (Work, Work) {
-        let worst = self
-            .per_operation_work()
-            .fold(Work::default(), |w, r| Work {
-                read: w.read.max(r.read),
-                faults: w.faults.max(r.faults),
-            });
+        let worst = Work {
+            read: self
+                .per_operation_work()
+                .map(|w| w.read)
+                .max()
+                .unwrap_or_default(),
+            faults: self
+                .per_operation_work()
+                .map(|w| w.faults)
+                .max()
+                .unwrap_or_default(),
+        };
         let control_median = Work {
-            read: median(control.per_operation_work().map(|w| w.read)).unwrap_or(0),
-            faults: median(control.per_operation_work().map(|w| w.faults)).unwrap_or(0),
+            read: median(control.per_operation_work().map(|w| w.read)).unwrap_or_default(),
+            faults: median(control.per_operation_work().map(|w| w.faults)).unwrap_or_default(),
         };
         (worst, control_median)
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 struct Work {
-    read: u64,
-    faults: u64,
+    read: Rate,
+    faults: Rate,
 }
 
-fn per_operation(total: u64, operations: u64) -> u64 {
-    total.div_ceil(operations.max(1))
+/// An exact per-operation rate. Cross-multiplication preserves fractional per-operation
+/// differences when comparing rates.
+#[derive(Debug, Clone, Copy)]
+struct Rate {
+    total: u64,
+    operations: u64,
 }
+
+impl Default for Rate {
+    fn default() -> Self {
+        Self::new(0, 1)
+    }
+}
+
+impl Rate {
+    fn new(total: u64, operations: u64) -> Self {
+        Self {
+            total,
+            operations: operations.max(1),
+        }
+    }
+
+    fn per_1k_ops(self) -> u64 {
+        let scaled = u128::from(self.total) * 1_000;
+        u64::try_from(scaled.div_ceil(u128::from(self.operations))).unwrap_or(u64::MAX)
+    }
+}
+
+impl Ord for Rate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (u128::from(self.total) * u128::from(other.operations))
+            .cmp(&(u128::from(other.total) * u128::from(self.operations)))
+    }
+}
+
+impl PartialOrd for Rate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Rate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Rate {}
 
 /// The lower median when the count is even.
-fn median(values: impl Iterator<Item = u64>) -> Option<u64> {
-    let mut values: Vec<u64> = values.collect();
+fn median<T: Ord>(values: impl Iterator<Item = T>) -> Option<T> {
+    let mut values: Vec<T> = values.collect();
     values.sort_unstable();
-    values.get(values.len().saturating_sub(1) / 2).copied()
+    let index = values.len().saturating_sub(1) / 2;
+    values.into_iter().nth(index)
 }
 
 /// One failed gate.
@@ -327,13 +379,15 @@ pub enum GateFailure {
     Lineage {
         violations: u64,
     },
+    /// Bytes read per thousand operations, rounded up; the gate compares the exact rates.
     ReadGrowth {
-        case_per_op: u64,
-        control_per_op: u64,
+        case_per_1k_ops: u64,
+        control_per_1k_ops: u64,
     },
+    /// Minor faults per thousand operations, rounded up; the gate compares the exact rates.
     AllocationGrowth {
-        case_per_op: u64,
-        control_per_op: u64,
+        case_per_1k_ops: u64,
+        control_per_1k_ops: u64,
     },
     P99Absolute {
         p99_us: u64,
@@ -348,8 +402,11 @@ pub enum GateFailure {
     MissingControl,
 }
 
-fn grew(case: u64, control: u64) -> bool {
-    u128::from(case) * 100 > u128::from(control) * u128::from(100 + MAX_GROWTH_PERCENT)
+fn grew(case: Rate, control: Rate) -> bool {
+    let case_scaled = u128::from(case.total) * u128::from(control.operations);
+    let control_scaled = u128::from(control.total) * u128::from(case.operations);
+    case_scaled.saturating_mul(100)
+        > control_scaled.saturating_mul(u128::from(100 + MAX_GROWTH_PERCENT))
 }
 
 /// Every gate `result` fails against its control in `results`.
@@ -405,14 +462,14 @@ pub fn compare(result: &CaseResult, control: &CaseResult) -> Vec<GateFailure> {
     let (work, control_work) = result.work_against(control);
     if grew(work.read, control_work.read) {
         failures.push(GateFailure::ReadGrowth {
-            case_per_op: work.read,
-            control_per_op: control_work.read,
+            case_per_1k_ops: work.read.per_1k_ops(),
+            control_per_1k_ops: control_work.read.per_1k_ops(),
         });
     }
     if grew(work.faults, control_work.faults) {
         failures.push(GateFailure::AllocationGrowth {
-            case_per_op: work.faults,
-            control_per_op: control_work.faults,
+            case_per_1k_ops: work.faults.per_1k_ops(),
+            control_per_1k_ops: control_work.faults.per_1k_ops(),
         });
     }
     let p99 = result.worst_p99_us();
@@ -753,22 +810,42 @@ fn lost(before: &[(u64, u64)], after: &[(u64, u64)]) -> Vec<(u64, u64)> {
     missing
 }
 
-/// Whether the store's retention cap explains `missing`: every missing range is older than
-/// everything still retained, and keeping the dropped transcripts would have exceeded the cap.
+/// The oldest-first retention model requires every missing range to precede every retained
+/// range. When the newest dropped transcript is one `before` observed, keeping it would also
+/// have exceeded the cap. Transcripts published and evicted between the observations are
+/// judged by order alone.
 fn evicted(
     before: &StoreObservation,
     after: &StoreObservation,
+    publications: &[Publication],
     missing: &[(u64, u64)],
     cap: u64,
 ) -> bool {
     let oldest_kept = after.raw.iter().map(|r| r.start).min().unwrap_or(u64::MAX);
-    let newest_dropped = before
+    if !missing.iter().all(|(_, end)| *end < oldest_kept) {
+        return false;
+    }
+    let newest_published_dropped = publications
+        .iter()
+        .filter(|p| {
+            !after
+                .raw
+                .iter()
+                .any(|r| r.start == p.start && r.end == p.end)
+        })
+        .map(|p| p.end)
+        .max();
+    let newest_observed_dropped = before
         .raw
         .iter()
         .filter(|r| !after.raw.contains(r))
-        .max_by_key(|r| r.end)
-        .map_or(0, |r| r.bytes);
-    missing.iter().all(|(_, end)| *end < oldest_kept) && after.bytes() + newest_dropped > cap
+        .max_by_key(|r| r.end);
+    match newest_observed_dropped {
+        Some(row) if newest_published_dropped.is_none_or(|end| end < row.end) => {
+            after.bytes() + row.bytes > cap
+        }
+        _ => true,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -793,7 +870,9 @@ pub enum LineageViolation {
 
 /// Audits per-publication accounting: each lineage publishes once, ranges never overlap, raw
 /// messages are lost only to the store's oldest-first eviction under `raw_cap_bytes`, and
-/// coverage is contiguous from the prior coverage through the publications.
+/// coverage is contiguous from the prior coverage through the publications. The audited raw
+/// history is the `before` transcripts plus the transcript the store writes with each
+/// publication.
 pub fn audit_lineage(
     before: &StoreObservation,
     after: &StoreObservation,
@@ -820,8 +899,10 @@ pub fn audit_lineage(
         }
         reach = reach.max(publication.end);
     }
-    let missing = lost(&before.ranges(), &after.ranges());
-    if !evicted(before, after, &missing, raw_cap_bytes) {
+    let mut expected = before.ranges();
+    expected.extend(publications.iter().map(|p| (p.start, p.end)));
+    let missing = lost(&expected, &after.ranges());
+    if !evicted(before, after, publications, &missing, raw_cap_bytes) {
         for (start, end) in missing {
             violations.insert(LineageViolation::RawHistoryLost { start, end });
         }
@@ -1107,6 +1188,48 @@ mod tests {
     }
 
     #[test]
+    fn growth_gates_compare_exact_per_operation_rates() {
+        let control = result("retained_10k", 10_000, 0);
+        let with_totals = |read: u64, faults: u64| {
+            let mut case = result("retained_1m", 10_000, 0);
+            for repetition in &mut case.repetitions {
+                repetition.read_bytes = read;
+                repetition.minor_faults = faults;
+            }
+            case
+        };
+        let mut sparse_control = control.clone();
+        for repetition in &mut sparse_control.repetitions {
+            repetition.read_bytes = 1_000;
+            repetition.minor_faults = 1_000;
+        }
+        let doubled = with_totals(2_000, 2_000);
+        assert_eq!(
+            compare(&doubled, &sparse_control),
+            vec![
+                GateFailure::ReadGrowth {
+                    case_per_1k_ops: 1_000,
+                    control_per_1k_ops: 500,
+                },
+                GateFailure::AllocationGrowth {
+                    case_per_1k_ops: 1_000,
+                    control_per_1k_ops: 500,
+                },
+            ],
+            "doubling half an event per operation is growth"
+        );
+        let mut busy_control = control;
+        for repetition in &mut busy_control.repetitions {
+            repetition.read_bytes = 2_000;
+            repetition.minor_faults = 2_000;
+        }
+        assert!(
+            compare(&with_totals(2_001, 2_001), &busy_control).is_empty(),
+            "one extra event over 2,000 operations is within the allowance"
+        );
+    }
+
+    #[test]
     fn drain_arrival_and_schedules_follow_the_fixed_rules() {
         assert_eq!(drain_seconds(36_000, 200, 100), Some(360));
         assert_eq!(drain_seconds(1, 100, 100), None);
@@ -1314,6 +1437,65 @@ mod tests {
             vec![LineageViolation::RawHistoryLost { start: 3, end: 4 }],
             "eviction removes the oldest transcripts first"
         );
+    }
+
+    #[test]
+    fn eviction_of_transcripts_published_inside_the_window_is_not_raw_history_loss() {
+        let sized = |start, bytes| RawRange {
+            start,
+            end: start,
+            bytes,
+        };
+        let publish = |start: u64| Publication {
+            lineage: format!("segment-{start}"),
+            start,
+            end: start,
+        };
+        let before = StoreObservation {
+            raw: vec![sized(1, 10)],
+            covered: 1,
+        };
+        let cap = 100;
+        let segment_2_bytes = 95;
+        let segment_3_bytes = 20;
+        assert!(10 + segment_2_bytes > cap && segment_2_bytes + segment_3_bytes > cap);
+        let after = StoreObservation {
+            raw: vec![sized(3, segment_3_bytes)],
+            covered: 3,
+        };
+        let publications = [publish(2), publish(3)];
+        assert_eq!(
+            audit_lineage(&before, &after, &publications, cap),
+            Vec::new(),
+            "each publication evicted the transcript before it"
+        );
+    }
+
+    #[test]
+    fn a_transcript_published_inside_the_window_and_lost_is_raw_history_loss() {
+        let before = StoreObservation {
+            raw: raw(&[(1, 2), (3, 4)]),
+            covered: 4,
+        };
+        let publication = [Publication {
+            lineage: "segment-3".into(),
+            start: 5,
+            end: 6,
+        }];
+        let after = StoreObservation {
+            raw: raw(&[(1, 2), (3, 4)]),
+            covered: 6,
+        };
+        assert_eq!(
+            audit_lineage(&before, &after, &publication, u64::MAX),
+            vec![LineageViolation::RawHistoryLost { start: 5, end: 6 }],
+            "older transcripts survive, so eviction cannot explain the missing one"
+        );
+        let kept = StoreObservation {
+            raw: raw(&[(1, 2), (3, 4), (5, 6)]),
+            covered: 6,
+        };
+        assert!(audit_lineage(&before, &kept, &publication, u64::MAX).is_empty());
     }
 
     #[test]
