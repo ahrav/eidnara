@@ -319,16 +319,16 @@ Writers MUST verify header `len` equals body length, reserve one block from the 
 The compact canonical `route.open` request defined in Section 7.2 is 167 UTF-8 bytes. Its `Request` header uses Interactive/Normal flags, control channel, epoch 0, correlation 1:
 
 ```text
-a7 00 00 00  03 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
+a7 00 00 00  04 00 02  00 00  00 00 00 00  01 00 00 00 00 00 00 00
 |--- len ---| ver ty fl | ch  |--- epoch --|--------- corr ----------|
 ```
 
-Hex without spacing: `a70000000300020000000000000100000000000000`.
+Hex without spacing: `a70000000400020000000000000100000000000000`.
 
 A routed 44-byte Background/Normal request on channel 7, epoch 77, correlation 2 has header:
 
 ```text
-2c00000003000407004d0000000200000000000000
+2c00000004000407004d0000000200000000000000
 ```
 
 ## 7. Control and application messages
