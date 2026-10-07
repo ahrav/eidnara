@@ -1787,6 +1787,23 @@ fn source_failure_decision<'m>(
     }
 }
 
+/// `hold_source_retry` stores a credential-source failure's retry deadline in `source_retry_at_ms`
+/// and returns the maximum of `backoff_at_ms` and every source deadline the firing has seen.
+/// A failed fallback preserves the credential-source retry deadline for the next firing.
+fn hold_source_retry(
+    source_retry_at_ms: &mut Option<i64>,
+    err: &HistorySummarizerProducerError,
+    backoff_at_ms: i64,
+) -> i64 {
+    if err
+        .classification()
+        .is_some_and(|classification| classification.scope == ErrorScope::CredentialSource)
+    {
+        *source_retry_at_ms = (*source_retry_at_ms).max(Some(backoff_at_ms));
+    }
+    backoff_at_ms.max(source_retry_at_ms.unwrap_or(backoff_at_ms))
+}
+
 pub(crate) fn completion_failure_backoff_at_ms(
     started_at_ms: i64,
     configured_backoff_at_ms: i64,
@@ -1902,6 +1919,9 @@ where
     // Providers this firing skips after an `AuthRequired` verdict or a credential-source failure.
     let mut blocked_providers = Vec::new();
     let mut all_failures_permanent = true;
+    // The latest credential-source retry deadline this firing has seen. A failed fallback
+    // preserves it for the next firing.
+    let mut source_retry_at_ms: Option<i64> = None;
 
     for (index, model) in request.model_chain.iter().enumerate() {
         if provider_is_blocked(&blocked_providers, model) {
@@ -1978,7 +1998,7 @@ where
                     request.failure_backoff_at_ms,
                     completed_at_ms,
                 );
-                let decision = decide_producer_failure(
+                let mut decision = decide_producer_failure(
                     &err,
                     model,
                     &request.model_chain[index + 1..],
@@ -1986,6 +2006,11 @@ where
                     &mut all_failures_permanent,
                     completed_at_ms,
                     failure_backoff_at_ms,
+                );
+                decision.failure_backoff_at_ms = hold_source_retry(
+                    &mut source_retry_at_ms,
+                    &err,
+                    decision.failure_backoff_at_ms,
                 );
                 persist_history_summarizer_state(
                     request.store,
@@ -2033,10 +2058,14 @@ where
                         let detail = format!(
                             "producer output ({model}): timed out; recovery re-drain also failed: {recovery_err}"
                         );
-                        let failure_backoff_at_ms = completion_failure_backoff_at_ms(
-                            request.now_ms,
-                            request.failure_backoff_at_ms,
-                            (request.completion_now_ms)(),
+                        let failure_backoff_at_ms = hold_source_retry(
+                            &mut source_retry_at_ms,
+                            &recovery_err,
+                            completion_failure_backoff_at_ms(
+                                request.now_ms,
+                                request.failure_backoff_at_ms,
+                                (request.completion_now_ms)(),
+                            ),
                         );
                         persist_history_summarizer_state(
                             request.store,
@@ -2065,7 +2094,7 @@ where
                     request.failure_backoff_at_ms,
                     completed_at_ms,
                 );
-                let decision = decide_producer_failure(
+                let mut decision = decide_producer_failure(
                     &err,
                     model,
                     &request.model_chain[index + 1..],
@@ -2073,6 +2102,11 @@ where
                     &mut all_failures_permanent,
                     completed_at_ms,
                     failure_backoff_at_ms,
+                );
+                decision.failure_backoff_at_ms = hold_source_retry(
+                    &mut source_retry_at_ms,
+                    &err,
+                    decision.failure_backoff_at_ms,
                 );
                 persist_history_summarizer_state(
                     request.store,
@@ -2117,7 +2151,11 @@ where
             validate_options: request.validate_options,
             created_at_ms: request.now_ms,
             failure_started_at_ms: request.now_ms,
-            failure_backoff_at_ms: request.failure_backoff_at_ms,
+            // Publication re-anchors this cooldown at completion. Passing the held source deadline
+            // keeps a publication failure's retry deadline at or after the source deadline.
+            failure_backoff_at_ms: request
+                .failure_backoff_at_ms
+                .max(source_retry_at_ms.unwrap_or(request.failure_backoff_at_ms)),
             completion_now_ms: request.completion_now_ms,
             publication_fence: request.publication_fence,
             memory_reviewer_handoff: request.memory_reviewer_handoff,
@@ -4989,6 +5027,78 @@ mod tests {
                     "the stopped fallback still honors the source's retry"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_fallback_keeps_the_source_retry_deadline() {
+        fn completed_at() -> i64 {
+            10_000
+        }
+        let fallback_start_failure = || {
+            HistorySummarizerProducerError::tagged_call(
+                "provider_error",
+                "provider unavailable",
+                ErrorClass::Transient,
+                None,
+            )
+        };
+        let fallback_output_failure = || HistorySummarizerProducerError::RunFailed {
+            run_id: "run-2".to_owned(),
+            detail: "opencode provider reported an error (status 503)".to_owned(),
+            classification: Some(ErrorClassification {
+                class: ErrorClass::Transient,
+                retry_after_secs: None,
+                scope: ErrorScope::Model,
+            }),
+            class_field_present: true,
+        };
+        let scripted: Vec<(&str, ScriptedProducer)> = vec![
+            (
+                "fallback start fails",
+                ScriptedProducer::default()
+                    .with_start(Ok(run_handle("run-1")))
+                    .with_output(Err(source_run_failure(ErrorClass::Transient)))
+                    .with_start(Err(fallback_start_failure())),
+            ),
+            (
+                "fallback output fails",
+                ScriptedProducer::default()
+                    .with_start(Ok(run_handle("run-1")))
+                    .with_output(Err(source_run_failure(ErrorClass::Transient)))
+                    .with_start(Ok(run_handle("run-2")))
+                    .with_output(Err(fallback_output_failure())),
+            ),
+            (
+                "fallback output fails validation",
+                ScriptedProducer::default()
+                    .with_start(Ok(run_handle("run-1")))
+                    .with_output(Err(source_run_failure(ErrorClass::Transient)))
+                    .with_start(Ok(run_handle("run-2")))
+                    .with_output(Ok(producer_output("not history_summarizer xml".to_owned()))),
+            ),
+        ];
+        for (case, mut producer) in scripted {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_history_segment(&store);
+            let chunk = history_summarizer_chunk();
+            let prior = prior_ranges();
+            let models = vec![
+                "amazon-bedrock/model-a".to_owned(),
+                "anthropic/model-c".to_owned(),
+            ];
+            let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+            request.completion_now_ms = completed_at;
+            let result = run_history_summarizer_firing(&mut producer, request).await;
+            assert!(result.is_err(), "{case}");
+            assert_eq!(producer.observed_starts.len(), 2, "{case}");
+            let state = store.load("ses").unwrap().meta.history_summarizer;
+            assert!(
+                state.failure_backoff_at_ms >= Some(10_000 + 120_000),
+                "{case}: the failed firing holds the source's retry deadline, got {:?}",
+                state.failure_backoff_at_ms
+            );
         }
     }
 
