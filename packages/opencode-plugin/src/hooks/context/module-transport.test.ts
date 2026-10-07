@@ -1083,6 +1083,30 @@ describe("managed startup envelope harness closures", () => {
         }
     });
 
+    test("an inadmissible selector refuses the envelope as harness_unavailable", () => {
+        for (const env of [
+            { HOME: "/home/u", AWS_PROFILE: "", AWS_REGION: "us-east-1" },
+            { HOME: "/home/u", AWS_PROFILE: "corp" },
+            { HOME: "relative", AWS_PROFILE: "corp", AWS_REGION: "us-east-1" },
+        ]) {
+            let thrown: unknown;
+            try {
+                buildManagedStartupEnvelope(
+                    "@eidnara/cli",
+                    env,
+                    "/bin/x",
+                    undefined,
+                    (path) => path,
+                );
+            } catch (error) {
+                thrown = error;
+            }
+            expect((thrown as { code?: string }).code, JSON.stringify(env)).toBe(
+                "harness_unavailable",
+            );
+        }
+    });
+
     test("a profile-mode owner sends its selector and no static AWS row, and only kept values meet the cap", () => {
         const env = {
             HOME: "/home/u",
