@@ -138,6 +138,10 @@ impl Default for HelperLimits {
 /// Everything one transaction reads.
 pub struct TransactionInput<'a> {
     pub source: &'a OwnerSource,
+    /// The owner's admitted graph identity. A capture that admits to a different
+    /// identity ends the transaction as [`TransactionFailure::GraphChanged`] before any
+    /// token is supplied or the helper runs.
+    pub admitted: Option<&'a GraphIdentity>,
     /// The newest private successor from an earlier transaction of this incarnation.
     pub predecessor: Option<&'a PrivateToken>,
     /// An owner token observation that can no longer renew, such as one whose rotation
@@ -188,6 +192,8 @@ pub enum CaptureFailure {
 pub enum TransactionFailure {
     Capture(CaptureFailure),
     Admission(AdmissionError),
+    /// The selected graph admits to an identity other than the owner's admitted one.
+    GraphChanged,
     /// No valid token is available for the SSO root; an external login is needed.
     LoginRequired,
     /// The owner's token observation changed during the transaction.
@@ -291,6 +297,13 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
     };
     let mut outcome = TransactionOutcome::failed(F::LoginRequired);
     outcome.identity = Some(graph.identity().clone());
+    if input
+        .admitted
+        .is_some_and(|admitted| admitted != graph.identity())
+    {
+        outcome.failure = Some(F::GraphChanged);
+        return outcome;
+    }
     let sso = match &graph.identity().root {
         RootIdentity::Sso {
             session_name,
@@ -834,6 +847,7 @@ mod tests {
         let mut slot = TransactionSlot { unresolved: true };
         let input = TransactionInput {
             source: &source,
+            admitted: None,
             predecessor: None,
             superseded: None,
             executable: Path::new("/nonexistent"),

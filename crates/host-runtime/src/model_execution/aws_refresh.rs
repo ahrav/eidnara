@@ -45,6 +45,7 @@ pub const MAX_ROW_LIFETIME: Duration = Duration::from_secs(86_400);
 
 /// What one physical refresh receives from the owner.
 pub struct RefreshRequest {
+    pub admitted: GraphIdentity,
     pub predecessor: Option<Arc<PrivateToken>>,
     pub superseded: Option<TokenObservation>,
 }
@@ -286,6 +287,7 @@ impl SourceOwner {
         state.in_flight = Some(settled.clone());
         let epoch = state.epoch;
         let request = RefreshRequest {
+            admitted: self.0.admitted.clone(),
             predecessor: state.successor.clone(),
             superseded: state.superseded.clone(),
         };
@@ -492,7 +494,7 @@ fn classify(failure: TransactionFailure) -> (SourceError, Authority) {
             (SourceError::LoginRequired, Keep)
         }
         F::Withdrawn => (SourceError::Withdrawn, Discard),
-        F::Admission(_) | F::Helper(HelperFailure::InvalidConfiguration) => {
+        F::GraphChanged | F::Admission(_) | F::Helper(HelperFailure::InvalidConfiguration) => {
             (SourceError::Invalid, Discard)
         }
         F::Capture(CaptureFailure::Missing | CaptureFailure::Unsafe | CaptureFailure::TooLarge)
@@ -547,6 +549,7 @@ impl Refresh for TransactionRefresh {
             let mut slot = context.slot.lock().await;
             let input = TransactionInput {
                 source: &context.source,
+                admitted: Some(&request.admitted),
                 predecessor: request.predecessor.as_deref(),
                 superseded: request.superseded.as_ref(),
                 executable: &context.executable,
