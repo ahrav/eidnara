@@ -6916,25 +6916,28 @@ impl RowMemo {
         self.row_version == row_version && self.session_id == session_id
     }
 
-    /// Heap and inline bytes the memo holds; strings and vectors count their capacity.
-    fn retained_bytes(&self) -> usize {
+    /// Heap bytes a memoized `core` holds; strings and vectors count their capacity.
+    fn core_bytes(core: &CoreState) -> usize {
         let unit = |unit: &FrozenUnit| {
             unit.key.capacity()
                 + unit.kind.capacity()
                 + unit.frozen_payload.capacity()
                 + unit.reset_rule.capacity()
         };
-        let core = self.core.as_ref().map_or(0, |core| {
-            core.boundary_id.capacity()
-                + (core.frozen_units.capacity() + core.pending_changes.capacity())
-                    * std::mem::size_of::<FrozenUnit>()
-                + core
-                    .frozen_units
-                    .iter()
-                    .chain(&core.pending_changes)
-                    .map(unit)
-                    .sum::<usize>()
-        });
+        core.boundary_id.capacity()
+            + (core.frozen_units.capacity() + core.pending_changes.capacity())
+                * std::mem::size_of::<FrozenUnit>()
+            + core
+                .frozen_units
+                .iter()
+                .chain(&core.pending_changes)
+                .map(unit)
+                .sum::<usize>()
+    }
+
+    /// Heap and inline bytes the memo holds; strings and vectors count their capacity.
+    fn retained_bytes(&self) -> usize {
+        let core = self.core.as_ref().map_or(0, Self::core_bytes);
         let coverage = self
             .coverage
             .as_ref()
@@ -8820,10 +8823,12 @@ impl MemoryStore {
             SessionCore::Memo(core) => Ok(core),
             SessionCore::Text(text) => {
                 let core: CoreState = serde_json::from_str(&text)?;
-                self.lock_row_memo()
-                    .record(session_id, row_version, |memo| {
-                        memo.core = Some(core.clone())
-                    });
+                if RowMemo::core_bytes(&core) <= ROW_MEMO_RETAINED_BYTES_BOUND {
+                    self.lock_row_memo()
+                        .record(session_id, row_version, |memo| {
+                            memo.core = Some(core.clone())
+                        });
+                }
                 Ok(core)
             }
         }
