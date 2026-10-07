@@ -2527,6 +2527,7 @@ pub const DECLARED_RETAINED_RESIDENT_BYTES: u64 = TRANSFORM_SERVE_CACHE_COMBINED
         * (STORAGE_CONNECTIONS - 1 + PEAK_SEARCH_CONNECTIONS)
     + memory_store::PAGE_CACHE_BUDGET_BYTES as u64
     + memory_store::MMAP_BUDGET_BYTES as u64
+    + memory_store::ROW_MEMO_RETAINED_BYTES_BOUND as u64
     + search_projection::CACHE_KIB as u64 * 1024 * PEAK_SEARCH_CONNECTIONS
     + kernel_routes::ingest::MAX_STAGED_BYTES
     + kernel_routes::ingest::FINISH_WORKING_BYTES_MAX
@@ -26959,12 +26960,13 @@ mod tests {
         );
     }
 
-    /// A steady pass reads `cache_state` through the statement cache exactly twice: the
+    /// A steady pass reads `cache_state` through the statement cache three times: the
     /// `meta` projection once before the transform, shared by the
     /// projection-cache lookup, the last-response anchor, and the history_summarizer-active check;
-    /// and the full row once after the commit in `prepare_history_summarizer_fire`. The interleave
-    /// hook runs after the transform commit and before the post-commit load. Each run count
-    /// is read on one handle, so the test also requires that neither handle was evicted.
+    /// the full row once for the transform snapshot; and the full row once after the commit in
+    /// `prepare_history_summarizer_fire`. The interleave hook runs after the transform commit
+    /// and before the post-commit load. Each run count is read on one handle, so the test also
+    /// requires that neither handle was evicted.
     #[tokio::test(flavor = "current_thread")]
     async fn a_steady_pass_loads_meta_once_before_the_transform_and_the_full_row_once_after() {
         let producer = Arc::new(ProducerState::default());
@@ -27001,8 +27003,8 @@ mod tests {
                 meta_at_hook - meta_after_warm,
                 full_at_hook - full_after_warm
             ),
-            (1, 0),
-            "one meta load and no full load before the transform"
+            (1, 1),
+            "one meta load and the snapshot's full load before the transform"
         );
         let (meta_after, full_after) = counts(&store);
         assert_eq!(
@@ -41727,6 +41729,89 @@ mod tests {
         );
         assert_eq!(epochs["tagger_epoch"], json!(TAGGER_FEATURE_EPOCH));
         assert!(state_sync_epoch_compatible(epochs));
+    }
+
+    /// Once a session's row stops changing, a steady pass takes the row's core from the
+    /// memory store's row memo: no statement parses `core_state`, and every `cache_state`
+    /// read returns at most the row version and `meta`, though the row's frozen m0 core is
+    /// many times larger.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_steady_pass_over_an_unchanged_row_reads_no_core_state_bytes() {
+        const SEGMENTS: usize = 1_000;
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let history = crate::test_support::synthetic_history::SyntheticHistory::mixed(SEGMENTS);
+        history.seed(&store, "ses");
+        let end = (history.span * SEGMENTS as i64) as u64;
+        let loaded = store.load("ses").unwrap();
+        let mut core = loaded.core.clone();
+        core.boundary_id = format!("m{end}#0");
+        let mut meta = loaded.meta.clone();
+        meta.ordinal_continuation_base = Some(end - 2);
+        meta.coverage_ordinal = Some(end);
+        store
+            .commit("ses", loaded.row_version, &core, &meta)
+            .unwrap();
+        let request = |turn: u64| {
+            let messages: Vec<IngressMessage> = (end..=end + 40)
+                .map(|ordinal| {
+                    let role = if ordinal % 2 == 1 {
+                        "user"
+                    } else {
+                        "assistant"
+                    };
+                    let text = format!("turn {ordinal}{}", " fold cache window".repeat(80));
+                    wire_with_role(&format!("m{ordinal}"), ordinal, role, &text)
+                })
+                .collect();
+            json!({
+                "kind": "transform",
+                "v": 3,
+                "boundary": {"mid": format!("m{end}"), "sequence": SEGMENTS},
+                "base_revision": format!("steady-{turn}"),
+                "serializer_profile": "owned-llmrunner",
+                "session_id": "ses",
+                "render_config": "cfg0",
+                "messages": messages,
+            })
+        };
+        for turn in 0..3 {
+            let response = call_transform_request(&handler, request(turn)).await;
+            assert_eq!(response["status"], "ok", "warm pass {turn}: {response}");
+        }
+        store.start_statement_work_ledger();
+        for turn in 3..5 {
+            let response = call_transform_request(&handler, request(turn)).await;
+            assert_eq!(response["status"], "ok", "steady pass {turn}: {response}");
+        }
+        let work = store.take_statement_work();
+        let (core_bytes, meta_bytes): (i64, i64) = store
+            .with_conn_for_test(|conn| {
+                conn.query_row(
+                    "SELECT length(CAST(core_state AS BLOB)), length(CAST(meta AS BLOB))
+                       FROM cache_state WHERE session_id = 'ses'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert!(
+            core_bytes > 4 * meta_bytes,
+            "{core_bytes} core vs {meta_bytes} meta bytes"
+        );
+        let reads: Vec<_> = work
+            .iter()
+            .filter(|run| run.sql.contains("cache_state"))
+            .collect();
+        assert!(!reads.is_empty());
+        for run in reads {
+            assert!(
+                !run.sql.contains("json_extract(core_state") && run.bytes <= 8 + meta_bytes as u64,
+                "{} bytes from {}",
+                run.bytes,
+                run.sql
+            );
+        }
     }
 }
 

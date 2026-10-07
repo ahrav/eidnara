@@ -324,6 +324,10 @@ fn main() {
             "a_cancelled_run_waiting_on_the_source_starts_no_child",
             a_cancelled_run_waiting_on_the_source_starts_no_child,
         ),
+        (
+            "a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner",
+            a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner,
+        ),
     ];
     // cargo-nextest requires each `--list --format terse` output line to end in `: test`.
     // It lists ignored tests with a second `--ignored` call; this suite has none, and a
@@ -3776,6 +3780,8 @@ struct ScriptedSource {
     outcomes: Mutex<std::collections::VecDeque<Result<u64, TransactionFailure>>>,
     calls: std::sync::atomic::AtomicUsize,
     controls: Mutex<String>,
+    /// The owner clock's wall offset, so rows expire on the owner's shifted wall.
+    wall_offset: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ScriptedSource {
@@ -3824,11 +3830,13 @@ impl Refresh for Scripted {
             .pop_front()
             .expect("scripted outcome");
         let controls = script.controls.lock().expect("controls").clone();
+        let offset = script.wall_offset.load(std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("wall clock")
-                .as_secs();
+                .as_secs()
+                + offset;
             let (row, failure) = match next {
                 Ok(lifetime) => (
                     Some(CredentialRow {
@@ -3907,6 +3915,7 @@ fn scripted_dispatch_with_clock(
         outcomes: Mutex::new(outcomes.into()),
         calls: Default::default(),
         controls: Mutex::default(),
+        wall_offset: Arc::clone(&clock.offset),
     });
     script.steer(setup, extra);
     let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
@@ -4246,4 +4255,81 @@ fn a_cancelled_run_waiting_on_the_source_starts_no_child() {
     );
     assert!(!setup.out.path().join("argv.json").exists());
     release.notify_one();
+}
+
+/// The 24-hour auth soak on a shifted wall clock: 48 Bedrock runs, one every 1,760 s of wall
+/// time, then one at the 24-hour mark, through one OpenCode adapter and one owner. Rows live
+/// 3,600 s of wall time, so every second run finds its row alive but 80 s short of the run
+/// deadline plus skew on the wall bound and rotates it, and the run at the day mark finds its
+/// row expired and rotates it. The 13th refresh observes an external login, which costs only
+/// the run that observed it.
+fn a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner() {
+    const STEP_SECS: u64 = 1_760;
+    const DAY_SECS: u64 = 24 * 3_600;
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "soak.ndjson",
+        &opencode_success_lines("soaked"),
+    );
+    let clock = ShiftedClock::default();
+    let mut outcomes = vec![Ok(3_600); 12];
+    outcomes.push(Err(TransactionFailure::Withdrawn));
+    outcomes.extend(vec![Ok(3_600); 13]);
+    let (aws, script) = scripted_dispatch_with_clock(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+        outcomes,
+        clock.clone(),
+    );
+    let owner = aws.owner().clone();
+    let opencode = opencode_backend(&setup, &[]).with_aws_source(Some(aws));
+    let mut failed_slots = Vec::new();
+    let mut rows = Vec::new();
+    for slot in 0..49 {
+        if slot == 48 {
+            clock.shift(DAY_SECS - 48 * STEP_SECS);
+        }
+        let (terminal, _) = execute(&opencode, bedrock(&setup, Harness::OpenCode));
+        match terminal {
+            BackendTerminal::Completed { .. } => {
+                rows.push(setup.env()["AWS_ACCESS_KEY_ID"].clone());
+            }
+            BackendTerminal::SourceFailed(error) => {
+                assert_eq!(error.class, ErrorClass::Transient, "slot {slot}");
+                failed_slots.push(slot);
+            }
+            other => panic!("slot {slot}: {other:?}"),
+        }
+        clock.shift(STEP_SECS);
+    }
+    assert_eq!(
+        failed_slots,
+        [24],
+        "only the run that observed the login fails"
+    );
+    let expected: Vec<String> = (0..49)
+        .filter(|slot| *slot != 24)
+        .map(|slot| {
+            let call = if slot < 24 {
+                slot / 2
+            } else if slot < 48 {
+                13 + (slot - 25) / 2
+            } else {
+                25
+            };
+            format!("ASIAROW{call}")
+        })
+        .collect();
+    assert_eq!(
+        rows, expected,
+        "every second run rotates, the run after the login rotates at once, and the run at the \
+         day mark rotates its expired row"
+    );
+    assert_eq!(
+        script.calls.load(std::sync::atomic::Ordering::SeqCst),
+        26,
+        "each rotation is one physical refresh, plus the one that observed the login"
+    );
+    rt().block_on(async { assert!(owner.join().await) });
 }

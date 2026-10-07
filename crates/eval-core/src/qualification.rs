@@ -1,4 +1,4 @@
-//! `eval-qualification/v1`: the fixed retained-history and outage qualification campaign.
+//! `eval-qualification/v2`: the fixed retained-history and outage qualification campaign.
 //! The case catalog, the required host, the numeric gates, the drain estimate, the outage and
 //! virtual rotation schedules, and the per-publication lineage oracle are values; the runner
 //! shell measures and this module judges.
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scale::{Histogram, HostManifest};
 
-pub const QUALIFICATION_SCHEMA: &str = "eval-qualification/v1";
+pub const QUALIFICATION_SCHEMA: &str = "eval-qualification/v2";
 /// Fixture seed every generated history uses.
 pub const QUALIFICATION_SEED: u64 = 702;
 /// Measured lexical tokens in each ordinary message under the pinned tokenizer.
@@ -191,8 +191,12 @@ pub struct Repetition {
     /// The generator writing the retained history into the store.
     pub seed_us: u64,
     pub ingested_bytes: u64,
-    /// The daemon's cold open of that store until every session reports ready.
+    /// The daemon's cold open of that store: every session reports ready, then each
+    /// session's first pass replays its retained history once.
     pub cold_open_us: u64,
+    /// Bytes the daemon read (`rchar`) from its launch through the cold open, accounted apart
+    /// from the interactive phase.
+    pub cold_read_bytes: u64,
     pub operations: u64,
     pub failed_operations: u64,
     pub latency_us: Histogram,
@@ -1021,6 +1025,7 @@ mod tests {
             seed_us: 1,
             ingested_bytes: 1,
             cold_open_us: 1,
+            cold_read_bytes: 0,
             operations: 2_000,
             failed_operations: 0,
             latency_us: histogram(&vec![latency; 2_000]),
