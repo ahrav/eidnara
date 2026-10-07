@@ -521,7 +521,10 @@ async fn health_reports_unavailable_when_no_harness_can_run() {
 async fn health_counts_an_attached_profile_owner_as_a_runnable_credential() {
     use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
     use host_runtime::model_execution::aws_refresh::{
-        Refresh, RefreshFuture, RefreshRequest, SourceOwner, SystemClock,
+        Refresh, RefreshFuture, RefreshRequest, SourceError, SourceOwner, SystemClock,
+    };
+    use host_runtime::model_execution::aws_transaction::{
+        RenewalEvidence, TransactionFailure, TransactionOutcome,
     };
     use host_runtime::model_execution::source_health::{
         SourceHealthCell, SourceKind, SourceObservation,
@@ -571,11 +574,45 @@ async fn health_counts_an_attached_profile_owner_as_a_runnable_credential() {
         "a profile selection without an attached owner has no runnable credential"
     );
     let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
-    let owner = SourceOwner::new(NeverRefreshed, SystemClock, identity, health);
+    let owner = SourceOwner::new(NeverRefreshed, SystemClock, identity.clone(), health);
     assert_eq!(
         state(profile_only().with_source_owner(Some(owner))).await,
         (host_runtime::HealthStatus::Ok, "ready".into()),
         "the attached owner answers Bedrock for both harnesses"
+    );
+
+    struct Unproven;
+    impl Refresh for Unproven {
+        fn refresh(&self, _: RefreshRequest, _: CancellationToken) -> RefreshFuture {
+            Box::pin(async {
+                TransactionOutcome {
+                    identity: None,
+                    row: None,
+                    successor: None,
+                    observation: None,
+                    renewal: RenewalEvidence::Unknown,
+                    lost_succession: false,
+                    record_retained: false,
+                    failure: Some(TransactionFailure::CleanupUnproven),
+                }
+            })
+        }
+    }
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(Unproven, SystemClock, identity, health);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    assert_eq!(
+        owner
+            .acquire(deadline, &CancellationToken::new())
+            .await
+            .err(),
+        Some(SourceError::Invalid),
+        "an unproven helper cleanup latches the owner invalid"
+    );
+    assert_eq!(
+        state(profile_only().with_source_owner(Some(owner))).await,
+        (host_runtime::HealthStatus::Degraded, "unavailable".into()),
+        "an invalid owner on a profile-only host leaves no runnable credential"
     );
 }
 
