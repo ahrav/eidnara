@@ -44,9 +44,9 @@ const BUDGET: Duration = Duration::from_secs(30);
 /// Pinned digests of the committed release files, restated from `release_contract_tests` so the
 /// binary's metadata output is checked against an independent literal instead of the same embedded string.
 const RELEASE_CONTRACT_SHA256: &str =
-    "66f07dc19c8bc0a5eac39f3efaf4c7b0399cac0fb0583127fa58856858759baf";
+    "9a4030244c6ea1b60c43ff2265839b9f0bbd27acb1a83d6b9c81fac938b0aac5";
 const PRODUCTION_INPUTS_LOCK_SHA256: &str =
-    "fea488ecb5f8e6d611480380d062d3d9eb03fd16be33b2af15a55c7e5a7ce58e";
+    "2f07eb36b8bf54822328d2fba1d79bfb457526d8b9b722986b3427ddd0ec2c58";
 
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest as _;
@@ -862,7 +862,7 @@ async fn full_dev_mode_lifecycle_roundtrip() {
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 fn merged_envelope() -> Value {
     serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "credentials": {
             "ANTHROPIC_API_KEY": "second-owner-secret",
             "OPENAI_API_KEY": "first-owner-secret"
@@ -888,11 +888,11 @@ fn credentialed_start_and_restart_refuse_changed_or_merged_credentials() {
     write_payload(&payload);
     let payload_arg = payload.to_str().expect("payload path");
     let first_envelope = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "credentials": {"OPENAI_API_KEY": "first-owner-secret"}
     });
     let changed_envelope = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "credentials": {"OPENAI_API_KEY": "second-owner-secret"}
     });
     let merged_envelope = merged_envelope();
@@ -958,7 +958,7 @@ fn credentialed_start_and_restart_refuse_changed_or_merged_credentials() {
     );
 
     let invalid_descriptor = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "opencode": {
             "manifest_sha256": "f".repeat(64),
             "source_roots": {"runtime": "/missing/qualified-runtime"}
@@ -1098,7 +1098,7 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
     assert_eq!(stopped.code, 0);
     janitor.active = false;
 
-    let unknown = b"{\"schema\":2,\"future\":\"preserve-me\"}";
+    let unknown = b"{\"schema\":3,\"future\":\"preserve-me\"}";
     std::fs::write(&selection, unknown).expect("unknown selection fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
         .expect("unknown selection mode");
@@ -1135,7 +1135,7 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
         unknown
     );
 
-    std::fs::write(&selection, b"{\"schema\":1}").expect("stale selection fixture");
+    std::fs::write(&selection, b"{\"schema\":2}").expect("stale selection fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
         .expect("stale selection mode");
     let stopped_again = run(&data, &["stop"]);
@@ -1152,10 +1152,22 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
         "already-stopped cleanup must remove stale active selection"
     );
 
-    // A schema-1 selection that cites a digest outside the qualified closure is stale state owned by this binary; `stop` clears it instead of treating it as tampering.
+    let prior_generation = b"{\"schema\":1}";
+    std::fs::write(&selection, prior_generation).expect("prior generation fixture");
+    std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
+        .expect("prior generation mode");
+    let prior_stop = run(&data, &["stop"]);
+    assert_eq!(prior_stop.code, 0);
+    assert_eq!(
+        std::fs::read(&selection).expect("prior generation selection kept for rollback"),
+        prior_generation
+    );
+    std::fs::remove_file(&selection).expect("remove prior generation fixture");
+
+    // A schema-2 selection that cites a digest outside the qualified closure is stale state owned by this binary; `stop` clears it instead of treating it as tampering.
     std::fs::write(
         &selection,
-        format!("{{\"schema\":1,\"opencode\":\"{}\"}}", "f".repeat(64)).as_bytes(),
+        format!("{{\"schema\":2,\"opencode\":\"{}\"}}", "f".repeat(64)).as_bytes(),
     )
     .expect("unqualified selection fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
@@ -1178,7 +1190,7 @@ fn stale_selector_is_cleared_by_stop_and_survives_cleanup_faults() {
     // Selector-cleanup residue is stale bookkeeping.
     // A later `start` rewrites stale selector state; failing `stop` would force recovery for a host that is already stopped.
     // An unsupported selector schema causes `stop` to fail.
-    std::fs::write(&selection, b"{\"schema\":1}").expect("cleanup-fault fixture");
+    std::fs::write(&selection, b"{\"schema\":2}").expect("cleanup-fault fixture");
     std::fs::set_permissions(&selection, std::fs::Permissions::from_mode(0o600))
         .expect("cleanup-fault mode");
     let already_stopped_cleanup_fault = run_with_envelope_and_env(
@@ -1445,7 +1457,7 @@ fn an_invalid_launcher_envelope_reports_harness_unavailable_not_internal_error()
     // Exceeds `CREDENTIAL_VALUE_CAP_BYTES` by one byte.
     let over_cap = "x".repeat(16 * 1024 + 1);
     let oversized = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "credentials": {"OPENAI_API_KEY": over_cap}
     });
     let out = run_with_envelope(&data, &["start"], Some(&oversized));

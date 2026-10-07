@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
@@ -6,8 +5,11 @@ import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import {
     AdmissionClass,
+    AwsSourceError,
+    type AwsSourceSelection,
     armExpiryTimer,
     type BindIdentity,
+    captureAwsSource,
     DAEMON_GENERATION_CHANGED_CODE,
     Deadline,
     evictProcessHostClient,
@@ -20,6 +22,7 @@ import {
     MODEL_EXECUTION_CREDENTIAL_NAMES,
     MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
     Priority,
+    processAwsSource,
     processHostClient,
     type RouteHandle,
     type RouteTarget,
@@ -27,6 +30,8 @@ import {
     SocketTimeoutError,
     StaleRouteHandleError,
     sameDaemonId,
+    sourceBinding,
+    sourceClaimVersion,
 } from "../../shared/host-client";
 import {
     type ConnectionOrigin,
@@ -98,14 +103,31 @@ function snapshotCredentialSource(
     return Object.freeze(snapshot);
 }
 
-function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
-    const hash = createHash("sha256").update("eidnara-host-route-credentials-v1");
-    for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) {
-        const value = env[name] ?? "";
-        hash.update(`${Buffer.byteLength(name)}:${name}`);
-        hash.update(`${Buffer.byteLength(value)}:${value}`);
+/**
+ * The owner's AWS source for a managed route, failing as `harness_unavailable`, the same
+ * refusal the lifecycle policy answers for an inadmissible selector at startup.
+ */
+function managedAwsSource(env: Record<string, string | undefined>): AwsSourceSelection {
+    try {
+        return env === process.env ? processAwsSource() : captureAwsSource(env);
+    } catch (error) {
+        if (!(error instanceof AwsSourceError)) throw error;
+        throw Object.assign(new Error(`managed AWS source is inadmissible: ${error.message}`), {
+            code: "harness_unavailable",
+            cause: error,
+        });
     }
-    return hash.digest("hex");
+}
+
+/**
+ * The owner source is selected once per process, so a route's version and its claims derive from
+ * that capture whichever credential snapshot `env` carries.
+ */
+export function managedCredentialSourceVersion(env: Record<string, string | undefined>): string {
+    const harness = getHarness();
+    return harness === "opencode" || harness === "pi"
+        ? sourceClaimVersion(harness, env, managedAwsSource(process.env))
+        : "";
 }
 
 interface HarnessClosure {
@@ -214,10 +236,14 @@ export function buildManagedStartupEnvelope(
     entrypoint: string | undefined = process.argv[1],
     resolvePath: (path: string) => string = realpathSync.native,
 ): NativeStartupEnvelope {
-    const credentials: Record<string, string> = {};
+    const collected: Record<string, string> = {};
     for (const name of MODEL_EXECUTION_CREDENTIAL_NAMES) {
         const value = env[name];
-        if (value === undefined || value.length === 0) continue;
+        if (value !== undefined && value.length !== 0) collected[name] = value;
+    }
+    const selection = managedAwsSource(env);
+    const binding = sourceBinding(selection, collected);
+    for (const value of Object.values(binding.credentials ?? {})) {
         if (Buffer.byteLength(value) > MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES) {
             const error = new Error("managed credential value exceeds its size cap") as Error & {
                 code?: string;
@@ -225,7 +251,6 @@ export function buildManagedStartupEnvelope(
             error.code = "credential_value_too_large";
             throw error;
         }
-        credentials[name] = value;
     }
     const harness = harnessForParentPackage(parentPackageName);
     const candidate =
@@ -235,10 +260,10 @@ export function buildManagedStartupEnvelope(
     const opencode = harness === "opencode" ? candidate : undefined;
     const pi = harness === "pi" ? candidate : undefined;
     return {
-        schema: 1,
+        schema: 2,
         ...(opencode === undefined ? {} : { opencode }),
         ...(pi === undefined ? {} : { pi }),
-        ...(Object.keys(credentials).length === 0 ? {} : { credentials }),
+        ...binding,
     };
 }
 
@@ -1042,7 +1067,11 @@ export class HostModuleTransport {
                 const credentialSource = snapshotCredentialSource(process.env);
                 bindVersion = managedCredentialSourceVersion(credentialSource);
                 routeOpening.credentialSourceVersion = bindVersion;
-                const open = client.routeOpen(target, identity, { ...fence, credentialSource });
+                const open = client.routeOpen(target, identity, {
+                    ...fence,
+                    credentialSource,
+                    awsSource: managedAwsSource(process.env),
+                });
                 try {
                     route = await this.beforeDeadline(open, deadline, "opening the module route");
                     break;
@@ -1175,6 +1204,7 @@ export class HostModuleTransport {
             connectionFile: this.connectionFile,
             handshakeTimeoutMs,
             credentialSource: process.env,
+            awsSource: managedAwsSource(process.env),
         };
     }
 

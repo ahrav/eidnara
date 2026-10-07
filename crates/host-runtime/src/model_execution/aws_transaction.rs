@@ -25,6 +25,7 @@ use zeroize::Zeroizing;
 
 use super::aws_helper::{self, HelperFailure, HelperReport, HelperRequest, Renewal};
 use super::aws_profile::{self, AdmissionError, CapturedProfileInput, GraphIdentity, RootIdentity};
+use super::aws_source::AwsProfileSource;
 use super::subprocess::group_registry::StateRoot;
 use super::subprocess::{self, PrivateDir, SubprocessEnd, SubprocessLimits, SubprocessSpec};
 use crate::instance::{
@@ -686,6 +687,30 @@ impl<'de> Deserialize<'de> for Slot {
             }
         }
         deserializer.deserialize_str(SlotVisitor)
+    }
+}
+
+pub fn admit_owner_source(source: &OwnerSource) -> Result<(), TransactionFailure> {
+    let [config, credentials] = capture_files(source).map_err(TransactionFailure::Capture)?;
+    aws_profile::admit(CapturedProfileInput {
+        profile: &source.profile,
+        region: &source.region,
+        config: &config,
+        credentials: &credentials,
+    })
+    .map(drop)
+    .map_err(TransactionFailure::Admission)
+}
+
+impl OwnerSource {
+    pub fn from_selector(selector: &AwsProfileSource) -> Self {
+        Self {
+            profile: selector.profile().to_owned(),
+            region: selector.region().to_owned(),
+            config_file: PathBuf::from(selector.config_file()),
+            credentials_file: PathBuf::from(selector.credentials_file()),
+            sso_cache_root: PathBuf::from(selector.sso_cache_root()),
+        }
     }
 }
 

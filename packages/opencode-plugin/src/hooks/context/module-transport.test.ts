@@ -13,14 +13,18 @@ import { join } from "node:path";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
 import {
+    _resetProcessAwsSourceForTesting,
     Deadline,
     HostCallError,
     type HostClient,
     type HostClientOptions,
     MODEL_EXECUTION_CREDENTIAL_NAMES,
+    MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
+    processAwsSource,
     RouteHandle,
     StaleRouteHandleError,
     sameDaemonId,
+    sourceClaimVersion,
 } from "../../shared/host-client";
 import { WaiterDetachedError } from "../../shared/host-lifecycle/policy";
 import {
@@ -29,6 +33,7 @@ import {
     HostModuleTransport,
     harnessForParentPackage,
     isModuleCallBodyValid,
+    managedCredentialSourceVersion,
 } from "./module-transport";
 
 const REPO_ROOT = join(import.meta.dir, "../../../../..");
@@ -1057,7 +1062,7 @@ describe("managed startup envelope harness closures", () => {
             resolveWithin("/opt/opencode"),
         );
         expect(envelope).toEqual({
-            schema: 1,
+            schema: 2,
             opencode: {
                 manifest_sha256: productionInputs.harnesses.opencode.closure.sha256,
                 source_roots: { runtime: "/opt/opencode" },
@@ -1078,8 +1083,100 @@ describe("managed startup envelope harness closures", () => {
                 undefined,
                 (path) => path,
             );
-            expect(envelope, parent).toEqual({ schema: 1 });
+            expect(envelope, parent).toEqual({ schema: 2 });
         }
+    });
+
+    test("a route version derives from the process-captured selector for every credential snapshot", () => {
+        const saved = {
+            HOME: process.env.HOME,
+            AWS_PROFILE: process.env.AWS_PROFILE,
+            AWS_REGION: process.env.AWS_REGION,
+        };
+        process.env.HOME = "/home/u";
+        process.env.AWS_PROFILE = "corp";
+        process.env.AWS_REGION = "us-east-1";
+        _resetProcessAwsSourceForTesting();
+        try {
+            expect(processAwsSource().mode).toBe("profile");
+            // A credential snapshot carries provider rows only, so a selector read from it would fall back to environment mode.
+            const snapshot = {
+                AWS_ACCESS_KEY_ID: "AKIA",
+                AWS_SECRET_ACCESS_KEY: "s",
+                AWS_REGION: "us-east-1",
+            };
+            expect(managedCredentialSourceVersion(snapshot)).toBe(
+                sourceClaimVersion("opencode", snapshot, processAwsSource()),
+            );
+            expect(managedCredentialSourceVersion(snapshot)).toBe(
+                managedCredentialSourceVersion({ ...process.env, ...snapshot }),
+            );
+        } finally {
+            for (const [name, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[name];
+                else process.env[name] = value;
+            }
+            _resetProcessAwsSourceForTesting();
+        }
+    });
+
+    test("an inadmissible selector refuses the envelope as harness_unavailable", () => {
+        for (const env of [
+            { HOME: "/home/u", AWS_PROFILE: "", AWS_REGION: "us-east-1" },
+            { HOME: "/home/u", AWS_PROFILE: "corp" },
+            { HOME: "relative", AWS_PROFILE: "corp", AWS_REGION: "us-east-1" },
+        ]) {
+            let thrown: unknown;
+            try {
+                buildManagedStartupEnvelope(
+                    "@eidnara/cli",
+                    env,
+                    "/bin/x",
+                    undefined,
+                    (path) => path,
+                );
+            } catch (error) {
+                thrown = error;
+            }
+            expect((thrown as { code?: string }).code, JSON.stringify(env)).toBe(
+                "harness_unavailable",
+            );
+        }
+    });
+
+    test("a profile-mode owner sends its selector and no static AWS row, and only kept values meet the cap", () => {
+        const env = {
+            HOME: "/home/u",
+            AWS_PROFILE: "corp",
+            AWS_REGION: "us-east-1",
+            AWS_ACCESS_KEY_ID: "AKIA",
+            AWS_SECRET_ACCESS_KEY: "s",
+            AWS_SESSION_TOKEN: "t".repeat(MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES + 1),
+            OPENAI_API_KEY: "secret",
+        };
+        expect(
+            buildManagedStartupEnvelope("@eidnara/cli", env, "/bin/x", undefined, (path) => path),
+        ).toEqual({
+            schema: 2,
+            credentials: { OPENAI_API_KEY: "secret" },
+            aws_source: {
+                kind: "profile",
+                profile: "corp",
+                region: "us-east-1",
+                config_file: "/home/u/.aws/config",
+                credentials_file: "/home/u/.aws/credentials",
+                sso_cache_root: "/home/u/.aws/sso/cache",
+            },
+        });
+        expect(() =>
+            buildManagedStartupEnvelope(
+                "@eidnara/cli",
+                { ...env, AWS_PROFILE: undefined },
+                "/bin/x",
+                undefined,
+                (path) => path,
+            ),
+        ).toThrow(/size cap/);
     });
 
     test("the lock's anchors name the manifest's executable, interpreter, or entrypoint node", () => {

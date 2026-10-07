@@ -6,7 +6,7 @@ import hostRelease from "../../../../../release/host-release.json";
 import type { CatalogEntry } from "../host-client";
 import type { PlatformReaders } from "./bootstrap";
 import { parseDaemonResult } from "./contract";
-import { buildManagedCredentialEnvelope } from "./managed-policy";
+import { buildManagedCredentialEnvelope, managedStartupDefaults } from "./managed-policy";
 import type { NativeStartupEnvelope } from "./native-launcher";
 import {
     aggregateForTarget,
@@ -271,6 +271,38 @@ describe("pre-native outcomes", () => {
         }
     });
 
+    test("an invalid AWS selector becomes a startup refusal", () => {
+        expect(managedStartupDefaults({ HOME: "/home/u", AWS_PROFILE: "" })).toEqual({
+            startupRefusal: "harness_unavailable",
+        });
+        expect(managedStartupDefaults({ OPENAI_API_KEY: "k" })).toEqual({
+            defaultStartupEnvelope: { schema: 2, credentials: { OPENAI_API_KEY: "k" } },
+        });
+    });
+
+    test("a startup refusal fails start and restart locally and leaves stop and status native", async () => {
+        const root = tempDir("eidnara-policy-startup-refusal-");
+        try {
+            const { binary, invocationLog } = fakeBinary(root);
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+                startupRefusal: "harness_unavailable",
+            });
+            for (const operation of ["start", "restart"] as const) {
+                const result = await policy[operation]();
+                expect(result.ok).toBe(false);
+                expect(result.reason).toBe("harness_unavailable");
+            }
+            expect(invocations(invocationLog)).toEqual([]);
+            await policy.stop();
+            await policy.status();
+            expect(invocations(invocationLog).length).toBeGreaterThanOrEqual(2);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     test("filesystem rejection keeps precedence over unsupported platform", async () => {
         const root = tempDir("eidnara-policy-platform-fs-precedence-");
         try {
@@ -346,9 +378,36 @@ describe("native invocation mapping", () => {
                 EMPTY: "",
             }),
         ).toEqual({
-            schema: 1,
+            schema: 2,
             credentials: { OPENAI_API_KEY: "secret" },
         });
+    });
+
+    test("a profile-mode credential envelope carries the selector and no static AWS row", () => {
+        expect(
+            buildManagedCredentialEnvelope({
+                HOME: "/home/u",
+                AWS_PROFILE: "corp",
+                AWS_REGION: "us-east-1",
+                AWS_ACCESS_KEY_ID: "AKIA",
+                AWS_SECRET_ACCESS_KEY: "s",
+                OPENAI_API_KEY: "secret",
+            }),
+        ).toEqual({
+            schema: 2,
+            credentials: { OPENAI_API_KEY: "secret" },
+            aws_source: {
+                kind: "profile",
+                profile: "corp",
+                region: "us-east-1",
+                config_file: "/home/u/.aws/config",
+                credentials_file: "/home/u/.aws/credentials",
+                sso_cache_root: "/home/u/.aws/sso/cache",
+            },
+        });
+        expect(() => buildManagedCredentialEnvelope({ HOME: "/home/u", AWS_PROFILE: "" })).toThrow(
+            /AWS_PROFILE/,
+        );
     });
 
     test("native current validation precedes one deferred certified package lookup", async () => {
@@ -1221,14 +1280,14 @@ describe("native invocation mapping", () => {
                 env: { XDG_DATA_HOME: root },
                 launchTarget: { kind: "test-binary", path: binary },
                 defaultStartupEnvelope: {
-                    schema: 1,
+                    schema: 2,
                     credentials: { OPENAI_API_KEY: "preserved-secret" },
                 },
             });
             const result = await policy.restart();
             expect(result.ok).toBe(true);
             expect(JSON.parse(readFileSync(envelopeLog, "utf8"))).toEqual({
-                schema: 1,
+                schema: 2,
                 credentials: { OPENAI_API_KEY: "preserved-secret" },
             });
         } finally {
@@ -1672,7 +1731,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                     while (performance.now() < until) {
                         // spin
                     }
-                    return { schema: 1 };
+                    return { schema: 2 };
                 },
             } as unknown as NativeStartupEnvelope;
             const restarted = await policy.restart(slowEnvelope);
@@ -1811,7 +1870,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 origin: "managed-default",
                 capability: "context",
                 startupEnvelope: {
-                    schema: 1,
+                    schema: 2,
                     credentials: { OPENAI_API_KEY: "shared-secret" },
                 },
             });
@@ -1844,7 +1903,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             const policy = policyFor({
                 env: { XDG_DATA_HOME: root },
                 launchTarget: { kind: "test-binary", path: binary },
-                defaultStartupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                defaultStartupEnvelope: { schema: 2, credentials: { KEY: "default" } },
                 storageProbe: async () => "ready",
             });
             const outcomes = await Promise.all([
@@ -1857,7 +1916,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 policy.demandStart({
                     origin: "managed-default",
                     capability: "context",
-                    startupEnvelope: { schema: 1, credentials: { KEY: "default" } },
+                    startupEnvelope: { schema: 2, credentials: { KEY: "default" } },
                 }),
             ]);
             for (const outcome of outcomes) expect(outcome.result.reason).toBe("started");
@@ -1881,25 +1940,25 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 policy.demandStart({
                     origin: "managed-default",
                     capability: "context",
-                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "2" } },
+                    startupEnvelope: { schema: 2, credentials: { A: "1", B: "2" } },
                 }),
                 // Same envelope, different key order: one request, so it joins.
                 policy.demandStart({
                     origin: "managed-default",
                     capability: "context",
-                    startupEnvelope: { schema: 1, credentials: { B: "2", A: "1" } },
+                    startupEnvelope: { schema: 2, credentials: { B: "2", A: "1" } },
                 }),
                 // An optional field set to `undefined` is omitted on the wire, so requests with and without the field join.
                 policy.demandStart({
                     origin: "managed-default",
                     capability: "context",
-                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "2" }, pi: undefined },
+                    startupEnvelope: { schema: 2, credentials: { A: "1", B: "2" }, pi: undefined },
                 }),
                 // Different credentials require a separate native `start` request.
                 policy.demandStart({
                     origin: "managed-default",
                     capability: "context",
-                    startupEnvelope: { schema: 1, credentials: { A: "1", B: "changed" } },
+                    startupEnvelope: { schema: 2, credentials: { A: "1", B: "changed" } },
                 }),
             ]);
             expect(a.result.reason).toBe("started");
@@ -2094,7 +2153,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                     while (performance.now() < until) {
                         // spin
                     }
-                    return { schema: 1 };
+                    return { schema: 2 };
                 },
             } as unknown as NativeStartupEnvelope;
             await expect(
@@ -2133,7 +2192,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                             // spin
                         }
                     }
-                    return { schema: 1 };
+                    return { schema: 2 };
                 },
             } as unknown as NativeStartupEnvelope;
             // No caller deadline: the policy aggregate is the only bound.
@@ -2171,7 +2230,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                             // spin
                         }
                     }
-                    return { schema: 1 };
+                    return { schema: 2 };
                 },
             } as unknown as NativeStartupEnvelope;
             const startedAt = performance.now();
@@ -2211,7 +2270,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 return {
                     toJSON() {
                         calls += 1;
-                        return { schema: 1, credentials: { KEY: calls === 1 ? first : later } };
+                        return { schema: 2, credentials: { KEY: calls === 1 ? first : later } };
                     },
                 } as unknown as NativeStartupEnvelope;
             };
@@ -2231,7 +2290,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             expect(b.result.reason).toBe("started");
             // The two demands use their first serialization as the coalescing key, and the child receives that snapshot rather than a second serialization.
             const received = readFileSync(stdinLog, "utf8").trim().split("\n");
-            expect(received).toEqual([JSON.stringify({ schema: 1, credentials: { KEY: "same" } })]);
+            expect(received).toEqual([JSON.stringify({ schema: 2, credentials: { KEY: "same" } })]);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -2249,7 +2308,7 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
             const abortingEnvelope = {
                 toJSON() {
                     controller.abort();
-                    return { schema: 1 };
+                    return { schema: 2 };
                 },
             } as unknown as NativeStartupEnvelope;
             await expect(
@@ -2277,11 +2336,11 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
                 storageProbe: async () => "ready",
             });
             // A cyclic object's fallback identity can equal a valid envelope's literal `self` value.
-            const cyclic: Record<string, unknown> = { schema: 1 };
+            const cyclic: Record<string, unknown> = { schema: 2 };
             cyclic.credentials = { KEY: "x" };
             cyclic.self = cyclic;
             const valid = {
-                schema: 1,
+                schema: 2,
                 credentials: { KEY: "x" },
                 self: "[Circular]",
             } as unknown as NativeStartupEnvelope;

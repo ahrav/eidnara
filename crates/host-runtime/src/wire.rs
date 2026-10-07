@@ -21,11 +21,11 @@ use std::{error::Error, fmt, sync::Arc};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// `PROTOCOL_VERSION` must equal `WIRE_V3_VERSION` so setup and ring frames use one wire version.
+/// `PROTOCOL_VERSION` must equal `WIRE_VERSION` so setup and ring frames use one wire version.
 pub use shm_transport::setup_auth::PROTOCOL_VERSION;
 
 const _: () = assert!(
-    PROTOCOL_VERSION == shm_transport::descriptor::WIRE_V3_VERSION,
+    PROTOCOL_VERSION == shm_transport::descriptor::WIRE_VERSION,
     "setup-handshake and ring wire versions must agree"
 );
 

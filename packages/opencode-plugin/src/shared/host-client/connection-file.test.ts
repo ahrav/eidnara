@@ -51,7 +51,7 @@ const DAEMON_ID = Array.from({ length: 16 }, (_, i) => 0x60 + i);
 function validJson(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
         schema: 2,
-        wire_version: 3,
+        wire_version: 4,
         setup_socket: "/tmp/eidnara-host.sock",
         key: KEY,
         daemon_id: DAEMON_ID,
@@ -539,7 +539,7 @@ describe("snapshot JSON validation", () => {
         await writeInvalid(noSchema, "invalid_schema");
     });
 
-    test("requires wire_version to be exactly 3 and rejects every other value", async () => {
+    test("requires wire_version to be exactly 4 and rejects every other value", async () => {
         const absent = validJson();
         delete absent.wire_version;
         await writeInvalid(absent, "invalid_wire_version");
@@ -547,6 +547,7 @@ describe("snapshot JSON validation", () => {
         await writeInvalid(validJson({ wire_version: null }), "invalid_wire_version");
         await writeInvalid(validJson({ wire_version: "2" }), "invalid_wire_version");
         await writeInvalid(validJson({ wire_version: 1 }), "invalid_wire_version");
+        await writeInvalid(validJson({ wire_version: 3 }), "invalid_wire_version");
     });
 
     test("rejects missing, relative, and non-string setup socket paths", async () => {

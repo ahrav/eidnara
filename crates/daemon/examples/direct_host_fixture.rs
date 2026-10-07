@@ -979,7 +979,7 @@ mod unix {
             if own_incarnation_is_running(root)
                 && let Ok(info) = host_runtime::read_connection_file(publication)
             {
-                if info.wire_version != 3 {
+                if info.wire_version != host_runtime::wire::PROTOCOL_VERSION {
                     return Err("fixture published an unsupported wire version".into());
                 }
                 return Ok(());
@@ -1120,6 +1120,7 @@ mod unix {
                 Arc::new(pi),
             )),
             env,
+            None,
             state_root,
         ))
     }
@@ -1271,7 +1272,7 @@ mod unix {
         if ready.is_ok() {
             let record = serde_json::json!({
                 "status": "ready",
-                "wire_version": 3,
+                "wire_version": host_runtime::wire::PROTOCOL_VERSION,
                 "catalog": CATALOG,
                 "debug_assertions": cfg!(debug_assertions),
                 "model_workers": host_runtime::model_execution::config::MAX_BACKEND_PROCESSES,

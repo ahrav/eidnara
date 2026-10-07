@@ -1,10 +1,12 @@
 import { createHash, createHmac } from "node:crypto";
+import hostRelease from "../../../../../release/host-release.json";
 import type { AwsProfileSource, AwsSourceSelection } from "./aws-source";
 import { MODEL_EXECUTION_PROVIDERS, providerRowEntries } from "./credential-fingerprint";
 import type { CredentialFingerprints, ModelExecutionProvider } from "./types";
 
-export const SOURCE_CLAIM_DOMAIN = "eidnara-model-execution-credential-v4";
-export const SOURCE_CLAIM_CANONICALIZATION = "harness-provider-source/2";
+export const SOURCE_CLAIM_DOMAIN: string = hostRelease.credential_fingerprint.domain;
+export const SOURCE_CLAIM_CANONICALIZATION: string =
+    hostRelease.credential_fingerprint.canonicalization;
 const SOURCE_CLAIM_VERSION_DOMAIN = "eidnara-host-route-source-claims-v1";
 
 const PROFILE_PROVIDER: ModelExecutionProvider = "amazon-bedrock";

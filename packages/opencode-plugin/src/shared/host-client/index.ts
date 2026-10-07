@@ -1,10 +1,12 @@
 export {
+    _resetProcessAwsSourceForTesting,
     type AwsProfileSource,
     AwsSourceError,
     type AwsSourceErrorCode,
     type AwsSourceSelection,
     captureAwsSource,
     parseAwsProfileSource,
+    processAwsSource,
     selectAwsSource,
     sourceBinding,
 } from "./aws-source";
@@ -19,8 +21,6 @@ export {
     isRetryableRouteOpenCode,
 } from "./client";
 export {
-    canonicalCredentialRowEncoding,
-    credentialFingerprints,
     MODEL_EXECUTION_CREDENTIAL_NAMES,
     MODEL_EXECUTION_CREDENTIAL_VALUE_CAP_BYTES,
 } from "./credential-fingerprint";

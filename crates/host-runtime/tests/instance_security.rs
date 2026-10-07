@@ -79,7 +79,7 @@ async fn discovery_validates_the_publication_the_way_a_client_must() {
     let info = host_runtime::read_connection_file(host.publication_path())
         .expect("host-owned discovery accepts publication");
     assert_eq!(info.schema, 2);
-    assert_eq!(info.wire_version, 3);
+    assert_eq!(info.wire_version, 4);
     assert!(!info.setup_socket.is_empty());
     assert_eq!(info.key.len(), 32);
     assert_eq!(info.daemon_id.len(), 16);
@@ -108,7 +108,7 @@ async fn discovery_validates_the_publication_the_way_a_client_must() {
 }
 
 #[tokio::test]
-async fn discovery_requires_numeric_wire_version_two() {
+async fn discovery_requires_numeric_wire_version_four() {
     let host = TestHost::start().await;
     let original: serde_json::Value =
         serde_json::from_slice(&std::fs::read(host.publication_path()).expect("read publication"))
@@ -119,6 +119,7 @@ async fn discovery_requires_numeric_wire_version_two() {
         ("null", Some(serde_json::Value::Null)),
         ("string", Some(serde_json::json!("2"))),
         ("other", Some(serde_json::json!(1))),
+        ("predecessor", Some(serde_json::json!(3))),
     ] {
         let path = host.runtime_dir().join(format!("{name}.json"));
         let mut candidate = original.clone();

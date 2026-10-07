@@ -15,6 +15,7 @@
  */
 
 import { access } from "node:fs/promises";
+import { type AwsSourceSelection, selectAwsSource } from "./aws-source";
 import {
     type ConnectionDiagnosticEvent,
     ConnectionGeneration,
@@ -31,7 +32,6 @@ import {
     type ConnectionSnapshot,
     readConnectionFile,
 } from "./connection-file";
-import { credentialFingerprints } from "./credential-fingerprint";
 import { armExpiryTimer, Deadline, defaultMonotonicClock, type MonotonicClock } from "./deadline";
 import {
     DAEMON_GENERATION_CHANGED_CODE,
@@ -49,6 +49,7 @@ import {
     StaleRouteHandleError,
 } from "./route-handle";
 import { serializedJsonText } from "./serialized-json-body";
+import { sourceClaims } from "./source-claim";
 import type {
     AuthenticatedPeer,
     BindIdentity,
@@ -64,6 +65,8 @@ import type {
     RouteTarget,
 } from "./types";
 import { AdmissionClass, sameDaemonId } from "./types";
+
+const ENVIRONMENT_SOURCE = selectAwsSource({});
 
 /** Preserves the repo's current 2-second TypeScript handshake budget. */
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 2_000;
@@ -419,6 +422,7 @@ export class HostClient {
     private readonly defaultIdentity: BindIdentity | undefined;
     private readonly defaultTargetKind: ManagedRouteKind;
     private readonly credentialSource: Record<string, string | undefined> | undefined;
+    private readonly awsSource: AwsSourceSelection | undefined;
     private readonly clock: MonotonicClock;
     private readonly sleep: (ms: number) => Promise<void>;
     private readonly connectionFileAfterOpen: (() => void | Promise<void>) | undefined;
@@ -446,6 +450,7 @@ export class HostClient {
         this.defaultIdentity = options.identity;
         this.defaultTargetKind = options.targetKind ?? DEFAULT_MANAGED_TARGET_KIND;
         this.credentialSource = options.credentialSource;
+        this.awsSource = options.awsSource;
         this.clock = options.clock ?? defaultMonotonicClock;
         this.sleep =
             options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -517,6 +522,7 @@ export class HostClient {
         identity: BindIdentity,
         options: Pick<RequestOptions, "expectedDaemonId"> & {
             credentialSource?: Record<string, string | undefined>;
+            awsSource?: AwsSourceSelection;
             /** `null` omits the ambient `EIDNARA_MODULE_ID` / `EIDNARA_LAUNCH_NONCE` pair for this bind only; absent, the pair is read from the process environment. */
             consumerIdentity?: null;
         } = {},
@@ -526,7 +532,12 @@ export class HostClient {
         return this.controlRouteOpen(
             active,
             target,
-            this.identityForConnection(active, identity, options.credentialSource),
+            this.identityForConnection(
+                active,
+                identity,
+                options.credentialSource,
+                options.awsSource,
+            ),
             options.consumerIdentity === null ? undefined : this.envConsumerIdentity(),
             deadline,
         );
@@ -1507,6 +1518,7 @@ export class HostClient {
         active: ActiveConnection,
         identity: BindIdentity,
         credentialSource: Record<string, string | undefined> | undefined = this.credentialSource,
+        awsSource: AwsSourceSelection | undefined = this.awsSource,
     ): BindIdentity {
         if (
             credentialSource === undefined ||
@@ -1514,10 +1526,11 @@ export class HostClient {
         ) {
             return identity;
         }
-        const fingerprints = credentialFingerprints(
+        const fingerprints = sourceClaims(
             active.snapshot.key,
             identity.harness,
             credentialSource,
+            awsSource ?? ENVIRONMENT_SOURCE,
         );
         const { credential_fingerprints: _supplied, ...base } = identity;
         return Object.keys(fingerprints).length === 0

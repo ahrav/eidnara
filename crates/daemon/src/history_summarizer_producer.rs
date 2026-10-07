@@ -15,7 +15,7 @@ use std::{
 
 use async_trait::async_trait;
 use host_runtime::model_execution::protocol::{
-    STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_MISSING, STATUS_QUEUED,
+    ErrorScope, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_FAILED, STATUS_MISSING, STATUS_QUEUED,
     STATUS_RUNNING,
 };
 use host_runtime::{
@@ -1475,6 +1475,9 @@ fn classification_from_json_text(s: &str) -> Option<(Option<ErrorClassification>
 }
 
 fn classification_from_object(value: &Value) -> (Option<ErrorClassification>, bool) {
+    if value.is_object() && ErrorScope::decode(value).is_err() {
+        return (None, true);
+    }
     let Some(class_value) = value.get("class") else {
         return (None, false);
     };
@@ -2295,6 +2298,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state.lock().unwrap().opened_routes.len(), 1);
+    }
+
+    #[test]
+    fn an_error_unit_with_an_unknown_scope_is_never_classified_as_a_model_error() {
+        let permanent = Some(ErrorClassification {
+            class: ErrorClass::Permanent,
+            retry_after_secs: None,
+        });
+        assert_eq!(
+            classification_from_object(&json!({"class": "permanent"})),
+            (permanent, true)
+        );
+        assert_eq!(
+            classification_from_object(&json!({"class": "permanent", "scope": "model"})),
+            (permanent, true)
+        );
+        for scope in [json!("bogus"), json!(7), json!(null)] {
+            assert_eq!(
+                classification_from_object(&json!({"class": "permanent", "scope": scope})),
+                (None, true)
+            );
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ backend/ring.rs, lease.rs, descriptor.rs, profile.rs}`.
 | Descriptor schema | `4` | `GrantMessage.descriptor_schema` on the setup socket; `TargetProfile::new`; the native addon's `descriptorSchemaVersion()` |
 | Mapping layout version | `4` | `PoolGrant::decode`; the lifecycle page of every mapping |
 | Hardware profile | `host-payload-pool-v1` | `WireDescriptor.profile` on the setup socket; `RingClientEndpoint::attach_with_descriptors`; the native addon's `attach` and `begin_connect` |
-| Application header version | unchanged (`WIRE_V3_VERSION`) | byte 4 of every frame header |
+| Application header version | 4 (`WIRE_VERSION`) | byte 4 of every frame header |
 | Discovery schema | unchanged (`2`) | connection file |
 
 A mismatch in any identifier retires the connection before application

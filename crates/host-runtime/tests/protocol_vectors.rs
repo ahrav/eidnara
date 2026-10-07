@@ -240,7 +240,7 @@ fn production_proof_matches_the_oracle_across_perturbed_tuples() {
 
 /// The committed `route.open` control header: length 167, version 2, request,
 /// Interactive/Normal, channel 0, epoch 0, correlation 1.
-const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000300020000000000000100000000000000";
+const ROUTE_OPEN_CONTROL_HEADER_HEX: &str = "a70000000400020000000000000100000000000000";
 
 #[test]
 fn committed_header_vectors_decode_to_their_documented_fields() {
@@ -248,7 +248,7 @@ fn committed_header_vectors_decode_to_their_documented_fields() {
     assert_eq!(control.len(), HEADER_LEN);
     let decoded = raw_client::decode_header(&control);
     assert_eq!(decoded.len, 167);
-    assert_eq!(decoded.ver, 3);
+    assert_eq!(decoded.ver, 4);
     assert_eq!(decoded.ty, TY_REQUEST);
     assert_eq!(decoded.flags, FLAGS_INTERACTIVE);
     assert_eq!(decoded.channel, 0);
@@ -262,7 +262,7 @@ fn committed_header_vectors_decode_to_their_documented_fields() {
 
     // The routed request uses header values: length 44, Background/Normal, channel 7, and epoch 77.
     // correlation 2.
-    let routed = hex_to_bytes("2c00000003000407004d0000000200000000000000");
+    let routed = hex_to_bytes("2c00000004000407004d0000000200000000000000");
     let decoded = raw_client::decode_header(&routed);
     assert_eq!(decoded.len, 44);
     assert_eq!(decoded.ty, TY_REQUEST);

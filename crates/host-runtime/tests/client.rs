@@ -426,7 +426,7 @@ async fn managed_client_witnesses_current_layout_maximum_bodies_and_controlled_r
     assert_eq!(shm["artifact"]["profile"], "host-payload-pool-v1");
     assert_eq!(shm["artifact"]["layout_version"], 4);
     assert_eq!(shm["artifact"]["descriptor_schema"], 4);
-    assert_eq!(shm["artifact"]["wire_version"], 3);
+    assert_eq!(shm["artifact"]["wire_version"], 4);
     assert_eq!(shm["activation"]["completed"], 1);
     assert_eq!(shm["reclamation"]["completed"], 0);
     assert_eq!(

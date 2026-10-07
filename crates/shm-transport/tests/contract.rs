@@ -5,7 +5,7 @@
 use shm_transport::backend::ring::{PoolGrant, Ring, RingError};
 use shm_transport::descriptor::{
     CompletionRecord, DESCRIPTOR_SCHEMA_VERSION, DescriptorError, HardwareProfileId, Incarnation,
-    PayloadIdentity, PoolDescriptor, TransportDescriptor, WIRE_V3_HEADER_BYTES, WIRE_V3_VERSION,
+    PayloadIdentity, PoolDescriptor, TransportDescriptor, WIRE_V3_HEADER_BYTES, WIRE_VERSION,
     check_wire_header,
 };
 use shm_transport::lifecycle::{CloseState, Lifecycle, LifecycleError};
@@ -15,7 +15,7 @@ use shm_transport::profile::{host_payload_pool_profile, pool_profile};
 fn header(body_len: usize) -> [u8; WIRE_V3_HEADER_BYTES] {
     let mut header = [0u8; WIRE_V3_HEADER_BYTES];
     header[..4].copy_from_slice(&(body_len as u32).to_le_bytes());
-    header[4] = WIRE_V3_VERSION;
+    header[4] = WIRE_VERSION;
     header
 }
 
@@ -155,12 +155,15 @@ fn wire_header_check_is_shared_by_producer_and_consumer() {
         check_wire_header(&header(10), 11),
         Err(DescriptorError::WireHeaderMismatch)
     );
-    let mut wrong_version = header(0);
-    wrong_version[4] = WIRE_V3_VERSION + 1;
-    assert_eq!(
-        check_wire_header(&wrong_version, 0),
-        Err(DescriptorError::WireHeaderMismatch)
-    );
+    for other in [WIRE_VERSION - 1, WIRE_VERSION + 1] {
+        let mut wrong_version = header(0);
+        wrong_version[4] = other;
+        assert_eq!(
+            check_wire_header(&wrong_version, 0),
+            Err(DescriptorError::WireHeaderMismatch)
+        );
+    }
+    assert_eq!(WIRE_VERSION, 4);
 }
 
 #[test]

@@ -17,6 +17,9 @@ const isolatedDataHome = mkdtempSync(join(tmpdir(), "eidnara-pi-test-xdg-"));
 // `getEidnaraStorageDir` falls back to EIDNARA_TEST_DATA_DIR once a test unsets XDG_DATA_HOME.
 process.env.EIDNARA_TEST_DATA_DIR = isolatedDataHome;
 process.env.XDG_DATA_HOME = isolatedDataHome;
+delete process.env.AWS_PROFILE;
+delete process.env.AWS_CONFIG_FILE;
+delete process.env.AWS_SHARED_CREDENTIALS_FILE;
 
 process.on("exit", () => {
     rmSync(isolatedDataHome, { recursive: true, force: true });

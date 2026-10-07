@@ -18,8 +18,6 @@ use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -47,11 +45,6 @@ pub struct EnvSnapshot {
 
 /// This cap rejects credential values larger than 16 KiB.
 pub const CREDENTIAL_VALUE_CAP_BYTES: usize = 16 * 1024;
-/// Every credential fingerprint includes this key-derivation domain.
-pub const CREDENTIAL_FINGERPRINT_DOMAIN: &str = "eidnara-model-execution-credential-v3";
-/// This identifier fixes the credential-fingerprint pre-image layout.
-/// `credential_fingerprint.canonicalization`.
-pub const CREDENTIAL_FINGERPRINT_CANONICALIZATION: &str = "harness-provider-name-length-value/1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialRowError {
@@ -248,47 +241,6 @@ impl EnvSnapshot {
         Self::SUPPORTED_PROVIDERS
             .iter()
             .any(|provider| self.provider_row(harness, provider).is_ok())
-    }
-
-    pub fn credential_fingerprint(
-        &self,
-        connection_key: &[u8; 32],
-        harness: &str,
-        provider: &str,
-    ) -> Result<String, CredentialRowError> {
-        let canonical = canonical_provider(harness, provider)?;
-        let row = self.provider_row(harness, canonical)?;
-        // Fields are length-prefixed raw bytes (`{len}:{bytes}`): the child receives the credential's original `OsStr` bytes, so the fingerprint must cover those same bytes, not a lossy Unicode rendering that would collide distinct non-UTF-8 values. For UTF-8 values this is byte-identical to the committed vector.
-        let mut message: Vec<u8> = Vec::new();
-        let mut encode = |field: &[u8]| {
-            message.extend_from_slice(field.len().to_string().as_bytes());
-            message.push(b':');
-            message.extend_from_slice(field);
-        };
-        encode(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes());
-        encode(harness.as_bytes());
-        encode(canonical.as_bytes());
-        for (name, value) in row {
-            use std::os::unix::ffi::OsStrExt;
-            let name = name.as_os_str().as_bytes();
-            let value = value.as_os_str().as_bytes();
-            encode(name);
-            encode(value.len().to_string().as_bytes());
-            encode(value);
-        }
-        let mut derive =
-            Hmac::<Sha256>::new_from_slice(connection_key).expect("HMAC accepts any key length");
-        derive.update(CREDENTIAL_FINGERPRINT_DOMAIN.as_bytes());
-        let derived = derive.finalize().into_bytes();
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&derived).expect("HMAC accepts any key length");
-        mac.update(&message);
-        Ok(mac
-            .finalize()
-            .into_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect())
     }
 }
 
@@ -2727,8 +2679,8 @@ mod tests {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
+    use super::super::source_claim::{SOURCE_CLAIM_CANONICALIZATION, SOURCE_CLAIM_DOMAIN};
     use super::{
-        CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
         CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, CredentialRowError,
         EnvSnapshot, credential_variable_mechanism, provider_row_spec,
     };
@@ -2914,16 +2866,16 @@ mod tests {
         .expect("vector snapshot");
         assert_eq!(
             snapshot
-                .credential_fingerprint(&key, "opencode", "anthropic")
+                .source_claim(&key, "opencode", "anthropic", None)
                 .expect("fingerprint"),
-            "77389364c8f8671636364d5f19b4788f6f2e990442798beb9338a99eae27e854"
+            "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218"
         );
         // A different connection key over the same row must not collide.
         assert_ne!(
             snapshot
-                .credential_fingerprint(&[0u8; 32], "opencode", "anthropic")
+                .source_claim(&[0u8; 32], "opencode", "anthropic", None)
                 .expect("fingerprint"),
-            "77389364c8f8671636364d5f19b4788f6f2e990442798beb9338a99eae27e854"
+            "77e2f22f3be6abf25f49883b92dd5f836d6c099346792d1e517a848ebe6cc218"
         );
     }
 
@@ -2939,16 +2891,17 @@ mod tests {
     ) -> String {
         let field = |text: &[u8]| [format!("{}:", text.len()).as_bytes(), text].concat();
         let message = [
-            field(CREDENTIAL_FINGERPRINT_CANONICALIZATION.as_bytes()),
+            field(SOURCE_CLAIM_CANONICALIZATION.as_bytes()),
             field(harness.as_bytes()),
             field(canonical.as_bytes()),
+            field(b"env"),
             field(name.as_bytes()),
             field(value.len().to_string().as_bytes()),
             field(value),
         ]
         .concat();
         let mut derive = Hmac::<Sha256>::new_from_slice(key).expect("key");
-        derive.update(CREDENTIAL_FINGERPRINT_DOMAIN.as_bytes());
+        derive.update(SOURCE_CLAIM_DOMAIN.as_bytes());
         let derived = derive.finalize().into_bytes();
         let mut mac = Hmac::<Sha256>::new_from_slice(&derived).expect("derived key");
         mac.update(&message);
@@ -3066,7 +3019,7 @@ mod tests {
                     )])
                     .expect("snapshot");
                     let actual = snapshot
-                        .credential_fingerprint(key, harness, provider)
+                        .source_claim(key, harness, provider, None)
                         .expect("fingerprint");
                     assert_eq!(
                         actual,
@@ -3146,15 +3099,15 @@ mod tests {
         let key = std::array::from_fn(|index| index as u8);
         assert_eq!(
             static_row
-                .credential_fingerprint(&key, "opencode", "amazon-bedrock")
+                .source_claim(&key, "opencode", "amazon-bedrock", None)
                 .expect("static fingerprint"),
-            "3c280e8e1a20d873f48a4b582e4776bdc5bd5d1534f80726d07df077da28fbda"
+            "036efb950878e220f1988e87733835bda23a3b98ae017d4971d3be89fea7b2dd"
         );
         assert_eq!(
             session_row
-                .credential_fingerprint(&key, "opencode", "amazon-bedrock")
+                .source_claim(&key, "opencode", "amazon-bedrock", None)
                 .expect("session fingerprint"),
-            "773c92ad5ea4c9d06abfdd75263014f161d81a413e6ddbe4f3610027b6df80ef"
+            "c6facdc901d90bf91034af2c09d9eb88be046ed57f0c90440a0b6d1793b14221"
         );
         let no_region = EnvSnapshot::capture_from(vec![
             (OsString::from("AWS_ACCESS_KEY_ID"), OsString::from("k")),
@@ -3194,7 +3147,7 @@ mod tests {
         )])
         .expect("snapshot");
         assert!(matches!(
-            empty.credential_fingerprint(&key, "opencode", "anthropic"),
+            empty.source_claim(&key, "opencode", "anthropic", None),
             Err(CredentialRowError::CredentialMissing)
         ));
         let oversize = EnvSnapshot::capture_from(vec![(
@@ -3203,7 +3156,7 @@ mod tests {
         )])
         .expect("snapshot");
         assert!(matches!(
-            oversize.credential_fingerprint(&key, "opencode", "anthropic"),
+            oversize.source_claim(&key, "opencode", "anthropic", None),
             Err(CredentialRowError::CredentialValueTooLarge)
         ));
     }

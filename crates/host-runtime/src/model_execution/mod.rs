@@ -22,8 +22,8 @@ use crate::handler::{
     BindOutcome, HealthReport, HealthStatus, InitError, ManifestSnapshot, RequestCtx,
     RequestOutcome, ResourceDeclaration, RouteClass, RouteHandle, RouteIdentity,
 };
-use subtle::ConstantTimeEq;
 
+use aws_source::AwsProfileSource;
 use backend::{Harness, LlmExecutionBackend};
 use protocol::{Request, RequestError};
 use subprocess::EnvSnapshot;
@@ -45,6 +45,7 @@ pub struct ModelExecutionComponent {
 
 struct CredentialVerifier {
     env: EnvSnapshot,
+    aws_source: Option<AwsProfileSource>,
     key: OnceLock<[u8; 32]>,
 }
 
@@ -60,12 +61,9 @@ impl CredentialVerifier {
             .map_err(|error| error.subreason())?;
         let expected = self
             .env
-            .credential_fingerprint(key, harness.as_str(), provider)
+            .source_claim(key, harness.as_str(), provider, self.aws_source.as_ref())
             .map_err(|error| error.subreason())?;
-        let actual = presented
-            .get(canonical)
-            .ok_or("credential_snapshot_mismatch")?;
-        if expected.as_bytes().ct_eq(actual.as_bytes()).into() {
+        if source_claim::presented_claim_matches(&expected, presented, canonical) {
             Ok(())
         } else {
             Err("credential_snapshot_mismatch")
@@ -84,9 +82,11 @@ impl ModelExecutionComponent {
         }
     }
 
+    /// A profile source installs the verifier when `env` is empty.
     pub fn new_with_credentials(
         backend: Arc<dyn LlmExecutionBackend>,
         env: EnvSnapshot,
+        aws_source: Option<AwsProfileSource>,
         state_root: StateRoot,
     ) -> Self {
         Self {
@@ -95,6 +95,7 @@ impl ModelExecutionComponent {
             route_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             credential_verifier: Some(Arc::new(CredentialVerifier {
                 env,
+                aws_source,
                 key: OnceLock::new(),
             })),
             state_root,

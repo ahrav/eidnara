@@ -1261,7 +1261,7 @@ async fn concurrent_requests_never_interleave_frame_bytes() {
             "settled {settled:?} of {expected:?}"
         );
         let frame: RawFrame = client.frame_within(BUDGET).await.expect("frame");
-        assert_eq!(frame.ver, 3, "a torn frame would decode a bogus version");
+        assert_eq!(frame.ver, 4, "a torn frame would decode a bogus version");
         assert!(
             expected.contains(&frame.corr),
             "unexpected correlation {}",

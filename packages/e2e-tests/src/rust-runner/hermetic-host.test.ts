@@ -107,7 +107,7 @@ describe("direct host fixture contract", () => {
         const valid = Buffer.from(
             JSON.stringify({
                 status: "ready",
-                wire_version: 3,
+                wire_version: 4,
                 catalog: ["context", "local_embeddings", "model_execution"],
                 debug_assertions: true,
                 model_workers: 8,
@@ -117,7 +117,7 @@ describe("direct host fixture contract", () => {
         const priorFixture = Buffer.from(
             JSON.stringify({
                 status: "ready",
-                wire_version: 3,
+                wire_version: 4,
                 catalog: ["context", "local_embeddings", "model_execution"],
             }),
         );
@@ -133,7 +133,7 @@ describe("direct host fixture contract", () => {
                     Buffer.from(
                         JSON.stringify({
                             status: "ready",
-                            wire_version: 3,
+                            wire_version: 4,
                             catalog: ["context", "local_embeddings", "model_execution"],
                             ...partial,
                         }),
@@ -143,7 +143,7 @@ describe("direct host fixture contract", () => {
         }
         expect(() =>
             __hermeticHostTest.parseReadyRecord(
-                Buffer.from('{"status":"ready","wire_version":3,"catalog":[],"key":"secret"}'),
+                Buffer.from('{"status":"ready","wire_version":4,"catalog":[],"key":"secret"}'),
             ),
         ).toThrow();
         expect(() =>
@@ -174,7 +174,7 @@ describe("direct host fixture contract", () => {
         const fixtureBin = join(root, "early-ready-fixture.sh");
         writeFileSync(
             fixtureBin,
-            `#!/bin/sh\nprintf '%s\\n' '{"status":"ready","wire_version":3,"catalog":["context","local_embeddings","model_execution"],"debug_assertions":true,"model_workers":8}'\nsleep 1\nmkdir -p "$2/eidnara/run"\n: > "$2/direct-host-control.sock"\n: > "$2/eidnara/run/connection.json"\nsleep 60\n`,
+            `#!/bin/sh\nprintf '%s\\n' '{"status":"ready","wire_version":4,"catalog":["context","local_embeddings","model_execution"],"debug_assertions":true,"model_workers":8}'\nsleep 1\nmkdir -p "$2/eidnara/run"\n: > "$2/direct-host-control.sock"\n: > "$2/eidnara/run/connection.json"\nsleep 60\n`,
             { mode: 0o700 },
         );
 

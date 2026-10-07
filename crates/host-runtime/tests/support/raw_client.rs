@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 pub const HEADER_LEN: usize = 21;
-pub const WIRE_VERSION: u8 = 3;
+pub const WIRE_VERSION: u8 = 4;
 pub const MAX_AUTH_MESSAGE_LEN: u32 = 4096;
 pub const SERVER_DOMAIN: &[u8] = b"eidnara-server-v3";
 pub const CLIENT_DOMAIN: &[u8] = b"eidnara-client-v3";

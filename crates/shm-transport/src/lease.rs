@@ -523,7 +523,7 @@ mod tests {
         retained.mark_live(block, generation);
         let mut header = [0u8; crate::descriptor::WIRE_V3_HEADER_BYTES];
         header[..4].copy_from_slice(&(body.len() as u32).to_le_bytes());
-        header[4] = crate::descriptor::WIRE_V3_VERSION;
+        header[4] = crate::descriptor::WIRE_VERSION;
         PayloadLease::new(Arc::clone(retained), block, generation, body.len(), header)
     }
 

@@ -2604,6 +2604,7 @@ mod tests {
             }),
             pi: None,
             credentials: std::collections::BTreeMap::new(),
+            aws_source: None,
         };
         let ready_json = serde_json::to_value(ready).expect("serialize ready startup");
         assert_eq!(

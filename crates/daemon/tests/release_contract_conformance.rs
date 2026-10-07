@@ -1,8 +1,11 @@
 use std::ffi::OsString;
 
 use host_runtime::harness_closure::{ClosureManifest, manifest_digest};
+use host_runtime::model_execution::source_claim::{
+    SOURCE_CLAIM_CANONICALIZATION as CREDENTIAL_FINGERPRINT_CANONICALIZATION,
+    SOURCE_CLAIM_DOMAIN as CREDENTIAL_FINGERPRINT_DOMAIN,
+};
 use host_runtime::model_execution::subprocess::{
-    CREDENTIAL_FINGERPRINT_CANONICALIZATION, CREDENTIAL_FINGERPRINT_DOMAIN,
     CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, EnvSnapshot,
     credential_variable_mechanism,
 };

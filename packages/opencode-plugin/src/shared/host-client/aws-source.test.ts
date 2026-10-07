@@ -66,7 +66,9 @@ describe("AWS source selector", () => {
                 AWS_REGION: "us-east-1",
             });
             const credentials = vector.credentials as Record<string, string>;
-            expect(sourceBinding(profile, credentials).credentials).toEqual(vector.kept as never);
+            expect(sourceBinding(profile, credentials).credentials ?? {}).toEqual(
+                vector.kept as never,
+            );
         });
     }
 

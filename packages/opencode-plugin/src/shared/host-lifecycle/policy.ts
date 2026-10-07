@@ -219,6 +219,8 @@ export interface LifecyclePolicyOptions {
     payloadDirFallback?: () => string | null;
     /** Credential-only fallback used by CLI start/restart callers. */
     defaultStartupEnvelope?: NativeStartupEnvelope;
+    /** Start and restart without a caller envelope refuse with this reason. */
+    startupRefusal?: DaemonReason;
     outerAggregateMs?: number;
 }
 
@@ -382,6 +384,7 @@ export class HostLifecyclePolicy {
     private readonly payloadManifestDigest: string | undefined;
     private readonly payloadDirFallback: (() => string | null) | undefined;
     private readonly defaultStartupEnvelope: NativeStartupEnvelope | undefined;
+    private readonly startupRefusal: DaemonReason | undefined;
     private readonly outerAggregateMs: number | undefined;
     private readonly inflightStarts = new Map<string, Promise<DaemonResultV1>>();
     /** One in-flight compatibility probe per data root, keyed independently of capability. */
@@ -407,6 +410,7 @@ export class HostLifecyclePolicy {
         this.payloadManifestDigest = options.payloadManifestDigest;
         this.payloadDirFallback = options.payloadDirFallback;
         this.defaultStartupEnvelope = options.defaultStartupEnvelope;
+        this.startupRefusal = options.startupRefusal;
         this.outerAggregateMs = options.outerAggregateMs;
     }
 
@@ -418,6 +422,9 @@ export class HostLifecyclePolicy {
     async start(
         startupEnvelope: NativeStartupEnvelope | undefined = this.defaultStartupEnvelope,
     ): Promise<DaemonResultV1> {
+        if (startupEnvelope === undefined && this.startupRefusal !== undefined) {
+            return localResult("start", false, "unavailable", this.startupRefusal);
+        }
         return this.mutatingCommand("start", startupEnvelope);
     }
 
@@ -429,6 +436,9 @@ export class HostLifecyclePolicy {
     async restart(
         startupEnvelope: NativeStartupEnvelope | undefined = this.defaultStartupEnvelope,
     ): Promise<DaemonResultV1> {
+        if (startupEnvelope === undefined && this.startupRefusal !== undefined) {
+            return localResult("restart", false, "unavailable", this.startupRefusal);
+        }
         return this.mutatingCommand("restart", startupEnvelope);
     }
 
