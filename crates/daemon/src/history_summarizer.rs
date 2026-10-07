@@ -1829,6 +1829,24 @@ fn classified_backoff_at_ms(
     now_ms.saturating_add(HISTORY_SUMMARIZER_FAILURE_BACKOFF_MS.max(retry_after_ms))
 }
 
+/// Failures that end a firing persist the returned backoff.
+fn terminal_failure_backoff_at_ms(
+    err: &HistorySummarizerProducerError,
+    completed_at_ms: i64,
+    failure_backoff_at_ms: i64,
+) -> i64 {
+    err.classification()
+        .map_or(failure_backoff_at_ms, |classification| {
+            if classification.class == ErrorClass::Transient
+                || classification.scope == ErrorScope::CredentialSource
+            {
+                classified_backoff_at_ms(completed_at_ms, failure_backoff_at_ms, classification)
+            } else {
+                failure_backoff_at_ms
+            }
+        })
+}
+
 fn has_eligible_model(models: &[String], blocked_providers: &[&str]) -> bool {
     models
         .iter()
@@ -2067,13 +2085,18 @@ where
                         let detail = format!(
                             "producer output ({model}): timed out; recovery re-drain also failed: {recovery_err}"
                         );
+                        let completed_at_ms = (request.completion_now_ms)();
                         let failure_backoff_at_ms = hold_source_retry(
                             &mut source_retry_at_ms,
                             &recovery_err,
-                            completion_failure_backoff_at_ms(
-                                request.now_ms,
-                                request.failure_backoff_at_ms,
-                                (request.completion_now_ms)(),
+                            terminal_failure_backoff_at_ms(
+                                &recovery_err,
+                                completed_at_ms,
+                                completion_failure_backoff_at_ms(
+                                    request.now_ms,
+                                    request.failure_backoff_at_ms,
+                                    completed_at_ms,
+                                ),
                             ),
                         );
                         persist_history_summarizer_state(
@@ -2303,20 +2326,7 @@ where
                 completed_at_ms,
             );
             let backoff_at_ms =
-                err.classification()
-                    .map_or(failure_backoff_at_ms, |classification| {
-                        if classification.class == ErrorClass::Transient
-                            || classification.scope == ErrorScope::CredentialSource
-                        {
-                            classified_backoff_at_ms(
-                                completed_at_ms,
-                                failure_backoff_at_ms,
-                                classification,
-                            )
-                        } else {
-                            failure_backoff_at_ms
-                        }
-                    });
+                terminal_failure_backoff_at_ms(&err, completed_at_ms, failure_backoff_at_ms);
             abandon_current_state_with_detail(
                 request.store,
                 request.session_id,
@@ -5228,6 +5238,43 @@ mod tests {
             state.failure_backoff_at_ms >= Some(10_000 + 120_000),
             "the reattached fallback's failure holds the source's retry deadline, got {:?}",
             state.failure_backoff_at_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_failure_on_the_recovery_redrain_holds_its_typed_retry() {
+        fn completed_at() -> i64 {
+            10_000
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_history_segment(&store);
+        let chunk = history_summarizer_chunk();
+        let prior = prior_ranges();
+        let models = vec![
+            "amazon-bedrock/model-a".to_owned(),
+            "anthropic/model-c".to_owned(),
+        ];
+        let mut producer = ScriptedProducer::default()
+            .with_start(Ok(run_handle("run-1")))
+            .with_output(Err(HistorySummarizerProducerError::TimedOut))
+            .with_output(Err(source_run_failure(ErrorClass::Transient)));
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.completion_now_ms = completed_at;
+        let error = run_history_summarizer_firing(&mut producer, request)
+            .await
+            .unwrap_err();
+        assert!(!is_chunk_failure(&error));
+        assert_eq!(
+            producer.observed_starts.len(),
+            1,
+            "a re-drain failure ends the firing"
+        );
+        let state = store.load("ses").unwrap().meta.history_summarizer;
+        assert_eq!(
+            state.failure_backoff_at_ms,
+            Some(10_000 + 120_000),
+            "the re-drained source failure holds its typed retry-after"
         );
     }
 
