@@ -37,8 +37,8 @@ flowchart TB
   CF --> RC[Managed Rust clients]
   TS <-->|authenticate and receive descriptors| US[Owner-only Unix setup socket]
   RC <-->|authenticate and receive descriptors| US
-  TS <-->|v3 application frames| R[Shared-memory ring]
-  RC <-->|v3 application frames| R
+  TS <-->|v4 application frames| R[Shared-memory ring]
+  RC <-->|v4 application frames| R
   US --> H[host-runtime]
   R --> H
   H -->|initialize, bind, handle, route-gone, health| M[Linked Handler]
@@ -202,7 +202,7 @@ sequenceDiagram
   C->>H: ClientAuth {client_auth}
   Note over H: constant-time verify
   H-->>C: two ring descriptors + activation data
-  Note over C,H: validate current identity, attach, commit; v3 ring traffic enabled
+  Note over C,H: validate current identity, attach, commit; v4 ring traffic enabled
 ```
 
 Canonical JSON shapes:
@@ -238,12 +238,12 @@ Any malformed JSON, wrong array length, oversized message, nonce-generation fail
 
 ### 6.1 Header
 
-After authentication, peers exchange a fixed 21-byte v3 header followed by `len` opaque body bytes. Integers are little-endian.
+After authentication, peers exchange a fixed 21-byte v4 header followed by `len` opaque body bytes. Integers are little-endian.
 
 | Offset | Width | Field | Constraint |
 | ---: | ---: | --- | --- |
 | 0 | 4 | `len: u32` | `0..=67,108,864` |
-| 4 | 1 | `ver: u8` | exactly 3 |
+| 4 | 1 | `ver: u8` | exactly 4 |
 | 5 | 1 | `type: u8` | `0..=11` per table below |
 | 6 | 1 | `flags: u8` | valid bit fields below |
 | 7 | 2 | `channel: u16` | 0 is control; routed channels are nonzero |
@@ -304,7 +304,7 @@ Any structurally illegal channel, epoch, correlation, body, or direction closes 
 
 ### 6.3 Reading, limits, and corruption
 
-The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v3 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
+The interoperability body maximum is exactly 64 MiB (`67,108,864` bytes). A conforming implementation MUST be able to accept one otherwise valid maximum-size frame on an admitted authenticated connection. A deployment MAY cap concurrent connections, aggregate buffered bytes, routes, pending correlations, handler tasks, queues, and diagnostics, but MUST NOT advertise v4 conformance while rejecting an otherwise valid frame solely because its declared length is at or below 64 MiB.
 
 Aggregate resource policy takes effect between frames, before admitting more connections/work, or after a complete frame reaches a profile/application limit. For example, `Handler` may return terminal `invalid_params` for its 1 MiB facade or 32 MiB transform limits after transport framing accepts the body. Local limits never change header bytes.
 
@@ -899,7 +899,7 @@ answer.
 
 ### 7.10 Transform application revision 3
 
-Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v3 and the context application protocol (Section 7.8) stays 3. This section specifies the whole revision: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). Revision 3 is neither backward nor forward compatible with any earlier transform body: a daemon serves exactly this revision, and a consumer and daemon of one release speak it together.
+Transform application revision 3 is a separately named application revision of the `transform` method family on the Context route; the frame protocol stays v4 and the context application protocol (Section 7.8) stays 3. This section specifies the whole revision: the per-session admission outcome (Section 7.10.1), the discovery method (Section 7.10.2), the `transform` request (Section 7.10.3), its outcomes and errors (Section 7.10.4), and the response with the coordinates of its recipe (Section 7.10.5). Revision 3 is neither backward nor forward compatible with any earlier transform body: a daemon serves exactly this revision, and a consumer and daemon of one release speak it together.
 
 #### 7.10.1 Per-session admission and `session_busy`
 
