@@ -4284,13 +4284,21 @@ fn a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner() {
         [24],
         "only the run that observed the login fails"
     );
-    assert_eq!(rows.len(), 47);
+    let expected: Vec<String> = (0..48)
+        .filter(|slot| *slot != 24)
+        .map(|slot| {
+            let call = if slot < 24 {
+                slot / 2
+            } else {
+                13 + (slot - 25) / 2
+            };
+            format!("ASIAROW{call}")
+        })
+        .collect();
     assert_eq!(
-        rows[24], "ASIAROW13",
-        "the run after the login rotates at once"
+        rows, expected,
+        "every second run rotates, and the run after the login rotates at once"
     );
-    let distinct: BTreeSet<&String> = rows.iter().collect();
-    assert_eq!(distinct.len(), 24, "24 rotations");
     assert_eq!(
         script.calls.load(std::sync::atomic::Ordering::SeqCst),
         25,
