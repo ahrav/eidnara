@@ -667,6 +667,7 @@ const CLIENT_MODULES = [
     "shared/host-client/route-handle.ts",
     "shared/host-client/serialized-json-body.ts",
     "shared/host-client/shm-frame-channel.ts",
+    "shared/host-client/source-claim.ts",
     "shared/host-client/types.ts",
     "shared/host-lifecycle/bootstrap.ts",
     "shared/host-lifecycle/compatibility.ts",
