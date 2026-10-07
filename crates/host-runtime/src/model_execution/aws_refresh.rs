@@ -220,6 +220,14 @@ impl SourceOwner {
             if let Some(found) = self.0.usable(&state, deadline) {
                 return found;
             }
+            // On a miss, cancellation or deadline expiry ends the demand before any
+            // credential I/O begins.
+            if cancel.is_cancelled() {
+                return Err(SourceError::Cancelled);
+            }
+            if deadline <= Instant::now() {
+                return Err(SourceError::DeadlineExceeded);
+            }
             match &state.in_flight {
                 Some(settled) => settled.clone(),
                 None => {
@@ -945,6 +953,29 @@ mod tests {
         assert_eq!(h.fake.calls(), 1, "a warm acquisition starts no refresh");
         assert_eq!(h.health.get().state, SourceState::Ready);
         assert_eq!(h.health.get().expires_in_seconds, Some(HOUR));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_already_cancelled_or_expired_demand_starts_no_refresh() {
+        let h = harness();
+        h.fake.push(h.ok(HOUR));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            h.owner.acquire(Instant::now() + MODEL, &cancel).await.err(),
+            Some(SourceError::Cancelled)
+        );
+        let expired = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            h.owner.acquire(expired, &h.never).await.err(),
+            Some(SourceError::DeadlineExceeded)
+        );
+        assert_eq!(
+            h.fake.calls(),
+            0,
+            "an aborted demand starts no credential I/O"
+        );
+        assert_eq!(h.health.get().state, SourceState::Unknown);
     }
 
     #[tokio::test(start_paused = true)]
