@@ -105,6 +105,26 @@ pub struct PrivateToken {
     basis: TokenObservation,
 }
 
+impl PrivateToken {
+    pub(super) fn basis(&self) -> &TokenObservation {
+        &self.basis
+    }
+}
+
+#[cfg(test)]
+impl PrivateToken {
+    pub(crate) fn for_test(token: &[u8], basis: TokenObservation) -> Self {
+        Self {
+            token: Zeroizing::new(token.to_vec()),
+            basis,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.token
+    }
+}
+
 /// Helper process limits. [`Default`] holds the fixed production values, which
 /// release builds always use.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,8 +155,16 @@ impl Default for HelperLimits {
 /// Everything one transaction reads.
 pub struct TransactionInput<'a> {
     pub source: &'a OwnerSource,
+    /// The owner's admitted graph identity. A capture that admits to a different
+    /// identity ends the transaction as [`TransactionFailure::GraphChanged`] before any
+    /// token is supplied or the helper runs.
+    pub admitted: Option<&'a GraphIdentity>,
     /// The newest private successor from an earlier transaction of this incarnation.
     pub predecessor: Option<&'a PrivateToken>,
+    /// An owner token observation that can no longer renew, such as one whose rotation
+    /// was lost. An owner token with the same content ends the transaction as
+    /// [`TransactionFailure::LoginRequired`] before the helper runs.
+    pub superseded: Option<&'a TokenObservation>,
     /// The host executable to launch in debug builds; release builds launch
     /// `/proc/self/exe`.
     pub executable: &'a Path,
@@ -181,6 +209,8 @@ pub enum CaptureFailure {
 pub enum TransactionFailure {
     Capture(CaptureFailure),
     Admission(AdmissionError),
+    /// The selected graph admits to an identity other than the owner's admitted one.
+    GraphChanged,
     /// No valid token is available for the SSO root; an external login is needed.
     LoginRequired,
     /// The owner's token observation changed during the transaction.
@@ -201,7 +231,8 @@ pub struct TransactionOutcome {
     pub identity: Option<GraphIdentity>,
     pub row: Option<CredentialRow>,
     pub successor: Option<PrivateToken>,
-    /// The external token observation taken last, before adoption.
+    /// The latest external token observation, except when `lost_succession` retains
+    /// the observation renewal started under.
     pub observation: Option<TokenObservation>,
     pub renewal: RenewalEvidence,
     /// Renewal may have rotated the token and no valid successor was recovered, so
@@ -283,6 +314,13 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
     };
     let mut outcome = TransactionOutcome::failed(F::LoginRequired);
     outcome.identity = Some(graph.identity().clone());
+    if input
+        .admitted
+        .is_some_and(|admitted| admitted != graph.identity())
+    {
+        outcome.failure = Some(F::GraphChanged);
+        return outcome;
+    }
     let sso = match &graph.identity().root {
         RootIdentity::Sso {
             session_name,
@@ -307,6 +345,12 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
         supplied = match input.predecessor {
             Some(private) if same_content(&private.basis, &observation) => {
                 sso.canonical(&private.token)
+            }
+            _ if input
+                .superseded
+                .is_some_and(|superseded| same_content(superseded, &observation)) =>
+            {
+                None
             }
             _ => owner_token.and_then(|bytes| sso.canonical(&bytes)),
         };
@@ -400,11 +444,17 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
     if let Some(sso) = &sso {
         let (observation, _) = sso.observe().await;
         let started = outcome.observation.replace(observation.clone());
-        if !started.is_some_and(|started| same_content(&started, &observation)) {
+        if !started
+            .as_ref()
+            .is_some_and(|started| same_content(started, &observation))
+        {
             // A new external login supersedes any rotation; a deleted or unusable
             // owner token leaves a possible rotation unrecovered.
             let relogin = matches!(observation, TokenObservation::Present { .. });
             outcome.lost_succession = unproven && !relogin;
+            if outcome.lost_succession {
+                outcome.observation = started;
+            }
             outcome.failure = Some(F::Withdrawn);
             return outcome;
         }
@@ -444,7 +494,7 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
 /// Two observations of the owner's token agree when both hold the same content, or
 /// when both are absent or unusable. A metadata-only change, such as `touch` or
 /// `chmod`, keeps the observation.
-fn same_content(a: &TokenObservation, b: &TokenObservation) -> bool {
+pub(super) fn same_content(a: &TokenObservation, b: &TokenObservation) -> bool {
     match (a, b) {
         (
             TokenObservation::Present { sha256: a, .. },
@@ -690,7 +740,8 @@ impl<'de> Deserialize<'de> for Slot {
     }
 }
 
-pub fn admit_owner_source(source: &OwnerSource) -> Result<(), TransactionFailure> {
+/// Captures and admits the owner's selected graph, returning its identity.
+pub fn admit_owner_source(source: &OwnerSource) -> Result<GraphIdentity, TransactionFailure> {
     let [config, credentials] = capture_files(source).map_err(TransactionFailure::Capture)?;
     aws_profile::admit(CapturedProfileInput {
         profile: &source.profile,
@@ -698,7 +749,7 @@ pub fn admit_owner_source(source: &OwnerSource) -> Result<(), TransactionFailure
         config: &config,
         credentials: &credentials,
     })
-    .map(drop)
+    .map(|graph| graph.identity().clone())
     .map_err(TransactionFailure::Admission)
 }
 
@@ -894,7 +945,9 @@ mod tests {
         let mut slot = TransactionSlot { unresolved: true };
         let input = TransactionInput {
             source: &source,
+            admitted: None,
             predecessor: None,
+            superseded: None,
             executable: Path::new("/nonexistent"),
             state_root: &state,
             budget: TRANSACTION_BUDGET,
