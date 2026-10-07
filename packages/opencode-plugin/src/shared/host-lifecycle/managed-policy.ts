@@ -13,6 +13,7 @@ import {
     sameDaemonId,
     sourceBinding,
 } from "../host-client";
+import { type AwsCredentialsHealth, parseAwsCredentialsBlock } from "../source-health";
 import { BootstrapError, checkPlatform, type PlatformReaders } from "./bootstrap";
 import {
     evaluateDaemonCompatibility,
@@ -134,6 +135,16 @@ export type KernelReadiness =
       }
     | { state: "starting"; reason: "kernel_starting" }
     | { state: "unavailable"; reason: "kernel_unavailable" };
+
+/** The closed model-execution `aws_credentials` block, or `undefined` when it is absent or malformed. */
+export function awsCredentialsObservation(
+    metrics: Record<string, unknown>,
+): AwsCredentialsHealth | undefined {
+    return (
+        parseAwsCredentialsBlock(componentMetrics(metrics, "model_execution")?.aws_credentials) ??
+        undefined
+    );
+}
 
 export function kernelReadiness(metrics: Record<string, unknown>): KernelReadiness {
     const kernel = asRecord(componentMetrics(metrics, "context")?.kernel);
@@ -390,8 +401,10 @@ async function probeManagedReadiness(root: string, budgetMs: number): Promise<Ob
     const storage = storageState(status.metrics);
     const kernel = kernelReadiness(status.metrics);
     const local_embeddings = local_embeddingsReadiness(status.metrics);
+    const aws_credentials = awsCredentialsObservation(status.metrics);
     return {
         ...compatibility,
+        ...(aws_credentials === undefined ? {} : { aws_credentials }),
         readiness: {
             transport: { state: "ready", reason: "healthy" },
             storage: {

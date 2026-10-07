@@ -1317,6 +1317,7 @@ pub fn run() -> Result<(), &'static str> {
     let handler = daemon::Handler::new_with_connection_file(Some(publication))
         .with_connection_key_hook(commit_selection)
         .with_capability_source(capability_source)
+        .with_source_health(model_execution.source_health())
         .with_local_embeddings(local_embeddings.clone())
         .with_memory_reviewer_host(memory_reviewer_host);
     // The query route serves under #825 D23's limits; admission still decides whether a request reaches the projection.

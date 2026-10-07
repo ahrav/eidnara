@@ -11,6 +11,7 @@ pub mod opencode;
 pub mod pi;
 pub mod protocol;
 pub mod source_claim;
+pub mod source_health;
 pub mod subprocess;
 pub mod supervisor;
 
@@ -26,6 +27,7 @@ use crate::handler::{
 use aws_source::AwsProfileSource;
 use backend::{Harness, LlmExecutionBackend};
 use protocol::{Request, RequestError};
+use source_health::{SourceHealthCell, SourceKind, SourceObservation, SourceState};
 use subprocess::EnvSnapshot;
 use subprocess::group_registry::StateRoot;
 use supervisor::{SessionKey, Supervisor};
@@ -39,6 +41,7 @@ pub struct ModelExecutionComponent {
     routes: Arc<Mutex<HashMap<RouteHandle, SessionKey>>>,
     route_fingerprints: Arc<Mutex<HashMap<RouteHandle, BTreeMap<String, String>>>>,
     credential_verifier: Option<Arc<CredentialVerifier>>,
+    source_health: SourceHealthCell,
     /// The same root the backends write crash-ownership records to; `initialize` sweeps it.
     state_root: StateRoot,
 }
@@ -78,6 +81,7 @@ impl ModelExecutionComponent {
             routes: Arc::new(Mutex::new(HashMap::new())),
             route_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             credential_verifier: None,
+            source_health: SourceHealthCell::new(SourceObservation::unknown(SourceKind::None)),
             state_root,
         }
     }
@@ -89,10 +93,12 @@ impl ModelExecutionComponent {
         aws_source: Option<AwsProfileSource>,
         state_root: StateRoot,
     ) -> Self {
+        let initial = initial_source_health(&env, aws_source.is_some());
         Self {
             supervisor: Arc::new(Supervisor::new(backend)),
             routes: Arc::new(Mutex::new(HashMap::new())),
             route_fingerprints: Arc::new(Mutex::new(HashMap::new())),
+            source_health: SourceHealthCell::new(initial),
             credential_verifier: Some(Arc::new(CredentialVerifier {
                 env,
                 aws_source,
@@ -106,12 +112,35 @@ impl ModelExecutionComponent {
         Arc::clone(&self.supervisor)
     }
 
+    pub fn source_health(&self) -> SourceHealthCell {
+        self.source_health.clone()
+    }
+
     fn key_of_route(&self, route: RouteHandle) -> Option<SessionKey> {
         self.routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&route)
             .cloned()
+    }
+}
+
+/// The startup observation: a selected profile is unknown until the refresh owner
+/// observes it, and an environment Bedrock row is a usable local row. Both harnesses map
+/// Bedrock to the same canonical row, so one probe answers for both.
+fn initial_source_health(env: &EnvSnapshot, profile_selected: bool) -> SourceObservation {
+    if profile_selected {
+        SourceObservation::unknown(SourceKind::Profile)
+    } else if env
+        .provider_row(Harness::OpenCode.as_str(), source_claim::PROFILE_PROVIDER)
+        .is_ok()
+    {
+        SourceObservation {
+            state: SourceState::Ready,
+            ..SourceObservation::unknown(SourceKind::Environment)
+        }
+    } else {
+        SourceObservation::unknown(SourceKind::None)
     }
 }
 
@@ -365,17 +394,24 @@ impl CompositeComponent for ModelExecutionComponent {
                         !verifier.env.any_credential_available(harness.as_str())
                     })
             });
+        let aws_credentials = self.source_health.get().to_json();
         if unavailable {
             return HealthReport {
                 status: HealthStatus::Degraded,
                 detail: None,
-                metrics: Some(serde_json::json!({"model_execution_state": "unavailable"})),
+                metrics: Some(serde_json::json!({
+                    "model_execution_state": "unavailable",
+                    source_health::AWS_CREDENTIALS_KEY: aws_credentials,
+                })),
             };
         }
         HealthReport {
             status: HealthStatus::Ok,
             detail: None,
-            metrics: Some(serde_json::json!({"model_execution_state": "ready"})),
+            metrics: Some(serde_json::json!({
+                "model_execution_state": "ready",
+                source_health::AWS_CREDENTIALS_KEY: aws_credentials,
+            })),
         }
     }
 

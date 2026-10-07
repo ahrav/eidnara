@@ -165,6 +165,27 @@ describe("Pi status dialog", () => {
         expect(text()).not.toContain("Context:");
     });
 
+    it("renders the daemon's AWS credential observation and unknown when it is absent or malformed", async () => {
+        for (const [aws_credentials, line] of [
+            [undefined, "AWS credentials: unknown"],
+            [{ kind: "profile", state: "ready", profile: "canary" }, "AWS credentials: unknown"],
+            [
+                { kind: "environment", state: "ready", consecutive_failures: 0 },
+                "AWS credentials: environment ready",
+            ],
+        ] as const) {
+            const { ctx, text } = renderingContext("ses-status-aws", 90);
+            await showStatusDialog(
+                fakePi,
+                ctx as never,
+                deps(),
+                daemonSource({ ...DAEMON_STATUS, aws_credentials }),
+            );
+            expect(text()).toContain(line);
+            expect(text()).not.toContain("canary");
+        }
+    });
+
     it("re-reads the daemon status on each refresh and keeps the last answer when a read fails", async () => {
         const sessionId = "ses-status-refresh";
         const settled: RustSessionStatus = {

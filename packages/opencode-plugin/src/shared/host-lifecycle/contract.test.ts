@@ -66,6 +66,30 @@ describe("parseDaemonResult", () => {
         expect(parsed.versions.daemon).toBe("eidnara-host/0.1.0");
     });
 
+    test("accepts a closed aws_credentials observation and refuses any other shape", () => {
+        const block = {
+            kind: "profile",
+            state: "cooldown",
+            next_retry_in_seconds: 30,
+            consecutive_failures: 2,
+        };
+        expect(
+            parseDaemonResult(JSON.stringify(validResult({ aws_credentials: block })))
+                .aws_credentials,
+        ).toEqual(block as never);
+        expect(parseDaemonResult(JSON.stringify(validResult())).aws_credentials).toBeUndefined();
+        for (const bad of [
+            null,
+            { ...block, profile: "canary" },
+            { ...block, state: "expired" },
+            { kind: "profile", state: "ready" },
+        ]) {
+            expect(() =>
+                parseDaemonResult(JSON.stringify(validResult({ aws_credentials: bad }))),
+            ).toThrow(ContractViolation);
+        }
+    });
+
     test("normalizes the native shared-memory readiness name", () => {
         const parsed = parseDaemonResult(
             JSON.stringify(

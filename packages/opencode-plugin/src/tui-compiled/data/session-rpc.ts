@@ -182,6 +182,7 @@ export async function loadStatusDetail(
             lastErrorMessage: null,
             lastErrorTime: null,
         },
+        awsCredentials: "unknown",
     };
 
     if (!rpcClient) return emptyDetail;

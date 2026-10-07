@@ -231,7 +231,7 @@
     "id": "eidnara-host-release",
     "version": "0.1.0"
   },
-  "release_contract_sha256": "9a4030244c6ea1b60c43ff2265839b9f0bbd27acb1a83d6b9c81fac938b0aac5",
+  "release_contract_sha256": "27ff180f3ae5eddaaece60ef0d22768d5fefe958fd975f0dbe17015e1c8376f3",
   "rust_runtime": {
     "fastembed": "6.0.0",
     "ort": "2.0.0-rc.13",

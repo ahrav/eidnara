@@ -180,8 +180,22 @@ describe("Pi /eidnara-status", () => {
         expect(entry?.text).toContain("- Boundary: present");
         expect(entry?.text).toContain("- Coverage ordinal: 12");
         expect(entry?.text).toContain("- HistorySegments: 4");
+        expect(entry?.text).toContain("- AWS credentials: unknown");
         expect(entry?.text).toContain("### Tail Hygiene");
         expect(entry?.text).toContain("65.1%");
+    });
+
+    it("renders the daemon's cached AWS credential observation", async () => {
+        const { pi, run } = harness();
+        const module = fakeModuleClient(() => ({
+            result: {
+                ...DAEMON_STATUS,
+                aws_credentials: { kind: "environment", state: "ready", consecutive_failures: 0 },
+            },
+        }));
+        registerCtxStatusCommand(pi, statusDeps(module.client));
+        const [entry] = await run("eidnara-status");
+        expect(entry?.text).toContain("- AWS credentials: environment ready");
     });
 
     it("renders the window derivation only when the daemon limit is absent or equals the usable window", async () => {

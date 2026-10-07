@@ -669,6 +669,32 @@ so `metadata_headroom_bytes` reaching zero means new review work is refused
 until a new incarnation; it is a safety ceiling, not a measured service
 lifetime.
 
+The `model_execution` component MAY also carry a sanitized
+`metrics.aws_credentials` object: the host's cached observation of the
+selected AWS credential source, read from a shared cell with no credential
+I/O. It is advisory and never authorizes dispatch. Unlike `kernel`, the block
+is sanitized all-or-nothing like `epochs`: any key outside the five below, any
+value outside its closed set or bound, or any malformed field drops the whole
+object from the response. A missing `aws_credentials` object means the source
+state is unknown. `ready` means a locally usable cached row, never remote
+permission or fold progress; every other state can still hold a
+lifetime-qualified row, so a consumer MUST NOT reduce it to unconditional
+readiness.
+
+| field | type | rule |
+| --- | --- | --- |
+| `kind` | `"none" \| "environment" \| "profile"` | required; which credential source the host selected at start |
+| `state` | `"unknown" \| "ready" \| "refreshing" \| "cooldown" \| "login_required" \| "invalid"` | required; a `ready` row past its expiry reads as `unknown` |
+| `expires_in_seconds` | unsigned integer, at most 86400 | present only while a live expiry is known; seconds remaining at the read, reported at the bound when larger |
+| `next_retry_in_seconds` | unsigned integer, at most 300 | present only while a retry is scheduled; seconds remaining at the read, reported at the bound when larger |
+| `consecutive_failures` | unsigned integer, at most `u32::MAX` | required; saturating count of consecutive source failures |
+
+No field carries a profile name, account, role, path, session, token, hash, or
+error text. The shared vectors in
+`crates/host-runtime/tests/fixtures/source-health-vectors.json` fix the field
+set, bounds, and drop cases, and the Rust sanitizer and TypeScript parser MUST
+agree on every case.
+
 `host.shutdown` is the authenticated host-global stop. Request and success response are both compact tagged objects; unknown request fields are ignored under the Section 7.1 bounds:
 
 ```json

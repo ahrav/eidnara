@@ -1,0 +1,310 @@
+{
+  "fields": [
+    "kind",
+    "state",
+    "expires_in_seconds",
+    "next_retry_in_seconds",
+    "consecutive_failures"
+  ],
+  "max_consecutive_failures": 4294967295,
+  "cases": [
+    {
+      "name": "closed minimum",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0
+      },
+      "closed": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0
+      }
+    },
+    {
+      "name": "every number at its bound",
+      "input": {
+        "kind": "profile",
+        "state": "cooldown",
+        "consecutive_failures": 4294967295,
+        "expires_in_seconds": 86400,
+        "next_retry_in_seconds": 300
+      },
+      "closed": {
+        "kind": "profile",
+        "state": "cooldown",
+        "consecutive_failures": 4294967295,
+        "expires_in_seconds": 86400,
+        "next_retry_in_seconds": 300
+      }
+    },
+    {
+      "name": "environment ready",
+      "input": {
+        "kind": "environment",
+        "state": "ready",
+        "consecutive_failures": 0
+      },
+      "closed": {
+        "kind": "environment",
+        "state": "ready",
+        "consecutive_failures": 0
+      }
+    },
+    {
+      "name": "none unknown",
+      "input": {
+        "kind": "none",
+        "state": "unknown",
+        "consecutive_failures": 0
+      },
+      "closed": {
+        "kind": "none",
+        "state": "unknown",
+        "consecutive_failures": 0
+      }
+    },
+    {
+      "name": "login required with retry",
+      "input": {
+        "kind": "profile",
+        "state": "login_required",
+        "consecutive_failures": 2,
+        "next_retry_in_seconds": 30
+      },
+      "closed": {
+        "kind": "profile",
+        "state": "login_required",
+        "consecutive_failures": 2,
+        "next_retry_in_seconds": 30
+      }
+    },
+    {
+      "name": "refreshing with expiry",
+      "input": {
+        "kind": "profile",
+        "state": "refreshing",
+        "consecutive_failures": 0,
+        "expires_in_seconds": 1
+      },
+      "closed": {
+        "kind": "profile",
+        "state": "refreshing",
+        "consecutive_failures": 0,
+        "expires_in_seconds": 1
+      }
+    },
+    {
+      "name": "invalid",
+      "input": {
+        "kind": "profile",
+        "state": "invalid",
+        "consecutive_failures": 7
+      },
+      "closed": {
+        "kind": "profile",
+        "state": "invalid",
+        "consecutive_failures": 7
+      }
+    },
+    {
+      "name": "expiry above bound",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "expires_in_seconds": 86401
+      },
+      "closed": null
+    },
+    {
+      "name": "retry above bound",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "next_retry_in_seconds": 301
+      },
+      "closed": null
+    },
+    {
+      "name": "negative expiry",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "expires_in_seconds": -1
+      },
+      "closed": null
+    },
+    {
+      "name": "fractional expiry",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "expires_in_seconds": 1.5
+      },
+      "closed": null
+    },
+    {
+      "name": "failures above u32",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 4294967296
+      },
+      "closed": null
+    },
+    {
+      "name": "failures as text",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": "1"
+      },
+      "closed": null
+    },
+    {
+      "name": "missing failures",
+      "input": {
+        "kind": "profile",
+        "state": "ready"
+      },
+      "closed": null
+    },
+    {
+      "name": "missing kind",
+      "input": {
+        "state": "ready",
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
+      "name": "missing state",
+      "input": {
+        "kind": "profile",
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
+      "name": "unknown state",
+      "input": {
+        "kind": "profile",
+        "state": "expired",
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
+      "name": "unknown kind",
+      "input": {
+        "kind": "static",
+        "state": "ready",
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
+      "name": "null state",
+      "input": {
+        "kind": "profile",
+        "state": null,
+        "consecutive_failures": 0
+      },
+      "closed": null
+    },
+    {
+      "name": "profile name canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "profile": "canary-profile"
+      },
+      "closed": null
+    },
+    {
+      "name": "account canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "account": "123456789012"
+      },
+      "closed": null
+    },
+    {
+      "name": "role canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "role_arn": "arn:aws:iam::123456789012:role/canary"
+      },
+      "closed": null
+    },
+    {
+      "name": "path canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "config_file": "/home/canary/.aws/config"
+      },
+      "closed": null
+    },
+    {
+      "name": "session canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "sso_session": "canary-session"
+      },
+      "closed": null
+    },
+    {
+      "name": "hash canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "closed": null
+    },
+    {
+      "name": "token canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "session_token": "IQoJcanary"
+      },
+      "closed": null
+    },
+    {
+      "name": "error text canary",
+      "input": {
+        "kind": "profile",
+        "state": "ready",
+        "consecutive_failures": 0,
+        "error": "ExpiredTokenException canary"
+      },
+      "closed": null
+    },
+    {
+      "name": "not an object",
+      "input": "ready",
+      "closed": null
+    },
+    {
+      "name": "array",
+      "input": [],
+      "closed": null
+    }
+  ]
+}

@@ -55,6 +55,7 @@ import {
 import { getLoggerDiagnostics, log } from "../shared/logger";
 import type { EidnaraRpcServer } from "../shared/rpc-server";
 import type { SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
+import { awsCredentialsHealth, formatAwsCredentialsHealth } from "../shared/source-health";
 import {
     resolveTailHygieneStatus,
     type WireTailHygieneBaseline,
@@ -197,6 +198,7 @@ export interface RustSessionStatus {
     wrapup_rounds?: number | null;
     pass_trace?: { last_reject_error?: string | null; scheduler_history?: unknown } | null;
     history_summarizer?: Record<string, unknown>;
+    aws_credentials?: unknown;
     summary?: string;
 }
 const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
@@ -665,6 +667,9 @@ export function buildStatusDetail(
         compressionUsage: null,
         toastDurationMs: 5000,
         loggerDiagnostics: getLoggerDiagnostics(),
+        awsCredentials: formatAwsCredentialsHealth(
+            awsCredentialsHealth(moduleStatus?.aws_credentials),
+        ),
     };
     const compactionTiming = formatCompactionTimingLines(
         summarizeCompactionTiming(sessionId, directory, moduleStatus),

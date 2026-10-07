@@ -17,6 +17,7 @@
 
 import hostRelease from "../../../../../release/host-release.json";
 import type { AuthenticatedPeer, CatalogEntry } from "../host-client";
+import type { AwsCredentialsHealth } from "../source-health";
 import { stableStringify } from "../stable-json";
 import {
     checkPlatform,
@@ -86,6 +87,7 @@ export interface CompatibilitySnapshot {
 
 export interface ObservationalHealth extends CompatibilitySnapshot {
     readiness: DaemonReadiness;
+    aws_credentials?: AwsCredentialsHealth;
 }
 
 /** Thrown after ring attachment and authentication when a control probe fails. */
@@ -1035,6 +1037,9 @@ export class HostLifecyclePolicy {
                 reason,
                 remediation,
                 readiness: observed.readiness,
+                ...(observed.aws_credentials === undefined
+                    ? {}
+                    : { aws_credentials: observed.aws_credentials }),
                 checks,
             };
         } catch (error) {

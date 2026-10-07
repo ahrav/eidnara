@@ -12,7 +12,7 @@ use super::subprocess::{CredentialRowError, EnvSnapshot, canonical_provider};
 pub const SOURCE_CLAIM_DOMAIN: &str = "eidnara-model-execution-credential-v4";
 pub const SOURCE_CLAIM_CANONICALIZATION: &str = "harness-provider-source/2";
 
-const PROFILE_PROVIDER: &str = "amazon-bedrock";
+pub(super) const PROFILE_PROVIDER: &str = "amazon-bedrock";
 
 pub enum ClaimSource<'a> {
     Env(&'a [(OsString, OsString)]),

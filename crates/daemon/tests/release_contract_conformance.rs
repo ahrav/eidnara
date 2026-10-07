@@ -579,3 +579,22 @@ fn committed_f32_bundle_matches_the_approved_identities_and_the_lock() {
         900 * 1024 * 1024
     );
 }
+
+#[test]
+fn source_health_vocabulary_matches_the_release_contract() {
+    use host_runtime::model_execution::source_health::{
+        MAX_EXPIRES_IN_SECONDS, MAX_NEXT_RETRY_IN_SECONDS, SourceKind, SourceState,
+    };
+    let contract: serde_json::Value =
+        serde_json::from_str(daemon::release_contract::RELEASE_CONTRACT_JSON).expect("contract");
+    let vocabulary = &contract["aws_credentials"];
+    let kinds = SourceKind::ALL.map(SourceKind::as_str);
+    let states = SourceState::ALL.map(SourceState::as_str);
+    assert_eq!(vocabulary["kinds"], serde_json::json!(kinds));
+    assert_eq!(vocabulary["states"], serde_json::json!(states));
+    assert_eq!(vocabulary["max_expires_in_seconds"], MAX_EXPIRES_IN_SECONDS);
+    assert_eq!(
+        vocabulary["max_next_retry_in_seconds"],
+        MAX_NEXT_RETRY_IN_SECONDS
+    );
+}

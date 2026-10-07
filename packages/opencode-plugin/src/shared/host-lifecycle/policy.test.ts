@@ -633,6 +633,43 @@ describe("native invocation mapping", () => {
         }
     });
 
+    test("the AWS credential observation is advisory and never changes the readiness verdict", async () => {
+        const root = tempDir("eidnara-policy-aws-credentials-");
+        const { binary } = fakeBinary(root);
+        try {
+            for (const state of hostRelease.aws_credentials.states) {
+                const aws_credentials = {
+                    kind: "profile",
+                    state,
+                    consecutive_failures: 3,
+                } as const;
+                const policy = policyFor({
+                    env: { XDG_DATA_HOME: root },
+                    launchTarget: { kind: "test-binary", path: binary },
+                    readinessProbe: async () => ({
+                        ...compatibleObservation(),
+                        aws_credentials: aws_credentials as never,
+                        readiness: {
+                            transport: { state: "ready", reason: "healthy" },
+                            storage: { state: "ready", reason: "healthy" },
+                            local_embeddings: { state: "ready", reason: "healthy" },
+                        },
+                    }),
+                });
+                for (const result of [await policy.status(), await policy.doctor()]) {
+                    expect(result.ok).toBe(true);
+                    expect(result.reason).toBe("healthy");
+                    expect(result.aws_credentials).toEqual(aws_credentials as never);
+                    expect(parseDaemonResult(JSON.stringify(result)).aws_credentials).toEqual(
+                        aws_credentials as never,
+                    );
+                }
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     test("a component still starting carries the state its promoted reason requires", async () => {
         const cases = [
             { component: "transport", record: { state: "starting", reason: "starting" } },

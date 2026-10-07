@@ -230,6 +230,25 @@ describe("daemon command contract", () => {
         }
     });
 
+    test("human output renders the advisory AWS credential observation, unknown when absent", () => {
+        const readiness = { transport: { state: "ready" as const, reason: "healthy" as const } };
+        expect(renderDaemonHuman(result("status", { readiness }))).toContain(
+            "AWS credentials: unknown",
+        );
+        expect(
+            renderDaemonHuman(
+                result("status", {
+                    readiness,
+                    aws_credentials: {
+                        kind: "profile",
+                        state: "login_required",
+                        consecutive_failures: 1,
+                    },
+                }),
+            ),
+        ).toContain("AWS credentials: profile login_required, 1 consecutive failure");
+    });
+
     test("human output always renders a kernel readiness line", () => {
         const withoutKernel = renderDaemonHuman(
             result("status", {
