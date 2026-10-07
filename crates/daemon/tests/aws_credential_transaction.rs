@@ -687,6 +687,7 @@ async fn a_deleted_owner_token_after_rotation_reports_lost_succession() {
     let _serial = SERIAL.lock().await;
     let owner = Owner::new(SSO_CONFIG, "dev");
     owner.write_token(&token_json("r1", Duration::from_secs(60)));
+    let r1 = owner.token_bytes();
     let fake = Fake::start().await;
     fake.reply(Route::Token, 200, &oidc_ok("r2"));
     let gate = fake.held(Route::Portal, 200, &portal_ok());
@@ -706,6 +707,30 @@ async fn a_deleted_owner_token_after_rotation_reports_lost_succession() {
         outcome.lost_succession,
         "a logout after rotation needs a new login"
     );
+
+    // The fence lands on the token whose renewal was lost, so restoring that same
+    // file needs a changed login before any helper runs.
+    let superseded = outcome.observation.expect("observation");
+    write_private(&owner.token_path(), std::str::from_utf8(&r1).unwrap());
+    let input = TransactionInput {
+        source: &owner.source,
+        predecessor: None,
+        superseded: Some(&superseded),
+        executable: Path::new(BIN),
+        state_root: &owner.state,
+        budget: Duration::from_secs(30),
+        limits: HelperLimits::default(),
+        test_origin: Some(fake.origin.clone()),
+    };
+    let seen = fake.seen().len();
+    let refused = slot.run(input, &CancellationToken::new()).await;
+    assert_eq!(refused.failure, Some(TransactionFailure::LoginRequired));
+    assert_eq!(
+        fake.seen().len(),
+        seen,
+        "the restored token is fenced before any helper"
+    );
+    assert_no_helper_processes(&owner);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -121,6 +121,8 @@ struct State {
     failure: Option<SourceError>,
     failures: u32,
     unresolved: bool,
+    /// A refresh retained its crash-ownership record.
+    record_retained: bool,
     closed: bool,
 }
 
@@ -218,6 +220,12 @@ impl SourceOwner {
                     if state.unresolved {
                         return Err(SourceError::Invalid);
                     }
+                    if cancel.is_cancelled() {
+                        return Err(SourceError::Cancelled);
+                    }
+                    if deadline <= now {
+                        return Err(SourceError::DeadlineExceeded);
+                    }
                     if let Some(until) = state.cooldown_until.filter(|until| *until > now) {
                         return Err(SourceError::Cooldown {
                             retry_in: until - now,
@@ -262,11 +270,12 @@ impl SourceOwner {
     }
 
     /// Closes the owner and waits for its refresh to settle physically. Returns whether
-    /// every refresh proved its cleanup.
+    /// every refresh proved its cleanup, including removal of its crash-ownership record.
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
-        !self.0.read().unresolved
+        let state = self.0.read();
+        !(state.unresolved || state.record_retained)
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -348,6 +357,7 @@ impl Inner {
         let mut state = self.lock();
         state.in_flight = None;
         state.unresolved |= outcome.failure == Some(TransactionFailure::CleanupUnproven);
+        state.record_retained |= outcome.record_retained;
         let stale = epoch != state.epoch;
         let verdict = if outcome
             .identity
@@ -828,6 +838,45 @@ mod tests {
             "no replacement refresh overlaps the stalled one"
         );
         assert_eq!(h.fake.0.overlapped.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_dead_on_arrival_starts_no_refresh() {
+        let h = harness();
+        let _held = h.fake.push_held(h.ok(HOUR));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            h.owner.acquire(Instant::now() + MODEL, &cancel).await.err(),
+            Some(SourceError::Cancelled)
+        );
+        assert_eq!(
+            h.owner
+                .acquire(Instant::now() - Duration::from_secs(1), &h.never)
+                .await
+                .err(),
+            Some(SourceError::DeadlineExceeded)
+        );
+        assert_eq!(h.fake.calls(), 0, "dead demand starts no credential I/O");
+        assert_eq!(h.health.get().state, SourceState::Unknown);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retained_crash_record_keeps_the_source_usable_and_fails_the_join() {
+        let h = harness();
+        let mut retained = h.ok(HOUR);
+        retained.record_retained = true;
+        h.fake.push(retained);
+        h.acquire_for(MODEL).await.expect("row");
+        h.acquire_for(MODEL)
+            .await
+            .expect("a retained record leaves the source usable");
+        assert_eq!(h.fake.calls(), 1);
+        assert!(
+            !h.owner.join().await,
+            "a retained crash record is cleanup debt at shutdown"
+        );
     }
 
     #[tokio::test(start_paused = true)]

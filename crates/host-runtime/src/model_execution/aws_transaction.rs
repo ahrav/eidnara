@@ -208,7 +208,8 @@ pub struct TransactionOutcome {
     pub identity: Option<GraphIdentity>,
     pub row: Option<CredentialRow>,
     pub successor: Option<PrivateToken>,
-    /// The external token observation taken last, before adoption.
+    /// The latest external token observation, except when `lost_succession` retains
+    /// the observation renewal started under.
     pub observation: Option<TokenObservation>,
     pub renewal: RenewalEvidence,
     /// Renewal may have rotated the token and no valid successor was recovered, so
@@ -411,11 +412,17 @@ async fn transact(input: TransactionInput<'_>, cancel: &CancellationToken) -> Tr
     if let Some(sso) = &sso {
         let (observation, _) = sso.observe().await;
         let started = outcome.observation.replace(observation.clone());
-        if !started.is_some_and(|started| same_content(&started, &observation)) {
+        if !started
+            .as_ref()
+            .is_some_and(|started| same_content(started, &observation))
+        {
             // A new external login supersedes any rotation; a deleted or unusable
             // owner token leaves a possible rotation unrecovered.
             let relogin = matches!(observation, TokenObservation::Present { .. });
             outcome.lost_succession = unproven && !relogin;
+            if outcome.lost_succession {
+                outcome.observation = started;
+            }
             outcome.failure = Some(F::Withdrawn);
             return outcome;
         }
