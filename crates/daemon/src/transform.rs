@@ -8624,7 +8624,7 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
     } else {
         format!("Your memory may contain {} related fragments:", lines.len())
     };
-    let footer = "If the fragments above seem relevant to the current request, you may run eidnara_search to retrieve full context. Otherwise ignore.";
+    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
     let body = [header, lines.join("\n"), footer.to_string()].join("\n");
     let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");
     // Native search returns only memory and history_segment results.

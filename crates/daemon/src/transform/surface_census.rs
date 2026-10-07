@@ -366,6 +366,33 @@ fn the_whole_hint_is_cut_at_eight_hundred_units() {
     );
 }
 
+#[test]
+fn the_footer_describes_eidnara_search_as_memory_search_only() {
+    let rendered = render_user_hint(&[hint_result("quasar nebula pulsar")]).unwrap();
+    let body = rendered
+        .strip_prefix("\n\n<eidnara-search-hint>\n")
+        .and_then(|body| body.strip_suffix("\n</eidnara-search-hint>"))
+        .unwrap();
+    let footer = body.lines().last().unwrap();
+    assert!(footer.contains("eidnara_search"), "{footer}");
+    assert!(footer.contains("memory"), "{footer}");
+    let lowered = footer.to_lowercase();
+    for claim in [
+        "full context",
+        "transcript",
+        "summarized history",
+        "restore",
+        "recover",
+        "retrieve",
+        "original",
+    ] {
+        assert!(
+            !lowered.contains(claim),
+            "footer claims {claim:?}: {footer}"
+        );
+    }
+}
+
 fn hint_fragment_lines(rendered: &str) -> Vec<&str> {
     rendered
         .lines()
