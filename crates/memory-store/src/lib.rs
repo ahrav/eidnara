@@ -6964,6 +6964,17 @@ impl RowMemo {
             *self = Self::default();
         }
     }
+
+    /// Memoizes `core` for `session_id` at `row_version` when the memo's other fields plus
+    /// the core fit the retention bound; the measurement precedes the clone.
+    fn record_core(&mut self, session_id: &str, row_version: u64, core: &CoreState) {
+        self.record(session_id, row_version, |memo| {
+            memo.core = None;
+            if memo.retained_bytes() + Self::core_bytes(core) <= ROW_MEMO_RETAINED_BYTES_BOUND {
+                memo.core = Some(core.clone());
+            }
+        });
+    }
 }
 
 /// Which `cache_state` row projection a statement-probe counter names.
@@ -8823,12 +8834,8 @@ impl MemoryStore {
             SessionCore::Memo(core) => Ok(core),
             SessionCore::Text(text) => {
                 let core: CoreState = serde_json::from_str(&text)?;
-                if RowMemo::core_bytes(&core) <= ROW_MEMO_RETAINED_BYTES_BOUND {
-                    self.lock_row_memo()
-                        .record(session_id, row_version, |memo| {
-                            memo.core = Some(core.clone())
-                        });
-                }
+                self.lock_row_memo()
+                    .record_core(session_id, row_version, &core);
                 Ok(core)
             }
         }
@@ -19784,6 +19791,19 @@ mod tests {
         memo.record("ses", 3, |memo| memo.core = Some(kept.clone()));
         assert_eq!(memo.core.as_ref(), Some(&kept));
         assert!(memo.retained_bytes() <= ROW_MEMO_RETAINED_BYTES_BOUND);
+
+        // A core that alone fits the bound but breaks it with the memo's own fields stays out.
+        let core_only = ROW_MEMO_RETAINED_BYTES_BOUND - RowMemo::core_bytes(&memo_core("m2#0", ""));
+        let edge = memo_core("m2#0", &"x".repeat(core_only));
+        assert_eq!(RowMemo::core_bytes(&edge), ROW_MEMO_RETAINED_BYTES_BOUND);
+        memo.record_core("ses", 3, &edge);
+        assert!(
+            memo.core.is_none(),
+            "the memo's other fields count against the bound"
+        );
+        assert_eq!(memo.coverage.as_ref(), Some(&scalars));
+        memo.record_core("ses", 3, &kept);
+        assert_eq!(memo.core.as_ref(), Some(&kept));
 
         memo.record("ses", 4, |_| {});
         assert!(memo.at("ses", 4));
