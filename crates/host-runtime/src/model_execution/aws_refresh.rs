@@ -447,7 +447,13 @@ impl Inner {
 
     fn publish(&self, state: &State) {
         let now = Instant::now();
-        let usable = state.row.as_ref().filter(|row| row.usable_until > now);
+        // A row serves demand only while `usable_until` exceeds the deadline plus the
+        // skew, so ready health ends `EXPIRY_SKEW` before `usable_until`.
+        let usable = state
+            .row
+            .as_ref()
+            .and_then(|row| row.usable_until.checked_sub(EXPIRY_SKEW))
+            .filter(|boundary| *boundary > now);
         let cooling = state.cooldown_until.filter(|until| *until > now);
         let condition = if state.closed {
             SourceState::Unknown
@@ -467,7 +473,7 @@ impl Inner {
         self.health.set(SourceObservation {
             kind: SourceKind::Profile,
             state: condition,
-            expires_at: usable.map(|row| row.usable_until),
+            expires_at: usable,
             retry_at: cooling.filter(|_| condition == SourceState::Cooldown),
             consecutive_failures: state.failures,
         });
@@ -807,7 +813,10 @@ mod tests {
         }
         assert_eq!(h.fake.calls(), 1, "a warm acquisition starts no refresh");
         assert_eq!(h.health.get().state, SourceState::Ready);
-        assert_eq!(h.health.get().expires_in_seconds, Some(HOUR));
+        assert_eq!(
+            h.health.get().expires_in_seconds,
+            Some(HOUR - EXPIRY_SKEW.as_secs())
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -841,6 +850,29 @@ mod tests {
             "no replacement refresh overlaps the stalled one"
         );
         assert_eq!(h.fake.0.overlapped.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_health_ends_where_the_row_stops_serving_demand() {
+        let h = harness();
+        h.fake.push(h.ok(HOUR));
+        h.acquire_for(MODEL).await.expect("row");
+        let skew = EXPIRY_SKEW.as_secs();
+        assert_eq!(h.health.get().expires_in_seconds, Some(HOUR - skew));
+        tokio::time::advance(Duration::from_secs(HOUR - skew - 1)).await;
+        let health = h.health.get();
+        assert_eq!(
+            (health.state, health.expires_in_seconds),
+            (SourceState::Ready, Some(1))
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let health = h.health.get();
+        assert_eq!(
+            (health.state, health.expires_in_seconds),
+            (SourceState::Unknown, None),
+            "a row inside the skew serves no demand"
+        );
+        assert_eq!(h.fake.calls(), 1, "the health read starts no refresh");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1005,7 +1037,12 @@ mod tests {
                 health.expires_in_seconds,
                 health.consecutive_failures
             ),
-            (SourceState::Ready, None, Some(MODEL.as_secs() - 75), 1),
+            (
+                SourceState::Ready,
+                None,
+                Some(MODEL.as_secs() - 75 - EXPIRY_SKEW.as_secs()),
+                1
+            ),
             "an elapsed cooldown over a usable row reads ready at the health read"
         );
     }
@@ -1310,7 +1347,7 @@ mod tests {
         h.acquire_for(MODEL).await.expect("row");
         assert_eq!(
             h.health.get().expires_in_seconds,
-            Some(MAX_ROW_LIFETIME.as_secs())
+            Some((MAX_ROW_LIFETIME - EXPIRY_SKEW).as_secs())
         );
         h.clock.shift(-(WALL_BASE.as_secs() as i64) - 1);
         h.fake.push(h.failed(TransactionFailure::Spawn));
