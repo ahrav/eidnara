@@ -1,4 +1,4 @@
-//! `eval-qualification/v1`: the fixed retained-history and outage qualification campaign.
+//! `eval-qualification/v2`: the fixed retained-history and outage qualification campaign.
 //! The case catalog, the required host, the numeric gates, the drain estimate, the outage and
 //! virtual rotation schedules, and the per-publication lineage oracle are values; the runner
 //! shell measures and this module judges.
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scale::{Histogram, HostManifest};
 
-pub const QUALIFICATION_SCHEMA: &str = "eval-qualification/v1";
+pub const QUALIFICATION_SCHEMA: &str = "eval-qualification/v2";
 /// Fixture seed every generated history uses.
 pub const QUALIFICATION_SEED: u64 = 702;
 /// Measured lexical tokens in each ordinary message under the pinned tokenizer.

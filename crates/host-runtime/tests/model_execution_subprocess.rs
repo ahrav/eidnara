@@ -4239,12 +4239,14 @@ fn a_cancelled_run_waiting_on_the_source_starts_no_child() {
 }
 
 /// The 24-hour auth soak on a shifted wall clock: 48 Bedrock runs, one every 1,760 s of wall
-/// time, through one OpenCode adapter and one owner. Rows live 3,600 s of wall time, so every
-/// second run finds its row alive but 80 s short of the run deadline plus skew on the wall
-/// bound and rotates it. The 13th refresh observes an external login, which costs only the
-/// run that observed it.
+/// time, then one at the 24-hour mark, through one OpenCode adapter and one owner. Rows live
+/// 3,600 s of wall time, so every second run finds its row alive but 80 s short of the run
+/// deadline plus skew on the wall bound and rotates it, and the run at the day mark finds its
+/// row expired and rotates it. The 13th refresh observes an external login, which costs only
+/// the run that observed it.
 fn a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner() {
     const STEP_SECS: u64 = 1_760;
+    const DAY_SECS: u64 = 24 * 3_600;
     let setup = RunSetup::new();
     let transcript = write_transcript(
         setup.scratch.path(),
@@ -4254,7 +4256,7 @@ fn a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner() {
     let clock = ShiftedClock::default();
     let mut outcomes = vec![Ok(3_600); 12];
     outcomes.push(Err(TransactionFailure::Withdrawn));
-    outcomes.extend(vec![Ok(3_600); 12]);
+    outcomes.extend(vec![Ok(3_600); 13]);
     let (aws, script) = scripted_dispatch_with_clock(
         &setup,
         &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
@@ -4265,7 +4267,10 @@ fn a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner() {
     let opencode = opencode_backend(&setup, &[]).with_aws_source(Some(aws));
     let mut failed_slots = Vec::new();
     let mut rows = Vec::new();
-    for slot in 0..48 {
+    for slot in 0..49 {
+        if slot == 48 {
+            clock.shift(DAY_SECS - 48 * STEP_SECS);
+        }
         let (terminal, _) = execute(&opencode, bedrock(&setup, Harness::OpenCode));
         match terminal {
             BackendTerminal::Completed { .. } => {
@@ -4284,24 +4289,27 @@ fn a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner() {
         [24],
         "only the run that observed the login fails"
     );
-    let expected: Vec<String> = (0..48)
+    let expected: Vec<String> = (0..49)
         .filter(|slot| *slot != 24)
         .map(|slot| {
             let call = if slot < 24 {
                 slot / 2
-            } else {
+            } else if slot < 48 {
                 13 + (slot - 25) / 2
+            } else {
+                25
             };
             format!("ASIAROW{call}")
         })
         .collect();
     assert_eq!(
         rows, expected,
-        "every second run rotates, and the run after the login rotates at once"
+        "every second run rotates, the run after the login rotates at once, and the run at the \
+         day mark rotates its expired row"
     );
     assert_eq!(
         script.calls.load(std::sync::atomic::Ordering::SeqCst),
-        25,
+        26,
         "each rotation is one physical refresh, plus the one that observed the login"
     );
     rt().block_on(async { assert!(owner.join().await) });
