@@ -932,6 +932,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_expired_cooldown_reads_from_the_cached_row_without_a_republish() {
+        let h = harness();
+        h.fake.push(h.ok(MODEL.as_secs()));
+        assert_eq!(
+            h.acquire_for(MODEL).await.err(),
+            Some(SourceError::InsufficientLifetime)
+        );
+        assert_eq!(h.health.get().state, SourceState::Cooldown);
+        tokio::time::advance(COOLDOWN_BASE + COOLDOWN_JITTER).await;
+        h.acquire_for(Duration::from_secs(60))
+            .await
+            .expect("warm row for a short demand");
+        assert_eq!(h.fake.calls(), 1, "a warm hit starts no refresh");
+        let health = h.health.get();
+        assert_eq!(
+            (
+                health.state,
+                health.next_retry_in_seconds,
+                health.expires_in_seconds,
+                health.consecutive_failures
+            ),
+            (SourceState::Ready, None, Some(MODEL.as_secs() - 75), 1),
+            "an elapsed cooldown over a usable row reads ready at the health read"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_successor_survives_role_failure_and_feeds_the_next_refresh() {
         let h = harness();
         let mut first = h.ok(MODEL.as_secs() + 120);
