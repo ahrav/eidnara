@@ -480,38 +480,41 @@ fn classify(failure: TransactionFailure) -> (SourceError, Authority) {
 /// The profile source as the model adapters use it: the shared owner and the selected
 /// region the child row carries.
 #[derive(Clone)]
-pub struct AwsDispatch {
+pub struct AwsDispatch(Arc<Dispatch>);
+
+struct Dispatch {
     owner: SourceOwner,
     region: String,
 }
 
 impl AwsDispatch {
     pub fn new(owner: SourceOwner, region: String) -> Self {
-        Self { owner, region }
+        Self(Arc::new(Dispatch { owner, region }))
     }
 
     pub fn owner(&self) -> &SourceOwner {
-        &self.owner
+        &self.0.owner
     }
 }
 
-/// The lease one child's row came from, kept for the recheck immediately before spawn.
-pub(super) struct ChildLease {
+/// The lease one child's row came from and the dispatch's owner, kept for the recheck
+/// immediately before spawn.
+pub(super) struct ChildLease<'a> {
     lease: Lease,
-    owner: SourceOwner,
+    owner: &'a SourceOwner,
 }
 
 /// The child's credential row and, for a profile source, the lease to recheck before
 /// spawn. A selected profile source answers Bedrock; every other provider reads the
 /// startup environment row.
-pub(super) async fn child_credentials(
+pub(super) async fn child_credentials<'a>(
     env: &EnvSnapshot,
-    aws: Option<&AwsDispatch>,
+    aws: Option<&'a AwsDispatch>,
     harness: Harness,
     provider: &str,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<(Vec<(OsString, OsString)>, Option<ChildLease>), BackendTerminal> {
+) -> Result<(Vec<(OsString, OsString)>, Option<ChildLease<'a>>), BackendTerminal> {
     let canonical = subprocess::canonical_provider(harness.as_str(), provider);
     let Some(aws) = aws.filter(|_| canonical == Ok(source_claim::PROFILE_PROVIDER)) else {
         return env
@@ -520,7 +523,7 @@ pub(super) async fn child_credentials(
             .map_err(|error| subprocess::credential_failure(harness, error));
     };
     let lease = aws
-        .owner
+        .owner()
         .acquire(deadline, cancel)
         .await
         .map_err(|error| source_terminal(harness, error))?;
@@ -538,16 +541,16 @@ pub(super) async fn child_credentials(
             "AWS_SESSION_TOKEN".into(),
             row.session_token.as_str().into(),
         ),
-        ("AWS_REGION".into(), aws.region.as_str().into()),
+        ("AWS_REGION".into(), aws.0.region.as_str().into()),
     ];
-    let owner = aws.owner.clone();
+    let owner = aws.owner();
     Ok((env, Some(ChildLease { lease, owner })))
 }
 
 /// The recheck immediately before a child spawns, under the same lifetime predicate and
 /// clock as acquisition.
 pub(super) fn recheck_before_spawn(
-    lease: Option<&ChildLease>,
+    lease: Option<&ChildLease<'_>>,
     harness: Harness,
     deadline: Instant,
 ) -> Result<(), BackendTerminal> {
