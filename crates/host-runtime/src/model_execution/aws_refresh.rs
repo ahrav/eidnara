@@ -615,9 +615,14 @@ pub(super) fn recheck_before_spawn(
     deadline: Instant,
 ) -> Result<(), BackendTerminal> {
     match lease {
-        Some(child) if !child.owner.0.covers(&child.lease, deadline) => {
-            Err(source_terminal(harness, SourceError::InsufficientLifetime))
-        }
+        // A forward wall-clock jump during setup causes a transient failure when the lease
+        // stops covering the run deadline.
+        Some(child) if !child.owner.0.covers(&child.lease, deadline) => Err(source_failed(
+            harness,
+            ErrorClass::Transient,
+            "row stopped covering the run deadline before spawn",
+            None,
+        )),
         _ => Ok(()),
     }
 }
@@ -659,6 +664,15 @@ fn source_terminal(harness: Harness, error: SourceError) -> BackendTerminal {
             None,
         ),
     };
+    source_failed(harness, class, detail, retry_after_secs)
+}
+
+fn source_failed(
+    harness: Harness,
+    class: ErrorClass,
+    detail: &str,
+    retry_after_secs: Option<u64>,
+) -> BackendTerminal {
     BackendTerminal::SourceFailed(BackendError {
         class,
         message: format!("{} AWS credential source {detail}", harness.as_str()),
@@ -1614,6 +1628,30 @@ mod tests {
         assert!(h.acquire_for(MODEL).await.is_err());
         let (predecessor, superseded, _) = h.fake.request(1);
         assert_eq!((predecessor, superseded), (None, Some(observed(1))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wall_jump_before_spawn_is_a_transient_source_failure() {
+        let h = harness();
+        h.fake.push(h.ok(HOUR));
+        let deadline = Instant::now() + MODEL;
+        let lease = h.owner.acquire(deadline, &h.never).await.expect("row");
+        let child = ChildLease {
+            lease,
+            owner: &h.owner,
+        };
+        assert!(recheck_before_spawn(Some(&child), super::Harness::Pi, deadline).is_ok());
+        h.clock.shift(HOUR as i64);
+        let terminal = recheck_before_spawn(Some(&child), super::Harness::Pi, deadline)
+            .expect_err("a forward wall jump refuses the spawn");
+        let BackendTerminal::SourceFailed(error) = terminal else {
+            panic!("{terminal:?}");
+        };
+        assert_eq!(
+            error.class,
+            ErrorClass::Transient,
+            "the next run refreshes against the new clock"
+        );
     }
 
     #[test]

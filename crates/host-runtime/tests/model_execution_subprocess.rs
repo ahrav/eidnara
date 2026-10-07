@@ -4142,7 +4142,7 @@ fn a_wall_jump_after_acquisition_refuses_the_spawn() {
         let BackendTerminal::SourceFailed(error) = &terminal else {
             panic!("{harness:?}: {terminal:?}");
         };
-        assert_eq!(error.class, ErrorClass::Permanent, "{harness:?}");
+        assert_eq!(error.class, ErrorClass::Transient, "{harness:?}");
         assert_eq!(
             health.get().state,
             SourceState::Ready,
