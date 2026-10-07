@@ -269,7 +269,17 @@ impl LauncherEnvelope {
         data_dir: PathBuf,
         mode: SelectionMode<'_>,
     ) -> Result<PreparedLauncherEnvelope, &'static str> {
-        if let Some(source) = &self.aws_source {
+        // A join keeps the running incarnation; only a fresh start or a restart admits the selector.
+        let joins_running = matches!(
+            mode,
+            SelectionMode::Running {
+                require_previous_credentials: false,
+                ..
+            }
+        );
+        if let Some(source) = &self.aws_source
+            && !joins_running
+        {
             admit_owner_source(&OwnerSource::from_selector(source))
                 .map_err(|_| "aws profile source is not admissible")?;
         }
@@ -2154,6 +2164,43 @@ mod tests {
             !closure_root(root.path())
                 .join(ACTIVE_HARNESS_SELECTION)
                 .exists()
+        );
+    }
+
+    #[test]
+    fn a_running_join_keeps_its_selector_while_a_restart_readmits_it() {
+        let root = tempfile::tempdir().expect("data root");
+        let data_dir = root.path().to_path_buf();
+        let closure_root = closure_root(&data_dir);
+        std::fs::create_dir_all(&closure_root).expect("closure root");
+        std::fs::set_permissions(&closure_root, std::fs::Permissions::from_mode(0o700))
+            .expect("closure root mode");
+        // The persisted selection models a running host whose admitted source config has been removed.
+        let missing = root.path().join("missing").join("config");
+        let source = profile("corp", missing.to_str().expect("utf-8"));
+        let running = HarnessSelection {
+            aws_source: Some(source.clone()),
+            ..HarnessSelection::empty()
+        };
+        write_selection(&closure_root, &running).expect("running selection");
+        let envelope = || LauncherEnvelope {
+            schema: LAUNCHER_ENVELOPE_SCHEMA,
+            opencode: None,
+            pi: None,
+            credentials: BTreeMap::new(),
+            aws_source: Some(source.clone()),
+        };
+        let mode = |require_previous_credentials| SelectionMode::Running {
+            credential_identity_key: &[3; 32],
+            require_previous_credentials,
+        };
+        let joined = envelope()
+            .prepare(data_dir.clone(), mode(false))
+            .expect("an unchanged selector joins the running host");
+        assert!(!joined.changed);
+        assert_eq!(
+            envelope().prepare(data_dir, mode(true)).err(),
+            Some("aws profile source is not admissible")
         );
     }
 

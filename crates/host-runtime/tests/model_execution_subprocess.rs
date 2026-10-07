@@ -3153,10 +3153,25 @@ fn provider_rows_exclude_ambient_credentials_and_enforce_caps() {
         .expect("vector snapshot")
         .source_claim(&key, "opencode", "anthropic", None)
         .expect("fingerprint");
-    assert_eq!(
-        vector,
-        "77389364c8f8671636364d5f19b4788f6f2e990442798beb9338a99eae27e854"
+    assert_eq!(vector, pinned_source_claim("anthropic env"));
+}
+
+fn pinned_source_claim(name: &str) -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/source-claim-vectors.json"
     );
+    let vectors: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("source-claim vectors"))
+            .expect("source-claim vectors JSON");
+    vectors["vectors"]
+        .as_array()
+        .expect("vector list")
+        .iter()
+        .find(|vector| vector["name"] == name)
+        .and_then(|vector| vector["claim"].as_str())
+        .expect("named vector claim")
+        .to_owned()
 }
 
 /// The parser enforces the JSON node limit before building a DOM, so many small values cannot bypass the limit.
