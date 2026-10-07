@@ -7,11 +7,12 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
+use host_runtime::CancellationToken;
 use host_runtime::CompositeComponent;
 use host_runtime::model_execution::ModelExecutionComponent;
 use host_runtime::model_execution::backend::{BackendError, BackendTerminal, ErrorClass, Harness};
 use host_runtime::model_execution::config::{self, ModelExecutionLimits, TERMINAL_RETENTION};
-use host_runtime::model_execution::protocol::SendRequest;
+use host_runtime::model_execution::protocol::{self, SendRequest};
 use host_runtime::model_execution::supervisor::{
     SessionKey, Subscription, Supervisor, SupervisorMetrics,
 };
@@ -1469,4 +1470,371 @@ async fn host_shutdown_drains_the_supervisor_to_zero_state() {
     assert_eq!(metrics.free_subscriber_permits, 64);
     assert_eq!(metrics.free_backend_permits, 8);
     assert_eq!(metrics.free_run_slots, 32);
+}
+
+/// A source failure before dispatch is an accepted terminal whose error unit names
+/// `credential_source`; a model failure omits the scope, which reads as `model`.
+#[tokio::test]
+async fn a_source_failure_terminal_carries_the_credential_source_scope() {
+    let error = BackendError {
+        class: ErrorClass::AuthRequired,
+        message: "pi AWS credential source needs a new `aws sso login`".to_owned(),
+        retry_after_secs: None,
+        provider_code: None,
+    };
+    for (terminal, scope) in [
+        (
+            BackendTerminal::SourceFailed(error.clone()),
+            Some("credential_source"),
+        ),
+        (BackendTerminal::Failed(error.clone()), None),
+    ] {
+        let backend = ScriptedBackend::with_behavior(move |_request, _events, _cancel| {
+            let terminal = terminal.clone();
+            Box::pin(async move { terminal })
+        });
+        let supervisor = Supervisor::new(backend as Arc<_>);
+        let run_id = send(&supervisor, "s-source", "p");
+        until(
+            || supervisor.status(&key("s-source"), &run_id) == Ok("failed"),
+            "the run fails",
+        )
+        .await;
+        let units = drain_bytes(supervisor.subscribe(&key("s-source")).expect("subscribe")).await;
+        let error_unit = unit_json(units.last().expect("terminal unit"));
+        assert_eq!(error_unit["unit"]["type"], "error");
+        assert_eq!(error_unit["unit"]["error"]["class"], "auth_required");
+        assert_eq!(error_unit["unit"]["error"]["scope"].as_str(), scope);
+        assert_eq!(
+            protocol::ErrorScope::decode(&error_unit["unit"]["error"]).expect("known scope"),
+            if scope.is_some() {
+                protocol::ErrorScope::CredentialSource
+            } else {
+                protocol::ErrorScope::Model
+            }
+        );
+    }
+}
+
+/// A source failure on a later run leaves an earlier retained result readable.
+#[tokio::test]
+async fn retained_results_stay_readable_while_the_source_fails() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = ScriptedBackend::with_behavior({
+        let calls = Arc::clone(&calls);
+        move |_request, _events, _cancel| {
+            let first = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                if first {
+                    BackendTerminal::Completed {
+                        finish_reason:
+                            host_runtime::model_execution::backend::FinishReason::Completed,
+                    }
+                } else {
+                    BackendTerminal::SourceFailed(BackendError {
+                        class: ErrorClass::Transient,
+                        message: "opencode AWS credential source is unavailable".to_owned(),
+                        retry_after_secs: Some(60),
+                        provider_code: None,
+                    })
+                }
+            })
+        }
+    });
+    let supervisor = Supervisor::new(backend as Arc<_>);
+    let done = send(&supervisor, "s-done", "p1");
+    until(
+        || supervisor.status(&key("s-done"), &done) == Ok("completed"),
+        "the first run completes",
+    )
+    .await;
+    let failed = send(&supervisor, "s-later", "p2");
+    until(
+        || supervisor.status(&key("s-later"), &failed) == Ok("failed"),
+        "the source-failed run fails",
+    )
+    .await;
+    assert_eq!(supervisor.status(&key("s-done"), &done), Ok("completed"));
+    let (request, body) = send_pair("p1");
+    let resent = supervisor
+        .send(&key("s-done"), request, &body)
+        .expect("the identical send answers from the retained run");
+    assert_eq!(
+        resent, done,
+        "idempotency lookup precedes any new-work source gate"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "no new backend run"
+    );
+    let units = drain_bytes(supervisor.subscribe(&key("s-done")).expect("subscribe")).await;
+    assert_eq!(
+        unit_json(units.last().unwrap())["unit"]["type"],
+        "run_finished"
+    );
+}
+
+/// A refresh that holds until released and counts its physical starts.
+struct GatedSource {
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl host_runtime::model_execution::aws_refresh::Refresh for GatedSource {
+    fn refresh(
+        &self,
+        _: host_runtime::model_execution::aws_refresh::RefreshRequest,
+        _: CancellationToken,
+    ) -> host_runtime::model_execution::aws_refresh::RefreshFuture {
+        use host_runtime::model_execution::aws_transaction::{
+            CredentialRow, RenewalEvidence, TransactionOutcome,
+        };
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            release.acquire().await.expect("gate").forget();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            TransactionOutcome {
+                identity: Some(source_identity()),
+                row: Some(CredentialRow {
+                    access_key_id: "ASIA".into(),
+                    secret_access_key: zeroize::Zeroizing::new("s".into()),
+                    session_token: zeroize::Zeroizing::new("t".into()),
+                    expires_at_unix_seconds: now + 3_600,
+                }),
+                successor: None,
+                observation: None,
+                renewal: RenewalEvidence::NotStarted,
+                lost_succession: false,
+                record_retained: false,
+                failure: None,
+            }
+        })
+    }
+}
+
+fn source_identity() -> host_runtime::model_execution::aws_profile::GraphIdentity {
+    use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
+    GraphIdentity {
+        profile: "dev".into(),
+        region: "us-west-2".into(),
+        roles: Vec::new(),
+        root: RootIdentity::Static {
+            profile: "base".into(),
+            access_key_id: "AKIA".into(),
+            secret_sha256: [0; 32],
+        },
+    }
+}
+
+fn gated_owner() -> (
+    host_runtime::model_execution::aws_refresh::SourceOwner,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<tokio::sync::Semaphore>,
+) {
+    use host_runtime::model_execution::aws_refresh::{SourceOwner, SystemClock};
+    use host_runtime::model_execution::source_health::{
+        SourceHealthCell, SourceKind, SourceObservation,
+    };
+    let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let source = GatedSource {
+        starts: Arc::clone(&starts),
+        release: Arc::clone(&release),
+    };
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(source, SystemClock, source_identity(), health);
+    (owner, starts, release)
+}
+
+/// Thirty-two admitted runs saturate the eight backend permits while one held refresh
+/// serves them all; the waiting runs hold their permits and start no second refresh.
+#[tokio::test]
+async fn thirty_two_admitted_runs_share_one_refresh_under_saturated_permits() {
+    use host_runtime::model_execution::config::ModelExecutionLimits;
+    let (owner, starts, release) = gated_owner();
+    let acquiring = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = ScriptedBackend::with_behavior({
+        let (owner, acquiring) = (owner.clone(), Arc::clone(&acquiring));
+        move |_request, _events, cancel| {
+            let (owner, acquiring) = (owner.clone(), Arc::clone(&acquiring));
+            Box::pin(async move {
+                acquiring.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(660);
+                match owner.acquire(deadline, &cancel).await {
+                    Ok(_) => BackendTerminal::Completed {
+                        finish_reason:
+                            host_runtime::model_execution::backend::FinishReason::Completed,
+                    },
+                    Err(error) => BackendTerminal::SourceFailed(BackendError {
+                        class: ErrorClass::Transient,
+                        message: format!("{error:?}"),
+                        retry_after_secs: None,
+                        provider_code: None,
+                    }),
+                }
+            })
+        }
+    });
+    let limits = ModelExecutionLimits::default();
+    assert_eq!(
+        (limits.max_active_runs, limits.max_backend_processes),
+        (32, 8)
+    );
+    let supervisor = Supervisor::with_limits(backend as Arc<_>, limits);
+    let runs: Vec<_> = (0..32)
+        .map(|n| {
+            let session = format!("s-{n}");
+            let run = send(&supervisor, &session, "p");
+            (session, run)
+        })
+        .collect();
+    until(
+        || acquiring.load(std::sync::atomic::Ordering::SeqCst) == 8,
+        "eight runs hold the eight backend permits",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(supervisor.metrics().free_backend_permits, 0);
+    assert_eq!(
+        acquiring.load(std::sync::atomic::Ordering::SeqCst),
+        8,
+        "the other runs queue on the permits while the refresh is held"
+    );
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    release.add_permits(1);
+    for (session, run) in &runs {
+        until(
+            || supervisor.status(&key(session), run) == Ok("completed"),
+            "every run completes on the shared row",
+        )
+        .await;
+    }
+    assert_eq!(acquiring.load(std::sync::atomic::Ordering::SeqCst), 32);
+    assert_eq!(
+        starts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one physical refresh"
+    );
+}
+
+/// Health reads `ready` for a cached row, yet a run whose deadline the row cannot outlive
+/// gets no row from it: the lifetime predicate, not health, gates dispatch.
+#[tokio::test]
+async fn a_ready_health_observation_never_authorizes_an_expiring_row() {
+    use host_runtime::model_execution::source_health::SourceState;
+    let (owner, starts, release) = gated_owner();
+    release.add_permits(1);
+    let never = CancellationToken::new();
+    owner
+        .acquire(
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            &never,
+        )
+        .await
+        .expect("row");
+    assert_eq!(owner.health().get().state, SourceState::Ready);
+    let beyond = tokio::time::Instant::now() + Duration::from_secs(3_600);
+    let refused = tokio::time::timeout(Duration::from_secs(1), owner.acquire(beyond, &never)).await;
+    assert!(
+        refused.is_err(),
+        "the long demand waits on a new refresh instead of the ready row"
+    );
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+/// Shutdown cancels a run that waits inside source acquisition and signals the held
+/// refresh before it joins either; the joins wait for the refresh to settle.
+#[tokio::test]
+async fn shutdown_cancels_a_run_waiting_on_the_source_and_joins_the_refresh() {
+    use host_runtime::model_execution::ModelExecutionComponent;
+    let (owner, starts, release) = gated_owner();
+    let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ended = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = ScriptedBackend::with_behavior({
+        let (owner, waiting, ended) = (owner.clone(), Arc::clone(&waiting), Arc::clone(&ended));
+        move |_request, _events, cancel| {
+            let (owner, waiting, ended) = (owner.clone(), Arc::clone(&waiting), Arc::clone(&ended));
+            Box::pin(async move {
+                waiting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(660);
+                let outcome = owner.acquire(deadline, &cancel).await;
+                if outcome.is_err() {
+                    ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                BackendTerminal::Failed(BackendError {
+                    class: ErrorClass::Transient,
+                    message: "cancelled during setup".to_owned(),
+                    retry_after_secs: None,
+                    provider_code: None,
+                })
+            })
+        }
+    });
+    let component =
+        ModelExecutionComponent::new(backend as Arc<_>, support::model_execution::state_root())
+            .with_source_owner(Some(owner.clone()));
+    let supervisor = component.supervisor();
+    send(&supervisor, "s-wait", "p");
+    until(
+        || waiting.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        "the run waits in acquisition",
+    )
+    .await;
+    assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let shutdown =
+        tokio::spawn(async move { host_runtime::CompositeComponent::shutdown(&component).await });
+    until(
+        || ended.load(std::sync::atomic::Ordering::SeqCst) == 1,
+        "the run's cancellation ends its wait while the refresh is held",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the held refresh"
+    );
+    release.add_permits(1);
+    shutdown
+        .await
+        .unwrap()
+        .expect("a settled refresh shuts down cleanly");
+}
+
+/// The M2 warm-acquisition gate: p99 at most 1 ms on the warm path alone, apart from
+/// descriptor and startup work. The qualified runner runs it in release with `--ignored`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "performance measurement for the qualified runner; run in release with --ignored"]
+async fn warm_acquisition_p99_stays_within_one_millisecond() {
+    let (owner, starts, release) = gated_owner();
+    release.add_permits(1);
+    let never = CancellationToken::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(660);
+    owner.acquire(deadline, &never).await.expect("first row");
+    let mut warm = Vec::with_capacity(100_000);
+    for _ in 0..100_000 {
+        let started = std::time::Instant::now();
+        owner.acquire(deadline, &never).await.expect("warm row");
+        warm.push(started.elapsed());
+    }
+    warm.sort();
+    let p99 = warm[warm.len() * 99 / 100];
+    eprintln!(
+        "warm acquisition p99 {p99:?}, max {:?}",
+        warm[warm.len() - 1]
+    );
+    assert!(
+        p99 <= Duration::from_millis(1),
+        "warm acquisition p99 {p99:?}"
+    );
+    assert_eq!(
+        starts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "warm hits start no refresh"
+    );
 }

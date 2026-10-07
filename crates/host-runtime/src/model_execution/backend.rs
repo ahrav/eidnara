@@ -156,6 +156,10 @@ pub enum BackendTerminal {
     /// Cancel and delete commit `BackendTerminal::Failed` when descendants may still be executing a billable request.
     /// `delete` must report failure rather than claim that the backend stopped.
     FailedUnresolved(BackendError),
+    /// The selected credential source failed before any model child was dispatched, so the
+    /// run had no model effect. The error unit carries `scope: credential_source`, and its
+    /// message also reports any setup cleanup residue.
+    SourceFailed(BackendError),
 }
 
 /// Assistant text is the only payload producers consume.

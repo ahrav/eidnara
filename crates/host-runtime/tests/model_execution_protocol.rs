@@ -392,6 +392,7 @@ fn error_unit_stays_within_terminal_headroom_after_json_escaping() {
             retry_after_secs: Some(u64::MAX),
             provider_code: Some(hostile),
         },
+        protocol::ErrorScope::CredentialSource,
     );
     let started = protocol::run_started_unit(&run_id);
     assert!(
@@ -513,6 +514,105 @@ async fn health_reports_unavailable_when_no_harness_can_run() {
     assert_eq!(
         state(&[Harness::OpenCode, Harness::Pi]).await,
         (host_runtime::HealthStatus::Degraded, "unavailable".into())
+    );
+}
+
+#[tokio::test]
+async fn health_counts_an_attached_profile_owner_as_a_runnable_credential() {
+    use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
+    use host_runtime::model_execution::aws_refresh::{
+        Refresh, RefreshFuture, RefreshRequest, SourceError, SourceOwner, SystemClock,
+    };
+    use host_runtime::model_execution::aws_transaction::{
+        RenewalEvidence, TransactionFailure, TransactionOutcome,
+    };
+    use host_runtime::model_execution::source_health::{
+        SourceHealthCell, SourceKind, SourceObservation,
+    };
+
+    struct NeverRefreshed;
+    impl Refresh for NeverRefreshed {
+        fn refresh(&self, _: RefreshRequest, _: CancellationToken) -> RefreshFuture {
+            unreachable!("health never refreshes the source")
+        }
+    }
+    let source: AwsProfileSource = serde_json::from_value(serde_json::json!({
+        "kind": "profile", "profile": "corp", "region": "us-east-1",
+        "config_file": "/home/u/.aws/config", "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache",
+    }))
+    .expect("selector");
+    let identity = GraphIdentity {
+        profile: "corp".into(),
+        region: "us-east-1".into(),
+        roles: Vec::new(),
+        root: RootIdentity::Static {
+            profile: "base".into(),
+            access_key_id: "AKIA".into(),
+            secret_sha256: [0; 32],
+        },
+    };
+    let profile_only = || {
+        ModelExecutionComponent::new_with_credentials(
+            Arc::clone(&ScriptedBackend::completing("out")) as Arc<_>,
+            EnvSnapshot::capture_from(Vec::new()).expect("empty snapshot"),
+            Some(source.clone()),
+            support::model_execution::state_root(),
+        )
+    };
+    let state = |component: ModelExecutionComponent| async move {
+        let report = component.health().await;
+        (
+            report.status,
+            report.metrics.expect("model_execution reports metrics")["model_execution_state"]
+                .clone(),
+        )
+    };
+    assert_eq!(
+        state(profile_only()).await,
+        (host_runtime::HealthStatus::Degraded, "unavailable".into()),
+        "a profile selection without an attached owner has no runnable credential"
+    );
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(NeverRefreshed, SystemClock, identity.clone(), health);
+    assert_eq!(
+        state(profile_only().with_source_owner(Some(owner))).await,
+        (host_runtime::HealthStatus::Ok, "ready".into()),
+        "the attached owner answers Bedrock for both harnesses"
+    );
+
+    struct Unproven;
+    impl Refresh for Unproven {
+        fn refresh(&self, _: RefreshRequest, _: CancellationToken) -> RefreshFuture {
+            Box::pin(async {
+                TransactionOutcome {
+                    identity: None,
+                    row: None,
+                    successor: None,
+                    observation: None,
+                    renewal: RenewalEvidence::Unknown,
+                    lost_succession: false,
+                    record_retained: false,
+                    failure: Some(TransactionFailure::CleanupUnproven),
+                }
+            })
+        }
+    }
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(Unproven, SystemClock, identity, health);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    assert_eq!(
+        owner
+            .acquire(deadline, &CancellationToken::new())
+            .await
+            .err(),
+        Some(SourceError::Invalid),
+        "an unproven helper cleanup latches the owner invalid"
+    );
+    assert_eq!(
+        state(profile_only().with_source_owner(Some(owner))).await,
+        (host_runtime::HealthStatus::Degraded, "unavailable".into()),
+        "an invalid owner on a profile-only host leaves no runnable credential"
     );
 }
 
@@ -965,4 +1065,97 @@ async fn malformed_requests_over_the_host_create_no_run_state() {
     assert_eq!(backend.starts(), 0, "no backend may start");
     assert_eq!(supervisor.metrics(), baseline, "no state may exist");
     host.shutdown().await.expect("graceful shutdown");
+}
+
+/// Component shutdown signals the AWS refresh before it joins, waits for the refresh to
+/// settle physically, and reports an unproven helper teardown as a shutdown failure.
+#[tokio::test]
+async fn shutdown_signals_and_joins_the_aws_refresh_and_reports_unproven_teardown() {
+    use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
+    use host_runtime::model_execution::aws_refresh::{
+        Refresh, RefreshFuture, RefreshRequest, SourceOwner, SystemClock,
+    };
+    use host_runtime::model_execution::aws_transaction::{
+        RenewalEvidence, TransactionFailure, TransactionOutcome,
+    };
+    use host_runtime::model_execution::source_health::{
+        SourceHealthCell, SourceKind, SourceObservation,
+    };
+
+    struct Held {
+        cancel: Arc<std::sync::Mutex<Option<CancellationToken>>>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl Refresh for Held {
+        fn refresh(&self, _: RefreshRequest, cancel: CancellationToken) -> RefreshFuture {
+            *self.cancel.lock().unwrap() = Some(cancel);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                release.notified().await;
+                TransactionOutcome {
+                    identity: None,
+                    row: None,
+                    successor: None,
+                    observation: None,
+                    renewal: RenewalEvidence::Unknown,
+                    lost_succession: false,
+                    record_retained: false,
+                    failure: Some(TransactionFailure::CleanupUnproven),
+                }
+            })
+        }
+    }
+    let identity = GraphIdentity {
+        profile: "dev".into(),
+        region: "us-west-2".into(),
+        roles: Vec::new(),
+        root: RootIdentity::Static {
+            profile: "base".into(),
+            access_key_id: "AKIA".into(),
+            secret_sha256: [0; 32],
+        },
+    };
+    let cancel = Arc::new(std::sync::Mutex::new(None));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = Held {
+        cancel: Arc::clone(&cancel),
+        release: Arc::clone(&release),
+    };
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(held, SystemClock, identity, health);
+    let component = ModelExecutionComponent::new(
+        Arc::clone(&ScriptedBackend::completing("out")) as Arc<_>,
+        support::model_execution::state_root(),
+    )
+    .with_source_owner(Some(owner.clone()));
+    let waiter = tokio::spawn({
+        let owner = owner.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+            owner.acquire(deadline, &CancellationToken::new()).await
+        }
+    });
+    while cancel.lock().unwrap().is_none() {
+        tokio::task::yield_now().await;
+    }
+    let shutdown =
+        tokio::spawn(async move { host_runtime::CompositeComponent::shutdown(&component).await });
+    let token = cancel.lock().unwrap().clone().expect("refresh token");
+    tokio::time::timeout(Duration::from_secs(5), token.cancelled())
+        .await
+        .expect("shutdown signals the refresh before it joins");
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown waits for the refresh to settle"
+    );
+    release.notify_one();
+    let error = shutdown
+        .await
+        .unwrap()
+        .expect_err("unproven helper teardown fails shutdown");
+    assert!(
+        error.to_string().contains("AWS credential refresh"),
+        "{error}"
+    );
+    assert!(waiter.await.unwrap().is_err());
 }

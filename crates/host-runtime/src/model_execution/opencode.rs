@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+use super::aws_refresh::{self, AwsDispatch};
 use super::backend::{
     self, BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal,
     ContextCapabilities, ErrorClass, EventSink, FinishReason, Harness, LlmExecutionBackend,
@@ -40,6 +41,7 @@ pub struct OpenCodeBackend {
     state_root: StateRoot,
     /// The base URL each named provider's requests go to, written into the inline config as that provider's `options.baseURL`; production backends name none, so every provider dials its own endpoint.
     provider_base_urls: BTreeMap<String, String>,
+    aws: Option<AwsDispatch>,
 }
 
 impl OpenCodeBackend {
@@ -59,7 +61,15 @@ impl OpenCodeBackend {
             env,
             state_root,
             provider_base_urls: BTreeMap::new(),
+            aws: None,
         }
+    }
+
+    /// Answers Bedrock runs from the selected AWS profile source, when there is one.
+    #[must_use]
+    pub fn with_aws_source(mut self, aws: Option<AwsDispatch>) -> Self {
+        self.aws = aws;
+        self
     }
 
     /// Sends `provider`'s requests to `base_url`, the way a scenario points a pinned OpenCode at a scripted provider peer through its own configuration. Compiled only for tests.
@@ -95,6 +105,7 @@ impl LlmExecutionBackend for OpenCodeBackend {
             runtime: self.runtime.clone(),
             limits: self.limits.clone(),
             env: self.env.clone(),
+            aws: self.aws.clone(),
             state_root: self.state_root.clone(),
             config_content: inline_config(
                 &request,
@@ -179,6 +190,7 @@ struct Launch {
     runtime: OpenCodeRuntime,
     limits: SubprocessLimits,
     env: EnvSnapshot,
+    aws: Option<AwsDispatch>,
     state_root: StateRoot,
     config_content: String,
 }
@@ -193,15 +205,13 @@ async fn run_opencode(
         runtime,
         mut limits,
         env,
+        aws,
         state_root,
         config_content,
     } = launch;
-    let mut child_env = match env.provider_row("opencode", &request.provider) {
-        Ok(row) => row,
-        Err(error) => {
-            return subprocess::credential_failure(Harness::OpenCode, error);
-        }
-    };
+    // One deadline, anchored after the backend permit, covers credential acquisition,
+    // setup, and execution.
+    let setup_deadline = tokio::time::Instant::now() + limits.run_timeout;
     // Reject configurations over `MAX_OPENCODE_CONFIG_BYTES` before spawning because Linux limits one environment string to `MAX_ARG_STRLEN` (~128 KiB), and exceeding that limit makes `exec(2)` fail with `E2BIG`.
     if config_content.len() > MAX_OPENCODE_CONFIG_BYTES {
         return BackendTerminal::Failed(BackendError {
@@ -216,7 +226,6 @@ async fn run_opencode(
         });
     }
     // Setup races cancellation and `setup_deadline` so stalled closure-store or directory I/O cannot block cancellation before spawning a child.
-    let setup_deadline = tokio::time::Instant::now() + limits.run_timeout;
     // Closure resolution precedes the private directory so an unavailable harness creates no on-disk state.
     // Resolution opens and stats the node, so it runs on the blocking pool rather than on a runtime worker.
     let closure = Arc::clone(&runtime.closure);
@@ -238,6 +247,20 @@ async fn run_opencode(
         }
         Ok(Err(err)) => return subprocess::spawn_failure(Harness::OpenCode, &err),
         Err(abort) => return subprocess::setup_aborted_terminal(Harness::OpenCode, abort),
+    };
+    // The source is acquired after every local refusal, so a request the host would refuse
+    // starts no refresh.
+    let credentials = aws_refresh::child_credentials(
+        &env,
+        aws.as_ref(),
+        Harness::OpenCode,
+        &request.provider,
+        setup_deadline,
+        &cancel,
+    );
+    let (mut child_env, lease) = match credentials.await {
+        Ok(credentials) => credentials,
+        Err(terminal) => return terminal,
     };
     let mut create = std::pin::pin!(PrivateDir::create_async(
         state_root.clone(),
@@ -313,6 +336,14 @@ async fn run_opencode(
         rlimits: Vec::new(),
     };
 
+    if let Err(terminal) =
+        aws_refresh::recheck_before_spawn(lease.as_ref(), Harness::OpenCode, setup_deadline)
+    {
+        return subprocess::merge_cleanup(
+            terminal,
+            subprocess::bounded_cleanup(dir, limits.termination_grace).await,
+        );
+    }
     // The OpenCode CLI closes its streams and exits when the run finishes, so EOF and the drain grace bound the tail without a terminal probe.
     let result = match subprocess::run(spec, &limits, &cancel, None).await {
         Ok(result) => result,

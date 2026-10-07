@@ -844,7 +844,9 @@ async fn cancellation_during_the_helper_run_reports_cancelled() {
     let cancel = CancellationToken::new();
     let input = TransactionInput {
         source: &owner.source,
+        admitted: None,
         predecessor: None,
+        superseded: None,
         executable: Path::new(BIN),
         state_root: &owner.state,
         budget: Duration::from_secs(30),
@@ -1262,7 +1264,7 @@ async fn the_refresh_owner_runs_one_real_transaction_for_concurrent_demand_and_n
         waiters.spawn(async move { source.acquire(deadline, &CancellationToken::new()).await });
     }
     for row in waiters.join_all().await {
-        assert_eq!(row.expect("row").access_key_id, "ASIAPORTAL");
+        assert_eq!(row.expect("row").row.access_key_id, "ASIAPORTAL");
     }
     assert_eq!(fake.seen().len(), 1, "eight waiters share one helper run");
     source

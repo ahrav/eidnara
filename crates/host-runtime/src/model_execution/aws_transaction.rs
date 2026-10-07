@@ -1033,7 +1033,9 @@ mod tests {
         let mut slot = TransactionSlot::default();
         let input = TransactionInput {
             source: &source,
+            admitted: None,
             predecessor: None,
+            superseded: None,
             executable: Path::new("/nonexistent/eidnara-host"),
             state_root: &state,
             budget: 3 * GRACE + Duration::from_secs(1),

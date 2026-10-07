@@ -23,6 +23,14 @@ use host_runtime::harness_closure::{
     ClosureCandidate, ClosureManifest, ClosureNode, DESCRIPTOR_PATHS_ARE_FILE_LIKE,
     HarnessClosureStore, NodeKind,
 };
+use host_runtime::model_execution::aws_profile::{AdmissionError, GraphIdentity, RootIdentity};
+use host_runtime::model_execution::aws_refresh::{
+    AwsDispatch, EXPIRY_SKEW, OwnerClock, Refresh, RefreshFuture, RefreshRequest, SourceOwner,
+    SystemClock,
+};
+use host_runtime::model_execution::aws_transaction::{
+    CredentialRow, RenewalEvidence, TransactionFailure, TransactionOutcome,
+};
 use host_runtime::model_execution::backend::{
     BackendEvent, BackendRequest, BackendTerminal, ErrorClass, EventSink, FinishReason, Harness,
     LlmExecutionBackend, SinkStatus,
@@ -37,6 +45,9 @@ use host_runtime::model_execution::pi::{
     PI_MODEL_EXECUTION_EXTENSION_FILE, PiBackend, PiRuntimeDescriptor, pi_model_ref,
 };
 use host_runtime::model_execution::protocol::SendRequest;
+use host_runtime::model_execution::source_health::{
+    SourceHealthCell, SourceKind, SourceObservation, SourceState,
+};
 use host_runtime::model_execution::subprocess::group_registry::StateRoot;
 use host_runtime::model_execution::subprocess::{
     CleanupFailure, EnvSnapshot, PrivateDir, SubprocessLimits, merge_cleanup,
@@ -61,15 +72,32 @@ const GROUP_NONCE_FIXTURE_ENV: &str = "EIDNARA_FIXTURE_GROUP_NONCE";
 /// The re-executed `record_group` fixture must write into the same registry the test sweeps.
 const STATE_ROOT_ENV: &str = "EIDNARA_FIXTURE_STATE_ROOT";
 
+/// The state root this process created, when no parent supplied one.
+static OWNED_STATE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+/// The shared closure fixture's directory, created once per process.
+static SHARED_FIXTURE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Each test process materializes its own state root and closure fixture, and nextest runs
+/// every test in its own process, so the runner removes both when its tests finish.
+fn remove_process_fixtures() {
+    for root in [OWNED_STATE_ROOT.get(), SHARED_FIXTURE_ROOT.get()]
+        .into_iter()
+        .flatten()
+    {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 /// One data root per test process; the sweep leaves live-owner entries alone, so tests can share it.
 fn state_root() -> StateRoot {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     let data_dir = ROOT.get_or_init(|| {
         std::env::var_os(STATE_ROOT_ENV).map_or_else(
             || {
-                tempfile::tempdir()
+                let root = tempfile::tempdir()
                     .expect("model_execution state root")
-                    .keep()
+                    .keep();
+                OWNED_STATE_ROOT.get_or_init(|| root.clone()).clone()
             },
             PathBuf::from,
         )
@@ -272,11 +300,39 @@ fn main() {
             "incomplete_closure_reports_unavailable_without_run_state",
             incomplete_closure_reports_unavailable_without_run_state,
         ),
+        (
+            "profile_rows_reach_each_child_alone_and_rotate_through_one_owner",
+            profile_rows_reach_each_child_alone_and_rotate_through_one_owner,
+        ),
+        (
+            "profile_rows_without_lifetime_start_no_child",
+            profile_rows_without_lifetime_start_no_child,
+        ),
+        (
+            "profile_source_failures_are_credential_source_terminals",
+            profile_source_failures_are_credential_source_terminals,
+        ),
+        (
+            "a_wall_jump_after_acquisition_refuses_the_spawn",
+            a_wall_jump_after_acquisition_refuses_the_spawn,
+        ),
+        (
+            "model_permission_denial_stays_model_scoped",
+            model_permission_denial_stays_model_scoped,
+        ),
+        (
+            "a_cancelled_run_waiting_on_the_source_starts_no_child",
+            a_cancelled_run_waiting_on_the_source_starts_no_child,
+        ),
     ];
     // cargo-nextest requires each `--list --format terse` output line to end in `: test`.
+    // It lists ignored tests with a second `--ignored` call; this suite has none, and a
+    // name in that list would mark the test ignored.
     if args.iter().any(|arg| arg == "--list") {
-        for (name, _) in tests {
-            println!("{name}: test");
+        if !args.iter().any(|arg| arg == "--ignored") {
+            for (name, _) in tests {
+                println!("{name}: test");
+            }
         }
         return;
     }
@@ -308,6 +364,7 @@ fn main() {
         "\nmodel_execution_subprocess: {ran} run, {} failed",
         failed.len()
     );
+    remove_process_fixtures();
     if !failed.is_empty() {
         for name in &failed {
             eprintln!("failed: {name}");
@@ -322,7 +379,12 @@ fn install_fixture_controls() {
         credential: String,
         vars: BTreeMap<String, String>,
     }
-    for credential_name in ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"] {
+    for credential_name in [
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+    ] {
         let Ok(encoded) = std::env::var(credential_name) else {
             continue;
         };
@@ -839,6 +901,7 @@ fn fixture_closure_uncached(
     let shared = provider_extensions.is_empty().then(|| {
         SHARED.get_or_init(|| {
             let root = tempfile::tempdir().expect("shared closure fixture").keep();
+            SHARED_FIXTURE_ROOT.get_or_init(|| root.clone());
             let source = root.join("source");
             fs::create_dir(&source).expect("shared closure source");
             fs::write(source.join("pi-entry.mjs"), b"// fixture entrypoint")
@@ -2790,19 +2853,21 @@ fn supervisor_shutdown_reaps_group() {
 
 fn private_paths_forced_modes_under_umask() {
     for mask in [0o000u32, 0o077] {
-        let _guard = UmaskGuard::set(mask);
         let setup = RunSetup::new();
         let transcript = write_transcript(
             setup.scratch.path(),
             "success.ndjson",
             &pi_success_lines("hi", "stop"),
         );
+        // The shared closure store refuses a group- or world-writable root, so the fixture
+        // closure is built before the umask under test applies to the run.
         let backend = pi_backend(
             &setup,
             &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
             Vec::new(),
             None,
         );
+        let _guard = UmaskGuard::set(mask);
         let request = request(
             setup.project.path(),
             Harness::Pi,
@@ -3153,7 +3218,11 @@ fn provider_rows_exclude_ambient_credentials_and_enforce_caps() {
         .expect("vector snapshot")
         .source_claim(&key, "opencode", "anthropic", None)
         .expect("fingerprint");
-    assert_eq!(vector, pinned_source_claim("anthropic env"));
+    assert_eq!(
+        vector,
+        pinned_source_claim("anthropic env"),
+        "the shared v4 `anthropic env` vector"
+    );
 }
 
 fn pinned_source_claim(name: &str) -> String {
@@ -3699,4 +3768,482 @@ fn sweep_spares_young_record_temps() {
         "an aged temp is a crashed write's leftover and must be removed"
     );
     fs::remove_file(&fresh).expect("clean up fresh temp");
+}
+
+/// A refresh that answers each call with the next scripted outcome: a row living that many
+/// seconds past now, or a failure.
+struct ScriptedSource {
+    outcomes: Mutex<std::collections::VecDeque<Result<u64, TransactionFailure>>>,
+    calls: std::sync::atomic::AtomicUsize,
+    controls: Mutex<String>,
+}
+
+impl ScriptedSource {
+    /// The fixture controls ride in the row's secret, the one value the child receives.
+    fn steer(&self, setup: &RunSetup, extra: &[(&str, &str)]) {
+        let base = setup.base_vars();
+        let mut vars: BTreeMap<&str, &str> =
+            base.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+        vars.extend(extra.iter().copied());
+        *self.controls.lock().expect("controls") = serde_json::to_string(&serde_json::json!({
+            "credential": CREDENTIAL_SENTINEL,
+            "vars": vars,
+        }))
+        .expect("fixture controls serialize");
+    }
+}
+
+fn admitted_identity() -> GraphIdentity {
+    GraphIdentity {
+        profile: "dev".into(),
+        region: "us-west-2".into(),
+        roles: Vec::new(),
+        root: RootIdentity::Sso {
+            profile: "dev".into(),
+            session_name: "corp".into(),
+            start_url: "https://example.awsapps.com/start".into(),
+            sso_region: "us-east-1".into(),
+            account_id: "111111111111".into(),
+            role_name: "Dev".into(),
+        },
+    }
+}
+
+struct Scripted(Arc<ScriptedSource>);
+
+impl Refresh for Scripted {
+    fn refresh(&self, _request: RefreshRequest, _cancel: CancellationToken) -> RefreshFuture {
+        let script = &self.0;
+        let call = script
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let next = script
+            .outcomes
+            .lock()
+            .expect("script")
+            .pop_front()
+            .expect("scripted outcome");
+        let controls = script.controls.lock().expect("controls").clone();
+        Box::pin(async move {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("wall clock")
+                .as_secs();
+            let (row, failure) = match next {
+                Ok(lifetime) => (
+                    Some(CredentialRow {
+                        access_key_id: format!("ASIAROW{call}"),
+                        secret_access_key: zeroize::Zeroizing::new(controls),
+                        session_token: zeroize::Zeroizing::new(format!("session-{call}")),
+                        expires_at_unix_seconds: now + lifetime,
+                    }),
+                    None,
+                ),
+                Err(failure) => (None, Some(failure)),
+            };
+            TransactionOutcome {
+                identity: Some(admitted_identity()),
+                row,
+                successor: None,
+                observation: None,
+                renewal: RenewalEvidence::NotStarted,
+                lost_succession: false,
+                record_retained: false,
+                failure,
+            }
+        })
+    }
+}
+
+/// The wall clock plus an offset the test shifts, with one optional jump applied at a
+/// chosen read: acquisition reads the wall twice on a cold cache (adoption, then the
+/// waiter's lifetime check), so a jump at read 2 lands between acquisition and spawn.
+#[derive(Clone, Default)]
+struct ShiftedClock {
+    offset: Arc<std::sync::atomic::AtomicU64>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+    jump: Option<(usize, u64)>,
+}
+
+impl ShiftedClock {
+    fn shift(&self, seconds: u64) {
+        self.offset
+            .fetch_add(seconds, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl OwnerClock for ShiftedClock {
+    fn wall(&self) -> Option<Duration> {
+        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some((_, seconds)) = self.jump.filter(|(at, _)| *at == read) {
+            self.shift(seconds);
+        }
+        let offset = self.offset.load(std::sync::atomic::Ordering::SeqCst);
+        SystemClock
+            .wall()
+            .map(|wall| wall + Duration::from_secs(offset))
+    }
+
+    fn jitter(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+fn scripted_dispatch(
+    setup: &RunSetup,
+    extra: &[(&str, &str)],
+    outcomes: Vec<Result<u64, TransactionFailure>>,
+) -> (AwsDispatch, Arc<ScriptedSource>) {
+    scripted_dispatch_with_clock(setup, extra, outcomes, ShiftedClock::default())
+}
+
+fn scripted_dispatch_with_clock(
+    setup: &RunSetup,
+    extra: &[(&str, &str)],
+    outcomes: Vec<Result<u64, TransactionFailure>>,
+    clock: ShiftedClock,
+) -> (AwsDispatch, Arc<ScriptedSource>) {
+    let script = Arc::new(ScriptedSource {
+        outcomes: Mutex::new(outcomes.into()),
+        calls: Default::default(),
+        controls: Mutex::default(),
+    });
+    script.steer(setup, extra);
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(
+        Scripted(Arc::clone(&script)),
+        clock,
+        admitted_identity(),
+        health,
+    );
+    (AwsDispatch::new(owner, "us-west-2".into()), script)
+}
+
+/// The startup environment holds an unrelated provider key; only the selected row may
+/// reach a Bedrock child.
+fn unrelated_snapshot() -> EnvSnapshot {
+    EnvSnapshot::capture_from(vec![
+        (os("ANTHROPIC_API_KEY"), os("unrelated-secret")),
+        (os("AWS_PROFILE"), os("owner-profile")),
+        (os("AWS_CONFIG_FILE"), os("/home/owner/.aws/config")),
+        (
+            os("AWS_SHARED_CREDENTIALS_FILE"),
+            os("/home/owner/.aws/credentials"),
+        ),
+        (os("AWS_ACCESS_KEY_ID"), os("AKIASTARTUPROW")),
+    ])
+    .expect("snapshot")
+}
+
+fn bedrock(setup: &RunSetup, harness: Harness) -> BackendRequest {
+    request(
+        setup.project.path(),
+        harness,
+        "amazon-bedrock/anthropic.claude-test",
+        None,
+    )
+}
+
+const RUN_DEADLINE_SECS: u64 = 20;
+
+fn profile_rows_reach_each_child_alone_and_rotate_through_one_owner() {
+    let setup = RunSetup::new();
+    let opencode_transcript = write_transcript(
+        setup.scratch.path(),
+        "opencode.ndjson",
+        &opencode_success_lines("from bedrock"),
+    );
+    let clock = ShiftedClock::default();
+    let (aws, script) = scripted_dispatch_with_clock(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &opencode_transcript.to_string_lossy())],
+        vec![Ok(180), Ok(3_600)],
+        clock.clone(),
+    );
+    let opencode = OpenCodeBackend::with_limits(
+        OpenCodeRuntime {
+            closure: fixture_closure(&setup, "opencode", &[]),
+            executable_node: "bin/runtime".to_owned(),
+        },
+        unrelated_snapshot(),
+        state_root(),
+        quick_limits(),
+    )
+    .with_aws_source(Some(aws.clone()));
+    let pi = PiBackend::with_limits(
+        PiRuntimeDescriptor {
+            closure: fixture_closure(&setup, "pi", &[]),
+            interpreter_node: "bin/runtime".to_owned(),
+            entrypoint_node: "node_modules/pi/entry.mjs".to_owned(),
+            provider_extension_nodes: Vec::new(),
+        },
+        unrelated_snapshot(),
+        state_root(),
+        None,
+        quick_limits(),
+    )
+    .with_aws_source(Some(aws.clone()));
+    let selected = |env: &BTreeMap<String, String>, call: usize| {
+        assert_eq!(
+            env.get("AWS_ACCESS_KEY_ID").map(String::as_str),
+            Some(format!("ASIAROW{call}").as_str())
+        );
+        assert_eq!(
+            env.get("AWS_SESSION_TOKEN").map(String::as_str),
+            Some(format!("session-{call}").as_str())
+        );
+        assert_eq!(env.get("AWS_REGION").map(String::as_str), Some("us-west-2"));
+        assert!(
+            !env.contains_key("ANTHROPIC_API_KEY"),
+            "no unrelated credential reaches the child"
+        );
+        assert!(
+            env.values()
+                .all(|value| !value.contains("/home/owner") && !value.contains("owner-profile")),
+            "no owner path or profile name reaches the child under any key"
+        );
+        let row = [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_REGION",
+        ];
+        assert!(
+            env.keys()
+                .all(|name| !name.starts_with("AWS_") || row.contains(&name.as_str())),
+            "the child receives the selected row and no profile, file, or cache selector: {env:?}"
+        );
+    };
+
+    let (terminal, _) = execute(&opencode, bedrock(&setup, Harness::OpenCode));
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    selected(&setup.env(), 0);
+
+    // The first row expires before the next run's deadline plus skew, so the next run
+    // rotates to a fresh row.
+    clock.shift(150);
+    let pi_transcript = write_transcript(
+        setup.scratch.path(),
+        "pi.ndjson",
+        &pi_success_lines("from bedrock", "stop"),
+    );
+    script.steer(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &pi_transcript.to_string_lossy())],
+    );
+    let (terminal, _) = execute(&pi, bedrock(&setup, Harness::Pi));
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    selected(&setup.env(), 1);
+    assert_eq!(
+        script.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both adapters share one owner, and the rotated row reaches the next child"
+    );
+}
+
+/// The owner's paused-clock tests pin the exact -1/equal/+1 boundary; here each adapter
+/// refuses a row short of the run deadline plus skew, and a row without a future expiry,
+/// before any child starts. The margin keeps the short row short however long setup takes.
+fn profile_backend(
+    setup: &RunSetup,
+    harness: Harness,
+    aws: AwsDispatch,
+) -> Box<dyn LlmExecutionBackend> {
+    match harness {
+        Harness::OpenCode => Box::new(opencode_backend(setup, &[]).with_aws_source(Some(aws))),
+        _ => Box::new(pi_backend(setup, &[], Vec::new(), None).with_aws_source(Some(aws))),
+    }
+}
+
+fn profile_rows_without_lifetime_start_no_child() {
+    let needed = RUN_DEADLINE_SECS + EXPIRY_SKEW.as_secs();
+    for harness in [Harness::OpenCode, Harness::Pi] {
+        for lifetime in [needed - 5, 0] {
+            let setup = RunSetup::new();
+            let (aws, script) = scripted_dispatch(&setup, &[], vec![Ok(lifetime)]);
+            let backend = profile_backend(&setup, harness, aws);
+            let (terminal, _) = execute(backend.as_ref(), bedrock(&setup, harness));
+            let BackendTerminal::SourceFailed(error) = &terminal else {
+                panic!("{harness:?} lifetime {lifetime}: {terminal:?}");
+            };
+            assert_eq!(error.class, ErrorClass::Permanent, "{harness:?}");
+            assert!(
+                !setup.out.path().join("argv.json").exists(),
+                "{harness:?} lifetime {lifetime} started a child"
+            );
+            assert_eq!(script.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+}
+
+fn profile_source_failures_are_credential_source_terminals() {
+    for (failure, class) in [
+        (TransactionFailure::LoginRequired, ErrorClass::AuthRequired),
+        (TransactionFailure::HelperUnreported, ErrorClass::Transient),
+        (
+            TransactionFailure::Admission(AdmissionError::Unparseable),
+            ErrorClass::Permanent,
+        ),
+    ] {
+        let setup = RunSetup::new();
+        let (aws, _) = scripted_dispatch(&setup, &[], vec![Err(failure)]);
+        let pi = pi_backend(&setup, &[], Vec::new(), None).with_aws_source(Some(aws.clone()));
+        let (terminal, _) = execute(&pi, bedrock(&setup, Harness::Pi));
+        let BackendTerminal::SourceFailed(error) = &terminal else {
+            panic!("{failure:?}: {terminal:?}");
+        };
+        assert_eq!(error.class, class, "{failure:?}");
+        assert!(!setup.out.path().join("argv.json").exists());
+        if class == ErrorClass::Transient {
+            let (terminal, _) = execute(&pi, bedrock(&setup, Harness::Pi));
+            assert!(
+                matches!(&terminal, BackendTerminal::SourceFailed(error) if error.retry_after_secs.is_some()),
+                "a cooling source answers with its retry: {terminal:?}"
+            );
+        }
+    }
+    let setup = RunSetup::new();
+    let (aws, script) = scripted_dispatch(&setup, &[], Vec::new());
+    let opencode = opencode_backend(&setup, &[]).with_aws_source(Some(aws));
+    let (terminal, _) = execute(
+        &opencode,
+        request(
+            setup.project.path(),
+            Harness::OpenCode,
+            "anthropic/claude-test",
+            None,
+        ),
+    );
+    assert!(!matches!(terminal, BackendTerminal::SourceFailed(_)));
+    assert_eq!(
+        script.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a non-Bedrock provider keeps its startup row and never touches the source"
+    );
+}
+
+fn a_wall_jump_after_acquisition_refuses_the_spawn() {
+    for harness in [Harness::OpenCode, Harness::Pi] {
+        let setup = RunSetup::new();
+        let clock = ShiftedClock {
+            jump: Some((2, 3_600)),
+            ..ShiftedClock::default()
+        };
+        let (aws, script) = scripted_dispatch_with_clock(&setup, &[], vec![Ok(3_600)], clock);
+        let health = aws.owner().health();
+        let backend = profile_backend(&setup, harness, aws);
+        let (terminal, _) = execute(backend.as_ref(), bedrock(&setup, harness));
+        let BackendTerminal::SourceFailed(error) = &terminal else {
+            panic!("{harness:?}: {terminal:?}");
+        };
+        assert_eq!(error.class, ErrorClass::Transient, "{harness:?}");
+        assert_eq!(
+            health.get().state,
+            SourceState::Ready,
+            "{harness:?}: acquisition succeeded, so the refusal came from the pre-spawn recheck"
+        );
+        assert!(
+            !setup.out.path().join("argv.json").exists(),
+            "{harness:?}: the pre-spawn recheck refused the child"
+        );
+        assert_eq!(script.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+fn model_permission_denial_stays_model_scoped() {
+    let setup = RunSetup::new();
+    let transcript = write_transcript(
+        setup.scratch.path(),
+        "denied.ndjson",
+        &[serde_json::json!({
+            "type": "error",
+            "error": {"name": "APIError", "data": {"message": "AccessDeniedException", "statusCode": 403}},
+        })],
+    );
+    let (aws, script) = scripted_dispatch(
+        &setup,
+        &[(TRANSCRIPT_FILE_ENV, &transcript.to_string_lossy())],
+        vec![Ok(3_600)],
+    );
+    let opencode = opencode_backend(&setup, &[]).with_aws_source(Some(aws));
+    for _ in 0..2 {
+        let (terminal, _) = execute(&opencode, bedrock(&setup, Harness::OpenCode));
+        assert!(
+            matches!(terminal, BackendTerminal::Failed(_)),
+            "a model denial is a model failure, not a source failure: {terminal:?}"
+        );
+    }
+    assert_eq!(
+        script.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a model denial never triggers a refresh"
+    );
+}
+
+/// A refresh that reports its start and settles only when released.
+struct HeldSource {
+    started: std::sync::mpsc::Sender<()>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl Refresh for HeldSource {
+    fn refresh(&self, _: RefreshRequest, _: CancellationToken) -> RefreshFuture {
+        let _ = self.started.send(());
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            release.notified().await;
+            TransactionOutcome {
+                identity: Some(admitted_identity()),
+                row: None,
+                successor: None,
+                observation: None,
+                renewal: RenewalEvidence::NotStarted,
+                lost_succession: false,
+                record_retained: false,
+                failure: Some(TransactionFailure::Spawn),
+            }
+        })
+    }
+}
+
+fn a_cancelled_run_waiting_on_the_source_starts_no_child() {
+    let setup = RunSetup::new();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (started, waiting) = std::sync::mpsc::channel();
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(
+        HeldSource {
+            started,
+            release: Arc::clone(&release),
+        },
+        SystemClock,
+        admitted_identity(),
+        health,
+    );
+    let pi = pi_backend(&setup, &[], Vec::new(), None)
+        .with_aws_source(Some(AwsDispatch::new(owner, "us-west-2".into())));
+    let cancel = CancellationToken::new();
+    let canceller = std::thread::spawn({
+        let cancel = cancel.clone();
+        move || {
+            waiting
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the run reaches the source wait");
+            cancel.cancel();
+        }
+    });
+    let (terminal, _) = execute_with_cancel(&pi, bedrock(&setup, Harness::Pi), &cancel);
+    canceller.join().unwrap();
+    assert!(
+        matches!(&terminal, BackendTerminal::Failed(error) if error.message.contains("cancelled during setup")),
+        "a waiter cancelled inside acquisition ends as a setup abort: {terminal:?}"
+    );
+    assert!(!setup.out.path().join("argv.json").exists());
+    release.notify_one();
 }

@@ -26,16 +26,25 @@ use host_runtime::local_embeddings::{
     LocalEmbeddingsComponent, LocalEmbeddingsConfig, LocalEmbeddingsLimits,
 };
 use host_runtime::model_execution::ModelExecutionComponent;
+use host_runtime::model_execution::aws_helper::TEST_ORIGIN_ENV;
+use host_runtime::model_execution::aws_refresh::{
+    AwsDispatch, SourceOwner, SystemClock, TransactionRefresh,
+};
 use host_runtime::model_execution::aws_source::{
     AwsProfileSource, deserialize_present, validate_source_binding,
 };
-use host_runtime::model_execution::aws_transaction::{OwnerSource, admit_owner_source};
+use host_runtime::model_execution::aws_transaction::{
+    HelperLimits, OwnerSource, admit_owner_source,
+};
 use host_runtime::model_execution::backend::{
     BackendError, BackendFuture, BackendRequest, BackendTerminal, ErrorClass, EventSink, Harness,
     HarnessDispatchBackend, LlmExecutionBackend,
 };
 use host_runtime::model_execution::opencode::{OpenCodeBackend, OpenCodeRuntime};
 use host_runtime::model_execution::pi::{PiBackend, PiRuntimeDescriptor};
+use host_runtime::model_execution::source_health::{
+    SourceHealthCell, SourceKind, SourceObservation,
+};
 use host_runtime::model_execution::subprocess::group_registry::StateRoot;
 use host_runtime::model_execution::subprocess::{
     CREDENTIAL_VALUE_CAP_BYTES, CREDENTIAL_VARIABLES, CredentialMechanism, EnvSnapshot,
@@ -969,9 +978,33 @@ fn closure_root(data_dir: &Path) -> PathBuf {
         .join("harness-closures")
 }
 
+/// The host's one profile source owner. Startup re-admits the selected graph, and that
+/// identity is the baseline every later refresh must match.
+fn aws_dispatch(
+    selector: &AwsProfileSource,
+    state_root: &StateRoot,
+) -> Result<AwsDispatch, &'static str> {
+    let source = OwnerSource::from_selector(selector);
+    let admitted =
+        admit_owner_source(&source).map_err(|_| "aws profile source is not admissible")?;
+    let executable = std::env::current_exe().map_err(|_| "host executable path is unavailable")?;
+    let test_origin = std::env::var(TEST_ORIGIN_ENV).ok();
+    let refresh = TransactionRefresh::new(
+        source,
+        executable,
+        state_root.clone(),
+        HelperLimits::default(),
+        test_origin,
+    );
+    let health = SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile));
+    let owner = SourceOwner::new(refresh, SystemClock, admitted, health);
+    Ok(AwsDispatch::new(owner, selector.region().to_owned()))
+}
+
 fn harness_backend(
     envelope: &StartupEnvelope,
     env: &EnvSnapshot,
+    aws: Option<&AwsDispatch>,
     state_root: &StateRoot,
 ) -> Result<HarnessDispatchBackend, &'static str> {
     let closure_root = closure_root(&envelope.data_dir);
@@ -991,14 +1024,17 @@ fn harness_backend(
     let opencode: Arc<dyn LlmExecutionBackend> =
         match open_snapshot(envelope.opencode.as_ref(), "opencode", store.as_ref()) {
             Ok(closure) => match closure.manifest().executable.clone() {
-                Some(executable_node) => Arc::new(OpenCodeBackend::new(
-                    OpenCodeRuntime {
-                        closure,
-                        executable_node,
-                    },
-                    env.clone(),
-                    state_root.clone(),
-                )),
+                Some(executable_node) => Arc::new(
+                    OpenCodeBackend::new(
+                        OpenCodeRuntime {
+                            closure,
+                            executable_node,
+                        },
+                        env.clone(),
+                        state_root.clone(),
+                    )
+                    .with_aws_source(aws.cloned()),
+                ),
                 None => degraded(envelope.opencode.as_ref(), "closure_incomplete")?,
             },
             Err(reason) => degraded(envelope.opencode.as_ref(), reason)?,
@@ -1010,16 +1046,19 @@ fn harness_backend(
                 match (manifest.interpreter.clone(), manifest.entrypoint.clone()) {
                     (Some(interpreter_node), Some(entrypoint_node)) => {
                         let provider_extension_nodes = manifest.extensions.clone();
-                        Arc::new(PiBackend::new(
-                            PiRuntimeDescriptor {
-                                closure,
-                                interpreter_node,
-                                entrypoint_node,
-                                provider_extension_nodes,
-                            },
-                            env.clone(),
-                            state_root.clone(),
-                        ))
+                        Arc::new(
+                            PiBackend::new(
+                                PiRuntimeDescriptor {
+                                    closure,
+                                    interpreter_node,
+                                    entrypoint_node,
+                                    provider_extension_nodes,
+                                },
+                                env.clone(),
+                                state_root.clone(),
+                            )
+                            .with_aws_source(aws.cloned()),
+                        )
                     }
                     _ => degraded(envelope.pi.as_ref(), "closure_incomplete")?,
                 }
@@ -1271,8 +1310,17 @@ pub fn run() -> Result<(), &'static str> {
     let local_embeddings = local_embeddings_component(&generation);
     let model_execution_state =
         StateRoot::resolve(Some(&root)).map_err(|_| "model_execution state root is unavailable")?;
-    let backend: Arc<dyn LlmExecutionBackend> =
-        Arc::new(harness_backend(&envelope, &env, &model_execution_state)?);
+    let aws = envelope
+        .aws_source
+        .as_ref()
+        .map(|selector| aws_dispatch(selector, &model_execution_state))
+        .transpose()?;
+    let backend: Arc<dyn LlmExecutionBackend> = Arc::new(harness_backend(
+        &envelope,
+        &env,
+        aws.as_ref(),
+        &model_execution_state,
+    )?);
     let capability_source = Arc::new(daemon::context_capabilities::BackendDeclarations::new(
         &backend,
     ));
@@ -1285,6 +1333,7 @@ pub fn run() -> Result<(), &'static str> {
             envelope.aws_source.clone(),
             model_execution_state,
         )
+        .with_source_owner(aws.as_ref().map(|aws| aws.owner().clone()))
     };
     // The daemon commits its own harness selection when the host hands it the bearer key, before publication, so a launcher killed after publication cannot leave a daemon serving harnesses that no selection on disk records. The launcher's later commit rewrites the same content.
     let selection_root = closure_root(&root);
