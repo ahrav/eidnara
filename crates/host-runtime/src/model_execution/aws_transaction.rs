@@ -88,6 +88,12 @@ pub struct PrivateToken {
     basis: TokenObservation,
 }
 
+impl PrivateToken {
+    pub(super) fn basis(&self) -> &TokenObservation {
+        &self.basis
+    }
+}
+
 #[cfg(test)]
 impl PrivateToken {
     pub(crate) fn for_test(token: &[u8], basis: TokenObservation) -> Self {
