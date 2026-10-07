@@ -12,7 +12,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
@@ -131,7 +131,7 @@ struct Inner {
     health: SourceHealthCell,
     cancel: CancellationToken,
     tasks: TaskTracker,
-    state: Mutex<State>,
+    state: RwLock<State>,
 }
 
 /// A shared handle. Hosts call [`SourceOwner::close`] and [`SourceOwner::join`] at
@@ -154,7 +154,7 @@ impl SourceOwner {
             health,
             cancel: CancellationToken::new(),
             tasks: TaskTracker::new(),
-            state: Mutex::new(State::default()),
+            state: RwLock::new(State::default()),
         }))
     }
 
@@ -166,6 +166,11 @@ impl SourceOwner {
         deadline: Instant,
         cancel: &CancellationToken,
     ) -> Result<Arc<CredentialRow>, SourceError> {
+        // Warm hits share the read lock. A miss checks again under the exclusive lock
+        // before it joins or starts the refresh.
+        if let Some(found) = self.0.usable(&self.0.read(), deadline) {
+            return found;
+        }
         let mut settled = {
             let mut state = self.0.lock();
             if let Some(found) = self.0.usable(&state, deadline) {
@@ -193,7 +198,7 @@ impl SourceOwner {
             () = tokio::time::sleep_until(deadline) => return Err(SourceError::DeadlineExceeded),
             _ = settled.wait_for(|done| *done) => {}
         }
-        let state = self.0.lock();
+        let state = self.0.read();
         self.0.usable(&state, deadline).unwrap_or(Err(state
             .failure
             .unwrap_or(SourceError::InsufficientLifetime)))
@@ -226,7 +231,7 @@ impl SourceOwner {
     pub async fn join(&self) -> bool {
         self.close();
         self.0.tasks.wait().await;
-        !self.0.lock().unresolved
+        !self.0.read().unresolved
     }
 
     /// Starts the single refresh for the demand that ends at `demand`. The refresh runs
@@ -275,8 +280,12 @@ enum Authority {
 }
 
 impl Inner {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> RwLockWriteGuard<'_, State> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn usable(
@@ -510,6 +519,7 @@ impl Refresh for TransactionRefresh {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use tokio::sync::oneshot;
