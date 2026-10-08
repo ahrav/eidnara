@@ -491,10 +491,16 @@ fn protect_literal_placeholders<'a>(
     )
 }
 
-/// Like `protect_regex`, but a match is preserved only when `accept(text,
-/// start, end)` holds; rejected matches pass through unchanged. This keeps the
-/// placeholder-minting invariant (`\u{0}EIDNARA_PRES_{index}\u{0}` with
-/// `preserved.len()` as the index) in one owner.
+fn mint_placeholder(preserved: &mut Vec<PreservedRegion>, original: &str, literal: bool) -> String {
+    let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
+    preserved.push(PreservedRegion {
+        placeholder: placeholder.clone(),
+        original: original.to_string(),
+        literal,
+    });
+    placeholder
+}
+
 fn protect_regex_filtered<'a>(
     text: &'a str,
     regex: &Regex,
@@ -510,13 +516,7 @@ fn protect_regex_filtered<'a>(
         }
         let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
         output.push_str(&text[cursor..matched.start()]);
-        let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
-        preserved.push(PreservedRegion {
-            placeholder: placeholder.clone(),
-            original: matched.as_str().to_string(),
-            literal,
-        });
-        output.push_str(&placeholder);
+        output.push_str(&mint_placeholder(preserved, matched.as_str(), literal));
         cursor = matched.end();
     }
     match output {
@@ -574,13 +574,7 @@ fn protect_hash_regions<'a>(text: &'a str, preserved: &mut Vec<PreservedRegion>)
         }
         let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
         output.push_str(&text[pending..start]);
-        let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
-        preserved.push(PreservedRegion {
-            placeholder: placeholder.clone(),
-            original: text[start..end].to_string(),
-            literal: false,
-        });
-        output.push_str(&placeholder);
+        output.push_str(&mint_placeholder(preserved, &text[start..end], false));
         pending = end;
     }
     match output {

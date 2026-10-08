@@ -761,6 +761,14 @@ fn the_hint_stopword_check_equals_the_stopword_list() {
             for third in b'a'..=b'z' {
                 let token = [first, second, third];
                 seen += is_hint_stopword(&token) as usize;
+                for fourth in b'a'..=b'z' {
+                    let token = [first, second, third, fourth];
+                    assert_eq!(
+                        is_hint_stopword(&token),
+                        USER_HINT_STOPWORDS.contains(&std::str::from_utf8(&token).unwrap()),
+                        "{token:?}"
+                    );
+                }
             }
         }
     }
@@ -792,6 +800,20 @@ fn whole_text_fragment(snippet: &str) -> String {
         .to_string();
     truncated.push('…');
     truncated
+}
+
+#[test]
+fn a_literal_ellipsis_at_the_prefix_cut_does_not_end_the_fragment() {
+    for text in [
+        format!("x{}… y", "\u{a0}".repeat(160)),
+        format!("x {}wait… tail words here", "§1§".repeat(64)),
+    ] {
+        assert_eq!(
+            user_hint_fragment(&text),
+            whole_text_fragment(&text),
+            "{text:?}"
+        );
+    }
 }
 
 proptest::proptest! {

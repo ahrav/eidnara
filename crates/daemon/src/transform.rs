@@ -8468,31 +8468,51 @@ fn hint_token_cmp(left_key: u64, left: &[u8], right_key: u64, right: &[u8]) -> s
     left_key.cmp(&right_key).then_with(|| left.cmp(right))
 }
 
-/// Equal to `USER_HINT_STOPWORDS.contains(token)`; every stopword is three or four ASCII bytes.
+const fn hint_stopword_count(len: usize) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < USER_HINT_STOPWORDS.len() {
+        let word_len = USER_HINT_STOPWORDS[index].len();
+        assert!(
+            word_len == 3 || word_len == 4,
+            "is_hint_stopword encodes only three- and four-byte stopwords"
+        );
+        if word_len == len {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+const fn hint_stopword_keys<const N: usize>(len: usize) -> [u32; N] {
+    let mut keys = [0u32; N];
+    let mut filled = 0;
+    let mut index = 0;
+    while index < USER_HINT_STOPWORDS.len() {
+        let word = USER_HINT_STOPWORDS[index].as_bytes();
+        if word.len() == len {
+            let mut key = 0u32;
+            let mut byte = 0;
+            while byte < len {
+                key = (key << 8) | word[byte] as u32;
+                byte += 1;
+            }
+            keys[filled] = key;
+            filled += 1;
+        }
+        index += 1;
+    }
+    keys
+}
+
+const HINT_STOPWORD_KEYS_3: [u32; hint_stopword_count(3)] = hint_stopword_keys(3);
+const HINT_STOPWORD_KEYS_4: [u32; hint_stopword_count(4)] = hint_stopword_keys(4);
+
 fn is_hint_stopword(token: &[u8]) -> bool {
     match *token {
-        [a, b, c] => matches!(
-            u32::from_be_bytes([0, a, b, c]),
-            0x0061_6e64 // and
-                | 0x0061_7265 // are
-                | 0x0062_7574 // but
-                | 0x0066_6f72 // for
-                | 0x006e_6f74 // not
-                | 0x0074_6865 // the
-                | 0x0075_7365 // use
-                | 0x0077_6173 // was
-                | 0x0079_6f75 // you
-        ),
-        [a, b, c, d] => matches!(
-            u32::from_be_bytes([a, b, c, d]),
-            0x6672_6f6d // from
-                | 0x6861_7665 // have
-                | 0x696e_746f // into
-                | 0x7468_6174 // that
-                | 0x7468_6973 // this
-                | 0x7769_7468 // with
-                | 0x796f_7572 // your
-        ),
+        [a, b, c] => HINT_STOPWORD_KEYS_3.contains(&u32::from_be_bytes([0, a, b, c])),
+        [a, b, c, d] => HINT_STOPWORD_KEYS_4.contains(&u32::from_be_bytes([a, b, c, d])),
         _ => false,
     }
 }
@@ -9027,8 +9047,9 @@ fn user_hint_fragment(snippet: &str) -> String {
         crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
     );
     // Escaping, tag stripping, and whitespace joining act on whole words, so a prefix that ends
-    // at whitespace renders the same leading words as the whole text. The prefix is used when it
-    // alone exceeds the cap; a shorter prefix cannot show whether more words follow.
+    // at whitespace renders the same leading words as the whole text. The prefix is used when its
+    // joined words alone exceed the cap; a prefix within the cap cannot show whether more words
+    // follow, even when its last word ends in a literal `…`.
     const PREFIX_BYTES: usize = 4 * USER_HINT_FRAGMENT_CHAR_CAP;
     if compressed.len() > PREFIX_BYTES
         && let Some(cut) = compressed
@@ -9036,11 +9057,11 @@ fn user_hint_fragment(snippet: &str) -> String {
             .find(|(offset, character)| *offset >= PREFIX_BYTES && character.is_whitespace())
             .map(|(offset, _)| offset)
     {
-        let fragment = one_line_fragment(
+        let (fragment, truncated) = one_line_fragment(
             &neutralize_user_hint_markup(&compressed[..cut]),
             USER_HINT_FRAGMENT_CHAR_CAP,
         );
-        if fragment.ends_with('…') {
+        if truncated {
             return fragment;
         }
     }
@@ -9048,6 +9069,7 @@ fn user_hint_fragment(snippet: &str) -> String {
         &neutralize_user_hint_markup(&compressed),
         USER_HINT_FRAGMENT_CHAR_CAP,
     )
+    .0
 }
 
 /// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
@@ -9105,7 +9127,9 @@ fn truncate_hint_to_total_cap(wrapped: &str, limit: usize) -> String {
     format!("{open}{body}…{close}")
 }
 
-fn one_line_fragment(text: &str, limit: usize) -> String {
+/// The words of `text` joined by single spaces and cut to `limit` UTF-16 units, with `true` when
+/// the joined words exceed `limit` and the fragment ends in the added `…`.
+fn one_line_fragment(text: &str, limit: usize) -> (String, bool) {
     // Words are joined by single spaces until the joined text is known to exceed the limit;
     // the truncation below reads only the first `limit - 1` units of that prefix.
     let mut normalized = String::new();
@@ -9122,13 +9146,13 @@ fn one_line_fragment(text: &str, limit: usize) -> String {
         }
     }
     if units <= limit {
-        return normalized;
+        return (normalized, false);
     }
     let mut truncated = utf16_prefix(&normalized, limit.saturating_sub(1))
         .trim_end()
         .to_string();
     truncated.push('…');
-    truncated
+    (truncated, true)
 }
 
 fn maybe_append_channel1_nudge(
