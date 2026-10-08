@@ -880,9 +880,9 @@ producer
 Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
 maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
 2 + 1 + 143 (footer, #926) + 23 = 482 UTF-16 units against a cap of 800.
-`USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment`
-caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced
-`:9132-9139`).
+`USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment`
+caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced
+`:9148-9155`).
 Existing check: none. The only guard is the `debug_assert!` at `:9115`, which
 is trivially satisfied.
 Impact: A dead truncation path plus a `debug_assert` that can never fail. It is
