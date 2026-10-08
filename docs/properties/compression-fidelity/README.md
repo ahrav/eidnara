@@ -15,7 +15,9 @@ longer promises full context (#926), and Pi folds history (#850).
 All **28 records are active**. U1 partially exercises
 [cf-source-obligation-independence](generation/catalog.md#cf-source-obligation-independence)
 and [cf-corpus-byte-identity](evaluation/catalog.md#cf-corpus-byte-identity);
-the other 26 are unexercised. Every listed existing check remains
+U2 ([#719](https://github.com/ahrav/eidnara/issues/719)) partially exercises
+nine more across generation, delivery, and recovery, each record naming its
+witness. The other 17 are unexercised. Every listed existing check remains
 **unaudited**. Source inspection, discovery, review, and documentation
 validation do not establish that a property holds.
 

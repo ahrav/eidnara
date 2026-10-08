@@ -27,11 +27,10 @@ are supplied. No tests or external model calls run here.
   withdraws aliases whose whole presented parts do not survive truncation.
 - [citations_golden.rs:457-482,509-522][golden] contains same-budget truncation
   and whitespace-transformation checks. Both are unaudited and unrun here.
-- [lib.rs:22416-22441][lib], `TestProducer::start`, records the user prompt
-  but ignores its `_system` and `_model` arguments. That helper alone does not
-  capture the complete producer request needed for this evidence claim. Extend
-  the private test recorder to retain system text, user prompt, and model; do
-  not introduce a production export to obtain these observations.
+- [lib.rs:22428-22463][lib], `TestProducer::start`, records each attempt's
+  system text, user prompt, and model in `ProducerState::attempts` since U2
+  (#719). The private test recorder supplies the complete producer request; no
+  production export obtains these observations.
 - The inspected `a03f58d2` patch changes the verbatim comparison from trimmed
   equality to exact native equality, retained at [chunk.rs:271-274][chunk].
   This is code-history evidence of offset risk, not a semantic incident.

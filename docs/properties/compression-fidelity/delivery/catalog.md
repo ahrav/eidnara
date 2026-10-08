@@ -114,8 +114,10 @@ are not implemented production gates. See each evidence file for reachability.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no corpus-specific publication-to-provider replay or human
-semantic review was run.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` serves each published
+approved example at P1 in m1 and m0 and at P2-P4 under natural decay, judged
+against the approved bodies (U2, #719). Provider capture and human review are
+absent.
 Guarantee: Each served P1-P4 capsule preserves the material meaning required
 at that tier without strengthening or contradicting the source.
 Check: `always` - for every qualified case/scenario and material obligation,
@@ -145,8 +147,10 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no qualified P5 or high-importance pressure capture exists
-from this discovery.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` observes natural P5
+omission for every source and positive-budget pressure for C1 (P4) and C3
+(importance 90, P5) with a generous-budget retention control (U2, #719). The
+invocation-level disposition check belongs to U3.
 Guarantee: Natural or pressure-induced omission exposes lost required meaning
 without hiding it behind unavailable evidence, safe abstention, or budget savings.
 Check: `always` - for each natural or guard-induced omission, bind the omitted
@@ -272,7 +276,9 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: not yet - the required situation witnesses have not been collected.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` fires the internal situations (m1, m0, natural
+and pressure tiers, P5, legacy and sparse rows); provider-delivery situations
+belong to U3.
 Guarantee: The declared delivery campaign constructs every required
 independent serving situation before claiming its coverage.
 Check: `sometimes` - evaluate and report each of the 14 constant situation
@@ -301,8 +307,9 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no candidate-versus-baseline serving-work audit or matched
-resource-boundary replay has run.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` measures the history
+body and the wrapped session-history slice separately under one named estimator
+and changes no budget, cache, or admission path (U2, #719).
 Guarantee: Fidelity work preserves existing serving budgets, query limits,
 caches, and admission without per-transform judging, native rereads, or new
 storage queries.

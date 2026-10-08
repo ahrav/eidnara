@@ -103,10 +103,9 @@ incident or a waiver of U5's witness and dependency requirements.
 The [MemoryReviewer corpus:44-70][curator-corpus] separates sources, scripts, and
 expectations, but `judge` uses fixture-specific substring rules. It is a reuse
 lead, not a fidelity oracle or evidence of a human-reviewed generation baseline.
-The private [TestProducer::start:22416-22441][lib] records the user prompt but
-ignores `_system` and `_model`; complete request capture is not supplied by
-that helper alone. Extending the private test recorder to retain all three is
-required for complete generation claims. No production export is needed.
+The private [TestProducer::start:22428-22463][lib] records each attempt's
+system text, user prompt, and model since U2 (#719), which is the complete
+request capture generation claims need. No production export is needed.
 
 The historical `run-history_summarizer-eval.ts` and `history_summarizer-eval`
 corpus paths are absent from tracked HEAD. No matching invocation is found in

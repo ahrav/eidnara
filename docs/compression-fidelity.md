@@ -97,6 +97,35 @@ follow-up prompts, reviewed outputs, each scenario's serving path, tier,
 and stage, accepted dispositions, and abstention. It exposes no native
 text, spans, obligation statements, or forbidden conclusion statements.
 
+### Replay and exact evidence
+
+`crates/daemon/src/compression_fidelity_replay_tests.rs`, another child of the
+daemon's library test module, drives every source's approved example through
+real prompt and alias assembly, a scripted producer, real validation, and
+accepted publication. It records the producer's complete system, user, and
+model input per attempt, and the exposure of every material span there:
+exact, transformed by the presenter, compacted with its tool output, or
+absent after truncation. It then observes covered input leaving the live
+messages, P1 in the m1 window after a test-authored baseline, P1 at m0,
+P2 to P4 and P5 omission under natural decay against test-authored newer
+rows, and positive-budget pressure with a generous-budget control. Controls
+cover a rejected primary with fallback, inherited P2 and P3, a healed tier
+close, a discarded final segment, a rejected fact set, a same-length drift,
+legacy and tier-sparse rows, and nonpositive budgets and disabled models.
+Expected tiers are the approved bodies; the renderer is only observed.
+
+The C6 witness in `crates/daemon/tests/harness_sources.rs` publishes C6's
+records through the OpenCode source adapter, publishes the same-length
+successor, reopens the kernel, selects the original descriptor at the saved
+commit sequence by its complete identity and revision, and reads its exact
+bytes through the guarded artifact reader. Its controls are the successor's
+bytes, an equal-text other occurrence, a normalized substitute, an empty
+block, and deleted evidence, which refuses rather than substituting.
+
+Both write one owner-attributed JSON observation per case and scenario, mode
+`0600`, only when `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names a private
+directory; a default run asserts in memory and writes nothing.
+
 ## What is unsupported
 
 - **Consumer exact expansion.** No registered tool returns native source
@@ -110,9 +139,8 @@ text, spans, obligation statements, or forbidden conclusion statements.
 - **Record-and-forward provider mode.** The e2e Messages mock serves scripted
   responses, and its cassette modes record or replay those scripted
   exchanges. No mode forwards a captured request to a real provider.
-- **Replay, delivery, and semantic review.** No test yet drives the approved
-  examples through the producer, publication, and serving, captures an
-  OpenCode invocation, or records human semantic judgments.
+- **Delivery and semantic review.** No test captures an OpenCode provider
+  invocation or records human semantic judgments.
 
 ## Planned `eval:compression-fidelity` command
 

@@ -9,7 +9,8 @@ older-catalog limitations, and the explicit `_lenses` placement deviation.
 
 ## Portfolio disposition
 
-The [catalog](catalog.md) contains five active, unexercised records and five
+The [catalog](catalog.md) contains five active records, three unexercised and
+two partial after U2, and five
 matching evidence files. Four are `always` safety records; one is a `sometimes`
 reachability record. Four surfaces are `test-only`; registered memory recovery
 is `default-production`. Test-only native/replay predicates do not make the

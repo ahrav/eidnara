@@ -95,7 +95,8 @@ the privileged C6 witness, replay accounting, or capability-report predicate,
 not a claim that the underlying storage and registry paths are test-only.
 `default-production` names the enabled plugin's existing memory-search path;
 it does not mean the required scenario has been exercised. Four records are
-test-only and one is default-production. All five are active and unexercised.
+test-only and one is default-production. All five are active; U2 partially exercises cf-native-reopen-bytes and
+cf-exact-source-binding, and three are unexercised.
 Semantics totals: four `always`, one `sometimes`; no unbounded liveness claim.
 
 ## Oracle vocabulary
@@ -124,8 +125,9 @@ may validate a result, but may not generate consumer arguments.
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - C6 native identities, command/value bytes, and a
-revision-bound read after clean reopen have not been replayed here.
+Exercised: partial - `crates/daemon/tests/harness_sources.rs` reads C6's original
+revision byte for byte after a same-length successor and clean reopen (U2,
+#719). No power-loss or agent-access claim follows.
 Guarantee: A successfully retained and still-readable native source returns
 the selected original UTF-8 bytes after clean reopen.
 Check: `always` - for every positive C6 selection, require a successful read
@@ -161,8 +163,9 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - no C6 wrong-occurrence, same-length revision, or
-normalized-substitution observation has been checked.
+Exercised: partial - `crates/daemon/tests/harness_sources.rs` checks the
+wrong revision, an equal-text other occurrence, a normalized substitute,
+absent versus empty, and deleted evidence for C6 (U2, #719).
 Guarantee: Exact-source credit requires the annotated native occurrence,
 revision, representation, span, and bytes rather than a plausible substitute.
 Check: `always` - an observation receives exact-source credit only if its
