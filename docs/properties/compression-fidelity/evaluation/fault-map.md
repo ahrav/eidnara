@@ -15,7 +15,7 @@ to build another framework.
 
 | Class | Fault or situation | Availability at HEAD |
 | --- | --- | --- |
-| E1 | Missing/unreadable corpus, stale compiled corpus, whitespace/source/scenario byte drift | File/read-failure inputs and SHA-256 libraries exist; the shared corpus and digest exchange are missing. `hermetic-host.ts:306-330` can select an existing prebuilt fixture path. |
+| E1 | Missing/unreadable corpus, stale compiled corpus, whitespace/source/scenario byte drift | U1 (#718) pins the shared corpus digest in Rust and TypeScript and rejects these edits; a runtime digest exchange and the manifest digest are missing. `hermetic-host.ts:306-330` can select an existing prebuilt fixture path. |
 | E2 | Unknown case, alias mismatch, queue exhaustion, wrong consumer | Control framing and backend success/block/failure exist at `direct_host_fixture.rs:604-634,749-802`; case scripts and consumption observations are missing. |
 | E3 | Backend completion without accepted nonempty publication | Existing sentinel backend and counter test expose the distinction. Required ungated qualification is missing; broad fold execution remains gated. |
 | E4 | Capture reset, absent artifact, cross-attempt binding, stale derived row | `server.ts:169-171` and `scripted-tool-call.ts:101` supply resets; deleting/tampering with local files is possible. The authoritative assembler is missing. |

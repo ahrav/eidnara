@@ -108,10 +108,9 @@ error guards are supporting facts, not a runtime semantic oracle.
 
 ## None found and quiet areas
 
-The planned `crates/daemon/testdata/compression-fidelity.json`,
-`crates/daemon/src/compression_fidelity_tests.rs`,
-`packages/e2e-tests/tests/rust-compression-fidelity.test.ts`, and
-`docs/compression-fidelity.md` are absent in the inspected checkout. Existing
+`crates/daemon/testdata/compression-fidelity.json`, its Rust module, and
+`docs/compression-fidelity.md` arrive with U1 (#718);
+`packages/e2e-tests/tests/rust-compression-fidelity.test.ts` is still absent. Existing
 checks inventoried here remain supporting evidence, not an implemented corpus.
 
 - **C6 full join:** none found combining original native occurrence/revision,

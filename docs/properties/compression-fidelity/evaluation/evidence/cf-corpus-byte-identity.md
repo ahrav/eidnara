@@ -35,8 +35,9 @@ not production loading. No digest comparison was exercised.
 - [Fingerprint tests](../../../../../packages/e2e-tests/src/incident-pool/runner.test.ts#L248-L284)
   explicitly assert formatting/key-order equivalence and implementation-byte
   sensitivity. Status: `unaudited`; no run is claimed.
-- Filesystem and tracked-file inspection found neither the planned
-  `compression-fidelity.json` nor `compression_fidelity_tests.rs` at HEAD.
+- At the inspected revision neither `compression-fidelity.json` nor its Rust
+  module existed. U1 (#718) adds both, with matching Rust and TypeScript
+  digest pins.
   [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L25) contain
   no compression-fidelity evaluator.
 

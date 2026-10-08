@@ -286,8 +286,8 @@ Required faults and enabling state: Enumerate enabled, compaction-off, and
 disabled registry outputs; inspect visible schemas and actual transport
 method; evaluate Pi's existing compaction gate without synthetic tier replay.
 Confidence: high - [evidence](evidence/cf-shipped-recovery-capabilities.md).
-Registration, memory-only execution, default enablement, and Pi's false
-transform flag were inspected; no future capability is assumed.
+Registration, memory-only execution, default enablement, and Pi's transform flag,
+false at the inspected revision, were inspected; no future capability is assumed.
 Existing check: `packages/opencode-plugin/src/plugin/tool-registry.test.ts:69-119,127-164`
 pins registry/schema behavior, search `tools.test.ts:428-439` pins descriptions,
 and `packages/pi-plugin/src/index.test.ts:59-78` pins the Pi gate; all unaudited.

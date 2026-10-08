@@ -53,17 +53,17 @@ path. Scripted output exercises mechanics; it is not model-quality evidence.
 
 | System-model lens | Inspected result |
 | --- | --- |
-| Architecture and data flow | [Chunk assembly:673-737][chunk] feeds the real presented input, calibration examples, prior summaries, and admitted memory to the prompt. |
-| State and persistence | [Publication orchestration:2042-2166][driver] separates output, validation, and publication. [Stored conversion:43-77][driver] copies effective tiers, not their authored-presence history. |
-| Concurrency | [Selected-range drift and tail-extension checks:3018-3111][driver] distinguish a changed source from later unrelated input. Fidelity evidence must retain that attribution. |
+| Architecture and data flow | [Chunk assembly:974-1053][chunk] feeds the real presented input, calibration examples, prior summaries, and admitted memory to the prompt. |
+| State and persistence | [Publication orchestration:2432-2564][driver] separates output, validation, and publication. [Stored conversion:48-83][driver] copies effective tiers, not their authored-presence history. |
+| Concurrency | [Selected-range drift and tail-extension checks:4208-4306][driver] distinguish a changed source from later unrelated input. Fidelity evidence must retain that attribution. |
 | Claimed safety | [Prompt:3-17][system-prompt] asks for decisions and constraints. R1/R2 add explicit temporal, polarity, scope, and evidence distinctions; schema acceptance cannot establish them. |
 | Claimed liveness | No bounded semantic-convergence mechanism is found. Producer completion and retries are not semantic progress evidence. |
-| Bug history and density | The inspected `a03f58d2` patch fixes trimmed text being called verbatim. [HEAD:203-206][chunk] uses exact native equality. This supports an identity hazard, not an observed semantic incident. |
-| Existing test strategy | Prompt goldens, native alias checks, parser fixtures, and scripted publication exist. The proposed fidelity corpus, test module, and evaluation command are absent. |
-| Failure and degradation | [Parser:306-327][validator] fills P2/P3 and defaults P4 empty. [Validation:581-645][validator] can discard coverage and reject facts while retaining history. |
-| Dependencies | [Config:118-124][config] defaults to an empty model chain; [handler:5795-5802][lib] reports `no_models`. Real generation is configuration-dependent. |
+| Bug history and density | The inspected `a03f58d2` patch fixes trimmed text being called verbatim. [HEAD:271-274][chunk] uses exact native equality. This supports an identity hazard, not an observed semantic incident. |
+| Existing test strategy | Prompt goldens, native alias checks, parser fixtures, and scripted publication exist. U1 (#718) adds the fidelity corpus and its validation module; the replay module and evaluation command are absent. |
+| Failure and degradation | [Parser:320-341][validator] fills P2/P3 and defaults P4 empty. [Validation:645-709][validator] can discard coverage and reject facts while retaining history. |
+| Dependencies | [Config:139-145][config] defaults to an empty model chain; [handler:5685-5692][lib] reports `no_models`. Real generation is configuration-dependent. |
 | Product context | Losing rejection, a scoped limit, final status, or uncertainty changes the permitted next action in C1-C5. C6 also exposes the difference between native and presented evidence. |
-| Unproven assumptions | [Tool summaries:921-938][chunk] omit result payloads. Covered ordinals and surviving aliases do not establish exposure of a decisive receipt. |
+| Unproven assumptions | [Tool summaries:1242-1259][chunk] omit result payloads. Covered ordinals and surviving aliases do not establish exposure of a decisive receipt. |
 | Wildcard, last | [MemoryReviewer fixture `judge`:55-70][curator-corpus] is substring-based. Its source/script separation is reusable; its lexical classifier is not a general semantic oracle. |
 
 Property passes follow the system model. Each row records a separate attention
@@ -84,8 +84,8 @@ focus, not independent corroboration by another reviewer.
 | Wildcard, last | Require a material source-to-publication situation, not a placeholder-prompt success or evidence found only in references. |
 
 Focused portfolio refinements retain two further consequences. Prompt lines
-130/212 and the hint footer promise recovery beyond the registered memory-only
-search contract, despite prompt lines 17/362 disclaiming transcript recovery.
+130/212 promised recovery beyond the registered memory-only search contract,
+and so did the hint footer until #926 rewrote it as a memory search, despite prompt lines 17/362 disclaiming transcript recovery.
 The owning guidance needs manual capability review, not automated semantic
 classification. U5 also needs a named failing witness, fresh reviewed same-case
 outputs for meaning changes, and explicit importance/serving-shift observations
@@ -192,7 +192,7 @@ Confidence: high - [Evidence](evidence/cf-producer-input-exposure.md). The input
 transformations and alias withdrawal are visible in inspected function bodies;
 this is mechanism confidence, not a fidelity result.
 Existing check: [Alias/truncation checks:347-522][citations-golden] and
-[prompt golden:468-569][prompt], unaudited; none found for material-obligation
+[prompt golden:481-582][prompt], unaudited; none found for material-obligation
 exposure accounting.
 Impact: A loss before generation is misreported as a model error, or a model
 receives credit for evidence it never saw.
@@ -235,7 +235,7 @@ Confidence: medium - [Evidence](evidence/cf-material-qualifier-fidelity.md).
 Prompt obligations and parser behavior are inspected; no actual model-fidelity
 failure or success is established.
 Existing check: None found for human-reviewed generation meaning;
-[P1-only fallback fixture:1520-1541][validator] checks structure only, unaudited.
+[P1-only fallback fixture:1656-1677][validator] checks structure only, unaudited.
 Impact: Later work revives a rejected option, violates a scoped constraint, or
 treats an unconfirmed action or inferred cause as fact.
 Open questions:
@@ -270,7 +270,7 @@ call.
 Confidence: high - [Evidence](evidence/cf-semantic-evidence-separation.md).
 Inspected validation and citation checks have no meaning oracle; the proposed
 semantic result gate is absent and unproven.
-Existing check: [Citation checker:133-164][citations] and
+Existing check: [Citation checker:141-172][citations] and
 [fact-set fixture:188-281][citations-golden], unaudited; none found for semantic
 acceptance or review completeness.
 Impact: A green parser test or valid citation is presented as evidence that
@@ -309,9 +309,9 @@ fallback; correlate the selected native identities.
 Confidence: high - [Evidence](evidence/cf-generation-stage-provenance.md). The
 stage transformations and separate store result are inspected; no joined
 provenance witness is exercised.
-Existing check: [Parser fallback:1520-1594][validator],
-[publication happy path:2964-3014][driver], and
-[validation fallback:4421-4460][driver], unaudited; none found for the complete
+Existing check: [Parser fallback:1656-1730][validator],
+[publication happy path:4154-4204][driver], and
+[validation fallback:6389-6420][driver], unaudited; none found for the complete
 fidelity provenance join.
 Impact: A skipped or inherited tier looks authored, discarded material looks
 covered, or a failure is hidden behind another attempt's publication.
@@ -348,7 +348,7 @@ observing the publication; no external model is required.
 Confidence: medium - [Evidence](evidence/cf-material-generation-reachability.md).
 Private prompt capture and publication seams exist, but their case-linked
 combination is not constructed here.
-Existing check: [Scripted publication test:2964-3014][driver] uses a placeholder
+Existing check: [Scripted publication test:4154-4204][driver] uses a placeholder
 prompt, unaudited; none found for this material situation marker.
 Impact: Generation properties appear green even though no material obligation
 traversed the path being evaluated.
@@ -385,8 +385,8 @@ Confidence: high - [Evidence](evidence/cf-guidance-capability-bound.md).
 The prompt conflict, history-derived hint footer, and registered memory-only
 search path are inspected; this is evidence of a false premise, not a passing
 guidance review or an observed consumer incident.
-Existing check: [Registry guidance test:258-305][registry-tests] and
-[search-description test:421-432][search-tests], unaudited. They do not cover
+Existing check: [Registry guidance test:272-319][registry-tests] and
+[search-description test:428-439][search-tests], unaudited. They do not cover
 the summarizer prompt and hint footer together; no complete review check is found.
 Impact: Generation discards necessary qualifiers or detail on a recovery
 assumption the consumer cannot fulfill.
@@ -427,8 +427,8 @@ Preserve the original cases and declared constraints throughout comparison.
 Confidence: high - [Evidence](evidence/cf-witnessed-corrections.md). U5's
 acceptance rule is explicit; inspected importance storage and tier selection
 show why rubric changes need serving observations. No correction is verified.
-Existing check: [Prompt golden:468-569][prompt] and
-[importance storage check:2541-2573][driver], unaudited; none found for the
+Existing check: [Prompt golden:481-582][prompt] and
+[importance storage check:3186-3219][driver], unaudited; none found for the
 prior-witness, fresh semantic review, and serving-shift acceptance gate.
 Impact: A text change earns a fidelity claim without evidence, or improves one
 case while losing a required obligation or changing what later tiers expose.
@@ -472,13 +472,14 @@ simulation requirement is inferred from these records.
 
 KTD1 keeps one Rust-owned corpus with byte identity owned by the evaluation
 part; KTD2 places the replay
-under [the existing private test module:18302-18308][lib]. The private
-[ProducerState:22042-22075][lib] and [handler helper:22315-22341][lib] exist.
-The new corpus, replay module, and evaluation command do not. Their absence is
+under [the existing private test module:18252-18266][lib]. The private
+[ProducerState:22322-22355][lib] and [handler helper:22626-22652][lib] exist.
+U1 (#718) adds the corpus; the replay module and evaluation command do not
+exist yet. Their absence is
 a handoff dependency, not permission to export internals or create a framework.
 The test recorder must be extended to retain the complete system text, user
 prompt, and selected model required by generation claims. Its existing
-[start method:22132-22157][lib] ignores system/model arguments. Keep that
+[start method:22416-22441][lib] ignores system/model arguments. Keep that
 extension under private test ancestry; no production export is needed.
 
 Preserve the settled unit order: U1 defines the corpus; U2 depends on U1; U3

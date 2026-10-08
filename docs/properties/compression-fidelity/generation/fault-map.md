@@ -14,7 +14,7 @@ Synthetic semantic mutations below are acceptance controls, not incidents.
 
 | Condition | Available mechanism or missing dependency | Owning records |
 | --- | --- | --- |
-| Wrong source occurrence/revision/span; equal-length change | Native alias fixtures and selected-identity drift checks exist. Fidelity corpus validation is absent. | cf-source-obligation-independence; cf-producer-input-exposure; cf-generation-stage-provenance |
+| Wrong source occurrence/revision/span; equal-length change | Native alias fixtures and selected-identity drift checks exist. U1 (#718) validates corpus spans and revisions; replay through real assembly is absent. | cf-source-obligation-independence; cf-producer-input-exposure; cf-generation-stage-provenance |
 | Corpus digest mismatch | The evaluation part's [cf-corpus-byte-identity][corpus-owner] owns validation. Generation consumes its accepted/rejected observation; no second hash validator is proposed. | Evaluation owner; cf-source-obligation-independence consumes its result |
 | Duplicate case IDs or candidate-derived answer key | None found for the planned source-obligation checks. | cf-source-obligation-independence |
 | Answer key enters generation input | Real prompt assembly and private prompt capture exist; fidelity source/answer separation check is absent. | cf-source-obligation-independence |
@@ -28,7 +28,7 @@ Synthetic semantic mutations below are acceptance controls, not incidents.
 | Length-capped output or invalid primary followed by valid fallback | Scripted producer cases exist. A fidelity observation must retain each attempt, not only the successful model. | cf-generation-stage-provenance |
 | Missing human judgment, wrong artifact linkage, scripted-as-real label | None found for the planned semantic result gate. These are offline metadata controls, not external calls. | cf-semantic-evidence-separation |
 | No models, no eligible boundary, placeholder prompt, no publication | Existing gates and private test helpers exist. No material source-to-publication situation marker exists. | cf-material-generation-reachability |
-| Unsupported prompt/hint recovery promise or changed tool registration | Prompt lines 130/212 and hint footer conflict with the memory-only search route. Registry/schema tests exist; joint manual guidance review and artifact linkage are absent. | cf-guidance-capability-bound |
+| Unsupported prompt/hint recovery promise or changed tool registration | Prompt lines 130/212 conflict with the memory-only search route; #926 aligned the hint footer with it. Registry/schema tests exist; joint manual guidance review and artifact linkage are absent. | cf-guidance-capability-bound |
 | Fix without prior failure, golden-only prompt change, stale review, or hidden rubric effect | U5 states the corrective evidence rule. No fidelity correction gate or fresh same-case comparison exists. | cf-witnessed-corrections |
 
 Detailed file/function evidence and failure scenarios live in each record's
@@ -69,9 +69,9 @@ in the fidelity harness at HEAD, and none is exercised here.
 | --- | --- | --- |
 | `cf-generation-material-transformed` | A preannotated material native fragment traverses real assembly, its linked presented fragment changes through an inspected transformation, and the captured alias marks it transformed. No semantic loss is required. | An unchanged single-block fragment must not satisfy it. [Whitespace transformation:509-522][golden] supplies the local mechanism. |
 | `cf-generation-material-truncated` | Real build and presentation use the same actual configured budget; the truncation marker is observed and the case's decisive native fragment lies outside the kept presented prefix. Withdrawal of a whole-part alias alone is insufficient. | A sufficient-budget control retains that fragment and must not satisfy it. [Same-budget truncation:457-482][golden] supplies the local mechanism. |
-| `cf-generation-primary-rejected-fallback-consumed` | One source-bound firing records the primary validation rejection, then a distinct fallback attempt whose output is actually consumed; a start counter alone is insufficient. | A rejected primary with no consumed fallback must not satisfy it. [Fallback test:4421-4460][driver] supplies the local sequence. |
+| `cf-generation-primary-rejected-fallback-consumed` | One source-bound firing records the primary validation rejection, then a distinct fallback attempt whose output is actually consumed; a start counter alone is insufficient. | A rejected primary with no consumed fallback must not satisfy it. [Fallback test:6389-6420][driver] supplies the local sequence. |
 | `cf-generation-final-discard-with-earlier-coverage` | Raw output contains at least two segments; validation retains nonempty valid earlier coverage and records the final segment as discarded. | A single segment or force-kept final segment must not satisfy it. [Discard control:311-343][golden] distinguishes earlier retained coverage from final discard. |
-| `cf-generation-p2-p3-inherited` | Captured raw output authors P1 but omits P2/P3; parsed effective P2/P3 inherit the denser text, and the observation records that neither was authored. | Explicitly authored equal P2/P3 strings must not satisfy it. [P1-only fallback:1520-1541][validator] supplies the local mechanism. |
+| `cf-generation-p2-p3-inherited` | Captured raw output authors P1 but omits P2/P3; parsed effective P2/P3 inherit the denser text, and the observation records that neither was authored. | Explicitly authored equal P2/P3 strings must not satisfy it. [P1-only fallback:1656-1677][validator] supplies the local mechanism. |
 
 For all five markers, bind the observations to a declared case and real prompt
 assembly. A `placeholder prompt` control or a `no_models` no-fire outcome must

@@ -98,9 +98,8 @@ character count copied from normalized presentation.
 - Findings: source records expose the relevant native fields, while summary
   assembly has transformed presentation. The plan assigns corpus identity
   validation to Rust and separates annotations from candidate outputs.
-- Missing evidence: the C6 corpus and its replay observation representation.
-  The plan's `compression-fidelity.json` and `compression_fidelity_tests.rs`
-  targets are absent in the inspected checkout.
+- Missing evidence: the C6 replay observation representation. U1 (#718)
+  adds the C6 corpus with its original and same-length successor records.
 - Conclusion: unresolved, needs the fixture-level representation selected by
   that implementation owner. Reusing a production normalizer to manufacture
   expected bytes would make the oracle circular and is not an acceptable fix.

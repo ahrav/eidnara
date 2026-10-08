@@ -25,7 +25,7 @@ supplied. No model calls, tests, or CI checks run here.
 - [Evidence and review gate][contract] (historical plan lines 237-242,270-271)
   requires real-output provenance and human review,
   rejects missing/disputed judgments, and keeps configured attempts visible.
-- [CI:557-566][ci] defines workspace tests and doctests. No historical
+- [CI:612-621][ci] defines workspace tests and doctests. No historical
   `run-history_summarizer-eval.ts` invocation is found at HEAD, and its tracked
   script/corpus paths are absent. This is not a claim that CI ran.
 - [Typed mutation script:12-16,40-70][mutation] tests backend-error reporting,

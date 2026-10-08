@@ -2,9 +2,9 @@
  * Narrow TypeScript reader for the compression fidelity corpus.
  *
  * The daemon's testdata file `compression-fidelity.json` is the oracle, and the Rust test module
- * `crates/daemon/src/compression_fidelity_tests.rs` owns its source, span, and revision
+ * `crates/daemon/src/compression_fidelity_corpus.rs` owns its source, span, and revision
  * validation. This reader accepts only the exact file bytes whose SHA-256 equals
- * {@link COMPRESSION_FIDELITY_CORPUS_SHA256}, the same pin the Rust module enforces, and then
+ * {@link COMPRESSION_FIDELITY_CORPUS_SHA256}, the same pin the Rust corpus module enforces, and then
  * exposes case and scenario IDs, follow-up prompts, the reviewed producer outputs, and review
  * expectations. Native source text, spans, obligation statements, and forbidden conclusions stay
  * in the file.
@@ -16,24 +16,31 @@ import { resolve } from "node:path";
 
 /** SHA-256 of the complete committed corpus file. It moves with the Rust pin, never alone. */
 export const COMPRESSION_FIDELITY_CORPUS_SHA256 =
-    "915b74d141b63a2c7d3a7f4b0f12b00d83675fb7b1254a0d251b2cb0616d2eb2";
+    "46980759b02b7696ea3be9d9b44e43603eed199a404620c3c6d952afbc153800";
 
 export const COMPRESSION_FIDELITY_CORPUS_PATH = resolve(
     import.meta.dir,
     "../../../../crates/daemon/testdata/compression-fidelity.json",
 );
 
-export type ServedTier = "p1" | "p2" | "p3" | "p4" | "p5";
-export type ServingStage = "m1" | "m0";
-export type ServingPath =
-    | "natural"
-    | "pressure"
-    | "omission"
-    | "hint_truncated"
-    | "memory_admitted"
-    | "memory_excluded"
-    | "exact_read";
-export type Disposition = "visible" | "discoverable" | "unavailable";
+const TIERS = ["p1", "p2", "p3", "p4", "p5"] as const;
+const STAGES = ["m1", "m0"] as const;
+const PATHS = [
+    "natural",
+    "pressure",
+    "omission",
+    "hint_truncated",
+    "memory_admitted",
+    "memory_excluded",
+    "exact_read",
+] as const;
+const DISPOSITIONS = ["visible", "discoverable", "unavailable"] as const;
+const ABSTENTIONS = ["permitted", "forbidden"] as const;
+
+export type ServedTier = (typeof TIERS)[number];
+export type ServingStage = (typeof STAGES)[number];
+export type ServingPath = (typeof PATHS)[number];
+export type Disposition = (typeof DISPOSITIONS)[number];
 
 export interface FidelityExpectation {
     readonly obligation: string;
@@ -50,7 +57,7 @@ export interface FidelityScenario {
         readonly stage?: ServingStage;
     };
     readonly expectations: readonly FidelityExpectation[];
-    readonly abstention: "permitted" | "forbidden";
+    readonly abstention: (typeof ABSTENTIONS)[number];
     /** IDs of the forbidden conclusions a reviewer checks; the statements stay in the corpus. */
     readonly forbidden: readonly string[];
 }
@@ -68,8 +75,6 @@ export interface FidelityCase {
 }
 
 export interface FidelityCorpus {
-    /** The digest of the exact bytes read, for the run manifest. */
-    readonly sha256: string;
     readonly cases: readonly FidelityCase[];
 }
 
@@ -77,20 +82,6 @@ export interface FidelityCorpus {
 export class CorpusIdentityError extends Error {
     override readonly name = "CorpusIdentityError";
 }
-
-const PATHS = new Set<string>([
-    "natural",
-    "pressure",
-    "omission",
-    "hint_truncated",
-    "memory_admitted",
-    "memory_excluded",
-    "exact_read",
-]);
-const TIERS = new Set<string>(["p1", "p2", "p3", "p4", "p5"]);
-const STAGES = new Set<string>(["m1", "m0"]);
-const DISPOSITIONS = new Set<string>(["visible", "discoverable", "unavailable"]);
-const ABSTENTIONS = new Set<string>(["permitted", "forbidden"]);
 
 type Json = Record<string, unknown>;
 
@@ -115,10 +106,16 @@ function string(value: unknown, where: string): string {
     return value;
 }
 
-function member<T extends string>(value: unknown, allowed: Set<string>, where: string): T {
+function member<const A extends readonly string[]>(
+    value: unknown,
+    allowed: A,
+    where: string,
+): A[number] {
     const text = string(value, where);
-    if (!allowed.has(text)) fail(`${where} is not one of ${[...allowed].join(", ")}`);
-    return text as T;
+    if (!(allowed as readonly string[]).includes(text)) {
+        fail(`${where} is not one of ${allowed.join(", ")}`);
+    }
+    return text;
 }
 
 function readScenario(value: unknown, followUps: Map<string, string>): FidelityScenario {
@@ -132,20 +129,20 @@ function readScenario(value: unknown, followUps: Map<string, string>): FidelityS
         source: string(scenario.source, `${id}.source`),
         followUp: { id: followUpId, prompt },
         serving: {
-            path: member<ServingPath>(serving.path, PATHS, `${id}.serving.path`),
+            path: member(serving.path, PATHS, `${id}.serving.path`),
             ...(serving.tier === undefined
                 ? {}
-                : { tier: member<ServedTier>(serving.tier, TIERS, `${id}.serving.tier`) }),
+                : { tier: member(serving.tier, TIERS, `${id}.serving.tier`) }),
             ...(serving.stage === undefined
                 ? {}
-                : { stage: member<ServingStage>(serving.stage, STAGES, `${id}.serving.stage`) }),
+                : { stage: member(serving.stage, STAGES, `${id}.serving.stage`) }),
         },
         expectations: array(scenario.expectations, `${id}.expectations`).map((entry) => {
             const expectation = object(entry, `${id}.expectation`);
             return {
                 obligation: string(expectation.obligation, `${id}.expectation.obligation`),
                 accepted: array(expectation.accepted, `${id}.expectation.accepted`).map((d) =>
-                    member<Disposition>(d, DISPOSITIONS, `${id}.expectation.accepted`),
+                    member(d, DISPOSITIONS, `${id}.expectation.accepted`),
                 ),
             };
         }),
@@ -188,7 +185,7 @@ function readCase(value: unknown): FidelityCase {
  * Throws {@link CorpusIdentityError} when the file is missing or unreadable, when its bytes do
  * not hash to `expectedSha256`, or when a field this reader exposes has the wrong shape. Hashing
  * covers the complete bytes with no normalization, so whitespace-only and same-length edits are
- * rejected.
+ * rejected. Callers keep the default digest; only the reader's own shape test passes another.
  */
 export function readCompressionFidelityCorpus(
     path: string = COMPRESSION_FIDELITY_CORPUS_PATH,
@@ -211,7 +208,6 @@ export function readCompressionFidelityCorpus(
         fail(`corpus at ${path} is not JSON: ${(error as Error).message}`);
     }
     return {
-        sha256,
         cases: array(object(parsed, "corpus").cases, "corpus.cases").map(readCase),
     };
 }

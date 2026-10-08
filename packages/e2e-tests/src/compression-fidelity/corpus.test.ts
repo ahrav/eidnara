@@ -11,7 +11,7 @@ import {
 
 const RUST_OWNER = resolve(
     import.meta.dir,
-    "../../../../crates/daemon/src/compression_fidelity_tests.rs",
+    "../../../../crates/daemon/src/compression_fidelity_corpus.rs",
 );
 
 const committed = readFileSync(COMPRESSION_FIDELITY_CORPUS_PATH);
@@ -40,7 +40,6 @@ describe("compression fidelity corpus reader", () => {
         expect(pin).toBe(COMPRESSION_FIDELITY_CORPUS_SHA256);
 
         const corpus = readCompressionFidelityCorpus();
-        expect(corpus.sha256).toBe(COMPRESSION_FIDELITY_CORPUS_SHA256);
         expect(corpus.cases.map((c) => c.id)).toEqual(["C1", "C2", "C3", "C4", "C5", "C6"]);
         expect(readCompressionFidelityCorpus(copyWith(committed))).toEqual(corpus);
     });
@@ -58,9 +57,9 @@ describe("compression fidelity corpus reader", () => {
         expect(Buffer.byteLength(edits["same length"] ?? "")).toBe(committed.length);
         for (const [label, edited] of Object.entries(edits)) {
             expect(edited, label).not.toBe(text);
-            expect(() => readCompressionFidelityCorpus(copyWith(edited)), label).toThrow(
-                CorpusIdentityError,
-            );
+            const read = () => readCompressionFidelityCorpus(copyWith(edited));
+            expect(read, label).toThrow(CorpusIdentityError);
+            expect(read, label).toThrow(/hashes to/);
         }
         const missing = join(scratchDir(), "absent.json");
         expect(() => readCompressionFidelityCorpus(missing)).toThrow(/unreadable/);
@@ -69,7 +68,7 @@ describe("compression fidelity corpus reader", () => {
 
     it("exposes IDs, follow-ups, reviewed outputs, and review expectations only", () => {
         const corpus = readCompressionFidelityCorpus();
-        expect(Object.keys(corpus).sort()).toEqual(["cases", "sha256"]);
+        expect(Object.keys(corpus)).toEqual(["cases"]);
         for (const fidelityCase of corpus.cases) {
             expect(Object.keys(fidelityCase).sort()).toEqual(["id", "scenarios", "sources"]);
             for (const source of fidelityCase.sources) {
@@ -86,6 +85,9 @@ describe("compression fidelity corpus reader", () => {
                     "source",
                 ]);
                 expect(Object.keys(scenario.followUp).sort()).toEqual(["id", "prompt"]);
+                for (const key of Object.keys(scenario.serving)) {
+                    expect(["path", "stage", "tier"]).toContain(key);
+                }
                 for (const expectation of scenario.expectations) {
                     expect(Object.keys(expectation).sort()).toEqual(["accepted", "obligation"]);
                 }
@@ -101,7 +103,9 @@ describe("compression fidelity corpus reader", () => {
                 );
                 for (const message of [...source.messages, ...(source.successors ?? [])]) {
                     for (const part of message.parts) {
-                        hidden.push(part.text ?? part.state.output ?? part.state.error);
+                        const text = part.text ?? part.state?.output ?? part.state?.error;
+                        expect(text, part.id).toBeString();
+                        hidden.push(text);
                     }
                 }
             }
@@ -119,10 +123,11 @@ describe("compression fidelity corpus reader", () => {
         const exposed = JSON.stringify(corpus, (key, value) =>
             key === "reviewedOutput" ? undefined : value,
         );
+        const leaks = (serialized: string) =>
+            hidden.filter((text) => serialized.includes(JSON.stringify(text).slice(1, -1)));
         expect(hidden.length).toBeGreaterThan(100);
-        for (const text of hidden) {
-            expect(exposed.includes(JSON.stringify(text).slice(1, -1)), text).toBe(false);
-        }
+        expect(leaks(exposed)).toEqual([]);
+        expect(leaks(JSON.stringify(raw))).toHaveLength(hidden.length);
     });
 
     it("rejects a pinned file whose exposed fields have the wrong shape", () => {

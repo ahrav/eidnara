@@ -34,7 +34,7 @@ or related repositories are supplied. No tests or model calls run here.
 - [execute.ts:33-85,172-260][execute] rejects other source names and searches
   memory rows from the kernel client's `explicit_search` read. That registered
   path does not retrieve the history segment that supplied the hint.
-- [Registry tests:32-44,258-305][registry-tests] pin four tool IDs and check
+- [Registry tests:32-44,272-319][registry-tests] pin four tool IDs and check
   memory-only guidance in four daemon assets. Those assets do not include the
   summarizer prompt or generated hint footer. Existing checks are unaudited.
 
@@ -47,8 +47,9 @@ corrective replay or an observed consumer failure.
 ## Failure scenario
 
 A producer writes a thinner P4 assuming search can restore its history detail.
-The consumer sees a matching history hint and follows its full-context promise,
-but the registered search only returns canonical memory. The source text and
+The consumer sees a matching history hint and, under the pre-#926 footer,
+follows its full-context promise, but the registered search only returns
+canonical memory. The source text and
 route establish the unsupported general promise; no consumer incident is claimed.
 
 A competing explanation is that the daemon's internal history search, or a

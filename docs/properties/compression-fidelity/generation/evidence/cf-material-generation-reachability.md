@@ -16,12 +16,12 @@ incident logs or related repositories are supplied. No tests run here.
 - [history_summarizer.rs:4154-4204][driver] executes the scripted producer and
   inspects stored P1 and the publication floor, but supplies `placeholder
   prompt`. It is not a witness of material native input reaching generation.
-- [lib.rs:18252-18262][lib] nests private test modules using `#[path]`.
+- [lib.rs:18252-18266][lib] nests private test modules using `#[path]`.
   This is the ancestry KTD2 requires for the new replay module.
-- [lib.rs:22318-22351][lib], `ProducerState`, has prompt, output, and attempt
-  observations and hooks. [lib.rs:22412-22477][lib], `TestProducer::start`,
+- [lib.rs:22322-22355][lib], `ProducerState`, has prompt, output, and attempt
+  observations and hooks. [lib.rs:22416-22481][lib], `TestProducer::start`,
   records prompts and prepares scripted output without a real model call.
-- [lib.rs:22622-22648][lib], `handler_with_store`, supplies the handler,
+- [lib.rs:22626-22652][lib], `handler_with_store`, supplies the handler,
   store, and test route through the existing producer factory.
 - [lib.rs:5660-5692,5732-5761][lib] distinguishes no-fire/no-model outcomes
   from real assembly. [chunk.rs:973-1053][chunk] builds the actual request.

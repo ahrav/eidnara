@@ -77,7 +77,7 @@ separate from the reachability classification.
 
 | Slug | Type | Reachability | Semantics | Exercise |
 | --- | --- | --- | --- | --- |
-| [cf-corpus-byte-identity](#cf-corpus-byte-identity) | safety | test-only | always | not yet |
+| [cf-corpus-byte-identity](#cf-corpus-byte-identity) | safety | test-only | always | partial |
 | [cf-fixture-script-qualification](#cf-fixture-script-qualification) | safety | test-only | always | not yet |
 | [cf-authoritative-evidence-assembly](#cf-authoritative-evidence-assembly) | safety | test-only | always | not yet |
 | [cf-complete-independent-comparison](#cf-complete-independent-comparison) | safety | test-only | always | not yet |

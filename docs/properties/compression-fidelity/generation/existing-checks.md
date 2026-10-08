@@ -74,13 +74,13 @@ retry, tier-floor, and renderer checks retain their endpoint ownership.
 | [tool-registry.test.ts:272-319][registry-tests], `keeps guidance within the registered memory address and search-source contracts` | Checks memory addresses and memory-only search guidance in four named daemon assets. The summarizer prompt and generated hint footer are not among those assets. | unaudited |
 | [search tools.test.ts:151-182,202-232][search-tests] | Empty sources issue no read, unsupported sources report errors, and text search ranks canonical memory summaries through `explicit_search`. | unaudited |
 | [search tools.test.ts:428-439][search-tests], `advertises only the memory source in both the full and light descriptions` | Pins memory-only description strings. It does not establish arbitrary guidance meaning or exact-source recovery. | unaudited |
-| [transform.rs:8609-8634][transform], `render_user_hint` | The UTF-16 cap assertion bounds hint size. The footer still promises full-context recovery for history-derived fragments; the cap does not validate that promise. | unaudited |
+| [transform.rs:8609-8634][transform], `render_user_hint` | The UTF-16 cap assertion bounds hint size. Since #926 the footer offers a project-memory search for the fragments' topic instead of full-context recovery; the cap does not validate the footer's meaning. | unaudited |
 | [history_summarizer.rs:3186-3219][driver], `stored_history_segment_importance_is_clamped_before_narrowing` | Checks default/clamp conversion of importance. It does not compare real importance outputs or effective serving after rubric changes. | unaudited |
 
 The contradiction is inspected, not inferred from test names: prompt lines
 [130,212][system-prompt] assume search recovery while [17,362][system-prompt]
-disclaim it; [history hint candidates:8261-8290][transform] feed the footer,
-but [the registered executor:151-222][search-execute] searches memory only.
+disclaim it; [history hint candidates:8286-8316][transform] feed the footer,
+but [the registered executor:172-260][search-execute] searches memory only.
 This is static evidence for a named false premise, not an executed consumer
 incident or a waiver of U5's witness and dependency requirements.
 
@@ -88,7 +88,7 @@ incident or a waiver of U5's witness and dependency requirements.
 
 | Category | Finding |
 | --- | --- |
-| Shared C1-C6 corpus and source/revision/span admission | None found. `crates/daemon/testdata/compression-fidelity.json` and `src/compression_fidelity_tests.rs` are absent. |
+| Shared C1-C6 corpus and source/revision/span admission | U1 (#718) adds `crates/daemon/testdata/compression-fidelity.json`, validated by `src/compression_fidelity_corpus.rs` with controls in `src/compression_fidelity_tests.rs`, unaudited. |
 | Compiled/runtime corpus digest agreement | None found for compression fidelity. [cf-corpus-byte-identity][corpus-owner] in evaluation owns this check; generation consumes its result. |
 | Answer-key exclusion and pre-output human material annotations | None found for compression fidelity. Prompt byte goldens do not establish this review process. |
 | Native material obligation exposure | None found. Alias presence, ordinal coverage, and a `TC:` line are insufficient substitutes. |
@@ -103,14 +103,14 @@ incident or a waiver of U5's witness and dependency requirements.
 The [MemoryReviewer corpus:44-70][curator-corpus] separates sources, scripts, and
 expectations, but `judge` uses fixture-specific substring rules. It is a reuse
 lead, not a fidelity oracle or evidence of a human-reviewed generation baseline.
-The private [TestProducer::start:22132-22157][lib] records the user prompt but
+The private [TestProducer::start:22416-22441][lib] records the user prompt but
 ignores `_system` and `_model`; complete request capture is not supplied by
 that helper alone. Extending the private test recorder to retain all three is
 required for complete generation claims. No production export is needed.
 
 The historical `run-history_summarizer-eval.ts` and `history_summarizer-eval`
 corpus paths are absent from tracked HEAD. No matching invocation is found in
-the current CI workflow. [CI:557-566][ci] declares Rust workspace tests and
+the current CI workflow. [CI:612-621][ci] declares Rust workspace tests and
 doctests; this is configuration evidence only, not evidence of execution.
 A separate [typed-producer mutation script:12-16,40-70][mutation] exists. It
 replaces a backend failure with success and checks which test fails; it does

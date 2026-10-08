@@ -49,8 +49,9 @@ keeps the option while dropping rejection or planned status. A misleading
 summary repeated in several tiers can also dominate the fragment's prefix.
 Repetition is not independent evidence of acceptance.
 
-The existing footer makes a recovery promise. Whether a registered tool can
-fulfill it must come from the separate capability audit. The presence of a
+Before #926 the footer made a recovery promise; it now offers a
+project-memory search. Whether a registered tool can fulfill that offer must
+come from the separate capability audit. The presence of a
 history-backed hint does not by itself prove that the tool retrieves history.
 No observed semantic incident or successful recovery is claimed here.
 

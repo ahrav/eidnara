@@ -192,7 +192,7 @@ Confidence: high - [evidence](evidence/cf-memory-credit-requires-admitted-visibl
 Pinned reads, visibility filtering, scope filtering, and budget trimming are
 verified; semantic credit remains a claim under test.
 Existing check: `crates/daemon/tests/transform_canonical_memory.rs:48-217,243-449` and
-`canonical_memory.rs:284-313,415-450`; status unaudited. They do not join memory
+`canonical_memory.rs:282-311,412-454`; status unaudited. They do not join memory
 to compression-fidelity obligations at the provider boundary.
 Impact: A test can falsely claim retention by reading private candidates or
 can change admission policy to make a lost constraint appear retained.
@@ -220,7 +220,7 @@ authored tail, add discriminating distractors, select an omitted row with a
 long qualified snippet, and run matched empty-fragment and hints-disabled
 scenarios without changing the selection gate.
 Confidence: medium - [evidence](evidence/cf-hints-do-not-strengthen-source-claims.md).
-Selection, truncation, freeze, and recovery-promising footer are verified;
+Selection, truncation, freeze, and the memory-search footer (#926) are verified;
 semantic loss needs an independently reviewed witness.
 Existing check: `transform.rs:8633` bounds the wrapper in debug builds;
 `transform.rs:22918-22984` checks query preservation and empty-decision reuse;

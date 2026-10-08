@@ -20,8 +20,10 @@ relative and were checked against HEAD.
 | `implementationBundleDigest`, `packages/e2e-tests/src/incident-pool/registry.ts:152-169`; tests at `runner.test.ts:276-290` | Hashes domain tag, sorted paths, lengths, and bytes; rejects non-root-confined or empty file lists. This is not plain corpus SHA-256. | unaudited |
 | Ledger fingerprint test, `packages/e2e-tests/src/incident-pool/runner.test.ts:293-297` | Appending a baseline event changes the ledger fingerprint. | unaudited |
 
-No shared Rust/TypeScript compression-corpus digest check was found. The planned
-corpus is absent. `crates/daemon/Cargo.toml:58` already includes `sha2`; dependency
+At the inspected revision no shared Rust/TypeScript compression-corpus digest
+check existed. U1 (#718) adds the corpus with matching pins in
+`crates/daemon/src/compression_fidelity_corpus.rs` and
+`packages/e2e-tests/src/compression-fidelity/corpus.ts`, unaudited. `crates/daemon/Cargo.toml:58` already includes `sha2`; dependency
 availability is not cross-language identity evidence. A 64-character digest
 shape check in `report.ts:145-150` does not verify artifact content. No
 compression-corpus missing-file or read-failure rejection check was found.

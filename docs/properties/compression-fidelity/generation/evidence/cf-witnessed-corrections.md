@@ -43,7 +43,8 @@ Reachability is `test-only`: this record governs offline acceptance of a U5
 correction, not a production policy or serving-time evaluator. Its rule is a
 documented claim under test. High confidence describes the explicit rule and
 inspected importance-to-serving dependency, not a successful correction.
-The fidelity corpus, replay module, and evaluation command remain absent.
+U1 (#718) adds the fidelity corpus; the replay module and evaluation command
+remain absent.
 
 ## Failure scenario
 

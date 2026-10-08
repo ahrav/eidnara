@@ -26,16 +26,21 @@ Each case carries:
 
 - **Sources.** Native OpenCode `MessageV2` records for one session each,
   restricted to `info.{id, sessionID, role, time}` and text or settled tool
-  parts. A block's native identity is its message ID and part index. Its
-  revision is the decimal millisecond timestamp the OpenCode source adapter
+  parts. A span addresses a block by its message ID and part index; the
+  OpenCode source adapter identifies a text block the same way and a tool
+  output by its parent message, call ID, result revision, and output block 0.
+  A block's revision is the decimal millisecond timestamp the adapter
   publishes: `time.completed` for assistant text, `time.created` for user
   text, and `state.time.end` for a tool output. C6 adds a successor record
   that keeps the message ID and part layout, completes later, and changes
   text without changing its byte length.
-- **Approved example.** The human-approved producer output for each source,
-  one `<history_segment>` with P1 to P3 bodies and an empty P4 whose title
-  carries the capsule. Scripted runs return it; it stays separate from
-  candidate outputs and observed results.
+- **Approved example.** The authored producer output for each source, pending
+  two-person corpus approval: one `<history_segment>` over the whole source
+  with P1 to P3 bodies and an empty P4 whose title carries the capsule.
+  Scripted runs return it; it stays separate from candidate outputs and
+  observed results. A witness that needs a prior publication, such as the m1
+  window, authors that baseline itself; the baseline earns no fidelity
+  credit and stays out of the corpus.
 - **Obligations.** Material decisions, constraints, status, uncertainty,
   rationale, and evidence, each with a statement written in evaluator voice
   and either native evidence spans or a memory example. A span names its
@@ -63,9 +68,11 @@ tracker, and name the corpus SHA-256 they cover.
 The corpus identity is the SHA-256 of the complete file bytes. Two pins hold
 it, and both must move together when the corpus is re-authored:
 
-- `CORPUS_SHA256` in `crates/daemon/src/compression_fidelity_tests.rs`, the
-  child test module of the daemon's library test module. It compares the
-  digest of the bytes compiled in with `include_bytes!`.
+- `CORPUS_SHA256` in `crates/daemon/src/compression_fidelity_corpus.rs`, a
+  child of the daemon's library test module. It compares the digest of the
+  bytes compiled in with `include_bytes!`. The module depends only on
+  `serde`, `serde_json`, and `sha2`, so an integration test can include it by
+  path.
 - `COMPRESSION_FIDELITY_CORPUS_SHA256` in
   `packages/e2e-tests/src/compression-fidelity/corpus.ts`. Its test also
   reads the Rust pin and requires equality.
@@ -74,7 +81,8 @@ Missing, unreadable, or mismatched bytes reject the run in both languages.
 No normalization applies, so whitespace-only, same-length, and
 scenario-only edits are rejected like any other edit.
 
-The Rust module owns source, span, and revision validation. It rejects
+The Rust corpus module owns source, span, and revision validation, and
+`compression_fidelity_tests.rs` holds its negative controls. It rejects
 duplicate or malformed IDs, spans that do not resolve to the exact bytes of
 their native block at the named revision, successors that change identity
 or byte length, missing P1 to P4 or pressure/omission coverage, unexercised
@@ -84,10 +92,10 @@ example text, and the approved example. Native records decode through a
 closed schema, so an extra field on a message or part fails to decode.
 
 The TypeScript reader `readCompressionFidelityCorpus` exposes only case,
-source, and scenario IDs, follow-up prompts, reviewed outputs, serving
-paths, accepted dispositions, abstention, and forbidden-conclusion IDs. It
-exposes no native text, spans, obligation statements, or forbidden
-conclusion statements.
+source, scenario, follow-up, obligation, and forbidden-conclusion IDs,
+follow-up prompts, reviewed outputs, each scenario's serving path, tier,
+and stage, accepted dispositions, and abstention. It exposes no native
+text, spans, obligation statements, or forbidden conclusion statements.
 
 ## What is unsupported
 
