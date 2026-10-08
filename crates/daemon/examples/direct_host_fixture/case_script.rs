@@ -392,10 +392,19 @@ pub struct Binding {
     pub output_sha256: String,
 }
 
-/// An admitted scripted answer. [`CaseScript::delivered`] records it once it is emitted.
+/// An admitted scripted answer. [`CaseScript::delivered`] records its receipt once the answer is
+/// emitted.
 #[derive(Debug)]
 pub struct Answer {
     pub text: String,
+    pub receipt: Receipt,
+}
+
+/// What [`CaseScript::delivered`] records for one emitted answer.
+#[derive(Debug)]
+pub struct Receipt {
+    /// [`CaseScript`]'s generation when the answer was admitted.
+    generation: u64,
     /// `None` for a filler answer.
     binding: Option<Binding>,
 }
@@ -512,33 +521,40 @@ impl Probe {
     /// the first word possibly inside a longer word and the last word possibly cut short. A probe
     /// that ends in a space needs whitespace and a further word after its last word, since
     /// collapsing drops trailing whitespace.
+    #[cfg(test)]
     fn carried_by(&self, text: &str) -> bool {
-        self.first
-            .find_iter(text.as_bytes())
-            .any(|at| self.matches_at(text, at))
+        self.carried_from(text, 0).is_some()
     }
 
-    fn matches_at(&self, text: &str, at: usize) -> bool {
+    /// `carried_from` returns the end offset of the first probe match starting at or after
+    /// `from`. `from` must be at most `text.len()`.
+    fn carried_from(&self, text: &str, from: usize) -> Option<usize> {
+        self.first
+            .find_iter(&text.as_bytes()[from..])
+            .find_map(|at| self.matches_at(text, from + at))
+    }
+
+    fn matches_at(&self, text: &str, at: usize) -> Option<usize> {
         let bytes = text.as_bytes();
         let mut pos = at;
         for (index, token) in self.tokens.iter().enumerate() {
             if index > 0 {
                 let after = skip_whitespace(text, pos);
                 if after == pos {
-                    return false;
+                    return None;
                 }
                 pos = after;
             }
             if !bytes[pos..].starts_with(token.as_bytes()) {
-                return false;
+                return None;
             }
             pos += token.len();
         }
         if !self.trailing_space {
-            return true;
+            return Some(pos);
         }
         let after = skip_whitespace(text, pos);
-        after > pos && after < text.len()
+        (after > pos && after < text.len()).then_some(pos)
     }
 }
 
@@ -547,6 +563,8 @@ impl Probe {
 #[derive(Default)]
 pub struct CaseScript {
     armed: bool,
+    /// The number of accepted selections.
+    generation: u64,
     queue: VecDeque<Queued>,
     bound: u64,
     filled: u64,
@@ -678,6 +696,7 @@ impl CaseScript {
             })
             .collect::<Result<VecDeque<_>, _>>()?;
         self.armed = true;
+        self.generation += 1;
         self.queue = queue;
         self.bindings.clear();
         Ok(())
@@ -706,10 +725,14 @@ impl CaseScript {
             self.exhausted += 1;
             return Some(Err(AnswerFailure::Exhausted));
         };
+        let generation = self.generation;
         let answer = match queued {
             Queued::Filler => Ok(Answer {
                 text: filler(records),
-                binding: None,
+                receipt: Receipt {
+                    generation,
+                    binding: None,
+                },
             }),
             Queued::Scenario {
                 scenario,
@@ -718,7 +741,10 @@ impl CaseScript {
             } => bind(&scenario, source, prepared, records)
                 .map(|(text, binding)| Answer {
                     text,
-                    binding: Some(binding),
+                    receipt: Receipt {
+                        generation,
+                        binding: Some(binding),
+                    },
                 })
                 .ok_or(AnswerFailure::Mismatch),
         };
@@ -728,12 +754,15 @@ impl CaseScript {
         Some(answer)
     }
 
-    /// Records an admitted answer once the fixture emits it.
-    pub fn delivered(&mut self, answer: &Answer) {
-        match &answer.binding {
+    /// Records an admitted answer once the fixture emits it. The lifetime counters count every
+    /// emitted answer.
+    pub fn delivered(&mut self, receipt: &Receipt) {
+        match &receipt.binding {
             Some(binding) => {
                 self.bound += 1;
-                self.bindings.push(binding.clone());
+                if receipt.generation == self.generation {
+                    self.bindings.push(binding.clone());
+                }
             }
             None => self.filled += 1,
         }
@@ -742,18 +771,23 @@ impl CaseScript {
 
 /// The first and last record of the source's run, when its messages appear in order in one
 /// contiguous run of presented records covering exactly the source's ordinals. Consecutive
-/// messages may share one merged record; a record inside the run that carries none of them is a
-/// mismatch.
+/// messages may share a merged record if each message starts at or after the preceding probe's
+/// end offset.
 fn locate(probes: &[Probe], records: &[Record]) -> Option<(usize, usize)> {
     let mut hits = Vec::with_capacity(probes.len());
-    let mut cursor = 0;
+    let (mut cursor, mut offset) = (0, 0);
     for probe in probes {
-        let at = cursor
-            + records[cursor..]
-                .iter()
-                .position(|record| probe.carried_by(&record.text))?;
+        let (at, end) = records[cursor..]
+            .iter()
+            .enumerate()
+            .find_map(|(index, record)| {
+                let from = if index == 0 { offset } else { 0 };
+                probe
+                    .carried_from(&record.text, from)
+                    .map(|end| (cursor + index, end))
+            })?;
         hits.push(at);
-        cursor = at;
+        (cursor, offset) = (at, end);
     }
     let (first, last) = (*hits.first()?, *hits.last()?);
     let contiguous = hits.windows(2).all(|pair| pair[1] - pair[0] <= 1);
@@ -999,6 +1033,28 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_messages_merged_out_of_order_are_a_mismatch() {
+        let source = sources().find(|source| source.id == "C4.V1").unwrap();
+        let mut records = presented(source, 1);
+        let reversed = format!("{} / {}", records[4].text, records[3].text);
+        records.splice(3..5, [record(4, 5, &reversed)]);
+        assert!(bind("S", source, &ready(source), &records).is_none());
+    }
+
+    #[test]
+    fn an_answer_admitted_under_a_replaced_selection_binds_nothing_in_the_new_one() {
+        let source = sources().find(|source| source.id == "C1.V1").unwrap();
+        let scenario = scenario_for(source);
+        let mut script = armed(&[&scenario]);
+        let stale = script.answer(&presented(source, 1)).unwrap().unwrap();
+        script.select(&[FILLER.to_owned()]).unwrap();
+        script.delivered(&stale.receipt);
+        let status = script.status();
+        assert_eq!((status.bound, status.remaining), (1, 1));
+        assert!(status.bindings.is_empty());
+    }
+
+    #[test]
     fn a_probe_is_carried_through_collapsed_whitespace_only() {
         let carries = |text: &str, probe: &str| Probe::from_text(probe).carried_by(text);
         assert!(carries("x a b c y", "a b c"));
@@ -1142,10 +1198,10 @@ mod tests {
         let mut script = armed(&[FILLER, &scenario, &scenario]);
         let filled = script.answer(&[record(1, 2, "x")]).unwrap().unwrap();
         assert!(filled.text.contains("title=\"Fixture filler 1 to 2\""));
-        script.delivered(&filled);
+        script.delivered(&filled.receipt);
         let bound = script.answer(&presented(source, 1)).unwrap().unwrap();
         assert!(script.status().bindings.is_empty());
-        script.delivered(&bound);
+        script.delivered(&bound.receipt);
         assert_eq!(
             script
                 .answer(&[record(1, 1, "unrelated")])

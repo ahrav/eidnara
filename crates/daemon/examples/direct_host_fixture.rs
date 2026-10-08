@@ -47,7 +47,7 @@ mod unix {
     use host_runtime::model_execution::ModelExecutionComponent;
     use host_runtime::model_execution::backend::{
         BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
-        EventSink, FinishReason, LlmExecutionBackend,
+        EventSink, FinishReason, LlmExecutionBackend, SinkStatus,
     };
     use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
     use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ mod unix {
     use tokio::sync::oneshot;
 
     use crate::case_script::{
-        Answer, AnswerFailure, CaseScript, Record, output_document, presented_records,
+        Answer, AnswerFailure, CaseScript, Receipt, Record, output_document, presented_records,
     };
     use crate::eval_cassette::CassetteBackend;
     use crate::publish::write_then_rename;
@@ -230,21 +230,15 @@ mod unix {
         Refused(AnswerFailure),
     }
 
-    /// The text a completing call emits: `fallback` for a non-summarizer prompt, the summary
-    /// otherwise. A refused script fails the call instead and counts it as failed.
     fn summary_text(
         summary: Option<Summary>,
         fallback: &str,
-        script: &Mutex<CaseScript>,
         counters: &BackendCounters,
-    ) -> Result<String, BackendTerminal> {
+    ) -> Result<(String, Option<Receipt>), BackendTerminal> {
         match summary {
-            None => Ok(fallback.to_owned()),
-            Some(Summary::Default(text)) => Ok(text),
-            Some(Summary::Scripted(answer)) => {
-                lock_script(script).delivered(&answer);
-                Ok(answer.text)
-            }
+            None => Ok((fallback.to_owned(), None)),
+            Some(Summary::Default(text)) => Ok((text, None)),
+            Some(Summary::Scripted(answer)) => Ok((answer.text, Some(answer.receipt))),
             Some(Summary::Refused(failure)) => {
                 counters.failed.fetch_add(1, Ordering::SeqCst);
                 Err(ControlledBackend::typed_failure(
@@ -253,6 +247,26 @@ mod unix {
                 ))
             }
         }
+    }
+
+    fn emit_summary(
+        events: &EventSink,
+        summary: Option<Summary>,
+        fallback: &str,
+        script: &Mutex<CaseScript>,
+        counters: &BackendCounters,
+    ) -> Result<(), BackendTerminal> {
+        let (text, receipt) = summary_text(summary, fallback, counters)?;
+        let status = events.emit(BackendEvent::AssistantText {
+            text,
+            finish_reason: None,
+        });
+        if let Some(receipt) = receipt
+            && status == SinkStatus::Accepted
+        {
+            lock_script(script).delivered(&receipt);
+        }
+        Ok(())
     }
 
     fn take_blocked_slot(counters: &BackendCounters) -> bool {
@@ -481,7 +495,7 @@ mod unix {
                 }
                 match behavior {
                     NextBehavior::Success => {
-                        let text = match commanded {
+                        let summary = match commanded {
                             Some((command, input)) => {
                                 // The child is observed beside shutdown and
                                 // cancellation, as the blocked path is; losing
@@ -499,24 +513,20 @@ mod unix {
                                     answer = commanded_summary(&command, &input) => answer,
                                 };
                                 match answer {
-                                    Ok(text) => text,
+                                    Ok(text) => Some(Summary::Default(text)),
                                     Err(error) => {
                                         counters.failed.fetch_add(1, Ordering::SeqCst);
                                         return ControlledBackend::terminal_error(&error);
                                     }
                                 }
                             }
-                            None => {
-                                match summary_text(summary, "fixture-success", &script, &counters) {
-                                    Ok(text) => text,
-                                    Err(terminal) => return terminal,
-                                }
-                            }
+                            None => summary,
                         };
-                        events.emit(BackendEvent::AssistantText {
-                            text,
-                            finish_reason: None,
-                        });
+                        if let Err(terminal) =
+                            emit_summary(&events, summary, "fixture-success", &script, &counters)
+                        {
+                            return terminal;
+                        }
                         counters.completed.fetch_add(1, Ordering::SeqCst);
                         BackendTerminal::Completed {
                             finish_reason: FinishReason::Completed,
@@ -562,19 +572,15 @@ mod unix {
                                 // The acknowledgment guarantees that the release waiter observes updated counters.
                                 // the counters.
                                 let _ = ack.send(());
-                                let text = match summary_text(
+                                if let Err(terminal) = emit_summary(
+                                    &events,
                                     summary,
                                     "fixture-released",
                                     &script,
                                     &counters,
                                 ) {
-                                    Ok(text) => text,
-                                    Err(terminal) => return terminal,
-                                };
-                                events.emit(BackendEvent::AssistantText {
-                                    text,
-                                    finish_reason: None,
-                                });
+                                    return terminal;
+                                }
                                 counters.completed.fetch_add(1, Ordering::SeqCst);
                                 BackendTerminal::Completed {
                                     finish_reason: FinishReason::Completed,
@@ -1379,6 +1385,37 @@ mod unix {
         host_result?;
         ready?;
         cassette_written
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn sink(status: SinkStatus) -> EventSink {
+            EventSink::new(Arc::new(move |_| status))
+        }
+
+        fn filler_summary(script: &Mutex<CaseScript>) -> Option<Summary> {
+            let mut script = lock_script(script);
+            script.select(&["filler".to_owned()]).unwrap();
+            let records = [Record {
+                start: 1,
+                end: 1,
+                text: "x".to_owned(),
+            }];
+            Some(Summary::Scripted(script.answer(&records).unwrap().unwrap()))
+        }
+
+        #[test]
+        fn a_scripted_answer_counts_as_delivered_only_when_the_sink_accepts_it() {
+            for (status, filled) in [(SinkStatus::Closed, 0), (SinkStatus::Accepted, 1)] {
+                let script = Mutex::new(CaseScript::default());
+                let counters = BackendCounters::default();
+                let summary = filler_summary(&script);
+                assert!(emit_summary(&sink(status), summary, "x", &script, &counters).is_ok());
+                assert_eq!(lock_script(&script).status().filled, filled, "{status:?}");
+            }
+        }
     }
 }
 
