@@ -186,7 +186,11 @@ fn collapse(text: &str) -> String {
 }
 
 fn probe_of(text: &str) -> String {
-    collapse(text).chars().take(PROBE_CHARS).collect()
+    text.split_whitespace()
+        .enumerate()
+        .flat_map(|(index, word)| (index > 0).then_some(' ').into_iter().chain(word.chars()))
+        .take(PROBE_CHARS)
+        .collect()
 }
 
 /// The probe that locates a message in the presented transcript: the leading characters of its
@@ -336,6 +340,17 @@ impl CaseScript {
     }
 }
 
+/// Whether `text` with its whitespace collapsed contains `probe`, a collapsed probe whose longest
+/// word is `word`.
+///
+/// Collapsing keeps each word intact, so the collapsed text holds `word` only where `text` does.
+/// A probe that ends in a word and appears verbatim in `text` spans whole single-space gaps, so it
+/// appears in the collapsed text too.
+fn carries(text: &str, probe: &str, word: &str) -> bool {
+    text.contains(word)
+        && ((!probe.ends_with(' ') && text.contains(probe)) || collapse(text).contains(probe))
+}
+
 /// The first and last record of the source's run, when its messages appear in order in one
 /// contiguous run of presented records covering exactly the source's ordinals. Consecutive
 /// messages may share one merged record; a record inside the run that carries none of them is a
@@ -345,10 +360,14 @@ fn locate(source: &Source, records: &[Record]) -> Option<(usize, usize)> {
     let mut cursor = 0;
     for message in &source.messages {
         let probe = message_probe(&message.parts)?;
+        let word = probe
+            .split(' ')
+            .max_by_key(|token| token.len())
+            .unwrap_or(probe.as_str());
         let at = cursor
             + records[cursor..]
                 .iter()
-                .position(|record| collapse(&record.text).contains(&probe))?;
+                .position(|record| carries(&record.text, &probe, word))?;
         hits.push(at);
         cursor = at;
     }
@@ -534,6 +553,33 @@ mod tests {
         records.splice(3..5, [record(4, 5, &merged)]);
         let (_, binding) = bind("S", source, &records).unwrap();
         assert_eq!((binding.start, binding.end), (1, 7));
+    }
+
+    #[test]
+    fn a_probe_is_carried_through_collapsed_whitespace_only() {
+        assert!(carries("x a b c y", "a b c", "a"));
+        assert!(carries("xa \n b\u{a0}cd", "a b cd", "cd"));
+        assert!(carries("a b c", "a b ", "a"));
+        assert!(!carries("a b \n", "a b ", "a"));
+        assert!(!carries("ab c", "a b c", "a"));
+        assert!(!carries("a b c", "a b cd", "cd"));
+    }
+
+    #[test]
+    fn a_source_presented_with_wider_whitespace_binds() {
+        for source in sources() {
+            let mut records = presented(source, 1);
+            for record in &mut records {
+                record.text = record.text.replace(' ', " \n\t ");
+            }
+            let (_, binding) = bind("S", source, &records).unwrap();
+            assert_eq!(
+                (binding.start, binding.end),
+                (1, source.messages.len() as u64),
+                "{}",
+                source.id
+            );
+        }
     }
 
     #[test]
