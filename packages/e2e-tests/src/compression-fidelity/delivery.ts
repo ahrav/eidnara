@@ -219,27 +219,41 @@ export function captureTexts(capture: RetainedCapture): string[] {
     return (capture.request.body.messages ?? []).map(messageText);
 }
 
-/**
- * The reviewed tier at which a request serves the case segment titled `title`: the body it
- * carries, the heading alone for P4, or absence for P5. A body matching no reviewed tier is
- * `unmatched`.
- */
+const HISTORY_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/g;
+
+function caseSegment(texts: readonly string[], title: string): string[] | undefined {
+    const suffix = ` · ${title}`;
+    for (const text of texts) {
+        for (const wrapper of text.match(HISTORY_WRAPPER) ?? []) {
+            const lines = wrapper.split("\n");
+            const heading = lines.findIndex(
+                (line) => line.startsWith("## ") && line.endsWith(suffix),
+            );
+            if (heading < 0) continue;
+            const next = lines.findIndex(
+                (line, index) =>
+                    index > heading && (line.startsWith("## ") || line.startsWith("</")),
+            );
+            return lines.slice(heading, next < 0 ? undefined : next);
+        }
+    }
+    return undefined;
+}
+
+/** A case heading outside every `<session-history>` wrapper reads as P5. */
 export function servedTier(
     texts: readonly string[],
     title: string,
     bodies: readonly string[],
 ): ServedTier | "unmatched" {
-    const text = texts.find((candidate) => candidate.includes(title));
-    if (text === undefined) return "p5";
-    // A segment runs from its heading to the next heading or the wrapper's closing tag.
-    const segment = text.slice(text.indexOf(title)).split(/\n(?:## |<\/)/)[0] ?? "";
+    const lines = caseSegment(texts, title);
+    if (lines === undefined) return "p5";
+    const segment = lines.join("\n");
     const carried = bodies.findIndex((body) => segment.includes(body));
     const tier = REVIEWED_TIERS[carried];
     if (tier) return tier;
     return segment.trim().split("\n").length === 1 ? "p4" : "unmatched";
 }
-
-const HISTORY_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/g;
 
 /**
  * Leak probes found anywhere in the request outside the `<session-history>` wrapper: the system
