@@ -57,7 +57,7 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
 
-    use crate::case_script::{AnswerFailure, CaseScript, Record};
+    use crate::case_script::{Answer, AnswerFailure, CaseScript, Record, output_document};
     use crate::eval_cassette::CassetteBackend;
     use crate::publish::write_then_rename;
 
@@ -139,8 +139,8 @@ mod unix {
         next_blocked_id: Arc<AtomicU64>,
         shutdown: CancellationToken,
         counters: Arc<BackendCounters>,
-        /// Corpus case scripts; while armed, every summarizer request consumes one entry.
-        script: Mutex<CaseScript>,
+        /// Corpus case scripts; while armed, every admitted summarizer request consumes one entry.
+        script: Arc<Mutex<CaseScript>>,
     }
 
     impl ControlledBackend {
@@ -156,7 +156,7 @@ mod unix {
                 next_blocked_id: Arc::new(AtomicU64::new(0)),
                 shutdown,
                 counters: Arc::new(BackendCounters::default()),
-                script: Mutex::new(CaseScript::default()),
+                script: Arc::new(Mutex::new(CaseScript::default())),
             })
         }
 
@@ -211,7 +211,46 @@ mod unix {
         }
 
         fn script(&self) -> std::sync::MutexGuard<'_, CaseScript> {
-            self.script.lock().expect("fixture case script mutex")
+            lock_script(&self.script)
+        }
+    }
+
+    fn lock_script(script: &Mutex<CaseScript>) -> std::sync::MutexGuard<'_, CaseScript> {
+        script.lock().expect("fixture case script mutex")
+    }
+
+    /// What a summarizer request is answered with.
+    enum Summary {
+        /// The fixture's segments over the request's own presented lines.
+        Default(String),
+        /// An armed case script's answer, recorded once emitted.
+        Scripted(Answer),
+        /// An armed case script refused the request; the call fails typed.
+        Refused(AnswerFailure),
+    }
+
+    /// The text a completing call emits: `fallback` for a non-summarizer prompt, the summary
+    /// otherwise. A refused script fails the call instead and counts it as failed.
+    fn summary_text(
+        summary: Option<Summary>,
+        fallback: &str,
+        script: &Mutex<CaseScript>,
+        counters: &BackendCounters,
+    ) -> Result<String, BackendTerminal> {
+        match summary {
+            None => Ok(fallback.to_owned()),
+            Some(Summary::Default(text)) => Ok(text),
+            Some(Summary::Scripted(answer)) => {
+                lock_script(script).delivered(&answer);
+                Ok(answer.text)
+            }
+            Some(Summary::Refused(failure)) => {
+                counters.failed.fetch_add(1, Ordering::SeqCst);
+                Err(ControlledBackend::typed_failure(
+                    failure.message(),
+                    failure.provider_code(),
+                ))
+            }
         }
     }
 
@@ -287,14 +326,14 @@ mod unix {
         // before it, which keeps its newlines.
         let mut lines: Vec<Record> = Vec::new();
         for line in body.lines() {
-            let next = lines.last().map(|(_, end, _)| end + 1);
+            let next = lines.last().map(|record| record.end + 1);
             match (presented_line(line), lines.last_mut()) {
-                (Some(presented), _) if next.is_none_or(|next| presented.0 == next) => {
-                    lines.push(presented)
+                (Some((start, end, text)), _) if next.is_none_or(|next| start == next) => {
+                    lines.push(Record { start, end, text })
                 }
-                (_, Some((_, _, text))) if !line.trim().is_empty() => {
-                    text.push(' ');
-                    text.push_str(line.trim());
+                (_, Some(record)) if !line.trim().is_empty() => {
+                    record.text.push(' ');
+                    record.text.push_str(line.trim());
                 }
                 _ => {}
             }
@@ -310,13 +349,13 @@ mod unix {
     fn scripted_summary(lines: &[Record]) -> String {
         let mut segments = String::new();
         for group in lines.chunks(SUMMARY_CHUNK) {
-            let start = group[0].0;
-            let end = group[group.len() - 1].1;
+            let start = group[0].start;
+            let end = group[group.len() - 1].end;
             // Escaped as element content, so a message saying `<T> & B`
             // leaves the document well-formed; the validator unescapes it.
             let text = group
                 .iter()
-                .map(|(_, _, text)| text.as_str())
+                .map(|record| record.text.as_str())
                 .collect::<Vec<_>>()
                 .join("; ")
                 .replace('&', "&amp;")
@@ -326,10 +365,7 @@ mod unix {
                 r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
             ));
         }
-        let next = lines.last().map(|(_, end, _)| end + 1).unwrap_or(1);
-        format!(
-            "<output><history_segments>{segments}</history_segments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"
-        )
+        output_document(&segments, lines.last().map_or(1, |record| record.end + 1))
     }
 
     /// Names an executable that answers summarizer prompts in place of the
@@ -422,19 +458,18 @@ mod unix {
             // A summarizer prompt is answered in the summarizer's format
             // whatever the scheduled behavior; the controls script transport
             // outcomes, not what a summary says.
-            let presented = presented_records(&request.prompt);
             // An armed case script answers every summarizer prompt a scheduled
             // success or block will answer; a scheduled failure consumes nothing.
-            let scripted = presented
-                .as_deref()
-                .filter(|_| !matches!(behavior, NextBehavior::Failure))
-                .filter(|_| self.script().armed())
-                .map(|records| self.script().answer(records));
-            let commandable = presented.is_some() && scripted.is_none();
-            let summary: Option<Result<String, AnswerFailure>> = scripted.or_else(|| {
-                presented
-                    .as_deref()
-                    .map(|lines| Ok(scripted_summary(lines)))
+            let summary = presented_records(&request.prompt).map(|records| {
+                let scripted = match behavior {
+                    NextBehavior::Failure => None,
+                    NextBehavior::Success | NextBehavior::Block => self.script().answer(&records),
+                };
+                match scripted {
+                    Some(Ok(answer)) => Summary::Scripted(answer),
+                    Some(Err(failure)) => Summary::Refused(failure),
+                    None => Summary::Default(scripted_summary(&records)),
+                }
             });
             // A requested dump is gate B's record of the run; a line it
             // cannot hold fails the call, typed, rather than leaving a file
@@ -460,7 +495,7 @@ mod unix {
                         .err()
                         .map(|error| format!("summarizer dump {}: {error}", path.display()))
                 });
-            let commanded = commandable
+            let commanded = matches!(summary, Some(Summary::Default(_)))
                 .then(|| std::env::var_os(SUMMARIZER_COMMAND_ENV))
                 .flatten()
                 .filter(|command| !command.is_empty())
@@ -476,6 +511,7 @@ mod unix {
             let next_blocked_id = Arc::clone(&self.next_blocked_id);
             let shutdown = self.shutdown.clone();
             let counters = Arc::clone(&self.counters);
+            let script = Arc::clone(&self.script);
             let latency = self.latency;
             Box::pin(async move {
                 if let Some(latency) = latency {
@@ -522,17 +558,12 @@ mod unix {
                                     }
                                 }
                             }
-                            None => match summary {
-                                Some(Ok(text)) => text,
-                                Some(Err(failure)) => {
-                                    counters.failed.fetch_add(1, Ordering::SeqCst);
-                                    return ControlledBackend::typed_failure(
-                                        failure.message(),
-                                        failure.provider_code(),
-                                    );
+                            None => {
+                                match summary_text(summary, "fixture-success", &script, &counters) {
+                                    Ok(text) => text,
+                                    Err(terminal) => return terminal,
                                 }
-                                None => "fixture-success".to_owned(),
-                            },
+                            }
                         };
                         events.emit(BackendEvent::AssistantText {
                             text,
@@ -583,16 +614,14 @@ mod unix {
                                 // The acknowledgment guarantees that the release waiter observes updated counters.
                                 // the counters.
                                 let _ = ack.send(());
-                                let text = match summary {
-                                    Some(Ok(text)) => text,
-                                    Some(Err(failure)) => {
-                                        counters.failed.fetch_add(1, Ordering::SeqCst);
-                                        return ControlledBackend::typed_failure(
-                                            failure.message(),
-                                            failure.provider_code(),
-                                        );
-                                    }
-                                    None => "fixture-released".to_owned(),
+                                let text = match summary_text(
+                                    summary,
+                                    "fixture-released",
+                                    &script,
+                                    &counters,
+                                ) {
+                                    Ok(text) => text,
+                                    Err(terminal) => return terminal,
                                 };
                                 events.emit(BackendEvent::AssistantText {
                                     text,
@@ -687,9 +716,10 @@ mod unix {
         UserHintOutcome,
         /// Whether a history_summarizer firing is still running for any session.
         HistorySummarizerLive,
-        /// Queues corpus scenarios for the next summarizer requests, replacing any queue.
+        /// Queues corpus scenario IDs or `filler` entries for the next summarizer requests,
+        /// replacing any queue.
         ScriptCases {
-            scenarios: Vec<String>,
+            entries: Vec<String>,
         },
         /// The case script's queue and consumption record.
         ScriptStatus,
@@ -866,9 +896,9 @@ mod unix {
                                     },
                                     false,
                                 )),
-                                ControlCommand::ScriptCases { scenarios } => backend
+                                ControlCommand::ScriptCases { entries } => backend
                                     .script()
-                                    .select(&scenarios)
+                                    .select(&entries)
                                     .map(|()| (ControlResult::Ack { accepted: true }, false))
                                     .map_err(|error| error.code()),
                                 ControlCommand::ScriptStatus => {

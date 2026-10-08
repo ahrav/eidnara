@@ -95,20 +95,28 @@ export interface ScriptStatus {
     armed: boolean;
     remaining: number;
     bound: number;
-    /** Requests a `filler` entry answered with the fixture's default segments. */
+    /** Delivered `filler` answers of compact fixture-authored segments. */
     filled: number;
     mismatched: number;
     exhausted: number;
     bindings: ScriptBinding[];
 }
 
-/** The native records of a scenario's source, as the corpus spells them. */
+/** One native corpus record: its role and its parts, as the corpus spells them. */
+export interface ScriptMessage {
+    info: { role: "user" | "assistant" } & Record<string, unknown>;
+    parts: ({ id: string; type: string } & Record<string, unknown>)[];
+}
+
+/** The native records of a scenario's source and the probes that locate a raw leak of them. */
 export interface ScriptSource {
     corpusSha256: string;
     case: string;
     scenario: string;
     source: string;
-    messages: Record<string, unknown>[];
+    messages: ScriptMessage[];
+    /** Leading characters of every text block and settled tool output long enough to locate. */
+    leakProbes: string[];
 }
 
 type ControlCommand =
@@ -443,17 +451,39 @@ function parseScriptStatus(value: unknown): ScriptStatus {
     };
 }
 
+function isScriptMessage(value: unknown): value is ScriptMessage {
+    const message = record(value);
+    const info = record(message?.info);
+    return (
+        (info?.role === "user" || info?.role === "assistant") &&
+        Array.isArray(message?.parts) &&
+        message.parts.every((part) => {
+            const fields = record(part);
+            return typeof fields?.id === "string" && typeof fields.type === "string";
+        })
+    );
+}
+
 function parseScriptSource(value: unknown): ScriptSource {
     const object = record(value);
     if (
         !object ||
-        !exactKeys(object, ["case", "corpus_sha256", "messages", "scenario", "source"]) ||
+        !exactKeys(object, [
+            "case",
+            "corpus_sha256",
+            "leak_probes",
+            "messages",
+            "scenario",
+            "source",
+        ]) ||
         !isSha256(object.corpus_sha256) ||
         typeof object.case !== "string" ||
         typeof object.scenario !== "string" ||
         typeof object.source !== "string" ||
         !Array.isArray(object.messages) ||
-        !object.messages.every((message) => record(message) !== null)
+        !object.messages.every(isScriptMessage) ||
+        !Array.isArray(object.leak_probes) ||
+        !object.leak_probes.every((probe) => typeof probe === "string" && probe.length > 0)
     ) {
         throw new Error("fixture control script source was malformed");
     }
@@ -462,7 +492,8 @@ function parseScriptSource(value: unknown): ScriptSource {
         case: object.case,
         scenario: object.scenario,
         source: object.source,
-        messages: object.messages as Record<string, unknown>[],
+        messages: object.messages,
+        leakProbes: object.leak_probes as string[],
     };
 }
 
@@ -612,11 +643,11 @@ class FixtureControlClient {
     }
 
     /**
-     * Queues corpus scenario IDs, or `filler` for one default-segment answer, for the next
-     * summarizer requests, replacing any earlier queue.
+     * Queues corpus scenario IDs, or `filler` for one answer of compact fixture-authored
+     * segments, for the next summarizer requests, replacing any earlier queue.
      */
-    scriptCases(scenarios: readonly string[]): Promise<void> {
-        return this.ack("script-cases", { scenarios: [...scenarios] });
+    scriptCases(entries: readonly string[]): Promise<void> {
+        return this.ack("script-cases", { entries: [...entries] });
     }
 
     async scriptStatus(): Promise<ScriptStatus> {
@@ -904,21 +935,21 @@ export class HermeticHostStack {
         return this.requireControl().counters();
     }
 
-    /** Queues corpus scenarios for the fixture's next summarizer requests. */
-    async scriptCases(scenarios: readonly string[]): Promise<void> {
-        await this.requireControl().scriptCases(scenarios);
+    /** Queues corpus scenario IDs or `filler` entries for the fixture's next summarizer requests. */
+    async scriptCases(entries: readonly string[]): Promise<void> {
+        await this.requireControl().scriptCases(entries);
     }
 
     async scriptStatus(): Promise<ScriptStatus> {
         return this.requireControl().scriptStatus();
     }
 
-    async historySummarizerLive(): Promise<boolean> {
-        return this.requireControl().historySummarizerLive();
-    }
-
     async scriptSource(scenario: string): Promise<ScriptSource> {
         return this.requireControl().scriptSource(scenario);
+    }
+
+    async historySummarizerLive(): Promise<boolean> {
+        return this.requireControl().historySummarizerLive();
     }
 
     async backendRequestCount(): Promise<number> {

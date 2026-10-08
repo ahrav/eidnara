@@ -99,18 +99,24 @@ describe("CaptureLedger", () => {
             ledger.retain();
             mock.reset();
             expect(mock.requests()).toEqual([]);
-            ledger.tag({ sessionId: "ses_a", caseId: "C1", scenarioId: "C1.S2" });
             mock.setDefault({ text: "ok", usage: { input_tokens: 1, output_tokens: 1 } });
+            // Arrives before the next tag, so it is filed under the identity it was driven under.
+            await post(baseURL, "ses_a");
+            ledger.tag({ sessionId: "ses_a", caseId: "C1", scenarioId: "C1.S2" });
             await post(baseURL, "ses_a");
 
             const retained = ledger.captures({ sessionId: "ses_a" });
-            expect(retained.map((capture) => [capture.scenarioId, capture.sequence])).toEqual([
-                ["C1.S1", 0],
-                ["C1.S2", 1],
+            expect(retained.map((capture) => capture.scenarioId)).toEqual([
+                "C1.S1",
+                "C1.S1",
+                "C1.S2",
             ]);
-            expect(ledger.captures({ sessionId: "ses_b" })).toEqual([]);
-            expect(ledger.captures({ scenarioId: "C1.S1" })).toHaveLength(1);
             expect(retained[0]?.request.headers["x-opencode-session-id"]).toBe("ses_a");
+            // ses_b's requests arrived before ses_b was tagged, so none is filed under it.
+            ledger.tag({ sessionId: "ses_b", caseId: "C2", scenarioId: "C2.S1" });
+            expect(ledger.captures({ sessionId: "ses_b" })).toEqual([]);
+            await post(baseURL, "ses_b");
+            expect(ledger.captures({ caseId: "C2" })).toHaveLength(1);
         } finally {
             await mock.stop();
         }

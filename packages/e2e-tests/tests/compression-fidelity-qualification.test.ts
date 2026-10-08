@@ -11,7 +11,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { readCompressionFidelityCorpus } from "../src/compression-fidelity/corpus";
+import {
+    COMPRESSION_FIDELITY_CORPUS_SHA256,
+    readCompressionFidelityCorpus,
+} from "../src/compression-fidelity/corpus";
 import {
     captureTexts,
     emitObservation,
@@ -20,10 +23,13 @@ import {
     reviewedTiers,
     seedSource,
     sessionPasses,
-    waitUntil,
 } from "../src/compression-fidelity/delivery";
+import { waitFor } from "../src/harness-primitives";
 import { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
+
+/** Set in CI, where a skipped qualification would hide a blocking runtime prerequisite. */
+const QUALIFICATION_REQUIRED = process.env.EIDNARA_E2E_REQUIRE_FIDELITY === "1";
 
 const EIDNARA_CONFIG = {
     history_summarizer: { model: "fixture/deterministic" },
@@ -36,6 +42,13 @@ const CASE = "C1";
 const SCENARIO = "C1.S1";
 /** Trailing turns allowed to reach the summarizer trigger before qualification fails. */
 const MAX_TRAILING_TURNS = 12;
+const WAIT_MS = 120_000;
+
+describe("compression fidelity: fixture qualification prerequisites", () => {
+    it.skipIf(!QUALIFICATION_REQUIRED)("are present when EIDNARA_E2E_REQUIRE_FIDELITY=1", () => {
+        expect(rustPrereqs.skipReason ?? "present").toBe("present");
+    });
+});
 
 describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", () => {
     let h: RustTestHarness;
@@ -70,9 +83,10 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", 
         await h.sendPrompt(sessionId, "lead-in turn");
 
         const source = await h.host.scriptSource(SCENARIO);
+        expect(source.corpusSha256).toBe(COMPRESSION_FIDELITY_CORPUS_SHA256);
         expect(source.source).toBe(reviewed.id);
-        const seeded = seedSource(h, sessionId, source);
-        expect(seeded.probes.length).toBeGreaterThan(0);
+        expect(source.leakProbes.length).toBeGreaterThan(0);
+        seedSource(h, sessionId, source);
         await h.restart({ eidnaraConfig: EIDNARA_CONFIG });
         await h.host.scriptCases([SCENARIO, "filler", "filler", "filler"]);
 
@@ -84,19 +98,37 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", 
             });
             await h.sendPrompt(sessionId, `trailing turn ${i}: ${h.ballast(2_000)}`);
             const status = await h.host.scriptStatus();
-            if (status.bound + status.mismatched + status.filled > 0) break;
+            if (status.remaining < 4) break;
         }
-        const script = await h.host.scriptStatus();
-        expect(script).toMatchObject({ bound: 1, mismatched: 0, exhausted: 0 });
-        expect(script.bindings[0]).toMatchObject({ scenario: SCENARIO, source: source.source });
-        await waitUntil(
-            async () => ((await publishedCount(h, sessionId)) >= 1 ? true : null),
-            "the bound case to publish",
-            () => h.host.hostLog().slice(-4_000),
+        const diagnostics = () => h.host.hostLog().slice(-4_000);
+        // The firing that consumed the case entry answers asynchronously.
+        const script = await waitFor(
+            "the scripted case to be answered",
+            async () => {
+                const status = await h.host.scriptStatus();
+                return status.bound + status.mismatched + status.filled > 0 ? status : undefined;
+            },
+            WAIT_MS,
+            diagnostics,
         );
-        await waitUntil(
-            async () => ((await h.host.historySummarizerLive()) ? null : true),
+        expect(script).toMatchObject({
+            corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
+            bound: 1,
+            mismatched: 0,
+            exhausted: 0,
+        });
+        expect(script.bindings[0]).toMatchObject({ scenario: SCENARIO, source: source.source });
+        await waitFor(
+            "the bound case to publish",
+            async () => ((await publishedCount(h, sessionId)) >= 1 ? true : undefined),
+            WAIT_MS,
+            diagnostics,
+        );
+        await waitFor(
             "the summarizer to settle",
+            async () => ((await h.host.historySummarizerLive()) ? undefined : true),
+            WAIT_MS,
+            diagnostics,
         );
 
         const passesBefore = sessionPasses(h, sessionId).length;
@@ -105,15 +137,23 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", 
             usage: { input_tokens: 9_000, output_tokens: 20 },
         });
         await h.sendPrompt(sessionId, scenario.followUp.prompt);
-        const pass = await waitUntil(
-            async () => sessionPasses(h, sessionId)[passesBefore] ?? null,
+        const pass = await waitFor(
             "the follow-up pass line",
+            () => sessionPasses(h, sessionId)[passesBefore],
+            WAIT_MS,
+            diagnostics,
         );
         const capture = h
             .retainedCaptures({ sessionId, scenarioId: SCENARIO })
             .filter((entry) => captureTexts(entry).at(-1)?.includes(scenario.followUp.prompt))
             .at(-1);
-        const verdict = judgeDelivery({ capture, pass, title, bodies, probes: seeded.probes });
+        const verdict = judgeDelivery({
+            capture,
+            pass,
+            title,
+            bodies,
+            leakProbes: source.leakProbes,
+        });
         emitObservation({
             case: CASE,
             source: source.source,
@@ -131,14 +171,16 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", 
                 },
                 served_tier: verdict.tier,
                 refusals: verdict.refusals,
+                leaks: verdict.leaks,
                 capture_messages: capture ? captureTexts(capture).length : 0,
             },
         });
 
         expect(verdict.refusals).toEqual([]);
         expect(verdict.tier).toBe("p1");
-        expect(pass.decision).not.toBe("");
-        expect(pass.reason).not.toBe("");
-        expect(capture?.sessionId).toBe(sessionId);
+        expect(pass.decision).toMatch(/^[A-Z]+\+?$/);
+        expect(pass.reason).toMatch(/^[a-z_]+$/);
+        expect(capture?.request.headers["x-opencode-session-id"]).toBe(sessionId);
+        expect(capture?.caseId).toBe(CASE);
     }, 600_000);
 });

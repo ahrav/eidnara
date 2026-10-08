@@ -12,11 +12,13 @@ import { createServer, type Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostClient } from "@eidnara/opencode/shared/host-client";
+import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 import {
     __hermeticHostTest,
     buildDirectHostFixture,
     detectRustModePrereqs,
     HermeticHostStack,
+    type ScriptMessage,
 } from "./hermetic-host";
 
 const fixturePrereqs = detectRustModePrereqs();
@@ -99,11 +101,10 @@ async function mockControl(
 }
 
 /** The text a corpus message presents: its text parts, joined as the presenter joins parts. */
-function messageText(message: Record<string, unknown>): string {
-    const parts = message.parts as Array<{ type?: string; text?: string }>;
-    return parts
+function messageText(message: ScriptMessage): string {
+    return message.parts
         .filter((part) => part.type === "text")
-        .map((part) => part.text ?? "")
+        .map((part) => String(part.text ?? ""))
         .join(" / ");
 }
 
@@ -389,7 +390,13 @@ describe("direct host fixture contract", () => {
                 );
             try {
                 const source = await stack.scriptSource("C1.S1");
-                expect(source).toMatchObject({ case: "C1", scenario: "C1.S1", source: "C1.V1" });
+                expect(source).toMatchObject({
+                    corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
+                    case: "C1",
+                    scenario: "C1.S1",
+                    source: "C1.V1",
+                });
+                expect(source.leakProbes.length).toBeGreaterThan(0);
                 expect(source.messages.length).toBe(6);
                 const caseTexts = source.messages.map(messageText);
 
@@ -411,7 +418,7 @@ describe("direct host fixture contract", () => {
                             id: 40,
                             command: {
                                 name: "script-cases",
-                                scenarios: Array(8).fill(
+                                entries: Array(8).fill(
                                     "C1.S1".padEnd(__hermeticHostTest.maxLineBytes / 4, " "),
                                 ),
                             },
@@ -422,17 +429,28 @@ describe("direct host fixture contract", () => {
                     ok: false,
                     error: { code: "request_too_large" },
                 });
-                const unarmed = await stack.scriptStatus();
-                expect(unarmed).toMatchObject({ armed: false, remaining: 0, bound: 0 });
+                const idle = {
+                    corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
+                    armed: false,
+                    remaining: 0,
+                    bound: 0,
+                    filled: 0,
+                    mismatched: 0,
+                    exhausted: 0,
+                    bindings: [],
+                };
+                expect(await stack.scriptStatus()).toEqual(idle);
 
                 // Unarmed, a summarizer prompt gets the default scripted answer.
                 let counters = await stack.backendCounters();
+                const unarmed = counters;
                 await send("script-default", summarizerPrompt(caseTexts));
                 counters = await settled(counters.completed + counters.failed);
-                expect((await stack.scriptStatus()).bound).toBe(0);
+                expect(counters.completed).toBe(unarmed.completed + 1);
+                expect(await stack.scriptStatus()).toEqual(idle);
 
-                await stack.scriptCases(["filler", "C1.S1", "C2.S1"]);
-                expect(await stack.scriptStatus()).toMatchObject({ armed: true, remaining: 3 });
+                await stack.scriptCases(["filler", "C1.S1", "C1.S1", "C2.S1"]);
+                expect(await stack.scriptStatus()).toMatchObject({ armed: true, remaining: 4 });
 
                 // A filler entry answers with compact fixture-authored segments.
                 const filled = counters;
@@ -440,7 +458,7 @@ describe("direct host fixture contract", () => {
                 counters = await settled(filled.completed + filled.failed);
                 expect(counters.completed).toBe(filled.completed + 1);
                 expect(await stack.scriptStatus()).toMatchObject({
-                    remaining: 2,
+                    remaining: 3,
                     bound: 0,
                     filled: 1,
                 });
@@ -455,7 +473,7 @@ describe("direct host fixture contract", () => {
                 expect(counters.completed).toBe(before.completed + 1);
                 const bound = await stack.scriptStatus();
                 expect(bound).toMatchObject({
-                    remaining: 1,
+                    remaining: 2,
                     bound: 1,
                     filled: 1,
                     mismatched: 0,
@@ -472,6 +490,33 @@ describe("direct host fixture contract", () => {
                     },
                 ]);
 
+                // A scheduled typed failure consumes no entry.
+                const scheduled = counters;
+                await stack.failNextBackendCall();
+                await send("script-scheduled-failure", summarizerPrompt(caseTexts));
+                counters = await settled(scheduled.completed + scheduled.failed);
+                expect(counters.failed).toBe(scheduled.failed + 1);
+                expect((await stack.scriptStatus()).remaining).toBe(2);
+
+                // A blocked call is answered from the script once released.
+                const blocked = counters;
+                await stack.blockNextBackendCall();
+                await send("script-blocked", summarizerPrompt(caseTexts));
+                await waitFor(
+                    () => stack.backendCounters(),
+                    (value) => value.blocked === blocked.blocked + 1,
+                );
+                expect((await stack.scriptStatus()).bindings).toHaveLength(1);
+                expect(await stack.releaseBlockedBackendCall()).toBe(true);
+                counters = await settled(blocked.completed + blocked.failed);
+                expect(counters.completed).toBe(blocked.completed + 1);
+                const released = await stack.scriptStatus();
+                expect(released).toMatchObject({ remaining: 1, bound: 2 });
+                expect(released.bindings.map((binding) => [binding.start, binding.end])).toEqual([
+                    [2, 7],
+                    [1, 6],
+                ]);
+
                 // A non-summarizer prompt consumes nothing and keeps its default answer.
                 const plain = counters;
                 await send("script-plain", "not a summarizer prompt");
@@ -486,7 +531,7 @@ describe("direct host fixture contract", () => {
                 expect(counters.failed).toBe(mismatch.failed + 1);
                 expect(await stack.scriptStatus()).toMatchObject({
                     remaining: 0,
-                    bound: 1,
+                    bound: 2,
                     mismatched: 1,
                     exhausted: 0,
                 });
@@ -498,7 +543,7 @@ describe("direct host fixture contract", () => {
                 expect(counters.completed).toBe(exhausted.completed);
                 expect(await stack.scriptStatus()).toMatchObject({
                     remaining: 0,
-                    bound: 1,
+                    bound: 2,
                     mismatched: 1,
                     exhausted: 1,
                 });

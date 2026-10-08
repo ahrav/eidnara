@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RetainedCapture, RustPassLine } from "../rust-harness";
 import { parseRustPassLine } from "../rust-harness";
+import type { ScriptSource } from "../rust-runner/hermetic-host";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "./corpus";
-import { emitObservation, judgeDelivery, reviewedTiers, servedTier } from "./delivery";
+import { emitObservation, judgeDelivery, planSeed, reviewedTiers, servedTier } from "./delivery";
 
 const TITLE = "Pooling-first rejected";
 const BODIES = ["full P1 body", "condensed P2", "short P3"];
@@ -16,7 +17,6 @@ function capture(messages: string[]): RetainedCapture {
         sessionId: "ses_a",
         caseId: "C1",
         scenarioId: "C1.S1",
-        sequence: 0,
         request: {
             receivedAt: 0,
             method: "POST",
@@ -44,13 +44,13 @@ describe("compression fidelity delivery judgment", () => {
             pass: APPLIED,
             title: TITLE,
             bodies: BODIES,
-            probes: [PROBE],
+            leakProbes: [PROBE],
         });
-        expect(verdict).toEqual({ refusals: [], tier: "p1", historyMessage: 0, leaks: [] });
+        expect(verdict).toEqual({ refusals: [], tier: "p1", leaks: [] });
     });
 
     it("refuses a missing capture, an empty capture, and a missing pass separately", () => {
-        const base = { title: TITLE, bodies: BODIES, probes: [PROBE] };
+        const base = { title: TITLE, bodies: BODIES, leakProbes: [PROBE] };
         expect(judgeDelivery({ ...base, capture: undefined, pass: APPLIED }).refusals).toEqual([
             "missing_capture",
         ]);
@@ -71,7 +71,7 @@ describe("compression fidelity delivery judgment", () => {
             capture: capture([history(BODIES[0] ?? ""), "follow-up"]),
             title: TITLE,
             bodies: BODIES,
-            probes: [PROBE],
+            leakProbes: [PROBE],
         };
         expect(
             judgeDelivery({
@@ -93,7 +93,7 @@ describe("compression fidelity delivery judgment", () => {
             pass: APPLIED,
             title: TITLE,
             bodies: BODIES,
-            probes: [PROBE],
+            leakProbes: [PROBE],
         });
         expect(leaked.refusals).toEqual(["raw_tail_leak"]);
         expect(leaked.leaks).toEqual([PROBE]);
@@ -103,7 +103,7 @@ describe("compression fidelity delivery judgment", () => {
                 pass: APPLIED,
                 title: TITLE,
                 bodies: BODIES,
-                probes: [PROBE],
+                leakProbes: [PROBE],
             }).refusals,
         ).toEqual(["body_unmatched"]);
     });
@@ -111,14 +111,81 @@ describe("compression fidelity delivery judgment", () => {
     it("reads P4 as the heading alone and P5 as absence", () => {
         expect(
             servedTier([`<session-history>\n## 1-6 · ${TITLE}\n</session-history>`], TITLE, BODIES),
-        ).toEqual({
-            tier: "p4",
-            message: 0,
+        ).toBe("p4");
+        expect(servedTier(["<session-history>\n</session-history>"], TITLE, BODIES)).toBe("p5");
+    });
+
+    it("scans the m1 window and system text for leaks, not only later messages", () => {
+        const folded = `${history(BODIES[0] ?? "")}\n${PROBE} restated in m1`;
+        expect(
+            judgeDelivery({
+                capture: capture([folded, "follow-up"]),
+                pass: APPLIED,
+                title: TITLE,
+                bodies: BODIES,
+                leakProbes: [PROBE],
+            }).refusals,
+        ).toEqual(["raw_tail_leak"]);
+        const withSystem = capture([history(BODIES[0] ?? ""), "follow-up"]);
+        withSystem.request.body.system = [{ type: "text", text: PROBE }];
+        expect(
+            judgeDelivery({
+                capture: withSystem,
+                pass: APPLIED,
+                title: TITLE,
+                bodies: BODIES,
+                leakProbes: [PROBE],
+            }).leaks,
+        ).toEqual([PROBE]);
+    });
+
+    it("plans seeded rows in order after the newest message and closes a user-final source", () => {
+        const source: ScriptSource = {
+            corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
+            case: "C1",
+            scenario: "C1.S1",
+            source: "C1.V1",
+            leakProbes: [],
+            messages: [
+                { info: { role: "user" }, parts: [{ id: "a", type: "text", text: "question" }] },
+                {
+                    info: { role: "assistant" },
+                    parts: [
+                        {
+                            id: "b",
+                            type: "tool",
+                            callID: "c",
+                            tool: "read",
+                            state: { status: "completed", input: {}, output: "o" },
+                        },
+                    ],
+                },
+                { info: { role: "user" }, parts: [{ id: "d", type: "text", text: "thanks" }] },
+            ],
+        };
+        const rows = planSeed(
+            source,
+            { user: { role: "user" }, assistant: { role: "assistant" } },
+            100,
+        );
+        expect(rows.map((row) => row.data.role)).toEqual([
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]);
+        expect(rows.every((row, i) => i === 0 || row.created > (rows[i - 1]?.completed ?? 0))).toBe(
+            true,
+        );
+        expect(rows[0]?.created).toBe(101);
+        expect(rows[1]?.data.parentID).toBe(rows[0]?.id);
+        expect(rows[3]?.data.parentID).toBe(rows[2]?.id);
+        expect(rows[1]?.parts[0]?.data).toMatchObject({
+            type: "tool",
+            state: { status: "completed", output: "o", title: "", metadata: {} },
         });
-        expect(servedTier(["<session-history>\n</session-history>"], TITLE, BODIES)).toEqual({
-            tier: "p5",
-            message: -1,
-        });
+        expect(rows[1]?.parts[0]?.data).not.toHaveProperty("id");
+        expect(rows[3]?.parts[0]?.data).toMatchObject({ type: "text" });
     });
 
     it("reads the title and tier bodies of a reviewed output", () => {

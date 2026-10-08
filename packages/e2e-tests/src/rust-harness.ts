@@ -89,8 +89,6 @@ export interface CaptureIdentity {
 
 /** One main provider request snapshotted under its session and case identity. */
 export interface RetainedCapture extends CaptureIdentity {
-    /** Position among every capture this harness retained, oldest first. */
-    sequence: number;
     request: CapturedRequest;
 }
 
@@ -98,9 +96,9 @@ export interface RetainedCapture extends CaptureIdentity {
 const SESSION_HEADER = "x-opencode-session-id";
 
 /**
- * Retains provider captures under the session and case identity they were driven under, so a
- * later `MockProvider.reset()` cannot clear them and a request for another session is never
- * filed under this identity.
+ * Retains provider captures under the session and case identity they were driven under. A
+ * capture retained before a `MockProvider.reset()` survives it, and a request that arrived
+ * before a `tag()` or for another session is never filed under the new identity.
  */
 export class CaptureLedger {
     private readonly retained: RetainedCapture[] = [];
@@ -111,25 +109,22 @@ export class CaptureLedger {
     constructor(private readonly source: () => CapturedRequest[]) {}
 
     /** Retains pending captures under the current identity, then files later ones under `identity`. */
-    tag(identity: CaptureIdentity | null): void {
+    tag(identity: CaptureIdentity): void {
         this.retain();
+        for (const request of this.source()) this.seen.add(request);
         this.identity = identity;
     }
 
-    /** Snapshots every not-yet-retained capture of the tagged session; returns the new ones. */
-    retain(): RetainedCapture[] {
+    /** Snapshots every not-yet-seen capture; the tagged session's are retained. */
+    retain(): void {
         const identity = this.identity;
-        if (!identity) return [];
-        const added: RetainedCapture[] = [];
+        if (!identity) return;
         for (const request of this.source()) {
             if (this.seen.has(request)) continue;
-            if (request.headers[SESSION_HEADER] !== identity.sessionId) continue;
             this.seen.add(request);
-            const capture = { ...identity, sequence: this.retained.length, request };
-            this.retained.push(capture);
-            added.push(capture);
+            if (request.headers[SESSION_HEADER] !== identity.sessionId) continue;
+            this.retained.push({ ...identity, request });
         }
-        return added;
     }
 
     /** Every retained capture matching `identity`, oldest first, after retaining pending ones. */
@@ -567,13 +562,14 @@ export class RustTestHarness {
     }
 
     /** Retains pending main-request captures, then files later ones under `identity`. */
-    tagCaptures(identity: CaptureIdentity | null): void {
+    tagCaptures(identity: CaptureIdentity): void {
         this.ledger.tag(identity);
     }
 
-    /** Retains the tagged session's pending main requests before a `mock.reset()` can clear them. */
-    retainCaptures(): RetainedCapture[] {
-        return this.ledger.retain();
+    /** Retains the tagged session's pending main requests, then starts a fresh mock run. */
+    resetMock(): void {
+        this.ledger.retain();
+        this.mock.reset();
     }
 
     /** Every retained main-request capture matching `identity`, oldest first. */
