@@ -161,26 +161,69 @@ fn exposure(prompt: &str, span: &str) -> Exposure {
     }
 }
 
-fn record_of<'s>(source: &'s Source, span: &Span) -> &'s NativeMessage {
+fn record_of<'s>(source: &'s Source, span: &Span) -> (usize, &'s NativeMessage) {
     source
         .messages
         .iter()
-        .find(|m| m.info.id == span.message_id)
+        .enumerate()
+        .find(|(_, m)| m.info.id == span.message_id)
         .unwrap()
 }
 
-/// One exposure entry per material native span of `source`, in one shape for every stage.
+fn rendered_record(record: &NativeMessage) -> String {
+    record
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::Text { text, .. } => Some(collapse(text)),
+            Part::Tool { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// The parts inside `<new_messages>` in alias order: the bytes after each `«sN»` marker up to
+/// the part separator or the next line.
+fn presented_parts(prompt: &str) -> Vec<&str> {
+    let start = prompt
+        .find("<new_messages>")
+        .map_or(0, |at| at + "<new_messages>".len());
+    let body = &prompt[start..];
+    let body = &body[..body.find("</new_messages>").unwrap_or(body.len())];
+    let marker = |n: usize| crate::history_summarizer_chunk::alias_marker(&format!("s{n}"));
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    for n in 1.. {
+        let Some(at) = body[cursor..].find(&marker(n)) else {
+            break;
+        };
+        let text_start = cursor + at + marker(n).len();
+        let text_end = body[text_start..]
+            .find(&marker(n + 1))
+            .map_or(body.len(), |at| text_start + at);
+        let line = body[text_start..text_end].split('\n').next().unwrap();
+        parts.push(line.strip_suffix(" / ").unwrap_or(line));
+        cursor = text_end;
+    }
+    parts
+}
+
+/// One exposure entry per material native span of `source`, in one shape for every stage. A span
+/// is exposed only inside the part presenting its annotated message, which is the part at the
+/// message's position carrying the message's rendered text.
 fn exposures(case: &Case, source: &Source, prompt: &str) -> Vec<(Exposure, bool, bool, Value)> {
+    let parts = presented_parts(prompt);
     let mut entries = Vec::new();
     for obligation in case.obligations.iter().filter(|o| o.memory.is_none()) {
         for span in obligation.evidence.iter().filter(|s| s.source == source.id) {
-            let record = record_of(source, span);
+            let (position, record) = record_of(source, span);
             let tool = matches!(record.parts[span.block_index], Part::Tool { .. });
-            let text_presented = record.parts.iter().any(|part| match part {
-                Part::Text { text, .. } => exposure(prompt, text) != Exposure::Absent,
-                Part::Tool { .. } => false,
-            });
-            let seen = exposure(prompt, &span.text);
+            let presented = parts
+                .get(position)
+                .copied()
+                .filter(|part| collapse(part) == rendered_record(record));
+            let text_presented = presented.is_some();
+            let seen = presented.map_or(Exposure::Absent, |part| exposure(part, &span.text));
             entries.push((
                 seen,
                 tool,
@@ -1293,6 +1336,53 @@ async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
     assert!(store.load_history_segments("ses").unwrap().is_empty());
 }
 
+fn new_messages_prompt(lines: &[(u64, &str, &str)]) -> String {
+    let body: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (ordinal, role, text))| {
+            format!("[{ordinal}] {role}: \u{ab}s{}\u{bb}{text}", index + 1)
+        })
+        .collect();
+    format!("<new_messages>\n\n{}\n\n</new_messages>", body.join("\n"))
+}
+
+#[test]
+fn exposure_is_credited_only_within_the_annotated_message() {
+    let (case, source) = case_source("C6", "C6.V1");
+    let [m1, m2, m3, m4] = source.messages.as_slice() else {
+        panic!("C6.V1 holds four messages");
+    };
+    let [r1, r2, r3, r4] = [m1, m2, m3, m4].map(rendered_record);
+    let seen = |prompt: &str| -> Vec<(String, Exposure)> {
+        exposures(case, source, prompt)
+            .into_iter()
+            .map(|(seen, _, _, entry)| (entry["obligation"].as_str().unwrap().to_owned(), seen))
+            .collect()
+    };
+
+    let whole = new_messages_prompt(&[(1, "U", &r1), (2, "A", &r2), (3, "U", &r3), (4, "A", &r4)]);
+    assert_eq!(
+        seen(&whole),
+        [
+            ("C6.O1".to_owned(), Exposure::Exact),
+            ("C6.O2".to_owned(), Exposure::Transformed),
+        ]
+    );
+
+    // msg_cf_c6_03 pastes msg_cf_c6_02's block verbatim. When the prompt omits msg_cf_c6_02, its
+    // annotated spans are Absent while msg_cf_c6_03 still carries the copy.
+    let annotated_dropped = new_messages_prompt(&[(1, "U", &r1), (3, "U", &r3), (4, "A", &r4)]);
+    assert!(r3.contains(&r2), "the control depends on the C6 duplicate");
+    assert_eq!(
+        seen(&annotated_dropped),
+        [
+            ("C6.O1".to_owned(), Exposure::Absent),
+            ("C6.O2".to_owned(), Exposure::Absent),
+        ]
+    );
+}
+
 #[test]
 fn an_observation_is_written_once_privately_and_reads_back() {
     use std::os::unix::fs::PermissionsExt;
@@ -1328,4 +1418,22 @@ fn an_observation_is_written_once_privately_and_reads_back() {
     );
     let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| record.emit_to(&target)));
     assert!(again.is_err(), "a second write of one record is refused");
+}
+
+#[test]
+fn publication_refuses_to_replace_a_completed_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record.json");
+    let temporary = dir.path().join(".record.json.tmp");
+    std::fs::write(&path, b"first").unwrap();
+    std::fs::write(&temporary, b"second").unwrap();
+    assert!(
+        super::compression_fidelity_observation::publish(&temporary, &path).is_err(),
+        "a second writer whose existence check raced the first is refused"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    assert!(
+        !temporary.exists(),
+        "the refused writer's temporary file is removed"
+    );
 }

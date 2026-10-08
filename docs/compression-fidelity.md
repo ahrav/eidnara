@@ -124,12 +124,12 @@ block, and deleted evidence, which refuses rather than substituting.
 
 Both write owner-attributed JSON observations through
 `crates/daemon/src/compression_fidelity_observation.rs`: one record per case,
-scenario or source, and stage, renamed into place from a temporary file with
-mode `0600` inside a directory created with mode `0700`, and only when
-`EIDNARA_FIDELITY_OBSERVATIONS_DIR` names that directory. A default run
-asserts in memory and writes nothing. The wrapped slice's 105% retry is
-recorded as unobserved; the history body and the wrapped slice are measured
-separately under one named estimator.
+scenario or source, and stage, linked into place without replacement from a
+temporary file with mode `0600` inside a directory created with mode `0700`,
+and only when `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names that directory. A
+default run asserts in memory and writes nothing. The wrapped slice's 105%
+retry is recorded as unobserved; the history body and the wrapped slice are
+measured separately under one named estimator.
 
 ## What is unsupported
 
