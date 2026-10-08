@@ -152,6 +152,10 @@ jobs:
               - 'tsconfig.json'
               - 'crates/*/gen/**'
               - 'assets/eidnara.schema.json'
+              # The e2e fidelity reader hashes the daemon corpus and reads the
+              # Rust pin beside it, so a pin move selects the TypeScript job.
+              - 'crates/daemon/testdata/compression-fidelity.json'
+              - 'crates/daemon/src/compression_fidelity_corpus.rs'
 
   gates:
     name: gates

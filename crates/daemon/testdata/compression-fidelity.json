@@ -1,0 +1,2968 @@
+{
+  "schema": "eidnara.compression-fidelity-corpus/v1",
+  "note": "Hand-reviewed oracle for the compression fidelity contract (issue 707). Every case is synthetic. Obligations, materiality, dispositions, and forbidden conclusions are authored before any candidate output exists; candidate outputs and observed results never enter this file. Byte offsets are UTF-8 and end-exclusive.",
+  "harness": "opencode",
+  "project_id": "d3d194076f28924ac9db41bfbc7739d1b67d3e2ac79dc4d15c0c3f507d3ae812",
+  "cases": [
+    {
+      "id": "C1",
+      "title": "Rejected design returns",
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "sources": [
+        {
+          "id": "C1.V1",
+          "session_id": "ses_cf_c1_rejected_design",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c1_01",
+                "sessionID": "ses_cf_c1_rejected_design",
+                "role": "user",
+                "time": {
+                  "created": 1758268860000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c1_01_0",
+                  "type": "text",
+                  "text": "Connection setup shows up in every flame graph for the store client. Before we touch it: do we put a connection pool in front of the client now, or wait for the transport redesign?"
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c1_02",
+                "sessionID": "ses_cf_c1_rejected_design",
+                "role": "assistant",
+                "time": {
+                  "created": 1758268920000,
+                  "completed": 1758268980000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c1_02_0",
+                  "type": "text",
+                  "text": "Two options. Pooling-first: add a bounded pool now, about two days of work, and remove it when the redesign lands. Redesign-first: skip the pool and build connection reuse into the new transport, which owns its sockets."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c1_03",
+                "sessionID": "ses_cf_c1_rejected_design",
+                "role": "user",
+                "time": {
+                  "created": 1758269040000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c1_03_0",
+                  "type": "text",
+                  "text": "Let's not do pooling first. The transport redesign replaces the store client entirely, so a pool would be thrown away within the quarter. We go with the redesign."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c1_04",
+                "sessionID": "ses_cf_c1_rejected_design",
+                "role": "assistant",
+                "time": {
+                  "created": 1758269100000,
+                  "completed": 1758269280000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c1_04_0",
+                  "type": "tool",
+                  "callID": "call_cf_104",
+                  "tool": "read",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "filePath": "docs/transport-redesign.md"
+                    },
+                    "output": "# Transport redesign\n\nStatus: planned\nOwner: store team\n",
+                    "time": {
+                      "start": 1758269160000,
+                      "end": 1758269220000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c1_04_1",
+                  "type": "text",
+                  "text": "Pooling-first is off the table: the planned redesign replaces the store client. I will draft the redesign plan next."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c1_05",
+                "sessionID": "ses_cf_c1_rejected_design",
+                "role": "assistant",
+                "time": {
+                  "created": 1758269340000,
+                  "completed": 1758269400000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c1_05_0",
+                  "type": "text",
+                  "text": "Draft plan written to docs/transport-redesign.md. Implementation has not started, and the first redesign PR is not scheduled yet."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c1_06",
+                "sessionID": "ses_cf_c1_rejected_design",
+                "role": "user",
+                "time": {
+                  "created": 1758269460000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c1_06_0",
+                  "type": "text",
+                  "text": "Thanks. I'm out tomorrow, so pick it up from the plan when you're back on it."
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"6\" title=\"Pooling-first rejected; transport redesign planned, not implemented\" episode_type=\"design\" importance=\"70\">\n<p1>I compared putting a connection pool in front of the store client first against waiting for the transport redesign. The user rejected pooling-first because the planned transport redesign replaces the store client, so a pool would be discarded within the quarter, and chose the redesign. I wrote a draft plan in docs/transport-redesign.md. Implementation has not started and the first redesign PR is not scheduled.</p1>\n<p2>Pooling-first was rejected: the planned transport redesign replaces the store client, so a pool would be thrown away. The redesign was chosen; a draft plan is in docs/transport-redesign.md and implementation has not started.</p2>\n<p3>Pooling-first rejected because the redesign replaces the store client. Redesign planned, not implemented.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-6</messages_processed></meta>\n</output>"
+        }
+      ],
+      "follow_ups": [
+        {
+          "id": "C1.F1",
+          "source": "C1.V1",
+          "prompt": "I have a free afternoon. Should I implement the connection pool first so we get a quick win?"
+        }
+      ],
+      "obligations": [
+        {
+          "id": "C1.O1",
+          "kind": "decision",
+          "materiality": "material",
+          "statement": "The pooling-first option stands rejected by the user.",
+          "evidence": [
+            {
+              "source": "C1.V1",
+              "message_id": "msg_cf_c1_03",
+              "block_index": 0,
+              "revision": "1758269040000",
+              "start": 0,
+              "end": 27,
+              "text": "Let's not do pooling first."
+            },
+            {
+              "source": "C1.V1",
+              "message_id": "msg_cf_c1_04",
+              "block_index": 1,
+              "revision": "1758269280000",
+              "start": 0,
+              "end": 30,
+              "text": "Pooling-first is off the table"
+            }
+          ]
+        },
+        {
+          "id": "C1.O2",
+          "kind": "rationale",
+          "materiality": "material",
+          "statement": "The rejection reason is that the planned redesign replaces the store client, so a pool would be discarded.",
+          "evidence": [
+            {
+              "source": "C1.V1",
+              "message_id": "msg_cf_c1_03",
+              "block_index": 0,
+              "revision": "1758269040000",
+              "start": 28,
+              "end": 137,
+              "text": "The transport redesign replaces the store client entirely, so a pool would be thrown away within the quarter."
+            }
+          ]
+        },
+        {
+          "id": "C1.O3",
+          "kind": "status",
+          "materiality": "material",
+          "statement": "The transport redesign is planned only; no implementation exists yet.",
+          "evidence": [
+            {
+              "source": "C1.V1",
+              "message_id": "msg_cf_c1_05",
+              "block_index": 0,
+              "revision": "1758269400000",
+              "start": 50,
+              "end": 129,
+              "text": "Implementation has not started, and the first redesign PR is not scheduled yet."
+            }
+          ]
+        }
+      ],
+      "forbidden_conclusions": [
+        {
+          "id": "C1.X1",
+          "class": "false-authoritative",
+          "statement": "Recommends implementing the pool first or describes pooling-first as accepted."
+        },
+        {
+          "id": "C1.X2",
+          "class": "false-authoritative",
+          "statement": "Describes the transport redesign as implemented or underway."
+        }
+      ],
+      "allowed_losses": [
+        {
+          "id": "C1.L1",
+          "materiality": "nonmaterial",
+          "statement": "The two-day estimate for the pool.",
+          "evidence": [
+            {
+              "source": "C1.V1",
+              "message_id": "msg_cf_c1_02",
+              "block_index": 0,
+              "revision": "1758268980000",
+              "start": 52,
+              "end": 74,
+              "text": "about two days of work"
+            }
+          ]
+        },
+        {
+          "id": "C1.L2",
+          "materiality": "nonmaterial",
+          "statement": "The user's absence the next day.",
+          "evidence": [
+            {
+              "source": "C1.V1",
+              "message_id": "msg_cf_c1_06",
+              "block_index": 0,
+              "revision": "1758269460000",
+              "start": 8,
+              "end": 24,
+              "text": "I'm out tomorrow"
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "C1.S1",
+          "source": "C1.V1",
+          "follow_up": "C1.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p1",
+            "stage": "m1"
+          },
+          "expectations": [
+            {
+              "obligation": "C1.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C1.X1",
+            "C1.X2"
+          ],
+          "description": "A prior baseline and a later publication serve this segment at P1 in the m1 window."
+        },
+        {
+          "id": "C1.S2",
+          "source": "C1.V1",
+          "follow_up": "C1.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p2",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C1.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C1.X1",
+            "C1.X2"
+          ],
+          "description": "Natural age and importance selection serves this segment at P2 after m0 decay."
+        },
+        {
+          "id": "C1.S3",
+          "source": "C1.V1",
+          "follow_up": "C1.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C1.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C1.X1",
+            "C1.X2"
+          ],
+          "description": "Natural age and importance selection serves this segment at P3 after m0 decay."
+        },
+        {
+          "id": "C1.S4",
+          "source": "C1.V1",
+          "follow_up": "C1.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C1.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C1.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C1.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C1.X1",
+            "C1.X2"
+          ],
+          "description": "Natural selection serves this segment at P4; its empty P4 body renders the title-only heading."
+        },
+        {
+          "id": "C1.S5",
+          "source": "C1.V1",
+          "follow_up": "C1.F1",
+          "serving": {
+            "path": "pressure",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C1.O1",
+              "accepted": [
+                "visible",
+                "discoverable"
+              ]
+            },
+            {
+              "obligation": "C1.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C1.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C1.X1",
+            "C1.X2"
+          ],
+          "description": "A positive history body budget demotes rows oldest first until the body fits; this segment leaves its natural tier."
+        }
+      ]
+    },
+    {
+      "id": "C2",
+      "title": "Unconfirmed deployment",
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "sources": [
+        {
+          "id": "C2.V1",
+          "session_id": "ses_cf_c2_no_receipt",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c2_01",
+                "sessionID": "ses_cf_c2_no_receipt",
+                "role": "user",
+                "time": {
+                  "created": 1758355260000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_01_0",
+                  "type": "text",
+                  "text": "Ship ingest v2.4.1 to production today if the staging soak stays green."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_02",
+                "sessionID": "ses_cf_c2_no_receipt",
+                "role": "assistant",
+                "time": {
+                  "created": 1758355320000,
+                  "completed": 1758355380000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_02_0",
+                  "type": "text",
+                  "text": "Staging soak is green. Proposal: deploy to production with `deploy prod ingest v2.4.1`."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_03",
+                "sessionID": "ses_cf_c2_no_receipt",
+                "role": "user",
+                "time": {
+                  "created": 1758355440000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_03_0",
+                  "type": "text",
+                  "text": "Approved, go ahead."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_04",
+                "sessionID": "ses_cf_c2_no_receipt",
+                "role": "assistant",
+                "time": {
+                  "created": 1758355500000,
+                  "completed": 1758355680000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_04_0",
+                  "type": "tool",
+                  "callID": "call_cf_204",
+                  "tool": "bash",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "command": "deploy prod ingest v2.4.1"
+                    },
+                    "output": "Deployment d-7781 started for ingest v2.4.1 (production).\nRollout in progress: 0/6 hosts updated.\n",
+                    "time": {
+                      "start": 1758355560000,
+                      "end": 1758355620000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c2_04_1",
+                  "type": "text",
+                  "text": "Started deployment d-7781. I have not seen a completion receipt yet."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_05",
+                "sessionID": "ses_cf_c2_no_receipt",
+                "role": "user",
+                "time": {
+                  "created": 1758355740000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_05_0",
+                  "type": "text",
+                  "text": "OK. I'm stepping away for lunch."
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"5\" title=\"ingest v2.4.1 production deploy d-7781 started; no success receipt\" episode_type=\"release\" importance=\"75\">\n<p1>The user asked to ship ingest v2.4.1 to production if the staging soak stayed green and approved my proposal. I ran deploy prod ingest v2.4.1. Deployment d-7781 started with 0 of 6 hosts updated. I saw no completion or success receipt, so whether production runs v2.4.1 is unconfirmed.</p1>\n<p2>Deployment d-7781 of ingest v2.4.1 to production started at 0 of 6 hosts. No success receipt exists; whether production runs v2.4.1 is unconfirmed.</p2>\n<p3>d-7781 ingest v2.4.1 production deploy started; success unconfirmed.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-5</messages_processed></meta>\n</output>"
+        },
+        {
+          "id": "C2.V2",
+          "session_id": "ses_cf_c2_with_receipt",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c2_01",
+                "sessionID": "ses_cf_c2_with_receipt",
+                "role": "user",
+                "time": {
+                  "created": 1758355260000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_01_0",
+                  "type": "text",
+                  "text": "Ship ingest v2.4.1 to production today if the staging soak stays green."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_02",
+                "sessionID": "ses_cf_c2_with_receipt",
+                "role": "assistant",
+                "time": {
+                  "created": 1758355320000,
+                  "completed": 1758355380000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_02_0",
+                  "type": "text",
+                  "text": "Staging soak is green. Proposal: deploy to production with `deploy prod ingest v2.4.1`."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_03",
+                "sessionID": "ses_cf_c2_with_receipt",
+                "role": "user",
+                "time": {
+                  "created": 1758355440000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_03_0",
+                  "type": "text",
+                  "text": "Approved, go ahead."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_04",
+                "sessionID": "ses_cf_c2_with_receipt",
+                "role": "assistant",
+                "time": {
+                  "created": 1758355500000,
+                  "completed": 1758355680000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_04_0",
+                  "type": "tool",
+                  "callID": "call_cf_204",
+                  "tool": "bash",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "command": "deploy prod ingest v2.4.1"
+                    },
+                    "output": "Deployment d-7781 started for ingest v2.4.1 (production).\nRollout in progress: 0/6 hosts updated.\n",
+                    "time": {
+                      "start": 1758355560000,
+                      "end": 1758355620000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c2_04_1",
+                  "type": "text",
+                  "text": "Started deployment d-7781. I have not seen a completion receipt yet."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_05",
+                "sessionID": "ses_cf_c2_with_receipt",
+                "role": "user",
+                "time": {
+                  "created": 1758355740000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_05_0",
+                  "type": "text",
+                  "text": "OK. I'm stepping away for lunch."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c2_06",
+                "sessionID": "ses_cf_c2_with_receipt",
+                "role": "assistant",
+                "time": {
+                  "created": 1758355800000,
+                  "completed": 1758355980000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c2_06_0",
+                  "type": "tool",
+                  "callID": "call_cf_206",
+                  "tool": "bash",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "command": "deploy status d-7781"
+                    },
+                    "output": "Deployment d-7781 succeeded: 6/6 hosts updated, health checks passing.\n",
+                    "time": {
+                      "start": 1758355860000,
+                      "end": 1758355920000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c2_06_1",
+                  "type": "text",
+                  "text": "Deployment d-7781 completed: production now runs ingest v2.4.1."
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"6\" title=\"ingest v2.4.1 production deploy d-7781 succeeded\" episode_type=\"release\" importance=\"75\">\n<p1>The user asked to ship ingest v2.4.1 to production if the staging soak stayed green and approved my proposal. I ran deploy prod ingest v2.4.1 and deployment d-7781 started. Later deploy status d-7781 reported success with 6 of 6 hosts updated and health checks passing, so production runs ingest v2.4.1.</p1>\n<p2>Deployment d-7781 of ingest v2.4.1 succeeded on 6 of 6 production hosts with health checks passing; production runs v2.4.1.</p2>\n<p3>d-7781 succeeded; production runs ingest v2.4.1.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-6</messages_processed></meta>\n</output>"
+        }
+      ],
+      "follow_ups": [
+        {
+          "id": "C2.F1",
+          "source": "C2.V1",
+          "prompt": "Quick check before I tell the team: is production running ingest v2.4.1 now?"
+        },
+        {
+          "id": "C2.F2",
+          "source": "C2.V2",
+          "prompt": "Quick check before I tell the team: is production running ingest v2.4.1 now?"
+        }
+      ],
+      "obligations": [
+        {
+          "id": "C2.O1",
+          "kind": "status",
+          "materiality": "material",
+          "statement": "Deployment d-7781 was started, and its outcome is unknown because no success receipt was observed.",
+          "evidence": [
+            {
+              "source": "C2.V1",
+              "message_id": "msg_cf_c2_04",
+              "block_index": 0,
+              "revision": "1758355620000",
+              "start": 0,
+              "end": 57,
+              "text": "Deployment d-7781 started for ingest v2.4.1 (production)."
+            },
+            {
+              "source": "C2.V1",
+              "message_id": "msg_cf_c2_04",
+              "block_index": 1,
+              "revision": "1758355680000",
+              "start": 27,
+              "end": 68,
+              "text": "I have not seen a completion receipt yet."
+            }
+          ]
+        },
+        {
+          "id": "C2.O2",
+          "kind": "decision",
+          "materiality": "material",
+          "statement": "The production deployment was proposed and then approved by the user.",
+          "evidence": [
+            {
+              "source": "C2.V1",
+              "message_id": "msg_cf_c2_02",
+              "block_index": 0,
+              "revision": "1758355380000",
+              "start": 23,
+              "end": 53,
+              "text": "Proposal: deploy to production"
+            },
+            {
+              "source": "C2.V1",
+              "message_id": "msg_cf_c2_03",
+              "block_index": 0,
+              "revision": "1758355440000",
+              "start": 0,
+              "end": 19,
+              "text": "Approved, go ahead."
+            }
+          ]
+        },
+        {
+          "id": "C2.O3",
+          "kind": "status",
+          "materiality": "material",
+          "statement": "A success receipt confirms that production runs v2.4.1 on all six hosts.",
+          "evidence": [
+            {
+              "source": "C2.V2",
+              "message_id": "msg_cf_c2_06",
+              "block_index": 0,
+              "revision": "1758355920000",
+              "start": 0,
+              "end": 70,
+              "text": "Deployment d-7781 succeeded: 6/6 hosts updated, health checks passing."
+            },
+            {
+              "source": "C2.V2",
+              "message_id": "msg_cf_c2_06",
+              "block_index": 1,
+              "revision": "1758355980000",
+              "start": 29,
+              "end": 63,
+              "text": "production now runs ingest v2.4.1."
+            }
+          ]
+        }
+      ],
+      "forbidden_conclusions": [
+        {
+          "id": "C2.X1",
+          "class": "false-authoritative",
+          "statement": "Without the receipt, asserts that production runs v2.4.1 or that d-7781 succeeded."
+        },
+        {
+          "id": "C2.X2",
+          "class": "recall",
+          "statement": "With the receipt present, declines to confirm or calls the outcome unknown."
+        }
+      ],
+      "allowed_losses": [
+        {
+          "id": "C2.L1",
+          "materiality": "nonmaterial",
+          "statement": "The user's lunch break.",
+          "evidence": [
+            {
+              "source": "C2.V1",
+              "message_id": "msg_cf_c2_05",
+              "block_index": 0,
+              "revision": "1758355740000",
+              "start": 4,
+              "end": 32,
+              "text": "I'm stepping away for lunch."
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "C2.S1",
+          "source": "C2.V1",
+          "follow_up": "C2.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p1",
+            "stage": "m1"
+          },
+          "expectations": [
+            {
+              "obligation": "C2.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C2.O2",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C2.X1"
+          ],
+          "description": "A prior baseline and a later publication serve this segment at P1 in the m1 window."
+        },
+        {
+          "id": "C2.S2",
+          "source": "C2.V1",
+          "follow_up": "C2.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p2",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C2.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C2.O2",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C2.X1"
+          ],
+          "description": "Natural age and importance selection serves this segment at P2 after m0 decay."
+        },
+        {
+          "id": "C2.S3",
+          "source": "C2.V1",
+          "follow_up": "C2.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C2.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C2.O2",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C2.X1"
+          ],
+          "description": "Natural age and importance selection serves this segment at P3 after m0 decay."
+        },
+        {
+          "id": "C2.S4",
+          "source": "C2.V1",
+          "follow_up": "C2.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C2.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C2.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C2.X1"
+          ],
+          "description": "Natural selection serves this segment at P4; its empty P4 body renders the title-only heading."
+        },
+        {
+          "id": "C2.S5",
+          "source": "C2.V1",
+          "follow_up": "C2.F1",
+          "serving": {
+            "path": "omission",
+            "tier": "p5",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C2.O1",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C2.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C2.X1"
+          ],
+          "description": "The segment is served at P5, so no segment text reaches the invocation and the omission rule applies."
+        },
+        {
+          "id": "C2.S6",
+          "source": "C2.V2",
+          "follow_up": "C2.F2",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C2.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C2.X2"
+          ],
+          "description": "The otherwise identical source with a success receipt is served at P3, so indiscriminate abstention fails."
+        }
+      ]
+    },
+    {
+      "id": "C3",
+      "title": "Constraint mentioned once",
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "sources": [
+        {
+          "id": "C3.V1",
+          "session_id": "ses_cf_c3_constraint_once",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c3_01",
+                "sessionID": "ses_cf_c3_constraint_once",
+                "role": "user",
+                "time": {
+                  "created": 1758441660000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c3_01_0",
+                  "type": "text",
+                  "text": "Next task: add a read-through cache for the manifest loader. For this task only, do not modify anything under `crates/storage/`, because its owner is mid-migration there until Friday. Keep the cache at or below 64 MiB resident."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c3_02",
+                "sessionID": "ses_cf_c3_constraint_once",
+                "role": "assistant",
+                "time": {
+                  "created": 1758441720000,
+                  "completed": 1758441900000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c3_02_0",
+                  "type": "tool",
+                  "callID": "call_cf_302",
+                  "tool": "read",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "filePath": "crates/manifest/src/loader.rs"
+                    },
+                    "output": "pub fn load(digest: &Digest) -> Result<Manifest> {\n    storage::fetch_manifest(digest)\n}\n",
+                    "time": {
+                      "start": 1758441780000,
+                      "end": 1758441840000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c3_02_1",
+                  "type": "text",
+                  "text": "The loader calls `storage::fetch_manifest` directly. I will wrap that call site inside the manifest crate instead of changing storage."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c3_03",
+                "sessionID": "ses_cf_c3_constraint_once",
+                "role": "user",
+                "time": {
+                  "created": 1758441960000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c3_03_0",
+                  "type": "text",
+                  "text": "Sounds good. Use an LRU keyed by manifest digest."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c3_04",
+                "sessionID": "ses_cf_c3_constraint_once",
+                "role": "assistant",
+                "time": {
+                  "created": 1758442020000,
+                  "completed": 1758442200000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c3_04_0",
+                  "type": "tool",
+                  "callID": "call_cf_304",
+                  "tool": "edit",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "filePath": "crates/manifest/src/cache.rs"
+                    },
+                    "output": "Edited crates/manifest/src/cache.rs (+84 -0)\n",
+                    "time": {
+                      "start": 1758442080000,
+                      "end": 1758442140000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c3_04_1",
+                  "type": "text",
+                  "text": "Implemented `ManifestCache` as an LRU keyed by digest. Eviction and tests are next."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c3_05",
+                "sessionID": "ses_cf_c3_constraint_once",
+                "role": "user",
+                "time": {
+                  "created": 1758442260000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c3_05_0",
+                  "type": "text",
+                  "text": "Run the tests when they're ready."
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"5\" title=\"Manifest cache LRU done; this task forbids crates/storage edits and caps the cache at 64 MiB\" episode_type=\"feature\" importance=\"90\">\n<p1>The user assigned a read-through cache for the manifest loader with two task-scoped constraints: for this task only, do not modify anything under crates/storage/ while its owner finishes a migration by Friday, and keep the cache at or below 64 MiB resident. I wrap the storage::fetch_manifest call site inside the manifest crate instead of changing storage. I implemented ManifestCache in crates/manifest/src/cache.rs as an LRU keyed by manifest digest; eviction within the 64 MiB limit and tests remain.</p1>\n<p2>Building a read-through manifest cache. For this task, no edits under crates/storage/ until its migration ends Friday, and resident size at most 64 MiB. The LRU keyed by digest is in crates/manifest/src/cache.rs; eviction and tests remain.</p2>\n<p3>Manifest cache LRU implemented; eviction and tests remain. This task: no crates/storage/ edits, at most 64 MiB resident.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-5</messages_processed></meta>\n</output>"
+        }
+      ],
+      "follow_ups": [
+        {
+          "id": "C3.F1",
+          "source": "C3.V1",
+          "prompt": "What's the next step on the manifest cache? Go ahead and do it."
+        }
+      ],
+      "memory_examples": [
+        {
+          "id": "C3.M1",
+          "scope": "project",
+          "category": "ARCHITECTURE",
+          "text": "Every cache in this workspace takes its resident limit from a max_resident_bytes field in its config struct.",
+          "eligibility": "Promoted project memory that predates this session and is scoped to the corpus project; it holds no session fact."
+        }
+      ],
+      "obligations": [
+        {
+          "id": "C3.O1",
+          "kind": "constraint",
+          "materiality": "material",
+          "statement": "Editing files below crates/storage/ is prohibited, and the prohibition applies to this manifest-cache task only.",
+          "evidence": [
+            {
+              "source": "C3.V1",
+              "message_id": "msg_cf_c3_01",
+              "block_index": 0,
+              "revision": "1758441660000",
+              "start": 61,
+              "end": 183,
+              "text": "For this task only, do not modify anything under `crates/storage/`, because its owner is mid-migration there until Friday."
+            }
+          ]
+        },
+        {
+          "id": "C3.O2",
+          "kind": "constraint",
+          "materiality": "material",
+          "statement": "The cache resident size limit is 64 MiB, inclusive.",
+          "evidence": [
+            {
+              "source": "C3.V1",
+              "message_id": "msg_cf_c3_01",
+              "block_index": 0,
+              "revision": "1758441660000",
+              "start": 184,
+              "end": 227,
+              "text": "Keep the cache at or below 64 MiB resident."
+            }
+          ]
+        },
+        {
+          "id": "C3.O3",
+          "kind": "status",
+          "materiality": "material",
+          "statement": "The LRU is implemented; eviction and tests are the remaining work.",
+          "evidence": [
+            {
+              "source": "C3.V1",
+              "message_id": "msg_cf_c3_04",
+              "block_index": 1,
+              "revision": "1758442200000",
+              "start": 0,
+              "end": 83,
+              "text": "Implemented `ManifestCache` as an LRU keyed by digest. Eviction and tests are next."
+            }
+          ]
+        },
+        {
+          "id": "C3.O4",
+          "kind": "constraint",
+          "materiality": "material",
+          "statement": "The resident limit is configured through the max_resident_bytes config field.",
+          "memory": "C3.M1"
+        }
+      ],
+      "forbidden_conclusions": [
+        {
+          "id": "C3.X1",
+          "class": "false-authoritative",
+          "statement": "Proposes or performs an edit under crates/storage/ during this task."
+        },
+        {
+          "id": "C3.X2",
+          "class": "recall",
+          "statement": "States a different limit value or unit than 64 MiB, or omits the limit from eviction work."
+        },
+        {
+          "id": "C3.X3",
+          "class": "false-authoritative",
+          "statement": "Presents the storage prohibition as a permanent project-wide rule."
+        }
+      ],
+      "allowed_losses": [
+        {
+          "id": "C3.L1",
+          "materiality": "nonmaterial",
+          "statement": "The loader source excerpt returned by the read tool.",
+          "evidence": [
+            {
+              "source": "C3.V1",
+              "message_id": "msg_cf_c3_02",
+              "block_index": 0,
+              "revision": "1758441840000",
+              "start": 55,
+              "end": 86,
+              "text": "storage::fetch_manifest(digest)"
+            }
+          ]
+        },
+        {
+          "id": "C3.L2",
+          "materiality": "nonmaterial",
+          "statement": "The line counts of the cache edit.",
+          "evidence": [
+            {
+              "source": "C3.V1",
+              "message_id": "msg_cf_c3_04",
+              "block_index": 0,
+              "revision": "1758442140000",
+              "start": 36,
+              "end": 44,
+              "text": "(+84 -0)"
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "C3.S1",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p1",
+            "stage": "m1"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "A prior baseline and a later publication serve this segment at P1 in the m1 window."
+        },
+        {
+          "id": "C3.S2",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p2",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "Natural age and importance selection serves this segment at P2 after m0 decay."
+        },
+        {
+          "id": "C3.S3",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "Natural age and importance selection serves this segment at P3 after m0 decay."
+        },
+        {
+          "id": "C3.S4",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "Natural selection serves this segment at P4; its empty P4 body renders the title-only heading."
+        },
+        {
+          "id": "C3.S5",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "pressure",
+            "tier": "p5",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible",
+                "discoverable"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible",
+                "discoverable"
+              ]
+            },
+            {
+              "obligation": "C3.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "A positive history body budget demotes rows oldest first until the body fits; this segment leaves its natural tier."
+        },
+        {
+          "id": "C3.S6",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "memory_admitted",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O4",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "The eligible project memory example is admitted and included in the invocation beside the P3 segment."
+        },
+        {
+          "id": "C3.S7",
+          "source": "C3.V1",
+          "follow_up": "C3.F1",
+          "serving": {
+            "path": "memory_excluded",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C3.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C3.O4",
+              "accepted": [
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C3.X1",
+            "C3.X2",
+            "C3.X3"
+          ],
+          "description": "The same memory example is withheld from the invocation, so it earns no visible credit."
+        }
+      ]
+    },
+    {
+      "id": "C4",
+      "title": "Repeated misleading summary",
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "sources": [
+        {
+          "id": "C4.V1",
+          "session_id": "ses_cf_c4_repeated_recap",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c4_01",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "user",
+                "time": {
+                  "created": 1758528060000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_01_0",
+                  "type": "text",
+                  "text": "We need a queue between the indexer and the embedder. Option A is a durable SQLite-backed queue; option B is an in-process channel."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c4_02",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "assistant",
+                "time": {
+                  "created": 1758528120000,
+                  "completed": 1758528180000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_02_0",
+                  "type": "text",
+                  "text": "Tradeoff: B is simpler, but it loses queued work when the process crashes. A survives restarts at the cost of a table and a writer."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c4_03",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "user",
+                "time": {
+                  "created": 1758528240000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_03_0",
+                  "type": "text",
+                  "text": "Decision after review with Priya: we reject B, the in-process channel, because losing queued work on a crash is unacceptable. We go with A, the SQLite-backed queue."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c4_04",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "assistant",
+                "time": {
+                  "created": 1758528300000,
+                  "completed": 1758528360000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_04_0",
+                  "type": "text",
+                  "text": "Recap: we accepted option B, the in-process channel."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c4_05",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "assistant",
+                "time": {
+                  "created": 1758528420000,
+                  "completed": 1758528480000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_05_0",
+                  "type": "text",
+                  "text": "Status recap: option B (in-process channel) accepted; starting the channel wiring."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c4_06",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "user",
+                "time": {
+                  "created": 1758528540000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_06_0",
+                  "type": "text",
+                  "text": "Okay, keep going."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c4_07",
+                "sessionID": "ses_cf_c4_repeated_recap",
+                "role": "assistant",
+                "time": {
+                  "created": 1758528600000,
+                  "completed": 1758528660000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c4_07_0",
+                  "type": "text",
+                  "text": "Recap for the log: B was accepted for the indexer queue."
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"7\" title=\"Indexer queue: SQLite-backed queue A chosen; in-process channel B rejected\" episode_type=\"design\" importance=\"80\">\n<p1>The user weighed A, a durable SQLite-backed queue, against B, an in-process channel, between the indexer and the embedder. After review with Priya the user rejected B because losing queued work on a crash is unacceptable, and chose A. My three later recaps said B was accepted; they contradict the user's decision and are not evidence for B.</p1>\n<p2>Queue decision: A, the SQLite-backed queue that survives restarts, was chosen; B, the in-process channel, was rejected because a crash loses queued work. Later recaps that called B accepted were wrong.</p2>\n<p3>A, the SQLite queue, chosen; B rejected because a crash loses queued work. Recaps calling B accepted were wrong.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-7</messages_processed></meta>\n</output>"
+        }
+      ],
+      "follow_ups": [
+        {
+          "id": "C4.F1",
+          "source": "C4.V1",
+          "prompt": "Remind me, what did we decide for the indexer-to-embedder queue?"
+        },
+        {
+          "id": "C4.F2",
+          "source": "C4.V1",
+          "prompt": "The recaps said the in-process channel was accepted for the indexer queue, so I can start wiring the channel, right?"
+        }
+      ],
+      "obligations": [
+        {
+          "id": "C4.O1",
+          "kind": "decision",
+          "materiality": "material",
+          "statement": "The user's primary decision rejects the in-process channel and selects the SQLite-backed queue.",
+          "evidence": [
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_03",
+              "block_index": 0,
+              "revision": "1758528240000",
+              "start": 34,
+              "end": 69,
+              "text": "we reject B, the in-process channel"
+            },
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_03",
+              "block_index": 0,
+              "revision": "1758528240000",
+              "start": 126,
+              "end": 164,
+              "text": "We go with A, the SQLite-backed queue."
+            }
+          ]
+        },
+        {
+          "id": "C4.O2",
+          "kind": "rationale",
+          "materiality": "material",
+          "statement": "The channel was rejected because a crash would lose queued work.",
+          "evidence": [
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_03",
+              "block_index": 0,
+              "revision": "1758528240000",
+              "start": 71,
+              "end": 124,
+              "text": "because losing queued work on a crash is unacceptable"
+            }
+          ]
+        },
+        {
+          "id": "C4.O3",
+          "kind": "evidence",
+          "materiality": "material",
+          "statement": "The later recaps repeat one unsupported claim and contradict the primary decision; repetition adds no independent evidence.",
+          "evidence": [
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_04",
+              "block_index": 0,
+              "revision": "1758528360000",
+              "start": 0,
+              "end": 52,
+              "text": "Recap: we accepted option B, the in-process channel."
+            },
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_05",
+              "block_index": 0,
+              "revision": "1758528480000",
+              "start": 14,
+              "end": 52,
+              "text": "option B (in-process channel) accepted"
+            },
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_07",
+              "block_index": 0,
+              "revision": "1758528660000",
+              "start": 19,
+              "end": 56,
+              "text": "B was accepted for the indexer queue."
+            }
+          ]
+        }
+      ],
+      "forbidden_conclusions": [
+        {
+          "id": "C4.X1",
+          "class": "false-authoritative",
+          "statement": "Reports the in-process channel as the decision because more recaps say so."
+        },
+        {
+          "id": "C4.X2",
+          "class": "false-authoritative",
+          "statement": "Treats the recaps as confirmation and proceeds with channel wiring."
+        }
+      ],
+      "allowed_losses": [
+        {
+          "id": "C4.L1",
+          "materiality": "nonmaterial",
+          "statement": "The reviewer's name.",
+          "evidence": [
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_03",
+              "block_index": 0,
+              "revision": "1758528240000",
+              "start": 22,
+              "end": 32,
+              "text": "with Priya"
+            }
+          ]
+        },
+        {
+          "id": "C4.L2",
+          "materiality": "nonmaterial",
+          "statement": "The storage cost of option A.",
+          "evidence": [
+            {
+              "source": "C4.V1",
+              "message_id": "msg_cf_c4_02",
+              "block_index": 0,
+              "revision": "1758528180000",
+              "start": 95,
+              "end": 130,
+              "text": "at the cost of a table and a writer"
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "C4.S1",
+          "source": "C4.V1",
+          "follow_up": "C4.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p1",
+            "stage": "m1"
+          },
+          "expectations": [
+            {
+              "obligation": "C4.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C4.X1",
+            "C4.X2"
+          ],
+          "description": "A prior baseline and a later publication serve this segment at P1 in the m1 window."
+        },
+        {
+          "id": "C4.S2",
+          "source": "C4.V1",
+          "follow_up": "C4.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p2",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C4.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C4.X1",
+            "C4.X2"
+          ],
+          "description": "Natural age and importance selection serves this segment at P2 after m0 decay."
+        },
+        {
+          "id": "C4.S3",
+          "source": "C4.V1",
+          "follow_up": "C4.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C4.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O3",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C4.X1",
+            "C4.X2"
+          ],
+          "description": "Natural age and importance selection serves this segment at P3 after m0 decay."
+        },
+        {
+          "id": "C4.S4",
+          "source": "C4.V1",
+          "follow_up": "C4.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C4.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C4.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C4.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C4.X1",
+            "C4.X2"
+          ],
+          "description": "Natural selection serves this segment at P4; its empty P4 body renders the title-only heading."
+        },
+        {
+          "id": "C4.S5",
+          "source": "C4.V1",
+          "follow_up": "C4.F1",
+          "serving": {
+            "path": "omission",
+            "tier": "p5",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C4.O1",
+              "accepted": [
+                "visible",
+                "discoverable"
+              ]
+            },
+            {
+              "obligation": "C4.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C4.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C4.X1",
+            "C4.X2"
+          ],
+          "description": "The segment is served at P5, so no segment text reaches the invocation and the omission rule applies."
+        },
+        {
+          "id": "C4.S6",
+          "source": "C4.V1",
+          "follow_up": "C4.F2",
+          "serving": {
+            "path": "hint_truncated",
+            "tier": "p5",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C4.O1",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C4.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C4.X1",
+            "C4.X2"
+          ],
+          "description": "The segment is served at P5 and the auto-hint selects it; the fragment cap cuts the stored body so the delivered fragment can lose its qualifier."
+        }
+      ]
+    },
+    {
+      "id": "C5",
+      "title": "Final state differs from plan",
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "sources": [
+        {
+          "id": "C5.V1",
+          "session_id": "ses_cf_c5_superseded_plan",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c5_01",
+                "sessionID": "ses_cf_c5_superseded_plan",
+                "role": "user",
+                "time": {
+                  "created": 1758614460000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c5_01_0",
+                  "type": "text",
+                  "text": "Plan: migrate all 12 services to the new Postgres cluster in one release this week."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c5_02",
+                "sessionID": "ses_cf_c5_superseded_plan",
+                "role": "assistant",
+                "time": {
+                  "created": 1758614520000,
+                  "completed": 1758614580000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c5_02_0",
+                  "type": "text",
+                  "text": "Accepted: a single-release migration of all 12 services. I will start with the cutover script."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c5_03",
+                "sessionID": "ses_cf_c5_superseded_plan",
+                "role": "user",
+                "time": {
+                  "created": 1758614640000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c5_03_0",
+                  "type": "text",
+                  "text": "Change of plan after the incident review: we migrate in waves instead, payments first. The single release is superseded, not rejected; we may use it for the next cluster."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c5_04",
+                "sessionID": "ses_cf_c5_superseded_plan",
+                "role": "assistant",
+                "time": {
+                  "created": 1758614700000,
+                  "completed": 1758614880000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c5_04_0",
+                  "type": "tool",
+                  "callID": "call_cf_504",
+                  "tool": "bash",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "command": "migrate --wave 1"
+                    },
+                    "output": "wave 1: 7/12 services migrated\nbilling-worker: error: connection refused (10.4.2.17:5433)\n",
+                    "time": {
+                      "start": 1758614760000,
+                      "end": 1758614820000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c5_04_1",
+                  "type": "text",
+                  "text": "Wave 1 migrated 7 of 12 services. billing-worker failed with connection refused on 10.4.2.17:5433. I think the cause is a missing firewall rule for port 5433, but I have not confirmed it."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c5_05",
+                "sessionID": "ses_cf_c5_superseded_plan",
+                "role": "user",
+                "time": {
+                  "created": 1758614940000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c5_05_0",
+                  "type": "text",
+                  "text": "Cancel the remaining waves for now; we'll pick this up next sprint."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c5_06",
+                "sessionID": "ses_cf_c5_superseded_plan",
+                "role": "assistant",
+                "time": {
+                  "created": 1758615000000,
+                  "completed": 1758615060000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c5_06_0",
+                  "type": "text",
+                  "text": "Cancelled waves 2 and 3. Final state: 7 of 12 services migrated, 5 remain on the old cluster."
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"6\" title=\"Postgres migration partial: waves superseded the single release; 7 of 12 moved, rest cancelled\" episode_type=\"infra\" importance=\"70\">\n<p1>The user planned, and I accepted, a single-release migration of all 12 services to the new Postgres cluster. After the incident review the user superseded that plan with a wave migration, payments first, and said the single release is not rejected and may serve the next cluster. Wave 1 migrated 7 of 12 services. billing-worker failed with connection refused on 10.4.2.17:5433, which I observed. I inferred a missing firewall rule for port 5433 as the cause; that cause is unconfirmed. The user cancelled the remaining waves, so 7 of 12 services are migrated and 5 remain on the old cluster.</p1>\n<p2>The single-release plan was superseded, not rejected, by a wave migration. Wave 1 moved 7 of 12 services; billing-worker hit connection refused on 10.4.2.17:5433; a missing firewall rule is my unconfirmed inference. Remaining waves were cancelled, so 5 services stay on the old cluster.</p2>\n<p3>Migration partial: 7 of 12 moved, remaining waves cancelled. Waves superseded the single release. billing-worker connection refused was observed; the firewall cause is inferred.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-6</messages_processed></meta>\n</output>"
+        }
+      ],
+      "follow_ups": [
+        {
+          "id": "C5.F1",
+          "source": "C5.V1",
+          "prompt": "Is the Postgres migration finished, and why did billing-worker fail?"
+        }
+      ],
+      "obligations": [
+        {
+          "id": "C5.O1",
+          "kind": "decision",
+          "materiality": "material",
+          "statement": "The wave plan superseded the accepted single-release plan; the earlier plan was not rejected.",
+          "evidence": [
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_02",
+              "block_index": 0,
+              "revision": "1758614580000",
+              "start": 0,
+              "end": 56,
+              "text": "Accepted: a single-release migration of all 12 services."
+            },
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_03",
+              "block_index": 0,
+              "revision": "1758614640000",
+              "start": 87,
+              "end": 170,
+              "text": "The single release is superseded, not rejected; we may use it for the next cluster."
+            }
+          ]
+        },
+        {
+          "id": "C5.O2",
+          "kind": "status",
+          "materiality": "material",
+          "statement": "The migration ended partial: seven services moved and the remaining waves were cancelled.",
+          "evidence": [
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_05",
+              "block_index": 0,
+              "revision": "1758614940000",
+              "start": 0,
+              "end": 34,
+              "text": "Cancel the remaining waves for now"
+            },
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_06",
+              "block_index": 0,
+              "revision": "1758615060000",
+              "start": 25,
+              "end": 93,
+              "text": "Final state: 7 of 12 services migrated, 5 remain on the old cluster."
+            }
+          ]
+        },
+        {
+          "id": "C5.O3",
+          "kind": "evidence",
+          "materiality": "material",
+          "statement": "The billing-worker failure is an observed connection refusal to 10.4.2.17:5433.",
+          "evidence": [
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_04",
+              "block_index": 0,
+              "revision": "1758614820000",
+              "start": 31,
+              "end": 89,
+              "text": "billing-worker: error: connection refused (10.4.2.17:5433)"
+            }
+          ]
+        },
+        {
+          "id": "C5.O4",
+          "kind": "uncertainty",
+          "materiality": "material",
+          "statement": "The missing firewall rule is an unconfirmed inference about the cause.",
+          "evidence": [
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_04",
+              "block_index": 1,
+              "revision": "1758614880000",
+              "start": 99,
+              "end": 187,
+              "text": "I think the cause is a missing firewall rule for port 5433, but I have not confirmed it."
+            }
+          ]
+        }
+      ],
+      "forbidden_conclusions": [
+        {
+          "id": "C5.X1",
+          "class": "false-authoritative",
+          "statement": "Reports the migration as complete or the single-release plan as carried out."
+        },
+        {
+          "id": "C5.X2",
+          "class": "false-authoritative",
+          "statement": "Describes the single-release plan as rejected."
+        },
+        {
+          "id": "C5.X3",
+          "class": "false-authoritative",
+          "statement": "States the firewall rule as the confirmed cause."
+        }
+      ],
+      "allowed_losses": [
+        {
+          "id": "C5.L1",
+          "materiality": "nonmaterial",
+          "statement": "Payments as the first wave.",
+          "evidence": [
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_03",
+              "block_index": 0,
+              "revision": "1758614640000",
+              "start": 71,
+              "end": 85,
+              "text": "payments first"
+            }
+          ]
+        },
+        {
+          "id": "C5.L2",
+          "materiality": "nonmaterial",
+          "statement": "The next-sprint timing.",
+          "evidence": [
+            {
+              "source": "C5.V1",
+              "message_id": "msg_cf_c5_05",
+              "block_index": 0,
+              "revision": "1758614940000",
+              "start": 36,
+              "end": 66,
+              "text": "we'll pick this up next sprint"
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "C5.S1",
+          "source": "C5.V1",
+          "follow_up": "C5.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p1",
+            "stage": "m1"
+          },
+          "expectations": [
+            {
+              "obligation": "C5.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O3",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O4",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C5.X1",
+            "C5.X2",
+            "C5.X3"
+          ],
+          "description": "A prior baseline and a later publication serve this segment at P1 in the m1 window."
+        },
+        {
+          "id": "C5.S2",
+          "source": "C5.V1",
+          "follow_up": "C5.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p2",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C5.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O3",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O4",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C5.X1",
+            "C5.X2",
+            "C5.X3"
+          ],
+          "description": "Natural age and importance selection serves this segment at P2 after m0 decay."
+        },
+        {
+          "id": "C5.S3",
+          "source": "C5.V1",
+          "follow_up": "C5.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C5.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O3",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O4",
+              "accepted": [
+                "visible"
+              ]
+            }
+          ],
+          "abstention": "forbidden",
+          "forbidden": [
+            "C5.X1",
+            "C5.X2",
+            "C5.X3"
+          ],
+          "description": "Natural age and importance selection serves this segment at P3 after m0 decay."
+        },
+        {
+          "id": "C5.S4",
+          "source": "C5.V1",
+          "follow_up": "C5.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C5.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O2",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C5.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C5.O4",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C5.X1",
+            "C5.X2",
+            "C5.X3"
+          ],
+          "description": "Natural selection serves this segment at P4; its empty P4 body renders the title-only heading."
+        },
+        {
+          "id": "C5.S5",
+          "source": "C5.V1",
+          "follow_up": "C5.F1",
+          "serving": {
+            "path": "omission",
+            "tier": "p5",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C5.O1",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C5.O2",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C5.O3",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C5.O4",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C5.X1",
+            "C5.X2",
+            "C5.X3"
+          ],
+          "description": "The segment is served at P5, so no segment text reaches the invocation and the omission rule applies."
+        }
+      ]
+    },
+    {
+      "id": "C6",
+      "title": "Exact source",
+      "provenance": {
+        "kind": "synthetic"
+      },
+      "sources": [
+        {
+          "id": "C6.V1",
+          "session_id": "ses_cf_c6_exact_source",
+          "messages": [
+            {
+              "info": {
+                "id": "msg_cf_c6_01",
+                "sessionID": "ses_cf_c6_exact_source",
+                "role": "user",
+                "time": {
+                  "created": 1758700860000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c6_01_0",
+                  "type": "text",
+                  "text": "Run the kernel tests and report the summary line exactly as printed."
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c6_02",
+                "sessionID": "ses_cf_c6_exact_source",
+                "role": "assistant",
+                "time": {
+                  "created": 1758700920000,
+                  "completed": 1758701100000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c6_02_0",
+                  "type": "tool",
+                  "callID": "call_cf_602",
+                  "tool": "bash",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "command": "cargo nextest run -p kernel --locked"
+                    },
+                    "output": "    Starting 4096 tests across 12 binaries\n     Summary [  12.408s] 4096 tests run: 4096 passed, 0 skipped\n\t✓ naïve café — «grüße» fixture ok\n",
+                    "time": {
+                      "start": 1758700980000,
+                      "end": 1758701040000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c6_02_1",
+                  "type": "text",
+                  "text": "Ran `cargo nextest run -p kernel --locked`:\n\n     Summary [  12.408s] 4096 tests run: 4096 passed, 0 skipped\n\t✓ naïve café — «grüße» fixture ok\n"
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c6_03",
+                "sessionID": "ses_cf_c6_exact_source",
+                "role": "user",
+                "time": {
+                  "created": 1758701160000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c6_03_0",
+                  "type": "text",
+                  "text": "Thanks. Pasting it into the release notes:"
+                },
+                {
+                  "id": "prt_cf_c6_03_1",
+                  "type": "text",
+                  "text": "Ran `cargo nextest run -p kernel --locked`:\n\n     Summary [  12.408s] 4096 tests run: 4096 passed, 0 skipped\n\t✓ naïve café — «grüße» fixture ok\n"
+                }
+              ]
+            },
+            {
+              "info": {
+                "id": "msg_cf_c6_04",
+                "sessionID": "ses_cf_c6_exact_source",
+                "role": "assistant",
+                "time": {
+                  "created": 1758701220000,
+                  "completed": 1758701280000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c6_04_0",
+                  "type": "text",
+                  "text": "Release notes updated with the quoted summary."
+                }
+              ]
+            }
+          ],
+          "successors": [
+            {
+              "info": {
+                "id": "msg_cf_c6_02",
+                "sessionID": "ses_cf_c6_exact_source",
+                "role": "assistant",
+                "time": {
+                  "created": 1758700920000,
+                  "completed": 1758701880000
+                }
+              },
+              "parts": [
+                {
+                  "id": "prt_cf_c6_02_0",
+                  "type": "tool",
+                  "callID": "call_cf_602",
+                  "tool": "bash",
+                  "state": {
+                    "status": "completed",
+                    "input": {
+                      "command": "cargo nextest run -p kernel --locked"
+                    },
+                    "output": "    Starting 4096 tests across 12 binaries\n     Summary [  12.408s] 4096 tests run: 4096 passed, 0 skipped\n\t✓ naïve café — «grüße» fixture ok\n",
+                    "time": {
+                      "start": 1758700980000,
+                      "end": 1758701040000
+                    }
+                  }
+                },
+                {
+                  "id": "prt_cf_c6_02_1",
+                  "type": "text",
+                  "text": "Ran `cargo nextest run -p kernel --locked`:\n\n     Summary [  12.408s] 4095 tests run: 4095 passed, 0 skipped\n\t✓ naïve café — «grüße» fixture ok\n"
+                }
+              ]
+            }
+          ],
+          "approved_example": "<output>\n<history_segments>\n<history_segment start=\"1\" end=\"4\" title=\"Kernel test run reported 4096 passed; summary quoted into release notes\" episode_type=\"investigation\" importance=\"60\">\n<p1>The user asked for the kernel test summary exactly as printed. I ran cargo nextest run -p kernel --locked, which reported 4096 tests run and 4096 passed with 0 skipped in 12.408s, and quoted the output. The user pasted the same quote into the release notes.</p1>\n<p2>Ran cargo nextest run -p kernel --locked: 4096 run, 4096 passed, 0 skipped in 12.408s. The quote was copied into the release notes.</p2>\n<p3>Kernel tests: 4096 passed, 0 skipped.</p3>\n<p4 />\n</history_segment>\n</history_segments>\n<meta><messages_processed>1-4</messages_processed></meta>\n</output>"
+        }
+      ],
+      "follow_ups": [
+        {
+          "id": "C6.F1",
+          "source": "C6.V1",
+          "prompt": "I need the original kernel test summary you reported earlier, byte for byte, including its spacing. Paste it."
+        }
+      ],
+      "obligations": [
+        {
+          "id": "C6.O1",
+          "kind": "evidence",
+          "materiality": "material",
+          "statement": "The original run reported 4096 tests run, 4096 passed, and 0 skipped.",
+          "evidence": [
+            {
+              "source": "C6.V1",
+              "message_id": "msg_cf_c6_02",
+              "block_index": 1,
+              "revision": "1758701100000",
+              "start": 70,
+              "end": 108,
+              "text": "4096 tests run: 4096 passed, 0 skipped"
+            }
+          ]
+        },
+        {
+          "id": "C6.O2",
+          "kind": "evidence",
+          "materiality": "material",
+          "statement": "The exact bytes of the original revision of the quoted summary block.",
+          "evidence": [
+            {
+              "source": "C6.V1",
+              "message_id": "msg_cf_c6_02",
+              "block_index": 1,
+              "revision": "1758701100000",
+              "start": 0,
+              "end": 154,
+              "text": "Ran `cargo nextest run -p kernel --locked`:\n\n     Summary [  12.408s] 4096 tests run: 4096 passed, 0 skipped\n\t✓ naïve café — «grüße» fixture ok\n"
+            }
+          ]
+        }
+      ],
+      "forbidden_conclusions": [
+        {
+          "id": "C6.X1",
+          "class": "false-authoritative",
+          "statement": "Presents the successor revision's counts as the original output."
+        },
+        {
+          "id": "C6.X2",
+          "class": "false-authoritative",
+          "statement": "Presents a normalized or paraphrased transcript as the exact original bytes."
+        },
+        {
+          "id": "C6.X3",
+          "class": "false-authoritative",
+          "statement": "Claims a registered tool returned the exact original bytes."
+        }
+      ],
+      "allowed_losses": [
+        {
+          "id": "C6.L1",
+          "materiality": "nonmaterial",
+          "statement": "The binary count in the tool's starting line.",
+          "evidence": [
+            {
+              "source": "C6.V1",
+              "message_id": "msg_cf_c6_02",
+              "block_index": 0,
+              "revision": "1758701040000",
+              "start": 24,
+              "end": 42,
+              "text": "across 12 binaries"
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "C6.S1",
+          "source": "C6.V1",
+          "follow_up": "C6.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p1",
+            "stage": "m1"
+          },
+          "expectations": [
+            {
+              "obligation": "C6.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C6.O2",
+              "accepted": [
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C6.X1",
+            "C6.X2",
+            "C6.X3"
+          ],
+          "description": "A prior baseline and a later publication serve this segment at P1 in the m1 window."
+        },
+        {
+          "id": "C6.S2",
+          "source": "C6.V1",
+          "follow_up": "C6.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p2",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C6.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C6.O2",
+              "accepted": [
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C6.X1",
+            "C6.X2",
+            "C6.X3"
+          ],
+          "description": "Natural age and importance selection serves this segment at P2 after m0 decay."
+        },
+        {
+          "id": "C6.S3",
+          "source": "C6.V1",
+          "follow_up": "C6.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p3",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C6.O1",
+              "accepted": [
+                "visible"
+              ]
+            },
+            {
+              "obligation": "C6.O2",
+              "accepted": [
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C6.X1",
+            "C6.X2",
+            "C6.X3"
+          ],
+          "description": "Natural age and importance selection serves this segment at P3 after m0 decay."
+        },
+        {
+          "id": "C6.S4",
+          "source": "C6.V1",
+          "follow_up": "C6.F1",
+          "serving": {
+            "path": "natural",
+            "tier": "p4",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C6.O1",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C6.O2",
+              "accepted": [
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C6.X1",
+            "C6.X2",
+            "C6.X3"
+          ],
+          "description": "Natural selection serves this segment at P4; its empty P4 body renders the title-only heading."
+        },
+        {
+          "id": "C6.S5",
+          "source": "C6.V1",
+          "follow_up": "C6.F1",
+          "serving": {
+            "path": "omission",
+            "tier": "p5",
+            "stage": "m0"
+          },
+          "expectations": [
+            {
+              "obligation": "C6.O1",
+              "accepted": [
+                "visible",
+                "discoverable",
+                "unavailable"
+              ]
+            },
+            {
+              "obligation": "C6.O2",
+              "accepted": [
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C6.X1",
+            "C6.X2",
+            "C6.X3"
+          ],
+          "description": "The segment is served at P5, so no segment text reaches the invocation and the omission rule applies."
+        },
+        {
+          "id": "C6.S6",
+          "source": "C6.V1",
+          "follow_up": "C6.F1",
+          "serving": {
+            "path": "exact_read"
+          },
+          "expectations": [
+            {
+              "obligation": "C6.O2",
+              "accepted": [
+                "unavailable"
+              ]
+            }
+          ],
+          "abstention": "permitted",
+          "forbidden": [
+            "C6.X1",
+            "C6.X2",
+            "C6.X3"
+          ],
+          "description": "After the successor is published and storage is reopened, the internal witness reads the original revision of the quoted block; the consumer has no tool exposing those bytes."
+        }
+      ]
+    }
+  ]
+}

@@ -18254,6 +18254,10 @@ impl Handler {
 mod tests {
     #[path = "transform_unit/tests.rs"]
     mod blocking_unit_tests;
+    #[path = "compression_fidelity_corpus.rs"]
+    mod compression_fidelity_corpus;
+    #[path = "compression_fidelity_tests.rs"]
+    mod compression_fidelity_tests;
     #[path = "fold_authority_handler_tests.rs"]
     mod fold_authority_handler_tests;
     #[path = "pi_native_serving_tests.rs"]
