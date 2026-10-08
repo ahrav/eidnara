@@ -8,12 +8,13 @@
 //! same pin the TypeScript reader in `packages/e2e-tests` enforces, so a changed corpus fails
 //! until both pins move together.
 //!
-//! The module depends only on `serde`, `serde_json`, `sha2`, and the files it embeds from
-//! `testdata/`: the corpus and `memory-category-vocabulary.json`. It names no `crate::` path.
+//! Integration tests can include this module by path, so its imports stay external crates and
+//! its embedded files stay in `testdata/`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
+use aho_corasick::{AhoCorasickBuilder, AhoCorasickKind};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -1058,20 +1059,36 @@ fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
     labels
 }
 
+/// Short label seeds keep the automaton small; each seed hit is confirmed against its whole label.
+const LABEL_SEED_BYTES: usize = 8;
+
+/// Overlapping matching reports every seed occurrence, including a seed inside another label, so
+/// every label a field contains is confirmed at one of its seed hits.
 fn answer_key_exclusion(corpus: &Corpus, out: &mut Vec<Violation>) {
-    let labels: Vec<(String, String)> = evaluator_labels(corpus)
-        .into_iter()
-        .map(|label| (label.to_lowercase(), label))
-        .collect();
+    let labels = evaluator_labels(corpus);
+    let needles: Vec<String> = labels.iter().map(|label| label.to_lowercase()).collect();
+    let seeds = needles
+        .iter()
+        .map(|needle| &needle.as_bytes()[..needle.len().min(LABEL_SEED_BYTES)]);
+    let matcher = AhoCorasickBuilder::new()
+        .kind(Some(AhoCorasickKind::NoncontiguousNFA))
+        .build(seeds)
+        .expect("evaluator label seeds build one matcher");
     for (field, text) in provider_input(corpus) {
         let haystack = text.to_lowercase();
-        for (needle, label) in &labels {
-            if haystack.contains(needle.as_str()) {
-                out.push(Violation::AnswerKeyInProviderInput {
-                    field: field.clone(),
-                    label: label.clone(),
-                });
-            }
+        let found: BTreeSet<usize> = matcher
+            .find_overlapping_iter(&haystack)
+            .map(|seed| (seed.start(), seed.pattern().as_usize()))
+            .filter(|&(start, index)| {
+                haystack.as_bytes()[start..].starts_with(needles[index].as_bytes())
+            })
+            .map(|(_, index)| index)
+            .collect();
+        for index in found {
+            out.push(Violation::AnswerKeyInProviderInput {
+                field: field.clone(),
+                label: labels[index].clone(),
+            });
         }
     }
 }

@@ -1,10 +1,13 @@
+use std::sync::LazyLock;
+
 use serde_json::{Value, json};
 
 use super::compression_fidelity_corpus::*;
 use crate::history_summarizer_validate::parse_history_segment_output;
 
 fn corpus_value() -> Value {
-    serde_json::from_slice(CORPUS_BYTES).unwrap()
+    static VALUE: LazyLock<Value> = LazyLock::new(|| serde_json::from_slice(CORPUS_BYTES).unwrap());
+    VALUE.clone()
 }
 
 fn validate_value(value: Value) -> Vec<Violation> {
@@ -429,6 +432,17 @@ fn answer_keys_and_evaluator_labels_stay_out_of_provider_input() {
             &format!(" {statement}")
         ),
         [leaked("C1.F1", &statement)]
+    );
+    assert_eq!(
+        with_appended(
+            &["cases", "0", "follow_ups", "0", "prompt"],
+            " nonmateriality"
+        ),
+        [
+            leaked("C1.F1", "materiality"),
+            leaked("C1.F1", "nonmaterial")
+        ],
+        "overlapping labels each leak, in label order"
     );
     let c1_part = ["cases", "0", "sources", "0", "messages", "2", "parts", "0"];
     assert_eq!(

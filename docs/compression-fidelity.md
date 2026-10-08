@@ -71,8 +71,8 @@ it, and both must move together when the corpus is re-authored:
 - `CORPUS_SHA256` in `crates/daemon/src/compression_fidelity_corpus.rs`, a
   child of the daemon's library test module. It compares the digest of the
   bytes compiled in with `include_bytes!`. The module depends only on
-  `serde`, `serde_json`, and `sha2`, so an integration test can include it by
-  path.
+  `aho-corasick`, `serde`, `serde_json`, and `sha2`, so an integration test
+  can include it by path.
 - `COMPRESSION_FIDELITY_CORPUS_SHA256` in
   `packages/e2e-tests/src/compression-fidelity/corpus.ts`. Its test also
   reads the Rust pin and requires equality.
