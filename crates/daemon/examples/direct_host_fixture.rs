@@ -39,7 +39,6 @@ mod unix {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use daemon::history_summarizer_chunk::{ALIAS_CLOSE, ALIAS_OPEN};
     use host_runtime::local_embeddings::embed_tokens::EmbedTokens;
     use host_runtime::local_embeddings::inference::InferenceError;
     use host_runtime::local_embeddings::{
@@ -57,7 +56,9 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
 
-    use crate::case_script::{Answer, AnswerFailure, CaseScript, Record, output_document};
+    use crate::case_script::{
+        Answer, AnswerFailure, CaseScript, Record, output_document, presented_records,
+    };
     use crate::eval_cassette::CassetteBackend;
     use crate::publish::write_then_rename;
 
@@ -287,59 +288,6 @@ mod unix {
 
     /// Messages per segment in the scripted summarizer's answer.
     const SUMMARY_CHUNK: usize = 5;
-
-    /// One presented line of the summarizer's input: `[a-b] R: part / part`,
-    /// with alias markers stripped from the parts.
-    fn presented_line(line: &str) -> Option<(u64, u64, String)> {
-        let rest = line.strip_prefix('[')?;
-        let (range, rest) = rest.split_once("] ")?;
-        let (start, end) = match range.split_once('-') {
-            Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
-            None => {
-                let ordinal = range.parse().ok()?;
-                (ordinal, ordinal)
-            }
-        };
-        let (_, parts) = rest.split_once(": ")?;
-        let text: String = parts
-            .split_whitespace()
-            .map(|token| match token.strip_prefix(ALIAS_OPEN) {
-                Some(marked) => marked
-                    .split_once(ALIAS_CLOSE)
-                    .map_or(token, |(_, rest)| rest),
-                None => token,
-            })
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        Some((start, end, text))
-    }
-
-    /// The presented records of a summarizer prompt's `<new_messages>`, or `None` for any other
-    /// prompt.
-    fn presented_records(prompt: &str) -> Option<Vec<Record>> {
-        let (_, body) = prompt.split_once("<new_messages>")?;
-        let (body, _) = body.split_once("</new_messages>")?;
-        // The transcript renders its records in ordinal order, so a header
-        // starts a record only when it continues the sequence; every other
-        // line, including one shaped like a header, is the text of the message
-        // before it, which keeps its newlines.
-        let mut lines: Vec<Record> = Vec::new();
-        for line in body.lines() {
-            let next = lines.last().map(|record| record.end + 1);
-            match (presented_line(line), lines.last_mut()) {
-                (Some((start, end, text)), _) if next.is_none_or(|next| start == next) => {
-                    lines.push(Record { start, end, text })
-                }
-                (_, Some(record)) if !line.trim().is_empty() => {
-                    record.text.push(' ');
-                    record.text.push_str(line.trim());
-                }
-                _ => {}
-            }
-        }
-        (!lines.is_empty()).then_some(lines)
-    }
 
     /// The summarizer answer the fixture stands in for a provider with: one
     /// `history_segment` per run of `SUMMARY_CHUNK` presented lines, its text

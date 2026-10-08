@@ -17,6 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::LazyLock;
 
+use daemon::history_summarizer_chunk::{ALIAS_CLOSE, ALIAS_OPEN};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -47,6 +48,58 @@ pub struct Record {
     pub start: u64,
     pub end: u64,
     pub text: String,
+}
+
+/// One presented line of the summarizer's input: `[a-b] R: part / part`, with alias markers
+/// stripped from the parts.
+fn presented_line(line: &str) -> Option<(u64, u64, String)> {
+    let rest = line.strip_prefix('[')?;
+    let (range, rest) = rest.split_once("] ")?;
+    let (start, end) = match range.split_once('-') {
+        Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+        None => {
+            let ordinal = range.parse().ok()?;
+            (ordinal, ordinal)
+        }
+    };
+    let (_, parts) = rest.split_once(": ")?;
+    let text: String = parts
+        .split_whitespace()
+        .map(|token| match token.strip_prefix(ALIAS_OPEN) {
+            Some(marked) => marked
+                .split_once(ALIAS_CLOSE)
+                .map_or(token, |(_, rest)| rest),
+            None => token,
+        })
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some((start, end, text))
+}
+
+/// The presented records of a summarizer prompt's first `<new_messages>` section. Returns `None`
+/// when the section is missing, unclosed, or holds no record line.
+pub fn presented_records(prompt: &str) -> Option<Vec<Record>> {
+    let (_, body) = prompt.split_once("<new_messages>")?;
+    let (body, _) = body.split_once("</new_messages>")?;
+    // The first parsed header starts a record. A later header starts a record when its start
+    // equals the preceding record's `end + 1`. After the first record, a nonblank line that does
+    // not start a record extends the preceding record's text.
+    let mut lines: Vec<Record> = Vec::new();
+    for line in body.lines() {
+        let next = lines.last().map(|record| record.end + 1);
+        match (presented_line(line), lines.last_mut()) {
+            (Some((start, end, text)), _) if next.is_none_or(|next| start == next) => {
+                lines.push(Record { start, end, text })
+            }
+            (_, Some(record)) if !line.trim().is_empty() => {
+                record.text.push(' ');
+                record.text.push_str(line.trim());
+            }
+            _ => {}
+        }
+    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 static CORPUS: LazyLock<Result<(Corpus, Value), String>> = LazyLock::new(|| {
