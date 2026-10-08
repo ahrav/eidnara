@@ -18256,6 +18256,9 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "compression_fidelity_corpus.rs"]
     mod compression_fidelity_corpus;
+    #[path = "compression_fidelity_observation.rs"]
+    #[allow(dead_code)]
+    mod compression_fidelity_observation;
     #[path = "compression_fidelity_replay_tests.rs"]
     mod compression_fidelity_replay_tests;
     #[path = "compression_fidelity_tests.rs"]

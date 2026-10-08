@@ -103,7 +103,7 @@ incident or a waiver of U5's witness and dependency requirements.
 The [MemoryReviewer corpus:44-70][curator-corpus] separates sources, scripts, and
 expectations, but `judge` uses fixture-specific substring rules. It is a reuse
 lead, not a fidelity oracle or evidence of a human-reviewed generation baseline.
-The private [TestProducer::start:22428-22463][lib] records each attempt's
+The private [TestProducer::start:22431-22466][lib] records each attempt's
 system text, user prompt, and model since U2 (#719), which is the complete
 request capture generation claims need. No production export is needed.
 

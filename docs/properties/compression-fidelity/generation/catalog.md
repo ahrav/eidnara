@@ -15,7 +15,7 @@ dependencies". The original plan's inspected SHA-256 is
 `b33aaf8508174d39ea578cb6927d1524bbee1c3f2496c8a22511349beb35a384`.
 It names revision `1555f00c702296406186f8c859045014e8e8a4d9`; HEAD has moved.
 The intervening diff changes Curator activation, lifecycle, worker, tests, and
-operations documentation. All code references here are verified against the U1 branch tip,
+operations documentation. All code references here are verified against the U2 branch tip,
 not the plan's source offsets. Contract statements remain claims under test.
 Plan line citations are historical provenance only; the
 [catalog index](../README.md#scope-and-provenance) maps them to published
@@ -168,8 +168,9 @@ Type: safety
 Reachability: explicit-config-only
 Status: active
 Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` records exact,
-transformed, tool-compacted, and truncated exposure for every C1-C6 material
-span at the producer's complete recorded input (U2, #719). Human meaning review
+transformed, or absent exposure, flagging omitted tool outputs, for every
+C1-C6 material span at the producer's complete recorded input, and absence
+after a truncated oversized lead for C5 (U2, #719). Human meaning review
 is absent.
 Guarantee: Every material native obligation has an explicit exposure outcome
 at the real producer input, and absent evidence receives no generation-fidelity
@@ -476,12 +477,12 @@ simulation requirement is inferred from these records.
 
 KTD1 keeps one Rust-owned corpus with byte identity owned by the evaluation
 part; KTD2 places the replay
-under [the existing private test module:18252-18276][lib]. The private
-[ProducerState:22324-22364][lib] and [handler helper:22648-22674][lib] exist.
+under [the existing private test module:18252-18281][lib]. The private
+[ProducerState:22327-22367][lib] and [handler helper:22651-22677][lib] exist.
 U1 (#718) adds the corpus and U2 (#719) the replay module; the evaluation
 command does not exist yet. Its absence is a handoff dependency, not
 permission to export internals or create a framework. Since U2 the
-[start method:22428-22463][lib] records the complete system text, user prompt,
+[start method:22431-22466][lib] records the complete system text, user prompt,
 and selected model of each attempt under private test ancestry; no production
 export was needed.
 
@@ -500,7 +501,7 @@ because semantic preservation is not a bounded recovery claim. Four remain
 
 Mechanical documentation validation passes for field order, record/index/file
 agreement, evidence headings and lengths, links, and source line bounds.
-Referenced tracked source files match the U1 branch tip; the local plan digest
+Referenced tracked source files match the U2 branch tip; the local plan digest
 is unchanged. These checks do not exercise any cataloged system property.
 
 [chunk]: ../../../../crates/daemon/src/history_summarizer_chunk.rs

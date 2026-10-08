@@ -104,8 +104,8 @@ daemon's library test module, drives every source's approved example through
 real prompt and alias assembly, a scripted producer, real validation, and
 accepted publication. It records the producer's complete system, user, and
 model input per attempt, and the exposure of every material span there:
-exact, transformed by the presenter, compacted with its tool output, or
-absent after truncation. It then observes covered input leaving the live
+exact, transformed by the presenter, or absent, with omitted tool outputs
+flagged and a constructed oversized lead showing absence after truncation. It then observes covered input leaving the live
 messages, P1 in the m1 window after a test-authored baseline, P1 at m0,
 P2 to P4 and P5 omission under natural decay against test-authored newer
 rows, and positive-budget pressure with a generous-budget control. Controls
@@ -122,9 +122,14 @@ bytes through the guarded artifact reader. Its controls are the successor's
 bytes, an equal-text other occurrence, a normalized substitute, an empty
 block, and deleted evidence, which refuses rather than substituting.
 
-Both write one owner-attributed JSON observation per case and scenario, mode
-`0600`, only when `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names a private
-directory; a default run asserts in memory and writes nothing.
+Both write owner-attributed JSON observations through
+`crates/daemon/src/compression_fidelity_observation.rs`: one record per case,
+scenario or source, and stage, renamed into place from a temporary file with
+mode `0600` inside a directory created with mode `0700`, and only when
+`EIDNARA_FIDELITY_OBSERVATIONS_DIR` names that directory. A default run
+asserts in memory and writes nothing. The wrapped slice's 105% retry is
+recorded as unobserved; the history body and the wrapped slice are measured
+separately under one named estimator.
 
 ## What is unsupported
 

@@ -1,113 +1,51 @@
 //! Replays each corpus source's approved producer output through the daemon's real prompt and
 //! alias assembly, producer validation, accepted publication, and the m1 and m0 serving paths,
-//! and records one owner-attributed observation per case and scenario. Expected tiers are the
-//! corpus's approved bodies; the renderer is only ever observed. Setting
-//! `EIDNARA_FIDELITY_OBSERVATIONS_DIR` writes each observation once as private JSON; a default
-//! run asserts in memory and writes nothing.
+//! and records owner-attributed observations per case, scenario or source, and stage. Expected
+//! tiers are the corpus's approved bodies; the renderer is only observed.
 
 use super::compression_fidelity_corpus::*;
+use super::compression_fidelity_observation::{Observation, Terminal};
 use super::*;
 
-use memory_store::{BlockIdentity, MemoryReviewerNonadmissionCode};
+use memory_store::{ExtractionFailure, MemoryReviewerNonadmissionCode};
 
 const OWNER: &str = "daemon.compression_fidelity.replay";
-const OBSERVATIONS_DIR: &str = "EIDNARA_FIDELITY_OBSERVATIONS_DIR";
 const ESTIMATOR: &str =
     "tokenizer::estimate_tokens (Claude encoding) through token_cache::cached_estimate_tokens";
 const HIGH_PRESSURE_USAGE: u64 = 49_000;
 const CONTEXT_LIMIT: u64 = 50_000;
 
-/// Every situation marker this module can fire, each a constant.
 mod marker {
     pub const OBLIGATION_TRANSFORMED: &str = "cf_u2_source_obligation_transformed";
-    pub const OBLIGATION_TRUNCATED: &str = "cf_u2_source_obligation_truncated";
-    pub const OBLIGATION_TOOL_COMPACTED: &str = "cf_u2_source_obligation_tool_compacted";
+    pub const OBLIGATION_ABSENT_AFTER_TRUNCATION: &str =
+        "cf_u2_source_obligation_absent_after_truncation";
+    pub const TOOL_OUTPUT_OMITTED: &str = "cf_u2_tool_output_obligation_omitted";
     pub const REJECTED_PRIMARY_FALLBACK: &str = "cf_u2_rejected_primary_fallback_consumed";
     pub const FINAL_DISCARD_AFTER_COVERAGE: &str = "cf_u2_final_discard_after_valid_coverage";
     pub const INHERITED_P2_P3: &str = "cf_u2_inherited_p2_p3";
     pub const HIGH_IMPORTANCE_PRESSURE: &str = "cf_u2_high_importance_positive_budget_pressure";
 }
 
-/// One terminal outcome per observation; aggregates never replace them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Terminal {
-    Published,
-    Served,
-    ValidationRejected,
-    DiscardedCoverage,
-    DriftRejected,
-    InputTruncated,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct Observation {
-    owner: &'static str,
-    corpus_sha256: &'static str,
-    case: String,
-    /// The corpus scenario this observation witnesses, or the source ID for a source-level stage.
-    scenario: String,
-    stage: String,
+fn observation(
+    case: &str,
+    source: &str,
+    stage: impl Into<String>,
     terminal: Terminal,
-    markers: Vec<&'static str>,
-    detail: Value,
+) -> Observation {
+    Observation::new(OWNER, CORPUS_SHA256, case, source, stage, terminal)
 }
 
-impl Observation {
-    fn new(case: &str, scenario: &str, stage: impl Into<String>, terminal: Terminal) -> Self {
-        Self {
-            owner: OWNER,
-            corpus_sha256: CORPUS_SHA256,
-            case: case.to_owned(),
-            scenario: scenario.to_owned(),
-            stage: stage.into(),
-            terminal,
-            markers: Vec::new(),
-            detail: json!({}),
-        }
-    }
-
-    fn with(mut self, detail: Value) -> Self {
-        self.detail = detail;
-        self
-    }
-
-    fn mark(mut self, marker: &'static str) -> Self {
-        self.markers.push(marker);
-        self
-    }
-
-    /// Writes the observation once, privately, when an operator selected an output directory.
-    fn emit(self) -> Self {
-        if let Some(dir) = std::env::var_os(OBSERVATIONS_DIR) {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let dir = PathBuf::from(dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let name = format!(
-                "{OWNER}.{}.{}.{}.json",
-                self.case, self.scenario, self.stage
-            );
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(dir.join(name))
-                .unwrap();
-            file.write_all(&serde_json::to_vec_pretty(&self).unwrap())
-                .unwrap();
-        }
-        self
-    }
+fn sha256_hex(text: &str) -> String {
+    format!("{:x}", sha2::Sha256::digest(text.as_bytes()))
 }
 
-/// The corpus scenarios of `source` that serve `tier` on `path`, at `stage` when one is named.
+/// The corpus scenarios of `source` that serve `tier` on `path` at `stage`.
 fn scenarios_serving(
     case: &'static Case,
     source: &Source,
     path: ServingPath,
     tier: Tier,
-    stage: Option<Stage>,
+    stage: Stage,
 ) -> Vec<&'static Scenario> {
     case.scenarios
         .iter()
@@ -115,9 +53,19 @@ fn scenarios_serving(
             s.source == source.id
                 && s.serving.path == path
                 && s.serving.tier == Some(tier)
-                && (stage.is_none() || s.serving.stage == stage)
+                && s.serving.stage == Some(stage)
         })
         .collect()
+}
+
+/// Emits `record` once per witnessed scenario, or once at source level when none matches.
+fn emit_for(record: impl Fn() -> Observation, witnessed: &[&Scenario]) {
+    if witnessed.is_empty() {
+        record().emit();
+    }
+    for scenario in witnessed {
+        record().scenario(&scenario.id).emit();
+    }
 }
 
 /// The corpus's raw native records for one source, as the OpenCode codec reads them.
@@ -138,8 +86,16 @@ fn native_records(case: &str, source: &str, field: &str) -> Vec<Arc<Value>> {
         .collect()
 }
 
+fn decoded(records: &[Arc<Value>]) -> Vec<IngressMessage> {
+    crate::codec::opencode::decode_opencode_shared(records).messages
+}
+
+fn source_ingress(case: &Case, source: &Source) -> Vec<IngressMessage> {
+    decoded(&native_records(&case.id, &source.id, "messages"))
+}
+
 /// A test-authored live tail: one unrelated message large enough to fill the protected tail,
-/// then the case's follow-up. The fold therefore covers exactly the corpus source.
+/// then the case's follow-up. The fold therefore covers exactly the messages before it.
 fn live_tail(follow_up: &FollowUp, first_ordinal: u64) -> Vec<IngressMessage> {
     vec![
         ck(
@@ -149,10 +105,6 @@ fn live_tail(follow_up: &FollowUp, first_ordinal: u64) -> Vec<IngressMessage> {
         ),
         ck("cf-tail-follow-up", first_ordinal + 1, &follow_up.prompt),
     ]
-}
-
-fn decoded(records: &[Arc<Value>]) -> Vec<IngressMessage> {
-    crate::codec::opencode::decode_opencode_shared(records).messages
 }
 
 /// The four authored tier bodies of an approved example, read from its tags without the
@@ -185,7 +137,7 @@ fn approved_title(approved_example: &str) -> String {
 #[serde(rename_all = "snake_case")]
 enum Exposure {
     Exact,
-    /// Present after whitespace normalization only.
+    /// Present after the presenter's known rewrites only.
     Transformed,
     Absent,
 }
@@ -209,13 +161,57 @@ fn exposure(prompt: &str, span: &str) -> Exposure {
     }
 }
 
-fn is_tool_span(source: &Source, span: &Span) -> bool {
+fn record_of<'s>(source: &'s Source, span: &Span) -> &'s NativeMessage {
     source
         .messages
         .iter()
         .find(|m| m.info.id == span.message_id)
-        .and_then(|m| m.parts.get(span.block_index))
-        .is_some_and(|part| matches!(part, Part::Tool { .. }))
+        .unwrap()
+}
+
+/// One exposure entry per material native span of `source`, in one shape for every stage.
+fn exposures(case: &Case, source: &Source, prompt: &str) -> Vec<(Exposure, bool, bool, Value)> {
+    let mut entries = Vec::new();
+    for obligation in case.obligations.iter().filter(|o| o.memory.is_none()) {
+        for span in obligation.evidence.iter().filter(|s| s.source == source.id) {
+            let record = record_of(source, span);
+            let tool = matches!(record.parts[span.block_index], Part::Tool { .. });
+            let text_presented = record.parts.iter().any(|part| match part {
+                Part::Text { text, .. } => exposure(prompt, text) != Exposure::Absent,
+                Part::Tool { .. } => false,
+            });
+            let seen = exposure(prompt, &span.text);
+            entries.push((
+                seen,
+                tool,
+                text_presented,
+                json!({
+                    "obligation": obligation.id,
+                    "message_id": span.message_id,
+                    "block_index": span.block_index,
+                    "tool_output": tool,
+                    "message_text_presented": text_presented,
+                    "exposure": seen,
+                    "generation_credit": seen != Exposure::Absent,
+                }),
+            ));
+        }
+    }
+    entries
+}
+
+/// Asserts the attempt carries a real assembled prompt and model, the precondition every
+/// generation situation needs.
+fn assert_real_generation(attempt: &ProducerAttempt) {
+    assert_eq!(
+        attempt.system,
+        crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT
+    );
+    assert!(!attempt.model.is_empty());
+    assert!(
+        attempt.prompt.contains("<new_messages>") && attempt.prompt.contains("\u{ab}s1\u{bb}"),
+        "a placeholder prompt witnesses nothing"
+    );
 }
 
 struct Fold {
@@ -240,17 +236,13 @@ impl Fold {
     fn attempts(&self) -> Vec<ProducerAttempt> {
         self.producer.attempts.lock().unwrap().clone()
     }
+
+    fn rows(&self) -> Vec<StoredHistorySegment> {
+        self.store.load_history_segments("ses").unwrap()
+    }
 }
 
-/// Folds `prefix ++ source ++ live tail` once, scripting `outputs` as the producer's answers,
-/// and waits for the firing to settle.
-async fn fold_with(
-    config: DaemonConfig,
-    prefix: Vec<IngressMessage>,
-    source_messages: Vec<IngressMessage>,
-    follow_up: &FollowUp,
-    outputs: Vec<String>,
-) -> Fold {
+fn scripted(outputs: Vec<String>) -> Arc<ProducerState> {
     let producer = Arc::new(ProducerState::default());
     producer
         .await_results
@@ -262,9 +254,19 @@ async fn fold_with(
                 length_capped: false,
             })
         }));
+    producer
+}
+
+/// Folds `messages ++ live tail` once, scripting `outputs` as the producer's answers, and waits
+/// for the firing to settle.
+async fn fold_with(
+    config: DaemonConfig,
+    mut messages: Vec<IngressMessage>,
+    follow_up: &FollowUp,
+    outputs: Vec<String>,
+) -> Fold {
+    let producer = scripted(outputs);
     let (handler, store, dir, _project) = handler_with_store(Arc::clone(&producer), config);
-    let mut messages = prefix;
-    messages.extend(source_messages);
     let next = messages.len() as u64 + 1;
     messages.extend(live_tail(follow_up, next));
     let fold = Fold {
@@ -281,6 +283,16 @@ async fn fold_with(
     fold
 }
 
+async fn approved_fold(case: &Case, source: &Source) -> Fold {
+    fold_with(
+        default_test_config(),
+        source_ingress(case, source),
+        follow_up_for(case, source),
+        vec![source.approved_example.clone()],
+    )
+    .await
+}
+
 fn follow_up_for<'c>(case: &'c Case, source: &Source) -> &'c FollowUp {
     case.follow_ups
         .iter()
@@ -295,8 +307,14 @@ fn sources() -> impl Iterator<Item = (&'static Case, &'static Source)> {
         .flat_map(|case| case.sources.iter().map(move |source| (case, source)))
 }
 
-/// The messages a serving response delivers outside its synthetic m0/m1 blocks.
-fn live_texts(response: &Value) -> Vec<String> {
+fn case_source(case: &str, source: &str) -> (&'static Case, &'static Source) {
+    let case = corpus().case(case).unwrap();
+    (case, case.source(source).unwrap())
+}
+
+/// The serialized content blocks a serving response delivers outside its synthetic m0/m1
+/// blocks.
+fn live_texts(response: &Value) -> String {
     response["messages"]
         .as_array()
         .unwrap()
@@ -310,19 +328,17 @@ fn live_texts(response: &Value) -> Vec<String> {
                 .map(|block| block.to_string())
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn m1_text(response: &Value) -> String {
-    response["messages"]
-        .as_array()
-        .unwrap()
+/// Every native string a covered source contributes: text parts and settled tool outputs.
+fn covered_strings(source: &Source) -> Vec<&str> {
+    source
+        .messages
         .iter()
-        .filter(|message| message["meta"]["synthetic"] == json!(true))
-        .nth(1)
-        .and_then(|message| message["content"][0]["kind"]["text"].as_str())
-        .unwrap_or_default()
-        .to_string()
+        .flat_map(|message| message.parts.iter().filter_map(block_text))
+        .collect()
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -330,26 +346,14 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
     let mut fired: BTreeSet<&str> = BTreeSet::new();
     for (case, source) in sources() {
         let follow_up = follow_up_for(case, source);
-        let source_messages = decoded(&native_records(&case.id, &source.id, "messages"));
-        let fold = fold_with(
-            default_test_config(),
-            Vec::new(),
-            source_messages.clone(),
-            follow_up,
-            vec![source.approved_example.clone()],
-        )
-        .await;
+        let fold = approved_fold(case, source).await;
+        let count = source.messages.len() as u64;
 
         let attempts = fold.attempts();
         let [attempt] = attempts.as_slice() else {
             panic!("{}: one attempt", source.id);
         };
-        assert_eq!(
-            attempt.system,
-            crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT,
-            "{}",
-            source.id
-        );
+        assert_real_generation(attempt);
         assert_eq!(attempt.model, "test/model", "{}", source.id);
         assert!(
             attempt
@@ -358,7 +362,6 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
             "{}: the producer runs in its own summarizer session",
             source.id
         );
-        let count = source_messages.len() as u64;
         assert_eq!(
             prompt_ordinal_range(&attempt.prompt),
             Some((1, count)),
@@ -366,30 +369,23 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
             source.id
         );
 
-        let mut exposures = Vec::new();
+        let entries = exposures(case, source, &attempt.prompt);
         let mut markers = Vec::new();
-        for obligation in case.obligations.iter().filter(|o| o.memory.is_none()) {
-            for span in obligation.evidence.iter().filter(|s| s.source == source.id) {
-                let seen = exposure(&attempt.prompt, &span.text);
-                let tool = is_tool_span(source, span);
-                if tool && seen == Exposure::Absent {
-                    markers.push(marker::OBLIGATION_TOOL_COMPACTED);
-                }
-                if seen == Exposure::Transformed {
-                    markers.push(marker::OBLIGATION_TRANSFORMED);
-                }
-                exposures.push(json!({
-                    "obligation": obligation.id,
-                    "message_id": span.message_id,
-                    "block_index": span.block_index,
-                    "tool_output": tool,
-                    "exposure": seen,
-                    "generation_credit": seen != Exposure::Absent,
-                }));
+        for (seen, tool, text_presented, entry) in &entries {
+            if *tool && *seen == Exposure::Absent && *text_presented {
+                markers.push(marker::TOOL_OUTPUT_OMITTED);
             }
+            if *seen == Exposure::Transformed {
+                markers.push(marker::OBLIGATION_TRANSFORMED);
+            }
+            assert!(
+                *tool || *seen != Exposure::Absent,
+                "{}: a text obligation reaches the producer: {entry}",
+                source.id
+            );
         }
 
-        let rows = fold.store.load_history_segments("ses").unwrap();
+        let rows = fold.rows();
         let [row] = rows.as_slice() else {
             panic!("{}: one published row", source.id);
         };
@@ -414,19 +410,13 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
             "{}: the newest row serves P1 at m0",
             source.id
         );
-        let live = live_texts(&served).join("\n");
-        for message in &source_messages {
-            for block in message.ck.content() {
-                let text = match block.kind() {
-                    BlockKind::Text { text } => text,
-                    _ => continue,
-                };
-                assert!(
-                    !live.contains(&serde_json::to_string(text).unwrap()),
-                    "{}: covered text {text:?} still reaches live input",
-                    source.id
-                );
-            }
+        let live = live_texts(&served);
+        for text in covered_strings(source) {
+            assert!(
+                !live.contains(&serde_json::to_string(text).unwrap()),
+                "{}: covered bytes {text:?} still reach live input",
+                source.id
+            );
         }
         assert!(
             live.contains(&serde_json::to_string(&follow_up.prompt).unwrap()),
@@ -436,30 +426,34 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
 
         markers.sort_unstable();
         markers.dedup();
-        let observation = Observation::new(&case.id, &source.id, "generation", Terminal::Published)
-            .with(json!({
-                "attempts": 1,
-                "model": attempt.model,
-                "system_sha256": format!("{:x}", sha2::Sha256::digest(attempt.system.as_bytes())),
-                "chunk": [1, count],
-                "authored_tiers": {"p1": true, "p2": true, "p3": true, "p4_empty": p4.is_empty()},
-                "published_tiers_match_approved": true,
-                "exposures": exposures,
-                "covered_input_replaced": true,
-            }));
         fired.extend(markers.iter().copied());
         markers
             .into_iter()
-            .fold(observation, Observation::mark)
+            .fold(
+                observation(&case.id, &source.id, "generation", Terminal::Published),
+                Observation::mark,
+            )
+            .with(json!({
+                "attempts": [{
+                    "attempt": 1,
+                    "model": attempt.model,
+                    "system_sha256": sha256_hex(&attempt.system),
+                    "prompt_sha256": sha256_hex(&attempt.prompt),
+                    "output_sha256": sha256_hex(&source.approved_example),
+                    "output_origin": "scripted approved example",
+                }],
+                "chunk": [1, count],
+                "authored_tiers": {"p1": true, "p2": true, "p3": true, "p4_empty": p4.is_empty()},
+                "published_tiers_match_approved": true,
+                "exposures": entries.iter().map(|e| e.3.clone()).collect::<Vec<_>>(),
+                "covered_input_replaced": true,
+            }))
             .emit();
-        Observation::new(&case.id, &source.id, "m0", Terminal::Served)
+        observation(&case.id, &source.id, "m0", Terminal::Served)
             .with(json!({"tier": "p1", "path": "natural", "first_fold_direct_to_m0": true}))
             .emit();
     }
-    for situation in [
-        marker::OBLIGATION_TRANSFORMED,
-        marker::OBLIGATION_TOOL_COMPACTED,
-    ] {
+    for situation in [marker::OBLIGATION_TRANSFORMED, marker::TOOL_OUTPUT_OMITTED] {
         assert!(fired.contains(situation), "{situation} never fired");
     }
 }
@@ -484,132 +478,130 @@ fn translated(approved_example: &str, count: u64, offset: u64) -> String {
         )
 }
 
-const BASELINE_MESSAGES: u64 = 3;
+const SCAFFOLD_MESSAGES: u64 = 3;
 
-fn baseline_messages() -> Vec<IngressMessage> {
-    (1..=BASELINE_MESSAGES)
-        .map(|ordinal| {
+/// Test-authored messages and their scripted segment, at ordinals `first..first + 3`.
+fn scaffold(first: u64, title: &str) -> (Vec<IngressMessage>, String) {
+    let messages = (0..SCAFFOLD_MESSAGES)
+        .map(|k| {
             ck(
-                &format!("cf-baseline-{ordinal}"),
-                ordinal,
+                &format!("cf-scaffold-{}", first + k),
+                first + k,
                 &format!(
-                    "Baseline setup note {ordinal}: {}",
+                    "Scaffold note {}: {}",
+                    first + k,
                     "the workspace builds cleanly. ".repeat(40)
                 ),
             )
         })
-        .collect()
+        .collect();
+    let last = first + SCAFFOLD_MESSAGES - 1;
+    let output = format!(
+        "<output><history_segments><history_segment start=\"{first}\" end=\"{last}\" title=\"{title}\" episode_type=\"infra\" importance=\"40\"><p1>Test-authored {title}: the workspace builds cleanly.</p1><p2>{title}: workspace builds.</p2><p3>{title}.</p3><p4 /></history_segment></history_segments><meta><messages_processed>{first}-{last}</messages_processed></meta></output>"
+    );
+    (messages, output)
 }
 
-fn baseline_output() -> String {
-    format!(
-        "<output><history_segments><history_segment start=\"1\" end=\"{BASELINE_MESSAGES}\" title=\"Baseline workspace setup\" episode_type=\"infra\" importance=\"40\"><p1>Test-authored baseline: the workspace builds cleanly.</p1><p2>Baseline: workspace builds.</p2><p3>Baseline.</p3><p4 /></history_segment></history_segments><meta><messages_processed>1-{BASELINE_MESSAGES}</messages_processed></meta></output>"
-    )
+/// Folds `before`, then `before ++ added` as a second firing, through one handler.
+async fn two_folds(
+    before: Vec<IngressMessage>,
+    added: Vec<IngressMessage>,
+    follow_up: &FollowUp,
+    outputs: [String; 2],
+) -> Fold {
+    let producer = scripted(outputs.into());
+    let (handler, store, dir, _project) =
+        handler_with_store(Arc::clone(&producer), default_test_config());
+    let mut first = before.clone();
+    first.extend(live_tail(follow_up, before.len() as u64 + 1));
+    let mut fold = Fold {
+        handler,
+        store,
+        producer,
+        _dir: dir,
+        messages: first,
+    };
+    fold.pass(None, "cfg0").await;
+    wait_for_count(&fold.producer.starts, 1).await;
+    wait_for_idle(&fold.store).await;
+    let settled = fold.pass(None, "cfg0").await;
+    assert!(!m0_text(&settled).is_empty());
+    let mut second = before;
+    second.extend(added);
+    second.extend(live_tail(follow_up, second.len() as u64 + 1));
+    fold.messages = second;
+    let fired = fold.pass(None, "cfg0").await;
+    assert_eq!(fired["history_summarizer"]["fired"], true, "{fired}");
+    wait_for_count(&fold.producer.starts, 2).await;
+    wait_for_idle(&fold.store).await;
+    assert_eq!(fold.rows().len(), 2);
+    fold
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
     for (case, source) in sources() {
         let follow_up = follow_up_for(case, source);
-        let source_messages = decoded(&native_records(&case.id, &source.id, "messages"));
-        let count = source_messages.len() as u64;
-        let producer = Arc::new(ProducerState::default());
-        producer.await_results.lock().unwrap().extend([
-            Ok(ProducerOutput {
-                text: baseline_output(),
-                length_capped: false,
-            }),
-            Ok(ProducerOutput {
-                text: translated(&source.approved_example, count, BASELINE_MESSAGES),
-                length_capped: false,
-            }),
-        ]);
-        let (handler, store, _dir, _project) =
-            handler_with_store(Arc::clone(&producer), default_test_config());
-        let call = |messages: Vec<IngressMessage>| {
-            let handler = &handler;
-            async move {
-                call_transform_request(
-                    handler,
-                    request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT),
-                )
-                .await
-            }
-        };
-        let mut before = baseline_messages();
-        before.extend(live_tail(follow_up, BASELINE_MESSAGES + 1));
-        call(before.clone()).await;
-        wait_for_count(&producer.starts, 1).await;
-        wait_for_idle(&store).await;
-        let baseline_served = call(before).await;
-        let m0_baseline = m0_text(&baseline_served);
-        assert!(
-            m0_baseline.contains("Baseline workspace setup"),
-            "{m0_baseline}"
-        );
-
-        let mut after = baseline_messages();
-        after.extend(source_messages.into_iter().map(|mut message| {
-            message.ordinal += BASELINE_MESSAGES;
-            message
-        }));
-        after.extend(live_tail(follow_up, BASELINE_MESSAGES + count + 1));
-        let fired = call(after.clone()).await;
-        assert_eq!(
-            fired["history_summarizer"]["fired"], true,
-            "{}: {fired}",
-            source.id
-        );
-        wait_for_count(&producer.starts, 2).await;
-        wait_for_idle(&store).await;
-        let rows = store.load_history_segments("ses").unwrap();
-        assert_eq!(rows.len(), 2, "{}", source.id);
-        let served = call(after).await;
+        let count = source.messages.len() as u64;
+        let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
+        let shifted = source_ingress(case, source)
+            .into_iter()
+            .map(|mut message| {
+                message.ordinal += SCAFFOLD_MESSAGES;
+                message
+            })
+            .collect();
+        let fold = two_folds(
+            baseline,
+            shifted,
+            follow_up,
+            [
+                baseline_output,
+                translated(&source.approved_example, count, SCAFFOLD_MESSAGES),
+            ],
+        )
+        .await;
+        let served = fold.pass(None, "cfg0").await;
         let [p1, ..] = approved_tiers(&source.approved_example);
-        let m1 = m1_text(&served);
+        let m1 = synthetic_text(&served, 1);
         assert!(m1.contains(&p1), "{}: P1 rides m1: {m1}", source.id);
+        let m0 = m0_text(&served);
+        assert!(m0.contains("Baseline workspace setup"), "{m0}");
         assert!(
-            !m0_text(&served).contains(&p1),
+            !m0.contains(&p1),
             "{}: m0 stays frozen at the baseline",
             source.id
         );
-        let witnessed = scenarios_serving(
-            case,
-            source,
-            ServingPath::Natural,
-            Tier::P1,
-            Some(Stage::M1),
-        );
-        let labels: Vec<String> = if witnessed.is_empty() {
-            vec![source.id.clone()]
-        } else {
-            witnessed.iter().map(|s| s.id.clone()).collect()
-        };
-        for label in labels {
-            Observation::new(&case.id, &label, "m1", Terminal::Served)
-                .with(json!({
-                    "source": source.id,
+        let witnessed = scenarios_serving(case, source, ServingPath::Natural, Tier::P1, Stage::M1);
+        emit_for(
+            || {
+                observation(&case.id, &source.id, "m1", Terminal::Served).with(json!({
                     "tier": "p1",
                     "path": "natural",
                     "baseline": "test-authored, earns no fidelity credit",
-                    "ordinal_offset": BASELINE_MESSAGES,
+                    "ordinal_offset": SCAFFOLD_MESSAGES,
                     "action": served["action"],
                 }))
-                .emit();
-        }
+            },
+            &witnessed,
+        );
     }
+}
+
+/// The served segment of the row titled `title`: from its heading to the next heading.
+fn segment_of<'r>(rendered: &'r str, title: &str) -> Option<&'r str> {
+    let at = rendered.find(title)?;
+    let segment = &rendered[at..];
+    Some(segment[..segment.find("\n\n## ").unwrap_or(segment.len())].trim_end())
 }
 
 /// The tier at which `rendered` serves the case row titled `title`, judged only against the
 /// approved bodies: the body it carries, title only for P4, or absent for P5.
 fn served_tier(rendered: &str, title: &str, approved: &[String; 4]) -> Tier {
-    let Some(at) = rendered.find(title) else {
+    let Some(segment) = segment_of(rendered, title) else {
         return Tier::P5;
     };
-    let segment = &rendered[at..];
-    let segment = segment[..segment.find("\n\n## ").unwrap_or(segment.len())].trim_end();
-    let tiers = [Tier::P1, Tier::P2, Tier::P3];
-    let carried: Vec<Tier> = tiers
+    let carried: Vec<Tier> = [Tier::P1, Tier::P2, Tier::P3]
         .into_iter()
         .zip(approved)
         .filter(|(_, body)| segment.ends_with(body.as_str()))
@@ -617,9 +609,15 @@ fn served_tier(rendered: &str, title: &str, approved: &[String; 4]) -> Tier {
         .collect();
     match carried.as_slice() {
         [tier] => *tier,
-        [] if segment == segment.lines().next().unwrap_or_default() => Tier::P4,
+        [] if segment.lines().count() == 1 => Tier::P4,
         other => panic!("{title}: ambiguous serving {other:?}: {segment}"),
     }
+}
+
+const TIERS: [Tier; 5] = [Tier::P1, Tier::P2, Tier::P3, Tier::P4, Tier::P5];
+
+fn rank(tier: Tier) -> usize {
+    TIERS.iter().position(|t| *t == tier).unwrap()
 }
 
 fn filler_row(sequence: i64, ordinal: i64) -> StoredHistorySegment {
@@ -639,87 +637,66 @@ fn filler_row(sequence: i64, ordinal: i64) -> StoredHistorySegment {
     }
 }
 
-async fn published_row(case: &Case, source: &Source) -> StoredHistorySegment {
-    let fold = fold_with(
-        default_test_config(),
-        Vec::new(),
-        decoded(&native_records(&case.id, &source.id, "messages")),
-        follow_up_for(case, source),
-        vec![source.approved_example.clone()],
-    )
-    .await;
-    let mut rows = fold.store.load_history_segments("ses").unwrap();
-    assert_eq!(rows.len(), 1, "{}", source.id);
-    rows.remove(0)
+/// `row` followed by `newer` test-authored rows, rendered at the natural curve (budget 0).
+fn render_aged(row: &StoredHistorySegment, newer: i64) -> String {
+    let mut rows = vec![row.clone()];
+    rows.extend((1..=newer).map(|k| filler_row(row.sequence + k, row.end_message + k)));
+    crate::decay_render::render_stored_history_segments(&rows, 0.0, |text: &str| {
+        crate::token_cache::cached_estimate_tokens(text)
+    })
+}
+
+/// The first number of newer rows at which `row` serves each tier.
+fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [i64; 5] {
+    let mut first: [Option<i64>; 5] = [None; 5];
+    for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
+        let tier = served_tier(&render_aged(row, newer), &row.title, approved);
+        first[rank(tier)].get_or_insert(newer);
+    }
+    TIERS.map(|tier| {
+        first[rank(tier)].unwrap_or_else(|| panic!("{id}: natural decay never served {tier:?}"))
+    })
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn natural_decay_serves_every_approved_tier_and_then_omits_the_segment() {
-    use crate::decay_render::render_stored_history_segments;
     for (case, source) in sources() {
-        let row = published_row(case, source).await;
+        let row = approved_fold(case, source).await.rows().remove(0);
         let approved = approved_tiers(&source.approved_example);
-        const TIERS: [Tier; 5] = [Tier::P1, Tier::P2, Tier::P3, Tier::P4, Tier::P5];
-        let mut first_age: [Option<i64>; 5] = [None; 5];
-        for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
-            let mut rows = vec![row.clone()];
-            rows.extend((1..=newer).map(|k| filler_row(row.sequence + k, row.end_message + k)));
-            let rendered = render_stored_history_segments(&rows, 0.0, |text: &str| {
-                crate::token_cache::cached_estimate_tokens(text)
-            });
-            let tier = served_tier(&rendered, &row.title, &approved);
-            let rank = TIERS.iter().position(|t| *t == tier).unwrap();
-            first_age[rank].get_or_insert(newer);
-        }
-        let ages: Vec<i64> = first_age
-            .iter()
-            .zip(TIERS)
-            .map(|(age, tier)| {
-                age.unwrap_or_else(|| panic!("{}: natural decay never served {tier:?}", source.id))
-            })
-            .collect();
+        let ages = first_ages(&row, &approved, &source.id);
         assert!(
             ages.windows(2).all(|pair| pair[0] < pair[1]),
             "{}: tiers decay in order: {ages:?}",
             source.id
         );
         for (tier, age) in TIERS.into_iter().zip(ages) {
-            let (path, stage) = match tier {
-                Tier::P5 => (ServingPath::Omission, Some(Stage::M0)),
-                Tier::P1 => (ServingPath::Natural, None),
-                _ => (ServingPath::Natural, Some(Stage::M0)),
-            };
-            let witnessed: Vec<String> = scenarios_serving(case, source, path, tier, stage)
-                .into_iter()
-                .filter(|s| tier != Tier::P1 || s.serving.stage == Some(Stage::M0))
-                .map(|s| s.id.clone())
-                .collect();
-            let tier_name = format!("{tier:?}").to_lowercase();
-            let labels = if witnessed.is_empty() {
-                vec![source.id.clone()]
+            let path = if tier == Tier::P5 {
+                ServingPath::Omission
             } else {
-                witnessed
+                ServingPath::Natural
             };
-            for label in labels {
-                Observation::new(
-                    &case.id,
-                    &label,
-                    format!("m0_decay_{tier_name}"),
-                    Terminal::Served,
-                )
-                .with(json!({
-                    "source": source.id,
-                    "tier": tier_name,
-                    "path": if tier == Tier::P5 { "omission" } else { "natural" },
-                    "newer_rows": age,
-                    "newer_rows_are": "test-authored filler",
-                    "importance": row.importance,
-                    "history_budget_tokens": 0,
-                    "body_matches_approved": tier != Tier::P5,
-                    "title_only": tier == Tier::P4,
-                }))
-                .emit();
-            }
+            let tier_name = format!("{tier:?}").to_lowercase();
+            emit_for(
+                || {
+                    observation(
+                        &case.id,
+                        &source.id,
+                        format!("m0_decay_{tier_name}"),
+                        Terminal::Served,
+                    )
+                    .with(json!({
+                        "tier": tier_name,
+                        "path": if tier == Tier::P5 { "omission" } else { "natural" },
+                        "newer_rows": age,
+                        "newer_rows_are": "test-authored filler",
+                        "importance": row.importance,
+                        "history_budget_tokens": 0,
+                        "body_matches_approved": tier != Tier::P5,
+                        "title_only": tier == Tier::P4,
+                    }))
+                },
+                &scenarios_serving(case, source, path, tier, Stage::M0),
+            );
         }
     }
 }
@@ -740,25 +717,27 @@ fn history_body(slice: &str) -> &str {
 async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_retains_it() {
     let estimate = crate::token_cache::cached_estimate_tokens;
     let mut high_importance_pressure = false;
-    for scenario in corpus()
+    for (case, scenario) in corpus()
         .cases
         .iter()
         .flat_map(|case| case.scenarios.iter().map(move |s| (case, s)))
         .filter(|(_, s)| s.serving.path == ServingPath::Pressure)
     {
-        let (case, scenario) = scenario;
         let source = case.source(&scenario.source).unwrap();
         let target = scenario.serving.tier.unwrap();
-        let fold = fold_with(
-            default_test_config(),
-            Vec::new(),
-            decoded(&native_records(&case.id, &source.id, "messages")),
+        let count = source.messages.len() as u64;
+        let newer_title = "Newer scaffold work";
+        let (newer, newer_output) = scaffold(count + 1, newer_title);
+        let fold = two_folds(
+            source_ingress(case, source),
+            newer,
             follow_up_for(case, source),
-            vec![source.approved_example.clone()],
+            [source.approved_example.clone(), newer_output.clone()],
         )
         .await;
-        let row = fold.store.load_history_segments("ses").unwrap().remove(0);
+        let row = fold.rows().remove(0);
         let approved = approved_tiers(&source.approved_example);
+        let newer_approved = approved_tiers(&newer_output);
 
         let generous = fold.pass(Some(60_000.0), "cfg-generous").await;
         let retained = session_history(&m0_text(&generous));
@@ -769,20 +748,30 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
             scenario.id
         );
 
-        let p1_tokens = estimate(&retained);
         let mut reached = None;
-        for (step, budget) in (1..p1_tokens).rev().enumerate() {
+        for (step, budget) in (1..estimate(&retained)).rev().enumerate() {
             let served = fold.pass(Some(budget as f64), &format!("cfg-{step}")).await;
             let slice = session_history(&m0_text(&served));
-            let tier = served_tier(history_body(&slice), &row.title, &approved);
-            if tier == target {
+            if served_tier(history_body(&slice), &row.title, &approved) == target {
                 reached = Some((budget, slice));
                 break;
             }
         }
         let (budget, slice) = reached
             .unwrap_or_else(|| panic!("{}: no positive budget served {target:?}", scenario.id));
+        assert!(budget > 0, "only a positive budget is a pressure witness");
         let body = history_body(&slice).to_owned();
+        let newer_tier = served_tier(&body, newer_title, &newer_approved);
+        assert!(
+            rank(newer_tier) < rank(target),
+            "{}: the guard demotes the oldest row first; the newer row serves {newer_tier:?}",
+            scenario.id
+        );
+        assert!(
+            estimate(&body) as f64 <= budget as f64,
+            "{}: the guarded history body fits its budget",
+            scenario.id
+        );
         let without_history_text: Vec<&str> = if target == Tier::P5 {
             scenario
                 .expectations
@@ -793,7 +782,8 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
         } else {
             Vec::new()
         };
-        let observation = Observation::new(&case.id, &scenario.id, "m0_pressure", Terminal::Served)
+        let mut record = observation(&case.id, &source.id, "m0_pressure", Terminal::Served)
+            .scenario(&scenario.id)
             .with(json!({
                 "observed_baseline": {
                     "obligations_left_without_history_text": without_history_text,
@@ -802,22 +792,20 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
                 "tier": format!("{target:?}").to_lowercase(),
                 "path": "pressure",
                 "importance": row.importance,
+                "newer_row_tier": format!("{newer_tier:?}").to_lowercase(),
                 "requested_history_budget_tokens": budget,
                 "estimator": ESTIMATOR,
                 "history_body_tokens": estimate(&body),
                 "wrapped_session_history_tokens": estimate(&slice),
+                "wrapped_slice_retries": "not observed by this witness",
                 "generous_budget_tokens": 60_000,
                 "generous_tier": "p1",
             }));
         if row.importance >= 80 {
             high_importance_pressure = true;
+            record = record.mark(marker::HIGH_IMPORTANCE_PRESSURE);
         }
-        let observation = if row.importance >= 80 {
-            observation.mark(marker::HIGH_IMPORTANCE_PRESSURE)
-        } else {
-            observation
-        };
-        observation.emit();
+        record.emit();
     }
     assert!(
         high_importance_pressure,
@@ -826,41 +814,30 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
     );
 }
 
-fn case_source(case: &str, source: &str) -> (&'static Case, &'static Source) {
-    let case = corpus().case(case).unwrap();
-    (case, case.source(source).unwrap())
-}
-
-fn source_ingress(case: &Case, source: &Source) -> Vec<IngressMessage> {
-    decoded(&native_records(&case.id, &source.id, "messages"))
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn a_rejected_primary_attempt_falls_back_and_publishes_the_fallback_output() {
     let (case, source) = case_source("C1", "C1.V1");
     let mut config = default_test_config();
     config.model_chain = vec!["test/primary".into(), "test/fallback".into()];
+    let invalid = "<output>not a history_segments document</output>".to_string();
     let fold = fold_with(
         config,
-        Vec::new(),
         source_ingress(case, source),
         follow_up_for(case, source),
-        vec![
-            "<output>not a history_segments document</output>".into(),
-            source.approved_example.clone(),
-        ],
+        vec![invalid.clone(), source.approved_example.clone()],
     )
     .await;
     wait_for_count(&fold.producer.starts, 2).await;
     wait_for_idle(&fold.store).await;
-    let models: Vec<String> = fold.attempts().into_iter().map(|a| a.model).collect();
-    assert_eq!(models, ["test/primary", "test/fallback"]);
     let attempts = fold.attempts();
+    let models: Vec<&str> = attempts.iter().map(|a| a.model.as_str()).collect();
+    assert_eq!(models, ["test/primary", "test/fallback"]);
+    attempts.iter().for_each(assert_real_generation);
     assert_eq!(
         attempts[0].prompt, attempts[1].prompt,
         "both attempts see the same input"
     );
-    let rows = fold.store.load_history_segments("ses").unwrap();
+    let rows = fold.rows();
     let [row] = rows.as_slice() else {
         panic!("one row from the fallback")
     };
@@ -868,15 +845,24 @@ async fn a_rejected_primary_attempt_falls_back_and_publishes_the_fallback_output
         row.p1.as_deref(),
         Some(approved_tiers(&source.approved_example)[0].as_str())
     );
-    Observation::new(
+    let attempt = |index: usize, output: &str, outcome: &str| {
+        json!({
+            "attempt": index + 1,
+            "model": attempts[index].model,
+            "prompt_sha256": sha256_hex(&attempts[index].prompt),
+            "output_sha256": sha256_hex(output),
+            "outcome": outcome,
+        })
+    };
+    observation(
         &case.id,
         &source.id,
         "generation_primary",
         Terminal::ValidationRejected,
     )
-    .with(json!({"model": "test/primary", "output": "no history_segments document"}))
+    .with(attempt(0, &invalid, "validation_rejected"))
     .emit();
-    Observation::new(
+    observation(
         &case.id,
         &source.id,
         "generation_fallback",
@@ -884,8 +870,8 @@ async fn a_rejected_primary_attempt_falls_back_and_publishes_the_fallback_output
     )
     .with(json!({
         "attempts": [
-            {"model": "test/primary", "outcome": "validation_rejected"},
-            {"model": "test/fallback", "outcome": "published"},
+            attempt(0, &invalid, "validation_rejected"),
+            attempt(1, &source.approved_example, "published"),
         ],
     }))
     .mark(marker::REJECTED_PRIMARY_FALLBACK)
@@ -903,13 +889,13 @@ async fn p1_only_output_inherits_p2_and_p3_and_records_them_as_unauthored() {
     assert!(!p1_only.contains("<p2>") && !p1_only.contains("<p3>"));
     let fold = fold_with(
         default_test_config(),
-        Vec::new(),
         source_ingress(case, source),
         follow_up_for(case, source),
         vec![p1_only],
     )
     .await;
-    let row = fold.store.load_history_segments("ses").unwrap().remove(0);
+    assert_real_generation(&fold.attempts()[0]);
+    let row = fold.rows().remove(0);
     assert_eq!(row.p1.as_deref(), Some(p1.as_str()));
     assert_eq!(
         row.p2.as_deref(),
@@ -922,7 +908,7 @@ async fn p1_only_output_inherits_p2_and_p3_and_records_them_as_unauthored() {
         "P3 inherits the denser P1"
     );
     assert_ne!(row.p2.as_deref(), Some(p2.as_str()));
-    Observation::new(
+    observation(
         &case.id,
         &source.id,
         "generation_inherited",
@@ -947,18 +933,17 @@ async fn a_mismatched_tier_close_heals_into_the_approved_bodies() {
     assert_ne!(mangled, source.approved_example);
     let fold = fold_with(
         default_test_config(),
-        Vec::new(),
         source_ingress(case, source),
         follow_up_for(case, source),
         vec![mangled],
     )
     .await;
-    let row = fold.store.load_history_segments("ses").unwrap().remove(0);
+    let row = fold.rows().remove(0);
     assert_eq!(
         [row.p1.as_deref(), row.p2.as_deref(), row.p3.as_deref()],
         [Some(p1.as_str()), Some(p2.as_str()), Some(p3.as_str())]
     );
-    Observation::new(
+    observation(
         &case.id,
         &source.id,
         "generation_healed",
@@ -971,8 +956,7 @@ async fn a_mismatched_tier_close_heals_into_the_approved_bodies() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_provisional_final_segment_is_discarded_after_valid_earlier_coverage() {
     let (case, source) = case_source("C4", "C4.V1");
-    let messages = source_ingress(case, source);
-    let count = messages.len() as u64;
+    let count = source.messages.len() as u64;
     let last = count;
     let two_segments = source
         .approved_example
@@ -990,27 +974,26 @@ async fn a_provisional_final_segment_is_discarded_after_valid_earlier_coverage()
         );
     let fold = fold_with(
         default_test_config(),
-        Vec::new(),
-        messages.clone(),
+        source_ingress(case, source),
         follow_up_for(case, source),
         vec![two_segments],
     )
     .await;
-    let rows = fold.store.load_history_segments("ses").unwrap();
+    assert_real_generation(&fold.attempts()[0]);
+    let rows = fold.rows();
     let [row] = rows.as_slice() else {
         panic!("only the earlier segment publishes: {rows:?}")
     };
     assert_eq!((row.start_message, row.end_message), (1, count as i64 - 1));
     let served = fold.pass(None, "cfg0").await;
-    let live = live_texts(&served).join("\n");
-    let BlockKind::Text { text } = messages[count as usize - 1].ck.content()[0].kind() else {
-        panic!("the last C4 message is text")
+    let Some(Part::Text { text, .. }) = source.messages.last().unwrap().parts.first() else {
+        panic!("the last C4 record opens with text")
     };
     assert!(
-        live.contains(&serde_json::to_string(text).unwrap()),
+        live_texts(&served).contains(&serde_json::to_string(text).unwrap()),
         "the discarded range stays live"
     );
-    Observation::new(
+    observation(
         &case.id,
         &source.id,
         "generation_final_discard",
@@ -1035,13 +1018,12 @@ async fn a_bad_citation_rejects_the_fact_set_while_history_publishes() {
     );
     let fold = fold_with(
         default_test_config(),
-        Vec::new(),
         source_ingress(case, source),
         follow_up_for(case, source),
         vec![with_facts],
     )
     .await;
-    assert_eq!(fold.store.load_history_segments("ses").unwrap().len(), 1);
+    assert_eq!(fold.rows().len(), 1);
     let latest = fold
         .store
         .load("ses")
@@ -1051,20 +1033,19 @@ async fn a_bad_citation_rejects_the_fact_set_while_history_publishes() {
         .memory_reviewer_nonadmission
         .latest
         .expect("the rejected fact set records a nonadmission");
-    assert!(
-        matches!(
-            latest.code,
-            MemoryReviewerNonadmissionCode::FactSetRejected { .. }
-        ),
-        "{latest:?}"
+    assert_eq!(
+        latest.code,
+        MemoryReviewerNonadmissionCode::FactSetRejected {
+            failure: ExtractionFailure::UnknownAlias
+        }
     );
-    Observation::new(
+    observation(
         &case.id,
         &source.id,
         "generation_citation_rejected",
         Terminal::Published,
     )
-    .with(json!({"facts": "rejected", "history": "published"}))
+    .with(json!({"facts": "rejected: unknown_alias", "history": "published"}))
     .emit();
 }
 
@@ -1077,26 +1058,19 @@ async fn a_same_length_source_drift_during_the_run_rejects_publication() {
         .identity_by_mid
         .remove(&successor.mid)
         .unwrap();
-    let producer = Arc::new(ProducerState::default());
-    producer
-        .await_results
-        .lock()
-        .unwrap()
-        .push_back(Ok(ProducerOutput {
-            text: source.approved_example.clone(),
-            length_capped: false,
-        }));
+    let producer = scripted(vec![source.approved_example.clone()]);
     let (handler, store, _dir, _project) =
         handler_with_store(Arc::clone(&producer), default_test_config());
     let hook_store = Arc::clone(&store);
     let mid = successor.mid.clone();
-    let identities: Vec<BlockIdentity> = drifted;
     *producer.on_await_output.lock().unwrap() = Some(Box::new(move || {
-        hook_store.upsert_block_identities_for_test("ses", [(mid, identities)]);
+        hook_store.upsert_block_identities_for_test("ses", [(mid, drifted)]);
     }));
     let mut messages = source_ingress(case, source);
-    let count = messages.len() as u64;
-    messages.extend(live_tail(follow_up_for(case, source), count + 1));
+    messages.extend(live_tail(
+        follow_up_for(case, source),
+        messages.len() as u64 + 1,
+    ));
     let fired = call_transform_request(
         &handler,
         request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT),
@@ -1117,7 +1091,7 @@ async fn a_same_length_source_drift_during_the_run_rejects_publication() {
         )
     );
     assert_eq!(summarizer.counters.invalidated, 1);
-    Observation::new(
+    observation(
         &case.id,
         &source.id,
         "generation_drift",
@@ -1135,21 +1109,17 @@ async fn an_oversized_lead_truncates_producer_input_and_earns_no_generation_cred
     let (case, source) = case_source("C5", "C5.V1");
     let mut config = default_test_config();
     config.history_summarizer_context_limit_tokens = 32_000;
-    let oversized = vec![ck(
+    let mut messages = vec![ck(
         "cf-oversized-log",
         1,
         &format!("Pasted build log: {}", "warning unused ".repeat(9_000)),
     )];
-    let messages: Vec<IngressMessage> = source_ingress(case, source)
-        .into_iter()
-        .map(|mut message| {
-            message.ordinal += 1;
-            message
-        })
-        .collect();
+    messages.extend(source_ingress(case, source).into_iter().map(|mut message| {
+        message.ordinal += 1;
+        message
+    }));
     let fold = fold_with(
         config,
-        oversized,
         messages,
         follow_up_for(case, source),
         vec![source.approved_example.clone()],
@@ -1157,35 +1127,51 @@ async fn an_oversized_lead_truncates_producer_input_and_earns_no_generation_cred
     .await;
     let attempt = fold.attempts().remove(0);
     assert!(attempt.prompt.contains("tokens truncated by the daemon"));
-    let mut exposures = Vec::new();
-    for obligation in &case.obligations {
-        for span in &obligation.evidence {
-            let seen = exposure(&attempt.prompt, &span.text);
-            assert_eq!(seen, Exposure::Absent, "{}: {}", obligation.id, span.text);
-            exposures.push(
-                json!({"obligation": obligation.id, "exposure": seen, "generation_credit": false}),
-            );
-        }
+    assert_eq!(
+        prompt_ordinal_range(&attempt.prompt),
+        Some((1, 1)),
+        "the budget-bounded chunk holds only the oversized lead, presented truncated"
+    );
+    let entries = exposures(case, source, &attempt.prompt);
+    for (seen, _, _, entry) in &entries {
+        assert_eq!(*seen, Exposure::Absent, "{entry}");
     }
-    assert!(fold.store.load_history_segments("ses").unwrap().is_empty());
-    Observation::new(
+    assert!(fold.rows().is_empty());
+    let last_failure = fold
+        .store
+        .load("ses")
+        .unwrap()
+        .meta
+        .history_summarizer
+        .last_failure;
+    assert!(
+        last_failure
+            .as_deref()
+            .is_some_and(|failure| failure.starts_with("validate rejected")),
+        "{last_failure:?}"
+    );
+    observation(
         &case.id,
         &source.id,
         "generation_truncated",
         Terminal::InputTruncated,
     )
-    .with(json!({"exposures": exposures, "lead": "test-authored oversized message"}))
-    .mark(marker::OBLIGATION_TRUNCATED)
+    .with(json!({
+        "lead": "test-authored oversized message",
+        "chunk": [1, 1],
+        "exposures": entries.into_iter().map(|e| e.3).collect::<Vec<_>>(),
+        "validation": last_failure,
+    }))
+    .mark(marker::OBLIGATION_ABSENT_AFTER_TRUNCATION)
     .emit();
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
-    use crate::decay_render::render_stored_history_segments;
     let (case, source) = case_source("C1", "C1.V1");
-    let row = published_row(case, source).await;
-    let [p1, ..] = approved_tiers(&source.approved_example);
-    let estimate = |text: &str| crate::token_cache::cached_estimate_tokens(text);
+    let row = approved_fold(case, source).await.rows().remove(0);
+    let approved = approved_tiers(&source.approved_example);
+    let [p1, ..] = &approved;
 
     let legacy = StoredHistorySegment {
         sequence: row.sequence - 1,
@@ -1197,38 +1183,40 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
         legacy: 1,
         ..Default::default()
     };
-    let rendered = render_stored_history_segments(&[legacy, row.clone()], 0.0, estimate);
+    let rendered = crate::decay_render::render_stored_history_segments(
+        &[legacy, row.clone()],
+        0.0,
+        |text: &str| crate::token_cache::cached_estimate_tokens(text),
+    );
     assert!(
         rendered.contains("Legacy flat row\nU: a pre-v2 flat summary body"),
         "{rendered}"
     );
     assert!(
-        rendered.ends_with(&p1),
+        rendered.ends_with(p1.as_str()),
         "the tiered row keeps its P1: {rendered}"
     );
 
+    let ages = first_ages(&row, &approved, &source.id);
+    let (p2_age, p4_age) = (ages[rank(Tier::P2)], ages[rank(Tier::P4)]);
     let mut sparse = row.clone();
     sparse.p2 = None;
     sparse.p3 = None;
-    let mut fallback_ages = Vec::new();
-    for newer in 0..60 {
-        let mut rows = vec![sparse.clone()];
-        rows.extend((1..=newer).map(|k| filler_row(row.sequence + k, row.end_message + k)));
-        let out = render_stored_history_segments(&rows, 0.0, estimate);
-        let at = out.find(&row.title).unwrap();
-        let segment = &out[at..];
-        let segment = &segment[..segment.find("\n\n## ").unwrap_or(segment.len())];
-        if segment.lines().count() == 1 {
-            break;
-        }
-        assert!(!segment.is_empty());
+    for newer in p2_age..p4_age {
+        let out = render_aged(&sparse, newer);
+        let segment = segment_of(&out, &row.title).unwrap();
         assert!(
-            segment.ends_with(&p1),
-            "a missing P2 or P3 falls back to P1: {segment}"
+            segment.ends_with(p1.as_str()),
+            "at {newer} newer rows a missing P2 or P3 falls back to P1: {segment}"
         );
-        fallback_ages.push(newer);
     }
-    Observation::new(
+    let at_p4 = render_aged(&sparse, p4_age);
+    assert_eq!(
+        segment_of(&at_p4, &row.title).unwrap().lines().count(),
+        1,
+        "the empty P4 still renders title only"
+    );
+    observation(
         &case.id,
         &source.id,
         "m0_legacy_and_sparse",
@@ -1236,7 +1224,8 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
     )
     .with(json!({
         "legacy_row": "renders flat content, no tier claim",
-        "sparse_row_fallback_to_p1_until_newer_rows": fallback_ages.last(),
+        "sparse_row_falls_back_to_p1_for_newer_rows": [p2_age, p4_age - 1],
+        "sparse_row_title_only_at": p4_age,
     }))
     .emit();
 }
@@ -1244,15 +1233,8 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
 #[tokio::test(flavor = "current_thread")]
 async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
     let (case, source) = case_source("C3", "C3.V1");
-    let fold = fold_with(
-        default_test_config(),
-        Vec::new(),
-        source_ingress(case, source),
-        follow_up_for(case, source),
-        vec![source.approved_example.clone()],
-    )
-    .await;
-    let row = fold.store.load_history_segments("ses").unwrap().remove(0);
+    let fold = approved_fold(case, source).await;
+    let row = fold.rows().remove(0);
     let approved = approved_tiers(&source.approved_example);
     for budget in [0.0, -1.0] {
         let served = fold.pass(Some(budget), &format!("cfg-{budget}")).await;
@@ -1266,19 +1248,16 @@ async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
             "a nonpositive budget disables the guard, so it is no pressure witness"
         );
     }
-    let attempt = fold.attempts().remove(0);
-    assert!(
-        attempt.prompt.contains("<new_messages>") && attempt.prompt.contains("\u{ab}s1\u{bb}"),
-        "the producer saw the real assembled prompt, not a placeholder"
-    );
 
     let mut disabled = default_test_config();
     disabled.model_chain.clear();
     let producer = Arc::new(ProducerState::default());
     let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), disabled);
     let mut messages = source_ingress(case, source);
-    let count = messages.len() as u64;
-    messages.extend(live_tail(follow_up_for(case, source), count + 1));
+    messages.extend(live_tail(
+        follow_up_for(case, source),
+        messages.len() as u64 + 1,
+    ));
     let response = call_transform_request(
         &handler,
         request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT),
@@ -1286,5 +1265,43 @@ async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
     .await;
     assert_ne!(response["history_summarizer"]["fired"], true, "{response}");
     assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    assert!(producer.attempts.lock().unwrap().is_empty());
     assert!(store.load_history_segments("ses").unwrap().is_empty());
+}
+
+#[test]
+fn an_observation_is_written_once_privately_and_reads_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("observations");
+    let record = observation("C1", "C1.V1", "probe", Terminal::Served)
+        .scenario("C1.S1")
+        .with(json!({"tier": "p1"}));
+    let path = record.emit_to(&target);
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let read: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(read["owner"], OWNER);
+    assert_eq!(read["corpus_sha256"], CORPUS_SHA256);
+    assert_eq!(read["scenario"], "C1.S1");
+    assert_eq!(read["source"], "C1.V1");
+    assert_eq!(read["terminal"], "served");
+    assert_eq!(read["schema_version"], 1);
+    let leftovers: Vec<_> = std::fs::read_dir(&target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        leftovers.len(),
+        1,
+        "no temporary file remains: {leftovers:?}"
+    );
+    let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| record.emit_to(&target)));
+    assert!(again.is_err(), "a second write of one record is refused");
 }

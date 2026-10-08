@@ -27,7 +27,7 @@ are supplied. No tests or external model calls run here.
   withdraws aliases whose whole presented parts do not survive truncation.
 - [citations_golden.rs:457-482,509-522][golden] contains same-budget truncation
   and whitespace-transformation checks. Both are unaudited and unrun here.
-- [lib.rs:22428-22463][lib], `TestProducer::start`, records each attempt's
+- [lib.rs:22431-22466][lib], `TestProducer::start`, records each attempt's
   system text, user prompt, and model in `ProducerState::attempts` since U2
   (#719). The private test recorder supplies the complete producer request; no
   production export obtains these observations.
