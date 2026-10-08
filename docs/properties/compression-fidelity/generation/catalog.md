@@ -15,7 +15,7 @@ dependencies". The original plan's inspected SHA-256 is
 `b33aaf8508174d39ea578cb6927d1524bbee1c3f2496c8a22511349beb35a384`.
 It names revision `1555f00c702296406186f8c859045014e8e8a4d9`; HEAD has moved.
 The intervening diff changes Curator activation, lifecycle, worker, tests, and
-operations documentation. All code references here are verified against the U1 branch tip,
+operations documentation. All code references here are verified against the U2 branch tip,
 not the plan's source offsets. Contract statements remain claims under test.
 Plan line citations are historical provenance only; the
 [catalog index](../README.md#scope-and-provenance) maps them to published
@@ -167,15 +167,18 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - No case-linked native-to-producer exposure observations
-are captured.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` records exact,
+transformed, or absent exposure, flagging omitted tool outputs, for every
+C1-C6 material span at the producer's complete recorded input, and absence
+after a truncated oversized lead for C5 (U2, #719). Human meaning review
+is absent.
 Guarantee: Every material native obligation has an explicit exposure outcome
 at the real producer input, and absent evidence receives no generation-fidelity
 credit.
 Check: `always` - For every case-marked obligation, require its native
 identity/span and a linked observation of the exact assembled system text,
-user prompt, and selected model. The private test recorder must capture all
-three; its current user-prompt-only log is insufficient.
+user prompt, and selected model. The private test recorder captures all
+three per attempt since U2 (#719).
 An exposed claim must identify the supporting presented fragment with its
 transformation status, while omitted, filtered, or truncated evidence must be
 recorded as unexercised input for that obligation. Machine checks verify
@@ -286,8 +289,9 @@ Open questions:
 Type: safety
 Reachability: explicit-config-only
 Status: active
-Exercised: not yet - Existing stage tests have not been run, and no fidelity
-replay joins their observations.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` joins authored
+tiers, healed and inherited tiers, rejected-primary fallback, final discard,
+citation rejection, and same-length drift to publication per source (U2, #719).
 Guarantee: Generation evidence distinguishes authored output, parser fallback,
 healed coverage, extraction outcome, and actual publication for the same
 source-bound attempt.
@@ -326,8 +330,9 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: not yet - No fidelity campaign constructs a case-linked material
-source-to-publication witness.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` publishes every
+C1-C6 approved example from real prompt assembly through real validation;
+outputs are scripted, so no real-model credit follows (U2, #719).
 Guarantee: A generation campaign reaches at least one real
 assembly-to-publication situation containing independently annotated material
 source evidence.
@@ -472,15 +477,14 @@ simulation requirement is inferred from these records.
 
 KTD1 keeps one Rust-owned corpus with byte identity owned by the evaluation
 part; KTD2 places the replay
-under [the existing private test module:18252-18274][lib]. The private
-[ProducerState:22322-22360][lib] and [handler helper:22626-22652][lib] exist.
-U1 (#718) adds the corpus; the replay module and evaluation command do not
-exist yet. Their absence is
-a handoff dependency, not permission to export internals or create a framework.
-The test recorder must be extended to retain the complete system text, user
-prompt, and selected model required by generation claims. Its existing
-[start method:22416-22441][lib] ignores system/model arguments. Keep that
-extension under private test ancestry; no production export is needed.
+under [the existing private test module:18252-18281][lib]. The private
+[ProducerState:22327-22367][lib] and [handler helper:22651-22656][lib] exist.
+U1 (#718) adds the corpus and U2 (#719) the replay module; the evaluation
+command does not exist yet. Its absence is a handoff dependency, not
+permission to export internals or create a framework. Since U2 the
+[start method:22431-22466][lib] records the complete system text, user prompt,
+and selected model of each attempt under private test ancestry; no production
+export was needed.
 
 Preserve the settled unit order: U1 defines the corpus; U2 depends on U1; U3
 depends on U1/U2 and qualifies its own fixture lane; U4 depends on U2 and the
@@ -491,13 +495,13 @@ corrections before those prerequisites. No extra blinding gate is introduced.
 Portfolio totals: eight active records, eight index rows, eight evidence files;
 seven safety and one reachability; seven `always` and one `sometimes`; three
 `explicit-config-only` and five `test-only`. No liveness record is added
-because semantic preservation is not a bounded recovery claim. Seven remain
-`Exercised: not yet`; cf-source-obligation-independence is partial after U1. See [existing checks](existing-checks.md) and
+because semantic preservation is not a bounded recovery claim. Four remain
+`Exercised: not yet`; four are partial after U1 and U2. See [existing checks](existing-checks.md) and
 [fault mapping](fault-map.md) for the unaudited evidence and missing harnesses.
 
 Mechanical documentation validation passes for field order, record/index/file
 agreement, evidence headings and lengths, links, and source line bounds.
-Referenced tracked source files match the U1 branch tip; the local plan digest
+Referenced tracked source files match the U2 branch tip; the local plan digest
 is unchanged. These checks do not exercise any cataloged system property.
 
 [chunk]: ../../../../crates/daemon/src/history_summarizer_chunk.rs

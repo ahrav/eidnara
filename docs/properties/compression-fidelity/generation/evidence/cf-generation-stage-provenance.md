@@ -80,7 +80,7 @@ checks are reuse targets, not duplicated atomicity or healing properties.
 - Conclusion: Resolved: stored tiers alone are insufficient.
 
 ### Q: Can the complete stage join use existing private observations?
-- Sources examined: Plan KTD2, lib.rs:18252-18274, and publication orchestration.
+- Sources examined: Plan KTD2, lib.rs:18252-18281, and publication orchestration.
 - Findings: Private test ancestry and scripted execution exist. Capturing
   pre-heal ranges and authored presence still needs implementation work.
 - Missing evidence: The joined replay, including Curator lifecycle attribution

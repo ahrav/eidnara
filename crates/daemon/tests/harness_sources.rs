@@ -1830,3 +1830,286 @@ async fn mixed_sessions_create_pending_only_for_message_text() {
     );
     assert_eq!(pending_now.len(), expected_messages.len() + 1);
 }
+
+#[path = "../src/compression_fidelity_corpus.rs"]
+#[allow(dead_code)]
+mod compression_fidelity_corpus;
+#[path = "../src/compression_fidelity_observation.rs"]
+#[allow(dead_code)]
+mod compression_fidelity_observation;
+
+const C6_OWNER: &str = "daemon.harness_sources.c6_exact_read";
+
+fn c6_source() -> &'static compression_fidelity_corpus::Source {
+    let case = compression_fidelity_corpus::corpus().case("C6").unwrap();
+    case.source("C6.V1").unwrap()
+}
+
+fn c6_record(
+    records: &'static [compression_fidelity_corpus::NativeMessage],
+    id: &str,
+) -> &'static compression_fidelity_corpus::NativeMessage {
+    records.iter().find(|record| record.info.id == id).unwrap()
+}
+
+/// The corpus's raw C6 records, as the OpenCode source adapter reads them.
+fn c6_records(field: &str) -> Vec<Value> {
+    let corpus: Value = serde_json::from_slice(compression_fidelity_corpus::CORPUS_BYTES).unwrap();
+    corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["id"] == "C6")
+        .and_then(|case| case["sources"].as_array())
+        .and_then(|sources| sources.iter().find(|source| source["id"] == "C6.V1"))
+        .and_then(|source| source[field].as_array())
+        .unwrap()
+        .clone()
+}
+
+/// A message occurrence's complete identity in tuple order.
+fn c6_target<'a>(session: &'a str, message_id: &'a str, block: &'a str) -> [(&'a str, &'a str); 5] {
+    [
+        ("project_id", PROJECT),
+        ("harness", "opencode"),
+        ("session_id", session),
+        ("message_id", message_id),
+        ("block_index", block),
+    ]
+}
+
+/// Every live message descriptor at `at`, paged within a fixed budget of pages.
+fn live_messages_at(kernel: &KernelStore, at: i64) -> Vec<kernel::LiveDescriptor> {
+    const MAX_PAGES: usize = 8;
+    let mut rows = Vec::new();
+    let mut after: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let page = kernel
+            .live_source_descriptors(
+                OccurrenceClass::Messages,
+                at,
+                after.as_deref(),
+                NonZeroUsize::new(4).unwrap(),
+                &budget(Duration::from_secs(5)),
+            )
+            .unwrap();
+        rows.extend(page.rows);
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return rows,
+        }
+    }
+    panic!("the live descriptor set exceeds {MAX_PAGES} pages");
+}
+
+/// The one descriptor whose complete identity, revision, representation, and span match the
+/// independent target, never the first row and never a digest match alone.
+fn select<'d>(
+    rows: &'d [kernel::LiveDescriptor],
+    target: &[(&str, &str)],
+    revision: &str,
+) -> Option<&'d kernel::LiveDescriptor> {
+    let matches: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            let identity: Vec<(&str, &str)> = row
+                .detail
+                .identity
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            identity == target
+                && row.detail.revision == revision
+                && row.detail.representation == "text"
+                && row.detail.span.is_none()
+        })
+        .collect();
+    assert!(matches.len() <= 1, "two descriptors claim one occurrence");
+    matches.into_iter().next()
+}
+
+fn read(kernel: &KernelStore, row: &kernel::LiveDescriptor) -> Result<Vec<u8>, ArtifactErrorKind> {
+    kernel
+        .read_artifact(&kernel::ArtifactHandle {
+            digest: row.detail.artifact_digest.clone(),
+            evidence_id: row.detail.evidence_id.clone(),
+        })
+        .map_err(|error| error.kind())
+}
+
+#[test]
+fn c6_original_revision_bytes_read_exactly_after_succession_and_reopen() {
+    use compression_fidelity_corpus::block_text;
+    use compression_fidelity_observation::{Observation, Terminal};
+    let source = c6_source();
+    let original_record = c6_record(&source.messages, "msg_cf_c6_02");
+    let successor_record = c6_record(&source.successors, "msg_cf_c6_02");
+    let pasted_record = c6_record(&source.messages, "msg_cf_c6_03");
+    let original_text = block_text(&original_record.parts[1]).unwrap();
+    let successor_text = block_text(&successor_record.parts[1]).unwrap();
+    let original_revision = original_record.info.time.completed.unwrap().to_string();
+    let successor_revision = successor_record.info.time.completed.unwrap().to_string();
+    let pasted_revision = pasted_record.info.time.created.to_string();
+    let session = SessionIdentity {
+        project_id: PROJECT.to_string(),
+        harness: Harness::OpenCode,
+        session_id: source.session_id.clone(),
+    };
+    let target = c6_target(&session.session_id, "msg_cf_c6_02", "1");
+    let observed_at = successor_record.info.time.completed.unwrap() as i64 + DAY_MS;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Corpus::open(dir.path());
+    fixture.seed();
+    let publisher = fixture.publisher();
+    for record in c6_records("messages") {
+        for unit in opencode_units(&session, &record).unwrap() {
+            publisher.publish(&unit, observed_at).unwrap();
+        }
+    }
+    let mut empty = opencode_user("msg_cf_c6_empty", "", 1_758_700_000_000);
+    empty["info"]["sessionID"] = json!(session.session_id);
+    for unit in opencode_units(&session, &empty).unwrap() {
+        publisher.publish(&unit, observed_at).unwrap();
+    }
+    let saved = fixture.tip();
+    let original = select(
+        &live_messages_at(&fixture.kernel, saved),
+        &target,
+        &original_revision,
+    )
+    .expect("the original is live before succession")
+    .clone();
+
+    let mut replaced = None;
+    for record in c6_records("successors") {
+        for unit in opencode_units(&session, &record).unwrap() {
+            let published = publisher.publish(&unit, observed_at).unwrap();
+            if unit.revision == successor_revision {
+                replaced = published.replaced_object_id;
+            }
+        }
+    }
+    assert_eq!(replaced.as_deref(), Some(original.object_id.as_str()));
+    assert_eq!(
+        Arc::strong_count(&fixture.kernel),
+        1,
+        "no other handle keeps the first incarnation open"
+    );
+    drop(fixture);
+
+    let reopened = Corpus::open(dir.path());
+    let historical = live_messages_at(&reopened.kernel, saved);
+    let selected = select(&historical, &target, &original_revision)
+        .expect("historical selection finds the original after reopen");
+    assert_eq!(selected.object_id, original.object_id);
+    let bytes = read(&reopened.kernel, selected).expect("succession leaves the evidence readable");
+    assert_eq!(bytes, original_text.as_bytes(), "exact original bytes");
+
+    let current = live_messages_at(&reopened.kernel, reopened.tip());
+    assert!(select(&current, &target, &original_revision).is_none());
+    let succeeded = select(&current, &target, &successor_revision).unwrap();
+    let successor_bytes = read(&reopened.kernel, succeeded).unwrap();
+    assert_eq!(
+        successor_bytes.len(),
+        bytes.len(),
+        "the successor keeps the length"
+    );
+    assert_ne!(successor_bytes, bytes, "the wrong revision has other bytes");
+    assert_eq!(successor_bytes, successor_text.as_bytes());
+
+    let other_occurrence = select(
+        &historical,
+        &c6_target(&session.session_id, "msg_cf_c6_03", "1"),
+        &pasted_revision,
+    )
+    .expect("the pasted copy is its own occurrence");
+    assert_eq!(
+        other_occurrence.detail.artifact_digest, selected.detail.artifact_digest,
+        "equal text shares a digest"
+    );
+    assert_ne!(
+        other_occurrence.detail.occurrence_id,
+        selected.detail.occurrence_id
+    );
+    assert_ne!(other_occurrence.object_id, selected.object_id);
+
+    let normalized = original_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_ne!(
+        normalized.as_bytes(),
+        bytes.as_slice(),
+        "a whitespace-normalized transcript of C6 differs from the bytes the reader returned"
+    );
+
+    let empty_row = select(
+        &historical,
+        &c6_target(&session.session_id, "msg_cf_c6_empty", "0"),
+        "1758700000000",
+    )
+    .unwrap();
+    assert_eq!(
+        read(&reopened.kernel, empty_row),
+        Ok(Vec::new()),
+        "present and empty"
+    );
+
+    reopened
+        .kernel
+        .delete_artifact(kernel::ArtifactDeletionRequest {
+            intent: intent("c6-delete-original"),
+            identity: kernel::ArtifactDeletionIdentity::EvidenceId(
+                selected.detail.evidence_id.clone(),
+            ),
+            kind: kernel::ArtifactDeletionKind::Delete,
+            operator_id: None,
+            target_locator: None,
+            reason: None,
+            deleted_at: observed_at,
+        })
+        .unwrap();
+    assert_eq!(
+        read(&reopened.kernel, selected),
+        Err(ArtifactErrorKind::ReferenceUnavailable),
+        "retired evidence is a refusal, not an empty block"
+    );
+    if let Some(row) = select(
+        &live_messages_at(&reopened.kernel, saved),
+        &target,
+        &original_revision,
+    ) {
+        assert_eq!(
+            read(&reopened.kernel, row),
+            Err(ArtifactErrorKind::ReferenceUnavailable),
+            "a historical descriptor whose evidence was deleted still refuses its read"
+        );
+    }
+
+    Observation::new(
+        C6_OWNER,
+        compression_fidelity_corpus::CORPUS_SHA256,
+        "C6",
+        &source.id,
+        "exact_read",
+        Terminal::ReadExact,
+    )
+    .scenario("C6.S6")
+    .with(json!({
+        "selected_object_id": selected.object_id,
+        "selected_at_commit_seq": saved,
+        "revision": original_revision,
+        "byte_length": bytes.len(),
+        "sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "controls": {
+            "wrong_revision": "same length, other bytes",
+            "equal_text_other_occurrence": "same digest, other occurrence",
+            "normalized_substitute": "bytes differ",
+            "absent_vs_empty": "empty block reads present and empty",
+            "deleted_evidence": "reference_unavailable",
+        },
+        "consumer_exact_recovery": "unavailable",
+    }))
+    .emit();
+}

@@ -18256,6 +18256,11 @@ mod tests {
     mod blocking_unit_tests;
     #[path = "compression_fidelity_corpus.rs"]
     mod compression_fidelity_corpus;
+    #[path = "compression_fidelity_observation.rs"]
+    #[allow(dead_code)]
+    mod compression_fidelity_observation;
+    #[path = "compression_fidelity_replay_tests.rs"]
+    mod compression_fidelity_replay_tests;
     #[path = "compression_fidelity_tests.rs"]
     mod compression_fidelity_tests;
     #[path = "fold_authority_handler_tests.rs"]
@@ -22334,6 +22339,8 @@ mod tests {
         outputs: Mutex<VecDeque<String>>,
         next_fact: Mutex<Option<String>>,
         prompts: Mutex<Vec<String>>,
+        /// Every `start` call's complete model input, in order.
+        attempts: Mutex<Vec<ProducerAttempt>>,
         harnesses: Mutex<Vec<String>>,
         sessions: Mutex<Vec<String>>,
         purges: Mutex<Vec<String>>,
@@ -22357,6 +22364,14 @@ mod tests {
         block_close_attempt: std::sync::atomic::AtomicBool,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct ProducerAttempt {
+        session_id: String,
+        system: String,
+        prompt: String,
+        model: String,
     }
 
     struct TestProducerFactory {
@@ -22416,13 +22431,23 @@ mod tests {
         async fn start(
             &mut self,
             session_id: &str,
-            _system: &str,
+            system: &str,
             prompt: &str,
-            _model: &str,
+            model: &str,
         ) -> Result<RunHandle, HistorySummarizerProducerError> {
             if let Some(hook) = self.state.on_start.lock().expect("start hook mutex").take() {
                 hook();
             }
+            self.state
+                .attempts
+                .lock()
+                .expect("attempts mutex")
+                .push(ProducerAttempt {
+                    session_id: session_id.to_string(),
+                    system: system.to_string(),
+                    prompt: prompt.to_string(),
+                    model: model.to_string(),
+                });
             let n = self.state.starts.fetch_add(1, Ordering::SeqCst) + 1;
             self.state
                 .sessions
