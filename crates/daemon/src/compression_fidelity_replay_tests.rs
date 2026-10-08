@@ -652,6 +652,9 @@ fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [
     for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
         let tier = served_tier(&render_aged(row, newer), &row.title, approved);
         first[rank(tier)].get_or_insert(newer);
+        if first.iter().all(Option::is_some) {
+            break;
+        }
     }
     TIERS.map(|tier| {
         first[rank(tier)].unwrap_or_else(|| panic!("{id}: natural decay never served {tier:?}"))
@@ -748,17 +751,35 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
             scenario.id
         );
 
-        let mut reached = None;
-        for (step, budget) in (1..estimate(&retained)).rev().enumerate() {
-            let served = fold.pass(Some(budget as f64), &format!("cfg-{step}")).await;
+        // The search requires the served tier's rank to be nonincreasing as the budget grows.
+        let served_at = async |budget: usize, probe: usize| {
+            let served = fold
+                .pass(Some(budget as f64), &format!("cfg-{probe}"))
+                .await;
             let slice = session_history(&m0_text(&served));
-            if served_tier(history_body(&slice), &row.title, &approved) == target {
-                reached = Some((budget, slice));
-                break;
+            (
+                served_tier(history_body(&slice), &row.title, &approved),
+                slice,
+            )
+        };
+        let (mut budget, mut high) = (1, estimate(&retained));
+        let (mut tier, mut slice) = served_at(budget, 0).await;
+        let mut probes = 1;
+        while rank(tier) >= rank(target) && high > budget + 1 {
+            let middle = budget + (high - budget) / 2;
+            let (middle_tier, middle_slice) = served_at(middle, probes).await;
+            probes += 1;
+            if rank(middle_tier) >= rank(target) {
+                (budget, tier, slice) = (middle, middle_tier, middle_slice);
+            } else {
+                high = middle;
             }
         }
-        let (budget, slice) = reached
-            .unwrap_or_else(|| panic!("{}: no positive budget served {target:?}", scenario.id));
+        assert_eq!(
+            tier, target,
+            "{}: no positive budget served {target:?}",
+            scenario.id
+        );
         let body = history_body(&slice).to_owned();
         let newer_tier = served_tier(&body, newer_title, &newer_approved);
         assert!(
