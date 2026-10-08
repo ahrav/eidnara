@@ -772,3 +772,42 @@ fn the_hint_stopword_check_equals_the_stopword_list() {
             .count()
     );
 }
+
+/// The fragment as the cap defines it: every word of the neutralized compressed text joined by
+/// single spaces, then cut to the cap.
+fn whole_text_fragment(snippet: &str) -> String {
+    let compressed = crate::terse_text_compression::compress(
+        snippet,
+        crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
+    );
+    let normalized = neutralize_user_hint_markup(&compressed)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if utf16_len(&normalized) <= USER_HINT_FRAGMENT_CHAR_CAP {
+        return normalized;
+    }
+    let mut truncated = utf16_prefix(&normalized, USER_HINT_FRAGMENT_CHAR_CAP - 1)
+        .trim_end()
+        .to_string();
+    truncated.push('…');
+    truncated
+}
+
+proptest::proptest! {
+    #[test]
+    fn the_fragment_prefix_equals_the_whole_text_fragment(
+        pieces in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "quasar", "nebula", "<b>", "&", ">", "§12§", "§3§ ", "日本語", "😀", "é", " ",
+                "  ", "\n", "\t", "the", "a", "and", "x".repeat(50).leak() as &str,
+                "configuration", "message", "https://x.y/z", "`code`", "deadbeef1234567",
+                "U: hello", "\u{a0}", "…",
+            ]),
+            0..200,
+        ),
+    ) {
+        let text = pieces.join("");
+        proptest::prop_assert_eq!(user_hint_fragment(&text), whole_text_fragment(&text));
+    }
+}

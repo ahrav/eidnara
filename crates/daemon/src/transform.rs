@@ -9026,6 +9026,24 @@ fn user_hint_fragment(snippet: &str) -> String {
         snippet,
         crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
     );
+    // Escaping, tag stripping, and whitespace joining act on whole words, so a prefix that ends
+    // at whitespace renders the same leading words as the whole text. The prefix is used when it
+    // alone exceeds the cap; a shorter prefix cannot show whether more words follow.
+    const PREFIX_BYTES: usize = 4 * USER_HINT_FRAGMENT_CHAR_CAP;
+    if compressed.len() > PREFIX_BYTES
+        && let Some(cut) = compressed
+            .char_indices()
+            .find(|(offset, character)| *offset >= PREFIX_BYTES && character.is_whitespace())
+            .map(|(offset, _)| offset)
+    {
+        let fragment = one_line_fragment(
+            &neutralize_user_hint_markup(&compressed[..cut]),
+            USER_HINT_FRAGMENT_CHAR_CAP,
+        );
+        if fragment.ends_with('…') {
+            return fragment;
+        }
+    }
     one_line_fragment(
         &neutralize_user_hint_markup(&compressed),
         USER_HINT_FRAGMENT_CHAR_CAP,
@@ -9088,8 +9106,22 @@ fn truncate_hint_to_total_cap(wrapped: &str, limit: usize) -> String {
 }
 
 fn one_line_fragment(text: &str, limit: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if utf16_len(&normalized) <= limit {
+    // Words are joined by single spaces until the joined text is known to exceed the limit;
+    // the truncation below reads only the first `limit - 1` units of that prefix.
+    let mut normalized = String::new();
+    let mut units = 0usize;
+    for word in text.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+            units += 1;
+        }
+        normalized.push_str(word);
+        units += utf16_len(word);
+        if units > limit {
+            break;
+        }
+    }
+    if units <= limit {
         return normalized;
     }
     let mut truncated = utf16_prefix(&normalized, limit.saturating_sub(1))
