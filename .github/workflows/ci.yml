@@ -156,6 +156,9 @@ jobs:
               # Rust pin beside it, so a pin move selects the TypeScript job.
               - 'crates/daemon/testdata/compression-fidelity.json'
               - 'crates/daemon/src/compression_fidelity_corpus.rs'
+              # The delivery campaign's decay oracle checks itself against the
+              # decay ladder's golden vectors.
+              - 'crates/context-core/testdata/decay-golden.json'
 
   gates:
     name: gates

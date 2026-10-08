@@ -159,11 +159,11 @@ is a refusal, not a pass.
 ### Delivery campaign
 
 The fixture's queue also takes `filler:N`, which answers one request with
-exactly `N` compact fixture-authored rows, `echo`, which answers with the
+at most `N` compact fixture-authored rows, `echo`, which answers with the
 fixture's default segments whose bodies repeat the presented text, and a
 scenario ID with an `@p1-only` suffix, which serves the approved example
 without its P2 and P3 bodies. `script-status` counts filler and echo answers
-as `filled`.
+as `filled` and reports the importance each kind of fixture row carries.
 
 `packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` drives each
 source through `src/compression-fidelity/campaign.ts` in one OpenCode session

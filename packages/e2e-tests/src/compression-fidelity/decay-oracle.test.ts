@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { budgetPressure, tierAt, tierWindows } from "./decay-oracle";
 
-const GOLDEN = resolve(import.meta.dir, "../../../../crates/context-core/testdata/decay-golden.json");
+const GOLDEN = resolve(
+    import.meta.dir,
+    "../../../../crates/context-core/testdata/decay-golden.json",
+);
 
 interface Golden {
     tier_cases: {

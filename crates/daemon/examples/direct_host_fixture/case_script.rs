@@ -1,9 +1,10 @@
 //! Corpus case scripts for the direct host fixture.
 //!
 //! A selection names up to [`MAX_QUEUE`] entries: compression fidelity scenario IDs, a scenario
-//! ID with the [`P1_ONLY`] suffix, [`FILLER`], optionally `filler:N` for exactly `N` rows, or
-//! [`ECHO`] for the fixture's default answer, whose bodies repeat the presented text. The fixture resolves each scenario ID through the digest-checked corpus, and every
-//! later summarizer request consumes the front entry when it is admitted. A scenario entry binds
+//! ID with the [`P1_ONLY`] suffix, [`FILLER`], optionally `filler:N` for at most `N` rows, or
+//! [`ECHO`] for the fixture's default answer, whose bodies repeat the presented text. The
+//! fixture resolves each scenario ID through the digest-checked corpus, and every later
+//! summarizer request consumes the front entry when it is admitted. A scenario entry binds
 //! its source's approved example to the ordinals the request actually presents; a filler entry
 //! answers with compact fixture-authored segments over the presented records, so a scenario can
 //! age behind newer rows whose bodies stay small. A request that does not present the scenario
@@ -34,16 +35,19 @@ pub const FILLER: &str = "filler";
 
 /// The queue entry that answers one request with the fixture's default segments, so newer rows
 /// can carry bodies as large as the messages they cover.
-pub const ECHO: &str = "echo";
+const ECHO: &str = "echo";
+
+/// The importance of every segment in the default answer.
+pub const ECHO_IMPORTANCE: u8 = 50;
 
 /// Presented records per segment in the default answer.
 const SUMMARY_CHUNK: usize = 5;
 
 /// The scenario-entry suffix that serves the approved example with its P2 and P3 bodies removed,
 /// so the parser's fallback supplies them.
-pub const P1_ONLY: &str = "@p1-only";
+const P1_ONLY: &str = "@p1-only";
 
-/// The importance of every fixture-authored segment, so a witness can compute the curve over
+/// The importance of every filler and lead-in segment, so a witness can compute the curve over
 /// its rows from their count alone.
 pub const FIXTURE_IMPORTANCE: u8 = 30;
 
@@ -57,7 +61,7 @@ const MIN_LEAK_PROBE_CHARS: usize = 16;
 const FILLER_CHUNK: usize = 2;
 
 /// The most rows one `filler:N` entry may ask for.
-pub const MAX_FILLER_ROWS: usize = 64;
+const MAX_FILLER_ROWS: usize = 64;
 
 /// One presented record of the summarizer's input: its ordinal range and its text with alias
 /// markers removed. One record can carry several consecutive messages of the same role.
@@ -149,10 +153,13 @@ pub struct ScriptStatus {
     pub armed: bool,
     pub remaining: usize,
     pub bound: u64,
-    /// Delivered filler answers.
+    /// Delivered filler and echo answers.
     pub filled: u64,
     pub mismatched: u64,
     pub exhausted: u64,
+    /// The importance of every filler and lead-in segment, and of every echo segment.
+    pub filler_importance: u8,
+    pub echo_importance: u8,
     /// The current selection's delivered bindings, oldest first.
     pub bindings: Vec<Binding>,
 }
@@ -340,6 +347,8 @@ impl CaseScript {
             filled: self.filled,
             mismatched: self.mismatched,
             exhausted: self.exhausted,
+            filler_importance: FIXTURE_IMPORTANCE,
+            echo_importance: ECHO_IMPORTANCE,
             bindings: self.bindings.clone(),
         }
     }
@@ -441,8 +450,9 @@ fn bind(
     );
     if p1_only {
         for tag in ["p2", "p3"] {
+            let close_tag = format!("</{tag}>");
             let open = text.find(&format!("<{tag}>"))?;
-            let close = open + text[open..].find(&format!("</{tag}>"))? + tag.len() + 3;
+            let close = open + text[open..].find(&close_tag)? + close_tag.len();
             text.replace_range(open..close, "");
         }
     }
@@ -494,7 +504,7 @@ pub fn scripted_summary(records: &[Record]) -> String {
             .replace('<', "&lt;")
             .replace('>', "&gt;");
         segments.push_str(&format!(
-            r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
+            r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="{ECHO_IMPORTANCE}"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
         ));
     }
     output_document(&segments, records.last().map_or(1, |record| record.end + 1))
@@ -508,16 +518,21 @@ fn output_document(segments: &str, next: u64) -> String {
 }
 
 /// Compact segments over every presented record, with bodies that name only their range, so a
-/// newer filler row costs a few tokens at any tier. `rows` splits the records into that many
-/// contiguous segments, as evenly as the record count allows; without it each segment covers two
-/// records.
+/// newer filler row costs a few tokens at any tier. Without `rows` each segment covers two
+/// records; `rows` splits the records into that many contiguous segments, as evenly as the
+/// record count allows, or one per record when fewer are presented.
 fn filler(records: &[Record], rows: Option<usize>) -> String {
-    let count = rows.map_or(records.len().div_ceil(FILLER_CHUNK), |rows| {
-        rows.min(records.len())
-    });
+    let groups: Vec<&[Record]> = match rows {
+        None => records.chunks(FILLER_CHUNK).collect(),
+        Some(rows) => {
+            let count = rows.min(records.len());
+            (0..count)
+                .map(|k| &records[k * records.len() / count..(k + 1) * records.len() / count])
+                .collect()
+        }
+    };
     let mut segments = String::new();
-    for k in 0..count {
-        let group = &records[k * records.len() / count..(k + 1) * records.len() / count];
+    for group in groups {
         let (start, end) = (group[0].start, group[group.len() - 1].end);
         segments.push_str(&format!(
             "<history_segment start=\"{start}\" end=\"{end}\" title=\"Fixture filler {start} to {end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored filler for messages {start} to {end}.</p1><p2>Filler {start} to {end}.</p2><p3>Filler.</p3><p4 /></history_segment>"
@@ -684,13 +699,40 @@ mod tests {
     }
 
     #[test]
-    fn a_p1_only_entry_removes_the_p2_and_p3_bodies() {
+    fn a_p1_only_entry_removes_the_case_p2_and_p3_bodies_and_keeps_the_lead_in() {
         let source = sources().find(|source| source.id == "C1.V1").unwrap();
+        let mut records = vec![record(1, 1, "lead-in turn")];
+        records.extend(presented(source, 2));
         let mut script = armed(&[&format!("{}{P1_ONLY}", scenario_for(source))]);
-        let answer = script.answer(&presented(source, 1)).unwrap().unwrap();
-        assert!(answer.text.contains("<p1>"));
-        assert!(!answer.text.contains("<p2>") && !answer.text.contains("<p3>"));
-        assert!(answer.text.contains("<p4 />"));
+        let answer = script.answer(&records).unwrap().unwrap();
+        let case_at = answer.text.find("start=\"2\"").unwrap();
+        let (lead, case) = answer.text.split_at(case_at);
+        assert!(lead.contains("<p2>Fixture lead-in.</p2>"));
+        assert!(case.contains("<p1>") && case.contains("<p4 />"));
+        assert!(!case.contains("<p2>") && !case.contains("<p3>"));
+        let binding = answer.binding.as_ref().unwrap();
+        assert_eq!(
+            binding.output_sha256,
+            format!("{:x}", Sha256::digest(answer.text.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn plain_filler_keeps_two_records_per_segment_and_echo_repeats_the_text() {
+        let records: Vec<Record> = (1..=5).map(|k| record(k, k, "note")).collect();
+        let mut script = armed(&[FILLER, ECHO]);
+        let filled = script.answer(&records).unwrap().unwrap().text;
+        for range in [
+            "start=\"1\" end=\"2\"",
+            "start=\"3\" end=\"4\"",
+            "start=\"5\" end=\"5\"",
+        ] {
+            assert!(filled.contains(range), "{range}");
+        }
+        assert!(filled.contains(&format!("importance=\"{FIXTURE_IMPORTANCE}\"")));
+        let echoed = script.answer(&records).unwrap().unwrap().text;
+        assert!(echoed.contains("<p1>note; note; note; note; note</p1>"));
+        assert!(echoed.contains(&format!("importance=\"{ECHO_IMPORTANCE}\"")));
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
     AGING_SERVING,
     CaseDriver,
+    CONTEXT_LIMIT,
     type Delivery,
     eidnaraConfig,
     M1_SERVING,
@@ -128,6 +129,8 @@ async function decayCampaign(h: RustTestHarness, caseId: string, source: string)
         const warm = await driver.observe("warm");
         expectCredited(warm, "p1");
         expect([warm.stage, warm.newer, warm.segment]).toEqual(["m1", m1.newer, m1.segment]);
+        // A warm repeat serves the frozen window; a rematerializing pass is HARD.
+        expect(warm.pass.decision).not.toBe("HARD");
         observation(driver, m1Scenario.id, warm, ["cf-delivery-warm-repeat-input"]);
 
         const cold = await driver.observeCold("cold-m0", M1_SERVING);
@@ -146,7 +149,6 @@ async function decayCampaign(h: RustTestHarness, caseId: string, source: string)
     for (const scenario of decayRows) {
         const tier = scenario.serving.tier ?? "p1";
         const delivery = await driver.ageTo(tier, budget);
-        if (!delivery) throw new Error(`${scenario.id}: ${tier} was passed before it was served`);
         expectCredited(delivery, tier);
         expect(delivery.budget).toBe(budget);
         expect([delivery.verdict.tier, delivery.curve]).toEqual([tier, tier]);
@@ -171,7 +173,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () =>
 
     beforeAll(async () => {
         h = await RustTestHarness.create({
-            modelContextLimit: M1_SERVING.contextLimit,
+            modelContextLimit: CONTEXT_LIMIT,
             eidnaraConfig: eidnaraConfig(M1_SERVING),
         });
     }, 600_000);
@@ -210,6 +212,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () =>
                 expect([before.stage, before.verdict.tier]).toEqual(["m0", "p1"]);
                 const pressed = await driver.pressure();
                 expectCredited(pressed, "p5");
+                expect(pressed.budget).toBeGreaterThan(0);
                 expect(pressed.curve).not.toBe("p5");
                 expect(TIER_RANK[pressed.verdict.tier ?? "p1"]).toBeGreaterThan(
                     TIER_RANK[pressed.curve],
@@ -235,7 +238,6 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () =>
             await driver.publish(`${scenario.id}@p1-only`);
             const budget = (await driver.observeCold("aging-budget", AGING_SERVING)).budget;
             const delivery = await driver.ageTo("p2", budget);
-            if (!delivery) throw new Error("C1 passed P2 before it was served");
             expect(delivery.curve).toBe("p2");
             expect(delivery.verdict.tier).toBe("p1");
             expect(delivery.verdict.refusals).toEqual([]);
@@ -243,14 +245,36 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () =>
                 "cf-delivery-parser-fallback-input",
             ]);
 
+            // A real request whose capture is filed under another identity supplies no
+            // matching observation, so the judge refuses it.
+            h.tagCaptures({ sessionId: "ses_other", caseId: "C1", scenarioId: "unmatched" });
+            await h.sendPrompt(driver.sessionId, `${scenario.followUp.prompt} (untagged)`);
+            h.tagCaptures({ sessionId: driver.sessionId, caseId: "C1", scenarioId: scenario.id });
+            const untagged = h
+                .retainedCaptures({ sessionId: driver.sessionId })
+                .find((entry) => JSON.stringify(entry.request.body).includes("(untagged)"));
+            expect(
+                h.mock
+                    .requests()
+                    .some((request) => JSON.stringify(request.body).includes("(untagged)")),
+            ).toBe(true);
             const missing = judgeDelivery({
-                capture: h.retainedCaptures({ sessionId: "ses_never_driven" }).at(-1),
+                capture: untagged,
                 pass: delivery.pass,
                 title: driver.title,
                 bodies: driver.bodies,
                 leakProbes: driver.source?.leakProbes ?? [],
             });
             expect(missing.refusals).toEqual(["missing_capture"]);
+            emitObservation({
+                case: "C1",
+                source: driver.sourceId,
+                scenario: scenario.id,
+                stage: "missing-capture",
+                terminal: "unqualified",
+                markers: ["cf-delivery-missing-capture-input"],
+                detail: { refusals: missing.refusals },
+            });
         },
         CASE_TIMEOUT_MS,
     );

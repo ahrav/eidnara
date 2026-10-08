@@ -19,6 +19,8 @@ const BOUNDARIES = [0.201, 0.729, 1.322, 2.587] as const;
 /** Estimated tokens of one segment at P1 through P4. */
 const TIER_COST = [322, 109, 35, 20] as const;
 const PRESSURE_FLOOR = 0.1;
+/** Newest rows whose importance moves the pressure; older rows add no cost. */
+const PRESSURE_WINDOW = 249;
 const TIERS = ["p1", "p2", "p3", "p4", "p5"] as const;
 
 /** The rendered tier of a row at 1-based `position` from the newest, with no anchor overlap. */
@@ -38,19 +40,14 @@ function tierIndex(position: number, importance: number, pressure: number): numb
 export function budgetPressure(importancesNewestFirst: readonly number[], budget: number): number {
     if (budget <= 0) return 1;
     let natural = 0;
-    for (const [i, importance] of importancesNewestFirst.entries()) {
+    for (const [i, importance] of importancesNewestFirst.slice(0, PRESSURE_WINDOW).entries()) {
         natural += TIER_COST[tierIndex(i + 1, importance, 1)] ?? 0;
     }
     return Math.max(PRESSURE_FLOOR, natural / budget);
 }
 
 /** The rows of a campaign session, newest first: `newer` rows, the case, then `older` rows. */
-function caseRows(
-    caseImportance: number,
-    newer: number,
-    older: number,
-    rest: number,
-): number[] {
+function caseRows(caseImportance: number, newer: number, older: number, rest: number): number[] {
     return [...Array<number>(newer).fill(rest), caseImportance, ...Array<number>(older).fill(rest)];
 }
 
@@ -62,8 +59,7 @@ export function curveTier(
 ): ServedTier {
     const importance = importancesNewestFirst[position - 1];
     if (importance === undefined) throw new Error(`no row at position ${position}`);
-    const pressure = budgetPressure(importancesNewestFirst, budget);
-    return TIERS[tierIndex(position, importance, pressure)] ?? "p5";
+    return tierAt(position, importance, budgetPressure(importancesNewestFirst, budget));
 }
 
 /**

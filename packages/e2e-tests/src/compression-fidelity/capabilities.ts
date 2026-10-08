@@ -4,7 +4,7 @@ export const PINNED_EIDNARA_TOOLS = [
     "eidnara_reduce",
     "eidnara_search",
 ] as const;
-export const PINNED_SEARCH_SOURCES = ["memory"] as const;
+const PINNED_SEARCH_SOURCES = ["memory"] as const;
 
 const EXACT_EXPANSION = /expand|exact|source_read|transcript|native_source/i;
 
@@ -40,10 +40,10 @@ export function surfaceOfRequest(
 
 export function capabilityDrift(surface: CapabilitySurface): string[] {
     const drift: string[] = [];
-    if (surface.eidnaraTools.join() !== [...PINNED_EIDNARA_TOOLS].join()) {
+    if (surface.eidnaraTools.join() !== [...PINNED_EIDNARA_TOOLS].sort().join()) {
         drift.push(`eidnara tools ${surface.eidnaraTools.join(",") || "none"}`);
     }
-    if (surface.searchSources.join() !== [...PINNED_SEARCH_SOURCES].join()) {
+    if (surface.searchSources.join() !== [...PINNED_SEARCH_SOURCES].sort().join()) {
         drift.push(`eidnara_search sources ${surface.searchSources.join(",") || "none"}`);
     }
     if (surface.exactExpansionTools.length > 0) {

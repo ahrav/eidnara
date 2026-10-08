@@ -51,16 +51,22 @@ function collapse(text: string): string {
     return text.split(/\s+/).filter(Boolean).join(" ");
 }
 
-/** The title and P1-P3 bodies of a reviewed output's case segment. */
-export function reviewedTiers(reviewedOutput: string): { title: string; bodies: string[] } {
+/** The title, importance, and P1-P3 bodies of a reviewed output's case segment. */
+export function reviewedTiers(reviewedOutput: string): {
+    title: string;
+    importance: number;
+    bodies: string[];
+} {
     const title = /title="([^"]*)"/.exec(reviewedOutput)?.[1];
     if (title === undefined) throw new Error("reviewed output has no title");
+    const importance = /importance="(\d+)"/.exec(reviewedOutput)?.[1];
+    if (importance === undefined) throw new Error("reviewed output has no importance");
     const bodies = REVIEWED_TIERS.map((tag) => {
         const body = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(reviewedOutput)?.[1];
         if (body === undefined) throw new Error(`reviewed output has no ${tag}`);
         return body;
     });
-    return { title, bodies };
+    return { title, importance: Number(importance), bodies };
 }
 
 /**
@@ -240,21 +246,42 @@ export function servedTier(
 }
 
 /** The m0 history wrapper and the m1 window's wrapper of rows published since. */
-const HISTORY_WRAPPER = /<session-history(?:-since)?>[\s\S]*?<\/session-history(?:-since)?>/g;
+const M0_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/;
+const M1_WRAPPER = /<session-history-since>[\s\S]*?<\/session-history-since>/;
 
-/**
- * Leak probes found anywhere in the request outside the history wrappers: the system text and
- * every message, including the live tail.
- */
-export function rawTailLeaks(capture: RetainedCapture, probes: readonly string[]): string[] {
-    const system = capture.request.body.system;
-    const outside = [
-        typeof system === "string" ? system : messageText({ content: system }),
-        ...captureTexts(capture),
-    ]
-        .map((text) => collapse(text.replace(HISTORY_WRAPPER, "")))
+/** Where served texts carry the case segment titled `title`. */
+export function stageOf(texts: readonly string[], title: string): "m1" | "m0" | "absent" {
+    for (const text of texts) {
+        if (M1_WRAPPER.exec(text)?.[0].includes(title)) return "m1";
+        if (M0_WRAPPER.exec(text)?.[0].includes(title)) return "m0";
+    }
+    return "absent";
+}
+
+/** Leak probes found in `texts` outside both history wrappers. */
+export function leaksOutside(texts: readonly string[], probes: readonly string[]): string[] {
+    const outside = texts
+        .map((text) =>
+            collapse(
+                text
+                    .replace(new RegExp(M0_WRAPPER, "g"), "")
+                    .replace(new RegExp(M1_WRAPPER, "g"), ""),
+            ),
+        )
         .join("\n");
     return probes.filter((probe) => outside.includes(probe));
+}
+
+/** Leak probes in the request's system text or any message, outside the history wrappers. */
+export function rawTailLeaks(capture: RetainedCapture, probes: readonly string[]): string[] {
+    const system = capture.request.body.system;
+    return leaksOutside(
+        [
+            typeof system === "string" ? system : messageText({ content: system }),
+            ...captureTexts(capture),
+        ],
+        probes,
+    );
 }
 
 /** Every pass line logged for `sessionId`, oldest first. */

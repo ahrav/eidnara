@@ -200,9 +200,12 @@ describe("compression fidelity delivery judgment", () => {
     it("reads the title and tier bodies of a reviewed output", () => {
         expect(
             reviewedTiers(
-                '<history_segment start="1" end="2" title="T"><p1>one</p1><p2>two</p2><p3>three</p3><p4 /></history_segment>',
+                '<history_segment start="1" end="2" title="T" importance="70"><p1>one</p1><p2>two</p2><p3>three</p3><p4 /></history_segment>',
             ),
-        ).toEqual({ title: "T", bodies: ["one", "two", "three"] });
+        ).toEqual({ title: "T", importance: 70, bodies: ["one", "two", "three"] });
+        expect(() =>
+            reviewedTiers('<history_segment title="T"><p1>a</p1><p2>b</p2><p3>c</p3>'),
+        ).toThrow("importance");
     });
 
     it("writes an owner-only observation only when a directory is named", () => {

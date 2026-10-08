@@ -78,7 +78,7 @@ Three control commands drive it:
   `fixture_script_mismatch`, and a request after the queue is empty fails as
   `fixture_script_exhausted`; neither returns default text. A scheduled
   `typed-failure` consumes no entry.
-- `filler:N` answers one request with exactly `N` compact rows, `echo`
+- `filler:N` answers one request with at most `N` compact rows, `echo`
   answers with the default segments whose bodies repeat the presented text,
   and a scenario ID with `@p1-only` serves its approved example without the
   P2 and P3 bodies.

@@ -306,12 +306,8 @@ export class RustTestHarness {
     /**
      * Restarts `opencode serve` against the same data directory.
      * OpenCode's database, the module store, and the direct host persist across restarts.
-     * A `modelContextLimit` replaces the mock model's context limit for this and later restarts.
      */
-    async restart(
-        opts: { eidnaraConfig?: Record<string, unknown>; modelContextLimit?: number } = {},
-    ): Promise<void> {
-        if (opts.modelContextLimit !== undefined) this.modelContextLimit = opts.modelContextLimit;
+    async restart(opts: { eidnaraConfig?: Record<string, unknown> } = {}): Promise<void> {
         await this.opencodeInstance.kill();
         this.opencodeInstance = await RustTestHarness.spawnServe({
             env: this.env,

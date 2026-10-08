@@ -325,8 +325,8 @@ function emptyRustPassTimings(): RustPassTimings {
     };
 }
 
-/** How the final-array admission heuristic judged the pass's candidate, and its charged size. */
-export interface InvocationAdmission {
+/** How the final-array admission heuristic judged the last validated candidate, and its size. */
+interface InvocationAdmission {
     branch: "fits" | "shrinks" | "limit_unknown" | "declined" | "none";
     bytes: number;
     chargedTokens: number;
