@@ -580,6 +580,17 @@ fn whole_word_lookup_matches_the_lexical_tokenizer() {
     );
 }
 
+#[test]
+fn whole_word_chars_match_the_lowercase_check_on_ascii() {
+    for ch in '\0'..='\u{7f}' {
+        assert_eq!(
+            is_whole_word_char(ch),
+            ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric),
+            "{ch:?}"
+        );
+    }
+}
+
 fn sorted_prefix_lexical_tokens(text: &str) -> BTreeSet<String> {
     text.to_lowercase()
         .split(|ch: char| !ch.is_alphanumeric())

@@ -8540,11 +8540,9 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
 /// A word ends where the tokenizer's lowercased text would split: U+0130 lowercases to `i` plus a
 /// combining dot, so it bounds a word instead of joining it.
 fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
-    let is_word_char =
-        |ch: char| ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric);
     let mut word_start = None;
     for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
-        match (is_word_char(character), word_start) {
+        match (is_whole_word_char(character), word_start) {
             (true, None) => word_start = Some(index),
             (false, Some(start)) => {
                 let word = &text[start..index];
@@ -8563,6 +8561,15 @@ fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
         }
     }
     None
+}
+
+/// Each ASCII alphanumeric lowercases to an ASCII alphanumeric, so the ASCII branch skips the lowercase check.
+fn is_whole_word_char(ch: char) -> bool {
+    if ch.is_ascii() {
+        ch.is_ascii_alphanumeric()
+    } else {
+        ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric)
+    }
 }
 
 /// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
