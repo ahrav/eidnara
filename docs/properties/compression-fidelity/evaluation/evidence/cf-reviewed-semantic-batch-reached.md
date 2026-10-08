@@ -40,8 +40,8 @@ not yet.
 - [Whole-pool report test](../../../../../packages/e2e-tests/src/incident-pool/runner.test.ts#L1214-L1229)
   uses fake-child envelopes. Evaluation-complete there is not human-reviewed
   compression evidence. Status: `unaudited`.
-- [Current package scripts](../../../../../packages/e2e-tests/package.json#L6-L25)
-  have no evaluation command. [CI](../../../../../.github/workflows/ci.yml#L973-L1000)
+- [Current package scripts](../../../../../packages/e2e-tests/package.json#L6-L26)
+  have no evaluation command. [CI](../../../../../.github/workflows/ci.yml#L977-L1004)
   invokes fixture and Rust E2E checks, not real semantic capture or review.
 
 ## Failure scenario

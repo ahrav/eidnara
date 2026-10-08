@@ -43,7 +43,7 @@ artifacts, not production transforms. Exercise: not yet.
 - [Incident exit policy](../../../../../packages/e2e-tests/src/incident-pool/report.ts#L672-L710)
   has dependency and baseline rules, not the fidelity gate. Local commit
   `de84c0d0` removes `known-red` from result lanes; current lines 65-66 confirm it.
-- [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L25) and
+- [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L26) and
   filesystem inventory show no fidelity comparison command or review checks.
 
 ## Failure scenario

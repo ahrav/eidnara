@@ -472,8 +472,8 @@ simulation requirement is inferred from these records.
 
 KTD1 keeps one Rust-owned corpus with byte identity owned by the evaluation
 part; KTD2 places the replay
-under [the existing private test module:18252-18266][lib]. The private
-[ProducerState:22322-22355][lib] and [handler helper:22626-22652][lib] exist.
+under [the existing private test module:18252-18274][lib]. The private
+[ProducerState:22322-22360][lib] and [handler helper:22626-22652][lib] exist.
 U1 (#718) adds the corpus; the replay module and evaluation command do not
 exist yet. Their absence is
 a handoff dependency, not permission to export internals or create a framework.
@@ -491,8 +491,8 @@ corrections before those prerequisites. No extra blinding gate is introduced.
 Portfolio totals: eight active records, eight index rows, eight evidence files;
 seven safety and one reachability; seven `always` and one `sometimes`; three
 `explicit-config-only` and five `test-only`. No liveness record is added
-because semantic preservation is not a bounded recovery claim. All eight remain
-`Exercised: not yet`. See [existing checks](existing-checks.md) and
+because semantic preservation is not a bounded recovery claim. Seven remain
+`Exercised: not yet`; cf-source-obligation-independence is partial after U1. See [existing checks](existing-checks.md) and
 [fault mapping](fault-map.md) for the unaudited evidence and missing harnesses.
 
 Mechanical documentation validation passes for field order, record/index/file

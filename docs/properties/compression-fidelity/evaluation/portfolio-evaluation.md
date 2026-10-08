@@ -9,7 +9,8 @@ older-catalog limitations, and the explicit `_lenses` placement deviation.
 
 ## Portfolio disposition
 
-The [catalog](catalog.md) contains eight active, unexercised records and eight
+The [catalog](catalog.md) contains eight active records, seven unexercised and
+cf-corpus-byte-identity partial after U1, and eight
 matching evidence files. Seven are safety records and one is reachability.
 Semantics are six `always`, one `sometimes`, and one `always-or-unreached`.
 All eight surfaces are `test-only`: the proposed evaluator and forwarding path

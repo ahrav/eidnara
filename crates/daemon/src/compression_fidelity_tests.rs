@@ -562,3 +562,201 @@ fn scenario_expectations_and_entries_are_consistent() {
         }]
     );
 }
+
+#[test]
+fn references_resolve_within_their_case() {
+    let unknown = |from: &str, to: &str| {
+        vec![Violation::UnknownReference {
+            from: from.into(),
+            to: to.into(),
+        }]
+    };
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["scenarios"][0]["forbidden"][0] = "C1.X99".into();
+    assert_eq!(validate_value(value), unknown("C1.S1", "C1.X99"));
+
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["scenarios"][0]["expectations"][0]["obligation"] = "C1.O99".into();
+    let violations = validate_value(value);
+    assert!(
+        violations.contains(&unknown("C1.S1", "C1.O99")[0]),
+        "{violations:?}"
+    );
+
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["obligations"][0]["evidence"][0]["source"] = "C1.V9".into();
+    assert_eq!(validate_value(value), unknown("C1.O1", "C1.V9"));
+
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["scenarios"][0]["source"] = "C1.V9".into();
+    let violations = validate_value(value);
+    assert!(
+        violations.contains(&unknown("C1.S1", "C1.V9")[0]),
+        "{violations:?}"
+    );
+
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["follow_ups"][0]["source"] = "C1.V9".into();
+    let violations = validate_value(value);
+    assert!(
+        violations.contains(&unknown("C1.F1", "C1.V9")[0]),
+        "{violations:?}"
+    );
+
+    let mut value = corpus_value();
+    case_mut(&mut value, 2)["obligations"][3]["memory"] = "C3.M9".into();
+    assert_eq!(validate_value(value), unknown("C3.O4", "C3.M9"));
+}
+
+#[test]
+fn allowed_losses_and_memory_obligations_keep_their_entry_rules() {
+    let entry_problem = |id: &str, problem| {
+        vec![Violation::Entry {
+            id: id.into(),
+            problem,
+        }]
+    };
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["allowed_losses"][0]["materiality"] = "material".into();
+    assert_eq!(
+        validate_value(value),
+        entry_problem("C1.L1", "an allowed loss is marked nonmaterial")
+    );
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["allowed_losses"][0]["evidence"] = json!([]);
+    assert_eq!(
+        validate_value(value),
+        entry_problem(
+            "C1.L1",
+            "an allowed loss names the native detail it permits losing"
+        )
+    );
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["allowed_losses"][0]["evidence"][0]["text"] = "about two years".into();
+    assert_eq!(
+        validate_value(value),
+        [Violation::SpanUnresolved {
+            owner: "C1.L1".into(),
+            problem: "the span bytes differ from its quoted text",
+        }]
+    );
+
+    let mut value = corpus_value();
+    let span = case_mut(&mut value, 2)["obligations"][0]["evidence"][0].clone();
+    case_mut(&mut value, 2)["obligations"][3]["evidence"] = json!([span]);
+    assert_eq!(
+        validate_value(value),
+        entry_problem(
+            "C3.O4",
+            "an obligation cites native evidence or a memory example, not both"
+        )
+    );
+    let mut value = corpus_value();
+    case_mut(&mut value, 2)["obligations"][3]
+        .as_object_mut()
+        .unwrap()
+        .remove("memory");
+    assert_eq!(
+        validate_value(value),
+        entry_problem(
+            "C3.O4",
+            "an obligation needs native evidence or a memory example"
+        )
+    );
+}
+
+#[test]
+fn native_message_and_part_ids_are_unique_within_a_source() {
+    let mut value = corpus_value();
+    let messages = &mut case_mut(&mut value, 0)["sources"][0]["messages"];
+    messages[1]["info"]["id"] = messages[0]["info"]["id"].clone();
+    let violations = validate_value(value);
+    assert!(
+        violations.contains(&Violation::DuplicateId("msg_cf_c1_01".into())),
+        "{violations:?}"
+    );
+
+    let mut value = corpus_value();
+    let messages = &mut case_mut(&mut value, 0)["sources"][0]["messages"];
+    messages[1]["parts"][0]["id"] = messages[0]["parts"][0]["id"].clone();
+    assert_eq!(
+        validate_value(value),
+        [Violation::DuplicateId("prt_cf_c1_01_0".into())]
+    );
+}
+
+type RuleMutation = (&'static str, fn(&mut Value), Violation);
+
+#[test]
+fn every_remaining_rule_rejects_its_own_mutation() {
+    let cases: [RuleMutation; 8] = [
+        (
+            "schema",
+            |v| v["schema"] = "eidnara.compression-fidelity-corpus/v0".into(),
+            Violation::Header("schema"),
+        ),
+        (
+            "project id",
+            |v| v["project_id"] = "not-hex".into(),
+            Violation::Header("project_id"),
+        ),
+        (
+            "case title",
+            |v| v["cases"][0]["title"] = " ".into(),
+            Violation::Case {
+                case: "C1".into(),
+                problem: "a case has a title",
+            },
+        ),
+        (
+            "empty expectations",
+            |v| v["cases"][0]["scenarios"][4]["expectations"] = json!([]),
+            Violation::Scenario {
+                id: "C1.S5".into(),
+                problem: "a scenario names the obligations it checks",
+            },
+        ),
+        (
+            "duplicate disposition",
+            |v| {
+                v["cases"][0]["scenarios"][0]["expectations"][0]["accepted"] =
+                    json!(["visible", "visible"])
+            },
+            Violation::Scenario {
+                id: "C1.S1".into(),
+                problem: "accepted dispositions are nonempty and distinct",
+            },
+        ),
+        (
+            "successor without an original",
+            |v| v["cases"][5]["sources"][0]["successors"][0]["info"]["id"] = "msg_cf_c6_09".into(),
+            Violation::Successor {
+                source: "C6.V1".into(),
+                message_id: "msg_cf_c6_09".into(),
+                problem: "a successor revises a record of its source",
+            },
+        ),
+        (
+            "tool settle order",
+            |v| {
+                v["cases"][0]["sources"][0]["messages"][3]["parts"][0]["state"]["time"]["start"] =
+                    u64::MAX.into()
+            },
+            Violation::Message {
+                source: "C1.V1".into(),
+                message_id: "msg_cf_c1_04".into(),
+                problem: "a tool part is settled with one output or error string",
+            },
+        ),
+        (
+            "tool name label",
+            |v| v["cases"][0]["sources"][0]["messages"][3]["parts"][0]["tool"] = "C1.L2".into(),
+            leaked("msg_cf_c1_04#0", "C1.L2"),
+        ),
+    ];
+    for (label, mutate, expected) in cases {
+        let mut value = corpus_value();
+        mutate(&mut value);
+        assert_eq!(validate_value(value), [expected], "{label}");
+    }
+}

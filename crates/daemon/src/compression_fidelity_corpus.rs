@@ -8,8 +8,8 @@
 //! same pin the TypeScript reader in `packages/e2e-tests` enforces, so a changed corpus fails
 //! until both pins move together.
 //!
-//! The module depends only on `serde`, `serde_json`, and `sha2`, so the daemon's integration
-//! tests can include it by path as well as the library's test module.
+//! The module depends only on `serde`, `serde_json`, `sha2`, and the two `testdata/` files it
+//! embeds, with no `crate::` path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -40,6 +40,9 @@ const EVALUATOR_VOCABULARY: [&str; 7] = [
     "answer key",
 ];
 
+/// The corpus schema. Every string field is either provider input, collected by
+/// `provider_input`, or an evaluator label, collected by `evaluator_labels`, unless it is an ID
+/// or enum; a new string field joins one of the two.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Corpus {
@@ -89,14 +92,14 @@ pub(crate) struct Source {
 
 /// An OpenCode `MessageV2` record restricted to the fields the corpus uses, so an evaluator label
 /// cannot ride along in an extra field.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeMessage {
     pub info: Info,
     pub parts: Vec<Part>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Info {
     pub id: String,
@@ -113,7 +116,7 @@ pub(crate) enum Role {
     Assistant,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Time {
     pub created: u64,
@@ -121,7 +124,7 @@ pub(crate) struct Time {
     pub completed: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Part {
     Text {
@@ -137,7 +140,7 @@ pub(crate) enum Part {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ToolState {
     pub status: ToolStatus,
@@ -156,7 +159,7 @@ pub(crate) enum ToolStatus {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ToolTime {
     pub start: u64,
@@ -216,7 +219,7 @@ pub(crate) enum Materiality {
 /// in its record; for a tool part the source adapter's own identity is the call ID and output
 /// block 0. Offsets are UTF-8 bytes, end-exclusive, and `text` repeats the bytes so a reviewer
 /// reads the span without counting.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Span {
     pub source: String,
@@ -289,7 +292,7 @@ pub(crate) enum ServingPath {
     ExactRead,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Tier {
     P1,
@@ -381,15 +384,15 @@ pub(crate) enum Unresolved {
 }
 
 impl Source {
-    /// The record and part a span names: the original or successor record of `message_id` whose
-    /// block at `block_index` carries `revision`. A miss reports the closest match: a revision
-    /// mismatch before a missing block before a missing message.
-    pub(crate) fn block(
+    /// The exact native bytes of the block a span names: the original or successor record of
+    /// `message_id` whose block at `block_index` carries `revision`. A miss reports the closest
+    /// match: a revision mismatch before a missing block before a missing message.
+    pub(crate) fn block_bytes(
         &self,
         message_id: &str,
         block_index: usize,
         revision: &str,
-    ) -> Result<(&NativeMessage, &Part), Unresolved> {
+    ) -> Result<&str, Unresolved> {
         let mut found = Unresolved::Message;
         for message in self.messages.iter().chain(&self.successors) {
             if message.info.id != message_id {
@@ -402,22 +405,11 @@ impl Source {
                 continue;
             };
             if block_revision(message, part).to_string() == revision {
-                return Ok((message, part));
+                return block_text(part).ok_or(Unresolved::NoText);
             }
             found = Unresolved::Revision;
         }
         Err(found)
-    }
-
-    /// The exact native bytes of the block a span names.
-    pub(crate) fn block_bytes(
-        &self,
-        message_id: &str,
-        block_index: usize,
-        revision: &str,
-    ) -> Result<&str, Unresolved> {
-        let (_, part) = self.block(message_id, block_index, revision)?;
-        block_text(part).ok_or(Unresolved::NoText)
     }
 }
 
@@ -1040,10 +1032,7 @@ fn provider_input(corpus: &Corpus) -> Vec<(String, String)> {
 /// Every answer key and evaluator label: corpus IDs, obligation and loss statements, forbidden
 /// conclusions, scenario descriptions, memory eligibility notes, and evaluation vocabulary.
 fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
-    let mut labels: Vec<String> = EVALUATOR_VOCABULARY
-        .iter()
-        .map(|s| (*s).to_owned())
-        .collect();
+    let mut labels = EVALUATOR_VOCABULARY.map(String::from).to_vec();
     for case in &corpus.cases {
         let ids = case
             .sources

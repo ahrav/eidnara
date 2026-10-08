@@ -16,7 +16,7 @@ feature-gated daemon example, not the production host wire. Exercise: not yet.
 
 ## Evidence trail
 
-- [Fixture target](../../../../../crates/daemon/Cargo.toml#L11-L15) requires
+- [Fixture target](../../../../../crates/daemon/Cargo.toml#L12-L15) requires
   `direct-host-fixture`. The [control enum](../../../../../crates/daemon/examples/direct_host_fixture.rs#L604-L634)
   accepts success, block, release, failure, counters, and shutdown, not case IDs.
 - [Backend execution](../../../../../crates/daemon/examples/direct_host_fixture.rs#L383-L499)
@@ -38,7 +38,7 @@ feature-gated daemon example, not the production host wire. Exercise: not yet.
   gates the actual fold scenario and otherwise checks that the flag is false.
   [The flag](../../../../../packages/e2e-tests/src/rust-scenario-support.ts#L12-L18)
   is `EIDNARA_E2E_FOLD=1`; the live scenario checks nonempty history at lines 82-86.
-- [Current CI](../../../../../.github/workflows/ci.yml#L973-L1000) builds the
+- [Current CI](../../../../../.github/workflows/ci.yml#L977-L1004) builds the
   fixture and invokes E2E selection. It does not enable that fold flag or prove
   the planned U3 qualification. No CI run is claimed here.
 

@@ -7,7 +7,7 @@ disposition, not implementation completion or a semantic baseline.
 Inspected source revision: `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 Date: 2026-09-19. U1 ([#718](https://github.com/ahrav/eidnara/issues/718))
 lands this part and re-verifies every `file:line` reference against its
-branch base `0bd2a5877`: unchanged lines were renumbered, and moved or
+branch tip: unchanged lines were renumbered, and moved or
 rewritten code was relocated by hand. Two capability facts changed after the
 inspected revision and are recorded where they apply: the hint footer no
 longer promises full context (#926), and Pi folds history (#850).

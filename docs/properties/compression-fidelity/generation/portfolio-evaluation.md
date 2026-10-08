@@ -9,7 +9,8 @@ older-catalog limitations, and the explicit `_lenses` placement deviation.
 
 ## Portfolio disposition
 
-The [catalog](catalog.md) contains eight active, unexercised records and eight
+The [catalog](catalog.md) contains eight active records, seven unexercised and
+cf-source-obligation-independence partial after U1, and eight
 matching evidence files. Seven are safety records with `always`; one is a
 reachability record with `sometimes`. Three surfaces are
 `explicit-config-only`, and five are `test-only`. All

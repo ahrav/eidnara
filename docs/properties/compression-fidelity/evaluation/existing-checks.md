@@ -140,7 +140,7 @@ only; private file modes are not a substitute for exclusion from artifacts.
 Current package scripts are at `packages/e2e-tests/package.json:6-26`. There is
 no `eval:compression-fidelity` command. CI's native-addon job builds prerequisites
 and invokes fixture-contract, mode-manifest validation, and Rust E2E at
-`.github/workflows/ci.yml:973-1000`. This is selection evidence only; no CI result
+`.github/workflows/ci.yml:977-1004`. This is selection evidence only; no CI result
 is claimed. `rust-scenario-support.ts:12-18` keeps broad fold execution optional.
 
 The historical inventory under `docs/properties/daemon/history_summarizer/`

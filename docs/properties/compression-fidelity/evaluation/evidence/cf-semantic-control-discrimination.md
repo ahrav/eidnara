@@ -38,7 +38,7 @@ not an executing semantic judge or a new control schema.
   reject missing or duplicate selected rows. Their
   [tests](../../../../../packages/e2e-tests/src/incident-pool/runner.test.ts#L1015-L1037)
   are `unaudited` prior art for set completeness, not semantic discrimination.
-- [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L25) and
+- [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L26) and
   filesystem inspection show no fidelity evaluator or sealed-control comparator.
 
 ## Failure scenario

@@ -34,9 +34,10 @@ logs or related repositories are supplied. No test or external model runs here.
 - [memory_reviewer_corpus.rs:44-70][curator] separates source/script/expectation fields,
   but `judge` recognizes fixed substrings. Its implementation is not reusable
   as a general test of temporal state, polarity, scope, or evidence fidelity.
-- [lib.rs:18252-18266][lib] provides the existing private test ancestry.
+- [lib.rs:18252-18274][lib] provides the existing private test ancestry.
   At inspection the corpus and its module were absent; U1 (#718) adds
-  `compression-fidelity.json` and `compression_fidelity_corpus.rs` there.
+  `crates/daemon/testdata/compression-fidelity.json` and registers
+  `compression_fidelity_corpus.rs` under that test module.
 
 Reachability is `test-only`: this is the planned offline source-obligation
 admission surface. Its private test boundary exists; its check does not.

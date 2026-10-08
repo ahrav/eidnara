@@ -38,7 +38,7 @@ not production loading. No digest comparison was exercised.
 - At the inspected revision neither `compression-fidelity.json` nor its Rust
   module existed. U1 (#718) adds both, with matching Rust and TypeScript
   digest pins.
-  [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L25) contain
+  [Package scripts](../../../../../packages/e2e-tests/package.json#L6-L26) contain
   no compression-fidelity evaluator.
 
 ## Failure scenario
@@ -95,8 +95,10 @@ digest proves shared bytes, not semantic truth or executed coverage.
 ### Q: How will Rust expose its compiled corpus digest to the evaluator?
 - Sources examined: Plan lines 153, 189, 218-219, 233; fixture build selection;
   repository filename and filesystem inventory.
-- Findings: The plan requires mismatch rejection, but the corpus, script
-  selection, and evaluator do not exist at HEAD.
+- Findings: The plan requires mismatch rejection. At the inspected revision
+  the corpus was absent; U1 (#718) adds it with Rust and TypeScript pins.
+  Script selection, the runtime digest exchange, and the evaluator do not
+  exist.
 - Missing evidence: The implemented digest exchange and its stale-build test.
 - Conclusion: Unresolved, needs the U1/U3/U4 implementation. No new exchange
   protocol is designed by this catalog.
