@@ -39,8 +39,11 @@ The package is private and never published.
 ## Retained suite
 
 `mode-manifest.json` lists every test file under `tests/`; each Rust-mode
-entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`, all with
-`contract_refs: ["U5-PORT"]`, and
+entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`. Each
+entry names the contracts it covers in `contract_refs`: the port suites carry
+`["U5-PORT"]`, and `compression-fidelity-qualification` carries its
+property-catalog records `cf-fixture-script-qualification` and
+`cf-delivery-credit-requires-published-folded-capture`.
 `validate-mode-manifest` fails when a test file lacks an entry or an entry
 lacks a file. A file whose every test is `it.skip` must carry a
 `quarantined` reason in its entry; the validator refuses a fully skipped
@@ -59,7 +62,7 @@ rust-multi-frame-delta      rust-stale-preference        thinking-block-safety
 pi-smoke
 ```
 
-Eighteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
+Nineteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
 
 ## Compression fidelity delivery
