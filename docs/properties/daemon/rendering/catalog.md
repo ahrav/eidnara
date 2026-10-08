@@ -1514,7 +1514,7 @@ none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
 earlier conversation plus the instruction "If these fragments seem relevant to
 the current request, you may run eidnara_search to search project memory for
-their topic" (#926; `transform.rs:8627` at `6edbe8b05`). Attributed to the user, that reads
+their topic" (#926; `transform.rs:9109`). Attributed to the user, that reads
 as the user's own instruction.
 The module's own code shows it knows this is a text convention and not a
 boundary: `is_system_reminder_transport_message`'s comment says wire
