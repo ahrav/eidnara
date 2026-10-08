@@ -21,7 +21,7 @@ function capture(messages: string[]): RetainedCapture {
             receivedAt: 0,
             method: "POST",
             path: "/v1/messages",
-            headers: { "x-opencode-session-id": "ses_a" },
+            headers: { "x-session-id": "ses_a" },
             body: { messages: messages.map((text) => ({ role: "user", content: text })) },
         },
     };

@@ -180,7 +180,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", 
         expect(verdict.tier).toBe("p1");
         expect(pass.decision).toMatch(/^[A-Z]+\+?$/);
         expect(pass.reason).toMatch(/^[a-z_]+$/);
-        expect(capture?.request.headers["x-opencode-session-id"]).toBe(sessionId);
+        expect(capture?.request.headers["x-session-id"]).toBe(sessionId);
         expect(capture?.caseId).toBe(CASE);
     }, 600_000);
 });

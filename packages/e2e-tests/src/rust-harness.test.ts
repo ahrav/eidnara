@@ -87,7 +87,7 @@ describe("CaptureLedger", () => {
     async function post(baseURL: string, session: string): Promise<void> {
         await fetch(`${baseURL}/v1/messages`, {
             method: "POST",
-            headers: { "content-type": "application/json", "x-opencode-session-id": session },
+            headers: { "content-type": "application/json", "x-session-id": session },
             body: JSON.stringify({ model: "m", messages: [{ role: "user", content: session }] }),
         }).then((response) => response.text());
     }
@@ -116,7 +116,7 @@ describe("CaptureLedger", () => {
                 "C1.S1",
                 "C1.S2",
             ]);
-            expect(retained[0]?.request.headers["x-opencode-session-id"]).toBe("ses_a");
+            expect(retained[0]?.request.headers["x-session-id"]).toBe("ses_a");
             // ses_b's requests arrived before ses_b was tagged, so none is filed under it.
             ledger.tag({ sessionId: "ses_b", caseId: "C2", scenarioId: "C2.S1" });
             expect(ledger.captures({ sessionId: "ses_b" })).toEqual([]);

@@ -100,7 +100,7 @@ export interface RetainedCapture extends CaptureIdentity {
 }
 
 /** OpenCode names the session each provider request serves in this header. */
-const SESSION_HEADER = "x-opencode-session-id";
+const SESSION_HEADER = "x-session-id";
 
 /**
  * Retains provider captures under the session and case identity they were driven under. A
