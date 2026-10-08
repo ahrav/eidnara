@@ -85,11 +85,21 @@ The Rust corpus module owns source, span, and revision validation, and
 `compression_fidelity_tests.rs` holds its negative controls. It rejects
 duplicate or malformed IDs, spans that do not resolve to the exact bytes of
 their native block at the named revision, successors that change identity
-or byte length, missing P1 to P4 or pressure/omission coverage, unexercised
-obligations, and any answer key or evaluator label in a field that can reach
-provider input: native text and tool fields, follow-up prompts, memory
-example text, and the approved example. Native records decode through a
-closed schema, so an extra field on a message or part fails to decode.
+or byte length, successors that give one block two byte strings at one
+revision, missing natural P1 at m1, P2 to P4 at m0, or pressure/omission
+coverage, unexercised obligations, and any answer key or evaluator label in
+a field that can reach provider input: native text and tool fields,
+follow-up prompts, memory example text, and the approved example. Evaluator
+labels include the corpus note, case titles, and incident references. Native
+records decode through a closed schema, so an extra field on a message or
+part fails to decode.
+
+The same test file holds two further checks. Each approved example must
+author its `<p1>` to `<p3>` bodies and a `<p4 />` capsule, because the
+history parser fills a missing P2 or P3 from a denser tier. Every native
+record also runs through the production adapter
+`harness_sources::opencode_units`, and each block's revision and bytes must
+equal the corpus module's own resolution.
 
 The TypeScript reader `readCompressionFidelityCorpus` exposes only case,
 source, scenario, follow-up, obligation, and forbidden-conclusion IDs,

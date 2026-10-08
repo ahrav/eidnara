@@ -41,9 +41,6 @@ const EVALUATOR_VOCABULARY: [&str; 7] = [
     "answer key",
 ];
 
-/// The corpus schema. Every string field is either provider input, collected by
-/// `provider_input`, or an evaluator label, collected by `evaluator_labels`, unless it is an ID
-/// or enum; a new string field joins one of the two.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Corpus {
@@ -773,13 +770,17 @@ fn validate_scenarios<'c>(
     exercised
 }
 
-/// Every case serves P1 at m1, P2 to P4 naturally, and at least one pressure or omission path.
 fn validate_coverage(case: &Case, out: &mut Vec<Violation>) {
-    for tier in [Tier::P1, Tier::P2, Tier::P3, Tier::P4] {
+    for (tier, stage) in [
+        (Tier::P1, Stage::M1),
+        (Tier::P2, Stage::M0),
+        (Tier::P3, Stage::M0),
+        (Tier::P4, Stage::M0),
+    ] {
         let covered = case.scenarios.iter().any(|s| {
             s.serving.path == ServingPath::Natural
                 && s.serving.tier == Some(tier)
-                && (tier != Tier::P1 || s.serving.stage == Some(Stage::M1))
+                && s.serving.stage == Some(stage)
         });
         if !covered {
             out.push(Violation::MissingTier {
@@ -878,9 +879,29 @@ fn validate_source(source: &Source, out: &mut Vec<Violation>) {
             }
         }
     }
+    let mut successor_blocks = BTreeMap::new();
     for successor in &source.successors {
         validate_message(source, successor, out);
         validate_successor(source, successor, out);
+        // A span names a block by message, index, and revision, so two successors that give one
+        // such block different bytes leave the span ambiguous.
+        let mut conflicts = false;
+        for (index, part) in successor.parts.iter().enumerate() {
+            let key = (
+                successor.info.id.as_str(),
+                index,
+                block_revision(successor, part),
+            );
+            conflicts |=
+                *successor_blocks.entry(key).or_insert(block_text(part)) != block_text(part);
+        }
+        if conflicts {
+            out.push(Violation::Successor {
+                source: source.id.clone(),
+                message_id: successor.info.id.clone(),
+                problem: "a block has one byte string at each revision",
+            });
+        }
     }
 }
 
@@ -1030,11 +1051,14 @@ fn provider_input(corpus: &Corpus) -> Vec<(String, String)> {
     fields
 }
 
-/// Every answer key and evaluator label: corpus IDs, obligation and loss statements, forbidden
-/// conclusions, scenario descriptions, memory eligibility notes, and evaluation vocabulary.
 fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
     let mut labels = EVALUATOR_VOCABULARY.map(String::from).to_vec();
+    labels.push(corpus.note.clone());
     for case in &corpus.cases {
+        labels.push(case.title.clone());
+        if let Provenance::Incident { reference } = &case.provenance {
+            labels.push(reference.clone());
+        }
         let ids = case
             .sources
             .iter()
@@ -1056,6 +1080,7 @@ fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
         labels.extend(case.scenarios.iter().map(|s| s.description.clone()));
         labels.extend(case.memory_examples.iter().map(|m| m.eligibility.clone()));
     }
+    labels.retain(|label| !label.trim().is_empty());
     labels
 }
 
