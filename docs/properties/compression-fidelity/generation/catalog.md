@@ -478,7 +478,7 @@ simulation requirement is inferred from these records.
 KTD1 keeps one Rust-owned corpus with byte identity owned by the evaluation
 part; KTD2 places the replay
 under [the existing private test module:18252-18281][lib]. The private
-[ProducerState:22327-22367][lib] and [handler helper:22651-22677][lib] exist.
+[ProducerState:22327-22367][lib] and [handler helper:22651-22656][lib] exist.
 U1 (#718) adds the corpus and U2 (#719) the replay module; the evaluation
 command does not exist yet. Its absence is a handoff dependency, not
 permission to export internals or create a framework. Since U2 the

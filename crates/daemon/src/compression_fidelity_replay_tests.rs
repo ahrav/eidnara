@@ -759,7 +759,6 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
         }
         let (budget, slice) = reached
             .unwrap_or_else(|| panic!("{}: no positive budget served {target:?}", scenario.id));
-        assert!(budget > 0, "only a positive budget is a pressure witness");
         let body = history_body(&slice).to_owned();
         let newer_tier = served_tier(&body, newer_title, &newer_approved);
         assert!(
@@ -1199,6 +1198,10 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
 
     let ages = first_ages(&row, &approved, &source.id);
     let (p2_age, p4_age) = (ages[rank(Tier::P2)], ages[rank(Tier::P4)]);
+    assert!(
+        p2_age < p4_age,
+        "the authored row serves P2 and P3 before P4"
+    );
     let mut sparse = row.clone();
     sparse.p2 = None;
     sparse.p3 = None;

@@ -1860,7 +1860,9 @@ fn c6_records(field: &str) -> Vec<Value> {
         .unwrap()
         .iter()
         .find(|case| case["id"] == "C6")
-        .and_then(|case| case["sources"][0][field].as_array())
+        .and_then(|case| case["sources"].as_array())
+        .and_then(|sources| sources.iter().find(|source| source["id"] == "C6.V1"))
+        .and_then(|source| source[field].as_array())
         .unwrap()
         .clone()
 }
@@ -2039,7 +2041,7 @@ fn c6_original_revision_bytes_read_exactly_after_succession_and_reopen() {
     assert_ne!(
         normalized.as_bytes(),
         bytes.as_slice(),
-        "a normalized transcript fails"
+        "a whitespace-normalized transcript of C6 differs from the bytes the reader returned"
     );
 
     let empty_row = select(

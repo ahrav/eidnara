@@ -21,7 +21,7 @@ incident logs or related repositories are supplied. No tests run here.
 - [lib.rs:22327-22367][lib], `ProducerState`, has prompt, output, and attempt
   observations and hooks. [lib.rs:22431-22510][lib], `TestProducer::start`,
   records complete attempts and prepares scripted output without a real model call.
-- [lib.rs:22651-22677][lib], `handler_with_store`, supplies the handler,
+- [lib.rs:22651-22656][lib], `handler_with_store`, supplies the handler,
   store, and test route through the existing producer factory.
 - [lib.rs:5660-5692,5732-5761][lib] distinguishes no-fire/no-model outcomes
   from real assembly. [chunk.rs:973-1053][chunk] builds the actual request.
