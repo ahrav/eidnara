@@ -864,9 +864,10 @@ not write.
 Existing check: `transform.rs:23075-23090`, `:23030-23048`, `:23049-23073`;
 none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
-earlier conversation plus the instruction "If the fragments above seem relevant
-to the current request, you may run eidnara_search to retrieve full context"
-(`:9109`). Attributed to the user, that reads as the user's own instruction. The
+earlier conversation plus the instruction "If these fragments seem relevant to
+the current request, you may run eidnara_search to search project memory for
+their topic" (#926; `transform.rs:9109`). Attributed to the user, that reads
+as the user's own instruction. The
 module's own code shows it knows this is a text convention and not a boundary:
 `is_system_reminder_transport_message`'s comment says wire "intentionally has no
 transport-origin field" and settles for a text-shape discriminator

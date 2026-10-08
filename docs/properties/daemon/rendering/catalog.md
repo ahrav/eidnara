@@ -847,7 +847,7 @@ Open questions:
 
 ## Group D: documented paths the build makes unreachable
 
-Three dead paths with three different keepers: a computed maximum of 458 UTF-16
+Three dead paths with three different keepers: a computed maximum of 482 UTF-16
 units against a cap of 800, two `Option` constants that are unconditionally
 `Some`, and a normalizing wrapper that collapses an `Option` before the documented
 fail-open branch can see it. The grouping earns its place because a reviewer
@@ -878,11 +878,11 @@ on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped
 producer
 (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD)).
 Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
-maximum: 18 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
-2 + 1 + 127 (footer) + 19 = 458 UTF-16 units against a cap of 800.
-`USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment`
-caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced
-`:9132-9139`).
+maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
+2 + 1 + 143 (footer, #926) + 23 = 482 UTF-16 units against a cap of 800.
+`USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment`
+caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced
+`:9148-9155`).
 Existing check: none. The only guard is the `debug_assert!` at `:9115`, which
 is trivially satisfied.
 Impact: A dead truncation path plus a `debug_assert` that can never fail. It is
@@ -1512,9 +1512,10 @@ material this turn's author did not write.
 Existing check: `transform.rs:23075-23090`, `:23030-23048`, `:23049-23073`;
 none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
-earlier conversation plus the instruction "If the fragments above seem relevant
-to the current request, you may run eidnara_search to retrieve full context"
-(`:9109`). Attributed to the user, that reads as the user's own instruction.
+earlier conversation plus the instruction "If these fragments seem relevant to
+the current request, you may run eidnara_search to search project memory for
+their topic" (#926; `transform.rs:9109`). Attributed to the user, that reads
+as the user's own instruction.
 The module's own code shows it knows this is a text convention and not a
 boundary: `is_system_reminder_transport_message`'s comment says wire
 "intentionally has no transport-origin field" and settles for a text-shape
@@ -1847,7 +1848,7 @@ dominance statement is a hypothesis, not a finding.
   [render-a-user-hint-total-cap-cannot-bind](#render-a-user-hint-total-cap-cannot-bind),
   [render-a-light-surface-fallback-notice-never-served](#render-a-light-surface-fallback-notice-never-served),
   [nudge-b-todo-availability-fail-open-is-unreachable](#nudge-b-todo-availability-fail-open-is-unreachable).
-  Three dead paths with three different keepers: a computed maximum of 458 UTF-16
+  Three dead paths with three different keepers: a computed maximum of 482 UTF-16
   units against a cap of 800, two `Option` constants that are unconditionally
   `Some`, and a normalizing wrapper (`todo_synthesis_verdict`,
   `transform.rs:2626-2630`) that collapses the `Option` before the documented

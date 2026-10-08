@@ -56,23 +56,35 @@ All references read back at `HEAD` `e447c927`, in
 `utf16_prefix(&normalized, limit - 1)` plus one `…` (`:9135-9139`), which is
 `limit` units.
 
+### The footer after #926
+
+The references above stay at `e447c927`. This section and the arithmetic below
+read back at this branch's HEAD, where `render_user_hint` sits at
+`transform.rs:9091-9117`. #926 replaces its footer line with:
+
+```
+9109:    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
+```
+
 ### The arithmetic
 
-Measured in UTF-16 code units, which is what `utf16_len` (`:9064-9066`) counts:
+Measured in UTF-16 code units, which is what `utf16_len`
+(`transform.rs:8961-8963`) counts. Every row was re-measured
+against the #926 footer and the wrapper strings:
 
 | Component | Units |
 | --- | --- |
-| `"<eidnara-search-hint>\n"` | 18 |
+| `"<eidnara-search-hint>\n"` | 22 |
 | header, worst case `"Your memory may contain 3 related fragments:"` | 44 |
 | the `\n` from `[header, .., ..].join("\n")` | 1 |
 | three lines of `"- "` + 80 | 3 × 82 = 246 |
 | two `\n` from `lines.join("\n")` | 2 |
 | the second `\n` from the outer join | 1 |
-| footer | 127 |
-| `"\n</eidnara-search-hint>"` | 19 |
-| **total** | **458** |
+| footer | 143 |
+| `"\n</eidnara-search-hint>"` | 23 |
+| **total** | **482** |
 
-458 against a cap of 800. There is no input that raises it: `take(3)` bounds the
+482 against a cap of 800. There is no input that raises it: `take(3)` bounds the
 line count, `one_line_fragment` bounds each line, and the header, footer and
 wrapper are constants apart from the line count digit, which is at most one
 character for a maximum of three.
@@ -124,8 +136,8 @@ None. This is arithmetic over compile-time constants.
 1. The `unreachable` check: instrument the `utf16_len(wrapped) > limit` path of
    `truncate_hint_to_total_cap` and assert it is never taken across the campaign.
 2. A guard that fails loudly if the constants drift: assert
-   `18 + 44 + 1 + USER_HINT_RESULT_LIMIT * (USER_HINT_FRAGMENT_CHAR_CAP + 2) +
-   (USER_HINT_RESULT_LIMIT - 1) + 1 + 127 + 19 <= USER_HINT_TOTAL_CHAR_CAP`, so
+   `22 + 44 + 1 + USER_HINT_RESULT_LIMIT * (USER_HINT_FRAGMENT_CHAR_CAP + 2) +
+   (USER_HINT_RESULT_LIMIT - 1) + 1 + 143 + 23 <= USER_HINT_TOTAL_CHAR_CAP`, so
    the day someone raises a limit the relationship is restated rather than
    silently inverted. If the intent is that the total cap *should* be able to bind,
    that assertion is the place to invert.
@@ -162,4 +174,4 @@ None. This is arithmetic over compile-time constants.
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.
 - Missing evidence: none.
-- Conclusion: resolved with answer — 458 is the maximum.
+- Conclusion: resolved with answer — 482 is the maximum.

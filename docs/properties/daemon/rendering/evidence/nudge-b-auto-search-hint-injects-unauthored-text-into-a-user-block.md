@@ -49,8 +49,9 @@ It mutates the existing text block in place. The target is selected in
 `render_user_hint` (`:9084-9117`):
 
 - `:9105-9108` — the header is "Your memory may contain N related fragments:".
-- `:9109` — the footer is "If the fragments above seem relevant to the current
-  request, you may run eidnara_search to retrieve full context. Otherwise ignore."
+- `:9109` — the footer. #926 replaced its text; it is now "If
+  these fragments seem relevant to the current request, you may run
+  eidnara_search to search project memory for their topic. Otherwise ignore."
 - `:9111` — `let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");`
 - `:9116` — `Some(format!("\n\n{wrapped}"))`
 
@@ -133,8 +134,8 @@ A user asks "can you check how the retry backoff interacts with the lease TTL". 
 tokens `retry`, `backoff`, `lease`, and `interacts` are rare in the history_segment
 pool, so the score clears 0.6, and three compressed fragments of an archived
 discussion from two hours ago are appended to the user's message, followed by "If
-the fragments above seem relevant to the current request, you may run eidnara_search to
-retrieve full context."
+these fragments seem relevant to the current request, you may run eidnara_search to
+search project memory for their topic."
 
 The provider receives one `role: "user"` message whose text is the question plus
 that instruction. From the model's position the user asked the question *and* told
