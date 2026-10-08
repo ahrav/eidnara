@@ -8245,20 +8245,32 @@ fn maybe_decide_live_user_hint(
     )))
 }
 
+const USER_HINT_STOPWORDS: &[&str] = &[
+    "and", "are", "but", "for", "from", "have", "into", "not", "that", "the", "this", "use", "was",
+    "with", "you", "your",
+];
+
 fn lexical_tokens(text: &str) -> BTreeSet<String> {
-    const STOPWORDS: &[&str] = &[
-        "and", "are", "but", "for", "from", "have", "into", "not", "that", "the", "this", "use",
-        "was", "with", "you", "your",
-    ];
     // The hint gate does not apply Unicode normalization.
-    text.to_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| token.chars().count() >= 3 && !STOPWORDS.contains(token))
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .take(USER_HINT_TOKEN_CAP)
-        .collect()
+    let lowered = text.to_lowercase();
+    // The result equals the sorted prefix of up to `USER_HINT_TOKEN_CAP` distinct tokens that pass
+    // the length and `USER_HINT_STOPWORDS` filters.
+    let mut smallest = BTreeSet::<&str>::new();
+    for token in lowered.split(|ch: char| !ch.is_alphanumeric()) {
+        if token.len() < 3
+            || (smallest.len() == USER_HINT_TOKEN_CAP
+                && smallest.last().is_some_and(|max| token >= *max))
+        {
+            continue;
+        }
+        if token.chars().count() < 3 || USER_HINT_STOPWORDS.contains(&token) {
+            continue;
+        }
+        if smallest.insert(token) && smallest.len() > USER_HINT_TOKEN_CAP {
+            smallest.pop_last();
+        }
+    }
+    smallest.into_iter().map(str::to_string).collect()
 }
 
 fn run_user_hint_lexical_search(

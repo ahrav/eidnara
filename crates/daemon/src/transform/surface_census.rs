@@ -579,3 +579,44 @@ fn whole_word_lookup_matches_the_lexical_tokenizer() {
         Some("zephyrine")
     );
 }
+
+fn sorted_prefix_lexical_tokens(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 3 && !USER_HINT_STOPWORDS.contains(token))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(USER_HINT_TOKEN_CAP)
+        .collect()
+}
+
+#[test]
+fn the_token_cap_keeps_the_smallest_tokens_wherever_they_appear() {
+    let late_small = (0..40)
+        .rev()
+        .map(|n| format!("term{n:02}"))
+        .chain(["the".to_string(), "ab".to_string(), "aaa".to_string()])
+        .collect::<Vec<_>>()
+        .join(" ");
+    let tokens = lexical_tokens(&late_small);
+    assert_eq!(tokens, sorted_prefix_lexical_tokens(&late_small));
+    assert_eq!(tokens.first().map(String::as_str), Some("aaa"));
+    assert_eq!(tokens.last().map(String::as_str), Some("term22"));
+}
+
+proptest::proptest! {
+    #[test]
+    fn bounded_lexical_tokens_match_the_sorted_prefix(
+        pieces in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "a", "b", "z", "ab", "abc", "Zeta", "é", "İ", "Σ", "ΣΑΣ", "日本", "語", "x1", "2",
+                " ", "_", "-", "\n", "the", "and", "your",
+            ]),
+            0..300,
+        ),
+    ) {
+        let text = pieces.concat();
+        proptest::prop_assert_eq!(lexical_tokens(&text), sorted_prefix_lexical_tokens(&text));
+    }
+}
