@@ -274,13 +274,12 @@ export class CaseDriver {
     }
 
     /**
-     * Seeds the case source after the baseline, restarts OpenCode under the m1 budget, and adds
-     * low-usage turns that move the source out of the protected tail without firing.
+     * Seeds the case source after the baseline under the m1 budget, and adds low-usage turns
+     * that move the source out of the protected tail without firing.
      */
     async seed(): Promise<ScriptSource> {
         const source = await this.h.host.scriptSource(this.scenario.id);
         seedSource(this.h, this.sessionId, source);
-        await this.restart(M1_SERVING);
         for (let i = 1; i <= TRAILING_TURNS; i += 1) {
             await this.send(`trailing turn ${i}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
         }
@@ -384,7 +383,7 @@ export class CaseDriver {
             this.sessionId,
             syntheticSource(Math.max(rows, MIN_AGING_PAIRS), step, (k) => `aging ${step}.${k}`),
         );
-        await this.restart(AGING_SERVING);
+        if (this.config !== AGING_SERVING) await this.restart(AGING_SERVING);
         await this.send(`aging ballast ${step}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
         const { added } = await this.publishStep(
             `filler:${rows}`,
@@ -423,9 +422,9 @@ export class CaseDriver {
     }
 
     /**
-     * Publishes newer rows whose bodies repeat large synthetic messages, so a positive budget
-     * below the history body forces the guard to demote the older case row, and observes the
-     * next cold pass under that budget.
+     * Publishes newer rows whose bodies repeat large synthetic messages under the current
+     * budget, then observes the next cold pass under the pressure budget, which the history body
+     * exceeds, so the guard demotes the older case row.
      */
     async pressure(): Promise<Delivery> {
         this.step += 1;
@@ -435,7 +434,6 @@ export class CaseDriver {
             this.sessionId,
             syntheticSource(2, step, (k) => `pressure ${step}.${k}: ${this.h.ballast(400)}`),
         );
-        await this.restart(PRESSURE_SERVING);
         await this.send(`pressure ballast ${step}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
         const echoImportance = (await this.h.host.scriptStatus()).echoImportance;
         await this.publishStep("echo", `pressure ${step}`, echoImportance);
