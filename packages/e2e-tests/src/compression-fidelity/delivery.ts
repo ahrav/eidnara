@@ -239,11 +239,12 @@ export function servedTier(
     return segment.trim().split("\n").length === 1 ? "p4" : "unmatched";
 }
 
-const HISTORY_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/g;
+/** The m0 history wrapper and the m1 window's wrapper of rows published since. */
+const HISTORY_WRAPPER = /<session-history(?:-since)?>[\s\S]*?<\/session-history(?:-since)?>/g;
 
 /**
- * Leak probes found anywhere in the request outside the `<session-history>` wrapper: the system
- * text and every message, including the m1 window and the live tail.
+ * Leak probes found anywhere in the request outside the history wrappers: the system text and
+ * every message, including the live tail.
  */
 export function rawTailLeaks(capture: RetainedCapture, probes: readonly string[]): string[] {
     const system = capture.request.body.system;
@@ -289,7 +290,7 @@ export interface DeliveryVerdict {
 /**
  * Judges one provider capture for compression credit: a captured nonempty request, an applied
  * recipe served from the transform, the case segment at a reviewed tier, and covered native text
- * only inside the history wrapper. Each failed precondition is its own refusal; P5 absence is
+ * only inside the history wrappers. Each failed precondition is its own refusal; P5 absence is
  * `history_absent`, which a scenario expecting omission reads as its result.
  */
 export function judgeDelivery(input: DeliveryInput): DeliveryVerdict {

@@ -77,6 +77,13 @@ export interface RustPassLine {
     rowVersion: number;
     /** Time the daemon spent awaiting or running a summarizer at the emergency wall, across reruns. */
     emergencyWaitMs: number;
+    /** The final-array admission branch: `fits`, `shrinks`, `limit_unknown`, `declined`, or `none`. */
+    admission: string;
+    /** The admitted candidate's canonical bytes and heuristic charged tokens. */
+    invocationBytes: number;
+    invocationCharged: number;
+    /** The history body budget the request carried, or `null` when it carried none. */
+    historyBudget: number | null;
     raw: string;
 }
 
@@ -166,6 +173,12 @@ export function parseRustPassLine(line: string): RustPassLine | null {
         transportBytes: Number(stageField(body, "transport_bytes") || "0"),
         rowVersion: Number(field(body, "row_version") || "0"),
         emergencyWaitMs: Number(field(body, "emergency_wait") || "0"),
+        admission: field(body, "admission") || "none",
+        invocationBytes: Number(field(body, "invocation_bytes") || "0"),
+        invocationCharged: Number(field(body, "invocation_charged") || "0"),
+        historyBudget: /^\d+$/.test(field(body, "history_budget"))
+            ? Number(field(body, "history_budget"))
+            : null,
         raw: line,
     };
 }
@@ -293,8 +306,12 @@ export class RustTestHarness {
     /**
      * Restarts `opencode serve` against the same data directory.
      * OpenCode's database, the module store, and the direct host persist across restarts.
+     * A `modelContextLimit` replaces the mock model's context limit for this and later restarts.
      */
-    async restart(opts: { eidnaraConfig?: Record<string, unknown> } = {}): Promise<void> {
+    async restart(
+        opts: { eidnaraConfig?: Record<string, unknown>; modelContextLimit?: number } = {},
+    ): Promise<void> {
+        if (opts.modelContextLimit !== undefined) this.modelContextLimit = opts.modelContextLimit;
         await this.opencodeInstance.kill();
         this.opencodeInstance = await RustTestHarness.spawnServe({
             env: this.env,

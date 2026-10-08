@@ -372,6 +372,10 @@ describe("Rust mode transform request", () => {
             expect(passLines[0]).toContain("emergency_wait=1234.5");
             expect(passLines[1]).toContain("emergency_wait=0.0");
             expect(passLines[0]).toMatch(
+                / admission=\w+ invocation_bytes=\d+ invocation_charged=\d+ /,
+            );
+            expect(passLines[0]).toMatch(/ history_budget=(\d+|none) elapsed=/);
+            expect(passLines[0]).toMatch(
                 /reason=first_render .* stages=prefix_guard:[\d.]+ clone:[\d.]+ wire_build:[\d.]+ wire_messages:1 transport:[\d.]+ transport_pages:1 transport_bytes:\d+ apply:[\d.]+ other:[\d.]+ work=scanned:\d+ charged:\d+ retained:\d+$/,
             );
             expect(passLines[1]).toContain("decision=SOFT+");
@@ -644,10 +648,11 @@ describe("Rust mode transform request", () => {
             installRawRows(sessionId, rawRows(1));
             const messages = gatedMessages(sessionId);
             const candidate = [...messages, ...makeMessages(sessionId)];
-            const charged = chargeInvocation(
+            const charge = chargeInvocation(
                 candidate.map((entry) => editRecipe.canonicalJsonLength(entry)),
                 { headroomPermille: 250, profile: "opencode-heuristic" },
-            ).chargedTokens;
+            );
+            const charged = charge.chargedTokens;
             const { client, calls } = recordingClient((request) =>
                 recipeResponse(request, candidate),
             );
@@ -668,8 +673,14 @@ describe("Rust mode transform request", () => {
             const output = { messages: [...messages] as unknown[] };
             const array = output.messages;
             const logSpy = spyOn(logger.sessionLog, "warn");
+            const debugSpy = spyOn(logger.sessionLog, "debug");
             try {
                 await transform.run(sessionId, output);
+                expect(
+                    sessionLogs(debugSpy, sessionId).find((line) => line.startsWith("rust pass:")),
+                ).toContain(
+                    `admission=${fits ? "fits" : "declined"} invocation_bytes=${charge.bytes} invocation_charged=${charged} `,
+                );
                 expect(output.messages).toBe(array);
                 expect(calls).toHaveLength(1);
                 if (fits) {
@@ -688,6 +699,7 @@ describe("Rust mode transform request", () => {
                 expect(transform.getState(sessionId).failureCount).toBe(0);
             } finally {
                 logSpy.mockRestore();
+                debugSpy.mockRestore();
                 limitSpy.mockRestore();
             }
         });
@@ -711,9 +723,14 @@ describe("Rust mode transform request", () => {
         });
         const transform = createRustModeTransform(deps, { moduleClient: client });
         const output = { messages: [...messages] as unknown[] };
+        const debugSpy = spyOn(logger.sessionLog, "debug");
         try {
             await transform.run(sessionId, output);
+            expect(
+                sessionLogs(debugSpy, sessionId).find((line) => line.startsWith("rust pass:")),
+            ).toContain("admission=shrinks ");
         } finally {
+            debugSpy.mockRestore();
             limitSpy.mockRestore();
         }
         expect(output.messages).toEqual(candidate);
@@ -755,8 +772,12 @@ describe("Rust mode transform request", () => {
         const transform = createRustModeTransform(deps, { moduleClient: client });
         const output = { messages: [...messages] as unknown[] };
         const logSpy = spyOn(logger.sessionLog, "warn");
+        const debugSpy = spyOn(logger.sessionLog, "debug");
         try {
             await transform.run(sessionId, output);
+            expect(
+                sessionLogs(debugSpy, sessionId).find((line) => line.startsWith("rust pass:")),
+            ).toContain("admission=limit_unknown ");
             expect(
                 sessionLogs(logSpy, sessionId).filter((line) =>
                     line.includes("pass declined: invocation_budget"),
@@ -766,6 +787,7 @@ describe("Rust mode transform request", () => {
             expect(transform.getState(sessionId).failureCount).toBe(0);
         } finally {
             logSpy.mockRestore();
+            debugSpy.mockRestore();
         }
     });
 

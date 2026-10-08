@@ -43,6 +43,28 @@
             ]
         },
         {
+            "path": "tests/compression-fidelity-delivery.test.ts",
+            "tier": "rust-only",
+            "rationale": "compression fidelity delivery campaign: each corpus source publishes through the case script and serves P1 in m1, a warm repeat, a cold m0, and its natural P2-P5 decay rows matched against the decay oracle at the pass's history budget; C1.S5 and C3.S5 serve guard-demoted rows; a P1-only publication serves the parser's inherited body; provider requests pin the shipped capability surface and every pass line records its admission branch and size",
+            "contract_refs": [
+                "cf-delivery-scenarios-reach-qualified-invocations",
+                "cf-delivery-credit-requires-published-folded-capture",
+                "cf-tier-transitions-preserve-qualified-meaning",
+                "cf-pressure-omission-discloses-evidence-loss",
+                "cf-shipped-recovery-capabilities",
+                "cf-serving-resource-boundaries"
+            ]
+        },
+        {
+            "path": "tests/compression-fidelity-pi.test.ts",
+            "tier": "pi-rust",
+            "rationale": "compression fidelity delivery through the Pi context handler: a scripted C1 publication against the direct-host fixture serves its reviewed P1 body in the m1 window and then in a rematerialized m0, with the covered source text only inside the history wrappers",
+            "contract_refs": [
+                "cf-delivery-scenarios-reach-qualified-invocations",
+                "cf-delivery-credit-requires-published-folded-capture"
+            ]
+        },
+        {
             "path": "tests/compression-fidelity-qualification.test.ts",
             "tier": "rust-only",
             "rationale": "compression fidelity fixture qualification: a scripted corpus case binds to the presented ordinals, publishes through real validation, and serves its reviewed P1 body in a session-correlated provider request whose pass line shows an applied transform recipe and whose live tail carries none of the covered native text",

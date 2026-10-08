@@ -17,7 +17,11 @@ import {
     parseRecipe,
     type RecipeSourceBase,
 } from "./edit-recipe";
-import { type HarnessProfileIdentity, validateInvocation } from "./invocation-budget";
+import {
+    type HarnessProfileIdentity,
+    type InvocationValidation,
+    validateInvocation,
+} from "./invocation-budget";
 import {
     isModuleTransportGenerationChangedResult,
     TRANSFORM_SEND_TIMEOUT_MS,
@@ -321,10 +325,30 @@ function emptyRustPassTimings(): RustPassTimings {
     };
 }
 
+/** How the final-array admission heuristic judged the pass's candidate, and its charged size. */
+export interface InvocationAdmission {
+    branch: "fits" | "shrinks" | "limit_unknown" | "declined" | "none";
+    bytes: number;
+    chargedTokens: number;
+}
+
+const NO_ADMISSION: InvocationAdmission = { branch: "none", bytes: 0, chargedTokens: 0 };
+
+function admissionOf(validation: InvocationValidation): InvocationAdmission {
+    return {
+        branch: validation.ok ? validation.reason : "declined",
+        bytes: validation.candidate.bytes,
+        chargedTokens: validation.candidate.chargedTokens,
+    };
+}
+
 export function formatRustPassLog(args: {
     decision: string;
     reason: string;
     servedFrom: string;
+    admission?: InvocationAdmission;
+    /** The history body budget the request carried, when it carried one. */
+    historyBudgetTokens?: number;
     inputCount: number;
     outputCount: number;
     applied: boolean;
@@ -340,7 +364,8 @@ export function formatRustPassLog(args: {
         timings.prefixGuard + timings.clone + timings.wireBuild + timings.transport + timings.apply;
     const unattributed = Math.max(0, args.elapsedMs - measured);
     const rowVersion = Number.isSafeInteger(args.rowVersion) ? args.rowVersion : 0;
-    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
+    const admission = args.admission ?? NO_ADMISSION;
+    return `rust pass: decision=${args.decision} reason=${args.reason} served_from=${args.servedFrom} in=${args.inputCount} out=${args.outputCount} applied=${args.applied} row_version=${rowVersion} emergency_wait=${(args.emergencyWaitMs ?? 0).toFixed(1)} rediscovered=${args.rediscovered === true} admission=${admission.branch} invocation_bytes=${admission.bytes} invocation_charged=${admission.chargedTokens} history_budget=${args.historyBudgetTokens ?? "none"} elapsed=${args.elapsedMs.toFixed(1)} ms module=${args.moduleElapsedMs.toFixed(1)} ms stages=prefix_guard:${timings.prefixGuard.toFixed(1)} clone:${timings.clone.toFixed(1)} wire_build:${timings.wireBuild.toFixed(1)} wire_messages:${timings.wireMessages} transport:${timings.transport.toFixed(1)} transport_pages:${timings.transportPages} transport_bytes:${timings.transportBytes} apply:${timings.apply.toFixed(1)} other:${unattributed.toFixed(1)} work=scanned:${timings.scannedItems} charged:${timings.chargedBytes} retained:${timings.retainedBytes}`;
 }
 
 function responseValue(response: unknown): Record<string, unknown> {
@@ -904,6 +929,8 @@ export function createTransformSessionClient(
         let decision = "error";
         let materializeReason = "none";
         let servedFrom = "none";
+        let admission = NO_ADMISSION;
+        let historyBudgetTokens: number | undefined;
         let moduleElapsedMs = 0;
         let emergencyWaitMs = 0;
         let rowVersion = 0;
@@ -918,6 +945,8 @@ export function createTransformSessionClient(
                     decision,
                     reason: materializeReason,
                     servedFrom,
+                    admission,
+                    historyBudgetTokens,
                     inputCount,
                     outputCount: host.length,
                     applied,
@@ -1074,6 +1103,7 @@ export function createTransformSessionClient(
                             profile: source.invocationProfile,
                         },
                     );
+                    admission = admissionOf(invocation);
                     if (!invocation.ok) {
                         sessionLog.debug(
                             sessionId,
@@ -1347,6 +1377,8 @@ export function createTransformSessionClient(
                 retainedOutputs.dropApplied(sessionId, previous);
             }
             const baseRevision = nextBaseRevision();
+            const budget = preparation.fields.history_budget_tokens;
+            historyBudgetTokens = typeof budget === "number" ? budget : undefined;
             const body = buildTransformRequest(
                 {
                     sessionId,
@@ -1554,6 +1586,7 @@ export function createTransformSessionClient(
                     headroomPermille: INVOCATION_HEADROOM_PERMILLE,
                     profile: source.invocationProfile,
                 });
+                admission = admissionOf(invocation);
                 if (!invocation.ok) {
                     throw new PassDeclined(
                         sessionId,

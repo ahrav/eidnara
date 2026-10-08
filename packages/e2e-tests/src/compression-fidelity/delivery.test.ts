@@ -115,11 +115,20 @@ describe("compression fidelity delivery judgment", () => {
         expect(servedTier(["<session-history>\n</session-history>"], TITLE, BODIES)).toBe("p5");
     });
 
-    it("scans the m1 window and system text for leaks, not only later messages", () => {
-        const folded = `${history(BODIES[0] ?? "")}\n${PROBE} restated in m1`;
+    it("scans outside both history wrappers, the system text included", () => {
+        const m1 = `<session-history-since>\n## 1-6 · ${TITLE}\n${PROBE} quoted in m1\n</session-history-since>`;
         expect(
             judgeDelivery({
-                capture: capture([folded, "follow-up"]),
+                capture: capture([`${m1}\nfollow-up`]),
+                pass: APPLIED,
+                title: TITLE,
+                bodies: BODIES,
+                leakProbes: [PROBE],
+            }).leaks,
+        ).toEqual([]);
+        expect(
+            judgeDelivery({
+                capture: capture([`${history(BODIES[0] ?? "")}\n${PROBE} after the wrapper`]),
                 pass: APPLIED,
                 title: TITLE,
                 bodies: BODIES,

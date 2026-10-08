@@ -57,7 +57,7 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
 
-    use crate::case_script::{Answer, AnswerFailure, CaseScript, Record, output_document};
+    use crate::case_script::{Answer, AnswerFailure, CaseScript, Record, scripted_summary};
     use crate::eval_cassette::CassetteBackend;
     use crate::publish::write_then_rename;
 
@@ -285,9 +285,6 @@ mod unix {
             .retain(|(queued, _)| *queued != id);
     }
 
-    /// Messages per segment in the scripted summarizer's answer.
-    const SUMMARY_CHUNK: usize = 5;
-
     /// One presented line of the summarizer's input: `[a-b] R: part / part`,
     /// with alias markers stripped from the parts.
     fn presented_line(line: &str) -> Option<(u64, u64, String)> {
@@ -339,33 +336,6 @@ mod unix {
             }
         }
         (!lines.is_empty()).then_some(lines)
-    }
-
-    /// The summarizer answer the fixture stands in for a provider with: one
-    /// `history_segment` per run of `SUMMARY_CHUNK` presented lines, its text
-    /// the lines' own words, in the output document the daemon's validator
-    /// reads. A recording of this is what the campaign's structured arm
-    /// replays.
-    fn scripted_summary(lines: &[Record]) -> String {
-        let mut segments = String::new();
-        for group in lines.chunks(SUMMARY_CHUNK) {
-            let start = group[0].start;
-            let end = group[group.len() - 1].end;
-            // Escaped as element content, so a message saying `<T> & B`
-            // leaves the document well-formed; the validator unescapes it.
-            let text = group
-                .iter()
-                .map(|record| record.text.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            segments.push_str(&format!(
-                r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
-            ));
-        }
-        output_document(&segments, lines.last().map_or(1, |record| record.end + 1))
     }
 
     /// Names an executable that answers summarizer prompts in place of the

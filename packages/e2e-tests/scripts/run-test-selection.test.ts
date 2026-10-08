@@ -33,7 +33,7 @@ describe("test selection arguments", () => {
 
     it("selects exactly the manifest's files", () => {
         const files = selectedTestFiles("rust");
-        expect(files.length).toBe(26);
+        expect(files.length).toBe(28);
         expect(files).toContain("tests/pi-smoke.test.ts");
         expect(files).toContain("tests/pi-rust-folding.test.ts");
         expect(files).toContain("tests/compression-fidelity-qualification.test.ts");

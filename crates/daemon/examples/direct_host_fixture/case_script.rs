@@ -1,7 +1,8 @@
 //! Corpus case scripts for the direct host fixture.
 //!
-//! A selection names up to [`MAX_QUEUE`] entries: compression fidelity scenario IDs, or
-//! [`FILLER`]. The fixture resolves each scenario ID through the digest-checked corpus, and every
+//! A selection names up to [`MAX_QUEUE`] entries: compression fidelity scenario IDs, a scenario
+//! ID with the [`P1_ONLY`] suffix, [`FILLER`], optionally `filler:N` for exactly `N` rows, or
+//! [`ECHO`] for the fixture's default answer, whose bodies repeat the presented text. The fixture resolves each scenario ID through the digest-checked corpus, and every
 //! later summarizer request consumes the front entry when it is admitted. A scenario entry binds
 //! its source's approved example to the ordinals the request actually presents; a filler entry
 //! answers with compact fixture-authored segments over the presented records, so a scenario can
@@ -31,14 +32,32 @@ pub const MAX_QUEUE: usize = 8;
 /// The queue entry that answers one request with compact fixture-authored segments.
 pub const FILLER: &str = "filler";
 
+/// The queue entry that answers one request with the fixture's default segments, so newer rows
+/// can carry bodies as large as the messages they cover.
+pub const ECHO: &str = "echo";
+
+/// Presented records per segment in the default answer.
+const SUMMARY_CHUNK: usize = 5;
+
+/// The scenario-entry suffix that serves the approved example with its P2 and P3 bodies removed,
+/// so the parser's fallback supplies them.
+pub const P1_ONLY: &str = "@p1-only";
+
+/// The importance of every fixture-authored segment, so a witness can compute the curve over
+/// its rows from their count alone.
+pub const FIXTURE_IMPORTANCE: u8 = 30;
+
 /// Characters of a native block that locate it in presented or delivered text.
 const PROBE_CHARS: usize = 48;
 
 /// Native blocks shorter than this are too generic to locate a leak; they yield no leak probe.
 const MIN_LEAK_PROBE_CHARS: usize = 16;
 
-/// Presented records per filler segment.
+/// Presented records per filler segment when the entry names no row count.
 const FILLER_CHUNK: usize = 2;
+
+/// The most rows one `filler:N` entry may ask for.
+pub const MAX_FILLER_ROWS: usize = 64;
 
 /// One presented record of the summarizer's input: its ordinal range and its text with alias
 /// markers removed. One record can carry several consecutive messages of the same role.
@@ -62,6 +81,7 @@ pub enum ScriptError {
     UnknownScenario,
     EmptyQueue,
     QueueTooLong,
+    BadFillerRows,
 }
 
 impl ScriptError {
@@ -71,6 +91,7 @@ impl ScriptError {
             Self::UnknownScenario => "unknown_scenario",
             Self::EmptyQueue => "empty_queue",
             Self::QueueTooLong => "queue_too_long",
+            Self::BadFillerRows => "bad_filler_rows",
         }
     }
 }
@@ -140,8 +161,13 @@ enum Queued {
     Scenario {
         scenario: String,
         source: &'static Source,
+        p1_only: bool,
     },
-    Filler,
+    /// `rows` is the exact segment count, or `None` for one segment per two records.
+    Filler {
+        rows: Option<usize>,
+    },
+    Echo,
 }
 
 /// The selection and its consumption record. Every summarizer request after a selection consumes
@@ -212,6 +238,9 @@ fn scriptable(source: &Source) -> bool {
     example.matches(&range_pattern(source)).count() == 1
         && example.matches("<meta>").count() == 1
         && example.contains("<history_segments>")
+        && ["<p2>", "</p2>", "<p3>", "</p3>"]
+            .iter()
+            .all(|tag| example.matches(tag).count() == 1)
         && source
             .messages
             .iter()
@@ -265,15 +294,34 @@ impl CaseScript {
             .iter()
             .map(|entry| {
                 if entry == FILLER {
-                    return Ok(Queued::Filler);
+                    return Ok(Queued::Filler { rows: None });
                 }
-                let (_, source) = resolve(entry)?;
+                if entry == ECHO {
+                    return Ok(Queued::Echo);
+                }
+                if let Some(rows) = entry
+                    .strip_prefix(FILLER)
+                    .and_then(|rest| rest.strip_prefix(':'))
+                {
+                    return match rows.parse::<usize>() {
+                        Ok(rows) if (1..=MAX_FILLER_ROWS).contains(&rows) => {
+                            Ok(Queued::Filler { rows: Some(rows) })
+                        }
+                        _ => Err(ScriptError::BadFillerRows),
+                    };
+                }
+                let (scenario, p1_only) = match entry.strip_suffix(P1_ONLY) {
+                    Some(scenario) => (scenario, true),
+                    None => (entry.as_str(), false),
+                };
+                let (_, source) = resolve(scenario)?;
                 if !scriptable(source) {
                     return Err(ScriptError::CorpusRejected);
                 }
                 Ok(Queued::Scenario {
                     scenario: entry.clone(),
                     source,
+                    p1_only,
                 })
             })
             .collect::<Result<VecDeque<_>, _>>()?;
@@ -307,11 +355,19 @@ impl CaseScript {
             return Some(Err(AnswerFailure::Exhausted));
         };
         let answer = match queued {
-            Queued::Filler => Ok(Answer {
-                text: filler(records),
+            Queued::Filler { rows } => Ok(Answer {
+                text: filler(records, rows),
                 binding: None,
             }),
-            Queued::Scenario { scenario, source } => bind(&scenario, source, records)
+            Queued::Echo => Ok(Answer {
+                text: scripted_summary(records),
+                binding: None,
+            }),
+            Queued::Scenario {
+                scenario,
+                source,
+                p1_only,
+            } => bind(&scenario, source, p1_only, records)
                 .map(|(text, binding)| Answer {
                     text,
                     binding: Some(binding),
@@ -370,7 +426,12 @@ fn locate(source: &Source, records: &[Record]) -> Option<(usize, usize)> {
 /// Records before the source's run are covered by one fixture-authored lead-in segment, since a
 /// summarizer answer covers its chunk from the start; records after it are left to a later
 /// firing through `<unprocessed_from>`.
-fn bind(scenario: &str, source: &Source, records: &[Record]) -> Option<(String, Binding)> {
+fn bind(
+    scenario: &str,
+    source: &Source,
+    p1_only: bool,
+    records: &[Record],
+) -> Option<(String, Binding)> {
     let (first, last) = locate(source, records)?;
     let (start, end) = (records[first].start, records[last].end);
     let mut text = source.approved_example.replacen(
@@ -378,6 +439,13 @@ fn bind(scenario: &str, source: &Source, records: &[Record]) -> Option<(String, 
         &format!("start=\"{start}\" end=\"{end}\""),
         1,
     );
+    if p1_only {
+        for tag in ["p2", "p3"] {
+            let open = text.find(&format!("<{tag}>"))?;
+            let close = open + text[open..].find(&format!("</{tag}>"))? + tag.len() + 3;
+            text.replace_range(open..close, "");
+        }
+    }
     let unprocessed_from = records.get(last + 1).map(|record| record.start);
     let meta_at = text.find("<meta>")?;
     let meta_end = meta_at + text[meta_at..].find("</meta>")? + "</meta>".len();
@@ -392,7 +460,7 @@ fn bind(scenario: &str, source: &Source, records: &[Record]) -> Option<(String, 
     if first > 0 {
         let (lead_start, lead_end) = (records[0].start, records[first - 1].end);
         let lead = format!(
-            "<history_segment start=\"{lead_start}\" end=\"{lead_end}\" title=\"Fixture lead-in {lead_start} to {lead_end}\" episode_type=\"infra\" importance=\"20\"><p1>Fixture-authored lead-in before the scripted case.</p1><p2>Fixture lead-in.</p2><p3>Lead-in.</p3><p4 /></history_segment>"
+            "<history_segment start=\"{lead_start}\" end=\"{lead_end}\" title=\"Fixture lead-in {lead_start} to {lead_end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored lead-in before the scripted case.</p1><p2>Fixture lead-in.</p2><p3>Lead-in.</p3><p4 /></history_segment>"
         );
         let at = text.find("<history_segments>")? + "<history_segments>".len();
         text.insert_str(at, &lead);
@@ -408,21 +476,51 @@ fn bind(scenario: &str, source: &Source, records: &[Record]) -> Option<(String, 
     Some((text, binding))
 }
 
+/// The summarizer answer the fixture stands in for a provider with: one `history_segment` per
+/// run of five presented records, its text the records' own words, in the output document the
+/// daemon's validator reads. A recording of this is what the campaign's structured arm replays.
+pub fn scripted_summary(records: &[Record]) -> String {
+    let mut segments = String::new();
+    for group in records.chunks(SUMMARY_CHUNK) {
+        let (start, end) = (group[0].start, group[group.len() - 1].end);
+        // Escaped as element content, so a message saying `<T> & B` leaves the document
+        // well-formed; the validator unescapes it.
+        let text = group
+            .iter()
+            .map(|record| record.text.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        segments.push_str(&format!(
+            r#"<history_segment start="{start}" end="{end}" title="messages {start} to {end}" episode_type="feature" importance="50"><p1>{text}</p1><p2>{text}</p2><p3>messages {start} to {end}</p3><p4 /></history_segment>"#
+        ));
+    }
+    output_document(&segments, records.last().map_or(1, |record| record.end + 1))
+}
+
 /// The summarizer's output document over `segments`, resuming at ordinal `next`.
-pub fn output_document(segments: &str, next: u64) -> String {
+fn output_document(segments: &str, next: u64) -> String {
     format!(
         "<output><history_segments>{segments}</history_segments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"
     )
 }
 
-/// Compact segments over every presented record, two records each, with bodies that name only
-/// their range, so a newer filler row costs a few tokens at any tier.
-fn filler(records: &[Record]) -> String {
+/// Compact segments over every presented record, with bodies that name only their range, so a
+/// newer filler row costs a few tokens at any tier. `rows` splits the records into that many
+/// contiguous segments, as evenly as the record count allows; without it each segment covers two
+/// records.
+fn filler(records: &[Record], rows: Option<usize>) -> String {
+    let count = rows.map_or(records.len().div_ceil(FILLER_CHUNK), |rows| {
+        rows.min(records.len())
+    });
     let mut segments = String::new();
-    for group in records.chunks(FILLER_CHUNK) {
+    for k in 0..count {
+        let group = &records[k * records.len() / count..(k + 1) * records.len() / count];
         let (start, end) = (group[0].start, group[group.len() - 1].end);
         segments.push_str(&format!(
-            "<history_segment start=\"{start}\" end=\"{end}\" title=\"Fixture filler {start} to {end}\" episode_type=\"infra\" importance=\"30\"><p1>Fixture-authored filler for messages {start} to {end}.</p1><p2>Filler {start} to {end}.</p2><p3>Filler.</p3><p4 /></history_segment>"
+            "<history_segment start=\"{start}\" end=\"{end}\" title=\"Fixture filler {start} to {end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored filler for messages {start} to {end}.</p1><p2>Filler {start} to {end}.</p2><p3>Filler.</p3><p4 /></history_segment>"
         ));
     }
     output_document(&segments, records.last().map_or(1, |record| record.end + 1))
@@ -495,7 +593,7 @@ mod tests {
             let mut records = vec![record(1, 1, "lead-in turn")];
             records.extend(presented(source, 2));
             records.push(record(count + 2, count + 2, "trailing turn"));
-            let (text, binding) = bind("S", source, &records).unwrap();
+            let (text, binding) = bind("S", source, false, &records).unwrap();
             assert_eq!(
                 (binding.start, binding.end, binding.unprocessed_from),
                 (2, count + 1, Some(count + 2)),
@@ -518,7 +616,7 @@ mod tests {
     #[test]
     fn a_source_presented_at_its_own_ordinals_binds_without_a_lead_in() {
         for source in sources() {
-            let (text, binding) = bind("S", source, &presented(source, 1)).unwrap();
+            let (text, binding) = bind("S", source, false, &presented(source, 1)).unwrap();
             assert_eq!((binding.start, binding.unprocessed_from), (1, None));
             assert!(!text.contains("Fixture lead-in"), "{}", source.id);
             assert!(!text.contains("<unprocessed_from>"), "{}", source.id);
@@ -532,7 +630,7 @@ mod tests {
         // C4.V1 messages 4 and 5 are consecutive assistant messages.
         let merged = format!("{} / {}", records[3].text, records[4].text);
         records.splice(3..5, [record(4, 5, &merged)]);
-        let (_, binding) = bind("S", source, &records).unwrap();
+        let (_, binding) = bind("S", source, false, &records).unwrap();
         assert_eq!((binding.start, binding.end), (1, 7));
     }
 
@@ -546,16 +644,53 @@ mod tests {
                 later.start += 1;
                 later.end += 1;
             }
-            assert!(bind("S", source, &foreign).is_none(), "{}", source.id);
+            assert!(
+                bind("S", source, false, &foreign).is_none(),
+                "{}",
+                source.id
+            );
             let mut reordered = records.clone();
             reordered.swap(0, 1);
-            assert!(bind("S", source, &reordered).is_none(), "{}", source.id);
             assert!(
-                bind("S", source, &records[..records.len() - 1]).is_none(),
+                bind("S", source, false, &reordered).is_none(),
+                "{}",
+                source.id
+            );
+            assert!(
+                bind("S", source, false, &records[..records.len() - 1]).is_none(),
                 "{}",
                 source.id
             );
         }
+    }
+
+    #[test]
+    fn a_counted_filler_entry_answers_with_that_many_segments() {
+        let records: Vec<Record> = (1..=10).map(|k| record(k, k, "note")).collect();
+        for (rows, segments) in [(1, 1), (3, 3), (4, 4), (6, 6), (7, 7), (10, 10), (64, 10)] {
+            let mut script = armed(&[&format!("filler:{rows}")]);
+            let answer = script.answer(&records).unwrap().unwrap();
+            assert_eq!(
+                answer.text.matches("<history_segment ").count(),
+                segments,
+                "{rows}"
+            );
+            assert!(
+                answer
+                    .text
+                    .contains("<unprocessed_from>11</unprocessed_from>")
+            );
+        }
+    }
+
+    #[test]
+    fn a_p1_only_entry_removes_the_p2_and_p3_bodies() {
+        let source = sources().find(|source| source.id == "C1.V1").unwrap();
+        let mut script = armed(&[&format!("{}{P1_ONLY}", scenario_for(source))]);
+        let answer = script.answer(&presented(source, 1)).unwrap().unwrap();
+        assert!(answer.text.contains("<p1>"));
+        assert!(!answer.text.contains("<p2>") && !answer.text.contains("<p3>"));
+        assert!(answer.text.contains("<p4 />"));
     }
 
     #[test]
@@ -611,6 +746,8 @@ mod tests {
                 vec![FILLER.to_owned(), "C9.S1".to_owned()],
                 ScriptError::UnknownScenario,
             ),
+            (vec!["filler:0".to_owned()], ScriptError::BadFillerRows),
+            (vec!["filler:65".to_owned()], ScriptError::BadFillerRows),
         ] {
             assert_eq!(script.select(&entries), Err(error));
             assert_eq!(script.status().remaining, 1);
