@@ -631,3 +631,144 @@ proptest::proptest! {
         proptest::prop_assert_eq!(lexical_tokens(&text), sorted_prefix_lexical_tokens(&text));
     }
 }
+
+fn matched_through_lexical_tokens(parts: &[&str], query: &[String]) -> u32 {
+    let tokens = lexical_tokens(&parts.join(" "));
+    query
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| tokens.contains(*token))
+        .fold(0, |bits, (index, _)| bits | (1 << index))
+}
+
+fn hint_query_tokens(text: &str) -> Vec<String> {
+    lexical_tokens(text).into_iter().collect()
+}
+
+#[test]
+fn the_hint_matcher_agrees_with_the_tokenizer_on_long_ascii_and_mixed_bodies() {
+    let query = hint_query_tokens(
+        "Do you have the 123 ab12 alike budget that was zephyrine for about yesterday 日本語 ΣΑΣ",
+    );
+    let hint_query = HintQuery::new(&query);
+    let words = [
+        "alpha",
+        "Budget",
+        "123",
+        "ab12",
+        "zephyrine",
+        "about",
+        "yesterday",
+        "the",
+        "and",
+        "x1",
+        "日本語",
+        "ΣΑΣ",
+        "é",
+        "İstanbul",
+        "commit",
+        "0a1b2c3",
+        "zzz",
+        "aaa",
+        "alike",
+    ];
+    let mut seed = 926u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed >> 33
+    };
+    for _ in 0..300 {
+        let count = 1 + next() % 400;
+        let mut parts: Vec<String> = vec![String::new(); 1 + (next() % 6) as usize];
+        for _ in 0..count {
+            let part = (next() % parts.len() as u64) as usize;
+            let word = words[(next() % words.len() as u64) as usize];
+            parts[part].push_str(word);
+            parts[part].push_str([" ", ", ", "\n", "-", "_", ""][(next() % 6) as usize]);
+        }
+        let parts = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hint_query.matched_in_parts(&parts),
+            matched_through_lexical_tokens(&parts, &query),
+            "{parts:?}"
+        );
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn the_hint_matcher_agrees_with_the_tokenizer(
+        parts in proptest::collection::vec(
+            proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "a", "b", "z", "ab", "abc", "Zeta", "é", "İ", "Σ", "ΣΑΣ", "日本", "語", "x1",
+                    "2", " ", "_", "-", "\n", "the", "and", "your", "0", "9", "aaa", "zzz", "ÿ",
+                    "Ω1", "abd", "abe", "b1", "b2", "c1", "c2", "d5", "e8", "f10", "g12", "h14",
+                    "i16", "j18", "k19", "l20", "m21", "n22", "o23", "p24", "q25", "r26", "s27",
+                ]),
+                0..120,
+            ),
+            1..4,
+        ),
+        query_words in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "abc", "zeta", "σασ", "日本", "日本語", "the", "aaa", "zzz", "abd", "abe", "b1x",
+                "c1", "d5", "e8", "f10", "g12", "h14", "i16", "j18", "k19", "l20", "m21", "n22",
+                "o23", "p24", "q25", "r26", "s27", "ω1", "stanbul", "é1",
+            ]),
+            1..30,
+        ),
+    ) {
+        let parts = parts.iter().map(|pieces| pieces.concat()).collect::<Vec<_>>();
+        let parts = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>();
+        let query = hint_query_tokens(&query_words.join(" "));
+        proptest::prop_assume!(!query.is_empty());
+        let hint_query = HintQuery::new(&query);
+        proptest::prop_assert_eq!(
+            hint_query.matched_in_parts(&parts),
+            matched_through_lexical_tokens(&parts, &query)
+        );
+    }
+}
+
+#[test]
+fn the_hint_stopword_check_equals_the_stopword_list() {
+    for stopword in USER_HINT_STOPWORDS {
+        assert!(is_hint_stopword(stopword.as_bytes()), "{stopword}");
+    }
+    for token in [
+        "an", "ands", "are1", "fro", "form", "than", "thi", "you2", "use_", "", "a",
+    ] {
+        assert_eq!(
+            is_hint_stopword(token.as_bytes()),
+            USER_HINT_STOPWORDS.contains(&token),
+            "{token}"
+        );
+    }
+    let mut seen = 0usize;
+    for first in b'a'..=b'z' {
+        for second in b'a'..=b'z' {
+            for third in b'a'..=b'z' {
+                let token = [first, second, third];
+                seen += is_hint_stopword(&token) as usize;
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        USER_HINT_STOPWORDS
+            .iter()
+            .filter(|stopword| stopword.len() == 3)
+            .count()
+    );
+}
