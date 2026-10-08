@@ -8,8 +8,8 @@
 //! same pin the TypeScript reader in `packages/e2e-tests` enforces, so a changed corpus fails
 //! until both pins move together.
 //!
-//! The module depends only on `serde`, `serde_json`, `sha2`, and the two `testdata/` files it
-//! embeds, with no `crate::` path.
+//! The module depends only on `serde`, `serde_json`, `sha2`, and the files it embeds from
+//! `testdata/`: the corpus and `memory-category-vocabulary.json`. It names no `crate::` path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;

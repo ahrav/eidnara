@@ -421,7 +421,7 @@ here; main disposition remains with the portfolio owner.
 
 Mechanical verification confirms eight index rows, eight schema-ordered records,
 and eight evidence files of 99-114 lines. All 129 relative links resolve, and
-the 19 linked source files match the inspected HEAD. The fault map names four
+the 19 linked source files match the U1 branch tip. The fault map names four
 safety assertions and 29 occurrence markers as separate kebab-case constants.
 These checks validate documentation structure and references, not property
 exercise, semantic truth, or existing-test adequacy.

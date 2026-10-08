@@ -18,7 +18,7 @@ incident logs or related repositories are supplied. No tests run here.
   prompt`. It is not a witness of material native input reaching generation.
 - [lib.rs:18252-18274][lib] nests private test modules using `#[path]`.
   This is the ancestry KTD2 requires for the new replay module.
-- [lib.rs:22322-22355][lib], `ProducerState`, has prompt, output, and attempt
+- [lib.rs:22322-22360][lib], `ProducerState`, has prompt, output, and attempt
   observations and hooks. [lib.rs:22416-22481][lib], `TestProducer::start`,
   records prompts and prepares scripted output without a real model call.
 - [lib.rs:22626-22652][lib], `handler_with_store`, supplies the handler,

@@ -15,7 +15,7 @@ dependencies". The original plan's inspected SHA-256 is
 `b33aaf8508174d39ea578cb6927d1524bbee1c3f2496c8a22511349beb35a384`.
 It names revision `1555f00c702296406186f8c859045014e8e8a4d9`; HEAD has moved.
 The intervening diff changes Curator activation, lifecycle, worker, tests, and
-operations documentation. All code references here use the inspected HEAD,
+operations documentation. All code references here are verified against the U1 branch tip,
 not the plan's source offsets. Contract statements remain claims under test.
 Plan line citations are historical provenance only; the
 [catalog index](../README.md#scope-and-provenance) maps them to published
@@ -497,7 +497,7 @@ because semantic preservation is not a bounded recovery claim. Seven remain
 
 Mechanical documentation validation passes for field order, record/index/file
 agreement, evidence headings and lengths, links, and source line bounds.
-Referenced tracked source files match the inspected HEAD; the local plan digest
+Referenced tracked source files match the U1 branch tip; the local plan digest
 is unchanged. These checks do not exercise any cataloged system property.
 
 [chunk]: ../../../../crates/daemon/src/history_summarizer_chunk.rs
