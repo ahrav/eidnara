@@ -7,6 +7,8 @@ use super::compression_fidelity_corpus::*;
 use super::compression_fidelity_observation::{Observation, Terminal};
 use super::*;
 
+use std::ops::Range;
+
 use memory_store::{ExtractionFailure, MemoryReviewerNonadmissionCode};
 
 const OWNER: &str = "daemon.compression_fidelity.replay";
@@ -170,16 +172,43 @@ fn record_of<'s>(source: &'s Source, span: &Span) -> (usize, &'s NativeMessage) 
         .unwrap()
 }
 
-fn rendered_record(record: &NativeMessage) -> String {
+/// The text blocks the presenter renders for `record`, by block index, as the presenter rewrites
+/// them: tool blocks and empty text are left out.
+fn rendered_blocks(record: &NativeMessage) -> Vec<(usize, String)> {
     record
         .parts
         .iter()
-        .filter_map(|part| match part {
-            Part::Text { text, .. } => Some(collapse(text)),
+        .enumerate()
+        .filter_map(|(index, part)| match part {
+            Part::Text { text, .. } => Some(collapse(text))
+                .filter(|text| !text.is_empty())
+                .map(|text| (index, text)),
             Part::Tool { .. } => None,
         })
+        .collect()
+}
+
+const PART_SEPARATOR: &str = " / ";
+
+fn rendered_record(record: &NativeMessage) -> String {
+    rendered_blocks(record)
+        .into_iter()
+        .map(|(_, text)| text)
         .collect::<Vec<_>>()
-        .join(" / ")
+        .join(PART_SEPARATOR)
+}
+
+/// The byte range of block `block_index` inside the record's rendered part; `None` for a block
+/// the presenter leaves out.
+fn rendered_block_range(record: &NativeMessage, block_index: usize) -> Option<Range<usize>> {
+    let mut offset = 0;
+    for (index, text) in rendered_blocks(record) {
+        if index == block_index {
+            return Some(offset..offset + text.len());
+        }
+        offset += text.len() + PART_SEPARATOR.len();
+    }
+    None
 }
 
 /// The parts inside `<new_messages>` in alias order: the bytes after each `«sN»` marker up to
@@ -208,22 +237,32 @@ fn presented_parts(prompt: &str) -> Vec<&str> {
     parts
 }
 
-/// One exposure entry per material native span of `source`, in one shape for every stage. A span
-/// is exposed only inside the part presenting its annotated message, which is the part at the
-/// message's position carrying the message's rendered text.
+/// Whether the span's message reached the prompt whole, and the span's exposure inside the
+/// bytes presenting its annotated block. The message's part is the one at its position among the
+/// source's messages holding the message's rendered text.
+fn span_exposure(parts: &[&str], source: &Source, span: &Span) -> (bool, Exposure) {
+    let (position, record) = record_of(source, span);
+    let presented = parts
+        .get(position)
+        .copied()
+        .filter(|part| *part == rendered_record(record));
+    let seen = presented
+        .zip(rendered_block_range(record, span.block_index))
+        .map_or(Exposure::Absent, |(part, range)| {
+            exposure(&part[range], &span.text)
+        });
+    (presented.is_some(), seen)
+}
+
+/// One exposure entry per material native span of `source`, in one shape for every stage.
 fn exposures(case: &Case, source: &Source, prompt: &str) -> Vec<(Exposure, bool, bool, Value)> {
     let parts = presented_parts(prompt);
     let mut entries = Vec::new();
     for obligation in case.obligations.iter().filter(|o| o.memory.is_none()) {
         for span in obligation.evidence.iter().filter(|s| s.source == source.id) {
-            let (position, record) = record_of(source, span);
+            let (_, record) = record_of(source, span);
             let tool = matches!(record.parts[span.block_index], Part::Tool { .. });
-            let presented = parts
-                .get(position)
-                .copied()
-                .filter(|part| collapse(part) == rendered_record(record));
-            let text_presented = presented.is_some();
-            let seen = presented.map_or(Exposure::Absent, |part| exposure(part, &span.text));
+            let (text_presented, seen) = span_exposure(&parts, source, span);
             entries.push((
                 seen,
                 tool,
@@ -1348,7 +1387,7 @@ fn new_messages_prompt(lines: &[(u64, &str, &str)]) -> String {
 }
 
 #[test]
-fn exposure_is_credited_only_within_the_annotated_message() {
+fn exposure_is_credited_only_within_the_annotated_block() {
     let (case, source) = case_source("C6", "C6.V1");
     let [m1, m2, m3, m4] = source.messages.as_slice() else {
         panic!("C6.V1 holds four messages");
@@ -1380,6 +1419,35 @@ fn exposure_is_credited_only_within_the_annotated_message() {
             ("C6.O1".to_owned(), Exposure::Absent),
             ("C6.O2".to_owned(), Exposure::Absent),
         ]
+    );
+
+    // msg_cf_c6_02's tool output repeats the summary line its text block quotes. The presenter
+    // omits tool output, so a span annotated on the tool block is Absent although the text
+    // block beside it carries the same bytes.
+    let text_span = &case.obligations[0].evidence[0];
+    assert_eq!(text_span.message_id, m2.info.id);
+    assert_eq!(text_span.block_index, 1);
+    let Part::Tool { state, .. } = &m2.parts[0] else {
+        panic!("msg_cf_c6_02 block 0 is the tool call");
+    };
+    assert!(state.output.as_deref().unwrap().contains(&text_span.text));
+    let tool_span = Span {
+        source: text_span.source.clone(),
+        message_id: text_span.message_id.clone(),
+        block_index: 0,
+        revision: text_span.revision.clone(),
+        start: 0,
+        end: text_span.text.len(),
+        text: text_span.text.clone(),
+    };
+    let parts = presented_parts(&whole);
+    assert_eq!(
+        span_exposure(&parts, source, text_span),
+        (true, Exposure::Exact)
+    );
+    assert_eq!(
+        span_exposure(&parts, source, &tool_span),
+        (true, Exposure::Absent)
     );
 }
 
