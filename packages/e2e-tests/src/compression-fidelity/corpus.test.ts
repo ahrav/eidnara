@@ -6,6 +6,7 @@ import {
     COMPRESSION_FIDELITY_CORPUS_PATH,
     COMPRESSION_FIDELITY_CORPUS_SHA256,
     CorpusIdentityError,
+    parseCompressionFidelityCorpus,
     readCompressionFidelityCorpus,
 } from "./corpus";
 
@@ -130,13 +131,19 @@ describe("compression fidelity corpus reader", () => {
         expect(leaks(JSON.stringify(raw))).toHaveLength(hidden.length);
     });
 
-    it("rejects a pinned file whose exposed fields have the wrong shape", () => {
+    it("compares every file against the pinned digest, with no caller-selected oracle", () => {
         const corpus = JSON.parse(committed.toString("utf8"));
         corpus.cases[0].scenarios[0].serving.path = "teleport";
         const bytes = `${JSON.stringify(corpus, null, 2)}\n`;
         const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-        expect(() => readCompressionFidelityCorpus(copyWith(bytes), digest)).toThrow(
-            /serving.path/,
-        );
+        const reader = readCompressionFidelityCorpus as unknown as (...args: unknown[]) => unknown;
+        expect(() => reader(copyWith(bytes), digest)).toThrow(/hashes to/);
+        expect(() => reader(copyWith(committed), "a".repeat(64))).not.toThrow();
+    });
+
+    it("rejects exposed fields with the wrong shape", () => {
+        const corpus = JSON.parse(committed.toString("utf8"));
+        corpus.cases[0].scenarios[0].serving.path = "teleport";
+        expect(() => parseCompressionFidelityCorpus(corpus)).toThrow(/serving.path/);
     });
 });

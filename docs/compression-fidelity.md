@@ -88,9 +88,10 @@ their native block at the named revision, successors that change identity
 or byte length, successors that give one block two byte strings at one
 revision, missing natural P1 at m1, P2 to P4 at m0, or pressure/omission
 coverage, unexercised obligations, and any answer key or evaluator label in
-a field that can reach provider input: native text and tool fields,
-follow-up prompts, memory example text, and the approved example. Evaluator
-labels include the corpus note, case titles, and incident references. Native
+a field that can reach provider input: native text, tool call IDs, names,
+inputs, and outputs, follow-up prompts, memory example text, and the approved
+example. Evaluator labels include the corpus note, case IDs and titles, every
+entry ID and statement, and incident references. Native
 records decode through a closed schema, so an extra field on a message or
 part fails to decode.
 
@@ -126,25 +127,8 @@ text, spans, obligation statements, or forbidden conclusion statements.
 
 ## Planned `eval:compression-fidelity` command
 
-This command is planned, not delivered. It will be a script in
-`packages/e2e-tests` with this contract:
-
-- **Inputs.** The corpus path, verified against the pinned digest; baseline
-  and candidate prompt identities; a mode, either scripted or forwarding,
-  with scripted as the default; for forwarding, one explicitly selected
-  HTTPS provider and model with fixed call count, maximum output, timeout,
-  and total spend limits covering the whole tool loop.
-- **Outputs.** A private output directory outside the repository, written
-  through the existing atomic JSON publisher with restrictive permissions.
-  The run manifest records the repository revision, the corpus digest, the
-  prompt hashes, the model, provider, version, and settings, and the limits
-  once. Each case and scenario row references the owner observations it was
-  derived from and keeps execution, deterministic result, preservation,
-  recovery, consumer safety, semantic review, and cost as separate columns.
-- **Limits.** Scripted mode makes no outbound provider call, including when
-  scripts exhaust or setup fails. Forwarding stops at its first exhausted
-  limit and treats an ambiguous send as spent.
-- **Review prerequisites.** Two people approve the corpus before any
-  candidate output is inspected, and the first semantic baseline before it
-  is accepted. Without an authorized provider or reviewers, semantic
-  evidence stays unverified.
+The evaluation command is planned, not delivered. Its contract (inputs,
+outputs, limits, and review prerequisites) is specified in the
+[Compression Fidelity Contract](https://github.com/ahrav/eidnara/issues/707)
+under milestone U4 and tracked there; this document describes it once it
+exists.

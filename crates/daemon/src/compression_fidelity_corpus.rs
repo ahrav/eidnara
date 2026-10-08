@@ -26,7 +26,7 @@ pub(crate) const CORPUS_BYTES: &[u8] = include_bytes!("../testdata/compression-f
 /// re-authored and re-reviewed; `packages/e2e-tests/src/compression-fidelity/corpus.ts` pins the
 /// same value.
 pub(crate) const CORPUS_SHA256: &str =
-    "46980759b02b7696ea3be9d9b44e43603eed199a404620c3c6d952afbc153800";
+    "14ca3aa94af9d581575e6133f963e5a26ec70a98d5d8c70bf17f77f3e6445fd8";
 
 const SCHEMA: &str = "eidnara.compression-fidelity-corpus/v1";
 
@@ -994,8 +994,8 @@ fn validate_span(case: &Case, owner: &str, span: &Span, out: &mut Vec<Violation>
     }
 }
 
-/// The provider-reachable strings of one part: a text part's text, or a tool's name, every key
-/// and string of its input, and its output or error.
+/// The provider-reachable strings of one part: a text part's text, or a tool's call id, name,
+/// every key and string of its input, and its output or error.
 fn part_texts(part: &Part) -> Vec<String> {
     fn strings(value: &Value, into: &mut Vec<String>) {
         match value {
@@ -1010,8 +1010,13 @@ fn part_texts(part: &Part) -> Vec<String> {
     }
     match part {
         Part::Text { text, .. } => vec![text.clone()],
-        Part::Tool { tool, state, .. } => {
-            let mut texts = vec![tool.clone()];
+        Part::Tool {
+            call_id,
+            tool,
+            state,
+            ..
+        } => {
+            let mut texts = vec![call_id.clone(), tool.clone()];
             strings(&state.input, &mut texts);
             texts.extend(state.output.clone());
             texts.extend(state.error.clone());
@@ -1059,10 +1064,8 @@ fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
         if let Provenance::Incident { reference } = &case.provenance {
             labels.push(reference.clone());
         }
-        let ids = case
-            .sources
-            .iter()
-            .map(|s| &s.id)
+        let ids = std::iter::once(&case.id)
+            .chain(case.sources.iter().map(|s| &s.id))
             .chain(case.follow_ups.iter().map(|f| &f.id))
             .chain(case.memory_examples.iter().map(|m| &m.id))
             .chain(case.obligations.iter().map(|o| &o.id))

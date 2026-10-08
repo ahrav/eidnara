@@ -612,7 +612,27 @@ fn answer_keys_and_evaluator_labels_stay_out_of_provider_input() {
     let c1_part = ["cases", "0", "sources", "0", "messages", "2", "parts", "0"];
     assert_eq!(
         with_appended(&[&c1_part[..], &["text"]].concat(), " (see C1.O1)"),
-        [leaked("msg_cf_c1_03#0", "C1.O1")]
+        [
+            leaked("msg_cf_c1_03#0", "C1"),
+            leaked("msg_cf_c1_03#0", "C1.O1")
+        ],
+        "a case id inside a longer label leaks on its own"
+    );
+    assert_eq!(
+        with_appended(&prompt, " C1"),
+        [leaked("C1.F1", "C1")],
+        "a case id is an evaluator label"
+    );
+    let c1_call = [
+        "cases", "0", "sources", "0", "messages", "3", "parts", "0", "callID",
+    ];
+    assert_eq!(
+        with_appended(&c1_call, "_C1.O1"),
+        [
+            leaked("msg_cf_c1_04#0", "C1"),
+            leaked("msg_cf_c1_04#0", "C1.O1")
+        ],
+        "a tool call id is replayed as the provider-visible tool_use id"
     );
     let c1_tool = [
         "cases", "0", "sources", "0", "messages", "3", "parts", "0", "state",
@@ -626,7 +646,10 @@ fn answer_keys_and_evaluator_labels_stay_out_of_provider_input() {
     );
     assert_eq!(
         with_appended(&[&c1_tool[..], &["input", "filePath"]].concat(), "#C1.S2"),
-        [leaked("msg_cf_c1_04#0", "C1.S2")]
+        [
+            leaked("msg_cf_c1_04#0", "C1"),
+            leaked("msg_cf_c1_04#0", "C1.S2")
+        ]
     );
     let mut value = corpus_value();
     text_mut(&mut value, &[&c1_tool[..], &["input"]].concat())["disposition"] = "visible".into();
@@ -929,8 +952,10 @@ fn every_remaining_rule_rejects_its_own_mutation() {
         ),
         (
             "tool name label",
-            |v| v["cases"][0]["sources"][0]["messages"][3]["parts"][0]["tool"] = "C1.L2".into(),
-            leaked("msg_cf_c1_04#0", "C1.L2"),
+            |v| {
+                v["cases"][0]["sources"][0]["messages"][3]["parts"][0]["tool"] = "abstention".into()
+            },
+            leaked("msg_cf_c1_04#0", "abstention"),
         ),
     ];
     for (label, mutate, expected) in cases {
