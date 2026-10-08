@@ -95,6 +95,8 @@ Three control commands drive it:
 `src/compression-fidelity/campaign.ts`: m1, warm, cold m0, natural decay to
 P2 through P5 checked against `decay-oracle.ts`, guard pressure for C1.S5 and
 C3.S5, a parser-fallback row, and the capability pins in `capabilities.ts`.
+Each case runs against its own harness as a concurrent test, and `test:rust`
+passes `--max-concurrency 6`, the limit Bun applies to concurrent tests.
 `compression-fidelity-pi` serves C1 through the Pi `context` handler at P1 in
 m1 and m0. The pass line's `admission`, `invocation_bytes`,
 `invocation_charged`, and `history_budget` fields feed both.

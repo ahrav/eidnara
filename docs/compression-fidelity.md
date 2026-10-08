@@ -167,15 +167,21 @@ as `filled` and reports the importance each kind of fixture row carries.
 
 `packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` drives each
 source through `src/compression-fidelity/campaign.ts` in one OpenCode session
-per source:
+per source. Each case owns its OpenCode, direct host, and mock provider, so
+the cases run as concurrent tests up to the runner's `--max-concurrency`
+(`test:rust` passes 6). Each turn waits until no summarizer firing is live,
+so no pass commits while a firing publishes.
 
 - A baseline of fixture-authored rows publishes first, then the scripted case.
   The next provider request serves the case's P1 body in the m1 window
   (`<session-history-since>`), a second request repeats those bytes warm, and
-  a restart with a changed prompt surface rematerializes the same body into
-  m0 on a `HARD` pass.
+  a restart under the aging budget with a changed prompt surface
+  rematerializes the same body into m0 on a `HARD` pass. A source without an
+  m1 row serves every row under the aging budget.
 - Natural decay adds counted fixture rows after the case under a 562-token
-  history budget and serves each P2, P3, P4, and P5 scenario row. Each served
+  history budget and serves each P2, P3, P4, and P5 scenario row on a `HARD`
+  pass that rebuilds m0 in the running OpenCode: the session's requests carry
+  new system text, so the next pass sees a changed render config. Each served
   tier must equal the tier `src/compression-fidelity/decay-oracle.ts` computes
   from the row count, the importances, and the budget the pass line reports,
   so a guard demotion or a retry fails the row. P4 rows serve the title-only

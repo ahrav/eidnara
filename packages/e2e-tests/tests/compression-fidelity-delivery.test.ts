@@ -1,12 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
 import {
     AGING_SERVING,
     CaseDriver,
-    CONTEXT_LIMIT,
     type Delivery,
-    eidnaraConfig,
     M1_SERVING,
+    withCaseHarness,
 } from "../src/compression-fidelity/campaign";
 import { capabilityDrift, surfaceOfRequest } from "../src/compression-fidelity/capabilities";
 import {
@@ -17,7 +16,7 @@ import {
 } from "../src/compression-fidelity/corpus";
 import { emitObservation, judgeDelivery } from "../src/compression-fidelity/delivery";
 import { PI_PLUGIN_ROOT } from "../src/pi-runner/spawn";
-import { RustTestHarness } from "../src/rust-harness";
+import type { RustTestHarness } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 const QUALIFICATION_REQUIRED = process.env.EIDNARA_E2E_REQUIRE_FIDELITY === "1";
@@ -108,17 +107,32 @@ async function expectPinnedCapabilities(delivery: Delivery): Promise<void> {
     ).toEqual([]);
 }
 
-async function decayCampaign(h: RustTestHarness, caseId: string, source: string): Promise<void> {
+/**
+ * A source with an m1 row starts under the m1 budget and restarts once, under the aging budget, for
+ * its cold row; a source without one serves every row under the aging budget.
+ */
+async function decayCampaign(caseId: string, source: string): Promise<void> {
     const fidelityCase = caseOf(caseId);
     const scenarios = decayScenarios(fidelityCase, source);
     const m1Scenario = scenarios.find((scenario) => scenario.serving.stage === "m1");
     const first = m1Scenario ?? scenarios[0];
     if (!first) throw new Error(`${source} has no decay scenario`);
-    const driver = await CaseDriver.open(h, fidelityCase, first);
-    await driver.baseline();
-    await driver.seed();
-    await driver.publish(first.id);
+    const serving = m1Scenario ? M1_SERVING : AGING_SERVING;
+    await withCaseHarness(serving, async (h) => {
+        const driver = await CaseDriver.open(h, fidelityCase, first, serving);
+        await driver.baseline();
+        await driver.seed();
+        await driver.publish(first.id);
+        await observeDecayRows(driver, m1Scenario, scenarios);
+    });
+}
 
+async function observeDecayRows(
+    driver: CaseDriver,
+    m1Scenario: FidelityScenario | undefined,
+    scenarios: FidelityScenario[],
+): Promise<void> {
+    let budget: number;
     if (m1Scenario) {
         const m1 = await driver.observe("m1");
         expectCredited(m1, "p1");
@@ -133,14 +147,15 @@ async function decayCampaign(h: RustTestHarness, caseId: string, source: string)
         expect(warm.pass.decision).not.toBe("HARD");
         observation(driver, m1Scenario.id, warm, ["cf-delivery-warm-repeat-input"]);
 
-        const cold = await driver.observeCold("cold-m0", M1_SERVING);
+        const cold = await driver.observeCold("cold-m0", AGING_SERVING);
         expectCredited(cold, "p1");
         expect([cold.stage, cold.verdict.tier, cold.pass.decision]).toEqual(["m0", "p1", "HARD"]);
         expect(cold.segment).toBe(m1.segment);
         observation(driver, m1Scenario.id, cold, []);
+        budget = cold.budget;
+    } else {
+        budget = (await driver.observeRebuilt("aging-budget")).budget;
     }
-
-    const budget = (await driver.observeCold("aging-budget", AGING_SERVING)).budget;
     expect(budget).toBeGreaterThan(0);
     const decayRows = scenarios
         .filter((scenario) => scenario.serving.stage === "m0")
@@ -150,6 +165,7 @@ async function decayCampaign(h: RustTestHarness, caseId: string, source: string)
         const tier = scenario.serving.tier ?? "p1";
         const delivery = await driver.ageTo(tier, budget);
         expectCredited(delivery, tier);
+        expect(delivery.pass.decision).toBe("HARD");
         expect(delivery.budget).toBe(budget);
         expect([delivery.verdict.tier, delivery.curve]).toEqual([tier, tier]);
         expect(delivery.stage).toBe(tier === "p5" ? "absent" : "m0");
@@ -162,26 +178,79 @@ async function decayCampaign(h: RustTestHarness, caseId: string, source: string)
     }
 }
 
+async function pressureCampaign(h: RustTestHarness, scenarioId: string): Promise<void> {
+    const fidelityCase = caseOf(scenarioId.split(".")[0] ?? "");
+    const scenario = fidelityCase.scenarios.find((entry) => entry.id === scenarioId);
+    if (!scenario) throw new Error(`${scenarioId} is not in the corpus`);
+    const driver = await CaseDriver.open(h, fidelityCase, scenario, M1_SERVING);
+    await driver.seed();
+    await driver.publish(scenario.id);
+    const before = await driver.observeRebuilt("pressure-before");
+    expect([before.stage, before.verdict.tier, before.pass.decision]).toEqual(["m0", "p1", "HARD"]);
+    const pressed = await driver.pressure();
+    expectCredited(pressed, "p5");
+    expect(pressed.budget).toBeGreaterThan(0);
+    expect(pressed.curve).not.toBe("p5");
+    expect(TIER_RANK[pressed.verdict.tier ?? "p1"]).toBeGreaterThan(TIER_RANK[pressed.curve]);
+    observation(driver, scenario.id, pressed, [
+        ...(driver.importance >= 80 ? ["cf-delivery-high-importance-pressure-input"] : []),
+    ]);
+}
+
+/** Serves every row under the aging budget. */
+async function fallbackCampaign(h: RustTestHarness): Promise<void> {
+    const fidelityCase = caseOf("C1");
+    const scenario = fidelityCase.scenarios.find((entry) => entry.id === "C1.S2");
+    if (!scenario) throw new Error("C1.S2 is not in the corpus");
+    const driver = await CaseDriver.open(h, fidelityCase, scenario, AGING_SERVING);
+    await driver.seed();
+    await driver.publish(`${scenario.id}@p1-only`);
+    const budget = (await driver.observeRebuilt("aging-budget")).budget;
+    const delivery = await driver.ageTo("p2", budget);
+    expect(delivery.curve).toBe("p2");
+    expect(delivery.verdict.tier).toBe("p1");
+    expect(delivery.verdict.refusals).toEqual([]);
+    observation(driver, `${scenario.id}@p1-only`, delivery, ["cf-delivery-parser-fallback-input"]);
+
+    // A real request whose capture is filed under another identity supplies no
+    // matching observation, so the judge refuses it.
+    h.tagCaptures({ sessionId: "ses_other", caseId: "C1", scenarioId: "unmatched" });
+    await h.sendPrompt(driver.sessionId, `${scenario.followUp.prompt} (untagged)`);
+    h.tagCaptures({ sessionId: driver.sessionId, caseId: "C1", scenarioId: scenario.id });
+    const untagged = h
+        .retainedCaptures({ sessionId: driver.sessionId })
+        .find((entry) => JSON.stringify(entry.request.body).includes("(untagged)"));
+    expect(
+        h.mock.requests().some((request) => JSON.stringify(request.body).includes("(untagged)")),
+    ).toBe(true);
+    const missing = judgeDelivery({
+        capture: untagged,
+        pass: delivery.pass,
+        title: driver.title,
+        bodies: driver.bodies,
+        leakProbes: driver.source?.leakProbes ?? [],
+    });
+    expect(missing.refusals).toEqual(["missing_capture"]);
+    emitObservation({
+        case: "C1",
+        source: driver.sourceId,
+        scenario: scenario.id,
+        stage: "missing-capture",
+        terminal: "unqualified",
+        markers: ["cf-delivery-missing-capture-input"],
+        detail: { refusals: missing.refusals },
+    });
+}
+
 describe("compression fidelity delivery campaign prerequisites", () => {
     it.skipIf(!QUALIFICATION_REQUIRED)("are present when EIDNARA_E2E_REQUIRE_FIDELITY=1", () => {
         expect(rustPrereqs.skipReason ?? "present").toBe("present");
     });
 });
 
+// Each case owns its OpenCode, direct host, and mock provider, so the cases run concurrently up
+// to the runner's `--max-concurrency`.
 describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () => {
-    let h: RustTestHarness;
-
-    beforeAll(async () => {
-        h = await RustTestHarness.create({
-            modelContextLimit: CONTEXT_LIMIT,
-            eidnaraConfig: eidnaraConfig(M1_SERVING),
-        });
-    }, 600_000);
-
-    afterAll(async () => {
-        await h?.dispose();
-    });
-
     for (const [caseId, source] of [
         ["C1", "C1.V1"],
         ["C2", "C2.V1"],
@@ -191,91 +260,24 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () =>
         ["C5", "C5.V1"],
         ["C6", "C6.V1"],
     ] as const) {
-        it(
+        it.concurrent(
             `${source} reaches its m1, warm, cold m0, and natural decay rows`,
-            async () => decayCampaign(h, caseId, source),
+            () => decayCampaign(caseId, source),
             CASE_TIMEOUT_MS,
         );
     }
 
     for (const scenarioId of ["C1.S5", "C3.S5"]) {
-        it(
+        it.concurrent(
             `${scenarioId} serves its row demoted by a positive history budget`,
-            async () => {
-                const fidelityCase = caseOf(scenarioId.split(".")[0] ?? "");
-                const scenario = fidelityCase.scenarios.find((entry) => entry.id === scenarioId);
-                if (!scenario) throw new Error(`${scenarioId} is not in the corpus`);
-                const driver = await CaseDriver.open(h, fidelityCase, scenario);
-                await driver.seed();
-                await driver.publish(scenario.id);
-                const before = await driver.observeCold("pressure-before", M1_SERVING);
-                expect([before.stage, before.verdict.tier]).toEqual(["m0", "p1"]);
-                const pressed = await driver.pressure();
-                expectCredited(pressed, "p5");
-                expect(pressed.budget).toBeGreaterThan(0);
-                expect(pressed.curve).not.toBe("p5");
-                expect(TIER_RANK[pressed.verdict.tier ?? "p1"]).toBeGreaterThan(
-                    TIER_RANK[pressed.curve],
-                );
-                observation(driver, scenario.id, pressed, [
-                    ...(driver.importance >= 80
-                        ? ["cf-delivery-high-importance-pressure-input"]
-                        : []),
-                ]);
-            },
+            () => withCaseHarness(M1_SERVING, (h) => pressureCampaign(h, scenarioId)),
             CASE_TIMEOUT_MS,
         );
     }
 
-    it(
+    it.concurrent(
         "serves a P1-only publication's inherited body at P2 and refuses a missing capture",
-        async () => {
-            const fidelityCase = caseOf("C1");
-            const scenario = fidelityCase.scenarios.find((entry) => entry.id === "C1.S2");
-            if (!scenario) throw new Error("C1.S2 is not in the corpus");
-            const driver = await CaseDriver.open(h, fidelityCase, scenario);
-            await driver.seed();
-            await driver.publish(`${scenario.id}@p1-only`);
-            const budget = (await driver.observeCold("aging-budget", AGING_SERVING)).budget;
-            const delivery = await driver.ageTo("p2", budget);
-            expect(delivery.curve).toBe("p2");
-            expect(delivery.verdict.tier).toBe("p1");
-            expect(delivery.verdict.refusals).toEqual([]);
-            observation(driver, `${scenario.id}@p1-only`, delivery, [
-                "cf-delivery-parser-fallback-input",
-            ]);
-
-            // A real request whose capture is filed under another identity supplies no
-            // matching observation, so the judge refuses it.
-            h.tagCaptures({ sessionId: "ses_other", caseId: "C1", scenarioId: "unmatched" });
-            await h.sendPrompt(driver.sessionId, `${scenario.followUp.prompt} (untagged)`);
-            h.tagCaptures({ sessionId: driver.sessionId, caseId: "C1", scenarioId: scenario.id });
-            const untagged = h
-                .retainedCaptures({ sessionId: driver.sessionId })
-                .find((entry) => JSON.stringify(entry.request.body).includes("(untagged)"));
-            expect(
-                h.mock
-                    .requests()
-                    .some((request) => JSON.stringify(request.body).includes("(untagged)")),
-            ).toBe(true);
-            const missing = judgeDelivery({
-                capture: untagged,
-                pass: delivery.pass,
-                title: driver.title,
-                bodies: driver.bodies,
-                leakProbes: driver.source?.leakProbes ?? [],
-            });
-            expect(missing.refusals).toEqual(["missing_capture"]);
-            emitObservation({
-                case: "C1",
-                source: driver.sourceId,
-                scenario: scenario.id,
-                stage: "missing-capture",
-                terminal: "unqualified",
-                markers: ["cf-delivery-missing-capture-input"],
-                detail: { refusals: missing.refusals },
-            });
-        },
+        () => withCaseHarness(AGING_SERVING, fallbackCampaign),
         CASE_TIMEOUT_MS,
     );
 });

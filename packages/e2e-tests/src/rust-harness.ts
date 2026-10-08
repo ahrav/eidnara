@@ -448,7 +448,7 @@ export class RustTestHarness {
     async sendPrompt(
         sessionId: string,
         text: string,
-        options: { agent?: string; timeoutMs?: number } = {},
+        options: { agent?: string; system?: string; timeoutMs?: number } = {},
     ): Promise<unknown> {
         const timeoutMs = options.timeoutMs ?? 180_000;
         const promptPromise = this.clientInstance.session.prompt({
@@ -457,6 +457,7 @@ export class RustTestHarness {
                 model: { providerID: "mock-anthropic", modelID: "mock-sonnet" },
                 parts: [{ type: "text", text }],
                 ...(options.agent ? { agent: options.agent } : {}),
+                ...(options.system ? { system: options.system } : {}),
             },
         });
         const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));
