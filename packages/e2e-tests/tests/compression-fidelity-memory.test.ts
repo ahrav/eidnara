@@ -297,14 +297,27 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                 markers: ["cf-delivery-hint-fragment-input"],
                 detail: {
                     hint_utf16_units: hint.length,
-                    case_fragment: caseFragment,
-                    fragment_truncated: caseFragment.includes("…"),
-                    qualifier_kept: qualifierKept,
                     distractor_rows: distractors,
                     candidate_rows: outcome.window.length,
                     matched_distractor_rows: matchedDistractors,
                     selected_rows: outcome.selected.length,
                     served_tier: on.verdict.tier,
+                },
+            });
+
+            // The fragment limit cuts the case row's snippet at both ends.
+            expect(caseFragment.startsWith("- …") && caseFragment.endsWith("…")).toBe(true);
+            emitObservation({
+                case: "C4",
+                source: driver.sourceId,
+                scenario: scenario.id,
+                stage: "hint-truncation",
+                terminal: "served",
+                markers: ["cf-delivery-hint-fragment-input"],
+                detail: {
+                    case_fragment: caseFragment,
+                    fragment_utf16_units: caseFragment.length,
+                    qualifier_kept: qualifierKept,
                 },
             });
 

@@ -233,8 +233,9 @@ memory, hint, and recovery rows:
   share the follow-up's generic terms. With `memory.auto_search.enabled`, the
   follow-up carries an `<eidnara-search-hint>` whose first fragment is the
   case row. The fixture's `user-hint-outcome` trace shows the case row
-  selected first while distractor rows also matched; the row records
-  whether the truncated fragment kept the source's qualifier. With
+  selected first while distractor rows also matched. A separate truncation
+  row records the fragment, cut at both ends by the fragment limit, and
+  whether it kept the source's qualifier. With
   auto-search off, the same request carries no hint and the host decides
   none.
 
