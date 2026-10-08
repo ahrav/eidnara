@@ -206,6 +206,7 @@ pub(crate) struct Rule {
     pub confidence_bonus: i8,
     /// Which source-code value shapes the evaluator rejects for this rule.
     pub code_reference_gate: Option<CodeReferenceGate>,
+    pub encoded_declaration: Vec<u8>,
 }
 
 /// Keyed rules whose unquoted value can be source code naming a secret, as in
@@ -396,11 +397,6 @@ impl RuleSet {
     ///
     /// Integer limits use little-endian 64-bit encoding. Rules are sorted before
     /// encoding, so storage order does not affect the digest.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConstructionError::InvalidRulePolicy`] if a validated declaration
-    /// cannot be serialized.
     pub fn semantic_digest(
         &self,
         profile: ScanProfile,
@@ -436,7 +432,7 @@ impl RuleSet {
                 .cmp(&(right.source, right.declaration.name.as_str()))
         });
         for rule in active {
-            encode_rule(&mut hash, rule)?;
+            encode_rule(&mut hash, rule);
         }
         Ok(hash.finalize().into())
     }
@@ -500,11 +496,50 @@ fn parse_document(bytes: &[u8], source: RuleSource) -> Result<Vec<Rule>, Constru
     if document.rules.is_empty() {
         return Err(ConstructionError::InvalidRuleDocument);
     }
-    document
-        .rules
-        .into_iter()
-        .map(|declaration| compile_rule(source, declaration))
-        .collect()
+    compile_rules(source, document.rules)
+}
+
+/// Results return to declaration order before the first error is selected, so the error
+/// matches sequential compilation.
+fn compile_rules(
+    source: RuleSource,
+    declarations: Vec<RuleDeclaration>,
+) -> Result<Vec<Rule>, ConstructionError> {
+    const MAX_COMPILE_THREADS: usize = 8;
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_COMPILE_THREADS)
+        .min(declarations.len());
+    if threads <= 1 {
+        return declarations
+            .into_iter()
+            .map(|declaration| compile_rule(source, declaration))
+            .collect();
+    }
+    let mut stripes: Vec<Vec<(usize, RuleDeclaration)>> =
+        (0..threads).map(|_| Vec::new()).collect();
+    for (index, declaration) in declarations.into_iter().enumerate() {
+        stripes[index % threads].push((index, declaration));
+    }
+    let mut compiled: Vec<(usize, Result<Rule, ConstructionError>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = stripes
+            .into_iter()
+            .map(|stripe| {
+                scope.spawn(move || {
+                    stripe
+                        .into_iter()
+                        .map(|(index, declaration)| (index, compile_rule(source, declaration)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("rule compilation does not panic"))
+            .collect()
+    });
+    compiled.sort_by_key(|(index, _)| *index);
+    compiled.into_iter().map(|(_, result)| result).collect()
 }
 
 pub(crate) fn compile_rule(
@@ -566,6 +601,8 @@ pub(crate) fn compile_rule(
         "generic-api-key" => Some(CodeReferenceGate::GenericApiKey),
         _ => None,
     };
+    let encoded_declaration =
+        serde_json::to_vec(&declaration).map_err(|_| ConstructionError::InvalidRulePolicy)?;
     Ok(Rule {
         source,
         declaration,
@@ -576,6 +613,7 @@ pub(crate) fn compile_rule(
         required_byte,
         confidence_bonus,
         code_reference_gate,
+        encoded_declaration,
     })
 }
 
@@ -679,16 +717,13 @@ fn verify_digest(
     }
 }
 
-fn encode_rule(hash: &mut Sha256, rule: &Rule) -> Result<(), ConstructionError> {
+fn encode_rule(hash: &mut Sha256, rule: &Rule) {
     hash.update([match rule.source {
         RuleSource::Upstream => 1,
         RuleSource::ConservativeOverlay => 2,
     }]);
-    let encoded =
-        serde_json::to_vec(&rule.declaration).map_err(|_| ConstructionError::InvalidRulePolicy)?;
-    hash.update((encoded.len() as u64).to_le_bytes());
-    hash.update(encoded);
-    Ok(())
+    hash.update((rule.encoded_declaration.len() as u64).to_le_bytes());
+    hash.update(&rule.encoded_declaration);
 }
 
 #[cfg(test)]
@@ -809,6 +844,43 @@ mod tests {
     }
 
     #[test]
+    fn parallel_compilation_keeps_declaration_order_and_sequential_error_selection() {
+        let declaration = |name: &str, regex: &str| {
+            format!("- name: '{name}'\n  regex: '{regex}'\n  anchors: ['x']\n  radius: 16\n")
+        };
+        let mut document = String::from("rules:\n");
+        let names: Vec<String> = (0..37).map(|index| format!("rule-{index:02}")).collect();
+        for name in &names {
+            document.push_str(&declaration(name, "x[0-9]+"));
+        }
+        let rules = parse_document(document.as_bytes(), RuleSource::Upstream).unwrap();
+        let compiled: Vec<&str> = rules
+            .iter()
+            .map(|rule| rule.declaration.name.as_str())
+            .collect();
+        assert_eq!(compiled, names);
+
+        let mut document = String::from("rules:\n");
+        for (index, name) in names.iter().enumerate() {
+            match index {
+                9 => document.push_str(&declaration(name, "x(")),
+                20 => document.push_str(&declaration("", "x")),
+                _ => document.push_str(&declaration(name, "x[0-9]+")),
+            }
+        }
+        assert_eq!(
+            parse_document(document.as_bytes(), RuleSource::Upstream).err(),
+            Some(ConstructionError::InvalidRulePattern),
+            "the earlier declaration's error wins"
+        );
+        let document = document.replacen("regex: 'x('", "regex: 'x'", 1);
+        assert_eq!(
+            parse_document(document.as_bytes(), RuleSource::Upstream).err(),
+            Some(ConstructionError::InvalidRulePolicy)
+        );
+    }
+
+    #[test]
     fn construction_wiring_rejects_source_tampering() {
         assert_eq!(
             RuleSet::from_sources(
@@ -925,7 +997,9 @@ mod tests {
                 .unwrap(),
             expected
         );
-        rules.rules[0].declaration.radius += 1;
+        let mut widened = rules.rules[0].declaration.clone();
+        widened.radius += 1;
+        rules.rules[0] = compile_rule(rules.rules[0].source, widened).unwrap();
         assert_ne!(
             rules
                 .semantic_digest(ScanProfile::Comprehensive, base)
