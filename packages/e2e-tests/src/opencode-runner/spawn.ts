@@ -354,6 +354,10 @@ function assertConfigHasNoCredentials(value: unknown, label: string): void {
 // OpenCode readiness allows up to 300 seconds for first-run initialization in CI.
 // GitHub-hosted runners can delay OpenCode readiness while the server initializes plugins and first-run state.
 // OpenCode initializes its SQLite store on first run against a fresh XDG_DATA_HOME.
+// The health route answers once the server serves requests, ahead of OpenAPI document
+// generation and project instance initialization.
+const READY_PATH = "/global/health";
+
 async function waitForReady(
     url: string,
     timeoutMs = 300_000,
@@ -369,7 +373,7 @@ async function waitForReady(
         try {
             fetchAttempts++;
             const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS);
-            const res = await fetch(`${url}/doc`, {
+            const res = await fetch(`${url}${READY_PATH}`, {
                 method: "GET",
                 signal: cancellation ? AbortSignal.any([timeout, cancellation]) : timeout,
             });
@@ -385,7 +389,7 @@ async function waitForReady(
     }
     throw new Error(
         `opencode serve did not become ready in ${timeoutMs}ms.\n` +
-            `  url=${url}/doc\n` +
+            `  url=${url}${READY_PATH}\n` +
             `  fetchAttempts=${fetchAttempts}\n` +
             `  fetchLastErr=${String(lastFetchErr)}`,
     );
