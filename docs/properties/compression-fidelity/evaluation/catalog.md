@@ -78,7 +78,7 @@ separate from the reachability classification.
 | Slug | Type | Reachability | Semantics | Exercise |
 | --- | --- | --- | --- | --- |
 | [cf-corpus-byte-identity](#cf-corpus-byte-identity) | safety | test-only | always | partial |
-| [cf-fixture-script-qualification](#cf-fixture-script-qualification) | safety | test-only | always | not yet |
+| [cf-fixture-script-qualification](#cf-fixture-script-qualification) | safety | test-only | always | partial |
 | [cf-authoritative-evidence-assembly](#cf-authoritative-evidence-assembly) | safety | test-only | always | not yet |
 | [cf-complete-independent-comparison](#cf-complete-independent-comparison) | safety | test-only | always | not yet |
 | [cf-semantic-control-discrimination](#cf-semantic-control-discrimination) | safety | test-only | always | not yet |
@@ -128,8 +128,14 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - case-ID scripting and ungated publication qualification
-are absent; existing counters do not witness publication.
+Exercised: partial - the fixture's `script-cases` queue (at most 8 entries)
+binds approved examples to presented ordinals, and
+`packages/e2e-tests/src/rust-runner/hermetic-host.test.ts` constructs a valid
+binding, unknown IDs, an over-bound and an oversized selection, a mismatched
+request, and queue exhaustion. `packages/e2e-tests/tests/compression-fidelity-qualification.test.ts`
+qualifies one case (C1.S1) through ungated publication and a correlated
+provider capture. An identity-bound receipt consumed by later delivery rows
+does not exist yet; each row re-judges its own capture.
 Guarantee: Initial ungated U3 fixture qualification after U1/U2 requires actual
 nonempty publication and correlated provider capture, with bounded request-matched
 case scripts before downstream use.
@@ -145,17 +151,19 @@ Required faults and enabling state: Construct a valid alias-bound script,
 unknown case ID, wrong request aliases, queue exhaustion, and unavailable fold
 prerequisites; observe publication and the later provider request separately.
 Confidence: high - [evidence](evidence/cf-fixture-script-qualification.md).
-`ControlledBackend.execute` ignores its request and emits `fixture-success`;
-the current control enum has no case selection.
+Before the case script, `ControlledBackend.execute` answered every summarizer
+request with segments over its own presented lines and had no case selection.
 Existing check: `packages/e2e-tests/src/rust-runner/hermetic-host.test.ts:105-378`
 checks the existing control contract; producer counters and gated fold checks
 are inventoried separately. All are `unaudited`; none checks the planned script.
 Impact: U3 and dependent U4 results can receive coverage credit without ever
 publishing the intended summary.
 Open questions:
-- Can valid scripted XML reach nonempty publication through the existing
-  ungated fixture lane without broader runtime work? This requires execution.
-- What case-ID queue bound will U3 declare? (needs human input)
+- Resolved: valid scripted XML reaches nonempty publication through the
+  ungated fixture lane without broader runtime work; the qualification test
+  executes it.
+- The queue bound is 8 entries, the fixture's `MAX_QUEUE`. A reviewer may
+  still choose a different bound. (needs human input)
 
 ### cf-authoritative-evidence-assembly
 

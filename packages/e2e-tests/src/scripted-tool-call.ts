@@ -83,7 +83,8 @@ let scriptedCallCounter = 0;
  * `runScriptedToolCall` drives one real tool loop and captures its provider-visible tool result.
  * Missing publication or result is an infrastructure failure, not a behavioral verdict.
  *
- * `mock.reset()` clears captured request history.
+ * `mock.reset()` clears captured request history, so the tagged session's captures are
+ * retained first through `harness.retainCaptures()`.
  * `mock.reset()` also clears the queue, default response, and matchers.
  * A turn driven before `mock.reset()` leaves no captured request behind.
  * Callers must reinstall matchers and the default response after `mock.reset()`.
@@ -98,6 +99,7 @@ export async function runScriptedToolCall(
     const usage = options.usage ?? DEFAULT_SCRIPTED_TOOL_USAGE;
     const callId = `toolu_scripted_${++scriptedCallCounter}`;
     let published: string | null = null;
+    harness.retainCaptures();
     harness.mock.reset();
     harness.mock.addMatcher((body) => {
         if (published !== null) return null;

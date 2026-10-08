@@ -27,7 +27,7 @@ import {
     type SdkClientCore,
     type SharedHarnessOptions,
 } from "./harness-primitives";
-import { MockProvider } from "./mock-provider/server";
+import { type CapturedRequest, MockProvider } from "./mock-provider/server";
 import {
     createIsolatedEnv,
     type IsolatedEnv,
@@ -80,6 +80,70 @@ export interface RustPassLine {
     raw: string;
 }
 
+/** The case and session identity a retained capture is filed under. */
+export interface CaptureIdentity {
+    sessionId: string;
+    caseId: string;
+    scenarioId: string;
+}
+
+/** One main provider request snapshotted under its session and case identity. */
+export interface RetainedCapture extends CaptureIdentity {
+    /** Position among every capture this harness retained, oldest first. */
+    sequence: number;
+    request: CapturedRequest;
+}
+
+/** OpenCode names the session each provider request serves in this header. */
+const SESSION_HEADER = "x-opencode-session-id";
+
+/**
+ * Retains provider captures under the session and case identity they were driven under, so a
+ * later `MockProvider.reset()` cannot clear them and a request for another session is never
+ * filed under this identity.
+ */
+export class CaptureLedger {
+    private readonly retained: RetainedCapture[] = [];
+    private readonly seen = new WeakSet<CapturedRequest>();
+    private identity: CaptureIdentity | null = null;
+
+    /** `source` returns the captures eligible for retention, such as the main requests. */
+    constructor(private readonly source: () => CapturedRequest[]) {}
+
+    /** Retains pending captures under the current identity, then files later ones under `identity`. */
+    tag(identity: CaptureIdentity | null): void {
+        this.retain();
+        this.identity = identity;
+    }
+
+    /** Snapshots every not-yet-retained capture of the tagged session; returns the new ones. */
+    retain(): RetainedCapture[] {
+        const identity = this.identity;
+        if (!identity) return [];
+        const added: RetainedCapture[] = [];
+        for (const request of this.source()) {
+            if (this.seen.has(request)) continue;
+            if (request.headers[SESSION_HEADER] !== identity.sessionId) continue;
+            this.seen.add(request);
+            const capture = { ...identity, sequence: this.retained.length, request };
+            this.retained.push(capture);
+            added.push(capture);
+        }
+        return added;
+    }
+
+    /** Every retained capture matching `identity`, oldest first, after retaining pending ones. */
+    captures(identity: Partial<CaptureIdentity> = {}): RetainedCapture[] {
+        this.retain();
+        return this.retained.filter(
+            (capture) =>
+                (identity.sessionId === undefined || capture.sessionId === identity.sessionId) &&
+                (identity.caseId === undefined || capture.caseId === identity.caseId) &&
+                (identity.scenarioId === undefined || capture.scenarioId === identity.scenarioId),
+        );
+    }
+}
+
 const RUST_PASS_MARKER = "rust pass: ";
 
 /** Top-level fields use `key=value`; stage timings follow `stages=` as `key:value` pairs. */
@@ -119,6 +183,7 @@ export class RustTestHarness {
 
     private opencodeInstance: SpawnedOpencode;
     private clientInstance: SdkClient;
+    private readonly ledger = new CaptureLedger(() => this.mainRequests());
     private modelContextLimit: number | undefined;
     private readonly mockBaseURL: string;
 
@@ -499,6 +564,21 @@ export class RustTestHarness {
 
     requests() {
         return this.mock.requests();
+    }
+
+    /** Retains pending main-request captures, then files later ones under `identity`. */
+    tagCaptures(identity: CaptureIdentity | null): void {
+        this.ledger.tag(identity);
+    }
+
+    /** Retains the tagged session's pending main requests before a `mock.reset()` can clear them. */
+    retainCaptures(): RetainedCapture[] {
+        return this.ledger.retain();
+    }
+
+    /** Every retained main-request capture matching `identity`, oldest first. */
+    retainedCaptures(identity: Partial<CaptureIdentity> = {}): RetainedCapture[] {
+        return this.ledger.captures(identity);
     }
 
     async dispose(): Promise<void> {

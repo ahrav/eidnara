@@ -49,6 +49,7 @@ prints the quarantines it validated so a green `test:rust` never hides
 them. The retained set is:
 
 ```
+compression-fidelity-qualification
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal
 cache-stability             rust-fm-oc-3                 rust-removal-self-heal
 incident-pool-green         rust-fm-oc-5                 rust-smoke
@@ -60,6 +61,39 @@ pi-smoke
 
 Eighteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
+
+## Compression fidelity delivery
+
+The direct-host fixture resolves compression fidelity scenarios through the
+digest-checked corpus (`crates/daemon/testdata/compression-fidelity.json`).
+Three control commands drive it:
+
+- `script-cases` queues up to eight entries, each a corpus scenario ID or
+  `filler`, replacing any earlier queue. An unknown ID, an empty queue, or a
+  ninth entry is refused with a typed error code. While a queue is armed,
+  every summarizer request consumes its front entry: a scenario entry binds
+  its source's approved example to the ordinals the request presents, and a
+  filler entry answers with compact fixture-authored segments. A request
+  that does not present the source's messages fails as
+  `fixture_script_mismatch`, and a request after the queue is empty fails as
+  `fixture_script_exhausted`; neither returns default text.
+- `script-status` reports the queue, the bound, filled, mismatched, and
+  exhausted counts, and each binding's scenario, ordinal range, and answer
+  digest. The backend counters keep their existing meaning.
+- `script-source` returns a scenario source's native records, which
+  `src/compression-fidelity/delivery.ts` seeds into OpenCode's own
+  `opencode.db`. The TypeScript side never reads native text from the
+  corpus file.
+
+`compression-fidelity-qualification` drives one scripted case to accepted
+publication and judges the next session-correlated provider request:
+the pass line must show an applied recipe served from the transform, the
+history must serve the reviewed P1 body, and the live tail must carry none
+of the covered native text. `RustTestHarness.tagCaptures` files main
+requests under their session and case identity, and `runScriptedToolCall`
+retains them before its `mock.reset()`. With
+`EIDNARA_FIDELITY_OBSERVATIONS_DIR` set, each judgment is written there as
+an owner-only `opencode-delivery.<case>.<scenario>.<stage>.json` record.
 
 ## Prerequisites and skipping
 

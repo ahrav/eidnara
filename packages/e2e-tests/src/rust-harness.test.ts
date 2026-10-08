@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { deleteMessagesAfter, parseRustPassLine } from "./rust-harness";
+import { MockProvider } from "./mock-provider/server";
+import { CaptureLedger, deleteMessagesAfter, parseRustPassLine } from "./rust-harness";
 
 // One line in the exact shape `transform-session-client.ts` logs, so a format drift fails here
 // instead of silently zeroing a timing the perf suite bounds.
@@ -74,5 +75,44 @@ describe("deleteMessagesAfter", () => {
         const parts = db.prepare("SELECT id FROM part ORDER BY id").all() as Array<{ id: string }>;
         expect(parts.map((row) => row.id)).toEqual(["prt_b", "prt_z"]);
         db.close();
+    });
+});
+
+describe("CaptureLedger", () => {
+    async function post(baseURL: string, session: string): Promise<void> {
+        await fetch(`${baseURL}/v1/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-opencode-session-id": session },
+            body: JSON.stringify({ model: "m", messages: [{ role: "user", content: session }] }),
+        }).then((response) => response.text());
+    }
+
+    it("keeps tagged captures across a mock reset and files only the tagged session", async () => {
+        const mock = new MockProvider();
+        const { baseURL } = await mock.start();
+        try {
+            mock.setDefault({ text: "ok", usage: { input_tokens: 1, output_tokens: 1 } });
+            const ledger = new CaptureLedger(() => mock.requests());
+            ledger.tag({ sessionId: "ses_a", caseId: "C1", scenarioId: "C1.S1" });
+            await post(baseURL, "ses_a");
+            await post(baseURL, "ses_b");
+            ledger.retain();
+            mock.reset();
+            expect(mock.requests()).toEqual([]);
+            ledger.tag({ sessionId: "ses_a", caseId: "C1", scenarioId: "C1.S2" });
+            mock.setDefault({ text: "ok", usage: { input_tokens: 1, output_tokens: 1 } });
+            await post(baseURL, "ses_a");
+
+            const retained = ledger.captures({ sessionId: "ses_a" });
+            expect(retained.map((capture) => [capture.scenarioId, capture.sequence])).toEqual([
+                ["C1.S1", 0],
+                ["C1.S2", 1],
+            ]);
+            expect(ledger.captures({ sessionId: "ses_b" })).toEqual([]);
+            expect(ledger.captures({ scenarioId: "C1.S1" })).toHaveLength(1);
+            expect(retained[0]?.request.headers["x-opencode-session-id"]).toBe("ses_a");
+        } finally {
+            await mock.stop();
+        }
     });
 });

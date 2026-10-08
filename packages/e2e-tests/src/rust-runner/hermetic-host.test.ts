@@ -98,6 +98,21 @@ async function mockControl(
     return { client, server };
 }
 
+/** The text a corpus message presents: its text parts, joined as the presenter joins parts. */
+function messageText(message: Record<string, unknown>): string {
+    const parts = message.parts as Array<{ type?: string; text?: string }>;
+    return parts
+        .filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join(" / ");
+}
+
+/** A summarizer-shaped prompt presenting `texts` at ordinals 1.. in the format the daemon renders. */
+function summarizerPrompt(texts: readonly string[]): string {
+    const lines = texts.map((text, index) => `[${index + 1}] U: ${text}`);
+    return `Summarize.\n<new_messages>\n${lines.join("\n")}\n</new_messages>`;
+}
+
 afterEach(() => {
     for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -341,6 +356,152 @@ describe("direct host fixture contract", () => {
                 await stack.stop();
                 expect(existsSync(root)).toBe(false);
                 temporaryRoots.splice(temporaryRoots.indexOf(root), 1);
+            } finally {
+                await stack.stop();
+            }
+        },
+        180_000,
+    );
+
+    it.skipIf(!fixturePrereqs.ok)(
+        "binds queued corpus scripts to presented ordinals and fails mismatch and exhaustion typed",
+        async () => {
+            const fixtureBin = await buildDirectHostFixture();
+            const root = mkdtempSync(join(tmpdir(), "opencode-e2e-direct-host-script-"));
+            temporaryRoots.push(root);
+            const stack = await HermeticHostStack.start({ dataDir: root, fixtureBin });
+            const send = async (session: string, prompt: string): Promise<void> => {
+                const client = await HostClient.connect({
+                    connectionFile: stack.connectionFile,
+                    identity: { project_root: root, harness: "opencode", session },
+                    targetKind: "management_surface",
+                });
+                try {
+                    expect((await model_executionCall(client, prompt)).run_id).toBeString();
+                } finally {
+                    await client.closeAsync();
+                }
+            };
+            const settled = (before: number) =>
+                waitFor(
+                    () => stack.backendCounters(),
+                    (counters) => counters.completed + counters.failed === before + 1,
+                );
+            try {
+                const source = await stack.scriptSource("C1.S1");
+                expect(source).toMatchObject({ case: "C1", scenario: "C1.S1", source: "C1.V1" });
+                expect(source.messages.length).toBe(6);
+                const caseTexts = source.messages.map(messageText);
+
+                const rejection = (promise: Promise<unknown>) =>
+                    promise.then(
+                        () => "accepted",
+                        (error: unknown) => String(error),
+                    );
+                expect(await rejection(stack.scriptCases(["C9.S1"]))).toContain("unknown_scenario");
+                expect(await rejection(stack.scriptSource("C1.V1"))).toContain("unknown_scenario");
+                expect(await rejection(stack.scriptCases([]))).toContain("empty_queue");
+                expect(await rejection(stack.scriptCases(Array(9).fill("C1.S1")))).toContain(
+                    "queue_too_long",
+                );
+                const oversized = await rawControl(
+                    stack.controlPath,
+                    Buffer.from(
+                        `${JSON.stringify({
+                            id: 40,
+                            command: {
+                                name: "script-cases",
+                                scenarios: Array(8).fill(
+                                    "C1.S1".padEnd(__hermeticHostTest.maxLineBytes / 4, " "),
+                                ),
+                            },
+                        })}\n`,
+                    ),
+                );
+                expect(oversized).toMatchObject({
+                    ok: false,
+                    error: { code: "request_too_large" },
+                });
+                const unarmed = await stack.scriptStatus();
+                expect(unarmed).toMatchObject({ armed: false, remaining: 0, bound: 0 });
+
+                // Unarmed, a summarizer prompt gets the default scripted answer.
+                let counters = await stack.backendCounters();
+                await send("script-default", summarizerPrompt(caseTexts));
+                counters = await settled(counters.completed + counters.failed);
+                expect((await stack.scriptStatus()).bound).toBe(0);
+
+                await stack.scriptCases(["filler", "C1.S1", "C2.S1"]);
+                expect(await stack.scriptStatus()).toMatchObject({ armed: true, remaining: 3 });
+
+                // A filler entry answers with compact fixture-authored segments.
+                const filled = counters;
+                await send("script-filler", summarizerPrompt(["filler one", "filler two"]));
+                counters = await settled(filled.completed + filled.failed);
+                expect(counters.completed).toBe(filled.completed + 1);
+                expect(await stack.scriptStatus()).toMatchObject({
+                    remaining: 2,
+                    bound: 0,
+                    filled: 1,
+                });
+
+                // A lead-in record before the case and a trailing record after it.
+                const before = counters;
+                await send(
+                    "script-bound",
+                    summarizerPrompt(["lead-in note", ...caseTexts, "trailing note"]),
+                );
+                counters = await settled(before.completed + before.failed);
+                expect(counters.completed).toBe(before.completed + 1);
+                const bound = await stack.scriptStatus();
+                expect(bound).toMatchObject({
+                    remaining: 1,
+                    bound: 1,
+                    filled: 1,
+                    mismatched: 0,
+                    exhausted: 0,
+                });
+                expect(bound.bindings).toEqual([
+                    {
+                        scenario: "C1.S1",
+                        source: "C1.V1",
+                        start: 2,
+                        end: 7,
+                        unprocessedFrom: 8,
+                        outputSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+                    },
+                ]);
+
+                // A non-summarizer prompt consumes nothing and keeps its default answer.
+                const plain = counters;
+                await send("script-plain", "not a summarizer prompt");
+                counters = await settled(plain.completed + plain.failed);
+                expect(counters.completed).toBe(plain.completed + 1);
+                expect((await stack.scriptStatus()).remaining).toBe(1);
+
+                // C2.S1 is next; C1's messages do not match it.
+                const mismatch = counters;
+                await send("script-mismatch", summarizerPrompt(caseTexts));
+                counters = await settled(mismatch.completed + mismatch.failed);
+                expect(counters.failed).toBe(mismatch.failed + 1);
+                expect(await stack.scriptStatus()).toMatchObject({
+                    remaining: 0,
+                    bound: 1,
+                    mismatched: 1,
+                    exhausted: 0,
+                });
+
+                const exhausted = counters;
+                await send("script-exhausted", summarizerPrompt(caseTexts));
+                counters = await settled(exhausted.completed + exhausted.failed);
+                expect(counters.failed).toBe(exhausted.failed + 1);
+                expect(counters.completed).toBe(exhausted.completed);
+                expect(await stack.scriptStatus()).toMatchObject({
+                    remaining: 0,
+                    bound: 1,
+                    mismatched: 1,
+                    exhausted: 1,
+                });
             } finally {
                 await stack.stop();
             }

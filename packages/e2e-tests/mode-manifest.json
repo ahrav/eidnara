@@ -43,6 +43,15 @@
             ]
         },
         {
+            "path": "tests/compression-fidelity-qualification.test.ts",
+            "tier": "rust-only",
+            "rationale": "compression fidelity fixture qualification: a scripted corpus case binds to the presented ordinals, publishes through real validation, and serves its reviewed P1 body in a session-correlated provider request whose pass line shows an applied transform recipe and whose live tail carries none of the covered native text",
+            "contract_refs": [
+                "cf-fixture-script-qualification",
+                "cf-delivery-credit-requires-published-folded-capture"
+            ]
+        },
+        {
             "path": "tests/incident-pool-green.test.ts",
             "tier": "rust-only",
             "rationale": "baseline-green incident variants executed in isolation through the incident-pool runner",

@@ -6,6 +6,14 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+#[path = "direct_host_fixture/case_script.rs"]
+mod case_script;
+/// The compression fidelity corpus, read through the daemon's own schema and digest check.
+#[cfg(unix)]
+#[path = "../src/compression_fidelity_corpus.rs"]
+#[allow(dead_code)]
+mod compression_fidelity_corpus;
 /// The evaluator's cassette over `LlmExecutionBackend`, shared with the
 /// integration tests by path so both sides read one schema.
 #[cfg(unix)]
@@ -49,6 +57,7 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
 
+    use crate::case_script::{AnswerFailure, CaseScript, Record};
     use crate::eval_cassette::CassetteBackend;
     use crate::publish::write_then_rename;
 
@@ -130,6 +139,8 @@ mod unix {
         next_blocked_id: Arc<AtomicU64>,
         shutdown: CancellationToken,
         counters: Arc<BackendCounters>,
+        /// Corpus case scripts; while armed, every summarizer request consumes one entry.
+        script: Mutex<CaseScript>,
     }
 
     impl ControlledBackend {
@@ -145,6 +156,7 @@ mod unix {
                 next_blocked_id: Arc::new(AtomicU64::new(0)),
                 shutdown,
                 counters: Arc::new(BackendCounters::default()),
+                script: Mutex::new(CaseScript::default()),
             })
         }
 
@@ -186,12 +198,20 @@ mod unix {
         }
 
         fn terminal_error(message: &str) -> BackendTerminal {
+            Self::typed_failure(message, "fixture_terminal")
+        }
+
+        fn typed_failure(message: &str, provider_code: &str) -> BackendTerminal {
             BackendTerminal::Failed(BackendError {
                 class: ErrorClass::Permanent,
                 message: message.to_owned(),
                 retry_after_secs: None,
-                provider_code: Some("fixture_terminal".to_owned()),
+                provider_code: Some(provider_code.to_owned()),
             })
+        }
+
+        fn script(&self) -> std::sync::MutexGuard<'_, CaseScript> {
+            self.script.lock().expect("fixture case script mutex")
         }
     }
 
@@ -256,19 +276,16 @@ mod unix {
         Some((start, end, text))
     }
 
-    /// The summarizer answer the fixture stands in for a provider with: one
-    /// `history_segment` per run of `SUMMARY_CHUNK` presented lines, its text
-    /// the lines' own words, in the output document the daemon's validator
-    /// reads. A recording of this is what the campaign's structured arm
-    /// replays.
-    fn scripted_summary(prompt: &str) -> Option<String> {
+    /// The presented records of a summarizer prompt's `<new_messages>`, or `None` for any other
+    /// prompt.
+    fn presented_records(prompt: &str) -> Option<Vec<Record>> {
         let (_, body) = prompt.split_once("<new_messages>")?;
         let (body, _) = body.split_once("</new_messages>")?;
         // The transcript renders its records in ordinal order, so a header
         // starts a record only when it continues the sequence; every other
         // line, including one shaped like a header, is the text of the message
         // before it, which keeps its newlines.
-        let mut lines: Vec<(u64, u64, String)> = Vec::new();
+        let mut lines: Vec<Record> = Vec::new();
         for line in body.lines() {
             let next = lines.last().map(|(_, end, _)| end + 1);
             match (presented_line(line), lines.last_mut()) {
@@ -282,9 +299,15 @@ mod unix {
                 _ => {}
             }
         }
-        if lines.is_empty() {
-            return None;
-        }
+        (!lines.is_empty()).then_some(lines)
+    }
+
+    /// The summarizer answer the fixture stands in for a provider with: one
+    /// `history_segment` per run of `SUMMARY_CHUNK` presented lines, its text
+    /// the lines' own words, in the output document the daemon's validator
+    /// reads. A recording of this is what the campaign's structured arm
+    /// replays.
+    fn scripted_summary(lines: &[Record]) -> String {
         let mut segments = String::new();
         for group in lines.chunks(SUMMARY_CHUNK) {
             let start = group[0].0;
@@ -304,9 +327,9 @@ mod unix {
             ));
         }
         let next = lines.last().map(|(_, end, _)| end + 1).unwrap_or(1);
-        Some(format!(
+        format!(
             "<output><history_segments>{segments}</history_segments><meta><unprocessed_from>{next}</unprocessed_from></meta></output>"
-        ))
+        )
     }
 
     /// Names an executable that answers summarizer prompts in place of the
@@ -399,7 +422,20 @@ mod unix {
             // A summarizer prompt is answered in the summarizer's format
             // whatever the scheduled behavior; the controls script transport
             // outcomes, not what a summary says.
-            let summary = scripted_summary(&request.prompt);
+            let presented = presented_records(&request.prompt);
+            // An armed case script answers every summarizer prompt a scheduled
+            // success or block will answer; a scheduled failure consumes nothing.
+            let scripted = presented
+                .as_deref()
+                .filter(|_| !matches!(behavior, NextBehavior::Failure))
+                .filter(|_| self.script().armed())
+                .map(|records| self.script().answer(records));
+            let commandable = presented.is_some() && scripted.is_none();
+            let summary: Option<Result<String, AnswerFailure>> = scripted.or_else(|| {
+                presented
+                    .as_deref()
+                    .map(|lines| Ok(scripted_summary(lines)))
+            });
             // A requested dump is gate B's record of the run; a line it
             // cannot hold fails the call, typed, rather than leaving a file
             // that does not cover what the run measured. An empty variable,
@@ -424,9 +460,9 @@ mod unix {
                         .err()
                         .map(|error| format!("summarizer dump {}: {error}", path.display()))
                 });
-            let commanded = summary
-                .as_ref()
-                .and_then(|_| std::env::var_os(SUMMARIZER_COMMAND_ENV))
+            let commanded = commandable
+                .then(|| std::env::var_os(SUMMARIZER_COMMAND_ENV))
+                .flatten()
                 .filter(|command| !command.is_empty())
                 .map(|command| {
                     let input = serde_json::json!({
@@ -486,7 +522,17 @@ mod unix {
                                     }
                                 }
                             }
-                            None => summary.unwrap_or_else(|| "fixture-success".to_owned()),
+                            None => match summary {
+                                Some(Ok(text)) => text,
+                                Some(Err(failure)) => {
+                                    counters.failed.fetch_add(1, Ordering::SeqCst);
+                                    return ControlledBackend::typed_failure(
+                                        failure.message(),
+                                        failure.provider_code(),
+                                    );
+                                }
+                                None => "fixture-success".to_owned(),
+                            },
                         };
                         events.emit(BackendEvent::AssistantText {
                             text,
@@ -537,8 +583,19 @@ mod unix {
                                 // The acknowledgment guarantees that the release waiter observes updated counters.
                                 // the counters.
                                 let _ = ack.send(());
+                                let text = match summary {
+                                    Some(Ok(text)) => text,
+                                    Some(Err(failure)) => {
+                                        counters.failed.fetch_add(1, Ordering::SeqCst);
+                                        return ControlledBackend::typed_failure(
+                                            failure.message(),
+                                            failure.provider_code(),
+                                        );
+                                    }
+                                    None => "fixture-released".to_owned(),
+                                };
                                 events.emit(BackendEvent::AssistantText {
-                                    text: summary.unwrap_or_else(|| "fixture-released".to_owned()),
+                                    text,
                                     finish_reason: None,
                                 });
                                 counters.completed.fetch_add(1, Ordering::SeqCst);
@@ -630,6 +687,16 @@ mod unix {
         UserHintOutcome,
         /// Whether a history_summarizer firing is still running for any session.
         HistorySummarizerLive,
+        /// Queues corpus scenarios for the next summarizer requests, replacing any queue.
+        ScriptCases {
+            scenarios: Vec<String>,
+        },
+        /// The case script's queue and consumption record.
+        ScriptStatus,
+        /// The native records of the source a scenario names.
+        ScriptSource {
+            scenario: String,
+        },
         GracefulShutdown,
     }
 
@@ -662,6 +729,8 @@ mod unix {
         UserHint {
             outcome: Option<daemon::transform::UserHintPass>,
         },
+        Script(crate::case_script::ScriptStatus),
+        Source(serde_json::Value),
     }
 
     /// One control frame after draining through its newline or end of stream.
@@ -750,54 +819,76 @@ mod unix {
                 BoundedLine::Oversized => rejected(None, "request_too_large"),
                 BoundedLine::Line(line) => match serde_json::from_slice::<ControlRequest>(&line) {
                     Ok(request) => {
-                        let (result, stop) = match request.command {
-                            ControlCommand::BackendSuccess => {
-                                backend.set_next(NextBehavior::Success);
-                                (ControlResult::Ack { accepted: true }, false)
-                            }
-                            ControlCommand::BlockNextCall => {
-                                backend.set_next(NextBehavior::Block);
-                                (ControlResult::Ack { accepted: true }, false)
-                            }
-                            ControlCommand::ReleaseBlockedCall => (
-                                ControlResult::Ack {
-                                    accepted: backend.release_blocked().await,
-                                },
-                                false,
-                            ),
-                            ControlCommand::TypedFailure => {
-                                backend.set_next(NextBehavior::Failure);
-                                (ControlResult::Ack { accepted: true }, false)
-                            }
-                            ControlCommand::OutageBegin => {
-                                backend.outage.store(true, Ordering::SeqCst);
-                                (ControlResult::Ack { accepted: true }, false)
-                            }
-                            ControlCommand::OutageEnd => {
-                                backend.outage.store(false, Ordering::SeqCst);
-                                (ControlResult::Ack { accepted: true }, false)
-                            }
-                            ControlCommand::Counters => {
-                                let mut counters = backend.counters.snapshot();
-                                counters.cassette_refused = recorder
-                                    .as_ref()
-                                    .map_or(0, |recorder| recorder.redaction_refusals() as u64);
-                                (ControlResult::Counters(counters), false)
-                            }
-                            ControlCommand::UserHintOutcome => (
-                                ControlResult::UserHint {
-                                    outcome: core.user_hint_outcome_for_test(),
-                                },
-                                false,
-                            ),
-                            ControlCommand::HistorySummarizerLive => (
-                                ControlResult::HistorySummarizer {
-                                    live: core.history_summarizer_live_for_test(),
-                                },
-                                false,
-                            ),
-                            ControlCommand::GracefulShutdown => {
-                                (ControlResult::Ack { accepted: true }, true)
+                        let outcome: Result<(ControlResult, bool), &'static str> =
+                            match request.command {
+                                ControlCommand::BackendSuccess => {
+                                    backend.set_next(NextBehavior::Success);
+                                    Ok((ControlResult::Ack { accepted: true }, false))
+                                }
+                                ControlCommand::BlockNextCall => {
+                                    backend.set_next(NextBehavior::Block);
+                                    Ok((ControlResult::Ack { accepted: true }, false))
+                                }
+                                ControlCommand::ReleaseBlockedCall => Ok((
+                                    ControlResult::Ack {
+                                        accepted: backend.release_blocked().await,
+                                    },
+                                    false,
+                                )),
+                                ControlCommand::TypedFailure => {
+                                    backend.set_next(NextBehavior::Failure);
+                                    Ok((ControlResult::Ack { accepted: true }, false))
+                                }
+                                ControlCommand::OutageBegin => {
+                                    backend.outage.store(true, Ordering::SeqCst);
+                                    Ok((ControlResult::Ack { accepted: true }, false))
+                                }
+                                ControlCommand::OutageEnd => {
+                                    backend.outage.store(false, Ordering::SeqCst);
+                                    Ok((ControlResult::Ack { accepted: true }, false))
+                                }
+                                ControlCommand::Counters => {
+                                    let mut counters = backend.counters.snapshot();
+                                    counters.cassette_refused = recorder
+                                        .as_ref()
+                                        .map_or(0, |recorder| recorder.redaction_refusals() as u64);
+                                    Ok((ControlResult::Counters(counters), false))
+                                }
+                                ControlCommand::UserHintOutcome => Ok((
+                                    ControlResult::UserHint {
+                                        outcome: core.user_hint_outcome_for_test(),
+                                    },
+                                    false,
+                                )),
+                                ControlCommand::HistorySummarizerLive => Ok((
+                                    ControlResult::HistorySummarizer {
+                                        live: core.history_summarizer_live_for_test(),
+                                    },
+                                    false,
+                                )),
+                                ControlCommand::ScriptCases { scenarios } => backend
+                                    .script()
+                                    .select(&scenarios)
+                                    .map(|()| (ControlResult::Ack { accepted: true }, false))
+                                    .map_err(|error| error.code()),
+                                ControlCommand::ScriptStatus => {
+                                    Ok((ControlResult::Script(backend.script().status()), false))
+                                }
+                                ControlCommand::ScriptSource { scenario } => {
+                                    crate::case_script::source_records(&scenario)
+                                        .map(|records| (ControlResult::Source(records), false))
+                                        .map_err(|error| error.code())
+                                }
+                                ControlCommand::GracefulShutdown => {
+                                    Ok((ControlResult::Ack { accepted: true }, true))
+                                }
+                            };
+                        let (result, stop) = match outcome {
+                            Ok(outcome) => outcome,
+                            Err(code) => {
+                                write_response(&mut stream, &rejected(Some(request.id), code))
+                                    .await?;
+                                continue;
                             }
                         };
                         let response = ControlResponse {
