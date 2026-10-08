@@ -499,47 +499,86 @@ fn parse_document(bytes: &[u8], source: RuleSource) -> Result<Vec<Rule>, Constru
     compile_rules(source, document.rules)
 }
 
-/// Results return to declaration order before the first error is selected, so the error
-/// matches sequential compilation.
 fn compile_rules(
     source: RuleSource,
     declarations: Vec<RuleDeclaration>,
 ) -> Result<Vec<Rule>, ConstructionError> {
     const MAX_COMPILE_THREADS: usize = 8;
-    let threads = std::thread::available_parallelism()
+    let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
-        .min(MAX_COMPILE_THREADS)
-        .min(declarations.len());
-    if threads <= 1 {
+        .min(MAX_COMPILE_THREADS);
+    compile_rules_on(source, declarations, workers, spawn_compile_worker)
+}
+
+type WorkerSpawn = for<'scope, 'env> fn(
+    &'scope std::thread::Scope<'scope, 'env>,
+    &'env (dyn Fn() + Sync),
+) -> std::io::Result<()>;
+
+fn spawn_compile_worker<'scope, 'env>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    work: &'env (dyn Fn() + Sync),
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .spawn_scoped(scope, work)
+        .map(drop)
+}
+
+fn compile_rules_on(
+    source: RuleSource,
+    declarations: Vec<RuleDeclaration>,
+    workers: usize,
+    spawn: WorkerSpawn,
+) -> Result<Vec<Rule>, ConstructionError> {
+    let workers = workers.min(declarations.len());
+    if workers <= 1 {
         return declarations
             .into_iter()
             .map(|declaration| compile_rule(source, declaration))
             .collect();
     }
-    let mut stripes: Vec<Vec<(usize, RuleDeclaration)>> =
-        (0..threads).map(|_| Vec::new()).collect();
-    for (index, declaration) in declarations.into_iter().enumerate() {
-        stripes[index % threads].push((index, declaration));
-    }
-    let mut compiled: Vec<(usize, Result<Rule, ConstructionError>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = stripes
-            .into_iter()
-            .map(|stripe| {
-                scope.spawn(move || {
-                    stripe
-                        .into_iter()
-                        .map(|(index, declaration)| (index, compile_rule(source, declaration)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("rule compilation does not panic"))
-            .collect()
+    let pending: Vec<std::sync::Mutex<Option<RuleDeclaration>>> = declarations
+        .into_iter()
+        .map(|declaration| std::sync::Mutex::new(Some(declaration)))
+        .collect();
+    let compiled: Vec<std::sync::Mutex<Option<Result<Rule, ConstructionError>>>> = pending
+        .iter()
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let work = || {
+        loop {
+            let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(slot) = pending.get(index) else {
+                return;
+            };
+            let declaration = slot
+                .lock()
+                .expect("no worker panics while holding a slot")
+                .take()
+                .expect("the cursor hands out each index once");
+            let result = compile_rule(source, declaration);
+            *compiled[index]
+                .lock()
+                .expect("no worker panics while holding a slot") = Some(result);
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            if spawn(scope, &work).is_err() {
+                break;
+            }
+        }
+        work();
     });
-    compiled.sort_by_key(|(index, _)| *index);
-    compiled.into_iter().map(|(_, result)| result).collect()
+    compiled
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .expect("no worker panics while holding a slot")
+                .expect("the calling thread drains every declaration")
+        })
+        .collect()
 }
 
 pub(crate) fn compile_rule(
@@ -843,41 +882,98 @@ mod tests {
         }
     }
 
+    fn refuse_spawn<'scope, 'env>(
+        _scope: &'scope std::thread::Scope<'scope, 'env>,
+        _work: &'env (dyn Fn() + Sync),
+    ) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::WouldBlock.into())
+    }
+
+    thread_local! {
+        static SPAWNED_ONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn spawn_one_then_refuse<'scope, 'env>(
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        work: &'env (dyn Fn() + Sync),
+    ) -> std::io::Result<()> {
+        if SPAWNED_ONE.with(|spawned| spawned.replace(true)) {
+            refuse_spawn(scope, work)
+        } else {
+            spawn_compile_worker(scope, work)
+        }
+    }
+
     #[test]
     fn parallel_compilation_keeps_declaration_order_and_sequential_error_selection() {
         let declaration = |name: &str, regex: &str| {
             format!("- name: '{name}'\n  regex: '{regex}'\n  anchors: ['x']\n  radius: 16\n")
         };
-        let mut document = String::from("rules:\n");
         let names: Vec<String> = (0..37).map(|index| format!("rule-{index:02}")).collect();
-        for name in &names {
-            document.push_str(&declaration(name, "x[0-9]+"));
+        let valid = names
+            .iter()
+            .fold(String::from("rules:\n"), |mut document, name| {
+                document.push_str(&declaration(name, "x[0-9]+"));
+                document
+            });
+        let mut two_errors = String::from("rules:\n");
+        for (index, name) in names.iter().enumerate() {
+            match index {
+                9 => two_errors.push_str(&declaration(name, "x(")),
+                20 => two_errors.push_str(&declaration("", "x")),
+                _ => two_errors.push_str(&declaration(name, "x[0-9]+")),
+            }
         }
-        let rules = parse_document(document.as_bytes(), RuleSource::Upstream).unwrap();
+        let policy_error = two_errors.replacen("regex: 'x('", "regex: 'x'", 1);
+
+        let rules = parse_document(valid.as_bytes(), RuleSource::Upstream).unwrap();
         let compiled: Vec<&str> = rules
             .iter()
             .map(|rule| rule.declaration.name.as_str())
             .collect();
         assert_eq!(compiled, names);
-
-        let mut document = String::from("rules:\n");
-        for (index, name) in names.iter().enumerate() {
-            match index {
-                9 => document.push_str(&declaration(name, "x(")),
-                20 => document.push_str(&declaration("", "x")),
-                _ => document.push_str(&declaration(name, "x[0-9]+")),
-            }
-        }
         assert_eq!(
-            parse_document(document.as_bytes(), RuleSource::Upstream).err(),
+            parse_document(two_errors.as_bytes(), RuleSource::Upstream).err(),
             Some(ConstructionError::InvalidRulePattern),
             "the earlier declaration's error wins"
         );
-        let document = document.replacen("regex: 'x('", "regex: 'x'", 1);
         assert_eq!(
-            parse_document(document.as_bytes(), RuleSource::Upstream).err(),
+            parse_document(policy_error.as_bytes(), RuleSource::Upstream).err(),
             Some(ConstructionError::InvalidRulePolicy)
         );
+
+        let spawners: [(&str, WorkerSpawn); 3] = [
+            ("spawned helpers", spawn_compile_worker),
+            ("every spawn refused", refuse_spawn),
+            ("one helper, then refused", spawn_one_then_refuse),
+        ];
+        let declarations = |document: &str| {
+            serde_norway::from_str::<RuleDocument>(document)
+                .unwrap()
+                .rules
+        };
+        for (label, spawn) in spawners {
+            let compile = |document: &str| {
+                SPAWNED_ONE.with(|spawned| spawned.set(false));
+                compile_rules_on(RuleSource::Upstream, declarations(document), 4, spawn)
+            };
+            let rules = compile(&valid).unwrap();
+            let compiled: Vec<&str> = rules
+                .iter()
+                .map(|rule| rule.declaration.name.as_str())
+                .collect();
+            assert_eq!(compiled, names, "{label}");
+            assert_eq!(
+                compile(&two_errors).err(),
+                Some(ConstructionError::InvalidRulePattern),
+                "{label}: the earlier declaration's error wins"
+            );
+            assert_eq!(
+                compile(&policy_error).err(),
+                Some(ConstructionError::InvalidRulePolicy),
+                "{label}"
+            );
+        }
     }
 
     #[test]
