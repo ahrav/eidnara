@@ -142,6 +142,31 @@ default run asserts in memory and writes nothing. The wrapped slice's 105%
 retry is recorded as unobserved; the history body and the wrapped slice are
 measured separately under one named estimator.
 
+### Fixture qualification
+
+The direct-host fixture example (`crates/daemon/examples/direct_host_fixture.rs`
+with `direct_host_fixture/case_script.rs`) includes the corpus module by path
+and resolves scenario IDs through the same digest check. Its `script-cases`
+control queues up to eight scenario IDs or `filler` entries. Each later
+admitted summarizer request consumes one entry: a scenario binds its source's approved
+example to the ordinals that request presents, covering any earlier presented
+records with one fixture-authored lead-in segment and leaving later ones to
+`<unprocessed_from>`. A request that does not present the source's messages
+as one contiguous run, or that arrives after the queue is empty, fails typed
+with no default text. `script-status` reports each delivered binding, and
+`script-source` returns a scenario source's native records for the harness
+to seed into OpenCode, with leak probes taken from its text blocks and tool
+outputs.
+
+`packages/e2e-tests/tests/compression-fidelity-qualification.test.ts` runs
+ungated in the manifest-selected Rust lane. It seeds C1's records into a real
+OpenCode session, drives the session until the bound case publishes, and
+judges the next provider request for that session and follow-up: an applied
+recipe served from the transform on the pass line, the reviewed P1 body in the
+served history, and covered native text only inside the `<session-history>`
+wrapper. A missing capture, an empty capture, a raw pass-through, or a leak
+is a refusal, not a pass.
+
 ## What is unsupported
 
 - **Consumer exact expansion.** No registered tool returns native source
@@ -155,8 +180,9 @@ measured separately under one named estimator.
 - **Record-and-forward provider mode.** The e2e Messages mock serves scripted
   responses, and its cassette modes record or replay those scripted
   exchanges. No mode forwards a captured request to a real provider.
-- **Delivery and semantic review.** No test captures an OpenCode provider
-  invocation or records human semantic judgments.
+- **Delivery campaign and semantic review.** The qualification test captures
+  one OpenCode provider invocation for one scenario. The per-scenario
+  delivery campaign and human semantic judgments do not exist yet.
 
 ## Planned `eval:compression-fidelity` command
 

@@ -77,12 +77,58 @@ interface ReadyRecord {
     catalog: ["context", "local_embeddings", "model_execution"];
 }
 
+/** One scenario's binding as the fixture's case script recorded it. */
+export interface ScriptBinding {
+    scenario: string;
+    source: string;
+    start: number;
+    end: number;
+    /** The first presented ordinal the binding left for a later firing, when there was one. */
+    unprocessedFrom: number | null;
+    /** SHA-256 of the exact answer text the fixture returned. */
+    outputSha256: string;
+}
+
+/** The fixture's case script: its queue and how its entries were consumed. */
+export interface ScriptStatus {
+    corpusSha256: string;
+    armed: boolean;
+    remaining: number;
+    bound: number;
+    /** Delivered `filler` answers of compact fixture-authored segments. */
+    filled: number;
+    mismatched: number;
+    exhausted: number;
+    bindings: ScriptBinding[];
+}
+
+/** One native corpus record: its role and its parts, as the corpus spells them. */
+export interface ScriptMessage {
+    info: { role: "user" | "assistant" } & Record<string, unknown>;
+    parts: ({ id: string; type: string } & Record<string, unknown>)[];
+}
+
+/** The native records of a scenario's source and the probes that locate a raw leak of them. */
+export interface ScriptSource {
+    corpusSha256: string;
+    case: string;
+    scenario: string;
+    source: string;
+    messages: ScriptMessage[];
+    /** Leading characters of every text block and settled tool output long enough to locate. */
+    leakProbes: string[];
+}
+
 type ControlCommand =
     | "backend-success"
     | "block-next-call"
     | "release-blocked-call"
     | "typed-failure"
     | "counters"
+    | "history-summarizer-live"
+    | "script-cases"
+    | "script-status"
+    | "script-source"
     | "graceful-shutdown";
 
 type PendingControl = {
@@ -329,6 +375,128 @@ export function buildDirectHostFixture(): Promise<string> {
     return buildDaemonExample(DIRECT_HOST_FIXTURE);
 }
 
+function isSha256(value: unknown): value is string {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isCount(value: unknown): value is number {
+    return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function parseScriptBinding(value: unknown): ScriptBinding {
+    const object = record(value);
+    if (
+        !object ||
+        !exactKeys(object, [
+            "end",
+            "output_sha256",
+            "scenario",
+            "source",
+            "start",
+            "unprocessed_from",
+        ]) ||
+        typeof object.scenario !== "string" ||
+        typeof object.source !== "string" ||
+        !isCount(object.start) ||
+        !isCount(object.end) ||
+        !(object.unprocessed_from === null || isCount(object.unprocessed_from)) ||
+        !isSha256(object.output_sha256)
+    ) {
+        throw new Error("fixture control script binding was malformed");
+    }
+    return {
+        scenario: object.scenario,
+        source: object.source,
+        start: object.start,
+        end: object.end,
+        unprocessedFrom: object.unprocessed_from as number | null,
+        outputSha256: object.output_sha256,
+    };
+}
+
+function parseScriptStatus(value: unknown): ScriptStatus {
+    const object = record(value);
+    if (
+        !object ||
+        !exactKeys(object, [
+            "armed",
+            "bindings",
+            "bound",
+            "corpus_sha256",
+            "exhausted",
+            "filled",
+            "mismatched",
+            "remaining",
+        ]) ||
+        !isSha256(object.corpus_sha256) ||
+        typeof object.armed !== "boolean" ||
+        !isCount(object.remaining) ||
+        !isCount(object.bound) ||
+        !isCount(object.filled) ||
+        !isCount(object.mismatched) ||
+        !isCount(object.exhausted) ||
+        !Array.isArray(object.bindings)
+    ) {
+        throw new Error("fixture control script status was malformed");
+    }
+    return {
+        corpusSha256: object.corpus_sha256,
+        armed: object.armed,
+        remaining: object.remaining,
+        bound: object.bound,
+        filled: object.filled,
+        mismatched: object.mismatched,
+        exhausted: object.exhausted,
+        bindings: object.bindings.map(parseScriptBinding),
+    };
+}
+
+function isScriptMessage(value: unknown): value is ScriptMessage {
+    const message = record(value);
+    const info = record(message?.info);
+    return (
+        (info?.role === "user" || info?.role === "assistant") &&
+        Array.isArray(message?.parts) &&
+        message.parts.every((part) => {
+            const fields = record(part);
+            return typeof fields?.id === "string" && typeof fields.type === "string";
+        })
+    );
+}
+
+function parseScriptSource(value: unknown): ScriptSource {
+    const object = record(value);
+    if (
+        !object ||
+        !exactKeys(object, [
+            "case",
+            "corpus_sha256",
+            "leak_probes",
+            "messages",
+            "scenario",
+            "source",
+        ]) ||
+        !isSha256(object.corpus_sha256) ||
+        typeof object.case !== "string" ||
+        typeof object.scenario !== "string" ||
+        typeof object.source !== "string" ||
+        !Array.isArray(object.messages) ||
+        !object.messages.every(isScriptMessage) ||
+        !Array.isArray(object.leak_probes) ||
+        !object.leak_probes.every((probe) => typeof probe === "string" && probe.length > 0)
+    ) {
+        throw new Error("fixture control script source was malformed");
+    }
+    return {
+        corpusSha256: object.corpus_sha256,
+        case: object.case,
+        scenario: object.scenario,
+        source: object.source,
+        messages: object.messages,
+        leakProbes: object.leak_probes as string[],
+    };
+}
+
 function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {
     const actual = Object.keys(value).sort();
     return (
@@ -465,6 +633,31 @@ class FixtureControlClient {
         return this.parseCounters(await this.request("counters"));
     }
 
+    /** Whether a history_summarizer firing is still running for any session. */
+    async historySummarizerLive(): Promise<boolean> {
+        const object = record(await this.request("history-summarizer-live"));
+        if (!object || !exactKeys(object, ["live"]) || typeof object.live !== "boolean") {
+            throw new Error("fixture control summarizer liveness was malformed");
+        }
+        return object.live;
+    }
+
+    /**
+     * Queues corpus scenario IDs, or `filler` for one answer of compact fixture-authored
+     * segments, for the next summarizer requests, replacing any earlier queue.
+     */
+    scriptCases(entries: readonly string[]): Promise<void> {
+        return this.ack("script-cases", { entries: [...entries] });
+    }
+
+    async scriptStatus(): Promise<ScriptStatus> {
+        return parseScriptStatus(await this.request("script-status"));
+    }
+
+    async scriptSource(scenario: string): Promise<ScriptSource> {
+        return parseScriptSource(await this.request("script-source", { scenario }));
+    }
+
     gracefulShutdown(): Promise<void> {
         return this.ack("graceful-shutdown");
     }
@@ -477,19 +670,27 @@ class FixtureControlClient {
         this.fail(new Error("fixture control client is closed"));
     }
 
-    private async ack(command: ControlCommand): Promise<void> {
-        const result = await this.request(command);
+    private async ack(
+        command: ControlCommand,
+        parameters: Record<string, unknown> = {},
+    ): Promise<void> {
+        const result = await this.request(command, parameters);
         if (!this.parseAck(result)) throw new Error(`fixture control ${command} was not accepted`);
     }
 
-    private request(command: ControlCommand): Promise<unknown> {
+    private request(
+        command: ControlCommand,
+        parameters: Record<string, unknown> = {},
+    ): Promise<unknown> {
         if (!this.socket || this.closed)
             return Promise.reject(new Error("fixture control is unavailable"));
         if (this.nextId > Number.MAX_SAFE_INTEGER) {
             return Promise.reject(new Error("fixture control id space exhausted"));
         }
         const id = this.nextId++;
-        const line = Buffer.from(JSON.stringify({ id, command: { name: command } }) + "\n");
+        const line = Buffer.from(
+            `${JSON.stringify({ id, command: { ...parameters, name: command } })}\n`,
+        );
         if (line.byteLength - 1 > MAX_LINE_BYTES) {
             return Promise.reject(new Error("fixture control request exceeded 64 KiB"));
         }
@@ -732,6 +933,23 @@ export class HermeticHostStack {
 
     async backendCounters(): Promise<BackendCounters> {
         return this.requireControl().counters();
+    }
+
+    /** Queues corpus scenario IDs or `filler` entries for the fixture's next summarizer requests. */
+    async scriptCases(entries: readonly string[]): Promise<void> {
+        await this.requireControl().scriptCases(entries);
+    }
+
+    async scriptStatus(): Promise<ScriptStatus> {
+        return this.requireControl().scriptStatus();
+    }
+
+    async scriptSource(scenario: string): Promise<ScriptSource> {
+        return this.requireControl().scriptSource(scenario);
+    }
+
+    async historySummarizerLive(): Promise<boolean> {
+        return this.requireControl().historySummarizerLive();
     }
 
     async backendRequestCount(): Promise<number> {

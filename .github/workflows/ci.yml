@@ -989,6 +989,7 @@ jobs:
         # directory the variables are resolved from.
         env:
           EIDNARA_E2E_REQUIRE_PI: "1"
+          EIDNARA_E2E_REQUIRE_FIDELITY: "1"
           EIDNARA_E2E_DIRECT_HOST_FIXTURE_BIN: "${{ github.workspace }}\
             /target/debug/examples/direct_host_fixture"
           EIDNARA_E2E_EVAL_RUNNER_BIN: "${{ github.workspace }}\

@@ -48,3 +48,19 @@ export interface SdkClientCore {
         messages: (opts: { path: { id: string } }) => Promise<{ data?: unknown }>;
     };
 }
+
+/** Polls `probe` every 250 ms until it yields a value, failing with `diagnostics()` after `timeoutMs`. */
+export async function waitFor<T>(
+    what: string,
+    probe: () => Promise<T | undefined> | T | undefined,
+    timeoutMs: number,
+    diagnostics: () => string,
+): Promise<T> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const value = await probe();
+        if (value !== undefined) return value;
+        await Bun.sleep(250);
+    }
+    throw new Error(`${what} did not happen within ${timeoutMs}ms\n${diagnostics()}`);
+}

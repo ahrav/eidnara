@@ -13,6 +13,7 @@ description = "Eidnara host component: harness-agnostic cache-stability transfor
 name = "direct_host_fixture"
 path = "examples/direct_host_fixture.rs"
 required-features = ["direct-host-fixture"]
+test = true
 
 [[example]]
 name = "eval_runner"

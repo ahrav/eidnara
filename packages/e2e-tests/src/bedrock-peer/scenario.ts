@@ -64,20 +64,7 @@ export function peerDiagnostics(peers: Peers | undefined): string {
         .join("\n");
 }
 
-export async function waitFor<T>(
-    what: string,
-    probe: () => Promise<T | undefined> | T | undefined,
-    timeoutMs: number,
-    diagnostics: () => string,
-): Promise<T> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        const value = await probe();
-        if (value !== undefined) return value;
-        await Bun.sleep(250);
-    }
-    throw new Error(`${what} did not happen within ${timeoutMs}ms\n${diagnostics()}`);
-}
+export { waitFor } from "../harness-primitives";
 
 /** The rounds a completed `/eidnara-wrapup` result reports; a Partial, Skipped, Failed, starting, or nothing-to-compact result reports none. */
 export function completedWrapupRounds(text: string): number | undefined {
