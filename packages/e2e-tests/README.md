@@ -49,7 +49,8 @@ prints the quarantines it validated so a green `test:rust` never hides
 them. The retained set is:
 
 ```
-compression-fidelity-delivery   compression-fidelity-pi   compression-fidelity-qualification
+compression-fidelity-delivery   compression-fidelity-memory   compression-fidelity-pi
+compression-fidelity-qualification
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal
 cache-stability             rust-fm-oc-3                 rust-removal-self-heal
 incident-pool-green         rust-fm-oc-5                 rust-smoke
@@ -59,7 +60,7 @@ rust-multi-frame-delta      rust-stale-preference        thinking-block-safety
 pi-smoke
 ```
 
-Eighteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
+Nineteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
 
 ## Compression fidelity delivery
@@ -80,8 +81,9 @@ Three control commands drive it:
   `typed-failure` consumes no entry.
 - `filler:N` answers one request with at most `N` compact rows, `echo`
   answers with the default segments whose bodies repeat the presented text,
-  and a scenario ID with `@p1-only` serves its approved example without the
-  P2 and P3 bodies.
+  `echo:N` repeats it in at most `N` rows, and a scenario ID with
+  `@p1-only` serves its approved example without the P2 and P3 bodies. A
+  row count outside 1 to 64 is refused as `bad_row_count`.
 - `script-status` reports the queue and the lifetime bound, filled,
   mismatched, and exhausted counts. Its `bindings` list the current
   selection's delivered answers: scenario, ordinal range, and answer digest.
@@ -96,7 +98,14 @@ Three control commands drive it:
 P2 through P5 checked against `decay-oracle.ts`, guard pressure for C1.S5 and
 C3.S5, a parser-fallback row, and the capability pins in `capabilities.ts`.
 `compression-fidelity-pi` serves C1 through the Pi `context` handler at P1 in
-m1 and m0. The pass line's `admission`, `invocation_bytes`,
+m1 and m0. `compression-fidelity-memory` credits C3's memory example only
+when a verified copy reaches `<project-memory>`, recovers it through
+`eidnara_search`, and serves C4's omitted row as a hint only while
+auto-search is on. Its fixture controls are `memory-seed`, which commits a
+verified project memory into an existing decision's scope,
+`memory-admission`, which records one admission event on a decision, and
+`user-hint-outcome`, which returns the newest auto-search decision and its
+ranking trace. The pass line's `admission`, `invocation_bytes`,
 `invocation_charged`, and `history_budget` fields feed both.
 
 `compression-fidelity-qualification` drives one scripted case to accepted

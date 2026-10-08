@@ -13338,8 +13338,9 @@ async fn settle_prepared(ctx: &RequestCtx, outcome: PreparedOutcome) -> RequestO
 }
 
 /// Request and store-row builders behind `test-support`, callable from the
-/// `kernel_routes` integration test and bench alike.
-#[cfg(feature = "test-support")]
+/// `kernel_routes` integration test and bench alike, and from the direct-host
+/// fixture's memory admission control.
+#[cfg(any(feature = "test-support", feature = "direct-host-fixture"))]
 pub mod kernel_route_fixtures {
     use std::path::Path;
 
@@ -13665,8 +13666,25 @@ pub mod kernel_route_fixtures {
         envelope: &mut Envelope<'_>,
         object_id: &str,
     ) -> Result<(), KernelError> {
+        observe_code(
+            envelope,
+            object_id,
+            &format!("{object_id}-observed"),
+            (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+        )
+        .map(|_| ())
+    }
+
+    /// Records a `code_present` observation as `observation` and admits `object_id` on it,
+    /// under the admission classes `classes` the subject already carries.
+    pub fn observe_code(
+        envelope: &mut Envelope<'_>,
+        object_id: &str,
+        observation: &str,
+        classes: (SourceClass, TaintClass),
+    ) -> Result<kernel::AdmissionDecision, KernelError> {
         ensure_domain(envelope, MEMORY_DOMAIN)?;
-        let observation = format!("{object_id}-observed");
+        let observation = observation.to_string();
         envelope.insert_observation(ObservationSpec {
             observation_id: observation.clone(),
             object_id: observation.clone(),
@@ -13692,9 +13710,8 @@ pub mod kernel_route_fixtures {
             object_id,
             EventKind::CodeObserved,
             Some(&observation),
-            (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
-        ))?;
-        Ok(())
+            classes,
+        ))
     }
 
     pub fn commit_verified_memory(
@@ -13736,7 +13753,7 @@ impl HandlerCore {
         self.kernel.state()
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(feature = "test-support", feature = "direct-host-fixture"))]
     pub fn kernel_store_for_test(&self) -> Option<Arc<kernel::KernelStore>> {
         self.kernel.kernel_store().ok()
     }

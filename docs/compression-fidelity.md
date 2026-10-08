@@ -160,7 +160,8 @@ is a refusal, not a pass.
 
 The fixture's queue also takes `filler:N`, which answers one request with
 at most `N` compact fixture-authored rows, `echo`, which answers with the
-fixture's default segments whose bodies repeat the presented text, and a
+fixture's default segments whose bodies repeat the presented text, `echo:N`,
+which repeats the presented text in at most `N` rows, and a
 scenario ID with an `@p1-only` suffix, which serves the approved example
 without its P2 and P3 bodies. `script-status` counts filler and echo answers
 as `filled` and reports the importance each kind of fixture row carries.
@@ -206,6 +207,37 @@ the Pi plugin's `context` handler against the direct-host fixture: a seeded
 baseline, the scripted publication, P1 in m1, and P1 in m0 after a restart.
 Pi carries C1's tool part as assistant text.
 
+`packages/e2e-tests/tests/compression-fidelity-memory.test.ts` drives the
+memory, hint, and recovery rows:
+
+- C3 ages its case row to P3, so the raw constraint is gone from history, and
+  then observes C3.M1 across cold passes. `script-source` returns the memory
+  example; the fixture's `memory-seed` control commits it as a
+  repository-sourced verified memory into the project scope of an existing
+  memory decision, and `memory-admission` records `code_observed`,
+  `quarantine`, or `explicit_reject` on a decision. A pass earns memory
+  credit only when the provider request's `<project-memory>` block carries
+  the example's text, and each admitted pass's block omits every excluded
+  decision present at that point. The candidate-only (an agent-created
+  memory), the wrong-project (a verified copy in another directory's project), the
+  budget-excluded (a verified copy whose body exceeds the 4000-token
+  injection budget), the withheld (quarantined), and the rejected variants
+  each serve the same P3 row with no memory credit. Two seeded copies show
+  the admission is repeatable.
+- From that excluded pass, `eidnara_search` with the query `manifest cache
+  resident`, every term taken from the visible request, and sources
+  `["memory"]` returns the memory's text in one call within 16 KiB, without
+  the wrong-project copy's distinct suffix. Exact recovery stays
+  `unavailable`.
+- C4 ages its case row to P5, then publishes up to 24 distractor rows that
+  share the follow-up's generic terms. With `memory.auto_search.enabled`, the
+  follow-up carries an `<eidnara-search-hint>` whose first fragment is the
+  case row. The fixture's `user-hint-outcome` trace shows the case row
+  selected first while distractor rows also matched; the row records
+  whether the truncated fragment kept the source's qualifier. With
+  auto-search off, the same request carries no hint and the host decides
+  none.
+
 ## What is unsupported
 
 - **Consumer exact expansion.** No registered tool returns native source
@@ -218,9 +250,13 @@ Pi carries C1's tool part as assistant text.
 - **Record-and-forward provider mode.** The e2e Messages mock serves scripted
   responses, and its cassette modes record or replay those scripted
   exchanges. No mode forwards a captured request to a real provider.
-- **Memory, hint, and recovery rows.** The admitted-memory and exclusion
-  pairs (C3.S6, C3.S7), the hint rows (C4.S6), and the `eidnara_search`
-  recovery loop are not yet driven through a provider request.
+- **Truncated-away memory.** A rendered memory line is capped at 64 KiB, far
+  above the injection budget, so no admitted row can render with its
+  decisive qualifier truncated away. The budget-excluded variant drops the
+  whole row instead.
+- **Agent-authored admission.** An `eidnara_memory` create stays a
+  `candidate` with `explicit_labeled` visibility after `code_observed`, so
+  the admitted rows use the fixture's repository-sourced seed.
 - **Legacy rows and invalid recipes.** The campaign cannot store a legacy row
   through the producer, and it constructs no invalid recipe; the U2 replay
   and the plugin's own tests cover both. The delivery judge refuses a raw

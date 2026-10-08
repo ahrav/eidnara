@@ -326,11 +326,12 @@ export class RustTestHarness {
         }) as unknown as SdkClient;
     }
 
-    async createSession(): Promise<string> {
+    /** Creates a session in `directory`, the isolated workdir by default. */
+    async createSession(directory = this.env.workdir): Promise<string> {
         const maxAttempts = 5;
         for (let i = 1; i <= maxAttempts; i++) {
             const res = await this.clientInstance.session.create({
-                query: { directory: this.env.workdir },
+                query: { directory },
             });
             if (res.data) return res.data.id;
             if (i < maxAttempts) {

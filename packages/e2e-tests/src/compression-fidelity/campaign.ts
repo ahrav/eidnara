@@ -134,6 +134,7 @@ function syntheticSource(pairs: number, step: number, text: (k: number) => strin
         source: `synthetic-${step}`,
         messages,
         leakProbes: [],
+        memoryExamples: [],
     };
 }
 
@@ -250,7 +251,7 @@ export class CaseDriver {
         const fired = await this.fireUntilConsumed(label);
         this.fillerImportance = fired.fillerImportance;
         const answered = (await this.h.host.scriptStatus()).filled - filledBefore;
-        const ownFilled = entry.startsWith("filler") || entry === "echo" ? 1 : 0;
+        const ownFilled = entry.startsWith("filler") || entry.startsWith("echo") ? 1 : 0;
         const spares = Math.max(0, answered - ownFilled);
         const added = (await this.rows()) - rowsBefore;
         this.newerRows.push(...Array<number>(Math.max(0, added - spares)).fill(importance));
@@ -321,12 +322,24 @@ export class CaseDriver {
         ];
     }
 
-    async observe(label: string, usageFraction = EXECUTE_USAGE): Promise<Delivery> {
+    /**
+     * Sends the follow-up, labeled by default; `verbatim` sends the corpus prompt as written,
+     * for a request whose search terms must be the prompt's alone. The delivery judges the
+     * first capture retained after the send that carries the prompt.
+     */
+    async observe(
+        label: string,
+        usageFraction = EXECUTE_USAGE,
+        verbatim = false,
+    ): Promise<Delivery> {
         const source = this.source;
         if (!source) throw new Error("observe before seed");
         const passesBefore = sessionPasses(this.h, this.sessionId).length;
+        const capturesBefore = this.h.retainedCaptures({ sessionId: this.sessionId }).length;
         const newer = await this.newer();
-        const prompt = `${this.scenario.followUp.prompt} (${label})`;
+        const prompt = verbatim
+            ? this.scenario.followUp.prompt
+            : `${this.scenario.followUp.prompt} (${label})`;
         await this.send(prompt, usageFraction);
         const pass = await waitFor(
             `the ${label} pass line`,
@@ -334,11 +347,16 @@ export class CaseDriver {
             WAIT_MS,
             this.diagnostics,
         );
-        const capture = this.h
-            .retainedCaptures({ sessionId: this.sessionId })
-            .filter((entry) => captureTexts(entry).at(-1)?.includes(prompt))
-            .at(-1);
-        if (!capture) throw new Error(`no ${label} capture for ${this.sessionId}`);
+        const capture = await waitFor(
+            `the ${label} capture`,
+            () =>
+                this.h
+                    .retainedCaptures({ sessionId: this.sessionId })
+                    .slice(capturesBefore)
+                    .find((entry) => captureTexts(entry).at(-1)?.includes(prompt)),
+            WAIT_MS,
+            this.diagnostics,
+        );
         const texts = captureTexts(capture);
         const budget = pass.historyBudget ?? 0;
         const delivery: Delivery = {
@@ -368,12 +386,18 @@ export class CaseDriver {
      * render config rematerializes m0 on the next pass, and observes that pass at usage below
      * the proactive band.
      */
-    async observeCold(label: string, config: ServingConfig): Promise<Delivery> {
+    async observeCold(
+        label: string,
+        config: ServingConfig,
+        extra: Record<string, unknown> = {},
+        verbatim = false,
+    ): Promise<Delivery> {
         this.coldRestarts += 1;
         await this.restart(config, {
             prompt_surface: { default: COLD_SURFACES[this.coldRestarts % 2] },
+            ...extra,
         });
-        return this.observe(label, QUIET_USAGE);
+        return this.observe(label, QUIET_USAGE, verbatim);
     }
 
     private async age(rows: number): Promise<number> {
@@ -423,22 +447,44 @@ export class CaseDriver {
     }
 
     /**
-     * Publishes newer rows whose bodies repeat large synthetic messages, so a positive budget
-     * below the history body forces the guard to demote the older case row, and observes the
-     * next cold pass under that budget.
+     * Publishes newer rows whose bodies repeat `pairs` synthetic message pairs, through the
+     * fixture's echo answer under `config`, in at most `rows` rows when given. `text` receives
+     * the step and the pair index. Returns the rows it added.
      */
-    async pressure(): Promise<Delivery> {
+    async publishEchoed(
+        label: string,
+        pairs: number,
+        text: (step: number, k: number) => string,
+        config: ServingConfig,
+        rows?: number,
+    ): Promise<number> {
         this.step += 1;
         const step = this.step;
         seedSource(
             this.h,
             this.sessionId,
-            syntheticSource(2, step, (k) => `pressure ${step}.${k}: ${this.h.ballast(400)}`),
+            syntheticSource(pairs, step, (k) => text(step, k)),
         );
-        await this.restart(PRESSURE_SERVING);
-        await this.send(`pressure ballast ${step}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
+        await this.restart(config);
+        await this.send(`${label} ballast ${step}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
         const echoImportance = (await this.h.host.scriptStatus()).echoImportance;
-        await this.publishStep("echo", `pressure ${step}`, echoImportance);
+        const entry = rows === undefined ? "echo" : `echo:${rows}`;
+        const { added } = await this.publishStep(entry, `${label} ${step}`, echoImportance);
+        return added;
+    }
+
+    /**
+     * Publishes newer rows whose bodies repeat large synthetic messages, so a positive budget
+     * below the history body forces the guard to demote the older case row, and observes the
+     * next cold pass under that budget.
+     */
+    async pressure(): Promise<Delivery> {
+        await this.publishEchoed(
+            "pressure",
+            2,
+            (step, k) => `pressure ${step}.${k}: ${this.h.ballast(400)}`,
+            PRESSURE_SERVING,
+        );
         return this.observeCold("pressure", PRESSURE_SERVING);
     }
 }

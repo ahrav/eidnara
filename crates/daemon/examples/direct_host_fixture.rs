@@ -141,6 +141,8 @@ mod unix {
         counters: Arc<BackendCounters>,
         /// Corpus case scripts; while armed, every admitted summarizer request consumes one entry.
         script: Arc<Mutex<CaseScript>>,
+        /// Memory admission controls issued, which key their kernel intents.
+        admissions: AtomicU64,
     }
 
     impl ControlledBackend {
@@ -157,6 +159,7 @@ mod unix {
                 shutdown,
                 counters: Arc::new(BackendCounters::default()),
                 script: Arc::new(Mutex::new(CaseScript::default())),
+                admissions: AtomicU64::new(0),
             })
         }
 
@@ -693,11 +696,125 @@ mod unix {
         },
         /// The case script's queue and consumption record.
         ScriptStatus,
+        /// Records one admission event on an existing memory decision through the kernel's own
+        /// admission engine: `code_observed` verifies it, `explicit_reject` and `quarantine`
+        /// withdraw it from automatic surfaces.
+        MemoryAdmission {
+            object_id: String,
+            event: MemoryEvent,
+        },
+        /// Commits a verified project memory, as repository code would establish it, into the
+        /// project scope of the existing decision `anchor`.
+        MemorySeed {
+            anchor: String,
+            object_id: String,
+            category: String,
+            text: String,
+        },
         /// The native records of the source a scenario names.
         ScriptSource {
             scenario: String,
         },
         GracefulShutdown,
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum MemoryEvent {
+        CodeObserved,
+        ExplicitReject,
+        Quarantine,
+    }
+
+    /// Runs `step` in one kernel transaction keyed by `sequence`, so every control call is a
+    /// distinct intent, and reports the admission decision it recorded.
+    fn admit(
+        core: &daemon::HandlerCore,
+        sequence: u64,
+        step: impl FnOnce(
+            &mut kernel::Envelope<'_>,
+        ) -> Result<kernel::AdmissionDecision, kernel::KernelError>,
+    ) -> Result<ControlResult, &'static str> {
+        let kernel = core.kernel_store_for_test().ok_or("kernel_unavailable")?;
+        let mut decided = None;
+        kernel
+            .commit(
+                daemon::kernel_route_fixtures::intent(&format!(
+                    "fixture-memory-admission-{sequence}"
+                )),
+                |envelope| {
+                    decided = Some(step(envelope)?);
+                    Ok(String::new())
+                },
+            )
+            .map_err(|error| {
+                eprintln!("direct host fixture: memory admission refused: {error:?}");
+                "admission_refused"
+            })?;
+        decided
+            .map(|decision| ControlResult::Admission {
+                effective_maturity: decision.effective_maturity.as_str(),
+                disposition: decision.disposition.as_str(),
+                visibility: decision.visibility.as_str(),
+            })
+            .ok_or("admission_refused")
+    }
+
+    /// Records `event` on `object_id` through the kernel's admission engine, under the classes
+    /// the decision already carries.
+    fn memory_admission(
+        core: &daemon::HandlerCore,
+        object_id: &str,
+        event: MemoryEvent,
+        sequence: u64,
+    ) -> Result<ControlResult, &'static str> {
+        use daemon::kernel_route_fixtures::{admission, observe_code};
+        use kernel::{EventKind, KernelError};
+        admit(core, sequence, |envelope| {
+            let (prior, _) = envelope
+                .subject_admission(object_id)?
+                .ok_or(KernelError::AdmissionPolicy)?;
+            let classes = (prior.source_class, prior.taint_class);
+            let kind = match event {
+                MemoryEvent::CodeObserved => {
+                    let observation = format!("{object_id}-observed-{sequence}");
+                    return observe_code(envelope, object_id, &observation, classes);
+                }
+                MemoryEvent::ExplicitReject => EventKind::ExplicitReject,
+                MemoryEvent::Quarantine => EventKind::Quarantine,
+            };
+            envelope.record_admission(admission(object_id, kind, None, classes))
+        })
+    }
+
+    /// Commits a repository-sourced memory decision into `anchor`'s project scope and admits it
+    /// on a code observation.
+    fn memory_seed(
+        core: &daemon::HandlerCore,
+        anchor: &str,
+        object_id: &str,
+        category: &str,
+        text: &str,
+        sequence: u64,
+    ) -> Result<ControlResult, &'static str> {
+        use daemon::kernel_route_fixtures::{
+            MEMORY_DOMAIN, ensure_domain, memory_decision_spec, observe_code,
+        };
+        use kernel::{KernelError, SourceClass, TaintClass};
+        admit(core, sequence, |envelope| {
+            let scope = envelope
+                .object_state(anchor)?
+                .and_then(|state| state.scope_id)
+                .ok_or(KernelError::NotFound)?;
+            ensure_domain(envelope, MEMORY_DOMAIN)?;
+            envelope.insert_decision(memory_decision_spec(object_id, &scope, category, text))?;
+            observe_code(
+                envelope,
+                object_id,
+                &format!("{object_id}-observed"),
+                (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+            )
+        })
     }
 
     #[derive(Serialize)]
@@ -730,6 +847,11 @@ mod unix {
             outcome: Option<daemon::transform::UserHintPass>,
         },
         Script(crate::case_script::ScriptStatus),
+        Admission {
+            effective_maturity: &'static str,
+            disposition: &'static str,
+            visibility: &'static str,
+        },
         Source(serde_json::Value),
     }
 
@@ -819,70 +941,86 @@ mod unix {
                 BoundedLine::Oversized => rejected(None, "request_too_large"),
                 BoundedLine::Line(line) => match serde_json::from_slice::<ControlRequest>(&line) {
                     Ok(request) => {
-                        let outcome: Result<(ControlResult, bool), &'static str> =
-                            match request.command {
-                                ControlCommand::BackendSuccess => {
-                                    backend.set_next(NextBehavior::Success);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::BlockNextCall => {
-                                    backend.set_next(NextBehavior::Block);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::ReleaseBlockedCall => Ok((
-                                    ControlResult::Ack {
-                                        accepted: backend.release_blocked().await,
-                                    },
-                                    false,
-                                )),
-                                ControlCommand::TypedFailure => {
-                                    backend.set_next(NextBehavior::Failure);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::OutageBegin => {
-                                    backend.outage.store(true, Ordering::SeqCst);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::OutageEnd => {
-                                    backend.outage.store(false, Ordering::SeqCst);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::Counters => {
-                                    let mut counters = backend.counters.snapshot();
-                                    counters.cassette_refused = recorder
-                                        .as_ref()
-                                        .map_or(0, |recorder| recorder.redaction_refusals() as u64);
-                                    Ok((ControlResult::Counters(counters), false))
-                                }
-                                ControlCommand::UserHintOutcome => Ok((
-                                    ControlResult::UserHint {
-                                        outcome: core.user_hint_outcome_for_test(),
-                                    },
-                                    false,
-                                )),
-                                ControlCommand::HistorySummarizerLive => Ok((
-                                    ControlResult::HistorySummarizer {
-                                        live: core.history_summarizer_live_for_test(),
-                                    },
-                                    false,
-                                )),
-                                ControlCommand::ScriptCases { entries } => backend
-                                    .script()
-                                    .select(&entries)
-                                    .map(|()| (ControlResult::Ack { accepted: true }, false))
-                                    .map_err(|error| error.code()),
-                                ControlCommand::ScriptStatus => {
-                                    Ok((ControlResult::Script(backend.script().status()), false))
-                                }
-                                ControlCommand::ScriptSource { scenario } => {
-                                    crate::case_script::source_records(&scenario)
-                                        .map(|records| (ControlResult::Source(records), false))
-                                        .map_err(|error| error.code())
-                                }
-                                ControlCommand::GracefulShutdown => {
-                                    Ok((ControlResult::Ack { accepted: true }, true))
-                                }
-                            };
+                        let outcome: Result<(ControlResult, bool), &'static str> = match request
+                            .command
+                        {
+                            ControlCommand::BackendSuccess => {
+                                backend.set_next(NextBehavior::Success);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::BlockNextCall => {
+                                backend.set_next(NextBehavior::Block);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::ReleaseBlockedCall => Ok((
+                                ControlResult::Ack {
+                                    accepted: backend.release_blocked().await,
+                                },
+                                false,
+                            )),
+                            ControlCommand::TypedFailure => {
+                                backend.set_next(NextBehavior::Failure);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::OutageBegin => {
+                                backend.outage.store(true, Ordering::SeqCst);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::OutageEnd => {
+                                backend.outage.store(false, Ordering::SeqCst);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::Counters => {
+                                let mut counters = backend.counters.snapshot();
+                                counters.cassette_refused = recorder
+                                    .as_ref()
+                                    .map_or(0, |recorder| recorder.redaction_refusals() as u64);
+                                Ok((ControlResult::Counters(counters), false))
+                            }
+                            ControlCommand::UserHintOutcome => Ok((
+                                ControlResult::UserHint {
+                                    outcome: core.user_hint_outcome_for_test(),
+                                },
+                                false,
+                            )),
+                            ControlCommand::HistorySummarizerLive => Ok((
+                                ControlResult::HistorySummarizer {
+                                    live: core.history_summarizer_live_for_test(),
+                                },
+                                false,
+                            )),
+                            ControlCommand::ScriptCases { entries } => backend
+                                .script()
+                                .select(&entries)
+                                .map(|()| (ControlResult::Ack { accepted: true }, false))
+                                .map_err(|error| error.code()),
+                            ControlCommand::ScriptStatus => {
+                                Ok((ControlResult::Script(backend.script().status()), false))
+                            }
+                            ControlCommand::MemoryAdmission { object_id, event } => {
+                                let sequence = backend.admissions.fetch_add(1, Ordering::SeqCst);
+                                memory_admission(&core, &object_id, event, sequence)
+                                    .map(|result| (result, false))
+                            }
+                            ControlCommand::MemorySeed {
+                                anchor,
+                                object_id,
+                                category,
+                                text,
+                            } => {
+                                let sequence = backend.admissions.fetch_add(1, Ordering::SeqCst);
+                                memory_seed(&core, &anchor, &object_id, &category, &text, sequence)
+                                    .map(|result| (result, false))
+                            }
+                            ControlCommand::ScriptSource { scenario } => {
+                                crate::case_script::source_records(&scenario)
+                                    .map(|records| (ControlResult::Source(records), false))
+                                    .map_err(|error| error.code())
+                            }
+                            ControlCommand::GracefulShutdown => {
+                                Ok((ControlResult::Ack { accepted: true }, true))
+                            }
+                        };
                         let (result, stop) = match outcome {
                             Ok(outcome) => outcome,
                             Err(code) => {

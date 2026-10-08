@@ -120,6 +120,33 @@ export interface ScriptSource {
     messages: ScriptMessage[];
     /** Leading characters of every text block and settled tool output long enough to locate. */
     leakProbes: string[];
+    /** The case's eligible memory examples. */
+    memoryExamples: { id: string; category: string; text: string }[];
+}
+
+/** The kernel admission events the fixture's `memory-admission` control records. */
+export type MemoryAdmissionEvent = "code_observed" | "explicit_reject" | "quarantine";
+
+/** The kernel's admission decision for one recorded event. */
+/**
+ * One pass's auto-search decision: the hint frozen for `blockId` with the candidate rows the
+ * ranking saw, matched, and selected, or the reason it skipped.
+ */
+export type UserHintPass =
+    | {
+          pass: "decided";
+          blockId: string;
+          hintText: string;
+          window: number[];
+          matched: number[];
+          selected: number[];
+      }
+    | { pass: "skipped"; reason: string };
+
+export interface MemoryAdmission {
+    effectiveMaturity: string;
+    disposition: string;
+    visibility: string;
 }
 
 type ControlCommand =
@@ -132,6 +159,9 @@ type ControlCommand =
     | "script-cases"
     | "script-status"
     | "script-source"
+    | "memory-admission"
+    | "memory-seed"
+    | "user-hint-outcome"
     | "graceful-shutdown";
 
 type PendingControl = {
@@ -481,6 +511,7 @@ function parseScriptSource(value: unknown): ScriptSource {
             "case",
             "corpus_sha256",
             "leak_probes",
+            "memory_examples",
             "messages",
             "scenario",
             "source",
@@ -492,7 +523,18 @@ function parseScriptSource(value: unknown): ScriptSource {
         !Array.isArray(object.messages) ||
         !object.messages.every(isScriptMessage) ||
         !Array.isArray(object.leak_probes) ||
-        !object.leak_probes.every((probe) => typeof probe === "string" && probe.length > 0)
+        !object.leak_probes.every((probe) => typeof probe === "string" && probe.length > 0) ||
+        !Array.isArray(object.memory_examples) ||
+        !object.memory_examples.every((example) => {
+            const fields = record(example);
+            return (
+                fields !== null &&
+                exactKeys(fields, ["category", "id", "text"]) &&
+                typeof fields.id === "string" &&
+                typeof fields.category === "string" &&
+                typeof fields.text === "string"
+            );
+        })
     ) {
         throw new Error("fixture control script source was malformed");
     }
@@ -503,6 +545,55 @@ function parseScriptSource(value: unknown): ScriptSource {
         source: object.source,
         messages: object.messages,
         leakProbes: object.leak_probes as string[],
+        memoryExamples: object.memory_examples as ScriptSource["memoryExamples"],
+    };
+}
+
+function parseUserHintPass(value: unknown): UserHintPass {
+    const object = record(value);
+    if (object?.pass === "skipped" && typeof object.reason === "string") {
+        return { pass: "skipped", reason: object.reason };
+    }
+    const trace = record(object?.trace);
+    const rows = (key: string): number[] => {
+        const list = trace?.[key];
+        if (!Array.isArray(list) || !list.every((entry) => Number.isInteger(entry))) {
+            throw new Error(`fixture control user hint trace ${key} was malformed`);
+        }
+        return list as number[];
+    };
+    if (
+        object?.pass !== "decided" ||
+        typeof object.block_id !== "string" ||
+        typeof object.hint_text !== "string"
+    ) {
+        throw new Error("fixture control user hint outcome was malformed");
+    }
+    return {
+        pass: "decided",
+        blockId: object.block_id,
+        hintText: object.hint_text,
+        window: rows("window"),
+        matched: rows("matched"),
+        selected: rows("selected"),
+    };
+}
+
+function parseMemoryAdmission(value: unknown): MemoryAdmission {
+    const object = record(value);
+    if (
+        !object ||
+        !exactKeys(object, ["disposition", "effective_maturity", "visibility"]) ||
+        typeof object.disposition !== "string" ||
+        typeof object.effective_maturity !== "string" ||
+        typeof object.visibility !== "string"
+    ) {
+        throw new Error("fixture control memory admission was malformed");
+    }
+    return {
+        effectiveMaturity: object.effective_maturity,
+        disposition: object.disposition,
+        visibility: object.visibility,
     };
 }
 
@@ -665,6 +756,32 @@ class FixtureControlClient {
 
     async scriptSource(scenario: string): Promise<ScriptSource> {
         return parseScriptSource(await this.request("script-source", { scenario }));
+    }
+
+    async memoryAdmission(objectId: string, event: MemoryAdmissionEvent): Promise<MemoryAdmission> {
+        return parseMemoryAdmission(
+            await this.request("memory-admission", { object_id: objectId, event }),
+        );
+    }
+
+    /** The newest native-serving pass's auto-search decision, or null before any pass. */
+    async userHintOutcome(): Promise<UserHintPass | null> {
+        const object = record(await this.request("user-hint-outcome"));
+        if (!object || !exactKeys(object, ["outcome"])) {
+            throw new Error("fixture control user hint outcome was malformed");
+        }
+        return object.outcome === null ? null : parseUserHintPass(object.outcome);
+    }
+
+    async memorySeed(
+        anchor: string,
+        objectId: string,
+        category: string,
+        text: string,
+    ): Promise<MemoryAdmission> {
+        return parseMemoryAdmission(
+            await this.request("memory-seed", { anchor, object_id: objectId, category, text }),
+        );
     }
 
     gracefulShutdown(): Promise<void> {
@@ -959,6 +1076,25 @@ export class HermeticHostStack {
 
     async historySummarizerLive(): Promise<boolean> {
         return this.requireControl().historySummarizerLive();
+    }
+
+    /** Records one kernel admission event on an existing memory decision. */
+    async memoryAdmission(objectId: string, event: MemoryAdmissionEvent): Promise<MemoryAdmission> {
+        return this.requireControl().memoryAdmission(objectId, event);
+    }
+
+    async userHintOutcome(): Promise<UserHintPass | null> {
+        return this.requireControl().userHintOutcome();
+    }
+
+    /** Commits a verified project memory into the project scope of the decision `anchor`. */
+    async memorySeed(
+        anchor: string,
+        objectId: string,
+        category: string,
+        text: string,
+    ): Promise<MemoryAdmission> {
+        return this.requireControl().memorySeed(anchor, objectId, category, text);
     }
 
     async backendRequestCount(): Promise<number> {

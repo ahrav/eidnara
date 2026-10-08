@@ -1,8 +1,8 @@
 //! Corpus case scripts for the direct host fixture.
 //!
 //! A selection names up to [`MAX_QUEUE`] entries: compression fidelity scenario IDs, a scenario
-//! ID with the [`P1_ONLY`] suffix, [`FILLER`], optionally `filler:N` for at most `N` rows, or
-//! [`ECHO`] for the fixture's default answer, whose bodies repeat the presented text. The
+//! ID with the [`P1_ONLY`] suffix, [`FILLER`], or [`ECHO`] for the fixture's default answer,
+//! whose bodies repeat the presented text; `filler:N` and `echo:N` answer with at most `N` rows. The
 //! fixture resolves each scenario ID through the digest-checked corpus, and every later
 //! summarizer request consumes the front entry when it is admitted. A scenario entry binds
 //! its source's approved example to the ordinals the request actually presents; a filler entry
@@ -60,8 +60,8 @@ const MIN_LEAK_PROBE_CHARS: usize = 16;
 /// Presented records per filler segment when the entry names no row count.
 const FILLER_CHUNK: usize = 2;
 
-/// The most rows one `filler:N` entry may ask for.
-const MAX_FILLER_ROWS: usize = 64;
+/// The most rows one `filler:N` or `echo:N` entry may ask for.
+const MAX_ROWS: usize = 64;
 
 /// One presented record of the summarizer's input: its ordinal range and its text with alias
 /// markers removed. One record can carry several consecutive messages of the same role.
@@ -85,7 +85,7 @@ pub enum ScriptError {
     UnknownScenario,
     EmptyQueue,
     QueueTooLong,
-    BadFillerRows,
+    BadRowCount,
 }
 
 impl ScriptError {
@@ -95,7 +95,7 @@ impl ScriptError {
             Self::UnknownScenario => "unknown_scenario",
             Self::EmptyQueue => "empty_queue",
             Self::QueueTooLong => "queue_too_long",
-            Self::BadFillerRows => "bad_filler_rows",
+            Self::BadRowCount => "bad_row_count",
         }
     }
 }
@@ -170,11 +170,10 @@ enum Queued {
         source: &'static Source,
         p1_only: bool,
     },
-    /// `rows` is the exact segment count, or `None` for one segment per two records.
-    Filler {
-        rows: Option<usize>,
-    },
-    Echo,
+    /// `rows` bounds the segment count, or `None` for one segment per two records.
+    Filler { rows: Option<usize> },
+    /// `rows` bounds the segment count, or `None` for one segment per five records.
+    Echo { rows: Option<usize> },
 }
 
 /// The selection and its consumption record. Every summarizer request after a selection consumes
@@ -257,7 +256,8 @@ fn scriptable(source: &Source) -> bool {
 /// The native records of the source a scenario names, as the corpus file spells them, so a
 /// harness can seed them without parsing the corpus itself. The records pass through as raw JSON
 /// because the corpus schema reads them without a serializer. `leak_probes` are the leading
-/// characters of every text block and settled tool output long enough to locate a raw leak.
+/// characters of every text block and settled tool output long enough to locate a raw leak, and
+/// `memory_examples` are the case's eligible memory examples.
 pub fn source_records(scenario: &str) -> Result<Value, ScriptError> {
     let (case, source) = resolve(scenario)?;
     let (_, raw) = corpus()?;
@@ -277,6 +277,19 @@ pub fn source_records(scenario: &str) -> Result<Value, ScriptError> {
         .map(probe_of)
         .filter(|probe| probe.chars().count() >= MIN_LEAK_PROBE_CHARS)
         .collect();
+    let (corpus, _) = corpus()?;
+    let memory_examples: Vec<Value> = corpus
+        .case(case)
+        .into_iter()
+        .flat_map(|case| &case.memory_examples)
+        .map(|example| {
+            serde_json::json!({
+                "id": example.id,
+                "category": example.category,
+                "text": example.text,
+            })
+        })
+        .collect();
     Ok(serde_json::json!({
         "corpus_sha256": CORPUS_SHA256,
         "case": case,
@@ -284,6 +297,7 @@ pub fn source_records(scenario: &str) -> Result<Value, ScriptError> {
         "source": source.id,
         "messages": found["messages"],
         "leak_probes": leak_probes,
+        "memory_examples": memory_examples,
     }))
 }
 
@@ -300,22 +314,11 @@ impl CaseScript {
         let queue = entries
             .iter()
             .map(|entry| {
-                if entry == FILLER {
-                    return Ok(Queued::Filler { rows: None });
+                if let Some(rows) = row_count(entry, FILLER) {
+                    return rows.map(|rows| Queued::Filler { rows });
                 }
-                if entry == ECHO {
-                    return Ok(Queued::Echo);
-                }
-                if let Some(rows) = entry
-                    .strip_prefix(FILLER)
-                    .and_then(|rest| rest.strip_prefix(':'))
-                {
-                    return match rows.parse::<usize>() {
-                        Ok(rows) if (1..=MAX_FILLER_ROWS).contains(&rows) => {
-                            Ok(Queued::Filler { rows: Some(rows) })
-                        }
-                        _ => Err(ScriptError::BadFillerRows),
-                    };
+                if let Some(rows) = row_count(entry, ECHO) {
+                    return rows.map(|rows| Queued::Echo { rows });
                 }
                 let (scenario, p1_only) = match entry.strip_suffix(P1_ONLY) {
                     Some(scenario) => (scenario, true),
@@ -368,8 +371,8 @@ impl CaseScript {
                 text: filler(records, rows),
                 binding: None,
             }),
-            Queued::Echo => Ok(Answer {
-                text: scripted_summary(records),
+            Queued::Echo { rows } => Ok(Answer {
+                text: echo(records, rows),
                 binding: None,
             }),
             Queued::Scenario {
@@ -486,12 +489,44 @@ fn bind(
     Some((text, binding))
 }
 
+/// The row bound of a `kind` or `kind:N` queue entry: `None` when `entry` is another kind,
+/// `Ok(None)` for the bare kind, and `Ok(Some(N))` for `N` in `1..=MAX_ROWS`.
+fn row_count(entry: &str, kind: &str) -> Option<Result<Option<usize>, ScriptError>> {
+    if entry == kind {
+        return Some(Ok(None));
+    }
+    let rows = entry.strip_prefix(kind)?.strip_prefix(':')?;
+    Some(match rows.parse::<usize>() {
+        Ok(rows) if (1..=MAX_ROWS).contains(&rows) => Ok(Some(rows)),
+        _ => Err(ScriptError::BadRowCount),
+    })
+}
+
+/// `records` in contiguous groups: `rows` groups as evenly as the record count allows, or one
+/// per record when fewer are presented, or groups of `chunk` without `rows`.
+fn groups(records: &[Record], rows: Option<usize>, chunk: usize) -> Vec<&[Record]> {
+    match rows {
+        None => records.chunks(chunk).collect(),
+        Some(rows) => {
+            let count = rows.min(records.len());
+            (0..count)
+                .map(|k| &records[k * records.len() / count..(k + 1) * records.len() / count])
+                .collect()
+        }
+    }
+}
+
 /// The summarizer answer the fixture stands in for a provider with: one `history_segment` per
 /// run of five presented records, its text the records' own words, in the output document the
 /// daemon's validator reads. A recording of this is what the campaign's structured arm replays.
 pub fn scripted_summary(records: &[Record]) -> String {
+    echo(records, None)
+}
+
+/// The default answer over `records` grouped by [`groups`].
+fn echo(records: &[Record], rows: Option<usize>) -> String {
     let mut segments = String::new();
-    for group in records.chunks(SUMMARY_CHUNK) {
+    for group in groups(records, rows, SUMMARY_CHUNK) {
         let (start, end) = (group[0].start, group[group.len() - 1].end);
         // Escaped as element content, so a message saying `<T> & B` leaves the document
         // well-formed; the validator unescapes it.
@@ -522,17 +557,8 @@ fn output_document(segments: &str, next: u64) -> String {
 /// records; `rows` splits the records into that many contiguous segments, as evenly as the
 /// record count allows, or one per record when fewer are presented.
 fn filler(records: &[Record], rows: Option<usize>) -> String {
-    let groups: Vec<&[Record]> = match rows {
-        None => records.chunks(FILLER_CHUNK).collect(),
-        Some(rows) => {
-            let count = rows.min(records.len());
-            (0..count)
-                .map(|k| &records[k * records.len() / count..(k + 1) * records.len() / count])
-                .collect()
-        }
-    };
     let mut segments = String::new();
-    for group in groups {
+    for group in groups(records, rows, FILLER_CHUNK) {
         let (start, end) = (group[0].start, group[group.len() - 1].end);
         segments.push_str(&format!(
             "<history_segment start=\"{start}\" end=\"{end}\" title=\"Fixture filler {start} to {end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored filler for messages {start} to {end}.</p1><p2>Filler {start} to {end}.</p2><p3>Filler.</p3><p4 /></history_segment>"
@@ -733,6 +759,10 @@ mod tests {
         let echoed = script.answer(&records).unwrap().unwrap().text;
         assert!(echoed.contains("<p1>note; note; note; note; note</p1>"));
         assert!(echoed.contains(&format!("importance=\"{ECHO_IMPORTANCE}\"")));
+        let mut counted = armed(&["echo:5"]);
+        let rows = counted.answer(&records).unwrap().unwrap().text;
+        assert_eq!(rows.matches("<history_segment ").count(), 5);
+        assert!(rows.contains("<p1>note</p1>"));
     }
 
     #[test]
@@ -788,8 +818,9 @@ mod tests {
                 vec![FILLER.to_owned(), "C9.S1".to_owned()],
                 ScriptError::UnknownScenario,
             ),
-            (vec!["filler:0".to_owned()], ScriptError::BadFillerRows),
-            (vec!["filler:65".to_owned()], ScriptError::BadFillerRows),
+            (vec!["filler:0".to_owned()], ScriptError::BadRowCount),
+            (vec!["filler:65".to_owned()], ScriptError::BadRowCount),
+            (vec!["echo:0".to_owned()], ScriptError::BadRowCount),
         ] {
             assert_eq!(script.select(&entries), Err(error));
             assert_eq!(script.status().remaining, 1);
@@ -807,5 +838,9 @@ mod tests {
             (MIN_LEAK_PROBE_CHARS..=PROBE_CHARS).contains(&length)
         }));
         assert_eq!(source_records("C6.V1"), Err(ScriptError::UnknownScenario));
+        assert_eq!(records["memory_examples"], serde_json::json!([]));
+        let c3 = source_records("C3.S6").unwrap();
+        assert_eq!(c3["memory_examples"][0]["id"], "C3.M1");
+        assert_eq!(c3["memory_examples"][0]["category"], "ARCHITECTURE");
     }
 }

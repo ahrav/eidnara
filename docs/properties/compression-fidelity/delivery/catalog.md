@@ -184,8 +184,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - admitted-memory and exclusion controls have not been
-paired with an omitted-history provider invocation.
+Exercised: partial - `packages/e2e-tests/tests/compression-fidelity-memory.test.ts`
+ages C3's case row to P3 and credits C3.M1 only when the OpenCode provider
+request's `<project-memory>` block carries it. Candidate-only, wrong-project,
+budget-excluded, withheld, and rejected variants serve the same row without
+the memory (U3). The admitted rows use a fixture-seeded repository memory, a
+truncated-away qualifier is unconstructible under the 64 KiB line cap, and
+human review is absent.
 Guarantee: Memory receives preservation credit only for qualified content
 actually included from the pass's eligible, scoped, budget-selected memory.
 Check: `always` - every memory-backed visible disposition identifies an
@@ -214,7 +219,11 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - no reviewed P5-plus-hint provider capture was produced.
+Exercised: partial - `packages/e2e-tests/tests/compression-fidelity-memory.test.ts`
+captures C4's P5 row as the first fragment of an `<eidnara-search-hint>`,
+ranked ahead of matching distractor rows, and records whether the truncated
+fragment kept the qualifier; the hints-disabled request carries no hint (U3).
+No empty-fragment scenario or human review exists.
 Guarantee: A delivered hint does not turn its supporting source into a
 stronger, contradictory, or falsely recoverable claim.
 Check: `always` - review every delivered hint against its contributing source
@@ -291,9 +300,11 @@ situations (m1, m0, natural and pressure tiers, P5, legacy and sparse rows).
 provider-delivery markers `m1-published-input`, `m0-tier-inputs` per case and
 tier, `natural-archive-input`, `high-importance-pressure-input` (C3.S5),
 `parser-fallback-input`, `empty-p4-input`, `warm-repeat-input`, and
-`missing-capture-input`. `legacy-input`, `raw-fallback-input`,
-`hint-fragment-input`, `hints-disabled-input`, and both memory markers remain
-missing.
+`missing-capture-input`, and
+`packages/e2e-tests/tests/compression-fidelity-memory.test.ts` witnesses
+`memory-positive-input`, `memory-negative-inputs` for each negative subcase,
+`hint-fragment-input`, and `hints-disabled-input`. `legacy-input` and
+`raw-fallback-input` remain missing.
 Guarantee: The declared delivery campaign constructs every required
 independent serving situation before claiming its coverage.
 Check: `sometimes` - evaluate and report each of the 14 constant situation
