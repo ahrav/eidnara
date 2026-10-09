@@ -260,10 +260,15 @@ environment variables, all required:
 Run it with
 `cargo +1.98 test -p daemon --lib --locked real_producer_capture -- --ignored`.
 Each source yields one `daemon.compression_fidelity.real_capture` record,
-written with mode `0600` in a `0700` directory. The record names the model,
+written with mode `0600` in an owner-only `0700` directory that the test
+creates or requires, outside the repository. Its terminal is `published`,
+`validation_rejected` for a settled firing without rows, or `unsettled` for
+a firing that did not settle within the wait or never started a producer;
+the test fails after writing every record when any source is unsettled. The
+record names the model,
 the output origin, whether the firing settled, the attempt count, and every
-attempt's complete system prompt, user prompt, generation settings, and
-drained output or error, followed by the published rows. The host's model
+attempt's complete system prompt, user prompt, generation settings, start
+error, and every drained output or error, followed by the published rows. The host's model
 execution protocol reports no token usage, so each record carries
 `usage: null` and `usage_reported: false`; its cost is unknown. The test
 reads no credential: the host owns them.
@@ -273,12 +278,12 @@ same capture over the scripted producer in the default suite.
 **Record-and-forward provider mode.** `new MockProvider({ forward })` in
 `packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends
 to one Messages endpoint and returns the provider's response to OpenCode.
-`RustTestHarness.create({ forward, modelContextLimit })` builds it and runs
-OpenCode on `forward.model` at that context limit, so the forwarded body
-already names the selected model. Construction requires:
+`RustTestHarness.create({ forward })` builds it and runs OpenCode on
+`forward.model` at `forward.contextLimit`, so the forwarded body already
+names the selected model. Construction requires:
 
-- an `https:` URL whose path ends in `/messages`;
-- the model, which every request must name;
+- an `https:` URL whose path ends in `/messages`, with no user info or query;
+- the model, which every request must name, and its context limit;
 - the reviewed corpus digest;
 - input and output prices in USD per million tokens, with the input price
   at least the model's highest input-side price;
@@ -287,20 +292,30 @@ already names the selected model. Construction requires:
 - a credential callback.
 
 Scripted responses and forwarding are exclusive: passing both, or scripting
-a forwarding mock, throws. Before each send the forwarder checks the model,
+a forwarding mock, throws. A forwarding mock accepts only requests carrying
+its per-mock `inboundKey`, which the harness writes into OpenCode's provider
+config, so no other local process can spend its budget. `forward.contextLimit`
+is the context limit OpenCode is configured with. Before each send the
+forwarder checks the model,
 the request's `max_tokens`, the call count, and the spend cap. The spend
 check reserves the body's byte length as input tokens plus `max_tokens` as
 output. A response with usage charges its stated tokens; a response without
 usage, or a send without a response, charges the reservation. A refused
-send, a non-2xx response, a timeout, or a redirect stops the run, and every
-later request is refused without a send. The forwarder sends the received
+send, a non-2xx response, a timeout, a redirect, a failed credential
+callback, or a response whose usage costs more than its reservation stops
+the run, and every later request is refused without a send. The input price
+must cover any pricing the client's `anthropic-beta` header enables. The forwarder sends the received
 bytes unchanged, adds the callback's headers to the outbound request only,
 and records each exchange with redacted headers and the bounded response
 bytes. `forwardingReport()` keeps attempted sends and acknowledged responses
-apart, and marks the run incomplete on a stop, a truncated capture, an
-unknown cost, or a last response that still asks for a tool.
-`publishForwardingReport` writes it with mode `0600` in a `0700` directory
-outside the repository. `tests/compression-fidelity-forwarding.test.ts`
+apart, and marks the run incomplete on a stop, a send in flight, a truncated
+capture, an unknown cost, an acknowledged response without a stop reason,
+spend above the cap, or a tool call that no later request answers with its
+`tool_result`. The limits, spend, and stop span the mock's life, across
+`reset()`.
+`publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
+directory outside the repository, refusing a shared existing directory or a
+label that is not a plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
 
 ## What is unsupported

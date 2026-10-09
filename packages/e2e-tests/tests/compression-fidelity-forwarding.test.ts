@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../src/compression-fidelity/corpus";
 import type { ForwardConfig } from "../src/mock-provider/forward";
 import { scriptedResponse } from "../src/mock-provider/server";
+import { userEidnaraConfigPath } from "../src/opencode-runner/spawn";
 import { RustTestHarness } from "../src/rust-harness";
 import { findToolResultText, publishedToolName } from "../src/scripted-tool-call";
 
@@ -15,6 +16,7 @@ const USAGE = { input_tokens: 1_200, output_tokens: 30 };
 
 interface Sent {
     body: string;
+    sha256: string;
     apiKey: string | null;
 }
 
@@ -27,7 +29,11 @@ function providerDouble(file: string) {
     const sent: Sent[] = [];
     const send = async (_url: string, init: RequestInit): Promise<Response> => {
         const body = new TextDecoder().decode(init.body as Uint8Array);
-        sent.push({ body, apiKey: new Headers(init.headers).get("x-api-key") });
+        sent.push({
+            body,
+            sha256: new Bun.CryptoHasher("sha256").update(init.body as Uint8Array).digest("hex"),
+            apiKey: new Headers(init.headers).get("x-api-key"),
+        });
         const parsed = JSON.parse(body) as Record<string, unknown>;
         if (body.includes(CALL_ID)) {
             return scriptedResponse({ text: "forwarded final answer", usage: USAGE }, parsed);
@@ -60,13 +66,14 @@ describe.skipIf(!prereqs.ok)("record-and-forward through OpenCode", () => {
         const forward: ForwardConfig = {
             upstreamURL: "https://provider.test/v1/messages",
             model: MODEL,
+            contextLimit: 100_000,
             corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
             pricing: { inputPerMTok: 3, outputPerMTok: 15 },
             limits: { maxCalls: 8, maxOutputTokens: 8_192, timeoutMs: 30_000, spendCapUsd: 1 },
             credentials: () => ({ "x-api-key": CANARY }),
             fetch: double.send,
         };
-        h = await RustTestHarness.create({ forward, modelContextLimit: 100_000 });
+        h = await RustTestHarness.create({ forward });
         writeFileSync(join(h.env.workdir, file), "forwarding fixture contents\n");
     });
 
@@ -82,8 +89,8 @@ describe.skipIf(!prereqs.ok)("record-and-forward through OpenCode", () => {
         expect(report.mode).toBe("forward");
         expect(report.stopped).toBeNull();
         expect(report.refusals).toEqual([]);
-        expect(report.exchanges.map((e) => e.request.body_text)).toEqual(
-            double.sent.map((s) => s.body),
+        expect(report.exchanges.map((e) => e.request.body_sha256)).toEqual(
+            double.sent.map((s) => s.sha256),
         );
         expect(double.sent.every((s) => s.apiKey === CANARY)).toBe(true);
         expect(report.exchanges.every((e) => JSON.parse(e.request.body_text).model === MODEL)).toBe(
@@ -98,6 +105,13 @@ describe.skipIf(!prereqs.ok)("record-and-forward through OpenCode", () => {
         expect(JSON.stringify(report)).not.toContain(CANARY);
         expect(JSON.stringify(h.mock.requests())).not.toContain(CANARY);
         expect(h.opencode.stderr()).not.toContain(CANARY);
+        for (const path of [
+            join(h.env.configDir, "opencode.json"),
+            userEidnaraConfigPath(h.env),
+            h.logPath,
+        ]) {
+            expect(existsSync(path) ? readFileSync(path, "utf8") : "").not.toContain(CANARY);
+        }
     }, 300_000);
 });
 

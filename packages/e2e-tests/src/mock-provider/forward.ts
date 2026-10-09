@@ -12,8 +12,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { publishJsonAtomically } from "../atomic-publish";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 
@@ -31,8 +31,10 @@ export interface ForwardLimits {
 export interface ForwardConfig {
     /** The HTTPS Messages endpoint, such as `https://api.anthropic.com/v1/messages`. */
     upstreamURL: string;
-    /** The model OpenCode was configured with; a request naming another model is refused. */
+    /** The model OpenCode runs; a request naming another model is refused. */
     model: string;
+    /** The model's context window, which OpenCode is configured with. */
+    contextLimit: number;
     /**
      * The SHA-256 of the reviewed synthetic corpus the run serves; any other value is refused,
      * so forwarding carries only reviewed corpus input.
@@ -40,7 +42,9 @@ export interface ForwardConfig {
     corpusSha256: string;
     /**
      * USD per million tokens. `inputPerMTok` must be the highest input-side price the model
-     * charges (cache writes included), so a bound built from it never undercounts.
+     * charges, cache writes and any `anthropic-beta` pricing the client enables included, so a
+     * bound built from it never undercounts. A response whose stated usage costs more than its
+     * reservation stops the run.
      */
     pricing: { inputPerMTok: number; outputPerMTok: number };
     limits: ForwardLimits;
@@ -106,6 +110,7 @@ export interface ForwardingReport {
     upstream_url: string;
     corpus_sha256: string;
     model: string;
+    context_limit: number;
     limits: ForwardLimits;
     pricing: ForwardConfig["pricing"];
     attempted_sends: number;
@@ -134,8 +139,14 @@ export function validateForwardConfig(config: ForwardConfig): Readonly<ForwardCo
     if (!url.pathname.endsWith("/messages")) {
         throw new Error("forwarding accepts only a Messages endpoint");
     }
+    if (url.username || url.password || url.search) {
+        throw new Error("the upstream URL carries no credential or query");
+    }
     if (typeof config.model !== "string" || config.model === "") {
         throw new Error("forwarding needs an explicit model");
+    }
+    if (!positive(config.contextLimit) || !Number.isInteger(config.contextLimit)) {
+        throw new Error("forwarding needs the model's whole-number context limit");
     }
     if (config.corpusSha256 !== COMPRESSION_FIDELITY_CORPUS_SHA256) {
         throw new Error("forwarding serves only the reviewed synthetic corpus");
@@ -253,6 +264,29 @@ function errorResponse(type: string, message: string): Response {
     });
 }
 
+/** The ids of the tool calls a Messages response body asks for. */
+function toolUseIds(text: string): string[] {
+    return [...text.matchAll(/"type"\s*:\s*"tool_use"\s*,\s*"id"\s*:\s*"([^"]+)"/g)].map(
+        (match) => match[1] ?? "",
+    );
+}
+
+function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]> {
+    return {
+        outcome: "ambiguous",
+        status: null,
+        headers: {},
+        body_sha256: null,
+        body_bytes: 0,
+        body_text: "",
+        truncated: false,
+        stop_reason: null,
+        usage: null,
+        cost_usd: reserved,
+        cost_known: false,
+    };
+}
+
 export class Forwarder {
     private readonly config: Readonly<ForwardConfig>;
     private readonly exchanges: ForwardedExchange[] = [];
@@ -275,6 +309,58 @@ export class Forwarder {
         return (inputTokens * inputPerMTok + outputTokens * outputPerMTok) / 1_000_000;
     }
 
+    /** The send's reservation, or the reason the limits refuse it. */
+    private admit(text: string, bytes: number): { reserved: number } | { refused: string } {
+        if (this.stopped) return { refused: `stopped: ${this.stopped}` };
+        const { limits, model } = this.config;
+        let parsed: Record<string, unknown>;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            return { refused: "unreadable request body" };
+        }
+        if (parsed.model !== model)
+            return { refused: `request names model ${String(parsed.model)}` };
+        if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
+            return { refused: "max_tokens is absent or above limits.maxOutputTokens" };
+        }
+        if (this.exchanges.length >= limits.maxCalls) return { refused: "limits.maxCalls reached" };
+        // Each token spans at least one body byte, so the body length bounds input tokens.
+        const reserved = this.price(bytes, parsed.max_tokens);
+        if (this.spent + reserved > limits.spendCapUsd) {
+            return { refused: "limits.spendCapUsd would be exceeded" };
+        }
+        return { reserved };
+    }
+
+    /** Sends `body` and reads the whole response before the deadline. */
+    private async timedSend(
+        body: Uint8Array<ArrayBuffer>,
+        headers: Record<string, string>,
+    ): Promise<readonly [Response, Uint8Array<ArrayBuffer>]> {
+        const deadline = AbortSignal.timeout(this.config.limits.timeoutMs);
+        const expired = new Promise<never>((_, reject) => {
+            deadline.addEventListener("abort", () => reject(deadline.reason), { once: true });
+        });
+        // A send that settles first leaves the deadline to fire unobserved.
+        expired.catch(() => {});
+        const send = this.config.fetch ?? fetch;
+        return Promise.race([
+            (async () => {
+                const sent = await send(this.config.upstreamURL, {
+                    method: "POST",
+                    headers,
+                    body,
+                    signal: deadline,
+                    // A redirect would move the send to an unselected target.
+                    redirect: "error",
+                });
+                return [sent, new Uint8Array(await sent.arrayBuffer())] as const;
+            })(),
+            expired,
+        ]);
+    }
+
     /**
      * Forwards `body` and returns the provider's response, or a non-retryable refusal when a
      * limit, the model, or an earlier stop forbids the send.
@@ -283,28 +369,19 @@ export class Forwarder {
         body: Uint8Array<ArrayBuffer>,
         headers: Record<string, string>,
     ): Promise<Response> {
-        if (this.stopped) return this.refuse(`stopped: ${this.stopped}`);
-        const { limits, model } = this.config;
-        let parsed: Record<string, unknown>;
-        try {
-            parsed = JSON.parse(new TextDecoder().decode(body));
-        } catch {
-            return this.refuse("unreadable request body");
-        }
-        if (parsed.model !== model)
-            return this.refuse(`request names model ${String(parsed.model)}`);
-        if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
-            return this.refuse("max_tokens is absent or above limits.maxOutputTokens");
-        }
-        if (this.exchanges.length >= limits.maxCalls) return this.refuse("limits.maxCalls reached");
-        // Each token spans at least one body byte, so the body length bounds input tokens.
-        const reserved = this.price(body.byteLength, parsed.max_tokens);
-        if (this.spent + reserved > limits.spendCapUsd) {
-            return this.refuse("limits.spendCapUsd would be exceeded");
-        }
+        const text = new TextDecoder().decode(body);
+        const admitted = this.admit(text, body.byteLength);
+        if ("refused" in admitted) return this.refuse(admitted.refused);
+        const { reserved } = admitted;
         const outbound: Record<string, string> = {};
         for (const name of FORWARDED_HEADERS) {
             if (headers[name] !== undefined) outbound[name] = headers[name];
+        }
+        let credentials: Record<string, string>;
+        try {
+            credentials = this.config.credentials();
+        } catch {
+            return this.refuse("the credential callback failed");
         }
         const exchange: ForwardedExchange = {
             index: this.exchanges.length,
@@ -312,7 +389,7 @@ export class Forwarder {
                 headers: redact(headers),
                 body_sha256: sha256(body),
                 body_bytes: body.byteLength,
-                body_text: new TextDecoder().decode(body),
+                body_text: text,
                 reserved_usd: reserved,
             },
             response: null,
@@ -320,51 +397,18 @@ export class Forwarder {
         this.exchanges.push(exchange);
         // The reservation counts until the response settles the real cost.
         this.spent += reserved;
-        const send = this.config.fetch ?? fetch;
         let response: Response;
         let bytes: Uint8Array<ArrayBuffer>;
-        const deadline = AbortSignal.timeout(limits.timeoutMs);
-        const expired = new Promise<never>((_, reject) => {
-            deadline.addEventListener("abort", () => reject(deadline.reason), { once: true });
-        });
-        // A send that settles first leaves the deadline to fire unobserved.
-        expired.catch(() => {});
         try {
-            [response, bytes] = await Promise.race([
-                (async () => {
-                    const sent = await send(this.config.upstreamURL, {
-                        method: "POST",
-                        headers: { ...outbound, ...this.config.credentials() },
-                        body,
-                        signal: deadline,
-                        // A redirect would move the send to an unselected target.
-                        redirect: "error",
-                    });
-                    return [sent, new Uint8Array(await sent.arrayBuffer())] as const;
-                })(),
-                expired,
-            ]);
+            [response, bytes] = await this.timedSend(body, { ...outbound, ...credentials });
         } catch (error) {
             const name = error instanceof Error ? error.name : "Error";
-            exchange.response = {
-                outcome: "ambiguous",
-                status: null,
-                headers: {},
-                body_sha256: null,
-                body_bytes: 0,
-                body_text: "",
-                truncated: false,
-                stop_reason: null,
-                usage: null,
-                cost_usd: reserved,
-                cost_known: false,
-            };
-            this.stopped = `send ${exchange.index} ended without a response (${name})`;
+            exchange.response = unanswered(reserved);
+            this.stopped ??= `send ${exchange.index} ended without a response (${name})`;
             return errorResponse("forwarding_failed", this.stopped);
         }
         const contentType = response.headers.get("content-type") ?? "";
-        const text = new TextDecoder().decode(bytes);
-        const { usage, stopReason } = readUsage(contentType, text);
+        const { usage, stopReason } = readUsage(contentType, new TextDecoder().decode(bytes));
         const cost = usage
             ? this.price(
                   usage.input_tokens +
@@ -388,7 +432,9 @@ export class Forwarder {
             cost_usd: cost,
             cost_known: usage !== null,
         };
-        if (!response.ok) this.stopped = `send ${exchange.index} returned HTTP ${response.status}`;
+        if (!response.ok)
+            this.stopped ??= `send ${exchange.index} returned HTTP ${response.status}`;
+        if (cost > reserved) this.stopped ??= `send ${exchange.index} cost above its reservation`;
         return new Response(bytes, {
             status: response.status,
             headers: contentType ? { "content-type": contentType } : {},
@@ -397,21 +443,34 @@ export class Forwarder {
 
     /** The run so far: the frozen limits, every send and response, and whether it is complete. */
     report(): ForwardingReport {
-        const acknowledged = this.exchanges.filter((e) => e.response?.outcome === "acknowledged");
+        const settled = this.exchanges.flatMap((e) => (e.response ? [e.response] : []));
+        const acknowledged = settled.filter((r) => r.outcome === "acknowledged");
         const reasons: string[] = [];
         if (this.stopped) reasons.push(`stopped: ${this.stopped}`);
         if (this.exchanges.length === 0) reasons.push("no send");
-        if (this.exchanges.some((e) => e.response?.truncated)) reasons.push("capture truncated");
-        if (this.exchanges.some((e) => e.response && !e.response.cost_known)) {
-            reasons.push("cost unknown for a send");
+        if (settled.length < this.exchanges.length) reasons.push("a send is in flight");
+        if (settled.some((r) => r.truncated)) reasons.push("capture truncated");
+        if (settled.some((r) => !r.cost_known)) reasons.push("cost unknown for a send");
+        if (acknowledged.some((r) => r.stop_reason === null)) {
+            reasons.push("a response states no stop reason");
         }
-        const last = this.exchanges.at(-1)?.response;
-        if (last?.stop_reason === "tool_use") reasons.push("tool loop unfinished");
+        if (this.spent > this.config.limits.spendCapUsd) reasons.push("spend above the cap");
+        const answered = this.exchanges.every((exchange) =>
+            toolUseIds(exchange.response?.body_text ?? "").every((id) =>
+                this.exchanges.some(
+                    (later) =>
+                        later.index > exchange.index &&
+                        later.request.body_text.includes(`"tool_use_id":"${id}"`),
+                ),
+            ),
+        );
+        if (!answered) reasons.push("tool loop unfinished");
         return {
             mode: "forward",
             upstream_url: this.config.upstreamURL,
             corpus_sha256: this.config.corpusSha256,
             model: this.config.model,
+            context_limit: this.config.contextLimit,
             limits: { ...this.config.limits },
             pricing: { ...this.config.pricing },
             attempted_sends: this.exchanges.length,
@@ -430,19 +489,30 @@ export class Forwarder {
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 
 /**
- * Publishes `report` as `<dir>/forwarding-<label>.json` with mode `0600` inside a `0700`
- * directory, refusing a directory inside the repository.
+ * Publishes `report` as `<dir>/forwarding-<label>.json` with mode `0600` in an owner-only
+ * directory outside the repository. The directory is created `0700` when absent; an existing
+ * one must already be `0700` and owned by this user.
  */
 export function publishForwardingReport(
     report: ForwardingReport,
     dir: string,
     label: string,
 ): string {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const real = realpathSync(dir);
+    if (!/^[A-Za-z0-9._-]+$/.test(label) || label.startsWith(".")) {
+        throw new Error(`${label} is not a plain file label`);
+    }
+    const target = resolve(dir);
+    let existing = target;
+    while (!existsSync(existing)) existing = dirname(existing);
+    const real = join(realpathSync(existing), relative(existing, target));
     const inside = relative(realpathSync(REPOSITORY_ROOT), real);
     if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) {
         throw new Error(`${real} is inside the repository`);
+    }
+    mkdirSync(real, { recursive: true, mode: 0o700 });
+    const stat = statSync(real);
+    if ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) {
+        throw new Error(`${real} is not an owner-only directory`);
     }
     const path = join(real, `forwarding-${label}.json`);
     publishJsonAtomically(report, path, { mode: 0o600 });

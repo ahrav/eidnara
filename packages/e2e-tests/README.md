@@ -25,7 +25,7 @@ The package is private and never published.
   selected HTTPS Messages endpoint under frozen call, output, timeout, and
   spend limits (`src/mock-provider/forward.ts`); scripting is unavailable in
   that mode. `RustTestHarness.create({ forward })` runs OpenCode on
-  `forward.model`.
+  `forward.model` at `forward.contextLimit`.
 - **Bedrock-only callers.** `bedrock-only-opencode` and `bedrock-only-pi` run
   a deployment whose only model credential is the `amazon-bedrock` row and
   whose environments carry no `ANTHROPIC_*` variable. Memory capture, the

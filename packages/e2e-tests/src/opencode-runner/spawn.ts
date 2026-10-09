@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 import { isSecretKey, keepsScalarValue } from "@eidnara/opencode/shared/redaction";
+import { FIXTURE_KEY } from "../mock-provider/server";
 import { waitForChildExit } from "../process-exit";
 import {
     buildDirectHostFixture,
@@ -76,6 +77,8 @@ export interface SpawnOptions {
     modelContextLimit?: number;
     /** The mock provider's model id; a forwarding run names the real model here. */
     modelId?: string;
+    /** The key OpenCode sends to the mock provider; the fixture key by default. */
+    mockApiKey?: string;
     /** Reuse an isolated env so direct host starts before OpenCode and survives serve restarts. */
     existingEnv?: IsolatedEnv;
     /** User-tier host connection file. When set, the user config carries `host.connection_file`. */
@@ -182,7 +185,7 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
                   npm: "@ai-sdk/anthropic",
                   env: [],
                   options: {
-                      apiKey: "test-key-not-real",
+                      apiKey: opts.mockApiKey ?? FIXTURE_KEY,
                       baseURL: mockProviderURL,
                   },
                   models: {
@@ -612,7 +615,7 @@ async function spawnOpencodeWithProvision(
         childEnv.XDG_CONFIG_HOME = env.configDir;
         childEnv.XDG_DATA_HOME = env.dataDir;
         childEnv.XDG_CACHE_HOME = env.cacheDir;
-        if (!resolvedOpts.bedrock) childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
+        if (!resolvedOpts.bedrock) childEnv.ANTHROPIC_API_KEY = FIXTURE_KEY;
         for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
             childEnv[key] = value;
         }

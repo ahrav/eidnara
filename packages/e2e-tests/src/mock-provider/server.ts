@@ -17,6 +17,7 @@
  * retries 408, 409, 429, and 5xx.
  */
 
+import { randomBytes } from "node:crypto";
 import {
     type CassetteMiss,
     type CassetteMode,
@@ -114,6 +115,8 @@ export type RequestMatcher = (
 ) => MockResponse | null;
 
 const JSON_HEADERS = { "content-type": "application/json" };
+/** The key OpenCode sends to a scripted mock. */
+export const FIXTURE_KEY = "test-key-not-real";
 /** Well above any provider body OpenCode sends (a 200k-token context is about 1 MiB). */
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 
@@ -127,12 +130,20 @@ export class MockProvider {
      * the object, so a request that began under an earlier run keeps writing into that run. */
     private run: Run = freshRun();
     private readonly forwarder: Forwarder | null;
+    /**
+     * The key a client must send as `x-api-key` in forwarding mode, fresh per mock, so only
+     * the OpenCode configured with it can spend the forwarding budget.
+     */
+    readonly inboundKey: string;
 
     constructor(options: MockProviderOptions = {}) {
         if (options.forward && options.script) {
             throw new Error("forwarding and scripted responses are mutually exclusive");
         }
         this.forwarder = options.forward ? new Forwarder(options.forward) : null;
+        this.inboundKey = this.forwarder
+            ? `forward-${randomBytes(16).toString("hex")}`
+            : FIXTURE_KEY;
         if (options.script) this.run.responses = [...options.script];
     }
 
@@ -142,7 +153,8 @@ export class MockProvider {
         return this.forwarder.report();
     }
 
-    private scripting(): Run {
+    /** The current run, after asserting this mock serves scripted responses. */
+    private scriptedRun(): Run {
         if (this.forwarder) throw new Error("a forwarding mock serves no scripted responses");
         return this.run;
     }
@@ -171,15 +183,15 @@ export class MockProvider {
         }
     }
     script(responses: MockResponse[]): void {
-        this.scripting().responses = [...responses];
+        this.scriptedRun().responses = [...responses];
     }
 
     /** Set a default response to return when the queue is empty. */
     setDefault(response: MockResponse): void {
-        this.scripting().defaultResponse = response;
+        this.scriptedRun().defaultResponse = response;
     }
     enqueue(response: MockResponse): void {
-        this.scripting().responses.push(response);
+        this.scriptedRun().responses.push(response);
     }
 
     /**
@@ -187,7 +199,7 @@ export class MockProvider {
      * If no matcher returns a response, the provider consults the main queue, then `defaultResponse`.
      */
     addMatcher(matcher: RequestMatcher): void {
-        this.scripting().matchers.push(matcher);
+        this.scriptedRun().matchers.push(matcher);
     }
     requests(): CapturedRequest[] {
         return [...this.run.captured];
@@ -196,7 +208,8 @@ export class MockProvider {
         return this.run.captured[this.run.captured.length - 1] ?? null;
     }
     /** Starts a new run: script, captures, counters, and the cassette binding with its logs are
-     * fresh, and a request still in flight keeps writing into the run it began in. */
+     * fresh, and a request still in flight keeps writing into the run it began in. A forwarding
+     * mock's limits, spend, and stop span its whole life, so its report survives a reset. */
     reset(): void {
         this.run = freshRun();
     }
@@ -210,7 +223,7 @@ export class MockProvider {
      * `reset()`, with a fresh script, captures, counters, and logs; a request still in flight keeps
      * the run it began in. */
     useCassette(session: CassetteSession): void {
-        this.scripting();
+        this.scriptedRun();
         this.run = { ...freshRun(), cassette: session };
     }
 
@@ -280,6 +293,12 @@ export class MockProvider {
                 headers: this.forwarder ? redact(headers) : headers,
                 body,
             };
+            if (this.forwarder && headers["x-api-key"] !== this.inboundKey) {
+                return new Response(errorBody("authentication_error", {}), {
+                    status: 401,
+                    headers: JSON_HEADERS,
+                });
+            }
             run.captured.push(captured);
             if (this.forwarder) {
                 const forwarded = await this.forwarder.forward(bodyBytes, headers);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
@@ -72,6 +72,7 @@ function config(overrides: Partial<ForwardConfig> = {}): ForwardConfig {
     return {
         upstreamURL: UPSTREAM,
         model: MODEL,
+        contextLimit: 100_000,
         corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
         pricing: { inputPerMTok: 3, outputPerMTok: 15 },
         limits: { maxCalls: 4, maxOutputTokens: 1024, timeoutMs: 2_000, spendCapUsd: 1 },
@@ -81,24 +82,30 @@ function config(overrides: Partial<ForwardConfig> = {}): ForwardConfig {
 }
 
 const started: MockProvider[] = [];
+const keys = new Map<string, string>();
 async function start(mock: MockProvider): Promise<string> {
     started.push(mock);
-    return (await mock.start()).baseURL;
+    const base = (await mock.start()).baseURL;
+    keys.set(base, mock.inboundKey);
+    return base;
 }
 
 afterEach(async () => {
     for (const mock of started.splice(0)) await mock.stop();
 });
 
-function post(baseURL: string, body: unknown): Promise<Response> {
+function post(baseURL: string, body: unknown, key = keys.get(baseURL)): Promise<Response> {
     return fetch(`${baseURL}/v1/messages`, {
         method: "POST",
         headers: {
             "content-type": "application/json",
             "anthropic-version": "2023-06-01",
-            "x-api-key": "test-key-not-real",
+            "x-api-key": key ?? "",
         },
-        body: typeof body === "string" ? body : JSON.stringify(body),
+        body:
+            typeof body === "string" || body instanceof Uint8Array
+                ? (body as BodyInit)
+                : JSON.stringify(body),
     });
 }
 
@@ -150,6 +157,22 @@ describe("scripted mode", () => {
         }
         expect(spy.calls).toEqual([]);
     });
+
+    test("the outbound spy sees a forwarding mock's send", async () => {
+        const spy = outboundSpy();
+        try {
+            const mock = new MockProvider({
+                forward: config({
+                    upstreamURL: "https://provider.invalid/v1/messages",
+                    limits: { ...config().limits, timeoutMs: 5_000 },
+                }),
+            });
+            await (await post(await start(mock), firstTurn)).text();
+        } finally {
+            spy.restore();
+        }
+        expect(spy.calls).toEqual(["https://provider.invalid/v1/messages"]);
+    });
 });
 
 describe("construction", () => {
@@ -172,6 +195,9 @@ describe("construction", () => {
             [{ upstreamURL: "" }, "explicit upstream URL"],
             [{ upstreamURL: "https://provider.test/v1/chat/completions" }, "Messages endpoint"],
             [{ model: "" }, "explicit model"],
+            [{ contextLimit: 0 }, "context limit"],
+            [{ upstreamURL: "https://user:pass@provider.test/v1/messages" }, "no credential"],
+            [{ upstreamURL: "https://provider.test/v1/messages?key=x" }, "no credential"],
             [{ corpusSha256: "0".repeat(64) }, "reviewed synthetic corpus"],
             [{ pricing: { inputPerMTok: 0, outputPerMTok: 15 } }, "prices"],
             [{ credentials: undefined as unknown as ForwardConfig["credentials"] }, "credential"],
@@ -201,22 +227,28 @@ describe("forwarding", () => {
         ]);
         const mock = new MockProvider({ forward: config({ fetch: double.send }) });
         const base = await start(mock);
-        const sent = [JSON.stringify(firstTurn), JSON.stringify(toolResultTurn)];
-        const first = await post(base, sent[0]);
+        // Whitespace, key order, an escape, and a raw non-ASCII letter that re-serializing
+        // the parsed body would change.
+        const firstBytes = new TextEncoder().encode(
+            `{ "stream" : true,"messages":[{"role":"user","content":"caf\\u00e9 é read the file"}],\n "max_tokens":512, "model":"${MODEL}" }`,
+        );
+        const secondBytes = new TextEncoder().encode(JSON.stringify(toolResultTurn));
+        const first = await post(base, firstBytes);
         expect(await first.text()).toBe(toolUse);
-        const second = await post(base, sent[1]);
+        const second = await post(base, secondBytes);
         expect(await second.text()).toBe(final);
 
-        expect(double.received.map((r) => new TextDecoder().decode(r.body))).toEqual(sent);
+        expect(double.received.map((r) => r.body)).toEqual([firstBytes, secondBytes]);
         expect(double.received.every((r) => r.url === UPSTREAM && r.redirect === "error")).toBe(
             true,
         );
         expect(double.received[0]?.headers["x-api-key"]).toBe(FAKE_KEY);
         expect(double.received[0]?.headers["anthropic-version"]).toBe("2023-06-01");
         const report = mock.forwardingReport();
-        expect(report.exchanges.map((e) => e.request.body_text)).toEqual(sent);
-        expect(report.exchanges[1]?.request.body_sha256).toBe(
-            new Bun.CryptoHasher("sha256").update(sent[1] ?? "").digest("hex"),
+        expect(report.exchanges.map((e) => e.request.body_sha256)).toEqual(
+            [firstBytes, secondBytes].map((bytes) =>
+                new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+            ),
         );
         expect(report.exchanges.map((e) => e.response?.stop_reason)).toEqual([
             "tool_use",
@@ -227,9 +259,137 @@ describe("forwarding", () => {
         );
         expect(report.attempted_sends).toBe(2);
         expect(report.acknowledged_responses).toBe(2);
+        expect(report.incomplete_reasons).toEqual([]);
         expect(report.complete).toBe(true);
         expect(report.mode).toBe("forward");
         expect(report.spent_usd).toBeCloseTo((2 * (40 * 3 + 6 * 15)) / 1_000_000, 12);
+    });
+
+    test("a request without this mock's key is refused before any send", async () => {
+        const double = upstreamDouble([]);
+        const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+        const base = await start(mock);
+        expect((await post(base, firstTurn, "test-key-not-real")).status).toBe(401);
+        expect((await post(base, firstTurn, "")).status).toBe(401);
+        expect(double.received).toEqual([]);
+        expect(mock.forwardingReport().attempted_sends).toBe(0);
+        expect(mock.forwardingReport().stopped).toBeNull();
+    });
+
+    test("the spend cap totals every send and settles each to its stated usage", async () => {
+        const reply =
+            (usage = USAGE) =>
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn", usage), {
+                    headers: { "content-type": "text/event-stream" },
+                });
+        const bytes = Buffer.byteLength(JSON.stringify(firstTurn));
+        const reservation = (bytes * 3 + 512 * 15) / 1_000_000;
+        const settled = (40 * 3 + 6 * 15) / 1_000_000;
+
+        const unsettled = upstreamDouble([
+            reply({ input_tokens: bytes, output_tokens: 512 }),
+            reply(),
+        ]);
+        const capped = new MockProvider({
+            forward: config({
+                fetch: unsettled.send,
+                limits: { ...config().limits, spendCapUsd: reservation * 1.5 },
+            }),
+        });
+        const cappedBase = await start(capped);
+        for (let turn = 0; turn < 2; turn += 1) await (await post(cappedBase, firstTurn)).text();
+        expect(unsettled.received.length).toBe(1);
+        expect(capped.forwardingReport().stopped).toContain("spendCapUsd");
+
+        const refunded = upstreamDouble([reply(), reply()]);
+        const fits = new MockProvider({
+            forward: config({
+                fetch: refunded.send,
+                limits: { ...config().limits, spendCapUsd: reservation + settled },
+            }),
+        });
+        const fitsBase = await start(fits);
+        for (let turn = 0; turn < 2; turn += 1) await (await post(fitsBase, firstTurn)).text();
+        expect(refunded.received.length).toBe(2);
+        expect(fits.forwardingReport().complete).toBe(true);
+    });
+
+    test("a request at exactly limits.maxOutputTokens is sent", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+        await (await post(await start(mock), { ...firstTurn, max_tokens: 1024 })).text();
+        expect(double.received.length).toBe(1);
+    });
+
+    test("usage above the reservation stops the run", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(
+                    sse([{ type: "text", text: "x" }], "end_turn", {
+                        input_tokens: 10_000_000,
+                        output_tokens: 6,
+                    }),
+                    { headers: { "content-type": "text/event-stream" } },
+                ),
+        ]);
+        const mock = new MockProvider({
+            forward: config({ fetch: double.send, limits: { ...config().limits, spendCapUsd: 1 } }),
+        });
+        const base = await start(mock);
+        await (await post(base, firstTurn)).text();
+        expect((await post(base, firstTurn)).status).toBe(400);
+        const report = mock.forwardingReport();
+        expect(report.stopped).toContain("above its reservation");
+        expect(report.incomplete_reasons).toContain("spend above the cap");
+        expect(report.complete).toBe(false);
+        expect(double.received.length).toBe(1);
+    });
+
+    test("a send in flight, a missing stop reason, or an unanswered tool call leaves the run incomplete", async () => {
+        let release: (response: Response) => void = () => {};
+        const pending = upstreamDouble([
+            () =>
+                new Promise<Response>((resolve) => {
+                    release = resolve;
+                }),
+        ]);
+        const inFlight = new MockProvider({ forward: config({ fetch: pending.send }) });
+        const reply = post(await start(inFlight), firstTurn);
+        while (pending.received.length === 0) await Bun.sleep(5);
+        expect(inFlight.forwardingReport().incomplete_reasons).toContain("a send is in flight");
+        release(
+            new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                headers: { "content-type": "text/event-stream" },
+            }),
+        );
+        await (await reply).text();
+        expect(inFlight.forwardingReport().complete).toBe(true);
+
+        const interleaved = upstreamDouble([
+            () =>
+                new Response(
+                    sse([{ type: "tool_use", id: "toolu_9", name: "read", input: {} }], "tool_use"),
+                    { headers: { "content-type": "text/event-stream" } },
+                ),
+            () =>
+                new Response(JSON.stringify({ type: "message", content: [], usage: USAGE }), {
+                    headers: { "content-type": "application/json" },
+                }),
+        ]);
+        const side = new MockProvider({ forward: config({ fetch: interleaved.send }) });
+        const sideBase = await start(side);
+        await (await post(sideBase, firstTurn)).text();
+        await (await post(sideBase, { ...firstTurn, stream: false })).text();
+        const report = side.forwardingReport();
+        expect(report.incomplete_reasons).toContain("tool loop unfinished");
+        expect(report.incomplete_reasons).toContain("a response states no stop reason");
+        expect(report.complete).toBe(false);
     });
 
     test("each limit stops the run instead of extending it", async () => {
@@ -302,7 +462,19 @@ describe("forwarding", () => {
         }
     });
 
-    test("an ambiguous send or missing usage is charged its reservation, never zero", async () => {
+    test("a timed-out send is charged its reservation", async () => {
+        const double = upstreamDouble([() => new Promise<Response>(() => {})]);
+        const mock = new MockProvider({
+            forward: config({ fetch: double.send, limits: { ...config().limits, timeoutMs: 50 } }),
+        });
+        await (await post(await start(mock), firstTurn)).text();
+        const report = mock.forwardingReport();
+        expect(report.exchanges[0]?.response?.outcome).toBe("ambiguous");
+        expect(report.exchanges[0]?.response?.cost_known).toBe(false);
+        expect(report.spent_usd).toBe(report.exchanges[0]?.request.reserved_usd ?? -1);
+    });
+
+    test("missing or partial usage is charged its reservation, never zero", async () => {
         const noUsage = () =>
             new Response(
                 JSON.stringify({ type: "message", stop_reason: "end_turn", content: [] }),
@@ -310,9 +482,22 @@ describe("forwarding", () => {
                     headers: { "content-type": "application/json" },
                 },
             );
-        const double = upstreamDouble([noUsage]);
+        const partial = () =>
+            new Response(
+                JSON.stringify({
+                    type: "message",
+                    stop_reason: "end_turn",
+                    content: [],
+                    usage: { input_tokens: 40 },
+                }),
+                { headers: { "content-type": "application/json" } },
+            );
+        const double = upstreamDouble([noUsage, partial]);
         const mock = new MockProvider({ forward: config({ fetch: double.send }) });
-        await (await post(await start(mock), { ...firstTurn, stream: false })).text();
+        const base = await start(mock);
+        await (await post(base, { ...firstTurn, stream: false })).text();
+        await (await post(base, { ...firstTurn, stream: false })).text();
+        expect(mock.forwardingReport().exchanges[1]?.response?.cost_known).toBe(false);
         const report = mock.forwardingReport();
         const exchange = report.exchanges[0];
         expect(exchange?.response?.cost_known).toBe(false);
@@ -332,6 +517,7 @@ describe("forwarding", () => {
         const mock = new MockProvider({ forward: config({ fetch: double.send }) });
         await (await post(await start(mock), firstTurn)).text();
         expect(mock.forwardingReport().incomplete_reasons).toContain("tool loop unfinished");
+        expect(mock.forwardingReport().complete).toBe(false);
     });
 
     test("captures, the report file, and generated configuration hold no credential", async () => {
@@ -353,16 +539,29 @@ describe("forwarding", () => {
             expect(statSync(path).mode & 0o777).toBe(0o600);
             const published = readFileSync(path, "utf8");
             expect(published).not.toContain(FAKE_KEY);
-            expect(published).not.toContain("test-key-not-real");
+            expect(published).not.toContain(mock.inboundKey);
             expect(published).toContain("[redacted]");
             expect(JSON.stringify(mock.requests())).not.toContain(FAKE_KEY);
-            expect(JSON.stringify(mock.requests())).not.toContain("test-key-not-real");
+            expect(JSON.stringify(mock.requests())).not.toContain(mock.inboundKey);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
         expect(() =>
-            publishForwardingReport(mock.forwardingReport(), resolve(import.meta.dir), "inside"),
+            publishForwardingReport(mock.forwardingReport(), resolve(import.meta.dir, "new"), "x"),
         ).toThrow("inside the repository");
+        expect(existsSync(resolve(import.meta.dir, "new"))).toBe(false);
+        const shared = mkdtempSync(join(tmpdir(), "forwarding-shared-"));
+        try {
+            chmodSync(shared, 0o755);
+            expect(() => publishForwardingReport(mock.forwardingReport(), shared, "x")).toThrow(
+                "owner-only",
+            );
+            expect(() => publishForwardingReport(mock.forwardingReport(), shared, "../x")).toThrow(
+                "plain file label",
+            );
+        } finally {
+            rmSync(shared, { recursive: true, force: true });
+        }
 
         const env = createIsolatedEnv();
         try {
@@ -370,9 +569,11 @@ describe("forwarding", () => {
                 mockProviderURL: "http://127.0.0.1:4321",
                 modelId: MODEL,
                 modelContextLimit: 200_000,
+                mockApiKey: mock.inboundKey,
             });
             const generated = readFileSync(join(env.configDir, "opencode.json"), "utf8");
             expect(generated).toContain(`"${MODEL}"`);
+            expect(generated).toContain(mock.inboundKey);
             expect(generated).not.toContain(FAKE_KEY);
         } finally {
             rmSync(resolve(env.configDir, ".."), { recursive: true, force: true });

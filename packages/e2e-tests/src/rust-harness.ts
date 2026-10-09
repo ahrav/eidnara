@@ -50,7 +50,7 @@ export interface RustTestHarnessOptions extends SharedHarnessOptions {
     daemonEnv?: Record<string, string>;
     /**
      * Record-and-forward mode: the mock forwards every request to this provider, OpenCode runs
-     * `forward.model` under `modelContextLimit`, and the mock serves no script or default.
+     * `forward.model` at `forward.contextLimit`, and the mock serves no script or default.
      */
     forward?: ForwardConfig;
 }
@@ -242,6 +242,8 @@ export class RustTestHarness {
 
         const mock = new MockProvider(options.forward ? { forward: options.forward } : {});
         const { baseURL } = await mock.start();
+        const modelId = options.forward?.model ?? MOCK_MODEL_ID;
+        const modelContextLimit = options.forward?.contextLimit ?? options.modelContextLimit;
         if (!options.forward) mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
 
         const env = createIsolatedEnv();
@@ -260,8 +262,9 @@ export class RustTestHarness {
                 mockURL: baseURL,
                 connectionFile: host.connectionFile,
                 logPath,
-                options,
-                modelId: options.forward?.model ?? MOCK_MODEL_ID,
+                options: { ...options, modelContextLimit },
+                modelId,
+                mockApiKey: mock.inboundKey,
             });
         } catch (error) {
             await RustTestHarness.teardownStack(mock, host, env);
@@ -282,8 +285,8 @@ export class RustTestHarness {
             opencode,
             client,
             logPath,
-            modelContextLimit: options.modelContextLimit,
-            modelId: options.forward?.model ?? MOCK_MODEL_ID,
+            modelContextLimit,
+            modelId,
         });
     }
 
@@ -295,12 +298,14 @@ export class RustTestHarness {
         logPath: string;
         options: RustTestHarnessOptions;
         modelId: string;
+        mockApiKey: string;
     }): Promise<SpawnedOpencode> {
         return spawnOpencode({
             mockProviderURL: args.mockURL,
             existingEnv: args.env,
             modelContextLimit: args.options.modelContextLimit,
             modelId: args.modelId,
+            mockApiKey: args.mockApiKey,
             openCodeConfigExtra: args.options.openCodeConfigExtra,
             eidnaraConfig: args.options.eidnaraConfig,
             userHostConnectionFile: args.connectionFile,
@@ -332,6 +337,7 @@ export class RustTestHarness {
                 eidnaraConfig: opts.eidnaraConfig,
             },
             modelId: this.modelId,
+            mockApiKey: this.mock.inboundKey,
         });
         const sdk = await import("@opencode-ai/sdk");
         // SAFETY: SdkClient is bounded subset of createOpencodeClient used by this harness.
