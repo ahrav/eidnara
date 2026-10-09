@@ -406,17 +406,25 @@ describe("evidence identity and completeness", () => {
 
     test("a terminal is one its owner emits", async () => {
         const first = allScenarios[0]?.s.id ?? "";
-        for (const terminal of ["excluded", "discoverable"]) {
-            const memory = await assemble(scratch(), {
+        const excluded =
+            allScenarios.find(({ s }) => s.serving.path === "memory_excluded")?.s.id ?? "";
+        const relabel = (scenario: string, terminal: string) =>
+            assemble(scratch(), {
                 tamper: (dir) => {
-                    const path = join(dir, `delivery.${first}.json`);
+                    const path = join(dir, `delivery.${scenario}.json`);
                     const value = JSON.parse(readFileSync(path, "utf8"));
                     value.terminal = terminal;
                     writeFileSync(path, JSON.stringify(value));
                 },
             });
+        for (const terminal of ["excluded", "discoverable"]) {
+            const memory = await relabel(excluded, terminal);
             expect(memory.arms[0]?.identity_errors).toEqual([]);
-            expect(rowOf(memory, first)?.execution.status).toBe("executed");
+            expect(rowOf(memory, excluded)?.execution.status).toBe("executed");
+            const elsewhere = await relabel(first, terminal);
+            expect(errorsOf(elsewhere)).toContain(
+                `delivery.${first}.json has terminal ${terminal}, which the memory campaign emits on a memory_excluded scenario only`,
+            );
         }
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
@@ -453,6 +461,17 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(fractional)).toContain(
             "arm.json declares no whole-number max_output_tokens",
         );
+        const hot = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, "arm.json");
+                const text = readFileSync(path, "utf8").replace(
+                    '"temperature": 0.1',
+                    '"temperature": 1e400',
+                );
+                writeFileSync(path, text);
+            },
+        });
+        expect(errorsOf(hot)).toContain("arm.json declares no finite temperature");
     });
 
     test("an output origin is the exact literal its producer writes", async () => {

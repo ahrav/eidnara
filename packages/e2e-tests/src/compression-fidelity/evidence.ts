@@ -59,6 +59,8 @@ const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly 
         failed: ["unsettled", "validation_rejected"],
     },
 };
+/** The delivery terminals the memory campaign emits on its `memory_excluded` scenario alone. */
+const MEMORY_TERMINALS = ["excluded", "discoverable"];
 const executed = (e: { owner: string; terminal: string }) =>
     TERMINALS[e.owner]?.executed.includes(e.terminal) ?? false;
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
@@ -692,6 +694,16 @@ export async function loadArm(
             arm.errors.push(`${name} has terminal ${value.terminal}, which ${owner} does not emit`);
             continue;
         }
+        if (
+            MEMORY_TERMINALS.includes(value.terminal) &&
+            (label === null ||
+                scenarioEntry.get(label)?.scenario.serving.path !== "memory_excluded")
+        ) {
+            arm.errors.push(
+                `${name} has terminal ${value.terminal}, which the memory campaign emits on a memory_excluded scenario only`,
+            );
+            continue;
+        }
         if (!record(value.detail)) {
             arm.errors.push(`${name} has no detail record`);
             continue;
@@ -866,6 +878,10 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     const tokens = config.settings.max_output_tokens;
     if (typeof tokens === "number" && (!Number.isInteger(tokens) || tokens <= 0)) {
         errors.push("arm.json declares no whole-number max_output_tokens");
+    }
+    const temperature = config.settings.temperature;
+    if (typeof temperature === "number" && !Number.isFinite(temperature)) {
+        errors.push("arm.json declares no finite temperature");
     }
     const published = generations.filter((g) => g.owner === REAL_CAPTURE);
     for (const capture of published) {

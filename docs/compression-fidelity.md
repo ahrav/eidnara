@@ -484,8 +484,8 @@ either arm; an arm directory is refused before any write, and a component of
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
 - an observation with no `stage`, no `terminal`, a `terminal` its owner does
-  not emit (`opencode-delivery`: `served`, `excluded`, `discoverable`,
-  `unqualified`; the replay:
+  not emit (`opencode-delivery`: `served`, `unqualified`, and on a
+  `memory_excluded` scenario `excluded` and `discoverable`; the replay:
   `published`, `served`, `validation_rejected`, `discarded_coverage`,
   `drift_rejected`, `input_truncated`, `unsettled`; the C6 witness:
   `read_exact`; the real capture: `published`, `unsettled`,
@@ -545,7 +545,7 @@ In an arm labeled `real`:
   text, nonempty `published_rows` of titled rows with integer `start` and
   `end`, and an `attempt_count` equal to its retained attempts, the state the
   capture writer publishes;
-- `arm.json` `settings` declare numeric `temperature` and a positive
+- `arm.json` `settings` declare a finite `temperature` and a positive
   whole-number `max_output_tokens`, and each attempt of a published real
   capture records those values and its system and user prompts as text;
 - every serving observation, one that records `detail.served_tier` or
