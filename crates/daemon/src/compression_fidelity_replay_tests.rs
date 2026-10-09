@@ -1832,6 +1832,34 @@ async fn a_capture_whose_producer_never_starts_is_recorded_unsettled() {
     }
 }
 
+/// A settled firing whose producer drained only errors is recorded unsettled, not rejected.
+#[tokio::test(flavor = "current_thread")]
+async fn a_capture_that_drains_only_errors_is_recorded_unsettled() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .await_results
+        .lock()
+        .unwrap()
+        .extend((0..4 * sources().count()).map(|_| {
+            Err(HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "probe_lost".to_owned(),
+                    message: "probe".to_owned(),
+                },
+            ))
+        }));
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records =
+        capture_sources(factory, "probe/model", "scripted", Duration::from_secs(10)).await;
+    for record in &records {
+        assert_eq!(record.terminal, Terminal::Unsettled, "{}", record.source);
+        assert_eq!(record.detail["settled"], true, "{}", record.source);
+        assert!(record.detail["attempt_count"].as_u64().unwrap() >= 1);
+    }
+}
+
 #[test]
 fn the_capture_directory_is_owner_only_and_outside_the_repository() {
     use std::os::unix::fs::PermissionsExt;

@@ -447,6 +447,27 @@ describe("forwarding", () => {
         await (await post(loopBase, spaced)).text();
         expect(loop.forwardingReport().complete).toBe(true);
 
+        const reordered = upstreamDouble([
+            () =>
+                new Response(
+                    JSON.stringify({
+                        content: [{ input: {}, name: "read", id: "toolu_8", type: "tool_use" }],
+                        stop_reason: "tool_use",
+                        usage: USAGE,
+                    }),
+                    { headers: { "content-type": "application/json" } },
+                ),
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const open = new MockProvider({ forward: config({ fetch: reordered.send }) });
+        const openBase = await start(open);
+        await (await post(openBase, { ...firstTurn, stream: false })).text();
+        await (await post(openBase, firstTurn)).text();
+        expect(open.forwardingReport().incomplete_reasons).toContain("tool loop unfinished");
+
         const side = new MockProvider({ forward: config({ fetch: interleaved.send }) });
         const sideBase = await start(side);
         await (await post(sideBase, firstTurn)).text();
