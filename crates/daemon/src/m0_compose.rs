@@ -12,7 +12,7 @@ use retrieval::packing::skip_and_continue;
 use memory_store::{MemoryStore, MemoryStoreError};
 
 use crate::canonical_memory::CanonicalMemory;
-use crate::decay_render::{PRESSURE_WINDOW, extract_m0_block, fold_horizon, render_rows};
+use crate::decay_render::{PRESSURE_WINDOW, extract_m0_block, fold_horizon, render_owned_rows};
 use crate::memory_render::{
     M0Inputs, is_positive_memory_category, render_m0, render_memory_block, render_memory_line,
 };
@@ -219,7 +219,7 @@ pub fn compose_m0(
         crate::project_docs::ProjectDocs::default()
     };
 
-    let decay_history_segments = render_rows(&history_segments, inputs.temporal_awareness);
+    let decay_history_segments = render_owned_rows(history_segments, inputs.temporal_awareness);
     let mut m0_bytes = render_m0_with_decay_pressure_retry(
         &M0Inputs {
             project_docs: &docs.rendered_block,

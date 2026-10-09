@@ -153,9 +153,14 @@ prerequisites; observe publication and the later provider request separately.
 Confidence: high - [evidence](evidence/cf-fixture-script-qualification.md).
 Before the case script, `ControlledBackend.execute` answered every summarizer
 request with segments over its own presented lines and had no case selection.
-Existing check: `packages/e2e-tests/src/rust-runner/hermetic-host.test.ts:105-378`
-checks the existing control contract; producer counters and gated fold checks
-are inventoried separately. All are `unaudited`; none checks the planned script.
+Existing check: `packages/e2e-tests/src/rust-runner/hermetic-host.test.ts:121-365`
+and `:557-584` check the existing control contract;
+`packages/e2e-tests/src/rust-runner/hermetic-host.test.ts:367-555` checks the
+case-script queue binding, mismatch, and exhaustion; and
+`packages/e2e-tests/tests/compression-fidelity-qualification.test.ts:53-186`
+qualifies one case through ungated publication and a correlated provider
+capture. Producer counters and gated fold checks are inventoried separately.
+All are `unaudited`.
 Impact: U3 and dependent U4 results can receive coverage credit without ever
 publishing the intended summary.
 Open questions:

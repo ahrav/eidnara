@@ -192,17 +192,28 @@ export function seedSource(
     }
 }
 
+/**
+ * The published history-segment count in a `session.status` response. The daemon serializes the
+ * counter on every response, zero included, so a response without it is malformed.
+ */
+export function publishedOf(status: Record<string, unknown>): number {
+    const summarizer = status.history_summarizer as
+        | { counters?: { published?: unknown } }
+        | undefined;
+    const published = summarizer?.counters?.published;
+    if (typeof published !== "number") {
+        throw new Error(
+            `session.status has no history_summarizer.counters.published: ${JSON.stringify(status)}`,
+        );
+    }
+    return published;
+}
+
 /** The daemon's published history-segment count for the session. */
 export async function publishedCount(harness: RustTestHarness, sessionId: string): Promise<number> {
-    const status = await harness.host.primaryStatus(
-        sessionId,
-        harness.env.workdir,
-        "session.status",
+    return publishedOf(
+        await harness.host.primaryStatus(sessionId, harness.env.workdir, "session.status"),
     );
-    const summarizer = status.history_summarizer as
-        | { counters?: { published?: number } }
-        | undefined;
-    return summarizer?.counters?.published ?? 0;
 }
 
 /** The text content of one provider message or system field. */
@@ -225,49 +236,80 @@ export function captureTexts(capture: RetainedCapture): string[] {
     return (capture.request.body.messages ?? []).map(messageText);
 }
 
+/** The m0 history wrapper and the m1 window's wrapper of rows published since. */
+const M0_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/g;
+const M1_WRAPPER = /<session-history-since>[\s\S]*?<\/session-history-since>/g;
+
+/** Every m1 and m0 wrapper in `text`, m1 first. */
+function historyWrappers(text: string): string[] {
+    return [...(text.match(M1_WRAPPER) ?? []), ...(text.match(M0_WRAPPER) ?? [])];
+}
+
+const STAGE_WRAPPERS = [
+    ["m1", M1_WRAPPER],
+    ["m0", M0_WRAPPER],
+] as const;
+
 /**
- * The reviewed tier at which a request serves the case segment titled `title`: the body it
- * carries, the heading alone for P4, or absence for P5. A body matching no reviewed tier is
- * `unmatched`.
+ * The case segment headed `## a-b · title` inside a history wrapper, with the stage of the
+ * wrapper that carries it. The segment runs to the next heading or the wrapper's closing tag.
  */
+function caseSegment(
+    texts: readonly string[],
+    title: string,
+): { stage: "m1" | "m0"; lines: string[] } | undefined {
+    const suffix = ` · ${title}`;
+    for (const text of texts) {
+        for (const [stage, pattern] of STAGE_WRAPPERS) {
+            for (const wrapper of text.match(pattern) ?? []) {
+                const lines = wrapper.split("\n");
+                const heading = lines.findIndex(
+                    (line) => line.startsWith("## ") && line.endsWith(suffix),
+                );
+                if (heading < 0) continue;
+                const next = lines.findIndex(
+                    (line, index) =>
+                        index > heading && (line.startsWith("## ") || line.startsWith("</")),
+                );
+                return { stage, lines: lines.slice(heading, next < 0 ? undefined : next) };
+            }
+        }
+    }
+    return undefined;
+}
+
+/** A case heading outside every history wrapper reads as P5. */
 export function servedTier(
     texts: readonly string[],
     title: string,
     bodies: readonly string[],
 ): ServedTier | "unmatched" {
-    const text = texts.find((candidate) => candidate.includes(title));
-    if (text === undefined) return "p5";
-    // A segment runs from its heading to the next heading or the wrapper's closing tag.
-    const segment = text.slice(text.indexOf(title)).split(/\n(?:## |<\/)/)[0] ?? "";
+    const lines = caseSegment(texts, title)?.lines;
+    if (lines === undefined) return "p5";
+    const segment = lines.join("\n");
     const carried = bodies.findIndex((body) => segment.includes(body));
     const tier = REVIEWED_TIERS[carried];
     if (tier) return tier;
     return segment.trim().split("\n").length === 1 ? "p4" : "unmatched";
 }
 
-/** The m0 history wrapper and the m1 window's wrapper of rows published since. */
-const M0_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/;
-const M1_WRAPPER = /<session-history-since>[\s\S]*?<\/session-history-since>/;
+/** The `## ` headings inside every history wrapper in `texts`, in served order. */
+export function historyHeadings(texts: readonly string[]): string[] {
+    return texts
+        .flatMap(historyWrappers)
+        .flatMap((wrapper) => wrapper.split("\n"))
+        .filter((line) => line.startsWith("## "));
+}
 
-/** Where served texts carry the case segment titled `title`. */
+/** Where served texts carry the case segment headed by `title`. */
 export function stageOf(texts: readonly string[], title: string): "m1" | "m0" | "absent" {
-    for (const text of texts) {
-        if (M1_WRAPPER.exec(text)?.[0].includes(title)) return "m1";
-        if (M0_WRAPPER.exec(text)?.[0].includes(title)) return "m0";
-    }
-    return "absent";
+    return caseSegment(texts, title)?.stage ?? "absent";
 }
 
 /** Leak probes found in `texts` outside both history wrappers. */
 export function leaksOutside(texts: readonly string[], probes: readonly string[]): string[] {
     const outside = texts
-        .map((text) =>
-            collapse(
-                text
-                    .replace(new RegExp(M0_WRAPPER, "g"), "")
-                    .replace(new RegExp(M1_WRAPPER, "g"), ""),
-            ),
-        )
+        .map((text) => collapse(text.replace(M0_WRAPPER, "").replace(M1_WRAPPER, "")))
         .join("\n");
     return probes.filter((probe) => outside.includes(probe));
 }
