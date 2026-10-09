@@ -103,6 +103,32 @@ proptest! {
             prop_assert_eq!(join_cost(&parts, estimate_tokens), reference::estimate_tokens(&joined));
         }
     }
+
+    #[test]
+    fn paragraph_spans_count_as_their_text(
+        parts in proptest::collection::vec(text_strategy(), 1..6),
+        joins in proptest::collection::vec("(\n\n|\n\n\n| \n\n|\n \n\n|\n)", 0..6),
+    ) {
+        let mut text = String::new();
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                text.push_str(joins.get(index - 1).map_or("\n\n", String::as_str));
+            }
+            text.push_str(part);
+        }
+        let spans: Vec<&str> = crate::paragraph_spans(&text).collect();
+        let separators = spans.len() - 1;
+        prop_assert_eq!(spans.iter().map(|span| span.len()).sum::<usize>() + separators, text.len());
+        let summed = spans.iter().map(|span| estimate_tokens(span)).sum::<usize>()
+            + separators * estimate_tokens("\n");
+        prop_assert_eq!(summed, estimate_tokens(&text));
+        let merged_whole = reference::piece_spans(&text)
+            .iter()
+            .all(|&(start, end)| end - start <= crate::MAX_PIECE_BYTES);
+        if merged_whole {
+            prop_assert_eq!(summed, reference::estimate_tokens(&text));
+        }
+    }
 }
 
 /// The join identity `starts_outside_whitespace` states, evaluated with `count`.
