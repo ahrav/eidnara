@@ -724,6 +724,8 @@ describe("eval:compression-fidelity gates", () => {
             [{ ...SERVING, admission: "none" }, "admission"],
             [{ ...SERVING, admission: "maybe" }, "admission"],
             [{ ...SERVING, raw_source_leaks: 1 }, "raw_source_leaks"],
+            [{ ...SERVING, invocation_charged_tokens: 11_000 }, "invocation_charged_tokens"],
+            [{ ...SERVING, invocation_bytes: 39_000.5 }, "invocation_bytes"],
             [{ ...SERVING, serving_kind: "warm_repeat" }, "serving_kind"],
             [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
             [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
@@ -768,7 +770,7 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("the qualification and Pi witnesses serve tiers without an OpenCode cost record", async () => {
-        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const entry = allScenarios.find(({ s }) => s.id === "C1.S1");
         const scenario = entry?.s.id ?? "";
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
@@ -798,6 +800,68 @@ describe("eval:compression-fidelity gates", () => {
         expect(report.arms[0]?.identity_errors).toEqual([]);
         expect(row?.cost.status).toBe("complete");
         expect(row?.cost.serving.length).toBe(1);
+    });
+
+    test("the replay's tier observations carry no OpenCode serving cost", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path === "natural");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "replay.m1.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "daemon.compression_fidelity.replay",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "m1",
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        tier: entry?.s.serving.tier,
+                        path: "natural",
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).not.toContain("replay.m1.json: serving");
+        expect(row?.cost.serving.length).toBe(1);
+    });
+
+    test("a stage named after an exempt witness on another scenario still needs its cost", async () => {
+        const entry = allScenarios.find(({ s }) => s.id === "C1.S3");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "spoof.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "qualification",
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        served_tier: served.detail.served_tier,
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("spoof.json: serving");
     });
 
     test("every serving observation needs its cost, whatever its siblings record", async () => {
@@ -917,7 +981,12 @@ describe("eval:compression-fidelity judgments", () => {
                 (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
             );
         });
-        for (const result of [false, undefined]) {
+        for (const detail of [
+            { calls: 1, result_utf8_bytes: 400, result_carries_memory: false },
+            { calls: 1, result_utf8_bytes: 400 },
+            { calls: 0, result_utf8_bytes: 400, result_carries_memory: true },
+            { calls: 1, result_utf8_bytes: 0, result_carries_memory: true },
+        ]) {
             write(baseline.dir, "recovery.json", {
                 schema_version: 1,
                 corpus_sha256: SHA,
@@ -928,7 +997,7 @@ describe("eval:compression-fidelity judgments", () => {
                 stage: "recovery-eidnara-search",
                 terminal: "discoverable",
                 markers: [],
-                detail: { calls: 1, result_utf8_bytes: 400, result_carries_memory: result },
+                detail,
             });
             const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
             expect(row?.recovery).toBe("unverified");

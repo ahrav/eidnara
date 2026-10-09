@@ -44,7 +44,8 @@ export const SERVING = {
     request_body_utf8_bytes: 40_000,
     admission: "fits",
     invocation_bytes: 39_000,
-    invocation_charged_tokens: 11_000,
+    // ceil(ceil(39_000 / 3.5) * 1.25): the admission estimator's charge for those bytes.
+    invocation_charged_tokens: 13_929,
     estimator: "opencode-heuristic utf8-bytes-div-3.5-v1",
     transform_elapsed_ms: 12,
     raw_source_leaks: 0,

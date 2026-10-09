@@ -316,18 +316,31 @@ function isRecovery(evidence: Evidence): boolean {
 
 const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 /**
- * The qualification and Pi witnesses serve a tier through fixtures that run no OpenCode admission
- * estimator, so their stages carry no serving cost and stay out of the cost column.
+ * The qualification and Pi witnesses serve C1.S1 through fixtures that run no OpenCode admission
+ * estimator, so their observations carry no serving cost and stay out of the cost column. The
+ * U2 replay serves through the daemon, never through OpenCode, so its tier observations do too.
  */
-const uncosted = (stage: string) => stage === "qualification" || stage.startsWith("pi-");
+function uncosted(e: Evidence): boolean {
+    if (e.owner === "daemon.compression_fidelity.replay") return true;
+    return (
+        e.owner === "opencode-delivery" &&
+        e.scenario === "C1.S1" &&
+        (e.stage === "qualification" || e.stage.startsWith("pi-"))
+    );
+}
+
+/** The admission estimator's charge for `bytes`: ceil(bytes / 3.5) with 25% headroom. */
+const OPENCODE_ESTIMATOR = "opencode-heuristic utf8-bytes-div-3.5-v1";
+const chargeFor = (bytes: number) => Math.ceil((Math.ceil(bytes / 3.5) * 1250) / 1000);
+const count = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 
 /** The admission branches that ran an admission check; `none` ran none and charges nothing. */
 const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown", "declined"];
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
     ["request_body_utf8_bytes", measurement],
     ["admission", (v) => typeof v === "string" && ADMISSIONS.includes(v)],
-    ["invocation_bytes", measurement],
-    ["invocation_charged_tokens", measurement],
+    ["invocation_bytes", count],
+    ["invocation_charged_tokens", count],
     ["estimator", named],
     ["transform_elapsed_ms", measurement],
     // A served observation leaked no raw source; the producer marks a leaking pass unqualified.
@@ -364,7 +377,7 @@ function costOf(
 ): ScenarioRow["cost"] {
     const missing: string[] = [];
     const serving: Json[] = [];
-    for (const e of evidence.filter((e) => servedTierOf(e) !== undefined && !uncosted(e.stage))) {
+    for (const e of evidence.filter((e) => servedTierOf(e) !== undefined && !uncosted(e))) {
         if (!record(e.detail.serving)) {
             missing.push(`${e.file}: serving`);
             continue;
@@ -376,6 +389,13 @@ function costOf(
         // The campaign's `warm` stage repeats the previous request; every other stage serves cold.
         if ((row.serving_kind === "warm_repeat") !== (e.stage === "warm")) {
             missing.push(`${e.file}: serving_kind`);
+        }
+        if (
+            row.estimator === OPENCODE_ESTIMATOR &&
+            count(row.invocation_bytes) &&
+            row.invocation_charged_tokens !== chargeFor(row.invocation_bytes)
+        ) {
+            missing.push(`${e.file}: invocation_charged_tokens`);
         }
         serving.push(row);
     }
@@ -503,7 +523,15 @@ export function scenarioRow(
     const discoverable = preservation.some((p) => p.disposition === "discoverable");
     const recovery = !discoverable
         ? "not_required"
-        : evidence.some((e) => isRecovery(e) && e.detail.result_carries_memory === true)
+        : evidence.some(
+                (e) =>
+                    isRecovery(e) &&
+                    e.detail.result_carries_memory === true &&
+                    count(e.detail.calls) &&
+                    e.detail.calls > 0 &&
+                    count(e.detail.result_utf8_bytes) &&
+                    e.detail.result_utf8_bytes > 0,
+            )
           ? "witnessed"
           : "unverified";
     let consumer_safety: ScenarioRow["consumer_safety"] = "unreviewed";
