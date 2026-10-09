@@ -159,7 +159,7 @@ function stringRecords<K extends string>(
 }
 
 /** Reads the sealed control labels and the judgments, refusing anything bound elsewhere. */
-export function loadReviews(dir: string, corpusSha256: string): Reviews {
+export async function loadReviews(dir: string, corpusSha256: string): Promise<Reviews> {
     const reviews: Reviews = {
         batch: "",
         approvals: [],
@@ -170,8 +170,10 @@ export function loadReviews(dir: string, corpusSha256: string): Reviews {
         sha256: { controls: "", judgments: "" },
         errors: [],
     };
-    const controls = readJson(join(dir, "controls.json"));
-    const judgments = readJson(join(dir, "judgments.json"));
+    const [controls, judgments] = await Promise.all([
+        readJson(join(dir, "controls.json")),
+        readJson(join(dir, "judgments.json")),
+    ]);
     if ("error" in controls || "error" in judgments) {
         if ("error" in controls) reviews.errors.push(controls.error);
         if ("error" in judgments) reviews.errors.push(judgments.error);

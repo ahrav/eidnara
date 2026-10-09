@@ -100,7 +100,7 @@ function writeReviews(root: string, options: ReviewOptions): string {
     return dir;
 }
 
-function evaluate(
+async function evaluate(
     root: string,
     options: {
         baseline?: Partial<ArmOptions>;
@@ -129,15 +129,15 @@ function evaluate(
         corpusSha256: SHA,
         revision: "rev",
         mode: "offline",
-        baseline: loadArm(baseline.dir, corpus, SHA),
-        candidate: loadArm(candidate.dir, corpus, SHA),
-        reviews: loadReviews(reviews, SHA),
+        baseline: await loadArm(baseline.dir, corpus, SHA),
+        candidate: await loadArm(candidate.dir, corpus, SHA),
+        reviews: await loadReviews(reviews, SHA),
     });
 }
 
 describe("eval:compression-fidelity assembly", () => {
-    test("a complete reviewed evidence set yields every column, a manifest, and a treatment comparison", () => {
-        const { manifest, report } = evaluate(scratch());
+    test("a complete reviewed evidence set yields every column, a manifest, and a treatment comparison", async () => {
+        const { manifest, report } = await evaluate(scratch());
         expect(report.arms.map((a) => a.identity_errors)).toEqual([[], []]);
         expect(report.controls.qualified).toBe(true);
         for (const arm of report.arms) {
@@ -163,16 +163,16 @@ describe("eval:compression-fidelity assembly", () => {
         expect(manifest.corpus.sha256).toBe(SHA);
     });
 
-    test("nothing is acceptable without human review", () => {
-        const { report } = evaluate(scratch(), { reviews: { skipJudgments: true } });
+    test("nothing is acceptable without human review", async () => {
+        const { report } = await evaluate(scratch(), { reviews: { skipJudgments: true } });
         expect(report.arms.every((a) => !a.accepted)).toBe(true);
         expect(report.arms[0]?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
         expect(report.accepted).toBe(false);
     });
 
-    test("a mutated capture byte unbinds its judgment", () => {
+    test("a mutated capture byte unbinds its judgment", async () => {
         const scenario = allScenarios[0]?.s.id ?? "";
-        const { report } = evaluate(scratch(), {
+        const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${scenario}.json`);
                 writeFileSync(path, `${readFileSync(path, "utf8")} `);
@@ -183,24 +183,24 @@ describe("eval:compression-fidelity assembly", () => {
         expect(report.arms[0]?.accepted).toBe(false);
     });
 
-    test("judgments bound to another corpus or batch are refused", () => {
+    test("judgments bound to another corpus or batch are refused", async () => {
         for (const reviews of [{ corpusSha256: "0".repeat(64) }, { batch: "batch-2" }]) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.accepted).toBe(false);
         }
     });
 
-    test("a missing scenario withholds acceptance and refuses the comparison", () => {
+    test("a missing scenario withholds acceptance and refuses the comparison", async () => {
         const missing = allScenarios[3]?.s.id ?? "";
-        const { report } = evaluate(scratch(), { baseline: { skipScenario: missing } });
+        const { report } = await evaluate(scratch(), { baseline: { skipScenario: missing } });
         expect(report.arms[0]?.missing_scenarios).toEqual([missing]);
         expect(report.arms[0]?.withheld.join("\n")).toContain(`missing scenarios: ${missing}`);
         expect(report.comparison.refused).toContain("the arms reached different scenario sets");
         expect(report.accepted).toBe(false);
     });
 
-    test("a missing control verdict or an always-accept, always-abstain, or always-reject set leaves review unqualified", () => {
+    test("a missing control verdict or an always-accept, always-abstain, or always-reject set leaves review unqualified", async () => {
         const cases: Array<Partial<ReviewOptions>> = [
             { dropVerdict: "ctl-reversed_negation" },
             { verdict: () => "acceptable" },
@@ -208,15 +208,15 @@ describe("eval:compression-fidelity assembly", () => {
             { verdict: () => "violation" },
         ];
         for (const reviews of cases) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.accepted).toBe(false);
         }
     });
 
-    test("a missing cost field leaves cost incomplete, never zero", () => {
+    test("a missing cost field leaves cost incomplete, never zero", async () => {
         const { transform_elapsed_ms: _, ...serving } = SERVING;
-        const { report } = evaluate(scratch(), { baseline: { serving } });
+        const { report } = await evaluate(scratch(), { baseline: { serving } });
         const row = report.arms[0]?.rows.find((r) => r.cost.status !== "complete");
         expect(row?.cost.missing.join("\n")).toContain("transform_elapsed_ms");
         expect(report.arms[0]?.accepted).toBe(false);
@@ -224,7 +224,7 @@ describe("eval:compression-fidelity assembly", () => {
 });
 
 describe("eval:compression-fidelity gates", () => {
-    test("controls must be exactly the sealed set, each with one matching human verdict", () => {
+    test("controls must be exactly the sealed set, each with one matching human verdict", async () => {
         const cases: Array<[Partial<ReviewOptions>, string]> = [
             [
                 {
@@ -275,21 +275,23 @@ describe("eval:compression-fidelity gates", () => {
             ],
         ];
         for (const [reviews, problem] of cases) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.controls.problems.join("\n")).toContain(problem);
         }
-        const { report } = evaluate(scratch(), { reviews: { controlsCorpus: "3".repeat(64) } });
+        const { report } = await evaluate(scratch(), {
+            reviews: { controlsCorpus: "3".repeat(64) },
+        });
         expect(report.controls.qualified).toBe(false);
     });
 
-    test("malformed control, verdict, and dispute entries are review errors", () => {
+    test("malformed control, verdict, and dispute entries are review errors", async () => {
         const cases: Array<Partial<ReviewOptions>> = [
             { editControls: (c) => [...c, { id: "ctl-x", kind: "reversed_negation" }] },
             { editVerdicts: (v) => [...v, { control: "ctl-x", verdict: "violation" }] },
         ];
         for (const reviews of cases) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.arms[0]?.withheld.join("\n")).toContain("does not match its schema");
         }
@@ -306,38 +308,40 @@ describe("eval:compression-fidelity gates", () => {
         const judgments = JSON.parse(readFileSync(path, "utf8"));
         judgments.disputes.push({ arm: "baseline", scenario: allScenarios[0]?.s.id });
         writeFileSync(path, JSON.stringify(judgments));
-        const reviews = loadReviews(dir, SHA);
+        const reviews = await loadReviews(dir, SHA);
         expect(reviews.errors.join("\n")).toContain("a dispute does not match its schema");
     });
 
-    test("fewer than two approvers withhold acceptance", () => {
-        const { report } = evaluate(scratch(), {
+    test("fewer than two approvers withhold acceptance", async () => {
+        const { report } = await evaluate(scratch(), {
             reviews: { approvers: ["reviewer-a", "reviewer-a"] },
         });
         expect(report.arms[0]?.withheld).toContain("the batch has 1 of 2 approvers");
         expect(report.accepted).toBe(false);
     });
 
-    test("the comparison names regressions and resolution candidates, and a same-prompt pair is no treatment", () => {
+    test("the comparison names regressions and resolution candidates, and a same-prompt pair is no treatment", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.tier === "p1")?.s.id ?? "";
         const wrong = (id: string) => (id === scenario ? "p3" : undefined);
-        const comparisonOf = (report: ReturnType<typeof evaluate>["report"]) =>
+        const comparisonOf = (report: Awaited<ReturnType<typeof evaluate>>["report"]) =>
             report.comparison.rows.find((r) => r.scenario === scenario)?.comparison;
-        expect(comparisonOf(evaluate(scratch(), { candidate: { tier: wrong } }).report)).toBe(
-            "regression",
-        );
-        expect(comparisonOf(evaluate(scratch(), { baseline: { tier: wrong } }).report)).toBe(
-            "resolution_candidate",
-        );
-        const same = evaluate(scratch(), {
-            candidate: { system: "summarizer system prompt" },
-        }).report;
+        expect(
+            comparisonOf((await evaluate(scratch(), { candidate: { tier: wrong } })).report),
+        ).toBe("regression");
+        expect(
+            comparisonOf((await evaluate(scratch(), { baseline: { tier: wrong } })).report),
+        ).toBe("resolution_candidate");
+        const same = (
+            await evaluate(scratch(), {
+                candidate: { system: "summarizer system prompt" },
+            })
+        ).report;
         expect(same.comparison.treatment).toBe(false);
     });
 
-    test("unreported generation usage, an unknown send cost, or an unmeasured recovery leaves cost incomplete", () => {
+    test("unreported generation usage, an unknown send cost, or an unmeasured recovery leaves cost incomplete", async () => {
         const root = scratch();
-        const { report } = evaluate(root, {
+        const { report } = await evaluate(root, {
             tamper: (dir) => {
                 const source = corpus.cases[0]?.sources[0]?.id ?? "";
                 const path = join(dir, `real.${source}.json`);
@@ -349,48 +353,52 @@ describe("eval:compression-fidelity gates", () => {
         const generation = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
         expect(generation?.cost.missing.join("\n")).toContain("generation usage unreported");
 
-        const forwarded = evaluate(scratch(), {
-            tamper: (dir) => {
-                write(dir, "forwarding-0.json", {
-                    mode: "forward",
-                    corpus_sha256: SHA,
-                    limits: { maxCalls: 40 },
-                    complete: false,
-                    incomplete_reasons: ["cost unknown for a send"],
-                    exchanges: [
-                        {
-                            index: 0,
-                            request: { body_text: "{}", body_sha256: sha256("{}") },
-                            response: {
-                                truncated: false,
-                                body_text: "",
-                                body_sha256: null,
-                                cost_known: false,
+        const forwarded = (
+            await evaluate(scratch(), {
+                tamper: (dir) => {
+                    write(dir, "forwarding-0.json", {
+                        mode: "forward",
+                        corpus_sha256: SHA,
+                        limits: { maxCalls: 40 },
+                        complete: false,
+                        incomplete_reasons: ["cost unknown for a send"],
+                        exchanges: [
+                            {
+                                index: 0,
+                                request: { body_text: "{}", body_sha256: sha256("{}") },
+                                response: {
+                                    truncated: false,
+                                    body_text: "",
+                                    body_sha256: null,
+                                    cost_known: false,
+                                },
                             },
-                        },
-                    ],
-                });
-            },
-        }).report;
+                        ],
+                    });
+                },
+            })
+        ).report;
         expect(forwarded.arms[0]?.rows[0]?.cost.missing.join("\n")).toContain("unknown send cost");
 
-        const recovery = evaluate(scratch(), {
-            tamper: (dir) => {
-                const entry = allScenarios[1];
-                write(dir, "recovery.json", {
-                    schema_version: 1,
-                    corpus_sha256: SHA,
-                    owner: "opencode-delivery",
-                    case: entry?.case,
-                    source: entry?.s.source,
-                    scenario: entry?.s.id,
-                    stage: "served-again",
-                    terminal: "discoverable",
-                    markers: ["cf-recovery-search"],
-                    detail: {},
-                });
-            },
-        }).report;
+        const recovery = (
+            await evaluate(scratch(), {
+                tamper: (dir) => {
+                    const entry = allScenarios[1];
+                    write(dir, "recovery.json", {
+                        schema_version: 1,
+                        corpus_sha256: SHA,
+                        owner: "opencode-delivery",
+                        case: entry?.case,
+                        source: entry?.s.source,
+                        scenario: entry?.s.id,
+                        stage: "served-again",
+                        terminal: "discoverable",
+                        markers: ["cf-recovery-search"],
+                        detail: {},
+                    });
+                },
+            })
+        ).report;
         const row = recovery.arms[0]?.rows.find((r) => r.scenario === allScenarios[1]?.s.id);
         expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
     });
@@ -423,16 +431,16 @@ describe("eval:compression-fidelity judgments", () => {
         return { baseline, reviewsDir };
     }
 
-    function rowOf(root: string, baselineDir: string, reviewsDir: string, scenario: string) {
+    async function rowOf(root: string, baselineDir: string, reviewsDir: string, scenario: string) {
         const { report } = assemble({
             corpus,
             corpusPath: "corpus.json",
             corpusSha256: SHA,
             revision: "rev",
             mode: "offline",
-            baseline: loadArm(baselineDir, corpus, SHA),
-            candidate: loadArm(join(root, "candidate"), corpus, SHA),
-            reviews: loadReviews(reviewsDir, SHA),
+            baseline: await loadArm(baselineDir, corpus, SHA),
+            candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
         });
         return report.arms[0]?.rows.find((r) => r.scenario === scenario);
     }
@@ -442,7 +450,7 @@ describe("eval:compression-fidelity judgments", () => {
         scenario: string,
     ) => judgments.judgments.find((j) => j.arm === "baseline" && j.scenario === scenario) ?? {};
 
-    test("a discoverable obligation needs a recovery observation", () => {
+    test("a discoverable obligation needs a recovery observation", async () => {
         const scenario = discoverableFirst;
         expect(scenario).toBeDefined();
         const root = scratch();
@@ -452,7 +460,7 @@ describe("eval:compression-fidelity judgments", () => {
                 (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
             );
         });
-        expect(rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "")?.recovery).toBe(
+        expect((await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? ""))?.recovery).toBe(
             "unverified",
         );
         write(baseline.dir, "recovery.json", {
@@ -467,12 +475,12 @@ describe("eval:compression-fidelity judgments", () => {
             markers: [],
             detail: { calls: 1, result_utf8_bytes: 400 },
         });
-        const row = rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.recovery).toBe("witnessed");
         expect(row?.cost.status).toBe("complete");
     });
 
-    test("a lost obligation or a disposition outside the accepted set is recall", () => {
+    test("a lost obligation or a disposition outside the accepted set is recall", async () => {
         const scenario = allScenarios.find(
             ({ s }) =>
                 s.expectations.length >= 3 &&
@@ -493,7 +501,7 @@ describe("eval:compression-fidelity judgments", () => {
                           : o,
             );
         });
-        const row = rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.preservation.map((p) => p.status)).toEqual([
             "recall",
             "recall",
@@ -502,7 +510,7 @@ describe("eval:compression-fidelity judgments", () => {
         expect(row?.withheld).toContain("preservation");
     });
 
-    test("agreeing human judgments in any obligation order are reviewed", () => {
+    test("agreeing human judgments in any obligation order are reviewed", async () => {
         const scenario = allScenarios.find(({ s }) => s.expectations.length >= 2)?.s;
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
@@ -514,18 +522,18 @@ describe("eval:compression-fidelity judgments", () => {
                 obligations: [...(original.obligations as unknown[])].reverse(),
             });
         });
-        expect(rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "")?.semantic_review).toBe(
-            "reviewed",
-        );
+        expect(
+            (await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? ""))?.semantic_review,
+        ).toBe("reviewed");
     });
 
-    test("a judgment binds only to the arm it names, even over byte-identical artifacts", () => {
+    test("a judgment binds only to the arm it names, even over byte-identical artifacts", async () => {
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
             j.judgments = j.judgments.filter((judgment) => judgment.arm === "baseline");
         });
-        const baseArm = loadArm(baseline.dir, corpus, SHA);
-        const candArm = loadArm(join(root, "candidate"), corpus, SHA);
+        const baseArm = await loadArm(baseline.dir, corpus, SHA);
+        const candArm = await loadArm(join(root, "candidate"), corpus, SHA);
         expect(candArm.evidence.map((e) => e.sha256)).toEqual(
             baseArm.evidence.map((e) => e.sha256),
         );
@@ -537,14 +545,14 @@ describe("eval:compression-fidelity judgments", () => {
             mode: "offline",
             baseline: baseArm,
             candidate: candArm,
-            reviews: loadReviews(reviewsDir, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
         });
         const [base, cand] = report.arms;
         expect(base?.rows.every((r) => r.semantic_review === "reviewed")).toBe(true);
         expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
     });
 
-    test("disagreeing human judgments and an open dispute are disputed; a resolved dispute is not", () => {
+    test("disagreeing human judgments and an open dispute are disputed; a resolved dispute is not", async () => {
         const [first, second, third] = allScenarios.map(({ s }) => s);
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
@@ -559,14 +567,14 @@ describe("eval:compression-fidelity judgments", () => {
             j.disputes.push({ arm: "baseline", scenario: third?.id, resolved: true });
         });
         const row = (s?: { id: string }) => rowOf(root, baseline.dir, reviewsDir, s?.id ?? "");
-        expect(row(first)?.semantic_review).toBe("disputed");
-        expect(row(first)?.consumer_safety).toBe("unreviewed");
-        expect(row(second)?.semantic_review).toBe("disputed");
-        expect(row(second)?.withheld).toContain("semantic review disputed");
-        expect(row(third)?.semantic_review).toBe("reviewed");
+        expect((await row(first))?.semantic_review).toBe("disputed");
+        expect((await row(first))?.consumer_safety).toBe("unreviewed");
+        expect((await row(second))?.semantic_review).toBe("disputed");
+        expect((await row(second))?.withheld).toContain("semantic review disputed");
+        expect((await row(third))?.semantic_review).toBe("reviewed");
     });
 
-    test("abstention, forbidden conclusions, model-only judgments, and disputes withhold credit", () => {
+    test("abstention, forbidden conclusions, model-only judgments, and disputes withhold credit", async () => {
         const permitted = allScenarios.find(
             ({ s }) =>
                 s.abstention === "permitted" &&
@@ -594,12 +602,12 @@ describe("eval:compression-fidelity judgments", () => {
             j.disputes.push({ arm: "baseline", scenario: disputed?.id, resolved: false });
         });
         const row = (s?: { id: string }) => rowOf(root, baseline.dir, reviewsDir, s?.id ?? "");
-        expect(row(permitted)?.consumer_safety).toBe("abstained");
-        expect(row(forbidden)?.consumer_safety).toBe("false-authoritative");
-        expect(row(withForbidden)?.consumer_safety).toBe("false-authoritative");
-        expect(row(modelOnly)?.semantic_review).toBe("model_only");
-        expect(row(disputed)?.semantic_review).toBe("disputed");
-        const abstainedUnavailable = row(permitted)?.preservation.filter(
+        expect((await row(permitted))?.consumer_safety).toBe("abstained");
+        expect((await row(forbidden))?.consumer_safety).toBe("false-authoritative");
+        expect((await row(withForbidden))?.consumer_safety).toBe("false-authoritative");
+        expect((await row(modelOnly))?.semantic_review).toBe("model_only");
+        expect((await row(disputed))?.semantic_review).toBe("disputed");
+        const abstainedUnavailable = (await row(permitted))?.preservation.filter(
             (p) => p.disposition === "unavailable",
         );
         expect(abstainedUnavailable?.length).toBeGreaterThan(0);
@@ -617,7 +625,7 @@ describe("eval:compression-fidelity command", () => {
         expect(() => parseArgs(base.slice(2))).toThrow("--baseline is required");
     });
 
-    test("the default run sends nothing and writes only owner-only files outside the repository", () => {
+    test("the default run sends nothing and writes only owner-only files outside the repository", async () => {
         const root = scratch();
         const baseline = writeArm(root, { label: "baseline" });
         const candidate = writeArm(root, { label: "candidate" });
@@ -635,9 +643,9 @@ describe("eval:compression-fidelity command", () => {
         };
         globalThis.fetch = Object.assign(spy, { preconnect: original.preconnect });
         const out = join(root, "out");
-        let written: ReturnType<typeof run> | undefined;
+        let written: Awaited<ReturnType<typeof run>> | undefined;
         try {
-            written = run({
+            written = await run({
                 baseline: baseline.dir,
                 candidate: candidate.dir,
                 reviews,
@@ -654,7 +662,7 @@ describe("eval:compression-fidelity command", () => {
         expect(statSync(out).mode & 0o777).toBe(0o700);
         expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
         const inside = resolve(import.meta.dir, "eval-out");
-        expect(() =>
+        await expect(
             run({
                 baseline: baseline.dir,
                 candidate: candidate.dir,
@@ -663,6 +671,6 @@ describe("eval:compression-fidelity command", () => {
                 corpus: CORPUS_PATH,
                 mode: "offline",
             }),
-        ).toThrow("inside the repository");
+        ).rejects.toThrow("inside the repository");
     });
 });
