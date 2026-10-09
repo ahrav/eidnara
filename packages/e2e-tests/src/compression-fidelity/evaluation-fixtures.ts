@@ -57,6 +57,8 @@ export interface ArmOptions {
     tier?: (scenario: string) => string | undefined;
     unlinked?: boolean;
     model?: string;
+    captureModel?: string;
+    generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
 }
 
@@ -67,16 +69,17 @@ export function writeArm(
     const dir = join(root, options.label);
     mkdirSync(dir);
     const system = options.system ?? "summarizer system prompt";
+    const model = options.model ?? "anthropic/claude-test";
     write(dir, "arm.json", {
         schema: ARM_SCHEMA,
         label: options.label,
         prompt_sha256: sha256(system),
-        model: options.model ?? "anthropic/claude-test",
+        model,
         provider: "anthropic",
         version: "2026-01-01",
         settings: { temperature: 0.1 },
         limits: options.limits ?? { maxCalls: 40 },
-        generation_origin: "real",
+        generation_origin: options.generationOrigin ?? "real",
     });
     const files = new Map<string, string>();
     const base = (c: string, source: string) => ({
@@ -96,6 +99,7 @@ export function writeArm(
                 stage: "capture",
                 terminal: "published",
                 detail: {
+                    model: options.captureModel ?? model,
                     output_origin: options.origin ?? "real producer through the host",
                     attempts: [{ system, prompt: "p", outputs: [{ text: "x" }] }],
                     usage: { input_tokens: 900, output_tokens: 300 },

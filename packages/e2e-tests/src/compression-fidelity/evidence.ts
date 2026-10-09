@@ -33,7 +33,14 @@ export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
 /** The arm fields a comparison holds equal; only the prompt may differ, as the treatment. */
-const HELD_EQUAL = ["model", "provider", "version", "settings", "limits"] as const;
+const HELD_EQUAL = [
+    "model",
+    "provider",
+    "version",
+    "settings",
+    "limits",
+    "generation_origin",
+] as const;
 
 export type Json = Record<string, unknown>;
 type Deterministic = (typeof BEHAVIORAL_VERDICTS)[number];
@@ -256,12 +263,18 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
             errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);
         }
         const response = exchange.response;
-        if (response && !response.truncated && response.body_sha256 !== null) {
-            if (sha256(response.body_text) !== response.body_sha256) {
+        if (!response || response.truncated) continue;
+        // A null hash on an untruncated response requires `report.complete` to be false.
+        if (response.body_sha256 === null) {
+            if (report.complete) {
                 errors.push(
-                    `${file} exchange ${exchange.index} response bytes do not match their hash`,
+                    `${file} exchange ${exchange.index} response has no hash in a complete report`,
                 );
             }
+        } else if (sha256(response.body_text) !== response.body_sha256) {
+            errors.push(
+                `${file} exchange ${exchange.index} response bytes do not match their hash`,
+            );
         }
     }
     return errors;
@@ -422,12 +435,20 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         }
     }
     if (config.generation_origin !== "real") return errors;
-    const captures = arm.evidence.filter(
+    const published = arm.evidence.filter(
         (e) =>
             e.owner === REAL_CAPTURE &&
             e.terminal === "published" &&
             String(e.detail.output_origin ?? "").startsWith("real"),
     );
+    for (const capture of published) {
+        if (capture.detail.model !== config.model) {
+            errors.push(
+                `${capture.file} captured with model ${String(capture.detail.model)}, not the arm's model`,
+            );
+        }
+    }
+    const captures = published.filter((c) => c.detail.model === config.model);
     for (const evidence of arm.evidence) {
         if (outputOrigins(evidence).some((origin) => origin.includes("scripted"))) {
             errors.push(`${evidence.file} carries scripted output in an arm labeled real`);

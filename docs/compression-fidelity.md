@@ -424,7 +424,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir>
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository whose existing ancestors
 are owned by the operator or root and closed to group and other writes unless
-sticky.
+sticky. `--out` must name a directory other than either arm; an arm directory
+is refused before any write.
 
 - **Manifest.** It records once:
   - the repository revision;
@@ -457,13 +458,15 @@ sticky.
 - a duplicate observation of one owner, case, source, scenario, and stage;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare;
-- forwarding exchange text that does not match its recorded hash. The
+- forwarding exchange text that does not match its recorded hash, or a
+  response in a complete report that records no hash. The
   hashed representation is the request body as UTF-8 bytes.
 
 In an arm labeled `real`:
 - scripted output is an identity error, whether `detail.output_origin` or an
   attempt's `output_origin` in `detail.attempts` records it;
-- every source needs a published real capture;
+- every source needs a published real capture whose `detail.model` is the
+  arm's model; a capture recorded under another model is an identity error;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.
@@ -480,7 +483,8 @@ nothing.
 
 - The comparison is refused when an arm is bound to another corpus or has
   identity errors, when the arms reached different scenario sets, or when
-  they differ in model, provider, version, settings, or limits. Held fields
+  they differ in model, provider, version, settings, limits, or generation
+  origin. Held fields
   compare as JSON with keys in UTF-16 code-unit order.
 - Differing prompt hashes mark it a treatment comparison.
 

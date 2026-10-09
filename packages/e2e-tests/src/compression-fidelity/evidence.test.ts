@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, run } from "../../scripts/eval-compression-fidelity";
 import {
@@ -91,6 +91,23 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain("scripted output");
         expect(errorsOf(assembled)).toContain("no published real-model capture");
         expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
+    test("a real capture recorded under another model is an identity error", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { captureModel: "anthropic/other" },
+        });
+        expect(errorsOf(assembled)).toContain("captured with model anthropic/other");
+        expect(errorsOf(assembled)).toContain("no published real-model capture");
+        expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
+    test("arms with different generation origins refuse the comparison", async () => {
+        const assembled = await assemble(scratch(), {
+            candidate: { generationOrigin: "scripted" },
+        });
+        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(assembled.refused).toContain("the arms differ in generation_origin");
     });
 
     test("evidence bound to another corpus refuses the comparison", async () => {
@@ -504,7 +521,7 @@ describe("evidence live mode", () => {
                     response: {
                         truncated: false,
                         body_text: "ok",
-                        body_sha256: sha256("ok"),
+                        body_sha256: sha256("ok") as string | null,
                         cost_known: true,
                     },
                 },
@@ -537,6 +554,14 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([forwardingReport("{}", sha256("{}"), false)]))).toContain(
             "is incomplete",
         );
+        const unhashed = forwardingReport("{}", sha256("{}"), true);
+        const [first] = unhashed.exchanges;
+        if (first) first.response = { ...first.response, body_sha256: null };
+        expect(errorsOf(await live([unhashed]))).toContain(
+            "response has no hash in a complete report",
+        );
+        const incompleteUnhashed = { ...unhashed, complete: false, incomplete_reasons: ["x"] };
+        expect(errorsOf(await live([incompleteUnhashed]))).not.toContain("has no hash");
         const raised = await live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);
@@ -606,5 +631,26 @@ describe("eval:compression-fidelity command", () => {
                 mode: "offline",
             }),
         ).rejects.toThrow("inside the repository");
+    });
+
+    test("an output directory that is an evidence arm is refused before any write", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        chmodSync(baseline.dir, 0o700);
+        chmodSync(candidate.dir, 0o700);
+        for (const out of [baseline.dir, join(candidate.dir, ".", "")]) {
+            await expect(
+                run({
+                    baseline: baseline.dir,
+                    candidate: candidate.dir,
+                    out,
+                    corpus: CORPUS_PATH,
+                    mode: "offline",
+                }),
+            ).rejects.toThrow("--out is an evidence arm");
+        }
+        expect(readdirSync(baseline.dir)).not.toContain("manifest.json");
+        expect(readdirSync(candidate.dir)).not.toContain("report.json");
     });
 });

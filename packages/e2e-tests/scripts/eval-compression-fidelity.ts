@@ -9,6 +9,7 @@
  * The command reads files and writes two files; it sends no request in either mode.
  */
 
+import { resolve } from "node:path";
 import { publishPrivateJson } from "../src/atomic-publish";
 import {
     COMPRESSION_FIDELITY_CORPUS_PATH,
@@ -68,6 +69,10 @@ export function parseArgs(argv: readonly string[]): EvalArgs {
 export async function run(
     args: EvalArgs,
 ): Promise<{ manifest: string; report: string; accepted: boolean }> {
+    const out = resolve(args.out);
+    if (out === resolve(args.baseline) || out === resolve(args.candidate)) {
+        throw new Error(`--out is an evidence arm: ${out}`);
+    }
     const corpus = readCompressionFidelityCorpus(args.corpus);
     const sha = COMPRESSION_FIDELITY_CORPUS_SHA256;
     const [baseline, candidate] = await Promise.all([
