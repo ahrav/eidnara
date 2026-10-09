@@ -9,7 +9,6 @@
  * The command reads files and writes two files; it sends no request in either mode.
  */
 
-import { spawnSync } from "node:child_process";
 import { publishPrivateJson } from "../src/atomic-publish";
 import {
     COMPRESSION_FIDELITY_CORPUS_PATH,
@@ -66,18 +65,23 @@ export function parseArgs(argv: readonly string[]): EvalArgs {
  * report carries each scenario's execution and deterministic columns and accepts no arm, since
  * it assembles no review, control, or cost evidence.
  */
-export function run(args: EvalArgs): { manifest: string; report: string; accepted: boolean } {
+export async function run(
+    args: EvalArgs,
+): Promise<{ manifest: string; report: string; accepted: boolean }> {
     const corpus = readCompressionFidelityCorpus(args.corpus);
     const sha = COMPRESSION_FIDELITY_CORPUS_SHA256;
-    const git = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" });
+    const [baseline, candidate] = await Promise.all([
+        loadArm(args.baseline, corpus, sha),
+        loadArm(args.candidate, corpus, sha),
+    ]);
     const assembled = assembleEvidence({
         corpus,
         corpusPath: args.corpus,
         corpusSha256: sha,
-        revision: git.status === 0 ? git.stdout.trim() : "unknown",
+        revision: repositoryRevision(),
         mode: args.mode,
-        baseline: loadArm(args.baseline, corpus, sha),
-        candidate: loadArm(args.candidate, corpus, sha),
+        baseline,
+        candidate,
     });
     const report = {
         schema: REPORT_SCHEMA,
@@ -109,9 +113,18 @@ export function run(args: EvalArgs): { manifest: string; report: string; accepte
     };
 }
 
+function repositoryRevision(): string {
+    try {
+        const git = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" });
+        return git.success ? git.stdout.toString().trim() : "unknown";
+    } catch {
+        return "unknown";
+    }
+}
+
 if (import.meta.main) {
     try {
-        console.log(JSON.stringify(run(parseArgs(process.argv.slice(2)))));
+        console.log(JSON.stringify(await run(parseArgs(process.argv.slice(2)))));
     } catch (error) {
         console.error((error as Error).message);
         process.exit(2);

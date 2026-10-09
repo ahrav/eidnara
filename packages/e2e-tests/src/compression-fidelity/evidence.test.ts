@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, run } from "../../scripts/eval-compression-fidelity";
 import {
@@ -15,7 +15,7 @@ import {
 } from "./evaluation-fixtures";
 import { assembleEvidence, loadArm } from "./evidence";
 
-function assemble(
+async function assemble(
     root: string,
     options: {
         baseline?: Partial<ArmOptions>;
@@ -37,19 +37,19 @@ function assemble(
         corpusSha256: SHA,
         revision: "rev",
         mode: options.mode ?? "offline",
-        baseline: loadArm(baseline.dir, corpus, SHA),
-        candidate: loadArm(candidate.dir, corpus, SHA),
+        baseline: await loadArm(baseline.dir, corpus, SHA),
+        candidate: await loadArm(candidate.dir, corpus, SHA),
     });
 }
 
-const errorsOf = (assembled: ReturnType<typeof assemble>) =>
+const errorsOf = (assembled: Awaited<ReturnType<typeof assemble>>) =>
     assembled.arms[0]?.identity_errors.join("\n") ?? "";
-const rowOf = (assembled: ReturnType<typeof assemble>, scenario: string | undefined) =>
+const rowOf = (assembled: Awaited<ReturnType<typeof assemble>>, scenario: string | undefined) =>
     assembled.arms[0]?.rows.find((r) => r.scenario.id === scenario);
 
 describe("evidence identity and completeness", () => {
-    test("a complete evidence set executes every scenario and lists every observation in the manifest", () => {
-        const assembled = assemble(scratch());
+    test("a complete evidence set executes every scenario and lists every observation in the manifest", async () => {
+        const assembled = await assemble(scratch());
         expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
         for (const arm of assembled.arms) {
             expect(arm.rows.length).toBe(allScenarios.length);
@@ -64,16 +64,16 @@ describe("evidence identity and completeness", () => {
         expect(assembled.manifest.corpus.sha256).toBe(SHA);
     });
 
-    test("a missing scenario is listed and refuses the comparison", () => {
+    test("a missing scenario is listed and refuses the comparison", async () => {
         const missing = allScenarios[3]?.s.id ?? "";
-        const assembled = assemble(scratch(), { baseline: { skipScenario: missing } });
+        const assembled = await assemble(scratch(), { baseline: { skipScenario: missing } });
         expect(assembled.arms[0]?.missing_scenarios).toEqual([missing]);
         expect(rowOf(assembled, missing)?.execution.status).toBe("missing");
         expect(assembled.refused).toContain("the arms reached different scenario sets");
     });
 
-    test("identity errors on the candidate side alone refuse the comparison", () => {
-        const assembled = assemble(scratch(), {
+    test("identity errors on the candidate side alone refuse the comparison", async () => {
+        const assembled = await assemble(scratch(), {
             candidate: { origin: "scripted approved example" },
         });
         expect(assembled.arms[0]?.identity_errors).toEqual([]);
@@ -81,8 +81,8 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toContain("an arm has identity errors");
     });
 
-    test("scripted output in an arm labeled real is an identity error", () => {
-        const assembled = assemble(scratch(), {
+    test("scripted output in an arm labeled real is an identity error", async () => {
+        const assembled = await assemble(scratch(), {
             baseline: { origin: "scripted approved example" },
         });
         expect(errorsOf(assembled)).toContain("scripted output");
@@ -90,13 +90,15 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toContain("an arm has identity errors");
     });
 
-    test("evidence bound to another corpus refuses the comparison", () => {
-        const assembled = assemble(scratch(), { candidate: { corpusSha256: "1".repeat(64) } });
+    test("evidence bound to another corpus refuses the comparison", async () => {
+        const assembled = await assemble(scratch(), {
+            candidate: { corpusSha256: "1".repeat(64) },
+        });
         expect(assembled.refused).toContain("an arm is bound to another corpus");
     });
 
-    test("a case mismatch is an identity error, not a corpus refusal", () => {
-        const assembled = assemble(scratch(), {
+    test("a case mismatch is an identity error, not a corpus refusal", async () => {
+        const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const first = allScenarios[0]?.s.id ?? "";
                 const path = join(dir, `delivery.${first}.json`);
@@ -108,8 +110,8 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).not.toContain("an arm is bound to another corpus");
     });
 
-    test("a prompt the arm did not declare is an identity error", () => {
-        const assembled = assemble(scratch(), {
+    test("a prompt the arm did not declare is an identity error", async () => {
+        const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, "arm.json");
                 const arm = JSON.parse(readFileSync(path, "utf8"));
@@ -119,8 +121,8 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain("not the arm's prompt");
     });
 
-    test("an unpublished temporary file and a duplicate observation are refused", () => {
-        const assembled = assemble(scratch(), {
+    test("an unpublished temporary file and a duplicate observation are refused", async () => {
+        const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 writeFileSync(join(dir, ".delivery.C1.S1.json.tmp"), "{}");
                 writeFileSync(join(dir, "delivery.C1.S1.json.tmp-abc123"), "{}");
@@ -140,11 +142,11 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain("duplicates another observation");
     });
 
-    test("a real arm's serving observation must link a published capture of its own source", () => {
+    test("a real arm's serving observation must link a published capture of its own source", async () => {
         const scenario = allScenarios[0]?.s;
-        const unlinked = assemble(scratch(), { baseline: { unlinked: true } });
+        const unlinked = await assemble(scratch(), { baseline: { unlinked: true } });
         expect(errorsOf(unlinked)).toContain("names no published real capture");
-        const crossed = assemble(scratch(), {
+        const crossed = await assemble(scratch(), {
             tamper: (dir) => {
                 const other = corpus.cases
                     .flatMap((c) => c.sources)
@@ -162,10 +164,10 @@ describe("evidence identity and completeness", () => {
         expect(crossed.refused).toContain("an arm has identity errors");
     });
 
-    test("an empty or nested variant label is an identity error", () => {
+    test("an empty or nested variant label is an identity error", async () => {
         const entry = allScenarios[0];
         for (const label of [`${entry?.s.id}@`, `${entry?.s.id}@a@b`, "@p1-only"]) {
-            const assembled = assemble(scratch(), {
+            const assembled = await assemble(scratch(), {
                 tamper: (dir) => {
                     write(dir, "variant.json", {
                         schema_version: 1,
@@ -185,9 +187,9 @@ describe("evidence identity and completeness", () => {
         }
     });
 
-    test("variants and judge controls are kept as outcomes and judge no scenario", () => {
+    test("variants and judge controls are kept as outcomes and judge no scenario", async () => {
         const entry = allScenarios[0];
-        const assembled = assemble(scratch(), {
+        const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const base = {
                     schema_version: 1,
@@ -224,8 +226,8 @@ describe("evidence identity and completeness", () => {
         );
     });
 
-    test("a malformed forwarding file is an identity error and assembly still completes", () => {
-        const assembled = assemble(scratch(), {
+    test("a malformed forwarding file is an identity error and assembly still completes", async () => {
+        const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 writeFileSync(join(dir, "forwarding-null.json"), "null");
                 writeFileSync(
@@ -241,18 +243,29 @@ describe("evidence identity and completeness", () => {
             "forwarding-partial.json does not match the forwarding report schema",
         );
     });
+
+    test("an unreadable or non-JSON observation file is an identity error", async () => {
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                mkdirSync(join(dir, "delivery.dir.json"));
+                writeFileSync(join(dir, "delivery.broken.json"), "{");
+            },
+        });
+        expect(errorsOf(assembled)).toContain("delivery.dir.json is unreadable: EISDIR");
+        expect(errorsOf(assembled)).toContain("delivery.broken.json is not JSON");
+    });
 });
 
 describe("evidence deterministic column", () => {
-    test("a wrong served tier fails the deterministic column", () => {
+    test("a wrong served tier fails the deterministic column", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.tier === "p1")?.s.id ?? "";
-        const assembled = assemble(scratch(), {
+        const assembled = await assemble(scratch(), {
             baseline: { tier: (id) => (id === scenario ? "p3" : undefined) },
         });
         expect(rowOf(assembled, scenario)?.deterministic).toBe("assertion_fail");
     });
 
-    test("a pressure delivery passes when it serves sparser than its curve tier", () => {
+    test("a pressure delivery passes when it serves sparser than its curve tier", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
         const pressed = (served: string) =>
             assemble(scratch(), {
@@ -264,11 +277,11 @@ describe("evidence deterministic column", () => {
                     writeFileSync(path, JSON.stringify(value));
                 },
             });
-        expect(rowOf(pressed("p5"), scenario?.id)?.deterministic).toBe("pass");
-        expect(rowOf(pressed("p2"), scenario?.id)?.deterministic).toBe("assertion_fail");
+        expect(rowOf(await pressed("p5"), scenario?.id)?.deterministic).toBe("pass");
+        expect(rowOf(await pressed("p2"), scenario?.id)?.deterministic).toBe("assertion_fail");
     });
 
-    test("the pressure oracle and judge controls apply to delivery observations only", () => {
+    test("the pressure oracle and judge controls apply to delivery observations only", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure");
         const otherOwner = (detail: Record<string, unknown>) =>
             assemble(scratch(), {
@@ -287,19 +300,19 @@ describe("evidence deterministic column", () => {
                     });
                 },
             });
-        const sparse = otherOwner({ tier: "p5", curve_tier: "p2" });
+        const sparse = await otherOwner({ tier: "p5", curve_tier: "p2" });
         expect(rowOf(sparse, scenario?.s.id)?.deterministic).toBe("assertion_fail");
-        const control = otherOwner({ tier: scenario?.s.serving.tier, judge_control: true });
+        const control = await otherOwner({ tier: scenario?.s.serving.tier, judge_control: true });
         expect(rowOf(control, scenario?.s.id)?.execution.outcomes).toContain(
             "daemon.compression_fidelity.replay:m0_pressure:served",
         );
-        const judged = otherOwner({ tier: "p1", judge_control: true });
+        const judged = await otherOwner({ tier: "p1", judge_control: true });
         expect(rowOf(judged, scenario?.s.id)?.deterministic).toBe("assertion_fail");
     });
 
-    test("an unknown curve tier fails the pressure oracle", () => {
+    test("an unknown curve tier fails the pressure oracle", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
-        const assembled = assemble(scratch(), {
+        const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${scenario?.id}.json`);
                 const value = JSON.parse(readFileSync(path, "utf8"));
@@ -313,13 +326,13 @@ describe("evidence deterministic column", () => {
 });
 
 describe("evidence comparison refusals", () => {
-    test("arms that differ in anything but the prompt are refused", () => {
-        const assembled = assemble(scratch(), { candidate: { model: "anthropic/other" } });
+    test("arms that differ in anything but the prompt are refused", async () => {
+        const assembled = await assemble(scratch(), { candidate: { model: "anthropic/other" } });
         expect(assembled.refused).toContain("the arms differ in model");
     });
 
-    test("held fields compare by value, whatever their key order", () => {
-        const differs = assemble(scratch(), {
+    test("held fields compare by value, whatever their key order", async () => {
+        const differs = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, "arm.json");
                 const arm = JSON.parse(readFileSync(path, "utf8"));
@@ -328,7 +341,7 @@ describe("evidence comparison refusals", () => {
         });
         expect(differs.refused).toContain("the arms differ in settings");
         const root = scratch();
-        const same = assemble(root, {
+        const same = await assemble(root, {
             tamper: (dir) => {
                 for (const arm of [dir, join(root, "candidate")]) {
                     const path = join(arm, "arm.json");
@@ -339,7 +352,9 @@ describe("evidence comparison refusals", () => {
             },
         });
         expect(same.refused).toEqual([]);
-        const prompt = assemble(scratch(), { candidate: { system: "summarizer system prompt" } });
+        const prompt = await assemble(scratch(), {
+            candidate: { system: "summarizer system prompt" },
+        });
         expect(prompt.treatment).toBe(false);
     });
 });
@@ -382,20 +397,22 @@ describe("evidence live mode", () => {
         });
     }
 
-    test("live mode needs complete, hash-consistent forwarding reports run under the arm's limits", () => {
-        expect(live([]).arms[0]?.identity_errors).toContain("live mode found no forwarding report");
-        expect(errorsOf(live([forwardingReport("{}", sha256("{ }"), true)]))).toContain(
+    test("live mode needs complete, hash-consistent forwarding reports run under the arm's limits", async () => {
+        expect((await live([])).arms[0]?.identity_errors).toContain(
+            "live mode found no forwarding report",
+        );
+        expect(errorsOf(await live([forwardingReport("{}", sha256("{ }"), true)]))).toContain(
             "do not match their hash",
         );
-        expect(errorsOf(live([forwardingReport("{}", sha256("{}"), false)]))).toContain(
+        expect(errorsOf(await live([forwardingReport("{}", sha256("{}"), false)]))).toContain(
             "is incomplete",
         );
-        const raised = live([
+        const raised = await live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);
 
         expect(errorsOf(raised)).toContain("ran limits other than the arm's");
-        const reordered = live(
+        const reordered = await live(
             [
                 {
                     ...forwardingReport("{}", sha256("{}"), true),
@@ -405,7 +422,7 @@ describe("evidence live mode", () => {
             { maxCalls: 40, maxOutputTokens: 1024 },
         );
         expect(reordered.arms[0]?.identity_errors).toEqual([]);
-        const clean = live([forwardingReport("{}", sha256("{}"), true)]);
+        const clean = await live([forwardingReport("{}", sha256("{}"), true)]);
         expect(clean.arms[0]?.identity_errors).toEqual([]);
         expect(clean.refused).toEqual([]);
     });
@@ -421,7 +438,7 @@ describe("eval:compression-fidelity command", () => {
         expect(() => parseArgs(base.slice(2))).toThrow("--baseline is required");
     });
 
-    test("the default run sends nothing and writes only owner-only files outside the repository", () => {
+    test("the default run sends nothing and writes only owner-only files outside the repository", async () => {
         const root = scratch();
         const baseline = writeArm(root, { label: "baseline" });
         const candidate = writeArm(root, { label: "candidate" });
@@ -433,9 +450,9 @@ describe("eval:compression-fidelity command", () => {
         };
         globalThis.fetch = Object.assign(spy, { preconnect: original.preconnect });
         const out = join(root, "out");
-        let written: ReturnType<typeof run> | undefined;
+        let written: Awaited<ReturnType<typeof run>> | undefined;
         try {
-            written = run({
+            written = await run({
                 baseline: baseline.dir,
                 candidate: candidate.dir,
                 out,
@@ -450,7 +467,7 @@ describe("eval:compression-fidelity command", () => {
         expect(readdirSync(out).sort()).toEqual(["manifest.json", "report.json"]);
         expect(statSync(out).mode & 0o777).toBe(0o700);
         expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
-        expect(() =>
+        await expect(
             run({
                 baseline: baseline.dir,
                 candidate: candidate.dir,
@@ -458,6 +475,6 @@ describe("eval:compression-fidelity command", () => {
                 corpus: CORPUS_PATH,
                 mode: "offline",
             }),
-        ).toThrow("inside the repository");
+        ).rejects.toThrow("inside the repository");
     });
 });

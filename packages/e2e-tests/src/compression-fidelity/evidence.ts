@@ -10,8 +10,8 @@
  * record-and-forward provider mode published, with the limits that mode enforced.
  */
 
-import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BEHAVIORAL_VERDICTS } from "../incident-pool/report";
 import type { FidelityCorpus, FidelityScenario } from "./corpus";
@@ -104,7 +104,7 @@ export interface EvidenceRow {
 }
 
 export function sha256(bytes: Uint8Array | string): string {
-    return createHash("sha256").update(bytes).digest("hex");
+    return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 }
 
 export function record(value: unknown): value is Json {
@@ -119,10 +119,12 @@ export function strings(value: unknown): string[] {
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
-export function readJson(path: string): { bytes: Buffer; value: unknown } | { error: string } {
+export async function readJson(
+    path: string,
+): Promise<{ bytes: Buffer; value: unknown } | { error: string }> {
     let bytes: Buffer;
     try {
-        bytes = readFileSync(path);
+        bytes = await readFile(path);
     } catch (error) {
         return { error: `${path} is unreadable: ${(error as Error).message}` };
     }
@@ -260,7 +262,11 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
 }
 
 /** Reads one arm directory and checks every file's identity against `corpus`. */
-export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: string): Arm {
+export async function loadArm(
+    dir: string,
+    corpus: FidelityCorpus,
+    corpusSha256: string,
+): Promise<Arm> {
     const arm: Arm = {
         dir,
         config: null,
@@ -278,20 +284,28 @@ export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: strin
     }
     const scenarioCase = new Map(scenarios(corpus).map((s) => [s.scenario.id, s.case]));
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
+    // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
+    // either left behind means a publication never finished.
+    const unpublished = (name: string) => name.startsWith(".") || /\.tmp(-|$)/.test(name);
+    const reads = new Map(
+        await Promise.all(
+            names
+                .filter((name) => name.endsWith(".json") && !unpublished(name))
+                .map(async (name) => [name, await readJson(join(dir, name))] as const),
+        ),
+    );
     const seen = new Set<string>();
     const foreign = (name: string, bound: unknown) => {
         arm.foreignCorpus = true;
         arm.errors.push(`${name} is bound to corpus ${String(bound)}`);
     };
     for (const name of names) {
-        // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
-        // either left behind means a publication never finished.
-        if (name.startsWith(".") || /\.tmp(-|$)/.test(name)) {
+        if (unpublished(name)) {
             arm.errors.push(`${name} is an unpublished temporary file`);
             continue;
         }
-        if (!name.endsWith(".json")) continue;
-        const read = readJson(join(dir, name));
+        const read = reads.get(name);
+        if (!read) continue;
         if ("error" in read) {
             arm.errors.push(read.error);
             continue;
