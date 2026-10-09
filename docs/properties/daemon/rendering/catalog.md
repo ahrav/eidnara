@@ -15,7 +15,7 @@ Three neighbours are cited rather than catalogued, and the reason is recorded
 because the task framing named them as in-scope files. `src/injection.rs` (911)
 belongs to sub-part 4b (`scope-map-and-risk-ranking.md:526`), which counts its 18
 tests as its own; 4e owns where the synthetic todo pair is *placed in the served
-array* (`transform.rs:11804-11833`, `:12091-12121`), not how the pair is built,
+array* (`transform.rs:11936-11965`, `:12091-12121`), not how the pair is built,
 and lens B cites the file throughout on that basis. `src/wire.rs` (1,279)
 belongs to 4f (`:619`) and is cited only at `:440-451`, where the arc-id
 assignment is what makes one 4e `HashMap` iteration order-independent. The
@@ -181,7 +181,7 @@ than on today's shipped default. A reader who needs today's shipped behaviour re
 ## What this part is about
 
 This is the code that assembles what the model finally sees. The splice
-`build_output_with_tags_inner` (`transform.rs:11678-12156`) is the single
+`build_output_with_tags_inner` (`transform.rs:11810-12288`) is the single
 byte-producing site, the overlay application at `:8208-8269` is the single site
 that edits a block the harness sent, and everything downstream of them is the
 provider's prompt cache. Six facts frame the records below.
@@ -190,7 +190,7 @@ provider's prompt cache. Six facts frame the records below.
 `enforce_unique_tool_use_ids` is the last transformation applied to the whole
 array (`:12147`) and it contains two mutually exclusive arms, so exactly one is
 compiled. A debug build panics on the `debug_assert!` at `:11246-11250` and
-serves nothing; a release build runs the repair at `transform.rs:11251-11302`,
+serves nothing; a release build runs the repair at `transform.rs:11383-11434`,
 which removes the later owner and its adjacent result and drops any message the
 removal empties, then returns the modified array. The paired guard is worse: the
 orphan-arc pairing detection whose own doc comments state the obligations
@@ -209,7 +209,7 @@ serializer reads the call id and ignores the marker (`todo-view.ts:117-126`),
 and the id format is deliberately distinctive (`:185-196`), so the only signal
 that reaches the provider array is a tool-call id prefix that nothing documents
 as a provenance contract. The module concedes the general shape of the problem in
-its own comment at `transform.rs:8525-8527`: wire has no transport-origin field for
+its own comment at `transform.rs:8549-8551`: wire has no transport-origin field for
 this case, so the narrowest safe discriminator is text shape. The three text
 overlays are in the same position, and text is forgeable by ingress.
 
@@ -301,7 +301,7 @@ carried them.
    claims a forbidden location.
 2. **`render-a-user-hint-total-cap-cannot-bind` keeps `unreachable`, restated so
    the subject is unambiguous.** Its target is a genuine forbidden location: the
-   guard at `transform.rs:9120-9122` returns early, so the truncating body at
+   guard at `transform.rs:9254-9256` returns early, so the truncating body at
    `:9123-9127` is entered only by falling through it, and the arithmetic says
    that cannot happen. The `Check:` line now says the truncating body is never
    entered, rather than naming the branch by its condition.
@@ -360,7 +360,7 @@ carried them.
 
 Two refinements are applied outside this file and are named for completeness.
 `R1` splits the fault map's frozen-unit seeding class, because the splice reads
-frozen units from `core.frozen_units` (`transform.rs:11699-11703`) while the
+frozen units from `core.frozen_units` (`transform.rs:11831-11835`) while the
 synthetic pair is read from `meta.synthetic_todo` (`:11805-11808`), a distinct
 field on `ModuleMeta` (`memory-store/src/lib.rs:2295-2299`), and clears both of that
 file's `Partial` verdicts. `R7` records in `existing-checks.md` that four driver
@@ -390,7 +390,7 @@ other.
 
 **`render-a-user-hint-total-cap-cannot-bind` is a genuine forbidden code point.**
 Its `Check:` line instruments the truncating body of `truncate_hint_to_total_cap`.
-The function guards at `transform.rs:9120-9122` with
+The function guards at `transform.rs:9254-9256` with
 `if utf16_len(wrapped) <= limit { return wrapped.to_string(); }`, so the
 truncating body at `:9123-9127` is reached only by falling through that guard,
 and it is a distinct location that the arithmetic says cannot execute. Lens A's
@@ -475,7 +475,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `historical_full_drop_replays_byte_identically_through_output_cache`
-(`transform.rs:27150`) and
+(`transform.rs:27282`) and
 `tag_overlay_replays_stably_and_new_tail_gets_next_number` (`:23307`) assert
 byte equality of whole renders, which would catch a duplicated or reordered
 unit. Neither asserts the ordering rule directly, and neither runs in CI.
@@ -493,7 +493,7 @@ Confidence: high - [evidence](evidence/render-a-composition-order-is-fixed-and-e
 Read the whole of `build_output_with_tags_inner` and confirmed `out.push`
 happens at exactly five sites (`:11733`, `:11754`, `:11830`, `:12089`,
 `:12117`), all inside straight-line control flow over `req.messages`.
-Existing check: `transform.rs:27150`, `:23307`; both inline, neither runs in
+Existing check: `transform.rs:27282`, `:23307`; both inline, neither runs in
 CI.
 Impact: A duplicated or reordered message is a provider-visible prefix change,
 which busts the prompt cache at best and produces an invalid conversation at
@@ -510,7 +510,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - the byte-equality replay tests (`transform.rs:27150`,
+Exercised: partial - the byte-equality replay tests (`transform.rs:27282`,
 `:27216`, `:23307`, `:28622`) all assert determinism across passes within one
 process. Nothing asserts it across processes, which is where a `HashMap` seed
 would differ.
@@ -537,7 +537,7 @@ projection-ordered `Vec`s (`:12520-12531`), `reduced` is a `BTreeMap`
 (`:11924`), the nudge lists are explicitly sorted (`:9244`, `:9275`), and every
 `HashSet`/`HashMap` in the splice is used only for `contains`, `get`, or an
 order-independent `any`.
-Existing check: `transform.rs:27150`, `:27216`, `:23307`, `:28622`; none run in
+Existing check: `transform.rs:27282`, `:27216`, `:23307`, `:28622`; none run in
 CI.
 Impact: The whole cache discipline in the module header (`transform.rs:1-16`)
 rests on a replay producing identical bytes. A seed-dependent render would bust
@@ -554,7 +554,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `duplicate_tool_full_drop_replays_byte_identically_through_output_cache`
-(`transform.rs:27216`) and `non_reasoning_adjacency_keeps_full_drop_mode`
+(`transform.rs:27348`) and `non_reasoning_adjacency_keeps_full_drop_mode`
 (`:27131`) exercise the full-drop path, but neither constructs a message with
 two overlay-eligible blocks after a dropped index.
 Guarantee: Every overlay string is applied to the block whose id it was
@@ -579,7 +579,7 @@ The index shift is verified from source: `filter_map` rebuilds `content` at
 `:12014-12021` and the overlay at `:12024-12031` passes the same unmodified
 `blocks` slice. What is not established is whether a real harness emits a
 message with a full-drop tool block followed by two taggable blocks.
-Existing check: `transform.rs:27216`, `:27131`; neither runs in CI.
+Existing check: `transform.rs:27348`, `:27131`; neither runs in CI.
 Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that
 `eidnara_reduce` resolves against, so the agent's reduce request hits content it
 did not choose. The bytes are already frozen into the provider prefix by the
@@ -683,7 +683,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `duplicate_tool_use_belt_panics_in_test_builds`
-(`transform.rs:21504`) covers the debug arm.
+(`transform.rs:21636`) covers the debug arm.
 `duplicate_tool_use_belt_drops_later_owner_and_result_in_release` (`:21514`)
 covers the release arm but carries `#[cfg(not(debug_assertions))]` (`:21512`),
 so it does not compile under a default `cargo test`, and no `daemon` lib
@@ -706,7 +706,7 @@ Confidence: high - [evidence](evidence/render-a-duplicate-tool-use-repair-is-rel
 Verified the `#[cfg]` split at `:11251` and `:11303-11304`, verified the
 release arm drops an emptied message at `:11297-11299`, and verified the
 release test's own `#[cfg]` gate at `:21512`.
-Existing check: `transform.rs:21504` (debug only), `:21514` (release only, does
+Existing check: `transform.rs:21636` (debug only), `:21514` (release only, does
 not compile in a debug test run).
 Impact: The two profiles disagree about what a duplicate does: debug aborts the
 pass, release silently removes content and continues. Whichever profile ships
@@ -725,7 +725,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `assert_no_orphaned_tool_arcs` is asserted on real render
-output at `transform.rs:14336` and `:27418`, `:27427`, and negatively at
+output at `transform.rs:14468` and `:27418`, `:27427`, and negatively at
 `:14314`, `:14321`. All of it is inline test code that CI does not run.
 Guarantee: The served array never contains a `tool_result` without a preceding
 `tool_use` of the same id, and never a `tool_use` whose result is not in the
@@ -798,7 +798,7 @@ Confidence: medium - [evidence](evidence/render-a-mint-batch-block-ids-are-uniqu
 Verified the projection guard, the mint loop's non-updating filter, and both
 generation fences. Not verified: that the SQLite triggers advance `generation`
 for *every* `tags` mutation, which is `memory-store` and outside 4e.
-Existing check: `transform.rs:23364`, `:23466`; neither runs in CI.
+Existing check: `transform.rs:23496`, `:23466`; neither runs in CI.
 Impact: This is the enabling condition for the sibling record
 [`speculative-tag-numbering-has-two-authorities`](../transform/catalog.md#speculative-tag-numbering-has-two-authorities).
 If it holds, that record's divergence is unreachable through the public path;
@@ -813,7 +813,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - `nudge_formula_tests` (`transform.rs:9628-9783`) covers
+Exercised: not yet - `nudge_formula_tests` (`transform.rs:9760-9915`) covers
 the band arithmetic, not the hint's tag numbers.
 Guarantee: Every `§N§` a nudge or directive renders names a tag number the
 agent can use, meaning one that a `tags` row holds for the block the text is
@@ -862,7 +862,7 @@ Type: reachability
 Reachability: default-production
 Status: active
 Exercised: not yet - `user_hint_query_keeps_terms_beyond_the_old_character_cap`
-(`transform.rs:23128`) covers the query path, not the render cap.
+(`transform.rs:23260`) covers the query path, not the render cap.
 Guarantee: `truncate_hint_to_total_cap` is never entered from
 `render_user_hint`, because the composed hint cannot exceed
 `USER_HINT_TOTAL_CHAR_CAP`.
@@ -1037,7 +1037,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
-(`transform.rs:23551-23590`) exercises firing and replay, but every block it
+(`transform.rs:23683-23722`) exercises firing and replay, but every block it
 targets is newly added, so it never constructs the previously-served case. It
 does not run in CI.
 Guarantee: An overlay is first-applied only to a block that no earlier render
@@ -1068,7 +1068,7 @@ ungated at `:7559-7573`. Verified the frontier's stated purpose at
 (`transform.rs:6471-6473`, used at `:9798`), and that
 `refresh_tail_hygiene_baseline` keeps the baseline evaluable on a non-busting
 refresh (`tail_hygiene.rs:665-682`), so the firing pass need not be a bust.
-Existing check: `transform.rs:23551-23590`; does not run in CI.
+Existing check: `transform.rs:23683-23722`; does not run in CI.
 Impact: A `<system-reminder>` appears inside a tool result the provider has
 already cached, so the prefix diverges and the whole cached prompt is
 discarded. On the divergence path this also shows up as a served-fingerprint
@@ -1088,7 +1088,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet - `nudge_formula_tests` (`transform.rs:9629-9783`) covers
+Exercised: not yet - `nudge_formula_tests` (`transform.rs:9761-9915`) covers
 the band arithmetic only. No test drives `channel2_directives` twice with the
 same inputs on the OpenCode arm.
 Guarantee: A Channel-2 authorization is emitted at most once per arming cycle,
@@ -1110,7 +1110,7 @@ reclaimable tokens at or above `CHANNEL2_FLOOR_TOKENS` (50_000,
 unrecognized `channel2_nudge_state`.
 Confidence: high - [evidence](evidence/nudge-b-opencode-channel2-arm-has-no-module-side-latch.md).
 Verified the arm reads only `channel2_nudge_state` and pressure
-(`transform.rs:9347-9365`), that `channel2_pressure` takes `&ModuleMeta` and so
+(`transform.rs:9479-9497`), that `channel2_pressure` takes `&ModuleMeta` and so
 cannot latch (`:9380-9383`), that `channel2_pressure_latched` is read and
 written only in the Claude Code arm (`:9483`, `:9493`), and that both module
 rearm helpers clear state this arm never reads (`:9407-9410`, `:9412-9433`).
@@ -1169,7 +1169,7 @@ describes a CC leg as a real deployment, so the arm is presumably reachable
 from a proxy outside this tree.
 Confidence: medium - [evidence](evidence/nudge-b-channel2-retirement-is-caller-asserted.md). The
 mechanism is verified from source: the delivered-id comparison at
-`transform.rs:9440-9448`, the TTL at `:9450-9458`, the pressure collapse at
+`transform.rs:9572-9580`, the TTL at `:9450-9458`, the pressure collapse at
 `:9479`, and the id derivation at `:9505-9513`. What is not established is
 whether the CC leg is live and, if so, whether the proxy has an independent
 record of delivery. Both are outside this tree.
@@ -1236,7 +1236,7 @@ and returned unchanged by both replay arms (`:9463-9466`, `:9473-9476`). The
 delivered-id comparison that precedes it is at `:9442-9448`, so a caller
 acknowledgement and a TTL expiry cannot both be credited for one retirement in the
 same pass.
-Existing check: none. `nudge_formula_tests` (`transform.rs:9629-9783`) covers the
+Existing check: none. `nudge_formula_tests` (`transform.rs:9761-9915`) covers the
 Channel-1 band arithmetic only.
 Impact: This is the load-bearing safety mechanism on the arm, which is why it is
 worth a record of its own. The parent record's finding is that the primary
@@ -1296,7 +1296,7 @@ Fault/timing angle: None. This is accumulation over a long session, not a race.
 Required faults and enabling state: `tagging_active`, and a session long enough
 for `decide_channel1` to clear the escalation-or-cadence gate repeatedly. The
 cadence step is `max(25_000, 0.08 * tail_tokens)` tokens of newly unreduced
-tool output (`channel1_refire_tokens`, `transform.rs:9623-9626`, gate at
+tool output (`channel1_refire_tokens`, `transform.rs:9755-9758`, gate at
 `:9608-9610`), so each additional row costs the agent that much unreduced growth.
 The cited range was `:9624-9627` before this pass; the function opens at `:9623`
 and closes at `:9626`, and the reference is corrected here per METHOD.md rule 1.
@@ -1379,7 +1379,7 @@ coverage-keyed one is not, which is a fact about the schema rather than a
 recommendation. A row can be placed directly with `seed_channel1_append_for_test`
 (`:6664`), which is gated `#[cfg(feature = "test-support")]` (`:6663`).
 Existing check: none. `channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
-(`transform.rs:23551-23590`) asserts `len() == 1` three times (`:23570`, `:23574`,
+(`transform.rs:23683-23722`) asserts `len() == 1` three times (`:23570`, `:23574`,
 `:23588`) and never advances past the block it fired on, so it observes
 persistence rather than removal.
 Impact: Unbounded retention is the parent record's cost. This record's cost is the
@@ -1459,7 +1459,7 @@ Impact: The model is shown an assistant `todowrite` call and result it never
 made, with a `completed` status and a zero timestamp (`injection.rs:345`,
 `:355-358`). It cannot tell that from its own work, so it may reason about the
 todo list as something it already did. The three text overlays are better off:
-Channel-1 and Channel-2 carry `<system-reminder>` (`transform.rs:9859`,
+Channel-1 and Channel-2 carry `<system-reminder>` (`transform.rs:9991`,
 `:9559`), the hint carries `<eidnara-search-hint>` (`:9111`), and the temporal mark
 is an HTML comment (`:8205`). All four of those markers are plain text a user
 or a tool result can forge, so they are a convention, not a boundary.
@@ -1477,7 +1477,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `empty_user_hint_decision_skips_future_queries`
-(`transform.rs:23075-23090`) and the query-sanitization tests (`:23030-23133`)
+(`transform.rs:23207-23222`) and the query-sanitization tests (`:23030-23133`)
 cover the decision and the query. Nothing asserts anything about the authorship
 boundary of the appended bytes.
 Guarantee: Text the module appends to a user's message is attributable to the
@@ -1509,12 +1509,12 @@ the envelope is forgeable from the user side. Verified the injected fragments
 come from stored history_segment bodies (`run_user_hint_lexical_search` reads only
 `load_history_segment_candidates`, `:8866`), so the content is earlier-conversation
 material this turn's author did not write.
-Existing check: `transform.rs:23075-23090`, `:23030-23048`, `:23049-23073`;
+Existing check: `transform.rs:23207-23222`, `:23030-23048`, `:23049-23073`;
 none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
 earlier conversation plus the instruction "If these fragments seem relevant to
 the current request, you may run eidnara_search to search project memory for
-their topic" (#926; `transform.rs:9109`). Attributed to the user, that reads
+their topic" (#926; `transform.rs:9243`). Attributed to the user, that reads
 as the user's own instruction.
 The module's own code shows it knows this is a text convention and not a
 boundary: `is_system_reminder_transport_message`'s comment says wire
@@ -1547,29 +1547,29 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: partial - `channel1_hygiene_ratio_nudge_replays_and_suppresses_refire`
-(`transform.rs:23551-23590`) covers the suppression *effect*, but only by
+(`transform.rs:23683-23722`) covers the suppression *effect*, but only by
 writing the flag directly into the store at `:23577`. That is the only write to
 `true` in the repository. The test does not run in CI.
 Guarantee: The documented eidnara_reduce feedback loop exists: after the agent acts
 on a reminder, the next transform suppresses new Channel-1 appends.
 Check: `always` - assert that on any pass following a `eidnara_reduce` that froze
 at least one reduction, `decide_channel1` takes the suppressed arm
-(`transform.rs:9593-9595`) on the next transform for that session. `always`
+(`transform.rs:9725-9727`) on the next transform for that session. `always`
 because the documented contract is unconditional once the antecedent holds.
 Fault/timing angle: The window is between the `eidnara_reduce` facade commit and
 the next transform pass. If the flag were ever set, the clear at
-`transform.rs:9157` would consume it on the first `tagging_active` pass, so the
+`transform.rs:9289` would consume it on the first `tagging_active` pass, so the
 suppression is a single-pass token.
 Required faults and enabling state: A `eidnara_reduce` call that applies a
 reduction, followed by a `tagging_active` transform pass. The suppression
 cannot be observed because nothing sets the flag.
 Confidence: high - [evidence](evidence/nudge-b-channel1-suppression-flag-is-never-set.md).
 `git grep reduce_suppressed` over the whole worktree returns six lines: the
-field (`memory-store/src/lib.rs:2461`), three reads (`transform.rs:9156`, `:9565`,
-`:9593`), one clear to `false` (`transform.rs:9157`), and one write to `true`
-inside `#[test]` (`transform.rs:23577`). The TypeScript side has no
+field (`memory-store/src/lib.rs:2461`), three reads (`transform.rs:9288`, `:9565`,
+`:9593`), one clear to `false` (`transform.rs:9289`), and one write to `true`
+inside `#[test]` (`transform.rs:23709`). The TypeScript side has no
 `reduceSuppressed` equivalent, checked by the same grep.
-Existing check: `transform.rs:23551-23590`; does not run in CI and only reaches
+Existing check: `transform.rs:23683-23722`; does not run in CI and only reaches
 the code by writing the store directly.
 Impact: The agent that complies with a reminder gets no credit for it. Refire
 is throttled only by the cadence gate, which keys on `reclaimable_tokens`
@@ -1643,7 +1643,7 @@ Fault/timing angle: None; both are computed in the same pass from the same
 Required faults and enabling state: Any frozen unit keyed `strip:placeholder:`,
 `strip:system_injected:`, `strip:system_injected_block:`, `strip:stale_reduce:`
 or `strip:processed_image:` whose target block is inside the measured tail.
-`new_frozen_strip_units` (`transform.rs:10181-10339`) is the producer.
+`new_frozen_strip_units` (`transform.rs:10313-10471`) is the producer.
 Confidence: high - [evidence](evidence/render-a-hygiene-metric-ignores-surface-strips.md).
 Verified `measure_tail_hygiene`'s exclusion set at `:499-512` and its per-kind
 arms at `:522-587`, and verified by grep that `tail_hygiene.rs` contains no
@@ -1728,7 +1728,7 @@ Type: reachability
 Reachability: default-production
 Status: active
 Exercised: not yet - `tag_overlay_replays_stably_and_new_tail_gets_next_number`
-(`transform.rs:23307`) and the Channel-1 test (`:23551`) each exercise one
+(`transform.rs:23439`) and the Channel-1 test (`:23551`) each exercise one
 overlay kind at a time. No test constructs a block carrying three.
 Guarantee: A campaign reaches the state where one block carries more than one
 overlay kind at once, so the fixed mutator order and the interaction between
@@ -1739,7 +1739,7 @@ least once per campaign a single `block_id` appears in two or more of
 `channel1_by_block_id` on the same accepted pass, and separately at least once in
 three of them. Three is the maximum by construction, not four, so the three-way arm
 is a reachable target rather than an unreachable one: a tool result is ineligible
-for the temporal marker (`transform.rs:8642-8647` requires an authored user
+for the temporal marker (`transform.rs:8746-8751` requires an authored user
 message) and for the user hint (`:8789` requires `role == "user"`). `sometimes` and
 not `reachable` because `apply_tag_overlay_to_message`'s lines execute on every
 tagging pass; what a campaign can easily miss is the operational *situation* of a
@@ -1765,7 +1765,7 @@ temporal prefix, user hint, Channel-1. Verified the consequence of that order,
 that the temporal comment ends up outside the tag prefix in the served bytes,
 by reading `prepend_tag` (`:8395-8399`) and `prepend_temporal_to_block`
 (`:8334-8343`).
-Existing check: `transform.rs:23307`, `:23551`; neither covers the combination,
+Existing check: `transform.rs:23439`, `:23551`; neither covers the combination,
 and neither runs in CI.
 Impact: Without this situation, three interactions go untested. First, whether
 `strip_tag_prefix` (`:8404-8406`) still inverts `prepend_tag` when a temporal
@@ -1792,7 +1792,7 @@ dominance statement is a hypothesis, not a finding.
   [render-a-overlay-targets-stale-indices-after-full-drop-filter](#render-a-overlay-targets-stale-indices-after-full-drop-filter),
   [render-a-emptied-tail-message-drops-without-a-report](#render-a-emptied-tail-message-drops-without-a-report),
   [render-a-composition-order-is-fixed-and-each-unit-appears-once](#render-a-composition-order-is-fixed-and-each-unit-appears-once).
-  All three turn on the same fact: `apply_surface_strips` (`transform.rs:10388`),
+  All three turn on the same fact: `apply_surface_strips` (`transform.rs:10520`),
   the full-drop filter (`:12014-12021`) and
   `remove_frozen_historical_reasoning` (`:12035`) may shorten `content`, and the
   overlay that follows still addresses blocks by their pre-removal `block_index`
@@ -1821,7 +1821,7 @@ dominance statement is a hypothesis, not a finding.
 - **The only defence is compiled out or compiled test-only.**
   [render-a-duplicate-tool-use-repair-is-release-only](#render-a-duplicate-tool-use-repair-is-release-only),
   [render-a-orphan-tool-arc-has-no-production-detection](#render-a-orphan-tool-arc-has-no-production-detection).
-  Two halves of one function pair at `transform.rs:11171-11305`, and the pairing
+  Two halves of one function pair at `transform.rs:11303-11437`, and the pairing
   is economic as well as diagnostic: `enforce_unique_tool_use_ids` runs in
   production at a cost comparable to the guard that does not, which is what makes
   the asymmetry look unintentional rather than a considered trade. Hypothesis: the
@@ -1837,7 +1837,7 @@ dominance statement is a hypothesis, not a finding.
   Both are about a `§N§` the agent cannot resolve, from opposite directions. The
   mint record is the property expected to hold, and it is what makes the durable
   numbering trustworthy; the Channel-2 record is a deliberate process-local
-  numbering (`transform.rs:9279-9281` says so) that reaches agent-visible bytes
+  numbering (`transform.rs:9411-9413` says so) that reaches agent-visible bytes
   through `format_reclaimable_hint` (`:9872`). Hypothesis: neither dominates,
   because the mint record's oracle is a pre-commit comparison against `tags`
   and the Channel-2 record's oracle is a post-render scan of served text against
@@ -1878,7 +1878,7 @@ dominance statement is a hypothesis, not a finding.
   way that bounds *retention*. The todo-pair record is the control in this cluster:
   it is the one injected thing with a retirement rule that actually holds, and it is
   the only one whose absent placement is a hard error
-  (`SyntheticTodoAnchorMissing`, `transform.rs:12125-12133`) rather than an
+  (`SyntheticTodoAnchorMissing`, `transform.rs:12257-12265`) rather than an
   absorbed skip.
 - **Idempotence delegated to the caller.**
   [nudge-b-opencode-channel2-arm-has-no-module-side-latch](#nudge-b-opencode-channel2-arm-has-no-module-side-latch),
@@ -1886,7 +1886,7 @@ dominance statement is a hypothesis, not a finding.
   [nudge-b-channel2-pending-directive-rearms-within-the-lease-ttl](#nudge-b-channel2-pending-directive-rearms-within-the-lease-ttl).
   The two Channel-2 arms plus the bound that separates them, and the arms are
   opposites rather than variants: one keeps a durable directive id, an arming
-  watermark and a 10-minute lease (`transform.rs:9435-9513`), the other writes
+  watermark and a 10-minute lease (`transform.rs:9567-9645`), the other writes
   nothing at all (`:9347-9365`).
   Hypothesis: the OpenCode record is the more urgent by a wide margin, because it
   is the profile the shipped host sends (`rust-mode-transform.ts:1339`) and its
@@ -1908,7 +1908,7 @@ dominance statement is a hypothesis, not a finding.
   message or carries a marker its consumer reads. Hypothesis: the hint record
   dominates the pair record's check but not its consequence. The hint's envelope is
   demonstrably forgeable, and the module's own
-  `has_stacked_user_hint_augmentation` (`transform.rs:8989-8997`) is the proof, so
+  `has_stacked_user_hint_augmentation` (`transform.rs:9118-9126`) is the proof, so
   a check that rejects text-only markers rejects the pair's `synthetic_todo_`
   id prefix for the same reason. The consequence runs the other way: the pair is a
   whole assistant turn the model never took, with a `completed` status, which is a

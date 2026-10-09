@@ -7,7 +7,6 @@ use serde_json::json;
 
 use super::tests::{active_cc_req, comp, run, spine, store, wire_item};
 use super::*;
-use crate::memory_tool::{MemorySearchResult, MemorySearchSourceKind};
 
 const SESSION: &str = "census";
 const FILLER: &str = "filler sentence about nothing in particular";
@@ -28,7 +27,7 @@ fn seeded(dir: &std::path::Path, texts: &[&str]) -> MemoryStore {
     s
 }
 
-fn search(s: &MemoryStore, query: &str) -> Result<Vec<MemorySearchResult>, TransformError> {
+fn search(s: &MemoryStore, query: &str) -> Result<Vec<UserHintSelection>, TransformError> {
     run_user_hint_lexical_search(
         s,
         SESSION,
@@ -38,21 +37,22 @@ fn search(s: &MemoryStore, query: &str) -> Result<Vec<MemorySearchResult>, Trans
     )
 }
 
-fn sequences(results: &[MemorySearchResult]) -> Vec<i64> {
-    results.iter().map(|result| result.id).collect()
+fn sequences(selected: &[UserHintSelection]) -> Vec<i64> {
+    selected
+        .iter()
+        .map(|selection| selection.sequence)
+        .collect()
 }
 
-fn hint_result(snippet: &str) -> MemorySearchResult {
-    MemorySearchResult {
-        source_kind: MemorySearchSourceKind::HistorySegmentBody,
-        id: 1,
-        snippet: snippet.to_string(),
-        category: None,
-        sequence: Some(1),
-        title: Some("C1".to_string()),
-        note_status: None,
-        surface_condition: None,
+fn selection(fragment: UserHintFragment) -> UserHintSelection {
+    UserHintSelection {
+        sequence: 1,
+        fragment,
     }
+}
+
+fn hint_result(snippet: &str) -> UserHintSelection {
+    selection(user_hint_fragment(snippet))
 }
 
 fn hint_queries_over_two_passes(request: &TransformRequest) -> usize {
@@ -575,8 +575,11 @@ fn reserved_markup_deep_in_a_segment_cannot_forge_hint_envelopes() {
 #[test]
 fn a_match_inside_the_prefix_keeps_the_prefix_fragment() {
     let body = format!("C1 quasar nebula {}", [FILLER; 6].join(" "));
-    assert_eq!(user_hint_snippet(body.clone(), &["quasar"]), body);
-    let rendered = render_user_hint(&[hint_result(&user_hint_snippet(body.clone(), &["nebula"]))]);
+    assert_eq!(
+        user_hint_served_fragment(&body, &["quasar"]),
+        user_hint_fragment(&body)
+    );
+    let rendered = render_user_hint(&[selection(user_hint_served_fragment(&body, &["nebula"]))]);
     let expected = render_user_hint(&[hint_result(&body)]);
     assert_eq!(rendered, expected);
     assert!(hint_fragment_lines(expected.as_deref().unwrap())[0].starts_with("C1 quasar nebula"));
@@ -593,9 +596,9 @@ fn the_anchor_window_respects_utf16_units_near_wide_characters() {
                 wide.repeat(40),
                 wide.repeat(40)
             );
-            let snippet = user_hint_snippet(body.clone(), &["zephyrine"]);
-            assert_ne!(snippet, body, "pad {pad} {wide}");
-            let rendered = render_user_hint(&[hint_result(&snippet)]).unwrap();
+            let fragment = user_hint_served_fragment(&body, &["zephyrine"]);
+            assert_ne!(fragment, user_hint_fragment(&body), "pad {pad} {wide}");
+            let rendered = render_user_hint(&[selection(fragment)]).unwrap();
             let line = hint_fragment_lines(&rendered)[0];
             assert!(line.contains("zephyrine"), "pad {pad} {wide}: {line:?}");
             assert!(utf16_len(line) <= SURFACE1_HINT_BOUNDS.fragment_units);
@@ -613,8 +616,8 @@ fn escaped_markup_before_a_prefix_match_does_not_keep_the_prefix() {
         "x".repeat(30),
         [FILLER; 6].join(" ")
     );
-    let snippet = user_hint_snippet(body.clone(), &["quasar"]);
-    let rendered = render_user_hint(&[hint_result(&snippet)]).unwrap();
+    let fragment = user_hint_served_fragment(&body, &["quasar"]);
+    let rendered = render_user_hint(&[selection(fragment)]).unwrap();
     let line = hint_fragment_lines(&rendered)[0];
     assert!(first_whole_word(line, "quasar").is_some(), "got {line:?}");
     assert!(utf16_len(line) <= SURFACE1_HINT_BOUNDS.fragment_units);
@@ -626,8 +629,8 @@ fn a_long_anchor_survives_the_centered_window() {
     for len in [40, 45, 60, 78] {
         let anchor = "a".repeat(len);
         let body = format!("{} {anchor} {}", "x".repeat(200), [FILLER; 6].join(" "));
-        let snippet = user_hint_snippet(body.clone(), &[&anchor]);
-        let rendered = render_user_hint(&[hint_result(&snippet)]).unwrap();
+        let fragment = user_hint_served_fragment(&body, &[&anchor]);
+        let rendered = render_user_hint(&[selection(fragment)]).unwrap();
         let line = hint_fragment_lines(&rendered)[0];
         assert!(
             first_whole_word(line, &anchor).is_some(),
@@ -822,6 +825,63 @@ proptest::proptest! {
     }
 }
 
+proptest::proptest! {
+    #[test]
+    fn the_hint_matcher_ignores_ascii_case_in_long_and_short_tokens(
+        parts in proptest::collection::vec(
+            proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "Abcdefghij", "abcdefghIJ", "ABCDEFGHIK", "abcdefghik", "AbcdefghiJa",
+                    "abcdefgh", "ABCDEFGH", "Abcdefg", "AAA", "aaa", "The", "AND", "Your",
+                    "Use", "0Nebula7", "0nebula7", "Zeta", "zeta", "é", "日本", " ", ", ",
+                    "\n", "-", "x",
+                ]),
+                0..80,
+            ),
+            1..4,
+        ),
+        query_words in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "abcdefghij", "abcdefghik", "abcdefghija", "abcdefgh", "abcdefg", "aaa",
+                "0nebula7", "zeta", "日本",
+            ]),
+            1..8,
+        ),
+    ) {
+        let parts = parts.iter().map(|pieces| pieces.concat()).collect::<Vec<_>>();
+        let parts = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>();
+        let query = hint_query_tokens(&query_words.join(" "));
+        proptest::prop_assume!(!query.is_empty());
+        let hint_query = HintQuery::new(&query);
+        proptest::prop_assert_eq!(
+            hint_query.matched_in_parts(&parts),
+            matched_through_lexical_tokens(&parts, &query)
+        );
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn the_hint_lowercase_equals_the_standard_lowercase(
+        pieces in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "a", "B", "z", "AB", "Zeta", "é", "É", "İ", "Σ", "ΣΑΣ", "ΑΣ ", "日本", "語", "x1",
+                " ", "_", "\n", "THE", "Straße", "ǅ", "😀", "§12§", "…", "ß", "ΐ",
+            ]),
+            0..40,
+        ),
+    ) {
+        let text = pieces.concat();
+        let expected = text.to_lowercase();
+        let lowered = hint_lowercase(&text);
+        proptest::prop_assert_eq!(lowered.as_ref(), expected.as_str());
+    }
+}
+
 #[test]
 fn the_hint_stopword_check_equals_the_stopword_list() {
     for stopword in USER_HINT_STOPWORDS {
@@ -890,7 +950,7 @@ fn a_literal_ellipsis_at_the_prefix_cut_does_not_end_the_fragment() {
         format!("x {}wait… tail words here", "§1§".repeat(64)),
     ] {
         assert_eq!(
-            user_hint_fragment(&text),
+            user_hint_fragment(&text).0,
             whole_text_fragment(&text),
             "{text:?}"
         );
@@ -911,6 +971,6 @@ proptest::proptest! {
         ),
     ) {
         let text = pieces.join("");
-        proptest::prop_assert_eq!(user_hint_fragment(&text), whole_text_fragment(&text));
+        proptest::prop_assert_eq!(user_hint_fragment(&text).0, whole_text_fragment(&text));
     }
 }

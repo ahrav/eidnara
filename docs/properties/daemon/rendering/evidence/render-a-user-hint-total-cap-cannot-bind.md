@@ -60,7 +60,7 @@ All references read back at `HEAD` `e447c927`, in
 
 The references above stay at `e447c927`. This section and the arithmetic below
 read back at this branch's HEAD, where `render_user_hint` sits at
-`transform.rs:9091-9117`. #926 replaces its footer line with:
+`transform.rs:9228-9292`. #926 replaces its footer line with:
 
 ```
 9109:    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
@@ -69,7 +69,7 @@ read back at this branch's HEAD, where `render_user_hint` sits at
 ### The arithmetic
 
 Measured in UTF-16 code units, which is what `utf16_len`
-(`transform.rs:8961-8963`) counts. Every row was re-measured
+(`transform.rs:9093-9095`) counts. Every row was re-measured
 against the #926 footer and the wrapper strings:
 
 | Component | Units |
@@ -155,7 +155,7 @@ None. This is arithmetic over compile-time constants.
 ### Q: Can `terse_text_compression::compress` produce a fragment longer than the cap?
 
 - Sources examined: `crates/daemon/src/terse_text_compression.rs:1-30` (the header and
-  `TerseTextCompressionLevel`), `transform.rs:9092-9097`.
+  `TerseTextCompressionLevel`), `transform.rs:9226-9231`.
 - Findings: irrelevant to the bound. Whatever `compress` returns is passed through
   `one_line_fragment`, which caps it at 80 UTF-16 units. `compress` is a
   shortening transform, so it cannot grow the input either, but the cap does not
@@ -173,7 +173,7 @@ None. This is arithmetic over compile-time constants.
 
 ### Q: Is the header's one-fragment wording shorter, and does it change the bound?
 
-- Sources examined: `transform.rs:9104-9108`.
+- Sources examined: `transform.rs:9238-9242`.
 - Findings: with one line the header is 43 units and there is one line rather than
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.

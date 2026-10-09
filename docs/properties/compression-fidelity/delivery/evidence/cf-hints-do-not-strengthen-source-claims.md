@@ -15,13 +15,13 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 - [transform.rs:8193-8240](../../../../../crates/daemon/src/transform.rs#L8193-L8240)
   requires an eligible new authored tail, no prior decision/frontier exclusion,
   no stacked augmentation, and sufficient sanitized prompt length.
-- [transform.rs:8289-8318](../../../../../crates/daemon/src/transform.rs#L8289-L8318)
+- [transform.rs:8298-8328](../../../../../crates/daemon/src/transform.rs#L8298-L8328)
   concatenates title, flat content, and all populated tiers from stored history.
   It does not restrict selection to the body actually rendered in m0.
-- [transform.rs:8342-8395](../../../../../crates/daemon/src/transform.rs#L8342-L8395)
+- [transform.rs:8352-8390](../../../../../crates/daemon/src/transform.rs#L8352-L8390)
   requires two matched terms and one appearing in fewer than half the candidate
   rows. Only the top score is compared with the configured threshold.
-- [transform.rs:8612-8646,8648-8657](../../../../../crates/daemon/src/transform.rs#L8612-L8669)
+- [transform.rs:8716-8750,8648-8657](../../../../../crates/daemon/src/transform.rs#L8716-L8773)
   applies Ultra compression, normalizes whitespace, and truncates fragments in
   UTF-16 units. It also drops formatted lines of at most two bytes: an empty
   fragment produces only `- `. Nonempty one- or two-character fragments survive
@@ -33,7 +33,7 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   [compression pass](../../../../../crates/daemon/src/terse_text_compression.rs#L848-L856)
   removes. Filler-only selected content is a construction lead for total drop,
   not evidence of a material semantic failure.
-- [transform.rs:22977-22996](../../../../../crates/daemon/src/transform.rs#L22977-L22996)
+- [transform.rs:23109-23128](../../../../../crates/daemon/src/transform.rs#L23109-L23128)
   asserts one lexical query across repeated empty decisions; status unaudited.
 - [opencode-transform-adapter.ts:477](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L477)
   defaults auto-search enabled. The daemon

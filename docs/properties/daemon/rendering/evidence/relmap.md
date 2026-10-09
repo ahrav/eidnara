@@ -16,7 +16,7 @@ dominance statement is a hypothesis, not a finding.
   [render-a-overlay-targets-stale-indices-after-full-drop-filter](#render-a-overlay-targets-stale-indices-after-full-drop-filter),
   [render-a-emptied-tail-message-drops-without-a-report](#render-a-emptied-tail-message-drops-without-a-report),
   [render-a-composition-order-is-fixed-and-each-unit-appears-once](#render-a-composition-order-is-fixed-and-each-unit-appears-once).
-  All three turn on the same fact: `apply_surface_strips` (`transform.rs:10388`),
+  All three turn on the same fact: `apply_surface_strips` (`transform.rs:10520`),
   the full-drop filter (`:12014-12021`) and
   `remove_frozen_historical_reasoning` (`:12035`) may shorten `content`, and the
   overlay that follows still addresses blocks by their pre-removal `block_index`
@@ -45,7 +45,7 @@ dominance statement is a hypothesis, not a finding.
 - **The only defence is compiled out or compiled test-only.**
   [render-a-duplicate-tool-use-repair-is-release-only](#render-a-duplicate-tool-use-repair-is-release-only),
   [render-a-orphan-tool-arc-has-no-production-detection](#render-a-orphan-tool-arc-has-no-production-detection).
-  Two halves of one function pair at `transform.rs:11171-11305`, and the pairing
+  Two halves of one function pair at `transform.rs:11303-11437`, and the pairing
   is economic as well as diagnostic: `enforce_unique_tool_use_ids` runs in
   production at a cost comparable to the guard that does not, which is what makes
   the asymmetry look unintentional rather than a considered trade. Hypothesis: the
@@ -61,7 +61,7 @@ dominance statement is a hypothesis, not a finding.
   Both are about a `§N§` the agent cannot resolve, from opposite directions. The
   mint record is the property expected to hold, and it is what makes the durable
   numbering trustworthy; the Channel-2 record is a deliberate process-local
-  numbering (`transform.rs:9279-9281` says so) that reaches agent-visible bytes
+  numbering (`transform.rs:9411-9413` says so) that reaches agent-visible bytes
   through `format_reclaimable_hint` (`:9872`). Hypothesis: neither dominates,
   because the mint record's oracle is a pre-commit comparison against `tags`
   and the Channel-2 record's oracle is a post-render scan of served text against
@@ -97,14 +97,14 @@ dominance statement is a hypothesis, not a finding.
   reconstructed block id. The todo-pair record is the control in this cluster: it
   is the one injected thing with a retirement rule that actually holds, and it is
   the only one whose absent placement is a hard error
-  (`SyntheticTodoAnchorMissing`, `transform.rs:12125-12133`) rather than an
+  (`SyntheticTodoAnchorMissing`, `transform.rs:12257-12265`) rather than an
   absorbed skip.
 - **Idempotence delegated to the caller.**
   [nudge-b-opencode-channel2-arm-has-no-module-side-latch](#nudge-b-opencode-channel2-arm-has-no-module-side-latch),
   [nudge-b-channel2-retirement-is-caller-asserted](#nudge-b-channel2-retirement-is-caller-asserted).
   The two Channel-2 arms, and they are opposites rather than variants: one keeps a
   durable directive id, an arming watermark and a 10-minute lease
-  (`transform.rs:9435-9513`), the other writes nothing at all (`:9347-9365`).
+  (`transform.rs:9567-9645`), the other writes nothing at all (`:9347-9365`).
   Hypothesis: the OpenCode record is the more urgent by a wide margin, because it
   is the profile the shipped host sends (`rust-mode-transform.ts:1339`) and its
   failure mode is a `<system-reminder>` on every pass while pressure is high,
@@ -121,7 +121,7 @@ dominance statement is a hypothesis, not a finding.
   message or carries a marker its consumer reads. Hypothesis: the hint record
   dominates the pair record's check but not its consequence. The hint's envelope is
   demonstrably forgeable, and the module's own
-  `has_stacked_user_hint_augmentation` (`transform.rs:8989-8997`) is the proof, so
+  `has_stacked_user_hint_augmentation` (`transform.rs:9118-9126`) is the proof, so
   a check that rejects text-only markers rejects the pair's `synthetic_todo_`
   id prefix for the same reason. The consequence runs the other way: the pair is a
   whole assistant turn the model never took, with a `completed` status, which is a

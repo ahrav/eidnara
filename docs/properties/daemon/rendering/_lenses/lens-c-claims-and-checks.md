@@ -26,7 +26,7 @@ applied:
    (`scope-map-and-risk-ranking.md:526`), and 4b's inventory counts its 18 tests
    as its own (`../../transform/existing-checks.md:45`). This lens treats
    injection as boundary context: 4e owns where the synthetic todo pair is
-   *placed in the served array* (`transform.rs:11804-11833`, `:12091-12121`), not
+   *placed in the served array* (`transform.rs:11936-11965`, `:12091-12121`), not
    how the pair is built.
 2. **`wire.rs` is not 4e.** The map assigns `src/wire.rs` (1,279) to
    sub-part **4f** (`scope-map-and-risk-ranking.md:619`). It is cited here only
@@ -46,7 +46,7 @@ Two reference corrections to lens A, both minor and neither changing a finding:
 - Lens A cites `prompt_surface.rs:156-158` for `tool_manifest_falls_back`. The
   function is `:156-157` plus its closing brace at `:158`; the predicate is
   `:157`.
-- Lens A cites `transform.rs:11001-11006` for `BuiltOutput`. Correct: `struct
+- Lens A cites `transform.rs:11133-11138` for `BuiltOutput`. Correct: `struct
   BuiltOutput` opens at `:11001` and closes at `:11006`.
 
 **Every status below is `unaudited`.** Adequacy verdicts belong to
@@ -72,27 +72,27 @@ out of a release build; `NOT FOUND` means nothing in the tree enforces it.
 
 | # | Verbatim quote (source ref) | Implied property | Impl |
 | --- | --- | --- | --- |
-| 1 | "Each `tool_result` block must have a corresponding `tool_use`." (`transform.rs:11208`) | The served array contains no `tool_result` without its owner. | **NOT FOUND** in production. `assert_no_orphaned_tool_arcs` is `#[cfg(test)]` at `:11171`, and its only non-test-module call site is `#[cfg(test)]` at `:5486` |
-| 2 | "Each `tool_use` block must have a corresponding `tool_result` immediately after" (`transform.rs:11221`) | No served `tool_use` lacks an adjacent result. | **NOT FOUND** in production. Same guard |
-| 3 | "The normal ingress and render paths must keep tool-use ids unique; debug and test builds fail at the first violation so the originating path is fixed." (`transform.rs:11227-11228`) | The belt is a last resort, and a violation is loud. | `enforce_unique_tool_use_ids` `:11231-11305`, called at `:12147`. **Loud only in debug** (`debug_assert!` `:11246-11250`); the release arm at `:11251` repairs silently |
-| 4 | "(and its adjacent result) rather than trapping a live session in a deterministic provider-400 loop." (`transform.rs:11230`) | The release repair removes the later owner and its otherwise-orphaned result, and nothing else. | `:11258-11277` removes the pair; `:11297-11299` drops a message the removal emptied. Release only |
-| 5 | "served output contains duplicate tool_use ids: {duplicates:?}" (`transform.rs:11248`) | The returned array has no duplicate id. | **debug only** (`:11246-11250`). Release relies on the repair at `:11251` onward, which is never asserted |
-| 6 | "claude-code-anthropic synthetic prefix must not contain system-role messages" (`transform.rs:12143`) | No system-role message reaches the `m0`/`m1` prefix on the Claude Code leg. | **debug only** (`debug_assert!` `:12139-12144`) |
+| 1 | "Each `tool_result` block must have a corresponding `tool_use`." (`transform.rs:11340`) | The served array contains no `tool_result` without its owner. | **NOT FOUND** in production. `assert_no_orphaned_tool_arcs` is `#[cfg(test)]` at `:11171`, and its only non-test-module call site is `#[cfg(test)]` at `:5486` |
+| 2 | "Each `tool_use` block must have a corresponding `tool_result` immediately after" (`transform.rs:11353`) | No served `tool_use` lacks an adjacent result. | **NOT FOUND** in production. Same guard |
+| 3 | "The normal ingress and render paths must keep tool-use ids unique; debug and test builds fail at the first violation so the originating path is fixed." (`transform.rs:11359-11360`) | The belt is a last resort, and a violation is loud. | `enforce_unique_tool_use_ids` `:11231-11305`, called at `:12147`. **Loud only in debug** (`debug_assert!` `:11246-11250`); the release arm at `:11251` repairs silently |
+| 4 | "(and its adjacent result) rather than trapping a live session in a deterministic provider-400 loop." (`transform.rs:11362`) | The release repair removes the later owner and its otherwise-orphaned result, and nothing else. | `:11258-11277` removes the pair; `:11297-11299` drops a message the removal emptied. Release only |
+| 5 | "served output contains duplicate tool_use ids: {duplicates:?}" (`transform.rs:11380`) | The returned array has no duplicate id. | **debug only** (`:11246-11250`). Release relies on the repair at `:11251` onward, which is never asserted |
+| 6 | "claude-code-anthropic synthetic prefix must not contain system-role messages" (`transform.rs:12275`) | No system-role message reaches the `m0`/`m1` prefix on the Claude Code leg. | **debug only** (`debug_assert!` `:12139-12144`) |
 | 7 | "Shared rendered-tail hygiene metric for the module's Channel-1 and Channel-2 nudges." (`tail_hygiene.rs:1`) | `u` and `t` count tokens the render actually serves. | Partial. `measure_tail_hygiene` `:458-603` walks `projection.blocks`; render-aware for terse_text_compression (`:526`), Channel-1 reminder spans (`:527`, `:553`), drop sentinels (`:528`, `:555`, `:568`), reduced and sentinel arcs (`:505-507`) and `red:` targets (`:508`). **No strip class**: `strip:` appears 0 times in the file |
 | 8 | "Reconstructed each final live tail after its latest history_segment coverage boundary, applied persisted drops **and strip transforms**, then ran the same part-typed TypeScript hygiene walk used by the nudge baseline." (`docs/nudge-hygiene-calibration-2026-08-16.md:12`) | The calibrated `{U,T}` are post-strip. | **NOT FOUND** on the Rust side. The Rust walk has no strip handling, so the shipped numbers and the calibrated numbers are measured over different tails |
 | 9 | "Channel 1/2 `eidnara_reduce` nudges instead consume the persisted final-tail `{U,T}` hygiene baseline, excluding reasoning from both terms, so live pressure cannot silently escalate their severity." (`packages/pi-plugin/PARITY.md:291-294`) | Reasoning is out of both terms, and severity cannot be silently inflated. | First half implemented: the `Reasoning \| RedactedReasoning \| Opaque` arm returns `excluded_part` at `:583-585`. Second half contradicted by claim 8: a strip inflates `t`, which lowers severity, so the direction of the silent error is *under*-escalation |
-| 10 | "The `<session-history>` tag is always present (never omitted) so the provider prompt-cache has a stable breakpoint to anchor on — an absent block would shift the bytes after it and bust the cache." (`memory_render.rs:7-9`) | The `m0` block is never absent. | **NOT FOUND** as stated. `M0_EMPTY_BODY` guarantees non-empty *content*, but the splice pushes `m0` only when a frozen unit keyed `"m0"` exists (`transform.rs:11709-11734`), so an absent unit yields an absent block. Lens A observation 20 |
-| 11 | "m1 is the volatile half of the cached prefix and must never be fully empty, because the provider cache anchors a breakpoint at the m1 block and an empty block would shift it." (`memory_render.rs:320-322`) | `assemble_m1` never returns an empty string. | `assemble_m1` `:323-347`; the all-empty branch returns `placeholder` at `:341-343`. Same absent-unit gap as claim 10 at `transform.rs:11735-11755` |
+| 10 | "The `<session-history>` tag is always present (never omitted) so the provider prompt-cache has a stable breakpoint to anchor on — an absent block would shift the bytes after it and bust the cache." (`memory_render.rs:7-9`) | The `m0` block is never absent. | **NOT FOUND** as stated. `M0_EMPTY_BODY` guarantees non-empty *content*, but the splice pushes `m0` only when a frozen unit keyed `"m0"` exists (`transform.rs:11841-11866`), so an absent unit yields an absent block. Lens A observation 20 |
+| 11 | "m1 is the volatile half of the cached prefix and must never be fully empty, because the provider cache anchors a breakpoint at the m1 block and an empty block would shift it." (`memory_render.rs:320-322`) | `assemble_m1` never returns an empty string. | `assemble_m1` `:323-347`; the all-empty branch returns `placeholder` at `:341-343`. Same absent-unit gap as claim 10 at `transform.rs:11867-11887` |
 | 12 | "This row-purity is load-bearing for the m1 digest: `m1_revision_signal` uses `max_history_segment_seq` as the complete m1-SOFT leg for history_segments BECAUSE the only way these bytes change without a new sequence (a row mutation) routes to a HARD." (`memory_render.rs:357-360`) | `render_new_history_segments` bytes are a pure function of row fields, with no clock, age or pressure input. | `:361-375` calls `render_history_segment_at_tier(c, 1)` with a literal tier. The consumer is `m1_compose.rs:54`, which is 4b scope, so the invariant spans the 4b/4e boundary |
 | 13 | "the cache holds the served bytes" (implied by the render-once discipline at `transform.rs:1-16` and the `"serialized output cache drift"` assertion at `:5478`) | A `tail:{mid}` cache entry equals the bytes served for that mid. | **NOT FOUND**. Every `record_output_item` call (`:11725`, `:11746`, `:11821`, `:12077`, `:12108`) precedes `enforce_unique_tool_use_ids` at `:12147`, which can remove blocks and whole messages without touching `cache_entries`. Lens A contract-vs-code lead 4 |
 | 14 | "a token must be followed by whitespace or ASCII punctuation so malformed text is never partially consumed" (`transform.rs:8411-8412`) | Imitation stripping never eats part of a malformed tag, and code spans pass through verbatim. | `strip_leading_tag_imitations` `:8413-8452`, `well_formed_tag_suffix` `:8475-8490`. Counter-lead: when a whole line is only imitations, `:8443-8445` does not re-emit the trailing newline, so two authored lines merge. That is a content change the doc does not license |
-| 15 | "Remove exactly the prefix added for this block's registered number ... it never trims source whitespace or interprets another block's number." (`transform.rs:8400-8402`) | `strip_tag_prefix` is a byte-exact inverse of `prepend_tag`. | `strip_tag_prefix`, with `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` at `:8396`. Test `tag_prefix_strip_is_a_byte_exact_inverse` at `:22619` |
+| 15 | "Remove exactly the prefix added for this block's registered number ... it never trims source whitespace or interprets another block's number." (`transform.rs:8397-8402`) | `strip_tag_prefix` is a byte-exact inverse of `prepend_tag`. | `strip_tag_prefix`, with `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` at `:8396`. Test `tag_prefix_strip_is_a_byte_exact_inverse` at `:22619` |
 | 16 | "Stored provenance must still match the live carrier before a row can occupy a slot." (`transform.rs:8081`) | A stale tag row cannot occupy a protected overlay slot. | `newest_active_tag_block_ids` `:8082-8125`; `row.kind` and `row.source_bytes` compared at `:8111`, descending sort on `(tag_number, block_id)` at `:8114-8119` |
 | 17 | "Overlay edits mutate the typed kind in place, but `Serialize` prefers retained ingress bytes ... the edit never reaches the wire." (`transform.rs:8256-8260`) | Every overlay mutation clears the retained-bytes cache on both block and message. | `apply_tag_overlay_to_message` `:8208-8269`; `mark_modified()` at `:8255-8268` |
 | 18 | "never commits its speculative mints, so the next load sees a different set" (`transform.rs:7717`) | A rejected pass invalidates the mint-frontier memo rather than skipping untagged blocks. | Memo identity `:7712-7727`, `tagged_key` `:7841-7845`, cache read and write at `:8601-8619` |
 | 19 | "SQLite probes and row hydration always happen after the snapshot has been copied out." (`transform.rs:7545`) | The tag baseline cache lock is not held across store I/O. | **Invalidated**. The tag baseline cache and `load_cached_tags` are deleted; `load_window_tags` reads the window's tag rows with no process-global lock, checked by `window_tag_read_keeps_every_session_relative_tag_decision` and `every_pass_read_is_bounded_independent_of_history_size` |
 | 20 | "prompt_surface selected light, but built-in light assets are not available yet; using the byte-identical full guidance and tool descriptions until light assets ship." (`prompt_surface.rs:28`) | A light selection may silently serve full bytes, and the caller is told. | **Dead**. `GUIDANCE_LIGHT_PRIMARY`, `GUIDANCE_LIGHT_NO_REDUCE` and `TOOL_LIGHT_DESCRIPTIONS` are unconditionally `Some` at `:33-37`, so `:141` `fallback: light.is_none()` and `:157` are always false and all four consumers (`lib.rs:7594`, `:7599`, `:7600-7601`, `:7718`, `:7720`) are unreachable. Lens A record `render-a-light-surface-fallback-notice-never-served` |
-| 21 | "The last 20 tags stay protected until they age out." (`docs/specs/prompt-surface/light-mapping.md`, rule G-002 / line `L-G-QUEUE`; the same sentence is served to the model) | Exactly the newest 20 tags are exempt from reclamation. | Partial and unit-mismatched. `default_protected_tags()` returns `20` at `transform.rs:893-895`, and `protected_tag_numbers` (`tail_hygiene.rs:401-412`) takes the top `protected_tags` tag numbers. But the strip path converts it to a **message** count: `protected_start = req.messages.len() - protected_tags * 2` at `transform.rs:10198-10201`, gating `:10229`, `:10277` and `:10301`. The `* 2` has no comment and no stated derivation |
+| 21 | "The last 20 tags stay protected until they age out." (`docs/specs/prompt-surface/light-mapping.md`, rule G-002 / line `L-G-QUEUE`; the same sentence is served to the model) | Exactly the newest 20 tags are exempt from reclamation. | Partial and unit-mismatched. `default_protected_tags()` returns `20` at `transform.rs:893-895`, and `protected_tag_numbers` (`tail_hygiene.rs:401-412`) takes the top `protected_tags` tag numbers. But the strip path converts it to a **message** count: `protected_start = req.messages.len() - protected_tags * 2` at `transform.rs:10330-10333`, gating `:10229`, `:10277` and `:10301`. The `* 2` has no comment and no stated derivation |
 | 22 | "The byte-identity invariant that matters is intra-module determinism (same history_segments + budget → same bytes across passes); a differential golden cross-checks the v2 paraphrase path against the TS reference." (`decay_render.rs:10-12`) | The decay body is deterministic and TS-equivalent. | `render_golden_matches_reference` `:629` (7 cases), `render_tight_golden_matches_reference_with_real_estimator` `:787` (7 cases), `redacted_store_shape_matches_ts_at_real_history_budgets` `:663` (4 cases) |
 | 23 | "Keep the transformation order and ASCII word-boundary rules aligned with that source: the committed differential fixture is the compatibility contract." (`terse_text_compression.rs:5-6`) | TerseTextCompression compression is byte-for-byte equal to `terse_text_compression.ts`. | `differential_golden_matches_typescript_oracle` `:626`, over 42 cases in `testdata/terse_text_compression-golden.json`. This is the file's **only** test |
 | 24 | "attempts must never attach to (or purge) each other's runs." (`classify.rs:239`) | Derived ModelExecution child session ids are distinct per attempt identity. | `:235-273`; tests `child_ids_are_stable_but_lineage_scoped` `:292` and `child_ids_are_stable_per_attempt_and_distinct_across_attempt_identity` `:452` |
@@ -155,7 +155,7 @@ here and are not restated. Six further leads:
    message reserve.** Contract side: the shipped guidance line `L-G-QUEUE`
    (`docs/specs/prompt-surface/light-mapping.md`, rules G-002 through G-005) and
    its full-asset twin tell the model "The last 20 tags stay protected until they
-   age out". Code side: `transform.rs:10198-10201` computes
+   age out". Code side: `transform.rs:10330-10333` computes
    `protected_start = messages.len() - protected_tags * 2` and uses it as a
    *message index* threshold at `:10229`, `:10277` and `:10301`. Nothing states
    the two-messages-per-tag conversion, and nothing checks that the message
@@ -177,7 +177,7 @@ This is a first-class contract question for 4e, not an incidental detail, and it
 is the only place in the sub-part where the *observable behaviour of the served
 array* depends on the build profile.
 
-`enforce_unique_tool_use_ids` (`transform.rs:11231-11305`) is the last
+`enforce_unique_tool_use_ids` (`transform.rs:11363-11437`) is the last
 transformation applied to the whole array (`:12147`). It contains two mutually
 exclusive arms, so exactly one is compiled:
 
@@ -216,10 +216,10 @@ What each side of the divergence means:
 
 Two smaller divergences on the same axis, both inside the 4e scope:
 
-- `transform.rs:12139-12144`, `debug_assert!` with
+- `transform.rs:12271-12276`, `debug_assert!` with
   `"claude-code-anthropic synthetic prefix must not contain system-role messages"`.
   A release build serves the violating prefix.
-- `transform.rs:9115`, `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)`.
+- `transform.rs:9249`, `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)`.
   Compiled out of release, and trivially satisfied in debug: lens A's
   `render-a-user-hint-total-cap-cannot-bind` computes a maximum of 604 UTF-16
   units against the cap of 800 at `:110`. Re-verified here: `:113`
@@ -238,7 +238,7 @@ runtime assertions** in the 9,304 lines (see the guard census below).
 
 Nine, each stated somewhere and mechanically checked nowhere.
 
-1. **The `* 2` tag-to-message conversion** at `transform.rs:10201`. No comment,
+1. **The `* 2` tag-to-message conversion** at `transform.rs:10333`. No comment,
    no constant, no test. Lead 5 above.
 2. **The `nudge-hygiene-golden.json` regeneration discipline.** The Rust side
    recomputes the fixture hash (`tail_hygiene.rs:1035-1039`, message "committed
@@ -519,7 +519,7 @@ modules.
    It runs on no machine but a developer's, on request.
 
 **Consequence for every 4e record.** `Exercised: partial` means "a test exists on
-a developer's machine", and for `transform.rs:21514` it means "a test exists that
+a developer's machine", and for `transform.rs:21646` it means "a test exists that
 a developer's default `cargo test` does not compile". METHOD.md's `Exercised`
 vocabulary does not distinguish these from `not yet`. 4b, 4c, 4d, the scope map
 (`:681`) and lens A have all raised it. It is recorded here as needing a human
@@ -584,10 +584,10 @@ Measured over production lines only: `transform.rs:7511-12623` excluding
 
 | Site | Guard | In release? |
 | --- | --- | --- |
-| `transform.rs:11246-11250` | `debug_assert!` "served output contains duplicate tool_use ids" — the loud half of the belt | **No** |
-| `transform.rs:12139-12144` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" | **No** |
-| `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
-| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 604 against 800 | **No** |
+| `transform.rs:11378-11382` | `debug_assert!` "served output contains duplicate tool_use ids" — the loud half of the belt | **No** |
+| `transform.rs:12271-12276` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" | **No** |
+| `transform.rs:8391` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
+| `transform.rs:9249` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 604 against 800 | **No** |
 
 **Zero unconditional runtime assertions in 9,304 production lines.** The two
 `assert!` sites in the transform range, `:11206` and `:11219`, are inside
@@ -614,14 +614,14 @@ serializable"`, `"wire message metadata must serialize"` and
 holding up the `HashMap` iteration discussed below.
 
 **`.unwrap()`: 20, all infallible-by-construction regex compilation.**
-`transform.rs:9927`, `:9972`, `:10154` and `terse_text_compression.rs` 17 sites (`:180`, `:204`,
+`transform.rs:10059`, `:9972`, `:10154` and `terse_text_compression.rs` 17 sites (`:180`, `:204`,
 `:237`, `:242`, `:247` and neighbours), every one a `Regex::new(...)` inside a
 `get_or_init` over a literal pattern. Zero `.unwrap()` in `tail_hygiene.rs`,
 `decay_render.rs`, `memory_render.rs`, `classify.rs` or `prompt_surface.rs`
 production halves.
 
 **Diagnostics that replace a guard: two stderr writers.**
-`transform.rs:11241-11245` (`action=drop_later`, the only trace of a release-build
+`transform.rs:11373-11377` (`action=drop_later`, the only trace of a release-build
 content removal) and `prompt_surface.rs:150-153` (an ignored tool-description
 override). Neither has a response field and neither has a test.
 
@@ -633,7 +633,7 @@ three.
 **Typed rejection guards.** With no unconditional assertion anywhere, the
 enforcement in 4e is either a returned value or a diagnostic string. The two
 places that return a hard error on a rendering failure are
-`SyntheticTodoAnchorMissing` (`transform.rs:12125-12133`) — the only site in the
+`SyntheticTodoAnchorMissing` (`transform.rs:12257-12265`) — the only site in the
 splice where a placement failure is reported rather than absorbed — and
 `memory_render.rs`'s four typed claim rejections (`:91`, `:94`, `:101`, `:104`),
 which name the reason a mirrored claim was excluded. `classify.rs` carries the
@@ -659,7 +659,7 @@ the determinism side.
 Ranked by the gap between what the code decides and what any check proves.
 
 1. **The release-only duplicate repair is the quietest decision in 4e that
-   changes served bytes.** `transform.rs:11251-11302` removes blocks and whole
+   changes served bytes.** `transform.rs:11383-11434` removes blocks and whole
    messages from the final array. Its only report is an `eprintln!`. Its only
    test carries `#[cfg(not(debug_assertions))]` (`:21512`) and therefore does not
    compile under a default `cargo test`. Its sibling arm panics instead. And the
@@ -690,7 +690,7 @@ Ranked by the gap between what the code decides and what any check proves.
    pinned by a fixture and never checked together.
 
 4. **The strip surface has no hygiene test and no strip literal anywhere in the
-   metric.** `new_frozen_strip_units` (`transform.rs:10181-10339`) produces five
+   metric.** `new_frozen_strip_units` (`transform.rs:10313-10471`) produces five
    strip classes, `apply_surface_strips` (`:10371-10458`) can collapse a whole
    message to one sentinel block (`:10388-10391`) or empty a stale reduce
    (`:10454-10457`), and `measure_tail_hygiene` knows about none of it. The
@@ -713,7 +713,7 @@ Ranked by the gap between what the code decides and what any check proves.
    validates the assets the notice claims do not exist.
 
 7. **The Channel-2 derived tag numbering can name a handle with no durable row,
-   and nothing checks it.** `active_tags_for_channel2` (`transform.rs:9282-9313`)
+   and nothing checks it.** `active_tags_for_channel2` (`transform.rs:9414-9445`)
    numbers taggable tail blocks `1..n` when no stored row survives, deliberately
    per the comment at `:9279-9281`, and that numbering reaches agent-visible
    bytes through `oldest_channel2_hint` (`:9534-9547`, called `:9396`) and
@@ -760,7 +760,7 @@ Ranked by the gap between what the code decides and what any check proves.
   artifact is not necessarily the shipped one. This decides which of two
   materially different served-array behaviours is in production. Unresolved,
   needs the release pipeline. Lens A left the same question open.
-- Is the debug-versus-release split at `transform.rs:11251`/`:11303` intended to
+- Is the debug-versus-release split at `transform.rs:11383`/`:11303` intended to
   be a *behavioural* contract, or was it intended as a debug-time diagnostic on
   top of one behaviour? The prose at `:11227-11230` reads as the latter but the
   code implements the former, and a release build never executes the assertion
@@ -780,7 +780,7 @@ Ranked by the gap between what the code decides and what any check proves.
   TypeScript generator. (needs human input)
 - Why is `memory-render-golden.json` generated and unread? Either a consumer was
   removed or one was never written. Unresolved, needs the author or the history.
-- Is `protected_tags * 2` (`transform.rs:10201`) a deliberate
+- Is `protected_tags * 2` (`transform.rs:10333`) a deliberate
   two-messages-per-tag heuristic, and is the resulting message window ever
   smaller than 20 tags? The served guidance promises 20 protected tags. Needs the
   author. (needs human input)
@@ -790,6 +790,6 @@ Ranked by the gap between what the code decides and what any check proves.
   regression test pinning the assumption would be cheap; whether the invariant
   should be enforced locally instead is a design choice. (needs human input)
 - Whether a never-executed test counts as `Exercised: partial` governs all 277
-  in-crate checks in this sub-part, and for `transform.rs:21514` the test does not
+  in-crate checks in this sub-part, and for `transform.rs:21646` the test does not
   even compile under a default `cargo test`. 4b, 4c, 4d, the scope map (`:681`)
   and lens A all raised it. (needs human input)
