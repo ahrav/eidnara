@@ -10,11 +10,13 @@
  * record-and-forward provider mode published, with the limits that mode enforced.
  */
 
-import { readdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { canonicalJson } from "../canonical-json";
 import type { BEHAVIORAL_VERDICTS } from "../incident-pool/report";
 import type { FidelityCorpus, FidelityScenario } from "./corpus";
+
+// Loaded through `getBuiltinModule` for the startup cost noted in `../atomic-publish`.
+const fs = process.getBuiltinModule("node:fs");
 
 export const ARM_SCHEMA = "eidnara.compression-fidelity-arm/v1";
 export const MANIFEST_SCHEMA = "eidnara.compression-fidelity-manifest/v1";
@@ -124,7 +126,7 @@ export async function readJson(
 ): Promise<{ bytes: Buffer; value: unknown } | { error: string }> {
     let bytes: Buffer;
     try {
-        bytes = await readFile(path);
+        bytes = await fs.promises.readFile(path);
     } catch (error) {
         return { error: `${path} is unreadable: ${(error as Error).message}` };
     }
@@ -143,15 +145,6 @@ export function scenarios(
     corpus: FidelityCorpus,
 ): Array<{ case: string; scenario: FidelityScenario }> {
     return corpus.cases.flatMap((c) => c.scenarios.map((scenario) => ({ case: c.id, scenario })));
-}
-
-/** `value` as JSON with object keys sorted, so equal values compare equal. */
-export function canonical(value: unknown): string {
-    return JSON.stringify(value, (_key, v) =>
-        record(v)
-            ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
-            : v,
-    );
 }
 
 export function armLabel(arm: Arm): string {
@@ -234,12 +227,25 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
 
 /** The system prompt hashes an observation claims its producer ran. */
 function systemHashes(evidence: Evidence): string[] {
-    const attempts = Array.isArray(evidence.detail.attempts) ? evidence.detail.attempts : [];
-    return attempts.filter(record).flatMap((attempt) => {
+    return attemptsOf(evidence).flatMap((attempt) => {
         if (typeof attempt.system_sha256 === "string") return [attempt.system_sha256];
         if (typeof attempt.system === "string") return [sha256(attempt.system)];
         return [];
     });
+}
+
+function attemptsOf(evidence: Evidence): Json[] {
+    return Array.isArray(evidence.detail.attempts) ? evidence.detail.attempts.filter(record) : [];
+}
+
+function outputOrigins(evidence: Evidence): string[] {
+    return [evidence.detail, ...attemptsOf(evidence)].flatMap((holder) =>
+        typeof holder.output_origin === "string" ? [holder.output_origin] : [],
+    );
+}
+
+function servedTierOf(evidence: Evidence): unknown {
+    return evidence.detail.served_tier ?? evidence.detail.tier;
 }
 
 function checkForwarding(file: string, report: ForwardingEvidence): string[] {
@@ -277,12 +283,12 @@ export async function loadArm(
     };
     let names: string[];
     try {
-        names = readdirSync(dir).sort();
+        names = fs.readdirSync(dir).sort();
     } catch {
         arm.errors.push(`${dir} is unreadable`);
         return arm;
     }
-    const scenarioCase = new Map(scenarios(corpus).map((s) => [s.scenario.id, s.case]));
+    const scenarioEntry = new Map(scenarios(corpus).map((s) => [s.scenario.id, s]));
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
     // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
     // either left behind means a publication never finished.
@@ -348,25 +354,36 @@ export async function loadArm(
             arm.errors.push(`${name} has a malformed scenario label ${String(value.scenario)}`);
             continue;
         }
+        const source = String(value.source);
+        const sourceLabel = label !== null && !scenarioEntry.has(label) && sourceCase.has(label);
+        if (sourceLabel && label !== source) {
+            arm.errors.push(`${name} labels source ${label} but names source ${source}`);
+            continue;
+        }
         const evidence: Evidence = {
             file: name,
             sha256: sha256(read.bytes),
             owner,
             case: String(value.case),
-            source: String(value.source),
-            scenario: label ?? null,
+            source,
+            scenario: sourceLabel ? null : (label ?? null),
             variant,
             stage: String(value.stage),
             terminal: String(value.terminal),
             markers: strings(value.markers),
             detail: record(value.detail) ? value.detail : {},
         };
-        const caseOf = evidence.scenario
-            ? scenarioCase.get(evidence.scenario)
-            : sourceCase.get(evidence.source);
+        const entry = evidence.scenario ? scenarioEntry.get(evidence.scenario) : undefined;
+        const caseOf = evidence.scenario ? entry?.case : sourceCase.get(evidence.source);
         if (caseOf !== evidence.case) {
             arm.errors.push(
                 `${name} names case ${evidence.case}, where the item is in ${caseOf ?? "no case"}`,
+            );
+            continue;
+        }
+        if (entry && entry.scenario.source !== evidence.source) {
+            arm.errors.push(
+                `${name} names source ${evidence.source}, where ${entry.scenario.id} is on ${entry.scenario.source}`,
             );
             continue;
         }
@@ -412,10 +429,10 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             String(e.detail.output_origin ?? "").startsWith("real"),
     );
     for (const evidence of arm.evidence) {
-        if (String(evidence.detail.output_origin ?? "").includes("scripted")) {
+        if (outputOrigins(evidence).some((origin) => origin.includes("scripted"))) {
             errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
         }
-        if (!record(evidence.detail.serving)) continue;
+        if (servedTierOf(evidence) === undefined) continue;
         const served = evidence.detail.generation_capture_sha256;
         if (!captures.some((c) => c.sha256 === served && c.source === evidence.source)) {
             errors.push(
@@ -440,7 +457,7 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
     // tier sparser than the curve's, the oracle that witness documents; every other observation
     // must serve the corpus tier.
     const results = evidence.flatMap((e) => {
-        const tier = e.detail.served_tier ?? e.detail.tier;
+        const tier = servedTierOf(e);
         if (typeof tier !== "string") return [];
         const curve = e.detail.curve_tier;
         if (
@@ -510,7 +527,7 @@ export function assembleEvidence(input: {
                 if (!report.complete) {
                     errors.push(`${file} is incomplete: ${report.incomplete_reasons.join("; ")}`);
                 }
-                if (canonical(report.limits) !== canonical(arm.config?.limits)) {
+                if (canonicalJson(report.limits) !== canonicalJson(arm.config?.limits)) {
                     errors.push(`${file} ran limits other than the arm's`);
                 }
             }
@@ -544,8 +561,8 @@ export function assembleEvidence(input: {
         refused.push("the arms reached different scenario sets");
     }
     for (const field of HELD_EQUAL) {
-        const before = canonical(input.baseline.config?.[field] ?? null);
-        const after = canonical(input.candidate.config?.[field] ?? null);
+        const before = canonicalJson(input.baseline.config?.[field] ?? null);
+        const after = canonicalJson(input.candidate.config?.[field] ?? null);
         if (before !== after) refused.push(`the arms differ in ${field}`);
     }
     const manifest = {

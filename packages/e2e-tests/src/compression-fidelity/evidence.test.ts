@@ -40,6 +40,9 @@ async function assemble(
     });
 }
 
+const captureOf = (dir: string, source: string) =>
+    sha256(readFileSync(join(dir, `real.${source}.json`)));
+
 const errorsOf = (assembled: Awaited<ReturnType<typeof assemble>>) =>
     assembled.arms[0]?.identity_errors.join("\n") ?? "";
 const rowOf = (assembled: Awaited<ReturnType<typeof assemble>>, scenario: string | undefined) =>
@@ -202,7 +205,10 @@ describe("evidence identity and completeness", () => {
                     scenario: `${entry?.s.id}@p1-only`,
                     stage: "aging",
                     terminal: "served",
-                    detail: { served_tier: "p5" },
+                    detail: {
+                        served_tier: "p5",
+                        generation_capture_sha256: captureOf(dir, entry?.s.source ?? ""),
+                    },
                 });
                 write(dir, "judge.json", {
                     ...base,
@@ -251,6 +257,118 @@ describe("evidence identity and completeness", () => {
         });
         expect(errorsOf(assembled)).toContain("delivery.dir.json is unreadable: EISDIR");
         expect(errorsOf(assembled)).toContain("delivery.broken.json is not JSON");
+    });
+
+    test("a stage labeled with its own source ID is source-level evidence", async () => {
+        const stage = (scenario: string, source: string) => (dir: string) =>
+            write(dir, "opencode-delivery.C2.C2.V2.m1.json", {
+                schema_version: 1,
+                corpus_sha256: SHA,
+                owner: "opencode-delivery",
+                case: "C2",
+                source,
+                scenario,
+                stage: "m1",
+                terminal: "served",
+                markers: ["cf-delivery-m1-published-input"],
+                detail: {
+                    served_tier: "p1",
+                    curve_tier: "p1",
+                    generation_capture_sha256: captureOf(dir, source),
+                },
+            });
+        const labeled = await assemble(scratch(), { tamper: stage("C2.V2", "C2.V2") });
+        expect(labeled.arms[0]?.identity_errors).toEqual([]);
+        expect(
+            labeled.manifest.arms[0]?.observations.find(
+                (o) => o.file === "opencode-delivery.C2.C2.V2.m1.json",
+            ),
+        ).toMatchObject({ case: "C2", source: "C2.V2", scenario: null, stage: "m1" });
+        const crossed = await assemble(scratch(), { tamper: stage("C2.V2", "C2.V1") });
+        expect(errorsOf(crossed)).toContain(
+            "opencode-delivery.C2.C2.V2.m1.json labels source C2.V2 but names source C2.V1",
+        );
+    });
+
+    test("a scenario observation must name the source its corpus scenario is on", async () => {
+        const scenario = allScenarios.find(({ s }) => s.id === "C2.S6");
+        const path = (dir: string) => join(dir, `delivery.${scenario?.s.id}.json`);
+        const crossed = await assemble(scratch(), {
+            tamper: (dir) => {
+                const value = JSON.parse(readFileSync(path(dir), "utf8"));
+                value.source = "C2.V1";
+                value.detail.generation_capture_sha256 = captureOf(dir, "C2.V1");
+                writeFileSync(path(dir), JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(crossed)).toContain(
+            `delivery.${scenario?.s.id}.json names source C2.V1, where ${scenario?.s.id} is on C2.V2`,
+        );
+        const copied = await assemble(scratch(), {
+            tamper: (dir) => {
+                const value = JSON.parse(readFileSync(path(dir), "utf8"));
+                writeFileSync(
+                    join(dir, "delivery.copy.json"),
+                    JSON.stringify({ ...value, source: "bogus" }),
+                );
+            },
+        });
+        expect(errorsOf(copied)).toContain(
+            `delivery.copy.json names source bogus, where ${scenario?.s.id} is on C2.V2`,
+        );
+        expect(rowOf(copied, scenario?.s.id)?.execution.outcomes).toHaveLength(1);
+    });
+});
+
+describe("evidence generation origin", () => {
+    test("a real arm's delivery in the witness record shape must name its real capture", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail = {
+                    served_tier: scenario?.serving.tier,
+                    curve_tier: scenario?.serving.tier,
+                    pass: { decision: "HARD", applied: true },
+                };
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            `delivery.${scenario?.id}.json names no published real capture of ${scenario?.source} it served`,
+        );
+    });
+
+    test("a scripted attempt recorded per attempt is scripted output in a real arm", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                write(dir, "replay.generation.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "daemon.compression_fidelity.replay",
+                    case: corpus.cases[0]?.id,
+                    source,
+                    scenario: null,
+                    stage: "generation",
+                    terminal: "published",
+                    markers: [],
+                    detail: {
+                        attempts: [
+                            {
+                                attempt: 1,
+                                system_sha256: sha256("summarizer system prompt"),
+                                output_origin: "scripted approved example",
+                            },
+                        ],
+                    },
+                });
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            "replay.generation.json carries scripted output in an arm labeled real",
+        );
     });
 });
 
@@ -350,6 +468,18 @@ describe("evidence comparison refusals", () => {
             },
         });
         expect(same.refused).toEqual([]);
+        const unicode = scratch();
+        const composed = await assemble(unicode, {
+            tamper: (dir) => {
+                for (const arm of [dir, join(unicode, "candidate")]) {
+                    const path = join(arm, "arm.json");
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    const settings = arm === dir ? { é: 1, "e\u0301": 2 } : { "e\u0301": 2, é: 1 };
+                    writeFileSync(path, JSON.stringify({ ...value, settings }));
+                }
+            },
+        });
+        expect(composed.refused).toEqual([]);
         const prompt = await assemble(scratch(), {
             candidate: { system: "summarizer system prompt" },
         });

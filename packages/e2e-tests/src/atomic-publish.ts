@@ -1,6 +1,9 @@
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+// `process.getBuiltinModule` returns the `node:fs` module object. Under Bun, a static `import`
+// of `node:fs` adds about 4 ms to process startup.
+const { existsSync, mkdirSync, realpathSync, renameSync, statSync, writeFileSync } =
+    process.getBuiltinModule("node:fs");
 
 export function publishJsonAtomically(
     value: unknown,
@@ -8,7 +11,8 @@ export function publishJsonAtomically(
     options?: { mode?: number },
 ): void {
     mkdirSync(dirname(path), { recursive: true });
-    const temp = `${path}.tmp-${randomBytes(6).toString("hex")}`;
+    const suffix = Buffer.from(crypto.getRandomValues(new Uint8Array(6))).toString("hex");
+    const temp = `${path}.tmp-${suffix}`;
     writeFileSync(temp, `${JSON.stringify(value, null, 4)}\n`, {
         mode: options?.mode ?? 0o644,
     });
