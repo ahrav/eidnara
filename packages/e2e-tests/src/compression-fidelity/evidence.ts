@@ -59,6 +59,8 @@ const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly 
         failed: ["unsettled", "validation_rejected"],
     },
 };
+/** The delivery terminals the memory campaign emits on its `memory_excluded` scenario alone. */
+const MEMORY_TERMINALS = ["excluded", "discoverable"];
 const executed = (e: { owner: string; terminal: string }) =>
     TERMINALS[e.owner]?.executed.includes(e.terminal) ?? false;
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
@@ -746,6 +748,16 @@ export async function loadArm(
         const terminals = TERMINALS[owner];
         if (!terminals || ![...terminals.executed, ...terminals.failed].includes(value.terminal)) {
             arm.errors.push(`${name} has terminal ${value.terminal}, which ${owner} does not emit`);
+            continue;
+        }
+        if (
+            MEMORY_TERMINALS.includes(value.terminal) &&
+            (label === null ||
+                scenarioEntry.get(label)?.scenario.serving.path !== "memory_excluded")
+        ) {
+            arm.errors.push(
+                `${name} has terminal ${value.terminal}, which the memory campaign emits on a memory_excluded scenario only`,
+            );
             continue;
         }
         if (!record(value.detail)) {

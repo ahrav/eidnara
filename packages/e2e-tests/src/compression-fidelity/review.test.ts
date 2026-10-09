@@ -571,7 +571,7 @@ describe("eval:compression-fidelity gates", () => {
                         source: entry?.s.source,
                         scenario: entry?.s.id,
                         stage: "served-again",
-                        terminal: "discoverable",
+                        terminal: "served",
                         markers: ["cf-recovery-search"],
                         detail: {},
                     });
@@ -637,7 +637,7 @@ describe("eval:compression-fidelity gates", () => {
                     source: entry?.s.source,
                     scenario: entry?.s.id,
                     stage: "recovery-eidnara-search",
-                    terminal: "discoverable",
+                    terminal: "served",
                     markers: [],
                     detail: { calls: -1, result_utf8_bytes: -400 },
                 });
@@ -758,7 +758,7 @@ describe("eval:compression-fidelity gates", () => {
                     source: entry?.s.source,
                     scenario,
                     stage: "recovery-eidnara-search",
-                    terminal: "discoverable",
+                    terminal: "served",
                     markers: [],
                     detail: { calls: 1, result_utf8_bytes: 400 },
                 });
@@ -963,7 +963,7 @@ describe("eval:compression-fidelity judgments", () => {
             source: scenario?.source,
             scenario: scenario?.id,
             stage: "recovery-eidnara-search",
-            terminal: "discoverable",
+            terminal: "served",
             markers: [],
             detail: { calls: 1, result_utf8_bytes: 400, result_carries_memory: true },
         });
@@ -995,7 +995,7 @@ describe("eval:compression-fidelity judgments", () => {
                 source: scenario?.source,
                 scenario: scenario?.id,
                 stage: "recovery-eidnara-search",
-                terminal: "discoverable",
+                terminal: "served",
                 markers: [],
                 detail,
             });
