@@ -354,7 +354,8 @@ const count = (v: unknown): v is number => typeof v === "number" && Number.isInt
 /** The admission branches that ran an admission check; `none` ran none and charges nothing. */
 const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown"];
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
-    ["request_body_utf8_bytes", measurement],
+    // A request the producer measured with `Buffer.byteLength` is a positive whole number.
+    ["request_body_utf8_bytes", (v) => count(v) && v > 0],
     ["admission", (v) => typeof v === "string" && ADMISSIONS.includes(v)],
     ["invocation_bytes", count],
     ["invocation_charged_tokens", count],

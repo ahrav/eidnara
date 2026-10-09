@@ -912,6 +912,8 @@ describe("eval:compression-fidelity gates", () => {
             [{ ...SERVING, raw_source_leaks: 1 }, "raw_source_leaks"],
             [{ ...SERVING, invocation_charged_tokens: 11_000 }, "invocation_charged_tokens"],
             [{ ...SERVING, invocation_bytes: 0, invocation_charged_tokens: 0 }, "invocation_bytes"],
+            [{ ...SERVING, request_body_utf8_bytes: 0 }, "request_body_utf8_bytes"],
+            [{ ...SERVING, request_body_utf8_bytes: 40_000.5 }, "request_body_utf8_bytes"],
             [{ ...SERVING, invocation_bytes: 39_000.5 }, "invocation_bytes"],
             [{ ...SERVING, serving_kind: "warm_repeat" }, "serving_kind"],
             [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
