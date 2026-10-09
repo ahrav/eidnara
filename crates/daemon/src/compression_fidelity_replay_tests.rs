@@ -1396,6 +1396,8 @@ struct RecordedAttempt {
     temperature: f64,
     run_id: Option<String>,
     start_error: Option<String>,
+    /// Whether a start error proves the host committed no run; `None` without a start error.
+    start_effect_proven: Option<bool>,
     outputs: Vec<RecordedOutput>,
     /// The firing's own `cancel` of this run, when it made one.
     cancel: Option<RecordedCancel>,
@@ -1493,7 +1495,11 @@ impl RecordingDriver {
     ) {
         match started {
             Ok(handle) => attempt.run_id = Some(handle.run_id.clone()),
-            Err(error) => attempt.start_error = Some(format!("{error:?}")),
+            Err(error) => {
+                attempt.start_error = Some(format!("{error:?}"));
+                attempt.start_effect_proven =
+                    Some(crate::history_summarizer::start_effect_proven(error));
+            }
         }
         self.attempts.lock().unwrap().push(attempt);
     }
@@ -1723,18 +1729,29 @@ async fn capture_sources(
         } else {
             wait_for_first_starts(&recording, START_QUIESCE).await
         };
-        let rows = store.load_history_segments("ses").unwrap();
-        let attempts = attempts.lock().unwrap().clone();
         // Run lifetime is detached from the waiter the timeout dropped; `run.cancel` ends it.
         // A settled firing's own cancel counts only when the host confirmed it.
         let connect = recording.connected.lock().unwrap().clone();
-        let cancelled_runs = cancel_unconfirmed_runs(&factory, connect, &attempts).await;
+        let cancelled_runs = {
+            let attempts = attempts.lock().unwrap().clone();
+            cancel_unconfirmed_runs(&factory, connect, &attempts).await
+        };
+        // A confirmed cancel ends the firing's wait with a terminal, which the firing records
+        // before it settles; the record is built after that settling.
+        let settled_after_cancel = if cancelled_runs.iter().any(|o| o["cancelled"] == true) {
+            let grace = tokio::time::Instant::now() + SETTLE_AFTER_CANCEL;
+            wait_settled(&store, &attempts, grace).await
+        } else {
+            settled
+        };
+        let rows = store.load_history_segments("ses").unwrap();
+        let attempts = attempts.lock().unwrap().clone();
         // A run the host has not confirmed stopped may still be generating, so no later source
         // starts another one.
         let capture_stopped = before_first_start > 0
             || cancelled_runs
                 .iter()
-                .any(|outcome| outcome["cancelled"] != true);
+                .any(|outcome| outcome["cancelled"] != true && outcome["session_purged"] != true);
         let answered = attempts
             .iter()
             .any(|attempt| attempt.outputs.iter().any(|output| output.text.is_some()));
@@ -1759,6 +1776,7 @@ async fn capture_sources(
                 "fired": fired,
                 "transform_returned": transform_returned,
                 "settled": settled,
+                "settled_after_cancel": settled_after_cancel,
                 "cancelled_runs": cancelled_runs,
                 "firings_before_first_start_at_cancel": before_first_start,
                 "capture_stopped": capture_stopped,
@@ -1791,6 +1809,8 @@ async fn capture_sources(
 const START_QUIESCE: Duration = Duration::from_secs(75);
 /// A spawned firing calls `connect` within this grace or it was never spawned.
 const CONNECT_GRACE: Duration = Duration::from_secs(2);
+/// A cancelled firing records its terminal and settles within this grace.
+const SETTLE_AFTER_CANCEL: Duration = Duration::from_secs(10);
 
 /// Polls until every firing has either passed its first start or been dropped, or `budget`
 /// passes, and returns the count still before its first start. A firing spawned just before
@@ -1813,14 +1833,16 @@ async fn wait_for_first_starts(recording: &RecordingFactory, budget: Duration) -
     }
 }
 
-/// Cancels, through one fresh connection made with the firing's connect arguments, every
-/// started run that drained no model output and whose own cancel the host did not confirm.
+/// Through one fresh connection made with the firing's connect arguments: cancels every
+/// started run that drained no model output and whose own cancel the host did not confirm, and
+/// purges the producer session of every start error that does not prove the host committed no
+/// run, since such a run has no id to cancel.
 async fn cancel_unconfirmed_runs(
     factory: &Arc<dyn HistorySummarizerProducerFactory>,
     connect: Option<ConnectArgs>,
     attempts: &[RecordedAttempt],
 ) -> Vec<Value> {
-    let undrained: Vec<(&str, &str)> = attempts
+    let undrained: Vec<(&str, Option<&str>)> = attempts
         .iter()
         .filter(|attempt| !attempt.outputs.iter().any(|output| output.text.is_some()))
         .filter(|attempt| {
@@ -1829,17 +1851,20 @@ async fn cancel_unconfirmed_runs(
                 .as_ref()
                 .is_some_and(|cancel| cancel.confirmed)
         })
-        .filter_map(|attempt| Some((attempt.session_id.as_str(), attempt.run_id.as_deref()?)))
+        .filter(|attempt| attempt.run_id.is_some() || attempt.start_effect_proven == Some(false))
+        .map(|attempt| (attempt.session_id.as_str(), attempt.run_id.as_deref()))
         .collect();
     if undrained.is_empty() {
         return Vec::new();
     }
-    let outcome = |run_id: &str, result: Result<(), HistorySummarizerProducerError>| {
-        json!({
-            "run_id": run_id,
-            "cancelled": result.is_ok(),
-            "error": result.err().map(|error| format!("{error:?}")),
-        })
+    let outcome = |run_id: Option<&str>, result: Result<(), HistorySummarizerProducerError>| {
+        let error = result.as_ref().err().map(|error| format!("{error:?}"));
+        match run_id {
+            Some(run_id) => {
+                json!({ "run_id": run_id, "cancelled": result.is_ok(), "error": error })
+            }
+            None => json!({ "run_id": null, "session_purged": result.is_ok(), "error": error }),
+        }
     };
     let connect = connect.expect("a started run implies a recorded connect");
     let mut driver = match factory
@@ -1855,18 +1880,27 @@ async fn cancel_unconfirmed_runs(
             let detail = format!("cancel connect: {error:?}");
             return undrained
                 .iter()
-                .map(|(_, run_id)| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
+                .map(|(_, run_id)| {
+                    outcome(
+                        *run_id,
+                        Err(HistorySummarizerProducerError::Protocol(detail.clone())),
+                    )
+                })
                 .collect();
         }
     };
     let mut outcomes = Vec::with_capacity(undrained.len());
     for (session_id, run_id) in undrained {
-        // `cancel` travels the session-scoped command route, so the run's session is bound first.
-        let cancelled = match driver.bind_session(session_id).await {
-            Ok(()) => driver.cancel(run_id).await,
-            Err(error) => Err(error),
+        let result = match run_id {
+            // `cancel` travels the session-scoped command route, so the run's session is bound
+            // first.
+            Some(run_id) => match driver.bind_session(session_id).await {
+                Ok(()) => driver.cancel(run_id).await,
+                Err(error) => Err(error),
+            },
+            None => driver.purge_session(session_id).await,
         };
-        outcomes.push(outcome(run_id, cancelled));
+        outcomes.push(outcome(run_id, result));
     }
     if let Err(error) = driver.close().await {
         eprintln!("compression fidelity capture: cancel connection close failed: {error:?}");
@@ -1922,22 +1956,27 @@ fn private_capture_dir(dir: &Path) -> PathBuf {
     );
     // Every existing ancestor is owned by this user or root and is closed to group and other
     // writes or sticky, so no other local user can swap the checked directory for a symlink
-    // between the check and the write.
+    // between the check and the write. The check runs before creation and again after, so a
+    // component another user created in between is refused rather than trusted.
     let uid = rustix::process::getuid().as_raw();
-    for ancestor in real.ancestors().filter(|a| a.exists()) {
-        let meta = std::fs::metadata(ancestor).unwrap();
-        let mode = meta.permissions().mode();
-        assert!(
-            (meta.uid() == uid || meta.uid() == 0) && (mode & 0o022 == 0 || mode & 0o1000 != 0),
-            "{} is writable by others or not owned by this user or root",
-            ancestor.display()
-        );
-    }
+    let require_trusted_ancestors = |real: &Path| {
+        for ancestor in real.ancestors().filter(|a| a.exists()) {
+            let meta = std::fs::metadata(ancestor).unwrap();
+            let mode = meta.permissions().mode();
+            assert!(
+                (meta.uid() == uid || meta.uid() == 0) && (mode & 0o022 == 0 || mode & 0o1000 != 0),
+                "{} is writable by others or not owned by this user or root",
+                ancestor.display()
+            );
+        }
+    };
+    require_trusted_ancestors(&real);
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&real)
         .unwrap();
+    require_trusted_ancestors(&real);
     let meta = std::fs::metadata(&real).unwrap();
     assert!(
         meta.permissions().mode() & 0o777 == 0o700
@@ -2075,14 +2114,19 @@ async fn a_timed_out_capture_cancels_its_started_runs() {
     let started: Vec<String> = (1..=records.len()).map(|n| format!("run-{n}")).collect();
     let attempts = producer.attempts.lock().unwrap().clone();
     assert_eq!(attempts.len(), records.len());
+    // The capture's cancel ends the firing's wait, and the firing then cancels once more on its
+    // own error path, so each run is cancelled through its session by both.
+    let cancels = producer.cancels.lock().unwrap().clone();
+    let expected: Vec<String> = attempts
+        .iter()
+        .zip(&started)
+        .map(|(attempt, run_id)| format!("{}:{run_id}", attempt.session_id))
+        .collect();
+    let mut distinct = cancels.clone();
+    distinct.dedup();
     assert_eq!(
-        producer.cancels.lock().unwrap().clone(),
-        attempts
-            .iter()
-            .zip(&started)
-            .map(|(attempt, run_id)| format!("{}:{run_id}", attempt.session_id))
-            .collect::<Vec<_>>(),
-        "every run that outlasted its wait is cancelled once through its own session"
+        distinct, expected,
+        "every run that outlasted its wait is cancelled through its own session: {cancels:?}"
     );
     let dir = tempfile::tempdir().unwrap();
     for (record, run_id) in records.iter().zip(&started) {
@@ -2126,7 +2170,8 @@ async fn a_start_in_flight_at_the_deadline_is_still_cancelled() {
     .await;
     release.await.unwrap();
     assert_eq!(records.len(), sources().count());
-    let cancels = producer.cancels.lock().unwrap().clone();
+    let mut cancels = producer.cancels.lock().unwrap().clone();
+    cancels.dedup();
     assert_eq!(
         cancels.len(),
         records.len(),
@@ -2167,7 +2212,8 @@ async fn a_firing_still_connecting_at_the_deadline_is_still_cancelled() {
     .await;
     release.await.unwrap();
     assert_eq!(records.len(), sources().count());
-    let cancels = producer.cancels.lock().unwrap().clone();
+    let mut cancels = producer.cancels.lock().unwrap().clone();
+    cancels.dedup();
     assert_eq!(cancels.len(), records.len(), "{cancels:?}");
     assert!(cancels[0].ends_with(":run-1"), "{cancels:?}");
     assert_eq!(records[0].detail["attempt_count"], 1);
@@ -2222,6 +2268,105 @@ async fn a_failed_in_firing_cancel_is_retried_before_the_next_source() {
         "the firing's cancel and the capture's retry: {cancels:?}"
     );
     assert!(cancels.iter().all(|cancel| cancel.ends_with(":run-1")));
+}
+
+/// A start error that does not prove the request never reached the host leaves a run the
+/// capture cannot name, so the producer session is purged before the next source.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unproven_start_failure_purges_the_session_before_the_next_source() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .start_errors
+        .lock()
+        .unwrap()
+        .push_back(Err(HistorySummarizerProducerError::TimedOut));
+    producer.outputs.lock().unwrap().extend(
+        sources()
+            .skip(1)
+            .map(|(_, source)| source.approved_example.clone()),
+    );
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records =
+        capture_sources(factory, "probe/model", "scripted", Duration::from_secs(10)).await;
+    let first = &records[0].detail;
+    assert_eq!(records.len(), sources().count(), "{first}");
+    let attempt = &first["attempts"][0];
+    assert_eq!(attempt["run_id"], Value::Null);
+    assert_eq!(attempt["start_error"], "TimedOut");
+    assert_eq!(attempt["start_effect_proven"], false);
+    let purges = producer.purges.lock().unwrap().clone();
+    assert_eq!(
+        purges,
+        vec![attempt["session_id"].as_str().unwrap().to_owned()]
+    );
+    assert_eq!(
+        first["cancelled_runs"],
+        json!([{ "run_id": null, "session_purged": true, "error": null }])
+    );
+    assert_eq!(first["capture_stopped"], false);
+
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .start_errors
+        .lock()
+        .unwrap()
+        .push_back(Err(HistorySummarizerProducerError::TimedOut));
+    producer
+        .purge_errors
+        .lock()
+        .unwrap()
+        .push_back(HistorySummarizerProducerError::TimedOut);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records =
+        capture_sources(factory, "probe/model", "scripted", Duration::from_secs(10)).await;
+    assert_eq!(records.len(), 1, "a failed purge stops the capture");
+    assert_eq!(records[0].detail["capture_stopped"], true);
+}
+
+/// The record built after the cancel pass carries the drained terminal and the firing's own
+/// cancel that the cancel provoked.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_record_includes_what_the_cancel_provoked() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(records.len(), sources().count());
+    for record in &records {
+        let attempt = &record.detail["attempts"][0];
+        assert_eq!(
+            attempt["outputs"][0]["error"]
+                .as_str()
+                .map(|e| e.contains("run cancelled")),
+            Some(true),
+            "{}: {attempt}",
+            record.source
+        );
+        assert_eq!(
+            attempt["cancel"]["confirmed"], true,
+            "{}: {attempt}",
+            record.source
+        );
+        assert_eq!(
+            record.detail["settled_after_cancel"], true,
+            "{}",
+            record.source
+        );
+    }
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
 }
 
 /// A cancel the host does not confirm ends the capture before another source can start a run.

@@ -303,9 +303,17 @@ firing's own cancel under `cancel`, the record lists each cancel's run id and
 outcome under `cancelled_runs` and any firing still before its first start
 under `firings_before_first_start_at_cancel`. A cancel the host does not
 confirm, or a firing still before its first start, sets `capture_stopped` on
-that record and ends the capture before another source can start a run. The capture directory and every
-existing ancestor must be owned by the operator or root and closed to group
-and other writes unless sticky. The
+that record and ends the capture before another source can start a run. A
+start error that does not prove the host committed no run (one that is
+neither `NotSent` nor a host terminal) has no run id to cancel, so the capture
+purges that attempt's producer session instead and records it under
+`cancelled_runs` with `session_purged`; a purge the host does not confirm
+also sets `capture_stopped`. After a confirmed cancel the capture waits up to
+10 s for the firing to record the terminal it provoked, so the record carries
+that drained error and the firing's own cancel. The capture directory and
+every existing ancestor must be owned by the operator or root and closed to
+group and other writes unless sticky, checked before and again after the
+directory is created. The
 record names the model, the harness,
 the output origin, whether the transform call returned and the firing settled,
 the attempt count, and every
@@ -375,7 +383,8 @@ spend above the cap, or a tool call that no later request answers with its
 `reset()`.
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
 directory outside the repository whose existing ancestors are owned by the
-operator or root and closed to group and other writes unless sticky, refusing
+operator or root and closed to group and other writes unless sticky, checked
+before and again after creation, refusing
 a shared existing directory, an untrusted ancestor, or a label that is not a
 plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.

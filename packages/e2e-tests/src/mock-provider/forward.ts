@@ -664,7 +664,8 @@ const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 /**
  * Every existing ancestor of `real` is owned by this user or root and is either closed to
  * group and other writes or sticky, so no other local user can rename the checked directory
- * away between its check and the write.
+ * away between its check and the write. It runs before creation and again after, so a
+ * component another user created in between is refused rather than trusted.
  */
 function requireTrustedAncestors(real: string): void {
     const uid = process.getuid?.();
@@ -708,6 +709,7 @@ export function publishForwardingReport(
     }
     requireTrustedAncestors(real);
     mkdirSync(real, { recursive: true, mode: 0o700 });
+    requireTrustedAncestors(real);
     const stat = statSync(real);
     if ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) {
         throw new Error(`${real} is not an owner-only directory`);
