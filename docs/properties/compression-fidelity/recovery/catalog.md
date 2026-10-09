@@ -237,7 +237,8 @@ Status: active
 Exercised: partial - `packages/e2e-tests/tests/compression-fidelity-memory.test.ts`
 calls `eidnara_search` from a captured C3 pass lacking the memory, with query
 terms taken from the visible request and sources `["memory"]`, and receives
-the memory text in one call within 16 KiB (U3). Human review of the
+the admitted project memory the injection budget excluded, named by object id
+with its text, in one call within 16 KiB (U3). Human review of the
 delivered text is absent.
 Guarantee: A declared discoverable decision or rationale has a bounded
 registered-tool witness that starts from consumer-visible information and

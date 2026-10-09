@@ -166,6 +166,17 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                 excludedIds.push(anchor);
                 await observeExcluded("memory-candidate-only");
 
+                // A verified memory that carries the obligation and exceeds the injection budget.
+                const oversized = await h.host.memorySeed(
+                    anchor,
+                    memoryId("budget-excluded"),
+                    example.category,
+                    `${example.text} ${h.ballast(12_000)}`,
+                );
+                expect(oversized.visibility).toBe("automatic");
+                excludedIds.push(memoryId("budget-excluded"));
+                await observeExcluded("memory-budget-excluded");
+
                 const visible = captureTexts(
                     h.retainedCaptures({ sessionId: driver.sessionId }).at(-1) ?? p3.capture,
                 )
@@ -178,6 +189,8 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                     input: { query, sources: ["memory"] },
                     prompt: excludedScenario.followUp.prompt,
                 });
+                // The admitted row the budget excluded from the invocation is the recovered copy.
+                expect(search.resultText).toContain(`id=${memoryId("budget-excluded")}`);
                 expect(search.resultText).toContain(example.text);
                 expect(Buffer.byteLength(search.resultText)).toBeLessThanOrEqual(
                     RECOVERY_RESULT_BYTES,
@@ -196,20 +209,10 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                         calls: 1,
                         result_utf8_bytes: Buffer.byteLength(search.resultText),
                         result_carries_memory: true,
+                        recovered_object: memoryId("budget-excluded"),
                         exact_recovery: "unavailable",
                     },
                 });
-
-                // A verified memory that carries the obligation and exceeds the injection budget.
-                const oversized = await h.host.memorySeed(
-                    anchor,
-                    memoryId("budget-excluded"),
-                    example.category,
-                    `${example.text} ${h.ballast(12_000)}`,
-                );
-                expect(oversized.visibility).toBe("automatic");
-                excludedIds.push(memoryId("budget-excluded"));
-                await observeExcluded("memory-budget-excluded");
 
                 const admittedId = memoryId("admitted");
                 const admitted = await h.host.memorySeed(

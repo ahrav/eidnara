@@ -242,9 +242,10 @@ memory, hint, and recovery rows:
   injection budget), the withheld (quarantined), and the rejected variants
   each serve the same P3 row with no memory credit. Two seeded copies show
   the admission is repeatable.
-- From that excluded pass, `eidnara_search` with the query `manifest cache
+- From the budget-excluded pass, `eidnara_search` with the query `manifest cache
   resident`, every term taken from the visible request, and sources
-  `["memory"]` returns the memory's text in one call within 16 KiB, without
+  `["memory"]` returns the budget-excluded admitted copy, named by object id
+  with the memory's text, in one call within 16 KiB, without
   the wrong-project copy's distinct suffix. Exact recovery stays
   `unavailable`.
 - C4 ages its case row to P5, then publishes up to 24 distractor rows that
