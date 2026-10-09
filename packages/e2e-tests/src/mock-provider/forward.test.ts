@@ -7,6 +7,7 @@ import { __spawnOpencodeTest, createIsolatedEnv } from "../opencode-runner/spawn
 import type { CassetteOracle } from "./cassette-oracle";
 import {
     type ForwardConfig,
+    Forwarder,
     publishForwardingReport,
     readResponse,
     validateForwardConfig,
@@ -297,6 +298,39 @@ describe("forwarding", () => {
         expect(report.complete).toBe(true);
         expect(report.mode).toBe("forward");
         expect(report.spent_usd).toBeCloseTo((2 * (40 * 3 + 6 * 15)) / 1_000_000, 12);
+    });
+
+    test("a report names each body's SHA-256 before and after its digest settles", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+            () =>
+                new Response(sse([{ type: "text", text: "y" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const forwarder = new Forwarder(config({ fetch: double.send }));
+        const bodies = [firstTurn, { ...firstTurn, max_tokens: 256 }].map((turn) =>
+            new TextEncoder().encode(JSON.stringify(turn)),
+        );
+        const send = (bytes: Uint8Array<ArrayBuffer>) => {
+            const text = new TextDecoder().decode(bytes);
+            return forwarder.forward(bytes, text, JSON.parse(text), {});
+        };
+        const hashes = bodies.map((bytes) =>
+            new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+        );
+
+        const pending = send(bodies[0] as Uint8Array<ArrayBuffer>);
+        expect(forwarder.report().exchanges[0]?.request.body_sha256).toBe(hashes[0]);
+        await (await pending).text();
+        await (await send(bodies[1] as Uint8Array<ArrayBuffer>)).text();
+        await Bun.sleep(20);
+        const report = forwarder.report();
+        expect(report.exchanges.map((e) => e.request.body_sha256)).toEqual(hashes);
+        expect(report.complete).toBe(true);
     });
 
     test("a request without this mock's key is refused before any send", async () => {

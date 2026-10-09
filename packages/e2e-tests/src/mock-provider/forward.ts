@@ -358,6 +358,7 @@ export class Forwarder {
     private readonly config: Readonly<ForwardConfig>;
     private readonly exchanges: ForwardedExchange[] = [];
     private readonly refusals: string[] = [];
+    private readonly unhashed = new Map<ForwardedExchange, Uint8Array>();
     private spent = 0;
     private stopped: string | null = null;
 
@@ -458,7 +459,7 @@ export class Forwarder {
             tool_uses: [],
             request: {
                 headers: redact(headers),
-                body_sha256: sha256(body),
+                body_sha256: "",
                 body_bytes: body.byteLength,
                 body_text: text,
                 reserved_usd: reserved,
@@ -466,6 +467,16 @@ export class Forwarder {
             response: null,
         };
         this.exchanges.push(exchange);
+        // The send proceeds while the digest is pending.
+        this.unhashed.set(exchange, body);
+        crypto.subtle.digest("SHA-256", body).then(
+            (digest) => {
+                if (this.unhashed.delete(exchange)) {
+                    exchange.request.body_sha256 = Buffer.from(digest).toString("hex");
+                }
+            },
+            () => {},
+        );
         // The reservation counts until the response settles the real cost.
         this.spent += reserved;
         let response: Response;
@@ -517,6 +528,10 @@ export class Forwarder {
 
     /** The run so far: the frozen limits, every send and response, and whether it is complete. */
     report(): ForwardingReport {
+        for (const [exchange, body] of this.unhashed) {
+            exchange.request.body_sha256 = sha256(body);
+        }
+        this.unhashed.clear();
         const settled = this.exchanges.flatMap((e) => (e.response ? [e.response] : []));
         const acknowledged = settled.filter((r) => r.outcome === "acknowledged");
         const reasons: string[] = [];
