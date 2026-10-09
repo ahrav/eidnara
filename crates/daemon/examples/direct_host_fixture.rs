@@ -130,6 +130,12 @@ mod unix {
     /// The queued sender delivers the acknowledgment channel the run uses to confirm it resumed.
     type BlockedQueue = Arc<Mutex<VecDeque<(u64, oneshot::Sender<oneshot::Sender<()>>)>>>;
 
+    fn fresh_incarnation() -> String {
+        let mut nonce = [0u8; 16];
+        getrandom::getrandom(&mut nonce).expect("OS entropy for the fixture incarnation");
+        nonce.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     struct ControlledBackend {
         next: Mutex<NextBehavior>,
         /// While set, every call fails as a source outage would.
@@ -143,6 +149,10 @@ mod unix {
         script: Arc<Mutex<CaseScript>>,
         /// Memory admission controls issued, which key their kernel intents.
         admissions: AtomicU64,
+        /// Random per-process prefix of every admission token. Committed intents outlive the
+        /// process in the state root, so a restarted fixture whose `admissions` count starts
+        /// over at zero still issues keys no earlier incarnation committed.
+        incarnation: String,
     }
 
     impl ControlledBackend {
@@ -160,7 +170,13 @@ mod unix {
                 counters: Arc::new(BackendCounters::default()),
                 script: Arc::new(Mutex::new(CaseScript::default())),
                 admissions: AtomicU64::new(0),
+                incarnation: fresh_incarnation(),
             })
+        }
+
+        fn admission_token(&self) -> String {
+            let issued = self.admissions.fetch_add(1, Ordering::SeqCst);
+            format!("{}-{issued}", self.incarnation)
         }
 
         fn set_next(&self, behavior: NextBehavior) {
@@ -726,22 +742,17 @@ mod unix {
         Quarantine,
     }
 
-    /// Runs `step` in one kernel transaction keyed by `sequence`, so every control call is a
-    /// distinct intent, and reports the admission decision it recorded.
     fn admit(
-        core: &daemon::HandlerCore,
-        sequence: u64,
+        kernel: &kernel::KernelStore,
+        token: &str,
         step: impl FnOnce(
             &mut kernel::Envelope<'_>,
         ) -> Result<kernel::AdmissionDecision, kernel::KernelError>,
     ) -> Result<ControlResult, &'static str> {
-        let kernel = core.kernel_store_for_test().ok_or("kernel_unavailable")?;
         let mut decided = None;
         kernel
             .commit(
-                daemon::kernel_route_fixtures::intent(&format!(
-                    "fixture-memory-admission-{sequence}"
-                )),
+                daemon::kernel_route_fixtures::intent(&format!("fixture-memory-admission-{token}")),
                 |envelope| {
                     decided = Some(step(envelope)?);
                     Ok(String::new())
@@ -763,21 +774,21 @@ mod unix {
     /// Records `event` on `object_id` through the kernel's admission engine, under the classes
     /// the decision already carries.
     fn memory_admission(
-        core: &daemon::HandlerCore,
+        kernel: &kernel::KernelStore,
         object_id: &str,
         event: MemoryEvent,
-        sequence: u64,
+        token: &str,
     ) -> Result<ControlResult, &'static str> {
         use daemon::kernel_route_fixtures::{admission, observe_code};
         use kernel::{EventKind, KernelError};
-        admit(core, sequence, |envelope| {
+        admit(kernel, token, |envelope| {
             let (prior, _) = envelope
                 .subject_admission(object_id)?
                 .ok_or(KernelError::AdmissionPolicy)?;
             let classes = (prior.source_class, prior.taint_class);
             let kind = match event {
                 MemoryEvent::CodeObserved => {
-                    let observation = format!("{object_id}-observed-{sequence}");
+                    let observation = format!("{object_id}-observed-{token}");
                     return observe_code(envelope, object_id, &observation, classes);
                 }
                 MemoryEvent::ExplicitReject => EventKind::ExplicitReject,
@@ -790,18 +801,18 @@ mod unix {
     /// Commits a repository-sourced memory decision into `anchor`'s project scope and admits it
     /// on a code observation.
     fn memory_seed(
-        core: &daemon::HandlerCore,
+        kernel: &kernel::KernelStore,
         anchor: &str,
         object_id: &str,
         category: &str,
         text: &str,
-        sequence: u64,
+        token: &str,
     ) -> Result<ControlResult, &'static str> {
         use daemon::kernel_route_fixtures::{
             MEMORY_DOMAIN, ensure_domain, memory_decision_spec, observe_code,
         };
         use kernel::{KernelError, SourceClass, TaintClass};
-        admit(core, sequence, |envelope| {
+        admit(kernel, token, |envelope| {
             let scope = envelope
                 .object_state(anchor)?
                 .and_then(|state| state.scope_id)
@@ -998,8 +1009,12 @@ mod unix {
                                 Ok((ControlResult::Script(backend.script().status()), false))
                             }
                             ControlCommand::MemoryAdmission { object_id, event } => {
-                                let sequence = backend.admissions.fetch_add(1, Ordering::SeqCst);
-                                memory_admission(&core, &object_id, event, sequence)
+                                let token = backend.admission_token();
+                                core.kernel_store_for_test()
+                                    .ok_or("kernel_unavailable")
+                                    .and_then(|kernel| {
+                                        memory_admission(&kernel, &object_id, event, &token)
+                                    })
                                     .map(|result| (result, false))
                             }
                             ControlCommand::MemorySeed {
@@ -1008,8 +1023,14 @@ mod unix {
                                 category,
                                 text,
                             } => {
-                                let sequence = backend.admissions.fetch_add(1, Ordering::SeqCst);
-                                memory_seed(&core, &anchor, &object_id, &category, &text, sequence)
+                                let token = backend.admission_token();
+                                core.kernel_store_for_test()
+                                    .ok_or("kernel_unavailable")
+                                    .and_then(|kernel| {
+                                        memory_seed(
+                                            &kernel, &anchor, &object_id, &category, &text, &token,
+                                        )
+                                    })
                                     .map(|result| (result, false))
                             }
                             ControlCommand::ScriptSource { scenario } => {
@@ -1539,6 +1560,64 @@ mod unix {
         host_result?;
         ready?;
         cassette_written
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use daemon::kernel_route_fixtures::{
+            commit_verified_memory, intent, project_scope_spec, seed_domain,
+        };
+
+        use super::*;
+
+        fn visibility(result: Result<ControlResult, &'static str>) -> Result<&'static str, String> {
+            match result {
+                Ok(ControlResult::Admission { visibility, .. }) => Ok(visibility),
+                Ok(_) => Err("not an admission result".to_string()),
+                Err(code) => Err(code.to_string()),
+            }
+        }
+
+        #[test]
+        fn admission_controls_after_a_fixture_restart_apply_to_the_persisted_kernel() {
+            let root = tempfile::tempdir().unwrap();
+            let store = kernel::KernelStore::open(root.path()).unwrap();
+            seed_domain(&store);
+            store
+                .commit(intent("project-scope"), |envelope| {
+                    envelope.insert_scope(project_scope_spec("scope-project", "project-digest"))?;
+                    Ok(String::new())
+                })
+                .unwrap();
+            commit_verified_memory(
+                &store,
+                "anchor",
+                "mem_anchor",
+                "scope-project",
+                "ARCHITECTURE",
+                "anchor",
+            );
+
+            let first = ControlledBackend::new(CancellationToken::new());
+            let seeded = memory_seed(
+                &store,
+                "mem_anchor",
+                "mem_seeded",
+                "ARCHITECTURE",
+                "seeded",
+                &first.admission_token(),
+            );
+            assert_eq!(visibility(seeded), Ok("automatic"));
+
+            let restarted = ControlledBackend::new(CancellationToken::new());
+            let withheld = memory_admission(
+                &store,
+                "mem_seeded",
+                MemoryEvent::Quarantine,
+                &restarted.admission_token(),
+            );
+            assert_eq!(visibility(withheld), Ok("audit_only"));
+        }
     }
 }
 
