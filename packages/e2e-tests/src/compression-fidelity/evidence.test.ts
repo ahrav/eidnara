@@ -1434,6 +1434,12 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([{ ...mispriced, spent_usd: 0.5 }]))).toContain(
             "exchange 0 costs 0.5 USD, where its usage prices at 0.6 USD",
         );
+        const unknownCost = forwardingReport("{}", sha256("{}"), true);
+        const [unpriced] = unknownCost.exchanges;
+        if (unpriced) unpriced.response = { ...unpriced.response, usage: null, cost_known: false };
+        const unknownErrors = errorsOf(await live([unknownCost]));
+        expect(unknownErrors).toContain("exchange 0 cost is unknown in a complete report");
+        expect(unknownErrors).not.toContain("claims a known cost without usage");
         const unmetered = forwardingReport("{}", sha256("{}"), true);
         const [metered] = unmetered.exchanges;
         if (metered) metered.response = { ...metered.response, usage: null };

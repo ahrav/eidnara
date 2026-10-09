@@ -67,7 +67,8 @@ const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 /** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
 /** The delivery stages labeled with a source id when the source has no m1 scenario. */
-const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"];
+/** The delivery witness's stages for a source with no m1 scenario, labeled by source ID. */
+export const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"] as const;
 /** The delivery witness's judge self-test; a judge control elsewhere is refused. */
 const JUDGE_CONTROL = { stage: "missing-capture", scenario: "C1.S2" } as const;
 /**
@@ -261,6 +262,18 @@ export function scenarios(
     corpus: FidelityCorpus,
 ): Array<{ case: string; scenario: FidelityScenario }> {
     return corpus.cases.flatMap((c) => c.scenarios.map((scenario) => ({ case: c.id, scenario })));
+}
+
+/** The sources the delivery witness labels by source ID: those with no m1 scenario. */
+export function sourceLabelSources(corpus: FidelityCorpus): string[] {
+    const m1 = new Set(
+        scenarios(corpus)
+            .filter((s) => s.scenario.serving.stage === "m1")
+            .map((s) => s.scenario.source),
+    );
+    return sources(corpus)
+        .map((s) => s.source)
+        .filter((source) => !m1.has(source));
 }
 
 export function armLabel(arm: Arm): string {
@@ -593,8 +606,9 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
                     `${file} exchange ${exchange.index} costs ${response.cost_usd} USD, where its usage prices at ${priced} USD`,
                 );
             }
-        } else if (response.usage === null)
+        } else if (response.cost_known && response.usage === null) {
             complete(exchange.index, "claims a known cost without usage");
+        }
         if (response.outcome !== "acknowledged") {
             complete(exchange.index, `response outcome is ${response.outcome}`);
         }
@@ -643,11 +657,7 @@ export async function loadArm(
     }
     const scenarioEntry = new Map(scenarios(corpus).map((s) => [s.scenario.id, s]));
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
-    const m1Sources = new Set(
-        scenarios(corpus)
-            .filter((s) => s.scenario.serving.stage === "m1")
-            .map((s) => s.scenario.source),
-    );
+    const sourceLabeled = new Set(sourceLabelSources(corpus));
     // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
     // either left behind means a publication never finished.
     const unpublished = (name: string) => /^\..*\.tmp$|\.tmp-[0-9a-f]+$/.test(name);
@@ -743,8 +753,8 @@ export async function loadArm(
             sourceLabel &&
             !(
                 owner === "opencode-delivery" &&
-                SOURCE_LABEL_STAGES.includes(String(value.stage)) &&
-                !m1Sources.has(label)
+                (SOURCE_LABEL_STAGES as readonly string[]).includes(String(value.stage)) &&
+                sourceLabeled.has(label)
             )
         ) {
             arm.errors.push(
