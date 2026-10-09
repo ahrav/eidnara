@@ -91,6 +91,23 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toContain("an arm has identity errors");
     });
 
+    test("a real capture recorded under another model is an identity error", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { captureModel: "anthropic/other" },
+        });
+        expect(errorsOf(assembled)).toContain("captured with model anthropic/other");
+        expect(errorsOf(assembled)).toContain("no published real-model capture");
+        expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
+    test("arms with different generation origins refuse the comparison", async () => {
+        const assembled = await assemble(scratch(), {
+            candidate: { generationOrigin: "scripted" },
+        });
+        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(assembled.refused).toContain("the arms differ in generation_origin");
+    });
+
     test("evidence bound to another corpus refuses the comparison", async () => {
         const assembled = await assemble(scratch(), {
             candidate: { corpusSha256: "1".repeat(64) },
@@ -391,13 +408,13 @@ describe("evidence generation origin", () => {
                 (detail) => {
                     detail.model = "other/model";
                 },
-                `real.${source}.json ran model other/model, not the arm's`,
+                `real.${source}.json captured with model other/model, not the arm's model`,
             ],
             [
                 (detail) => {
                     (detail.attempts as Array<Record<string, unknown>>)[0]!.model = "other/model";
                 },
-                `real.${source}.json ran model other/model, not the arm's`,
+                `real.${source}.json ran an attempt on model other/model, not the arm's`,
             ],
             [
                 (detail) => {
@@ -553,7 +570,7 @@ describe("evidence live mode", () => {
                     response: {
                         truncated: false,
                         body_text: "ok",
-                        body_sha256: sha256("ok"),
+                        body_sha256: sha256("ok") as string | null,
                         cost_known: true,
                     },
                 },
@@ -586,6 +603,14 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([forwardingReport("{}", sha256("{}"), false)]))).toContain(
             "is incomplete",
         );
+        const unhashed = forwardingReport("{}", sha256("{}"), true);
+        const [first] = unhashed.exchanges;
+        if (first) first.response = { ...first.response, body_sha256: null };
+        expect(errorsOf(await live([unhashed]))).toContain(
+            "response has no hash in a complete report",
+        );
+        const incompleteUnhashed = { ...unhashed, complete: false, incomplete_reasons: ["x"] };
+        expect(errorsOf(await live([incompleteUnhashed]))).not.toContain("has no hash");
         const raised = await live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);

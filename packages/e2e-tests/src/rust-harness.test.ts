@@ -1,10 +1,12 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "./compression-fidelity/corpus";
 import { MockProvider } from "./mock-provider/server";
 import {
     CaptureLedger,
     deleteMessagesAfter,
     parseRustPassLine,
+    RustTestHarness,
     requestSessionId,
 } from "./rust-harness";
 
@@ -16,6 +18,23 @@ const PASS_LINE =
     "invocation_bytes=9000 invocation_charged=3215 history_budget=750 elapsed=41.7 ms module=23.4 ms " +
     "stages=prefix_guard:6.2 clone:0.4 wire_build:3.9 wire_messages:3 transport:9.8 " +
     "transport_pages:1 transport_bytes:20480 apply:1.2 other:0.8 work=scanned:3 charged:4096 retained:512";
+
+describe("RustTestHarness.create", () => {
+    it("refuses a scripted default beside forwarding before starting anything", async () => {
+        const forward = {
+            upstreamURL: "https://provider.invalid/v1/messages",
+            model: "m",
+            contextLimit: 100_000,
+            corpusSha256: COMPRESSION_FIDELITY_CORPUS_SHA256,
+            pricing: { inputPerMTok: 3, outputPerMTok: 15 },
+            limits: { maxCalls: 1, maxOutputTokens: 1024, timeoutMs: 1_000, spendCapUsd: 1 },
+            credentials: () => ({}),
+        };
+        await expect(
+            RustTestHarness.create({ forward, mockDefault: { text: "scripted" } }),
+        ).rejects.toThrow("forwarding serves no scripted default");
+    });
+});
 
 describe("parseRustPassLine", () => {
     it("reads top-level fields and every stage timing, including the first stage after stages=", () => {

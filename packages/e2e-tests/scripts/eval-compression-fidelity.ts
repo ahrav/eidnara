@@ -69,6 +69,10 @@ export function parseArgs(argv: readonly string[]): EvalArgs {
 export async function run(
     args: EvalArgs,
 ): Promise<{ manifest: string; report: string; accepted: boolean }> {
+    const out = resolve(args.out);
+    if (out === resolve(args.baseline) || out === resolve(args.candidate)) {
+        throw new Error(`--out is an evidence arm: ${out}`);
+    }
     const revision = repositoryRevision();
     const corpus = readCompressionFidelityCorpus(args.corpus);
     const sha = COMPRESSION_FIDELITY_CORPUS_SHA256;

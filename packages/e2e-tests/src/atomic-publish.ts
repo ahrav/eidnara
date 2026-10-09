@@ -23,10 +23,30 @@ export function publishJsonAtomically(
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../..");
 
 /**
+ * Every existing ancestor of `real` is owned by this user or root and is either closed to
+ * group and other writes or sticky, so no other local user can rename the checked directory
+ * away between its check and the write.
+ */
+function requireTrustedAncestors(real: string): void {
+    const uid = process.getuid?.();
+    let existing = real;
+    while (!existsSync(existing)) existing = dirname(existing);
+    for (let ancestor = existing; ; ancestor = dirname(ancestor)) {
+        const stat = statSync(ancestor);
+        const ownedByTrusted = stat.uid === uid || stat.uid === 0;
+        const othersWrite = (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0;
+        if (!ownedByTrusted || othersWrite) {
+            throw new Error(`${ancestor} is writable by others or not owned by this user or root`);
+        }
+        if (ancestor === dirname(ancestor)) break;
+    }
+}
+
+/**
  * Publishes `value` as `<dir>/<name>` with mode `0600` in an owner-only directory outside the
- * repository. The directory is created `0700` when absent; an existing one must already be
- * `0700` and owned by this user. A `..` segment or a name that is not a plain file name is
- * refused.
+ * repository. The directory is created `0700` when absent. An existing directory must be `0700`
+ * and owned by this user, every existing ancestor must be trusted, and `name` must be a plain
+ * file name.
  */
 export function publishPrivateJson(value: unknown, dir: string, name: string): string {
     if (!/^[A-Za-z0-9._-]+$/.test(name) || name.startsWith(".")) {
@@ -44,6 +64,7 @@ export function publishPrivateJson(value: unknown, dir: string, name: string): s
     ) {
         throw new Error(`${real} is inside the repository`);
     }
+    requireTrustedAncestors(real);
     mkdirSync(real, { recursive: true, mode: 0o700 });
     const stat = statSync(real);
     if ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) {

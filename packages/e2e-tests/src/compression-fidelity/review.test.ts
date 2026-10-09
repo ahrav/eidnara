@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
 import { parseRustPassLine } from "../rust-harness";
@@ -1081,6 +1081,34 @@ describe("eval:compression-fidelity command", () => {
                 mode: "offline",
             }),
         ).rejects.toThrow("inside the repository");
+    });
+
+    test("an output directory that is an evidence arm is refused before any write", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const reviews = writeReviews(root, {
+            arms: [
+                { label: "baseline", files: baseline.files },
+                { label: "candidate", files: candidate.files },
+            ],
+        });
+        chmodSync(baseline.dir, 0o700);
+        chmodSync(candidate.dir, 0o700);
+        for (const out of [baseline.dir, join(candidate.dir, ".", "")]) {
+            await expect(
+                run({
+                    baseline: baseline.dir,
+                    candidate: candidate.dir,
+                    reviews,
+                    out,
+                    corpus: CORPUS_PATH,
+                    mode: "offline",
+                }),
+            ).rejects.toThrow("--out is an evidence arm");
+        }
+        expect(readdirSync(baseline.dir)).not.toContain("manifest.json");
+        expect(readdirSync(candidate.dir)).not.toContain("report.json");
     });
 
     // With a discovery variable set, git and the reader both defer to it, so the fixture

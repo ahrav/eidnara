@@ -22377,8 +22377,13 @@ mod tests {
         block_status: std::sync::atomic::AtomicBool,
         /// `connect` waits on `notify` while `block_connect` is set.
         block_connect: std::sync::atomic::AtomicBool,
+        /// `start` waits on `notify` while `block_start` is set, after counting the start.
+        block_start: std::sync::atomic::AtomicBool,
         close_attempts: AtomicUsize,
         block_close_attempt: std::sync::atomic::AtomicBool,
+        cancels: Mutex<Vec<String>>,
+        /// Scripted `cancel` failures, served before a success.
+        cancel_errors: Mutex<VecDeque<HistorySummarizerProducerError>>,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
@@ -22509,6 +22514,9 @@ mod tests {
             {
                 return result;
             }
+            while self.state.block_start.load(Ordering::SeqCst) {
+                self.state.notify.notified().await;
+            }
             let output = match self.state.next_fact.lock().expect("next fact mutex").take() {
                 Some(fact) => {
                     let (start, end) = prompt_ordinal_range(prompt).unwrap_or((1, 3));
@@ -22622,8 +22630,26 @@ mod tests {
                 .unwrap_or(RunState::Active))
         }
 
-        async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
-            Ok(())
+        async fn cancel(&mut self, run_id: &str) -> Result<(), HistorySummarizerProducerError> {
+            // The real producer routes `cancel` through the bound session and answers `MissingSession` otherwise.
+            let Some(session) = self.bound_session.clone() else {
+                return Err(HistorySummarizerProducerError::MissingSession);
+            };
+            self.state
+                .cancels
+                .lock()
+                .expect("cancels mutex")
+                .push(format!("{session}:{run_id}"));
+            match self
+                .state
+                .cancel_errors
+                .lock()
+                .expect("cancel errors mutex")
+                .pop_front()
+            {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         }
 
         async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {
@@ -22677,13 +22703,19 @@ mod tests {
         config: DaemonConfig,
         resolver: Arc<dyn SessionResolver>,
     ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
-        handler_with_factory(Arc::new(TestProducerFactory { state }), config, resolver)
+        handler_with_factory(
+            Arc::new(TestProducerFactory { state }),
+            config,
+            resolver,
+            "daemon-test",
+        )
     }
 
     fn handler_with_factory(
         factory: Arc<dyn HistorySummarizerProducerFactory>,
         config: DaemonConfig,
         resolver: Arc<dyn SessionResolver>,
+        harness: &str,
     ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
@@ -22694,7 +22726,10 @@ mod tests {
         handler.install_store_for_test(Arc::clone(&store));
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "ses"));
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(project.to_str().unwrap(), harness, "ses"),
+        );
         (handler, store, dir, project)
     }
 

@@ -58,6 +58,8 @@ export interface ArmOptions {
     tier?: (scenario: string) => string | undefined;
     unlinked?: boolean;
     model?: string;
+    captureModel?: string;
+    generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
 }
 
@@ -78,7 +80,7 @@ export function writeArm(
         version: "2026-01-01",
         settings: { temperature: 0.1 },
         limits: options.limits ?? { maxCalls: 40 },
-        generation_origin: "real",
+        generation_origin: options.generationOrigin ?? "real",
     });
     const files = new Map<string, string>();
     const base = (c: string, source: string) => ({
@@ -98,7 +100,7 @@ export function writeArm(
                 stage: "capture",
                 terminal: "published",
                 detail: {
-                    model,
+                    model: options.captureModel ?? model,
                     output_origin: options.origin ?? "real producer through the host",
                     attempts: [{ model, system, prompt: "p", outputs: [{ text: "x" }] }],
                     usage: { input_tokens: 900, output_tokens: 300 },
