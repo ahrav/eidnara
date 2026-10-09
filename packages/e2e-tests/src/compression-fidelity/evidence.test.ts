@@ -10,7 +10,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseArgs, run } from "../../scripts/eval-compression-fidelity";
+import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
 import {
     type ArmOptions,
     allScenarios,
@@ -206,6 +206,35 @@ describe("evidence identity and completeness", () => {
         });
         expect(errorsOf(absent)).toContain(`no published scripted generation for ${first}`);
         expect(absent.refused).toContain("an arm has identity errors");
+    });
+
+    test("real captures cannot stand in for a scripted arm's generation", async () => {
+        const scripted = { generationOrigin: "scripted" as const };
+        const first = corpus.cases[0]?.sources[0]?.id ?? "";
+        const assembled = await assemble(scratch(), {
+            baseline: scripted,
+            candidate: scripted,
+            tamper: (dir) => {
+                const generation = JSON.parse(
+                    readFileSync(join(dir, `generation.${first}.json`), "utf8"),
+                );
+                rmSync(join(dir, `generation.${first}.json`));
+                write(dir, `real.${first}.json`, {
+                    ...generation,
+                    owner: "daemon.compression_fidelity.real_capture",
+                    stage: "capture",
+                    detail: {
+                        model: "anthropic/claude-test",
+                        output_origin: "real producer through the host",
+                        attempts: generation.detail.attempts,
+                    },
+                });
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            `real.${first}.json carries real output in an arm labeled scripted`,
+        );
+        expect(errorsOf(assembled)).toContain(`no published scripted generation for ${first}`);
     });
 
     test("a generation record that names a scenario is an identity error", async () => {
@@ -582,6 +611,20 @@ describe("evidence deterministic column", () => {
         expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
     });
 
+    test("a pressure delivery without a curve tier fails the pressure oracle", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = scenario?.serving.tier;
+                delete value.detail.curve_tier;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
     test("an unknown curve tier fails the pressure oracle", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
         const assembled = await assemble(scratch(), {
@@ -656,13 +699,17 @@ describe("evidence live mode", () => {
             mode: "forward",
             corpus_sha256: SHA,
             model: "claude-live",
+            context_limit: 200_000,
             stopped: null as string | null,
-            limits: { maxCalls: 40 },
+            spent_usd: 0.5,
+            limits: { maxCalls: 40 } as Record<string, number>,
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
             exchanges: [
                 {
                     index: 0,
+                    tool_uses: [] as string[],
+                    tool_results: [] as string[],
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
                         outcome: "acknowledged",
@@ -742,6 +789,24 @@ describe("evidence live mode", () => {
         expect(
             errorsOf(await live([{ ...complete, stopped: "send 0 returned HTTP 500" }])),
         ).toContain("complete report records a stop: send 0 returned HTTP 500");
+        const looped = forwardingReport("{}", sha256("{}"), true);
+        const [call] = looped.exchanges;
+        if (call) call.tool_uses = ["toolu_1"];
+        expect(errorsOf(await live([looped]))).toContain(
+            "exchange 0 asks for tool toolu_1 that no later request answers in a complete report",
+        );
+        const answer = {
+            ...looped.exchanges[0],
+            index: 1,
+            tool_uses: [],
+            tool_results: ["toolu_1"],
+        };
+        const answered = { ...looped, exchanges: [...looped.exchanges, answer] };
+        expect(errorsOf(await live([answered]))).not.toContain("asks for tool");
+        const capped = { maxCalls: 40, spendCapUsd: 1 };
+        expect(
+            errorsOf(await live([{ ...complete, spent_usd: 1.5, limits: capped }], capped)),
+        ).toContain("complete report spent 1.5 USD above its 1 USD cap");
         const raised = await live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);
@@ -778,6 +843,17 @@ describe("evidence live mode", () => {
         expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
         expect(assembled.refused).toContain("the arms forwarded to different models");
         expect(assembled.manifest.arms[1]?.forwarding_reports[0]?.model).toBe("claude-other");
+        const limited = await assemble(scratch(), {
+            mode: "live",
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", report);
+                write(join(dir, "..", "candidate"), "forwarding-0.json", {
+                    ...report,
+                    context_limit: 100_000,
+                });
+            },
+        });
+        expect(limited.refused).toContain("the arms forwarded at different context limits");
         const mixed = await live([report, { ...report, model: "claude-other" }]);
         expect(errorsOf(mixed)).toContain(
             "forwarding-1.json forwarded to claude-other, where forwarding-0.json forwarded to claude-live",
@@ -836,6 +912,26 @@ describe("eval:compression-fidelity command", () => {
                 mode: "offline",
             }),
         ).rejects.toThrow("inside the repository");
+    });
+
+    test("the manifest revision marks a worktree with uncommitted changes", () => {
+        const repo = scratch();
+        const git = (...args: string[]) =>
+            Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+                cwd: repo,
+                stderr: "ignore",
+            });
+        git("init", "-q");
+        writeFileSync(join(repo, "a.txt"), "a\n");
+        git("add", "a.txt");
+        git("commit", "-q", "-m", "a");
+        const head = git("rev-parse", "HEAD").stdout.toString().trim();
+        expect(repositoryRevision(repo)).toBe(head);
+        writeFileSync(join(repo, "a.txt"), "b\n");
+        expect(repositoryRevision(repo)).toBe(`${head}-dirty`);
+        writeFileSync(join(repo, "untracked.txt"), "u\n");
+        expect(repositoryRevision(repo)).toBe(`${head}-dirty`);
+        expect(repositoryRevision(join(repo, "missing"))).toBe("unknown");
     });
 
     test("an output directory that is an evidence arm is refused before any write", async () => {

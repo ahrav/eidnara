@@ -117,10 +117,20 @@ export async function run(
     };
 }
 
-function repositoryRevision(): string {
+/**
+ * The commit the assembler ran from, suffixed `-dirty` when the worktree holds uncommitted or
+ * untracked changes, so the manifest never attributes a report to code that did not produce it.
+ */
+export function repositoryRevision(cwd: string = process.cwd()): string {
     try {
-        const git = Bun.spawnSync(["git", "rev-parse", "HEAD"], { stderr: "ignore" });
-        return git.success ? git.stdout.toString().trim() : "unknown";
+        const git = (...args: string[]) =>
+            Bun.spawnSync(["git", ...args], { cwd, stderr: "ignore" });
+        const head = git("rev-parse", "HEAD");
+        if (!head.success) return "unknown";
+        const status = git("status", "--porcelain");
+        if (!status.success) return "unknown";
+        const dirty = status.stdout.toString().trim() !== "";
+        return `${head.stdout.toString().trim()}${dirty ? "-dirty" : ""}`;
     } catch {
         return "unknown";
     }
