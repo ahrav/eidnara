@@ -9,6 +9,7 @@
  * The command reads files and writes two files; it sends no request in either mode.
  */
 
+import { resolve } from "node:path";
 import { publishPrivateJson, realDirectory } from "../src/atomic-publish";
 import {
     COMPRESSION_FIDELITY_CORPUS_PATH,
@@ -23,7 +24,7 @@ import {
 } from "../src/compression-fidelity/evidence";
 
 // `node:fs` is loaded through `getBuiltinModule` for the startup cost noted in `../src/atomic-publish`.
-const { readFileSync } = process.getBuiltinModule("node:fs");
+const { readFileSync, realpathSync } = process.getBuiltinModule("node:fs");
 
 export const USAGE =
     "eval:compression-fidelity --baseline <dir> --candidate <dir> --out <dir> [--corpus <path>] [--mode offline|live]";
@@ -77,7 +78,7 @@ export async function run(
     args: EvalArgs,
 ): Promise<{ manifest: string; report: string; accepted: boolean }> {
     const out = realDirectory(args.out);
-    if ([args.baseline, args.candidate].some((arm) => realDirectory(arm) === out)) {
+    if ([args.baseline, args.candidate].some((arm) => armPath(arm) === out)) {
         throw new Error(`--out is an evidence arm: ${out}`);
     }
     const corpus = readCompressionFidelityCorpus(args.corpus);
@@ -136,6 +137,15 @@ export async function run(
         ),
         accepted: false,
     };
+}
+
+/** An evidence arm's canonical path; an arm that does not exist keeps its resolved spelling. */
+function armPath(dir: string): string {
+    try {
+        return realpathSync(dir);
+    } catch {
+        return resolve(dir);
+    }
 }
 
 /**

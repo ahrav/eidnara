@@ -266,7 +266,12 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (typeof contextLimit !== "number" || !Number.isInteger(contextLimit) || contextLimit <= 0) {
         return null;
     }
-    if (typeof value.spent_usd !== "number") return null;
+    const spent = value.spent_usd;
+    if (typeof spent !== "number" || !Number.isFinite(spent) || spent < 0) return null;
+    const reasons = value.incomplete_reasons;
+    if (!Array.isArray(reasons) || !reasons.every((reason) => typeof reason === "string")) {
+        return null;
+    }
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -327,9 +332,9 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         pricing: { inputPerMTok: pricing.inputPerMTok, outputPerMTok: pricing.outputPerMTok },
         limits: value.limits,
         stopped: value.stopped as string | null,
-        spent_usd: value.spent_usd,
+        spent_usd: spent,
         complete: value.complete,
-        incomplete_reasons: strings(value.incomplete_reasons),
+        incomplete_reasons: reasons,
         exchanges,
     };
 }
@@ -399,6 +404,9 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     }
     if (report.complete && report.stopped !== null) {
         errors.push(`${file} complete report records a stop: ${report.stopped}`);
+    }
+    for (const reason of report.complete ? report.incomplete_reasons : []) {
+        errors.push(`${file} complete report lists an incomplete reason: ${reason}`);
     }
     const cap = report.limits.spendCapUsd;
     if (report.complete && typeof cap === "number" && report.spent_usd > cap) {
@@ -475,7 +483,7 @@ export async function loadArm(
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
     // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
     // either left behind means a publication never finished.
-    const unpublished = (name: string) => name.startsWith(".") || /\.tmp(-|$)/.test(name);
+    const unpublished = (name: string) => /^\..*\.tmp$|\.tmp-[0-9a-f]+$/.test(name);
     const reads = new Map(
         await Promise.all(
             names

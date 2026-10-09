@@ -481,6 +481,13 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain(
             ".delivery.C1.S1.json.tmp is an unpublished temporary file",
         );
+        const hidden = await assemble(scratch(), {
+            tamper: (dir) => {
+                writeFileSync(join(dir, ".DS_Store"), "");
+                writeFileSync(join(dir, ".gitkeep"), "");
+            },
+        });
+        expect(hidden.arms[0]?.identity_errors).toEqual([]);
         expect(errorsOf(assembled)).toContain(
             "delivery.C1.S1.json.tmp-abc123 is an unpublished temporary file",
         );
@@ -1137,6 +1144,17 @@ describe("evidence live mode", () => {
         expect(errorsOf(relocated)).toContain(
             "forwarding-1.json forwarded to https://other.example.test/v1/messages, where forwarding-0.json forwarded to https://api.example.test/v1/messages",
         );
+        expect(
+            errorsOf(await live([{ ...report, incomplete_reasons: ["a send is in flight"] }])),
+        ).toContain("complete report lists an incomplete reason: a send is in flight");
+        expect(errorsOf(await live([{ ...report, incomplete_reasons: [1] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        for (const spent of [-0.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(errorsOf(await live([{ ...report, spent_usd: spent }]))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
         for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
             expect(errorsOf(await live([{ ...report, context_limit: limit }]))).toContain(
                 "does not match the forwarding report schema",
@@ -1214,6 +1232,25 @@ describe("eval:compression-fidelity command", () => {
                 mode: "offline",
             }),
         ).rejects.toThrow("inside the repository");
+    });
+
+    test("evidence arms may be named through parent-relative paths", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const written = await run({
+            baseline: `${root}/candidate/../baseline`,
+            candidate: `${candidate.dir}/./`,
+            out: join(root, "out"),
+            corpus: CORPUS_PATH,
+            mode: "offline",
+        });
+        const manifest = JSON.parse(readFileSync(written.manifest, "utf8"));
+        expect(manifest.arms.map((a: { label: string }) => a.label)).toEqual([
+            "baseline",
+            "candidate",
+        ]);
+        expect(statSync(baseline.dir).isDirectory()).toBe(true);
     });
 
     test("the manifest revision marks a worktree with uncommitted changes", () => {
