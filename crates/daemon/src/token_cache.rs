@@ -259,6 +259,20 @@ pub(crate) fn test_cache_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The exact tokenizer through this cache, as the production m0 composer counts.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ExactTokens;
+
+impl crate::decay_render::TokenCount for ExactTokens {
+    fn count(&self, text: &str) -> usize {
+        cached_estimate_tokens(text)
+    }
+
+    fn counts_joins_exactly(&self) -> bool {
+        true
+    }
+}
+
 /// Drop-in replacement for `tokenizer::estimate_tokens` that hashes and
 /// caches contents long enough to be worth it.
 ///

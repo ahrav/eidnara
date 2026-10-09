@@ -1794,7 +1794,7 @@ fn revision_signal_for_context(
 fn compose_m0_for_context(
     store: &MemoryStore,
     inputs: &crate::m0_compose::M0ComposeInputs<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
     ctx: &ProducerContext<'_>,
 ) -> Result<crate::m0_compose::M0Composition, MemoryStoreError> {
     compose_m0(store, inputs, ctx.project_memory_rows(), estimate_tokens)
@@ -1841,14 +1841,14 @@ pub(crate) fn transform_with_projection(
 }
 
 /// The production pipeline entry. The name is historical: the pass takes no cache now, and the
-/// property catalogs cite it by this name.
+/// property catalogs cite it by this name. It counts with the exact tokenizer, whose counts
+/// follow the paragraph-join identity the history renderer relies on.
 pub(crate) fn transform_with_projection_cached(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result =
-        apply_once_with_estimator(store, req, ctx, crate::token_cache::cached_estimate_tokens);
+    let result = apply_once_with_estimator(store, req, ctx, crate::token_cache::ExactTokens);
     record_stable_pass_trace(store, req, &result);
     result
 }
@@ -2021,7 +2021,7 @@ fn apply_once_with_estimator(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<TransformWithProjection, TransformError> {
     let mut attempt = 0;
     let mut reset_row_version = None;
@@ -2673,7 +2673,7 @@ struct AdditiveM0Composition {
 fn compose_additive_m0(
     store: &MemoryStore,
     ctx: &ProducerContext<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<AdditiveM0Composition, TransformError> {
     let selected_memories = if ctx.memory_enabled {
         ctx.project_memory_rows()
@@ -2688,7 +2688,7 @@ fn compose_additive_m0(
     let user_profile = trim_user_profile_to_budget(
         user_profile,
         ctx.user_profile_budget_tokens,
-        estimate_tokens,
+        crate::decay_render::counting(estimate_tokens),
     );
     let docs = if ctx.inject_docs {
         read_project_docs_canonical(ctx.project_directory)
@@ -2704,7 +2704,7 @@ fn compose_additive_m0(
             history_budget_tokens: 0.0,
             decay_pressure_multiplier: 1.0,
         },
-        estimate_tokens,
+        crate::decay_render::counting(estimate_tokens),
     );
     let project_memory = render_memory_block(selected_memories, "project-memory");
     if !project_memory.is_empty() {
@@ -2719,7 +2719,7 @@ fn apply_additive_only(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     authority: &FoldAuthorityPlan,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
     let projection_started_at = Instant::now();
@@ -3218,7 +3218,7 @@ fn apply_once(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     authority: &FoldAuthorityPlan,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
     mut coverage_row_version: Option<u64>,
 ) -> Result<TransformWithProjection, TransformError> {
     if !authority.eidnara_folds && !(req.lineage_switched && req.is_subagent) {
@@ -4617,7 +4617,7 @@ fn apply_once(
                         &core.frozen_units,
                         body,
                         ctx.history_budget_tokens,
-                        estimate_tokens,
+                        crate::decay_render::counting(estimate_tokens),
                     )
                 });
                 // An unserved body folds; the empty default is never rendered.
@@ -4859,7 +4859,7 @@ fn apply_once(
             &live,
             context_limit_tokens,
             ctx.execute_threshold_percentage,
-            estimate_tokens,
+            crate::decay_render::counting(estimate_tokens),
         ));
     }
     if lineage_anchor_failure {

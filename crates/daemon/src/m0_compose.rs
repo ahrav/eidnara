@@ -12,9 +12,12 @@ use retrieval::packing::skip_and_continue;
 use memory_store::{MemoryStore, MemoryStoreError};
 
 use crate::canonical_memory::CanonicalMemory;
-use crate::decay_render::{PRESSURE_WINDOW, extract_m0_block, fold_horizon, render_owned_rows};
+use crate::decay_render::{
+    PRESSURE_WINDOW, TokenCount, counting, fold_plan, m0_block, render_owned_rows,
+};
 use crate::memory_render::{
-    M0Inputs, is_positive_memory_category, render_m0, render_memory_block, render_memory_line,
+    M0Inputs, is_positive_memory_category, render_m0_counted, render_memory_block,
+    render_memory_line,
 };
 use crate::project_docs::read_project_docs_canonical;
 
@@ -130,17 +133,17 @@ pub(crate) fn trim_user_profile_to_budget(
 
 /// The history estimate counts only the rendered `<session-history>` slice to match the history budget.
 fn history_slice_tokens(m0_text: &str, estimate_tokens: impl Fn(&str) -> usize) -> usize {
-    extract_m0_block(m0_text, "session-history").map_or(0, |slice| estimate_tokens(&slice))
+    m0_block(m0_text, "session-history").map_or(0, estimate_tokens)
 }
 
 /// The renderer retries at most three times while history tokens exceed 105% of a positive budget.
 /// After three retries, the function returns the last render even if history tokens exceed 105% of the budget.
 fn render_m0_with_decay_pressure_retry(
     inputs: &M0Inputs<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    tokens: impl TokenCount + Copy,
 ) -> String {
     let render = |decay_pressure_multiplier| {
-        render_m0(
+        render_m0_counted(
             &M0Inputs {
                 project_docs: inputs.project_docs,
                 user_profile: inputs.user_profile,
@@ -149,22 +152,24 @@ fn render_m0_with_decay_pressure_retry(
                 history_budget_tokens: inputs.history_budget_tokens,
                 decay_pressure_multiplier,
             },
-            estimate_tokens,
+            &tokens,
         )
     };
+    let slice_tokens = |(m0_bytes, counted): &(String, Option<usize>)| {
+        counted.unwrap_or_else(|| history_slice_tokens(m0_bytes, counting(tokens)))
+    };
     let mut decay_pressure_multiplier = 1.0;
-    let mut m0_bytes = render(decay_pressure_multiplier);
+    let mut m0 = render(decay_pressure_multiplier);
     let mut attempts = 0;
     while inputs.history_budget_tokens > 0.0
-        && history_slice_tokens(&m0_bytes, estimate_tokens) as f64
-            > inputs.history_budget_tokens * 1.05
+        && slice_tokens(&m0) as f64 > inputs.history_budget_tokens * 1.05
         && attempts < 3
     {
         decay_pressure_multiplier *= 1.15;
-        m0_bytes = render(decay_pressure_multiplier);
+        m0 = render(decay_pressure_multiplier);
         attempts += 1;
     }
-    m0_bytes
+    m0.0
 }
 
 /// Composes m0 from durable state and the pass's pinned canonical memory rows.
@@ -175,18 +180,18 @@ pub fn compose_m0(
     store: &MemoryStore,
     inputs: &M0ComposeInputs<'_>,
     memories: &[CanonicalMemory],
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    tokens: impl TokenCount + Copy,
 ) -> Result<M0Composition, MemoryStoreError> {
     // Read only rows the curve can render: newest non-legacy rows up to the budget's horizon,
     // plus every legacy row. Older rows archive at every retry multiplier, so the bytes match a
     // full read. Appends enforce range order, so coverage comes from the two ends.
-    let fold = store.load_history_segment_fold(
+    let fold = store.load_history_segment_fold_planned(
         inputs.session_id,
         inputs.legacy_history_segment_seqs,
         PRESSURE_WINDOW,
         |newest| {
             let importances: Vec<i32> = newest.iter().map(|row| row.importance).collect();
-            fold_horizon(&importances, inputs.history_budget_tokens)
+            fold_plan(&importances, inputs.history_budget_tokens)
         },
     )?;
     let history_segments = fold.history_segments;
@@ -211,7 +216,7 @@ pub fn compose_m0(
     let user_profile = trim_user_profile_to_budget(
         user_profile,
         inputs.user_profile_budget_tokens,
-        estimate_tokens,
+        counting(tokens),
     );
     let docs = if inputs.inject_docs {
         read_project_docs_canonical(inputs.project_directory)
@@ -229,7 +234,7 @@ pub fn compose_m0(
             history_budget_tokens: inputs.history_budget_tokens,
             decay_pressure_multiplier: 1.0,
         },
-        estimate_tokens,
+        tokens,
     );
     let project_memory = render_memory_block(selected_memories, "project-memory");
     if !project_memory.is_empty() {
@@ -358,7 +363,7 @@ mod bounded_read_tests {
 
     use super::*;
     use crate::decay_render::DecayRenderHistorySegment;
-    use crate::decay_render::PRESSURE_WINDOW;
+    use crate::decay_render::{PRESSURE_WINDOW, fold_horizon};
     use crate::history_segment_coverage::oracle::resolve_coverage;
     use crate::m1_compose::compose_m1;
     use crate::memory_render::{M1_PLACEHOLDER, assemble_m1, render_new_history_segments};
