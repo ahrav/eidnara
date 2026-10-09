@@ -339,6 +339,21 @@ function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]
     };
 }
 
+function copyExchange(exchange: ForwardedExchange): ForwardedExchange {
+    const { request, response } = exchange;
+    return {
+        ...exchange,
+        tool_results: [...exchange.tool_results],
+        tool_uses: [...exchange.tool_uses],
+        request: { ...request, headers: { ...request.headers } },
+        response: response && {
+            ...response,
+            headers: { ...response.headers },
+            usage: response.usage && { ...response.usage },
+        },
+    };
+}
+
 export class Forwarder {
     private readonly config: Readonly<ForwardConfig>;
     private readonly exchanges: ForwardedExchange[] = [];
@@ -537,7 +552,7 @@ export class Forwarder {
             refusals: [...this.refusals],
             complete: reasons.length === 0,
             incomplete_reasons: reasons,
-            exchanges: structuredClone(this.exchanges),
+            exchanges: this.exchanges.map(copyExchange),
         };
     }
 }

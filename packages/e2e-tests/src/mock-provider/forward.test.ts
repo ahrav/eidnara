@@ -412,6 +412,49 @@ describe("forwarding", () => {
         expect(double.received.length).toBe(1);
     });
 
+    test("a report is a snapshot that later sends and edits to an earlier report leave unchanged", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(
+                    sse([{ type: "tool_use", id: "toolu_1", name: "read", input: {} }], "tool_use"),
+                    { headers: { "content-type": "text/event-stream", "x-trace": "t1" } },
+                ),
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+        const base = await start(mock);
+        await (await post(base, firstTurn)).text();
+        const first = mock.forwardingReport();
+        const pristine = structuredClone(first);
+        await (await post(base, toolResultTurn)).text();
+        expect(first).toEqual(pristine);
+
+        const edited = mock.forwardingReport();
+        const exchange = edited.exchanges[0];
+        const response = exchange?.response;
+        if (!exchange || !response?.usage) throw new Error("the first exchange has no usage");
+        exchange.tool_uses.push("toolu_edit");
+        exchange.tool_results.push("toolu_edit");
+        exchange.request.headers["x-edit"] = "1";
+        exchange.request.body_text = "edited";
+        response.headers["x-edit"] = "1";
+        response.usage.output_tokens = 999;
+        response.stop_reason = "edited";
+        edited.refusals.push("edited");
+        edited.limits.maxCalls = 999;
+
+        const after = mock.forwardingReport();
+        expect(after.exchanges[0]).toEqual(pristine.exchanges[0]);
+        expect(after.exchanges[0]?.response?.headers["x-trace"]).toBe("t1");
+        expect(after.refusals).toEqual([]);
+        expect(after.limits.maxCalls).toBe(config().limits.maxCalls);
+        expect(after.exchanges.length).toBe(2);
+        expect(after.complete).toBe(true);
+    });
+
     test("a send in flight, a missing stop reason, or an unanswered tool call leaves the run incomplete", async () => {
         let release: (response: Response) => void = () => {};
         const pending = upstreamDouble([
