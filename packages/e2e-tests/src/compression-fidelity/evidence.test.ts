@@ -216,6 +216,19 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain("not the arm's prompt");
     });
 
+    test("a blank arm.json identifier does not match the arm schema", async () => {
+        for (const field of ["label", "model", "provider", "version", "prompt_sha256"]) {
+            const assembled = await assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, "arm.json");
+                    const arm = JSON.parse(readFileSync(path, "utf8"));
+                    writeFileSync(path, JSON.stringify({ ...arm, [field]: "   " }));
+                },
+            });
+            expect(errorsOf(assembled)).toContain("arm.json does not match its schema");
+        }
+    });
+
     test("an unpublished temporary file and a duplicate observation are refused", async () => {
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
@@ -726,6 +739,12 @@ describe("evidence live mode", () => {
         if (only) only.response = { ...only.response, cost_known: false };
         expect(errorsOf(await live([costless]))).toContain(
             "exchange 0 cost is unknown in a complete report",
+        );
+        const clipped = forwardingReport("{}", sha256("{}"), true);
+        const [cut] = clipped.exchanges;
+        if (cut) cut.response = { ...cut.response, truncated: true };
+        expect(errorsOf(await live([clipped]))).toContain(
+            "exchange 0 response is truncated in a complete report",
         );
         const incomplete = { ...unanswered, complete: false, incomplete_reasons: ["x"] };
         expect(errorsOf(await live([incomplete]))).not.toContain("in a complete report");

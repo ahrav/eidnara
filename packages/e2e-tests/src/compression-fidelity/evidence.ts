@@ -133,6 +133,10 @@ export function text(value: unknown): value is string {
     return typeof value === "string" && value !== "";
 }
 
+export function named(value: unknown): value is string {
+    return typeof value === "string" && value.trim() !== "";
+}
+
 export function strings(value: unknown): string[] {
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
@@ -172,7 +176,13 @@ function armConfig(value: unknown): ArmConfig | null {
     if (!record(value) || value.schema !== ARM_SCHEMA) return null;
     const { label, prompt_sha256, model, provider, version, settings, limits, generation_origin } =
         value;
-    if (!text(label) || !text(prompt_sha256) || !text(model) || !text(provider) || !text(version)) {
+    if (
+        !named(label) ||
+        !named(prompt_sha256) ||
+        !named(model) ||
+        !named(provider) ||
+        !named(version)
+    ) {
         return null;
     }
     if (!record(settings) || !(limits === null || record(limits))) return null;

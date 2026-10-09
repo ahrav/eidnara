@@ -16,6 +16,7 @@ import {
     type Evidence,
     type EvidenceRow,
     type Json,
+    named,
     REAL_CAPTURE,
     REPORT_SCHEMA,
     readJson,
@@ -106,10 +107,6 @@ const DISPOSITION_VALUES: readonly string[] = ["visible", "discoverable", "unava
 
 function stringList(value: unknown): value is string[] {
     return Array.isArray(value) && value.every((v) => typeof v === "string");
-}
-
-function named(value: unknown): value is string {
-    return typeof value === "string" && value.trim() !== "";
 }
 
 function list(value: unknown, where: string, errors: string[]): unknown[] {
@@ -374,8 +371,13 @@ function costOf(
             recovery_output_utf8_bytes: e.detail.result_utf8_bytes,
         });
     }
+    // A served row credits the captures its serving observations link to; a row with no link,
+    // such as an exact read, credits the captures of its source.
+    const linked = new Set(evidence.map((s) => s.detail.generation_capture_sha256).filter(text));
     const generation: Json[] = generations
-        .filter((e) => evidence.some((s) => s.source === e.source))
+        .filter((e) =>
+            linked.size > 0 ? linked.has(e.sha256) : evidence.some((s) => s.source === e.source),
+        )
         .map((e) => ({
             file: e.file,
             owner: e.owner,
@@ -554,15 +556,29 @@ export function evaluate(input: {
     const binding = controls.qualified ? reviews : { ...reviews, judgments: [], disputes: [] };
     const grouped = byArmAndScenario(binding.judgments);
     const labels = new Set(assembled.arms.map((side) => side.label));
-    const scenarioIds = new Set(scenarios(input.corpus).map((s) => s.scenario.id));
+    const expectations = new Map(
+        scenarios(input.corpus).map((s) => [
+            s.scenario.id,
+            new Set(s.scenario.expectations.map((e) => e.obligation)),
+        ]),
+    );
     const stray = [
         ...reviews.judgments.map((j) => ["judgment", j.arm, j.scenario] as const),
         ...reviews.disputes.map((d) => ["dispute", d.arm, d.scenario] as const),
     ]
-        .filter(([, arm, scenario]) => !labels.has(arm) || !scenarioIds.has(scenario))
+        .filter(([, arm, scenario]) => !labels.has(arm) || !expectations.has(scenario))
         .map(
             ([what, arm, scenario]) => `a ${what} names unknown arm or scenario ${arm}/${scenario}`,
         );
+    for (const j of reviews.judgments) {
+        const declared = expectations.get(j.scenario);
+        if (!declared) continue;
+        for (const o of j.obligations) {
+            if (!declared.has(o.obligation)) {
+                stray.push(`a judgment names unknown obligation ${o.obligation} for ${j.scenario}`);
+            }
+        }
+    }
     const arms = assembled.arms.map((side) => {
         const judged = grouped.get(side.label);
         const generations = generationsOf(side.arm);

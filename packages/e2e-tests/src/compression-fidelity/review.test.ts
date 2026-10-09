@@ -145,6 +145,22 @@ async function evaluate(
     });
 }
 
+/** Rewrites the source's real capture and points its serving observations at the new hash. */
+function recapture(dir: string, source: string, edit: (capture: Record<string, unknown>) => void) {
+    const path = join(dir, `real.${source}.json`);
+    const capture = JSON.parse(readFileSync(path, "utf8"));
+    edit(capture);
+    const relinked = write(dir, `real.${source}.json`, capture);
+    for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+        const file = join(dir, `delivery.${s.id}.json`);
+        const observation = JSON.parse(readFileSync(file, "utf8"));
+        if (observation.detail.generation_capture_sha256 === undefined) continue;
+        observation.detail.generation_capture_sha256 = relinked;
+        writeFileSync(file, JSON.stringify(observation));
+    }
+    return capture;
+}
+
 describe("eval:compression-fidelity assembly", () => {
     test("a complete reviewed evidence set yields every column, a manifest, and a treatment comparison", async () => {
         const { manifest, report } = await evaluate(scratch());
@@ -478,10 +494,9 @@ describe("eval:compression-fidelity gates", () => {
             const { report } = await evaluate(scratch(), {
                 tamper: (dir) => {
                     const source = corpus.cases[0]?.sources[0]?.id ?? "";
-                    const path = join(dir, `real.${source}.json`);
-                    const value = JSON.parse(readFileSync(path, "utf8"));
-                    value.detail.usage = usage;
-                    writeFileSync(path, JSON.stringify(value));
+                    recapture(dir, source, (capture) => {
+                        (capture.detail as Record<string, unknown>).usage = usage;
+                    });
                 },
             });
             const generation = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
@@ -543,10 +558,9 @@ describe("eval:compression-fidelity gates", () => {
         const source = corpus.cases[0]?.sources[0]?.id ?? "";
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
-                const path = join(dir, `real.${source}.json`);
-                const value = JSON.parse(readFileSync(path, "utf8"));
-                value.detail.attempts = [];
-                writeFileSync(path, JSON.stringify(value));
+                recapture(dir, source, (capture) => {
+                    (capture.detail as Record<string, unknown>).attempts = [];
+                });
             },
         });
         const row = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
@@ -578,6 +592,30 @@ describe("eval:compression-fidelity gates", () => {
         expect(report.arms[0]?.identity_errors).toEqual([]);
         const row = report.arms[0]?.rows.find((r) => r.case === c?.id);
         expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
+    });
+
+    test("a served row credits generation only from the capture it links to", async () => {
+        const c = corpus.cases[0];
+        const source = c?.sources[0]?.id ?? "";
+        const served = allScenarios.find(
+            ({ s }) => s.source === source && s.serving.path !== "exact_read",
+        )?.s.id;
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const linked = recapture(dir, source, (capture) => {
+                    (capture.detail as Record<string, unknown>).usage = null;
+                }) as { detail: Record<string, unknown> };
+                write(dir, `real.${source}.retry.json`, {
+                    ...linked,
+                    stage: "capture-retry",
+                    detail: { ...linked.detail, usage: { input_tokens: 1, output_tokens: 1 } },
+                });
+            },
+        });
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        const row = report.arms[0]?.rows.find((r) => r.scenario === served);
+        expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
+        expect(row?.cost.missing).toContain(`real.${source}.json: generation usage unreported`);
     });
 
     test("a negative recovery measurement leaves cost incomplete", async () => {
@@ -654,6 +692,11 @@ describe("eval:compression-fidelity gates", () => {
             delivery(`${head} admission=fits invocation_bytes=9000 invocation_charged=3215`),
         );
         expect(untimed.transform_elapsed_ms).toBeNull();
+        const uncharged = servingCost(
+            delivery(`${head} admission=fits elapsed=3.0 ms module=1.0 ms`),
+        );
+        expect(uncharged.invocation_charged_tokens).toBeNull();
+        expect(uncharged.invocation_bytes).toBeNull();
     });
 
     test("a serving cost that is not a measurement leaves cost incomplete", async () => {
@@ -970,6 +1013,32 @@ describe("eval:compression-fidelity judgments", () => {
         const [base, cand] = report.arms;
         expect(base?.rows.every((r) => r.semantic_review === "reviewed")).toBe(true);
         expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+    });
+
+    test("a judgment naming an undeclared obligation withholds acceptance", async () => {
+        const scenario = allScenarios[0]?.s.id ?? "";
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            const judgment = judgmentFor(j, scenario);
+            judgment.obligations = [
+                ...(judgment.obligations as unknown[]),
+                { obligation: "C9.O9", disposition: "visible", preserved: false },
+            ];
+        });
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: await loadArm(baseline.dir, corpus, SHA),
+            candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
+        });
+        expect(report.arms[0]?.withheld).toContain(
+            `a judgment names unknown obligation C9.O9 for ${scenario}`,
+        );
+        expect(report.accepted).toBe(false);
     });
 
     test("a judgment or dispute naming an unknown arm or scenario withholds acceptance", async () => {

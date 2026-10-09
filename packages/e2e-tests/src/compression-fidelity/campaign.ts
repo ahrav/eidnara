@@ -155,11 +155,13 @@ export const OPENCODE_ESTIMATOR = "opencode-heuristic utf8-bytes-div-3.5-v1";
 export function servingCost(delivery: Delivery): Record<string, unknown> {
     const { pass } = delivery;
     const admitted = pass.admission !== "none";
+    const recorded = (field: string) => new RegExp(`(?:^|\\s)${field}=`).test(pass.raw);
     return {
         request_body_utf8_bytes: Buffer.byteLength(JSON.stringify(delivery.capture.request.body)),
         admission: pass.admission,
-        invocation_bytes: admitted ? pass.invocationBytes : null,
-        invocation_charged_tokens: admitted ? pass.invocationCharged : null,
+        invocation_bytes: admitted && recorded("invocation_bytes") ? pass.invocationBytes : null,
+        invocation_charged_tokens:
+            admitted && recorded("invocation_charged") ? pass.invocationCharged : null,
         estimator: OPENCODE_ESTIMATOR,
         transform_elapsed_ms: /(?:^|\s)elapsed=/.test(pass.raw) ? pass.elapsedMs : null,
         raw_source_leaks: delivery.verdict.leaks.length,
