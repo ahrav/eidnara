@@ -11,16 +11,16 @@ details do not authorize a weaker acceptance threshold.
 
 ## Evidence trail
 
-- [decay_render.rs:547-661](../../../../../crates/daemon/src/decay_render.rs#L547-L661)
+- [decay_render.rs:701-841](../../../../../crates/daemon/src/decay_render.rs#L701-L841)
   returns the unwrapped history body. Its positive-budget guard demotes
   oldest-first, bounded by `history_segments.len() * 5`, until the body fits
   its effective budget or is empty. This is the absolute body-budget boundary.
-- [memory_render.rs:191-198](../../../../../crates/daemon/src/memory_render.rs#L191-L198)
+- [memory_render.rs:206-215](../../../../../crates/daemon/src/memory_render.rs#L206-L215)
   divides the requested budget by the pressure multiplier before calling the
   renderer, then adds the session-history wrapper or its empty placeholder.
   [memory_render.rs:7-12](../../../../../crates/daemon/src/memory_render.rs#L7-L12)
   keeps the empty wrapper deliberately for prompt-cache stability.
-- [m0_compose.rs:131-168](../../../../../crates/daemon/src/m0_compose.rs#L131-L168)
+- [m0_compose.rs:134-173](../../../../../crates/daemon/src/m0_compose.rs#L134-L173)
   measures that wrapped history slice. Above `requested_budget * 1.05`, it
   increases pressure by 1.15 and retries at most three times. It returns the
   last render even if the trigger remains true. The trigger is not a cap.

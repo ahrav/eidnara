@@ -171,7 +171,7 @@ removal of a high-importance row; inspect the whole invocation and any executed
 recovery evidence with covered raw source absent.
 Confidence: medium - [evidence](evidence/cf-pressure-omission-discloses-evidence-loss.md).
 P5 omission, oldest-first demotion, and zero daemon anchor overlap are verified.
-Existing check: `decay_render.rs:765-777,835-852` checks omission and budget
+Existing check: `decay_render.rs:950-962,1020-1037` checks omission and budget
 mechanics; status unaudited. No complete-invocation disposition check was found.
 Impact: Budget savings can conceal a lost prohibition or unsupported next
 action, including when the consumer abstains safely.
@@ -363,7 +363,7 @@ memory. Record each surface's estimator and actual provider/raw-fallback outcome
 Confidence: high - [evidence](evidence/cf-serving-resource-boundaries.md).
 The body guard, separate wrapper retries, hint bounds, pinned read, and cache
 checks are verified in source; compliance with R9 remains a claim under test.
-Existing check: `crates/daemon/src/decay_render.rs:835-852,1213-1384`,
+Existing check: `crates/daemon/src/decay_render.rs:1020-1037,1599-1770`,
 `crates/daemon/src/transform.rs:22965-22984,21111-21216`, and
 `crates/daemon/tests/transform_canonical_memory.rs:48-217,243-449`, plus
 `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:7-55`;

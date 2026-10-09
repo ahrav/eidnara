@@ -10,20 +10,20 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 
 ## Evidence trail
 
-- [decay_render.rs:413-416](../../../../../crates/daemon/src/decay_render.rs#L413-L416)
+- [decay_render.rs:568-571](../../../../../crates/daemon/src/decay_render.rs#L568-L571)
   returns empty for P5. Stored existence therefore does not imply prompt text.
-- [decay_render.rs:491-531](../../../../../crates/daemon/src/decay_render.rs#L491-L531)
+- [decay_render.rs:652-686](../../../../../crates/daemon/src/decay_render.rs#L652-L686)
   computes age/importance tiers and passes literal `0.0` for anchor overlap.
   Core tests with nonzero overlap cannot establish production protection.
-- [context-core/decay.rs:132-149](../../../../../crates/context-core/src/decay.rs#L132-L149)
+- [context-core/decay.rs:142-159](../../../../../crates/context-core/src/decay.rs#L142-L159)
   can keep a naturally archived row at P4 when anchor overlap protects it.
   This capability is not used by the daemon call above.
-- [decay_render.rs:575-596](../../../../../crates/daemon/src/decay_render.rs#L575-L596)
+- [decay_render.rs:741-768](../../../../../crates/daemon/src/decay_render.rs#L741-L768)
   demotes the oldest nonarchived row until its positive budget fits or the guard
   exhausts. The loop does not exempt high importance or the newest-tier floor.
-- [decay_render.rs:835-852](../../../../../crates/daemon/src/decay_render.rs#L835-L852)
+- [decay_render.rs:1020-1037](../../../../../crates/daemon/src/decay_render.rs#L1020-L1037)
   tests an 80-character budget with importance 50 rows; status unaudited.
-- [m0_compose.rs:138-167](../../../../../crates/daemon/src/m0_compose.rs#L138-L167)
+- [m0_compose.rs:141-172](../../../../../crates/daemon/src/m0_compose.rs#L141-L172)
   adds at most three pressure retries for wrapped history above 105% of budget.
   This trigger is neither a hard-budget allowance nor a guaranteed cap. The
   [resource record](../catalog.md#cf-serving-resource-boundaries) owns that distinction.

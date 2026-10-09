@@ -22,10 +22,10 @@ every other tokenizer record depends on.
   `piece_end` (`:202-237`) per span; the whitespace class is a literal in
   `class_from_tables` (`:71`) and `ASCII_CLASS` (`:38`), and the letter and
   number classes come from `src/unicode_tables.rs`.
-- `pattern_is_upstream_with_ecmascript_whitespace` (`:168`) derives the pattern
-  from the asset and asserts `derived == CLAUDE_PAT_STR` (`:175`), then asserts
-  the constant contains neither `\s` nor `\S` (`:176-177`).
-- `reference_pattern_equals_upstream_derived_pattern` (`:213`) asserts
+- `pattern_is_upstream_with_ecmascript_whitespace` (`:228`) derives the pattern
+  from the asset and asserts `derived == CLAUDE_PAT_STR` (`:235`), then asserts
+  the constant contains neither `\s` nor `\S` (`:236-237`).
+- `reference_pattern_equals_upstream_derived_pattern` (`:243`) asserts
   `reference_impl::CLAUDE_PAT_STR` (`src/reference_impl.rs:23-33`) equals the
   derived constant; the reference compiles that constant at `:56`.
 - `matches_reference_on_hand_cases` (`src/scan.rs:307`) compares the scanner's
