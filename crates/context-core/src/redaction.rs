@@ -643,11 +643,14 @@ pub fn secret_shaped_json_key(key: &str) -> bool {
 /// Affixes cover a name without qualifying it, so `keyvalue` and `keyid` stay structural
 /// exactly as `key_value` and `key_id` do.
 fn undelimited_names_a_credential(joined: &str) -> bool {
+    if !LABEL_WORDS.iter().any(|word| joined.contains(word)) {
+        return false;
+    }
     let from_start = vocabulary_reach(joined, false);
-    let to_end = vocabulary_reach(joined, true);
     if !from_start[joined.len()] {
         return false;
     }
+    let to_end = vocabulary_reach(joined, true);
     let mut names_a_label = false;
     let mut names_a_qualified_segment = false;
     for start in 0..joined.len() {

@@ -49,8 +49,7 @@ It mutates the existing text block in place. The target is selected in
 `render_user_hint` (`:9084-9117`):
 
 - `:9105-9108` — the header is "Your memory may contain N related fragments:".
-- `:9109` — the footer. #926 replaced its text at `transform.rs:8627` (line
-  number at `6edbe8b05`); it is now "If
+- `:9109` — the footer. #926 replaced its text; it is now "If
   these fragments seem relevant to the current request, you may run
   eidnara_search to search project memory for their topic. Otherwise ignore."
 - `:9111` — `let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");`

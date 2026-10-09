@@ -5,7 +5,13 @@ import { join, resolve } from "node:path";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 import { __spawnOpencodeTest, createIsolatedEnv } from "../opencode-runner/spawn";
 import type { CassetteOracle } from "./cassette-oracle";
-import { type ForwardConfig, publishForwardingReport, validateForwardConfig } from "./forward";
+import {
+    type ForwardConfig,
+    Forwarder,
+    publishForwardingReport,
+    readResponse,
+    validateForwardConfig,
+} from "./forward";
 import { MockProvider } from "./server";
 
 const UPSTREAM = "https://provider.test/v1/messages";
@@ -215,6 +221,31 @@ describe("construction", () => {
 });
 
 describe("forwarding", () => {
+    test("a response is read from its events however their keys are spelled", () => {
+        const stream = [
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":40,"output_tokens":0}}}',
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"the \\"usage\\" word"}}',
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"plain"}}',
+            'data: {"type":"content_block_start","content_bloc\\u006b":{"type":"tool_use","id":"toolu_esc"}}',
+            'data: {"type":"message_delta","delta":{"stop_reaso\\u006e":"tool_use"},"\\u0075sage":{"output_tokens":6}}',
+            "data: 7",
+            "data: not json",
+        ].join("\n");
+        expect(readResponse("text/event-stream", stream)).toEqual({
+            usage: {
+                input_tokens: 40,
+                output_tokens: 6,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            stopReason: "tool_use",
+            toolUses: ["toolu_esc"],
+        });
+        expect(
+            readResponse("text/event-stream", stream.split("\n").slice(1, 3).join("\n")),
+        ).toEqual({ usage: null, stopReason: null, toolUses: [] });
+    });
+
     test("forwards the received bytes, returns the provider's response, and captures the tool-result turn", async () => {
         const toolUse = sse(
             [{ type: "tool_use", id: "toolu_1", name: "read", input: {} }],
@@ -267,6 +298,39 @@ describe("forwarding", () => {
         expect(report.complete).toBe(true);
         expect(report.mode).toBe("forward");
         expect(report.spent_usd).toBeCloseTo((2 * (40 * 3 + 6 * 15)) / 1_000_000, 12);
+    });
+
+    test("a report names each body's SHA-256 before and after its digest settles", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+            () =>
+                new Response(sse([{ type: "text", text: "y" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const forwarder = new Forwarder(config({ fetch: double.send }));
+        const bodies = [firstTurn, { ...firstTurn, max_tokens: 256 }].map((turn) =>
+            new TextEncoder().encode(JSON.stringify(turn)),
+        );
+        const send = (bytes: Uint8Array<ArrayBuffer>) => {
+            const text = new TextDecoder().decode(bytes);
+            return forwarder.forward(bytes, text, JSON.parse(text), {});
+        };
+        const hashes = bodies.map((bytes) =>
+            new Bun.CryptoHasher("sha256").update(bytes).digest("hex"),
+        );
+
+        const pending = send(bodies[0] as Uint8Array<ArrayBuffer>);
+        expect(forwarder.report().exchanges[0]?.request.body_sha256).toBe(hashes[0]);
+        await (await pending).text();
+        await (await send(bodies[1] as Uint8Array<ArrayBuffer>)).text();
+        await Bun.sleep(20);
+        const report = forwarder.report();
+        expect(report.exchanges.map((e) => e.request.body_sha256)).toEqual(hashes);
+        expect(report.complete).toBe(true);
     });
 
     test("a request without this mock's key is refused before any send", async () => {
@@ -380,6 +444,49 @@ describe("forwarding", () => {
         expect(report.incomplete_reasons).toContain("spend above the cap");
         expect(report.complete).toBe(false);
         expect(double.received.length).toBe(1);
+    });
+
+    test("a report is a snapshot that later sends and edits to an earlier report leave unchanged", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(
+                    sse([{ type: "tool_use", id: "toolu_1", name: "read", input: {} }], "tool_use"),
+                    { headers: { "content-type": "text/event-stream", "x-trace": "t1" } },
+                ),
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+        const base = await start(mock);
+        await (await post(base, firstTurn)).text();
+        const first = mock.forwardingReport();
+        const pristine = structuredClone(first);
+        await (await post(base, toolResultTurn)).text();
+        expect(first).toEqual(pristine);
+
+        const edited = mock.forwardingReport();
+        const exchange = edited.exchanges[0];
+        const response = exchange?.response;
+        if (!exchange || !response?.usage) throw new Error("the first exchange has no usage");
+        exchange.tool_uses.push("toolu_edit");
+        exchange.tool_results.push("toolu_edit");
+        exchange.request.headers["x-edit"] = "1";
+        exchange.request.body_text = "edited";
+        response.headers["x-edit"] = "1";
+        response.usage.output_tokens = 999;
+        response.stop_reason = "edited";
+        edited.refusals.push("edited");
+        edited.limits.maxCalls = 999;
+
+        const after = mock.forwardingReport();
+        expect(after.exchanges[0]).toEqual(pristine.exchanges[0]);
+        expect(after.exchanges[0]?.response?.headers["x-trace"]).toBe("t1");
+        expect(after.refusals).toEqual([]);
+        expect(after.limits.maxCalls).toBe(config().limits.maxCalls);
+        expect(after.exchanges.length).toBe(2);
+        expect(after.complete).toBe(true);
     });
 
     test("a send in flight, a missing stop reason, or an unanswered tool call leaves the run incomplete", async () => {
@@ -510,6 +617,13 @@ describe("forwarding", () => {
                 replies: [],
                 sends: 0,
                 stopped: "another",
+            },
+            {
+                forward: {},
+                body: `{"model":"${MODEL}","max_tokens":512,`,
+                replies: [],
+                sends: 0,
+                stopped: "unreadable request body",
             },
             {
                 forward: { limits: { ...config().limits, spendCapUsd: 0.000001 } },

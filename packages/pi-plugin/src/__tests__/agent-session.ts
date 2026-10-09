@@ -18,7 +18,8 @@ export interface TestAgentSession {
     session: AgentSession;
     authStorage: AuthStorage;
     sessionManager: SessionManager;
-    requests: { messages: unknown[] }[];
+    /** Every provider request the faux model answered: its messages and system prompt. */
+    requests: { messages: unknown[]; systemPrompt: string | undefined }[];
     respond(steps: FauxResponseStep[]): void;
     dispose(): Promise<void>;
 }
@@ -42,10 +43,13 @@ export async function createTestAgentSession(args: {
             { id: "faux-model", contextWindow: args.contextWindow ?? 200_000, maxTokens: 8_192 },
         ],
     });
-    const requests: { messages: unknown[] }[] = [];
+    const requests: { messages: unknown[]; systemPrompt: string | undefined }[] = [];
     const script: FauxResponseStep[] = [];
     const answer: FauxResponseStep = (context) => {
-        requests.push({ messages: structuredClone(context.messages) });
+        requests.push({
+            messages: structuredClone(context.messages),
+            systemPrompt: context.systemPrompt,
+        });
         const next = script.shift();
         if (typeof next === "function")
             return next(context, undefined, faux.state, faux.getModel());

@@ -1,6 +1,6 @@
 //! Owner-attributed observations for the compression fidelity witnesses. The library test module
 //! and the daemon's integration tests share this file through path-based inclusion. An atomic
-//! rename publishes each record from a temporary file created with mode `0600`, inside a
+//! no-replace link publishes each record from a temporary file created with mode `0600`, inside a
 //! directory created with mode `0700`, when `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names it.
 
 use std::io::Write;
@@ -92,8 +92,8 @@ impl Observation {
         self
     }
 
-    /// Atomic rename publishes the complete record at its final path; `emit_to` panics when that
-    /// path exists at the check.
+    /// Publishes the complete record at its final path; `emit_to` panics when that path exists,
+    /// whether at the check or at publication.
     pub(crate) fn emit_to(&self, dir: &Path) -> PathBuf {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -112,8 +112,15 @@ impl Observation {
         file.write_all(&serde_json::to_vec_pretty(self).unwrap())
             .and_then(|()| file.sync_all())
             .unwrap_or_else(|error| panic!("{}: {error}", temporary.display()));
-        std::fs::rename(&temporary, &path)
-            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        publish(&temporary, &path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         path
     }
+}
+
+/// Links the complete temporary file to its final name; the link fails when that name exists,
+/// so a writer whose existence check raced another writer keeps the first record intact.
+pub(crate) fn publish(temporary: &Path, path: &Path) -> std::io::Result<()> {
+    let linked = std::fs::hard_link(temporary, path);
+    std::fs::remove_file(temporary)?;
+    linked
 }

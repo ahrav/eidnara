@@ -579,3 +579,257 @@ fn whole_word_lookup_matches_the_lexical_tokenizer() {
         Some("zephyrine")
     );
 }
+
+#[test]
+fn whole_word_chars_match_the_lowercase_check_on_ascii() {
+    for ch in '\0'..='\u{7f}' {
+        assert_eq!(
+            is_whole_word_char(ch),
+            ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric),
+            "{ch:?}"
+        );
+    }
+}
+
+fn sorted_prefix_lexical_tokens(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 3 && !USER_HINT_STOPWORDS.contains(token))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .take(USER_HINT_TOKEN_CAP)
+        .collect()
+}
+
+#[test]
+fn the_token_cap_keeps_the_smallest_tokens_wherever_they_appear() {
+    let late_small = (0..40)
+        .rev()
+        .map(|n| format!("term{n:02}"))
+        .chain(["the".to_string(), "ab".to_string(), "aaa".to_string()])
+        .collect::<Vec<_>>()
+        .join(" ");
+    let tokens = lexical_tokens(&late_small);
+    assert_eq!(tokens, sorted_prefix_lexical_tokens(&late_small));
+    assert_eq!(tokens.first().map(String::as_str), Some("aaa"));
+    assert_eq!(tokens.last().map(String::as_str), Some("term22"));
+}
+
+proptest::proptest! {
+    #[test]
+    fn bounded_lexical_tokens_match_the_sorted_prefix(
+        pieces in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "a", "b", "z", "ab", "abc", "Zeta", "é", "İ", "Σ", "ΣΑΣ", "日本", "語", "x1", "2",
+                " ", "_", "-", "\n", "the", "and", "your",
+            ]),
+            0..300,
+        ),
+    ) {
+        let text = pieces.concat();
+        proptest::prop_assert_eq!(lexical_tokens(&text), sorted_prefix_lexical_tokens(&text));
+    }
+}
+
+fn matched_through_lexical_tokens(parts: &[&str], query: &[String]) -> u32 {
+    let tokens = lexical_tokens(&parts.join(" "));
+    query
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| tokens.contains(*token))
+        .fold(0, |bits, (index, _)| bits | (1 << index))
+}
+
+fn hint_query_tokens(text: &str) -> Vec<String> {
+    lexical_tokens(text).into_iter().collect()
+}
+
+#[test]
+fn the_hint_matcher_agrees_with_the_tokenizer_on_long_ascii_and_mixed_bodies() {
+    let query = hint_query_tokens(
+        "Do you have the 123 ab12 alike budget that was zephyrine for about yesterday 日本語 ΣΑΣ",
+    );
+    let hint_query = HintQuery::new(&query);
+    let words = [
+        "alpha",
+        "Budget",
+        "123",
+        "ab12",
+        "zephyrine",
+        "about",
+        "yesterday",
+        "the",
+        "and",
+        "x1",
+        "日本語",
+        "ΣΑΣ",
+        "é",
+        "İstanbul",
+        "commit",
+        "0a1b2c3",
+        "zzz",
+        "aaa",
+        "alike",
+    ];
+    let mut seed = 926u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed >> 33
+    };
+    for _ in 0..300 {
+        let count = 1 + next() % 400;
+        let mut parts: Vec<String> = vec![String::new(); 1 + (next() % 6) as usize];
+        for _ in 0..count {
+            let part = (next() % parts.len() as u64) as usize;
+            let word = words[(next() % words.len() as u64) as usize];
+            parts[part].push_str(word);
+            parts[part].push_str([" ", ", ", "\n", "-", "_", ""][(next() % 6) as usize]);
+        }
+        let parts = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hint_query.matched_in_parts(&parts),
+            matched_through_lexical_tokens(&parts, &query),
+            "{parts:?}"
+        );
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn the_hint_matcher_agrees_with_the_tokenizer(
+        parts in proptest::collection::vec(
+            proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "a", "b", "z", "ab", "abc", "Zeta", "é", "İ", "Σ", "ΣΑΣ", "日本", "語", "x1",
+                    "2", " ", "_", "-", "\n", "the", "and", "your", "0", "9", "aaa", "zzz", "ÿ",
+                    "Ω1", "abd", "abe", "b1", "b2", "c1", "c2", "d5", "e8", "f10", "g12", "h14",
+                    "i16", "j18", "k19", "l20", "m21", "n22", "o23", "p24", "q25", "r26", "s27",
+                ]),
+                0..120,
+            ),
+            1..4,
+        ),
+        query_words in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "abc", "zeta", "σασ", "日本", "日本語", "the", "aaa", "zzz", "abd", "abe", "b1x",
+                "c1", "d5", "e8", "f10", "g12", "h14", "i16", "j18", "k19", "l20", "m21", "n22",
+                "o23", "p24", "q25", "r26", "s27", "ω1", "stanbul", "é1",
+            ]),
+            1..30,
+        ),
+    ) {
+        let parts = parts.iter().map(|pieces| pieces.concat()).collect::<Vec<_>>();
+        let parts = parts
+            .iter()
+            .map(String::as_str)
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>();
+        let query = hint_query_tokens(&query_words.join(" "));
+        proptest::prop_assume!(!query.is_empty());
+        let hint_query = HintQuery::new(&query);
+        proptest::prop_assert_eq!(
+            hint_query.matched_in_parts(&parts),
+            matched_through_lexical_tokens(&parts, &query)
+        );
+    }
+}
+
+#[test]
+fn the_hint_stopword_check_equals_the_stopword_list() {
+    for stopword in USER_HINT_STOPWORDS {
+        assert!(is_hint_stopword(stopword.as_bytes()), "{stopword}");
+    }
+    for token in [
+        "an", "ands", "are1", "fro", "form", "than", "thi", "you2", "use_", "", "a",
+    ] {
+        assert_eq!(
+            is_hint_stopword(token.as_bytes()),
+            USER_HINT_STOPWORDS.contains(&token),
+            "{token}"
+        );
+    }
+    let mut seen = 0usize;
+    for first in b'a'..=b'z' {
+        for second in b'a'..=b'z' {
+            for third in b'a'..=b'z' {
+                let token = [first, second, third];
+                seen += is_hint_stopword(&token) as usize;
+                for fourth in b'a'..=b'z' {
+                    let token = [first, second, third, fourth];
+                    assert_eq!(
+                        is_hint_stopword(&token),
+                        USER_HINT_STOPWORDS.contains(&std::str::from_utf8(&token).unwrap()),
+                        "{token:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        USER_HINT_STOPWORDS
+            .iter()
+            .filter(|stopword| stopword.len() == 3)
+            .count()
+    );
+}
+
+/// The fragment as the cap defines it: every word of the neutralized compressed text joined by
+/// single spaces, then cut to the cap.
+fn whole_text_fragment(snippet: &str) -> String {
+    let compressed = crate::terse_text_compression::compress(
+        snippet,
+        crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
+    );
+    let normalized = neutralize_user_hint_markup(&compressed)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if utf16_len(&normalized) <= USER_HINT_FRAGMENT_CHAR_CAP {
+        return normalized;
+    }
+    let mut truncated = utf16_prefix(&normalized, USER_HINT_FRAGMENT_CHAR_CAP - 1)
+        .trim_end()
+        .to_string();
+    truncated.push('…');
+    truncated
+}
+
+#[test]
+fn a_literal_ellipsis_at_the_prefix_cut_does_not_end_the_fragment() {
+    for text in [
+        format!("x{}… y", "\u{a0}".repeat(160)),
+        format!("x {}wait… tail words here", "§1§".repeat(64)),
+    ] {
+        assert_eq!(
+            user_hint_fragment(&text),
+            whole_text_fragment(&text),
+            "{text:?}"
+        );
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn the_fragment_prefix_equals_the_whole_text_fragment(
+        pieces in proptest::collection::vec(
+            proptest::sample::select(vec![
+                "quasar", "nebula", "<b>", "&", ">", "§12§", "§3§ ", "日本語", "😀", "é", " ",
+                "  ", "\n", "\t", "the", "a", "and", "x".repeat(50).leak() as &str,
+                "configuration", "message", "https://x.y/z", "`code`", "deadbeef1234567",
+                "U: hello", "\u{a0}", "…",
+            ]),
+            0..200,
+        ),
+    ) {
+        let text = pieces.join("");
+        proptest::prop_assert_eq!(user_hint_fragment(&text), whole_text_fragment(&text));
+    }
+}
