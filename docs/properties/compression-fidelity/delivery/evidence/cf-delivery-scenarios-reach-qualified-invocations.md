@@ -18,7 +18,7 @@ and final wildcard passes produced this record. Inspected 2026-09-19 at
 - [hermetic-host.test.ts:225-307](../../../../../packages/e2e-tests/src/rust-runner/hermetic-host.test.ts#L225-L307)
   checks readiness/control and completion counters. It does not establish a
   published nonempty history segment. Status of all these checks: unaudited.
-- [transform.rs:21289-21394](../../../../../crates/daemon/src/transform.rs#L21289-L21394)
+- [transform.rs:21787-21892](../../../../../crates/daemon/src/transform.rs#L21787-L21892)
   supplies a seeded baseline/later-segment SOFT example with warm replay.
   It is a construction lead for m1, not end-to-end producer qualification.
 - [transform.rs:8357-8368](../../../../../crates/daemon/src/transform.rs#L8357-L8368)

@@ -24,7 +24,7 @@ or related repositories are supplied. No tests or model calls run here.
   a design-doc example.
 - [transform.rs:8303-8334][transform], `run_user_hint_lexical_search`, builds
   candidates from stored history content and P1-P4, not canonical memory rows.
-- [transform.rs:8721-8746][transform], `render_user_hint`, emits those
+- [transform.rs:9233-9295][transform], `render_user_hint`, emits those
   fragments with a footer that offers `eidnara_search` as a project-memory
   search; #926 removed the earlier promise that it retrieves full context.
 - [tool-registry.ts:34-60][registry], `createToolRegistry`, exposes the search
