@@ -9,7 +9,7 @@
  * The command reads files and writes two files; it sends no request in either mode.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { publishPrivateJson, realDirectory } from "../src/atomic-publish";
 import {
@@ -70,7 +70,7 @@ export async function run(
     args: EvalArgs,
 ): Promise<{ manifest: string; report: string; accepted: boolean }> {
     const out = realDirectory(args.out);
-    if ([args.baseline, args.candidate].some((arm) => realDirectory(arm) === out)) {
+    if ([args.baseline, args.candidate].some((arm) => armPath(arm) === out)) {
         throw new Error(`--out is an evidence arm: ${out}`);
     }
     const revision = repositoryRevision();
@@ -110,6 +110,14 @@ export async function run(
 /** Environment variables that override or bound git's repository discovery from `cwd`. */
 const DISCOVERY_ENV = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"];
 const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+/** An evidence arm's canonical path; an arm that does not exist keeps its resolved spelling. */
+function armPath(dir: string): string {
+    try {
+        return realpathSync(dir);
+    } catch {
+        return resolve(dir);
+    }
+}
 
 /**
  * The commit `git rev-parse HEAD` names in `cwd`'s repository, or `"unknown"` outside one. The

@@ -515,6 +515,7 @@ either arm; an arm directory is refused before any write, and a component of
 - a scenario variant no witness emits: `opencode-delivery` emits `p1-only`
   for `C1.S2`;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
+  other files that are not `.json` are skipped;
 - a system prompt the arm did not declare, or an attempt whose prompt text
   and recorded digest disagree, for the system prompt or the user prompt;
 - a published generation record with an attempt that records no system
@@ -531,14 +532,13 @@ either arm; an arm directory is refused before any write, and a component of
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
-  `maxCalls` and `maxOutputTokens`), positive prices, or an HTTPS Messages
-  endpoint free of credential and query, whose spend or an exchange's
-  `cost_usd` is negative, whose incomplete reasons are not strings, or whose
-  exchange tool ids are not string arrays;
-- a forwarding report marked complete that lists incomplete reasons, records
-  a stop, no send, a spend other than the sum of its exchanges' costs, or
-  spend
-  above its `spendCapUsd`, or whose exchange asks for a tool no later request
+  `maxCalls` and `maxOutputTokens`), positive prices, a nonnegative spend and
+  exchange `cost_usd`, string incomplete reasons, or an HTTPS Messages
+  endpoint free of credential and query, or whose exchange tool ids are not
+  string arrays;
+- a forwarding report marked complete that lists an incomplete reason,
+  records a stop, no send, a spend other than the sum of its exchanges'
+  costs, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason or naming no model or a
   model other than the report's, a known cost without usage, a truncated response, an unknown cost, a

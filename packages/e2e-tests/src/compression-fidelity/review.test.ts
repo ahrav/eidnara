@@ -1321,6 +1321,32 @@ describe("eval:compression-fidelity command", () => {
         ).rejects.toThrow("inside the repository");
     });
 
+    test("evidence arms may be named through parent-relative paths", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const reviews = writeReviews(root, {
+            arms: [
+                { label: "baseline", files: baseline.files },
+                { label: "candidate", files: candidate.files },
+            ],
+        });
+        const written = await run({
+            baseline: `${root}/candidate/../baseline`,
+            candidate: `${candidate.dir}/./`,
+            reviews,
+            out: join(root, "out"),
+            corpus: CORPUS_PATH,
+            mode: "offline",
+        });
+        const manifest = JSON.parse(readFileSync(written.manifest, "utf8"));
+        expect(manifest.arms.map((a: { label: string }) => a.label)).toEqual([
+            "baseline",
+            "candidate",
+        ]);
+        expect(statSync(baseline.dir).isDirectory()).toBe(true);
+    });
+
     test("an output directory that is an evidence arm is refused before any write", async () => {
         const root = scratch();
         const baseline = writeArm(root, { label: "baseline" });

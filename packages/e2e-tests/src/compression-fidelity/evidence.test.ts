@@ -581,6 +581,13 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain(
             ".delivery.C1.S1.json.tmp is an unpublished temporary file",
         );
+        const hidden = await assemble(scratch(), {
+            tamper: (dir) => {
+                writeFileSync(join(dir, ".DS_Store"), "");
+                writeFileSync(join(dir, ".gitkeep"), "");
+            },
+        });
+        expect(hidden.arms[0]?.identity_errors).toEqual([]);
         expect(errorsOf(assembled)).toContain(
             "delivery.C1.S1.json.tmp-abc123 is an unpublished temporary file",
         );
@@ -1169,7 +1176,7 @@ describe("evidence live mode", () => {
         ).toContain("complete report records a stop: send 0 returned HTTP 500");
         expect(
             errorsOf(await live([{ ...complete, incomplete_reasons: ["a send is in flight"] }])),
-        ).toContain("complete report lists incomplete reasons: a send is in flight");
+        ).toContain("complete report lists an incomplete reason: a send is in flight");
         expect(errorsOf(await live([{ ...complete, incomplete_reasons: [7] }]))).toContain(
             "does not match the forwarding report schema",
         );
@@ -1362,6 +1369,17 @@ describe("evidence live mode", () => {
         expect(errorsOf(relocated)).toContain(
             "forwarding-1.json forwarded to https://other.example.test/v1/messages, where forwarding-0.json forwarded to https://api.example.test/v1/messages",
         );
+        expect(
+            errorsOf(await live([{ ...report, incomplete_reasons: ["a send is in flight"] }])),
+        ).toContain("complete report lists an incomplete reason: a send is in flight");
+        expect(errorsOf(await live([{ ...report, incomplete_reasons: [1] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        for (const spent of [-0.01, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(errorsOf(await live([{ ...report, spent_usd: spent }]))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
         for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
             expect(errorsOf(await live([{ ...report, context_limit: limit }]))).toContain(
                 "does not match the forwarding report schema",
