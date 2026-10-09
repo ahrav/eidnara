@@ -5,19 +5,23 @@
  * chosen tiers behind counted newer fixture-authored rows.
  *
  * Every observation is one provider request for the case's own session and follow-up, judged by
- * `judgeDelivery` and placed by the history wrapper that carries the case segment. A row ledger
- * records each published row's importance, as the fixture reports it, so the decay oracle can
- * compute the curve tier at the pass's own history budget.
+ * `judgeDelivery` and placed by the history wrapper that carries the case segment. A cold
+ * observation restarts OpenCode, and so does a change of serving config. Every other rebuild of
+ * m0 happens in the running OpenCode: the session's requests carry new system text, so the next
+ * pass sees a changed render config. A row ledger records each published row's importance, as
+ * the fixture reports it, so the decay oracle can compute the curve tier at the pass's own
+ * history budget.
  */
 
 import { waitFor } from "../harness-primitives";
-import type { RetainedCapture, RustPassLine, RustTestHarness } from "../rust-harness";
+import { type RetainedCapture, type RustPassLine, RustTestHarness } from "../rust-harness";
 import type { ScriptMessage, ScriptSource, ScriptStatus } from "../rust-runner/hermetic-host";
 import type { FidelityCase, FidelityScenario, ServedTier } from "./corpus";
 import { curveTier, tierWindows } from "./decay-oracle";
 import {
     captureTexts,
     type DeliveryVerdict,
+    historyHeadings,
     judgeDelivery,
     publishedCount,
     reviewedTiers,
@@ -41,6 +45,12 @@ const COLD_SURFACES = ["light", "full"] as const;
  */
 const SPARE_FILLERS: string[] = Array(7).fill("filler:1");
 const QUEUE_DEPTH = SPARE_FILLERS.length + 1;
+/**
+ * Completed turns seeded before the baseline's firing turns. The summarizer's proactive trigger
+ * needs twelve messages outside the protected tail, and these supply them from the store, so the
+ * baseline prompts only the few turns that move them out of that tail.
+ */
+const BASELINE_TURNS = 12;
 /** Low-usage turns after a seeded source: enough tokens to make its chunk worth a firing. */
 const TRAILING_TURNS = 4;
 /** Synthetic message pairs an aging step seeds at least, so its chunk is worth a firing. */
@@ -54,6 +64,11 @@ const MAX_FIRE_TURNS = 6;
 const EXECUTE_USAGE = 0.26;
 const QUIET_USAGE = 0.02;
 const FIRE_USAGE = 0.3;
+/**
+ * The plugin's logger writes buffered lines every 500 ms, so a pass line can trail its response
+ * by that long. A pass count read sooner after a request can miss that request's line.
+ */
+const PASS_LOG_FLUSH_MS = 600;
 
 export interface ServingConfig {
     label: "m1" | "aging" | "pressure";
@@ -97,6 +112,26 @@ export function eidnaraConfig(
     };
 }
 
+/**
+ * Runs `drive` against its own OpenCode, direct host, and mock provider, started under `serving`,
+ * and disposes of them afterward. A case that owns its stack inherits no serving config, session,
+ * or capture from another case, so cases can run concurrently.
+ */
+export async function withCaseHarness(
+    serving: ServingConfig,
+    drive: (h: RustTestHarness) => Promise<void>,
+): Promise<void> {
+    const h = await RustTestHarness.create({
+        modelContextLimit: CONTEXT_LIMIT,
+        eidnaraConfig: eidnaraConfig(serving),
+    });
+    try {
+        await drive(h);
+    } finally {
+        await h.dispose();
+    }
+}
+
 export interface Delivery {
     label: string;
     config: ServingConfig["label"];
@@ -107,6 +142,8 @@ export interface Delivery {
     newer: number;
     curve: ServedTier;
     segment: string;
+    /** The row headings served inside the history wrappers. */
+    headings: string[];
     pass: RustPassLine;
     capture: RetainedCapture;
 }
@@ -117,13 +154,22 @@ function segmentOf(texts: readonly string[], title: string): string {
     return at < 0 ? "" : (text.slice(at).split(/\n(?:## |<\/)/)[0] ?? "");
 }
 
-function syntheticSource(pairs: number, step: number, text: (k: number) => string): ScriptSource {
+/** `pairs` completed turns, user text `user(k)` and assistant text `assistant(k)` for turn `k`. */
+function syntheticSource(
+    pairs: number,
+    name: string,
+    user: (k: number) => string,
+    assistant: (k: number) => string = user,
+): ScriptSource {
     const messages: ScriptMessage[] = [];
     for (let k = 1; k <= pairs; k += 1) {
-        for (const role of ["user", "assistant"] as const) {
+        for (const [role, text] of [
+            ["user", user(k)],
+            ["assistant", assistant(k)],
+        ] as const) {
             messages.push({
                 info: { role },
-                parts: [{ id: `f${step}-${k}-${role}`, type: "text", text: text(k) }],
+                parts: [{ id: `${name}-${k}-${role}`, type: "text", text }],
             });
         }
     }
@@ -131,18 +177,35 @@ function syntheticSource(pairs: number, step: number, text: (k: number) => strin
         corpusSha256: "",
         case: "fixture",
         scenario: "fixture",
-        source: `synthetic-${step}`,
+        source: `synthetic-${name}`,
         messages,
         leakProbes: [],
         memoryExamples: [],
     };
 }
 
+/**
+ * One completed turn whose user text is about 2,000 tokens of ballast. Seeded after newer rows,
+ * it fills the protected tail so the rows before it are eligible for the next firing.
+ */
+function ballastTurn(h: RustTestHarness, name: string): ScriptSource {
+    return syntheticSource(
+        1,
+        name,
+        () => `${name}: ${h.ballast(2_000)}`,
+        () => `assistant ${name}`,
+    );
+}
+
 export class CaseDriver {
     private turn = 0;
     private step = 0;
     private coldRestarts = 0;
-    private config: ServingConfig = M1_SERVING;
+    /** System text every request carries; each rebuild names a new surface. */
+    private surface: string | undefined;
+    private rebuilds = 0;
+    private lastSendAt = 0;
+    private config: ServingConfig;
     /** Rows published before the case, the lead-in included. */
     private olderRows = 0;
     /** Importances of the rows published after the case, oldest first. */
@@ -158,7 +221,9 @@ export class CaseDriver {
         readonly sessionId: string,
         readonly fidelityCase: FidelityCase,
         readonly scenario: FidelityScenario,
+        serving: ServingConfig,
     ) {
+        this.config = serving;
         const reviewed = fidelityCase.sources.find((entry) => entry.id === scenario.source);
         if (!reviewed) throw new Error(`${scenario.source} is not in ${fidelityCase.id}`);
         const tiers = reviewedTiers(reviewed.reviewedOutput);
@@ -176,17 +241,17 @@ export class CaseDriver {
     }
 
     /**
-     * Restarts OpenCode under the m1 budget to isolate each case's serving configuration, then
-     * opens a fresh session for `scenario`'s source with one small completed turn.
+     * Opens a session for `scenario`'s source with one small completed turn in `h`, a stack from
+     * {@link withCaseHarness} started under `serving`.
      */
     static async open(
         h: RustTestHarness,
         fidelityCase: FidelityCase,
         scenario: FidelityScenario,
+        serving: ServingConfig,
     ): Promise<CaseDriver> {
-        await h.restart({ eidnaraConfig: eidnaraConfig(M1_SERVING) });
         const sessionId = await h.createSession();
-        const driver = new CaseDriver(h, sessionId, fidelityCase, scenario);
+        const driver = new CaseDriver(h, sessionId, fidelityCase, scenario, serving);
         h.tagCaptures({ sessionId, caseId: fidelityCase.id, scenarioId: scenario.id });
         await driver.send("lead-in turn", QUIET_USAGE);
         return driver;
@@ -194,13 +259,27 @@ export class CaseDriver {
 
     private diagnostics = () => this.h.host.hostLog().slice(-4_000);
 
+    /**
+     * Sends one turn, then waits until no summarizer firing is live. A pass claims the firing it
+     * starts before it returns, so the next turn's pass never commits while that firing
+     * publishes; an overlapping commit fails the firing on a row-version conflict, and the daemon
+     * then holds every firing for its 60 s failure backoff.
+     */
     private async send(text: string, usageFraction: number): Promise<void> {
         this.turn += 1;
         this.h.mock.setDefault({
             text: `assistant ${this.turn}`,
             usage: { input_tokens: Math.round(CONTEXT_LIMIT * usageFraction), output_tokens: 20 },
         });
-        await this.h.sendPrompt(this.sessionId, text);
+        await this.h.sendPrompt(this.sessionId, text, { system: this.surface });
+        this.lastSendAt = Date.now();
+        await this.settle();
+    }
+
+    /** The session's pass lines once every earlier request's line has been written. */
+    private async flushedPasses(): Promise<number> {
+        await Bun.sleep(Math.max(0, this.lastSendAt + PASS_LOG_FLUSH_MS - Date.now()));
+        return sessionPasses(this.h, this.sessionId).length;
     }
 
     private async settle(): Promise<void> {
@@ -231,7 +310,6 @@ export class CaseDriver {
     private async fireUntilConsumed(label: string): Promise<ScriptStatus> {
         for (let i = 1; i <= MAX_FIRE_TURNS; i += 1) {
             await this.send(`${label} turn ${i}`, FIRE_USAGE);
-            await this.settle();
             const script = await this.h.host.scriptStatus();
             if (script.remaining < QUEUE_DEPTH) return script;
         }
@@ -261,7 +339,17 @@ export class CaseDriver {
 
     async baseline(): Promise<void> {
         await this.h.host.scriptCases(Array(QUEUE_DEPTH).fill("filler"));
-        for (let i = 1; i <= 20; i += 1) {
+        seedSource(
+            this.h,
+            this.sessionId,
+            syntheticSource(
+                BASELINE_TURNS,
+                "baseline",
+                (k) => `baseline turn ${k}: ${this.h.ballast(40)}`,
+                (k) => `assistant baseline ${k}`,
+            ),
+        );
+        for (let i = BASELINE_TURNS + 1; i <= BASELINE_TURNS + 20; i += 1) {
             await this.send(`baseline turn ${i}: ${this.h.ballast(40)}`, FIRE_USAGE);
             if ((await publishedCount(this.h, this.sessionId)) > 0) break;
         }
@@ -271,17 +359,15 @@ export class CaseDriver {
             WAIT_MS,
             this.diagnostics,
         );
-        await this.settle();
     }
 
     /**
-     * Seeds the case source after the baseline, restarts OpenCode under the m1 budget, and adds
-     * low-usage turns that move the source out of the protected tail without firing.
+     * Seeds the case source after the baseline, and adds low-usage turns that move the source out
+     * of the protected tail without firing.
      */
     async seed(): Promise<ScriptSource> {
         const source = await this.h.host.scriptSource(this.scenario.id);
         seedSource(this.h, this.sessionId, source);
-        await this.restart(M1_SERVING);
         for (let i = 1; i <= TRAILING_TURNS; i += 1) {
             await this.send(`trailing turn ${i}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
         }
@@ -334,7 +420,7 @@ export class CaseDriver {
     ): Promise<Delivery> {
         const source = this.source;
         if (!source) throw new Error("observe before seed");
-        const passesBefore = sessionPasses(this.h, this.sessionId).length;
+        const passesBefore = await this.flushedPasses();
         const capturesBefore = this.h.retainedCaptures({ sessionId: this.sessionId }).length;
         const newer = await this.newer();
         const prompt = verbatim
@@ -359,7 +445,7 @@ export class CaseDriver {
         );
         const texts = captureTexts(capture);
         const budget = pass.historyBudget ?? 0;
-        const delivery: Delivery = {
+        return {
             label,
             config: this.config.label,
             budget,
@@ -374,11 +460,10 @@ export class CaseDriver {
             newer,
             curve: curveTier(this.importancesNewestFirst(newer), newer + 1, budget),
             segment: segmentOf(texts, this.title),
+            headings: historyHeadings(texts),
             pass,
             capture,
         };
-        await this.settle();
-        return delivery;
     }
 
     /**
@@ -400,16 +485,33 @@ export class CaseDriver {
         return this.observe(label, QUIET_USAGE, verbatim);
     }
 
+    /**
+     * Gives the session's requests new system text and sends one quiet turn, which records the
+     * new prompt hash after its own pass; the next pass carries a changed render config, so it
+     * rebuilds m0 from every published row on a `HARD` pass. That pass is observed at usage below
+     * the proactive band.
+     */
+    async observeRebuilt(label: string): Promise<Delivery> {
+        this.rebuilds += 1;
+        this.surface = `Fidelity campaign surface ${this.rebuilds}.`;
+        await this.send(`surface turn ${this.rebuilds}`, QUIET_USAGE);
+        return this.observe(label, QUIET_USAGE);
+    }
+
     private async age(rows: number): Promise<number> {
         this.step += 1;
         const step = this.step;
         seedSource(
             this.h,
             this.sessionId,
-            syntheticSource(Math.max(rows, MIN_AGING_PAIRS), step, (k) => `aging ${step}.${k}`),
+            syntheticSource(
+                Math.max(rows, MIN_AGING_PAIRS),
+                `aging-${step}`,
+                (k) => `aging ${step}.${k}`,
+            ),
         );
-        await this.restart(AGING_SERVING);
-        await this.send(`aging ballast ${step}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
+        seedSource(this.h, this.sessionId, ballastTurn(this.h, `aging ballast ${step}`));
+        if (this.config !== AGING_SERVING) await this.restart(AGING_SERVING);
         const { added } = await this.publishStep(
             `filler:${rows}`,
             `aging ${step}`,
@@ -420,7 +522,7 @@ export class CaseDriver {
 
     /**
      * Ages the case under the aging budget until the curve serves `tier`, landing one row inside
-     * the tier's window, and returns the delivery observed after a cold restart.
+     * the tier's window, and returns the delivery observed on the next rebuilt pass.
      */
     async ageTo(tier: ServedTier, budget: number): Promise<Delivery> {
         const window = tierWindows(
@@ -443,47 +545,57 @@ export class CaseDriver {
                 `${tier} overshot: newer=${newer} window=${window.first}-${window.last}`,
             );
         }
-        return this.observeCold(`aging-${tier}`, AGING_SERVING);
+        return this.observeRebuilt(`aging-${tier}`);
     }
 
     /**
      * Publishes newer rows whose bodies repeat `pairs` synthetic message pairs, through the
-     * fixture's echo answer under `config`, in at most `rows` rows when given. `text` receives
-     * the step and the pair index. Returns the rows it added.
+     * fixture's echo answer, in at most `rows` rows when given. `text` receives the step and the
+     * pair index. With `restart`, OpenCode restarts under that budget after the seed; otherwise
+     * the rows publish under the current budget. With `cover`, the turns an earlier observation
+     * left unpublished land in a filler row first, behind two ballast turns, so the echo rows
+     * repeat the synthetic pairs and ballast alone. Returns the rows the echo added.
      */
     async publishEchoed(
         label: string,
         pairs: number,
         text: (step: number, k: number) => string,
-        config: ServingConfig,
-        rows?: number,
+        options: { rows?: number; restart?: ServingConfig; cover?: boolean } = {},
     ): Promise<number> {
         this.step += 1;
         const step = this.step;
+        if (options.cover) {
+            // The protected tail holds about 2,000 tokens and snaps to a user message, so two
+            // ballast turns put that boundary inside the second one and the observation's turns
+            // fall inside the firing's range.
+            for (const name of [`${label} cover ${step}`, `${label} cover tail ${step}`]) {
+                seedSource(this.h, this.sessionId, ballastTurn(this.h, name));
+            }
+            await this.publishStep("filler:1", `${label} cover ${step}`, this.fillerImportance);
+        }
         seedSource(
             this.h,
             this.sessionId,
-            syntheticSource(pairs, step, (k) => text(step, k)),
+            syntheticSource(pairs, `${label}-${step}`, (k) => text(step, k)),
         );
-        await this.restart(config);
-        await this.send(`${label} ballast ${step}: ${this.h.ballast(2_000)}`, QUIET_USAGE);
+        seedSource(this.h, this.sessionId, ballastTurn(this.h, `${label} ballast ${step}`));
+        if (options.restart) await this.restart(options.restart);
         const echoImportance = (await this.h.host.scriptStatus()).echoImportance;
-        const entry = rows === undefined ? "echo" : `echo:${rows}`;
+        const entry = options.rows === undefined ? "echo" : `echo:${options.rows}`;
         const { added } = await this.publishStep(entry, `${label} ${step}`, echoImportance);
         return added;
     }
 
     /**
-     * Publishes newer rows whose bodies repeat large synthetic messages, so a positive budget
-     * below the history body forces the guard to demote the older case row, and observes the
-     * next cold pass under that budget.
+     * Publishes newer rows whose bodies repeat large synthetic messages under the current
+     * budget, then observes the next cold pass under the pressure budget, which the history body
+     * exceeds, so the guard demotes the older case row.
      */
     async pressure(): Promise<Delivery> {
         await this.publishEchoed(
             "pressure",
             2,
             (step, k) => `pressure ${step}.${k}: ${this.h.ballast(400)}`,
-            PRESSURE_SERVING,
         );
         return this.observeCold("pressure", PRESSURE_SERVING);
     }

@@ -4445,8 +4445,8 @@ fn prepare_json_content_single_pass(
         }
         // Protected-key containers with nested text can expose it under unprotected member keys.
         // `{"credential":{"value":".."}}` reads its text under `value`.
-        if key.is_some_and(|key| protected_json_key_label(key).is_some())
-            && (value.is_object() || value.is_array())
+        if (value.is_object() || value.is_array())
+            && key.is_some_and(|key| protected_json_key_label(key).is_some())
             && contains_nonempty_text(value)
         {
             return Err(MemoryStoreError::Redaction(

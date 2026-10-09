@@ -71,8 +71,8 @@ it, and both must move together when the corpus is re-authored:
 - `CORPUS_SHA256` in `crates/daemon/src/compression_fidelity_corpus.rs`, a
   child of the daemon's library test module. It compares the digest of the
   bytes compiled in with `include_bytes!`. The module depends only on
-  `serde`, `serde_json`, and `sha2`, so an integration test can include it by
-  path.
+  `aho-corasick`, `serde`, `serde_json`, and `sha2`, so an integration test
+  can include it by path.
 - `COMPRESSION_FIDELITY_CORPUS_SHA256` in
   `packages/e2e-tests/src/compression-fidelity/corpus.ts`. Its test also
   reads the Rust pin and requires equality.
@@ -85,11 +85,22 @@ The Rust corpus module owns source, span, and revision validation, and
 `compression_fidelity_tests.rs` holds its negative controls. It rejects
 duplicate or malformed IDs, spans that do not resolve to the exact bytes of
 their native block at the named revision, successors that change identity
-or byte length, missing P1 to P4 or pressure/omission coverage, unexercised
-obligations, and any answer key or evaluator label in a field that can reach
-provider input: native text and tool fields, follow-up prompts, memory
-example text, and the approved example. Native records decode through a
-closed schema, so an extra field on a message or part fails to decode.
+or byte length, successors that give one block two byte strings at one
+revision, missing natural P1 at m1, P2 to P4 at m0, or pressure/omission
+coverage, unexercised obligations, and any answer key or evaluator label in
+a field that can reach provider input: native text, tool call IDs, names,
+inputs, and outputs, follow-up prompts, memory example text, and the approved
+example. Evaluator labels include the corpus note, case IDs and titles, every
+entry ID and statement, and incident references. Native
+records decode through a closed schema, so an extra field on a message or
+part fails to decode.
+
+The same test file holds two further checks. Each approved example must
+author its `<p1>` to `<p3>` bodies and a `<p4 />` capsule, because the
+history parser fills a missing P2 or P3 from a denser tier. Every native
+record also runs through the production adapter
+`harness_sources::opencode_units`, and each block's revision and bytes must
+equal the corpus module's own resolution.
 
 The TypeScript reader `readCompressionFidelityCorpus` exposes only case,
 source, scenario, follow-up, obligation, and forbidden-conclusion IDs,
@@ -124,12 +135,12 @@ block, and deleted evidence, which refuses rather than substituting.
 
 Both write owner-attributed JSON observations through
 `crates/daemon/src/compression_fidelity_observation.rs`: one record per case,
-scenario or source, and stage, renamed into place from a temporary file with
-mode `0600` inside a directory created with mode `0700`, and only when
-`EIDNARA_FIDELITY_OBSERVATIONS_DIR` names that directory. A default run
-asserts in memory and writes nothing. The wrapped slice's 105% retry is
-recorded as unobserved; the history body and the wrapped slice are measured
-separately under one named estimator.
+scenario or source, and stage, linked into place without replacement from a
+temporary file with mode `0600` inside a directory created with mode `0700`,
+and only when `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names that directory. A
+default run asserts in memory and writes nothing. The wrapped slice's 105%
+retry is recorded as unobserved; the history body and the wrapped slice are
+measured separately under one named estimator.
 
 ### Fixture qualification
 
@@ -168,15 +179,22 @@ as `filled` and reports the importance each kind of fixture row carries.
 
 `packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` drives each
 source through `src/compression-fidelity/campaign.ts` in one OpenCode session
-per source:
+per source. Each case owns its OpenCode, direct host, and mock provider, so
+the cases run as concurrent tests up to the runner's `--max-concurrency`
+(`test:rust` passes 6). Each turn waits until no summarizer firing is live,
+so no pass commits while a firing publishes.
 
 - A baseline of fixture-authored rows publishes first, then the scripted case.
   The next provider request serves the case's P1 body in the m1 window
   (`<session-history-since>`), a second request repeats those bytes warm, and
-  a restart with a changed prompt surface rematerializes the same body into
-  m0 on a `HARD` pass.
+  a restart under the aging budget with a changed prompt surface
+  rematerializes the same body into m0 on a `HARD` pass. Every source serves
+  these three rows; their observations carry the source's m1 scenario when
+  the corpus declares one and the source ID otherwise.
 - Natural decay adds counted fixture rows after the case under a 562-token
-  history budget and serves each P2, P3, P4, and P5 scenario row. Each served
+  history budget and serves each P2, P3, P4, and P5 scenario row on a `HARD`
+  pass that rebuilds m0 in the running OpenCode: the session's requests carry
+  new system text, so the next pass sees a changed render config. Each served
   tier must equal the tier `src/compression-fidelity/decay-oracle.ts` computes
   from the row count, the importances, and the budget the pass line reports,
   so a guard demotion or a retry fails the row. P4 rows serve the title-only
@@ -224,9 +242,10 @@ memory, hint, and recovery rows:
   injection budget), the withheld (quarantined), and the rejected variants
   each serve the same P3 row with no memory credit. Two seeded copies show
   the admission is repeatable.
-- From that excluded pass, `eidnara_search` with the query `manifest cache
+- From the budget-excluded pass, `eidnara_search` with the query `manifest cache
   resident`, every term taken from the visible request, and sources
-  `["memory"]` returns the memory's text in one call within 16 KiB, without
+  `["memory"]` returns the budget-excluded admitted copy, named by object id
+  with the memory's text, in one call within 16 KiB, without
   the wrong-project copy's distinct suffix. Exact recovery stays
   `unavailable`.
 - C4 ages its case row to P5, then publishes up to 24 distractor rows that
@@ -343,25 +362,8 @@ runs the whole loop through OpenCode against an in-process provider double.
 
 ## Planned `eval:compression-fidelity` command
 
-This command is planned, not delivered. It will be a script in
-`packages/e2e-tests` with this contract:
-
-- **Inputs.** The corpus path, verified against the pinned digest; baseline
-  and candidate prompt identities; a mode, either scripted or forwarding,
-  with scripted as the default; for forwarding, one explicitly selected
-  HTTPS provider and model with fixed call count, maximum output, timeout,
-  and total spend limits covering the whole tool loop.
-- **Outputs.** A private output directory outside the repository, written
-  through the existing atomic JSON publisher with restrictive permissions.
-  The run manifest records the repository revision, the corpus digest, the
-  prompt hashes, the model, provider, version, and settings, and the limits
-  once. Each case and scenario row references the owner observations it was
-  derived from and keeps execution, deterministic result, preservation,
-  recovery, consumer safety, semantic review, and cost as separate columns.
-- **Limits.** Scripted mode makes no outbound provider call, including when
-  scripts exhaust or setup fails. Live mode reuses the record-and-forward
-  provider mode and its limits.
-- **Review prerequisites.** Two people approve the corpus before any
-  candidate output is inspected, and the first semantic baseline before it
-  is accepted. Without an authorized provider or reviewers, semantic
-  evidence stays unverified.
+The evaluation command is planned, not delivered. Its contract (inputs,
+outputs, limits, and review prerequisites) is specified in the
+[Compression Fidelity Contract](https://github.com/ahrav/eidnara/issues/707)
+under milestone U4 and tracked there; this document describes it once it
+exists.

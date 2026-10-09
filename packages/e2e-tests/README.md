@@ -43,8 +43,12 @@ The package is private and never published.
 ## Retained suite
 
 `mode-manifest.json` lists every test file under `tests/`; each Rust-mode
-entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`, all with
-`contract_refs: ["U5-PORT"]`, and
+entry is `tier: "rust-only"`, `compression-fidelity-pi` is `tier: "pi-rust"`,
+and `pi-smoke` is `tier: "pi-smoke"`. Each
+entry names the contracts it covers in `contract_refs`: the port suites carry
+`["U5-PORT"]`, and `compression-fidelity-qualification` carries its
+property-catalog records `cf-fixture-script-qualification` and
+`cf-delivery-credit-requires-published-folded-capture`.
 `validate-mode-manifest` fails when a test file lacks an entry or an entry
 lacks a file. A file whose every test is `it.skip` must carry a
 `quarantined` reason in its entry; the validator refuses a fully skipped
@@ -64,7 +68,8 @@ rust-multi-frame-delta      rust-stale-preference        thinking-block-safety
 pi-smoke
 ```
 
-Nineteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
+Twenty-one Rust-mode tests plus `compression-fidelity-pi` and `pi-smoke`.
+`rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
 
 ## Compression fidelity delivery
@@ -101,6 +106,8 @@ Three control commands drive it:
 `src/compression-fidelity/campaign.ts`: m1, warm, cold m0, natural decay to
 P2 through P5 checked against `decay-oracle.ts`, guard pressure for C1.S5 and
 C3.S5, a parser-fallback row, and the capability pins in `capabilities.ts`.
+Each case runs against its own harness as a concurrent test, and `test:rust`
+passes `--max-concurrency 6`, the limit Bun applies to concurrent tests.
 `compression-fidelity-pi` serves C1 through the Pi `context` handler at P1 in
 m1 and m0. `compression-fidelity-memory` credits C3's memory example only
 when a verified copy reaches `<project-memory>`, recovers it through

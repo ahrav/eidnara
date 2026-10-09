@@ -1,10 +1,14 @@
+use std::sync::LazyLock;
+
 use serde_json::{Value, json};
 
 use super::compression_fidelity_corpus::*;
+use crate::harness_sources::{Harness, Representation, SessionIdentity, opencode_units};
 use crate::history_summarizer_validate::parse_history_segment_output;
 
 fn corpus_value() -> Value {
-    serde_json::from_slice(CORPUS_BYTES).unwrap()
+    static VALUE: LazyLock<Value> = LazyLock::new(|| serde_json::from_slice(CORPUS_BYTES).unwrap());
+    VALUE.clone()
 }
 
 fn validate_value(value: Value) -> Vec<Violation> {
@@ -37,6 +41,72 @@ fn leaked(field: &str, label: &str) -> Violation {
     }
 }
 
+fn adapter_disagreements(value: &Value) -> Vec<String> {
+    let corpus: Corpus = serde_json::from_value(value.clone()).expect("the corpus decodes");
+    let mut out = Vec::new();
+    for (case, raw_case) in corpus.cases.iter().zip(value["cases"].as_array().unwrap()) {
+        for (source, raw) in case
+            .sources
+            .iter()
+            .zip(raw_case["sources"].as_array().unwrap())
+        {
+            let session = SessionIdentity {
+                project_id: corpus.project_id.clone(),
+                harness: Harness::OpenCode,
+                session_id: source.session_id.clone(),
+            };
+            let natives = raw["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(raw["successors"].as_array().into_iter().flatten());
+            let records = source
+                .messages
+                .iter()
+                .chain(&source.successors)
+                .zip(natives);
+            for (message, native) in records {
+                let at = format!("{}/{}", source.id, message.info.id);
+                let units = match opencode_units(&session, native) {
+                    Ok(units) => units,
+                    Err(refusal) => {
+                        out.push(format!("{at}: {refusal}"));
+                        continue;
+                    }
+                };
+                if units.len() != message.parts.len() {
+                    out.push(format!(
+                        "{at}: {} units for {} parts",
+                        units.len(),
+                        message.parts.len()
+                    ));
+                }
+                for (index, part) in message.parts.iter().enumerate() {
+                    let (text_part, field, key) = match part {
+                        Part::Text { .. } => (true, "block_index", index.to_string()),
+                        Part::Tool { call_id, .. } => (false, "tool_call_id", call_id.clone()),
+                    };
+                    let published = units.iter().find(|unit| {
+                        (unit.representation == Representation::Text) == text_part
+                            && unit
+                                .identity
+                                .iter()
+                                .any(|(name, value)| *name == field && *value == key)
+                    });
+                    let agrees = published.is_some_and(|unit| {
+                        unit.revision == block_revision(message, part).to_string()
+                            && Some(unit.text.as_str()) == block_text(part)
+                    });
+                    if !agrees {
+                        out.push(format!("{at}#{index}"));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn the_committed_corpus_matches_its_pin_and_validates() {
     let corpus = corpus();
@@ -57,44 +127,94 @@ fn the_committed_corpus_matches_its_pin_and_validates() {
     );
 }
 
+fn authored_tier<'e>(example: &'e str, tier: &str) -> Option<&'e str> {
+    if [format!("<{tier} />"), format!("<{tier}/>")]
+        .iter()
+        .any(|tag| example.contains(tag.as_str()))
+    {
+        return Some("");
+    }
+    let (_, rest) = example.split_once(&format!("<{tier}>"))?;
+    rest.split_once(&format!("</{tier}>"))
+        .map(|(body, _)| body.trim())
+}
+
+fn approved_example_problem(example: &str, message_count: u64) -> Result<(), String> {
+    for tier in ["p1", "p2", "p3"] {
+        if !authored_tier(example, tier).is_some_and(|body| !body.is_empty()) {
+            return Err(format!("<{tier}> is authored"));
+        }
+    }
+    if authored_tier(example, "p4").is_none() {
+        return Err("<p4> is authored".into());
+    }
+    let parsed = parse_history_segment_output(example).map_err(|error| format!("{error:?}"))?;
+    let [segment] = parsed.history_segments.as_slice() else {
+        return Err("one segment".into());
+    };
+    if (segment.start_message, segment.end_message) != (1, message_count) {
+        return Err("the segment covers the whole source".into());
+    }
+    if segment.title.trim().is_empty() {
+        return Err("the segment has a title".into());
+    }
+    for tier in [&segment.p1, &segment.p2, &segment.p3] {
+        if !tier.as_deref().is_some_and(|body| !body.trim().is_empty()) {
+            return Err("authored P1 to P3".into());
+        }
+    }
+    if segment.p4.as_deref() != Some("") {
+        return Err("P4 is the title-only capsule".into());
+    }
+    if !example.contains(&format!(
+        "<messages_processed>1-{message_count}</messages_processed>"
+    )) {
+        return Err("the processed range covers the whole source".into());
+    }
+    Ok(())
+}
+
 #[test]
 fn every_approved_example_is_one_segment_over_its_whole_source() {
     for case in &corpus().cases {
         for source in &case.sources {
-            let parsed = parse_history_segment_output(&source.approved_example)
-                .unwrap_or_else(|error| panic!("{}: {error:?}", source.id));
-            let [segment] = parsed.history_segments.as_slice() else {
-                panic!("{}: one segment", source.id);
-            };
-            let count = source.messages.len() as u64;
             assert_eq!(
-                (segment.start_message, segment.end_message),
-                (1, count),
-                "{}",
-                source.id
-            );
-            assert!(!segment.title.trim().is_empty(), "{}", source.id);
-            for tier in [&segment.p1, &segment.p2, &segment.p3] {
-                assert!(
-                    tier.as_deref().is_some_and(|body| !body.trim().is_empty()),
-                    "{}: authored P1 to P3",
-                    source.id
-                );
-            }
-            assert_eq!(
-                segment.p4.as_deref(),
-                Some(""),
-                "{}: P4 is the title-only capsule",
-                source.id
-            );
-            assert!(
-                source.approved_example.contains(&format!(
-                    "<messages_processed>1-{count}</messages_processed>"
-                )),
+                approved_example_problem(&source.approved_example, source.messages.len() as u64),
+                Ok(()),
                 "{}",
                 source.id
             );
         }
+    }
+}
+
+/// Approved examples author P2, P3, and P4 explicitly, even where the history parser accepts
+/// their omission.
+#[test]
+fn an_approved_example_without_an_authored_tier_is_rejected() {
+    let source = &corpus().cases[0].sources[0];
+    let count = source.messages.len() as u64;
+    let example = source.approved_example.as_str();
+    let without = |open: &str, close: &str| {
+        let start = example.find(open).unwrap();
+        let end = example.find(close).unwrap() + close.len();
+        format!("{}{}", &example[..start], &example[end..])
+    };
+    for (tier, edited) in [
+        ("p2", without("<p2>", "</p2>")),
+        ("p3", without("<p3>", "</p3>")),
+        ("p4", without("<p4 />", "<p4 />")),
+    ] {
+        assert_ne!(edited, example, "{tier}");
+        assert!(
+            parse_history_segment_output(&edited).is_ok(),
+            "{tier}: the edit still parses"
+        );
+        assert_eq!(
+            approved_example_problem(&edited, count),
+            Err(format!("<{tier}> is authored")),
+            "{tier}"
+        );
     }
 }
 
@@ -302,6 +422,24 @@ fn successor_revisions_keep_identity_and_byte_length() {
             "a successor keeps each part's identity and every tool part"
         )]
     );
+
+    let mut value = corpus_value();
+    let successors = case_mut(&mut value, 5)["sources"][0]["successors"]
+        .as_array_mut()
+        .unwrap();
+    let mut conflicting = successors[0].clone();
+    let text = conflicting["parts"][1]["text"].as_str().unwrap();
+    conflicting["parts"][1]["text"] = text
+        .replacen("4095 tests run: 4095", "4094 tests run: 4094", 1)
+        .into();
+    assert_ne!(conflicting, successors[0]);
+    successors.push(conflicting);
+    assert_eq!(
+        validate_value(value),
+        [successor_problem(
+            "a block has one byte string at each revision"
+        )]
+    );
 }
 
 #[test]
@@ -366,6 +504,18 @@ fn every_case_requires_p1_to_p4_and_a_pressure_or_omission_scenario() {
         }],
         "P1 counts only in the m1 window"
     );
+    for (tier, index) in [(P2, 1), (P3, 2), (P4, 3)] {
+        let mut value = corpus_value();
+        case_mut(&mut value, 0)["scenarios"][index]["serving"]["stage"] = "m1".into();
+        assert_eq!(
+            validate_value(value),
+            [Violation::MissingTier {
+                case: "C1".into(),
+                tier
+            }],
+            "{tier:?} counts only in the m0 window"
+        );
+    }
     let mut value = corpus_value();
     case_mut(&mut value, 4)["scenarios"]
         .as_array_mut()
@@ -430,10 +580,59 @@ fn answer_keys_and_evaluator_labels_stay_out_of_provider_input() {
         ),
         [leaked("C1.F1", &statement)]
     );
+    let prompt = ["cases", "0", "follow_ups", "0", "prompt"];
+    let title = corpus().cases[0].title.clone();
+    assert_eq!(
+        with_appended(&prompt, &format!(" {title}")),
+        [leaked("C1.F1", &title)]
+    );
+    let note = corpus().note.clone();
+    let violations = with_appended(&prompt, &format!(" {note}"));
+    assert!(
+        violations.contains(&leaked("C1.F1", &note)),
+        "{violations:?}"
+    );
+    let mut value = corpus_value();
+    let reference = "INC-4242 store outage";
+    case_mut(&mut value, 0)["provenance"] = json!({"kind": "incident", "reference": reference});
+    let text = text_mut(&mut value, &prompt);
+    *text = format!("{} {reference}", text.as_str().unwrap()).into();
+    assert_eq!(validate_value(value), [leaked("C1.F1", reference)]);
+    assert_eq!(
+        with_appended(
+            &["cases", "0", "follow_ups", "0", "prompt"],
+            " nonmateriality"
+        ),
+        [
+            leaked("C1.F1", "materiality"),
+            leaked("C1.F1", "nonmaterial")
+        ],
+        "overlapping labels each leak, in label order"
+    );
     let c1_part = ["cases", "0", "sources", "0", "messages", "2", "parts", "0"];
     assert_eq!(
         with_appended(&[&c1_part[..], &["text"]].concat(), " (see C1.O1)"),
-        [leaked("msg_cf_c1_03#0", "C1.O1")]
+        [
+            leaked("msg_cf_c1_03#0", "C1"),
+            leaked("msg_cf_c1_03#0", "C1.O1")
+        ],
+        "a case id inside a longer label leaks on its own"
+    );
+    assert_eq!(
+        with_appended(&prompt, " C1"),
+        [leaked("C1.F1", "C1")],
+        "a case id is an evaluator label"
+    );
+    let c1_call = [
+        "cases", "0", "sources", "0", "messages", "3", "parts", "0", "callID",
+    ];
+    assert_eq!(
+        with_appended(&c1_call, "_C1.O1"),
+        [
+            leaked("msg_cf_c1_04#0", "C1"),
+            leaked("msg_cf_c1_04#0", "C1.O1")
+        ],
+        "a tool call id is replayed as the provider-visible tool_use id"
     );
     let c1_tool = [
         "cases", "0", "sources", "0", "messages", "3", "parts", "0", "state",
@@ -447,7 +646,10 @@ fn answer_keys_and_evaluator_labels_stay_out_of_provider_input() {
     );
     assert_eq!(
         with_appended(&[&c1_tool[..], &["input", "filePath"]].concat(), "#C1.S2"),
-        [leaked("msg_cf_c1_04#0", "C1.S2")]
+        [
+            leaked("msg_cf_c1_04#0", "C1"),
+            leaked("msg_cf_c1_04#0", "C1.S2")
+        ]
     );
     let mut value = corpus_value();
     text_mut(&mut value, &[&c1_tool[..], &["input"]].concat())["disposition"] = "visible".into();
@@ -750,8 +952,10 @@ fn every_remaining_rule_rejects_its_own_mutation() {
         ),
         (
             "tool name label",
-            |v| v["cases"][0]["sources"][0]["messages"][3]["parts"][0]["tool"] = "C1.L2".into(),
-            leaked("msg_cf_c1_04#0", "C1.L2"),
+            |v| {
+                v["cases"][0]["sources"][0]["messages"][3]["parts"][0]["tool"] = "abstention".into()
+            },
+            leaked("msg_cf_c1_04#0", "abstention"),
         ),
     ];
     for (label, mutate, expected) in cases {
@@ -759,4 +963,21 @@ fn every_remaining_rule_rejects_its_own_mutation() {
         mutate(&mut value);
         assert_eq!(validate_value(value), [expected], "{label}");
     }
+}
+
+#[test]
+fn the_opencode_adapter_publishes_every_block_the_corpus_resolves() {
+    assert_eq!(adapter_disagreements(&corpus_value()), Vec::<String>::new());
+}
+
+#[test]
+fn a_revision_the_validator_accepts_but_the_adapter_refuses_is_a_disagreement() {
+    let mut value = corpus_value();
+    case_mut(&mut value, 0)["sources"][0]["messages"][3]["parts"][0]["state"]["time"]["end"] =
+        (i64::MAX as u64 + 1).into();
+    assert_eq!(validate_value(value.clone()), []);
+    assert_eq!(
+        adapter_disagreements(&value),
+        ["C1.V1/msg_cf_c1_04: the native state.time.end is not a canonical revision"]
+    );
 }

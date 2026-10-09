@@ -468,12 +468,19 @@ fn apply_ultra_abbreviations(buf: &mut ShadowedText) {
     }
 }
 
-fn protect_regex(text: &str, regex: &Regex, preserved: &mut Vec<PreservedRegion>) -> String {
+fn protect_regex<'a>(
+    text: &'a str,
+    regex: &Regex,
+    preserved: &mut Vec<PreservedRegion>,
+) -> Cow<'a, str> {
     protect_regex_filtered(text, regex, preserved, false, |_, _, _| true)
 }
 
 /// Captures input that already spells a placeholder as a literal region.
-fn protect_literal_placeholders(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+fn protect_literal_placeholders<'a>(
+    text: &'a str,
+    preserved: &mut Vec<PreservedRegion>,
+) -> Cow<'a, str> {
     static LITERAL_PLACEHOLDER: OnceLock<Regex> = OnceLock::new();
     protect_regex_filtered(
         text,
@@ -484,38 +491,47 @@ fn protect_literal_placeholders(text: &str, preserved: &mut Vec<PreservedRegion>
     )
 }
 
-/// Like `protect_regex`, but a match is preserved only when `accept(text,
-/// start, end)` holds; rejected matches pass through unchanged. This keeps the
-/// placeholder-minting invariant (`\u{0}EIDNARA_PRES_{index}\u{0}` with
-/// `preserved.len()` as the index) in one owner.
-fn protect_regex_filtered(
-    text: &str,
+fn mint_placeholder(preserved: &mut Vec<PreservedRegion>, original: &str, literal: bool) -> String {
+    let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
+    preserved.push(PreservedRegion {
+        placeholder: placeholder.clone(),
+        original: original.to_string(),
+        literal,
+    });
+    placeholder
+}
+
+fn protect_regex_filtered<'a>(
+    text: &'a str,
     regex: &Regex,
     preserved: &mut Vec<PreservedRegion>,
     literal: bool,
     accept: impl Fn(&str, usize, usize) -> bool,
-) -> String {
-    let mut output = String::with_capacity(text.len());
+) -> Cow<'a, str> {
+    let mut output: Option<String> = None;
     let mut cursor = 0;
     for matched in regex.find_iter(text) {
         if !accept(text, matched.start(), matched.end()) {
             continue;
         }
+        let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
         output.push_str(&text[cursor..matched.start()]);
-        let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
-        preserved.push(PreservedRegion {
-            placeholder: placeholder.clone(),
-            original: matched.as_str().to_string(),
-            literal,
-        });
-        output.push_str(&placeholder);
+        output.push_str(&mint_placeholder(preserved, matched.as_str(), literal));
         cursor = matched.end();
     }
-    output.push_str(&text[cursor..]);
-    output
+    match output {
+        None => Cow::Borrowed(text),
+        Some(mut output) => {
+            output.push_str(&text[cursor..]);
+            Cow::Owned(output)
+        }
+    }
 }
 
-fn protect_identifier_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+fn protect_identifier_regions<'a>(
+    text: &'a str,
+    preserved: &mut Vec<PreservedRegion>,
+) -> Cow<'a, str> {
     static IDENTIFIER: OnceLock<Regex> = OnceLock::new();
     let regex = IDENTIFIER.get_or_init(|| Regex::new(r"(?:msg|ses|toolu)_[A-Za-z0-9]+").unwrap());
     protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
@@ -523,60 +539,130 @@ fn protect_identifier_regions(text: &str, preserved: &mut Vec<PreservedRegion>) 
     })
 }
 
-fn protect_hash_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
-    static HASH: OnceLock<Regex> = OnceLock::new();
-    let regex = HASH.get_or_init(|| Regex::new(r"[0-9a-fA-F]{7,40}").unwrap());
-    protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
-        !previous_char(text, start).is_some_and(|ch| ch.is_ascii_alphanumeric())
-            && !next_char(text, end).is_some_and(|ch| ch.is_ascii_alphanumeric())
-    })
+/// Protects each maximal run of 7 to 40 hex digits whose neighbours are not ASCII alphanumerics.
+/// A longer run protects nothing: its 40-digit prefix borders a digit and its remainder borders
+/// the prefix, which is what the regex `[0-9a-fA-F]{7,40}` with the same neighbour filter selects.
+fn protect_hash_regions<'a>(text: &'a str, preserved: &mut Vec<PreservedRegion>) -> Cow<'a, str> {
+    let bytes = text.as_bytes();
+    let mut output: Option<String> = None;
+    let mut pending = 0usize;
+    // Every run of seven or more hex digits covers a probe position, so probing every seventh
+    // byte finds each such run.
+    let mut probe = 6usize;
+    let mut scanned = 0usize;
+    while probe < bytes.len() {
+        if !bytes[probe].is_ascii_hexdigit() {
+            probe += 7;
+            continue;
+        }
+        let mut start = probe;
+        while start > scanned && bytes[start - 1].is_ascii_hexdigit() {
+            start -= 1;
+        }
+        let mut end = probe + 1;
+        while end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        scanned = end;
+        probe = end + 6;
+        let run = end - start;
+        if !(7..=40).contains(&run)
+            || (start > 0 && bytes[start - 1].is_ascii_alphanumeric())
+            || (end < bytes.len() && bytes[end].is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+        output.push_str(&text[pending..start]);
+        output.push_str(&mint_placeholder(preserved, &text[start..end], false));
+        pending = end;
+    }
+    match output {
+        None => Cow::Borrowed(text),
+        Some(mut output) => {
+            output.push_str(&text[pending..]);
+            Cow::Owned(output)
+        }
+    }
 }
 
 fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
     let mut preserved = Vec::new();
-    let mut working = text.to_string();
+    let mut working = Cow::Borrowed(text);
+
+    fn advance<'a>(working: &mut Cow<'a, str>, pass: impl FnOnce(&str) -> Cow<'_, str>) {
+        if let Cow::Owned(next) = pass(working) {
+            *working = Cow::Owned(next);
+        }
+    }
 
     // Input that already spells a placeholder (`\0EIDNARA_PRES_<n>\0`) is
     // captured first, as its own literal region, so restoration cannot mistake
     // it for a region minted below.
-    working = protect_literal_placeholders(&working, &mut preserved);
+    advance(&mut working, |text| {
+        protect_literal_placeholders(text, &mut preserved)
+    });
 
     static FENCED: OnceLock<Regex> = OnceLock::new();
     static INLINE: OnceLock<Regex> = OnceLock::new();
     static URL: OnceLock<Regex> = OnceLock::new();
     static TAG: OnceLock<Regex> = OnceLock::new();
     static PATH: OnceLock<Regex> = OnceLock::new();
-    working = protect_regex(
-        &working,
-        FENCED.get_or_init(|| Regex::new(r"(?s)```.*?```").unwrap()),
-        &mut preserved,
-    );
-    working = protect_regex(
-        &working,
-        INLINE.get_or_init(|| Regex::new(r"`[^`\n]+`").unwrap()),
-        &mut preserved,
-    );
-    working = protect_regex(
-        &working,
-        URL.get_or_init(|| Regex::new(r"https?://\S+").unwrap()),
-        &mut preserved,
-    );
-    working = protect_regex(
-        &working,
-        TAG.get_or_init(|| Regex::new(r"§[0-9]+§").unwrap()),
-        &mut preserved,
-    );
-    working = protect_identifier_regions(&working, &mut preserved);
-    working = protect_regex(
-        &working,
-        PATH.get_or_init(|| {
-            Regex::new(r"(?:\.{1,2}/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_]{1,6}")
-                .unwrap()
-        }),
-        &mut preserved,
-    );
-    working = protect_hash_regions(&working, &mut preserved);
-    (working, preserved)
+    if working.contains('`') {
+        advance(&mut working, |text| {
+            protect_regex(
+                text,
+                FENCED.get_or_init(|| Regex::new(r"(?s)```.*?```").unwrap()),
+                &mut preserved,
+            )
+        });
+        advance(&mut working, |text| {
+            protect_regex(
+                text,
+                INLINE.get_or_init(|| Regex::new(r"`[^`\n]+`").unwrap()),
+                &mut preserved,
+            )
+        });
+    }
+    if working.contains("http") {
+        advance(&mut working, |text| {
+            protect_regex(
+                text,
+                URL.get_or_init(|| Regex::new(r"https?://\S+").unwrap()),
+                &mut preserved,
+            )
+        });
+    }
+    if working.contains('§') {
+        advance(&mut working, |text| {
+            protect_regex(
+                text,
+                TAG.get_or_init(|| Regex::new(r"§[0-9]+§").unwrap()),
+                &mut preserved,
+            )
+        });
+    }
+    advance(&mut working, |text| {
+        protect_identifier_regions(text, &mut preserved)
+    });
+    if working.contains('/') {
+        advance(&mut working, |text| {
+            protect_regex(
+                text,
+                PATH.get_or_init(|| {
+                    Regex::new(
+                        r"(?:\.{1,2}/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_]{1,6}",
+                    )
+                    .unwrap()
+                }),
+                &mut preserved,
+            )
+        });
+    }
+    advance(&mut working, |text| {
+        protect_hash_regions(text, &mut preserved)
+    });
+    (working.into_owned(), preserved)
 }
 
 fn placeholder_marker_finder() -> &'static Finder<'static> {
@@ -644,56 +730,117 @@ fn restore_into(text: &str, preserved: &[PreservedRegion], max_idx: usize, out: 
 }
 
 fn drop_articles(text: &str) -> String {
+    let bytes = text.as_bytes();
     let mut output = String::with_capacity(text.len());
-    let mut cursor = 0;
-    while cursor < text.len() {
-        let Some(ch) = next_char(text, cursor) else {
-            break;
+    let mut pending = 0usize;
+    let mut cursor = 0usize;
+    let mut next_lower = memchr::memchr3(b'a', b't', b'A', bytes);
+    let mut next_upper_t = memchr::memchr(b'T', bytes);
+    loop {
+        let candidate = match (next_lower, next_upper_t) {
+            (Some(lower), Some(upper)) => lower.min(upper),
+            (Some(lower), None) => lower,
+            (None, Some(upper)) => upper,
+            (None, None) => break,
         };
-        if (ch == 't' || ch == 'T' || ch == 'a' || ch == 'A')
-            && has_word_boundary_before(text, cursor)
-        {
-            let word = if ascii_eq_at(text, cursor, "the") {
-                "the"
-            } else if ascii_eq_at(text, cursor, "an") {
-                "an"
-            } else if ascii_eq_at(text, cursor, "a") {
-                "a"
+        if candidate < cursor {
+            if next_lower == Some(candidate) {
+                next_lower =
+                    memchr::memchr3(b'a', b't', b'A', &bytes[cursor..]).map(|o| cursor + o);
             } else {
-                ""
-            };
-            if !word.is_empty() && has_word_boundary_after(text, cursor + word.len()) {
-                let mut end = cursor + word.len();
-                if end < text.len() && next_char(text, end).is_some_and(char::is_whitespace) {
-                    while end < text.len() && next_char(text, end).is_some_and(char::is_whitespace)
-                    {
-                        end += next_char(text, end).unwrap().len_utf8();
-                    }
-                    cursor = end;
-                    continue;
-                }
+                next_upper_t = memchr::memchr(b'T', &bytes[cursor..]).map(|o| cursor + o);
+            }
+            continue;
+        }
+        cursor = candidate;
+        let after = cursor + 1;
+        if next_lower == Some(candidate) {
+            next_lower = memchr::memchr3(b'a', b't', b'A', &bytes[after..]).map(|o| after + o);
+        } else {
+            next_upper_t = memchr::memchr(b'T', &bytes[after..]).map(|o| after + o);
+        }
+        if cursor > 0 && is_word_byte(bytes[cursor - 1]) {
+            cursor = after;
+            continue;
+        }
+        let word_len = if ascii_eq_at(text, cursor, "the") {
+            3
+        } else if ascii_eq_at(text, cursor, "an") {
+            2
+        } else if ascii_eq_at(text, cursor, "a") {
+            1
+        } else {
+            0
+        };
+        if word_len > 0 {
+            let word_end = cursor + word_len;
+            if (word_end >= bytes.len() || !is_word_byte(bytes[word_end]))
+                && word_end < bytes.len()
+                && let Some(run_end) = whitespace_run_end(text, word_end)
+            {
+                output.push_str(&text[pending..cursor]);
+                pending = run_end;
+                cursor = run_end;
+                continue;
             }
         }
-        output.push(ch);
-        cursor += ch.len_utf8();
+        cursor = after;
     }
+    output.push_str(&text[pending..]);
     collapse_ascii_spaces(&output)
 }
 
-fn collapse_ascii_spaces(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut previous_space = false;
-    for ch in text.chars() {
-        if ch == ' ' {
-            if previous_space {
-                continue;
+/// End of the Unicode-whitespace run starting at `offset`, or `None` when no whitespace starts
+/// there.
+fn whitespace_run_end(text: &str, offset: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut end = offset;
+    while end < bytes.len() {
+        let byte = bytes[end];
+        if byte < 0x80 {
+            if !matches!(byte, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r') {
+                break;
             }
-            previous_space = true;
+            end += 1;
         } else {
-            previous_space = false;
+            let ch = text[end..].chars().next().expect("char boundary");
+            if !ch.is_whitespace() {
+                break;
+            }
+            end += ch.len_utf8();
         }
-        output.push(ch);
     }
+    (end > offset).then_some(end)
+}
+
+/// Indices into `sorted_auxiliaries` grouped by first byte, in that list's order.
+fn auxiliary_buckets() -> &'static [Vec<usize>; 128] {
+    static BUCKETS: OnceLock<[Vec<usize>; 128]> = OnceLock::new();
+    BUCKETS.get_or_init(|| {
+        let mut buckets: [Vec<usize>; 128] = std::array::from_fn(|_| Vec::new());
+        for (index, aux) in sorted_auxiliaries().iter().enumerate() {
+            buckets[aux.as_bytes()[0] as usize].push(index);
+        }
+        buckets
+    })
+}
+
+fn collapse_ascii_spaces(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let Some(first_run) = memchr::memmem::find(bytes, b"  ") else {
+        return text.to_string();
+    };
+    let mut output = String::with_capacity(text.len());
+    let mut pending = 0usize;
+    let mut cursor = first_run;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b' ' && cursor > 0 && bytes[cursor - 1] == b' ' {
+            output.push_str(&text[pending..cursor]);
+            pending = cursor + 1;
+        }
+        cursor += 1;
+    }
+    output.push_str(&text[pending..]);
     output
 }
 
@@ -728,55 +875,63 @@ fn sorted_auxiliaries() -> &'static [&'static str] {
 
 fn drop_auxiliaries(text: &str) -> String {
     let auxiliaries = sorted_auxiliaries();
-
+    let buckets = auxiliary_buckets();
+    let bytes = text.as_bytes();
     let mut output = String::with_capacity(text.len());
-    let mut cursor = 0;
-    while cursor < text.len() {
-        let Some(ch) = next_char(text, cursor) else {
-            break;
+    let mut pending = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let byte = bytes[cursor];
+        if byte < 0x80 && !matches!(byte, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r') {
+            cursor += 1;
+            continue;
+        }
+        let Some(whitespace_end) = whitespace_run_end(text, cursor) else {
+            cursor += text[cursor..]
+                .chars()
+                .next()
+                .expect("char boundary")
+                .len_utf8();
+            continue;
         };
-        if ch.is_whitespace() {
-            let mut whitespace_end = cursor;
-            while whitespace_end < text.len()
-                && next_char(text, whitespace_end).is_some_and(char::is_whitespace)
-            {
-                whitespace_end += next_char(text, whitespace_end).unwrap().len_utf8();
-            }
-            let Some(aux) = auxiliaries.iter().find(|aux| {
+        let first = bytes.get(whitespace_end).map_or(0, u8::to_ascii_lowercase);
+        let candidates: &[usize] = if first < 0x80 {
+            &buckets[first as usize]
+        } else {
+            &[]
+        };
+        let aux = candidates
+            .iter()
+            .map(|&index| auxiliaries[index])
+            .find(|aux| {
                 ascii_eq_at(text, whitespace_end, aux)
                     && has_word_boundary_before(text, whitespace_end)
                     && has_word_boundary_after(text, whitespace_end + aux.len())
-            }) else {
-                output.push_str(&text[cursor..whitespace_end]);
-                cursor = whitespace_end;
-                continue;
-            };
-            let mut aux_end = whitespace_end + aux.len();
-            if aux_end >= text.len() || !next_char(text, aux_end).is_some_and(char::is_whitespace) {
-                output.push_str(&text[cursor..aux_end]);
-                cursor = aux_end;
-                continue;
-            }
-            while aux_end < text.len() && next_char(text, aux_end).is_some_and(char::is_whitespace)
-            {
-                aux_end += next_char(text, aux_end).unwrap().len_utf8();
-            }
-            if matches_participle(text, aux_end) {
-                output.push(' ');
-                cursor = aux_end;
-                continue;
-            }
-            output.push_str(&text[cursor..aux_end]);
+            });
+        let Some(aux) = aux else {
+            cursor = whitespace_end;
+            continue;
+        };
+        let aux_end = whitespace_end + aux.len();
+        let Some(run_end) = whitespace_run_end(text, aux_end) else {
             cursor = aux_end;
             continue;
+        };
+        if matches_participle(text, run_end) {
+            output.push_str(&text[pending..cursor]);
+            output.push(' ');
+            pending = run_end;
         }
-        output.push(ch);
-        cursor += ch.len_utf8();
+        cursor = run_end;
     }
+    output.push_str(&text[pending..]);
     collapse_ascii_spaces(&output)
 }
 
 fn transform_preserving_user_lines(text: &str, transform: impl Fn(&str) -> String) -> String {
+    if !text.starts_with("U: ") && !text.contains("\nU: ") {
+        return transform(text);
+    }
     let lines: Vec<&str> = text.split('\n').collect();
     let mut output = Vec::with_capacity(lines.len());
     let mut buffer = Vec::new();
@@ -798,35 +953,38 @@ fn transform_preserving_user_lines(text: &str, transform: impl Fn(&str) -> Strin
 }
 
 fn normalize_whitespace(text: &str) -> String {
-    let mut lines = Vec::new();
-    for line in text.split('\n') {
-        let mut normalized = String::with_capacity(line.len());
-        let mut previous_space = false;
-        for ch in line.chars() {
-            if ch == ' ' || ch == '\t' {
-                if previous_space {
-                    continue;
-                }
-                normalized.push(' ');
-                previous_space = true;
-            } else {
-                normalized.push(ch);
-                previous_space = false;
-            }
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut pending = 0usize;
+    let mut cursor = 0usize;
+    // Collapse runs of spaces and tabs to one space, and drop them before a newline or the end.
+    while let Some(offset) = memchr::memchr2(b' ', b'\t', &bytes[cursor..]) {
+        let run_start = cursor + offset;
+        cursor = run_start + 1;
+        while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
+            cursor += 1;
         }
-        while normalized.ends_with([' ', '\t']) {
-            normalized.pop();
+        if run_start + 1 == cursor
+            && bytes[run_start] == b' '
+            && cursor < bytes.len()
+            && bytes[cursor] != b'\n'
+        {
+            continue;
         }
-        lines.push(normalized);
+        output.push_str(&text[pending..run_start]);
+        if cursor < bytes.len() && bytes[cursor] != b'\n' {
+            output.push(' ');
+        }
+        pending = cursor;
     }
-    let joined = lines.join("\n");
-    if !joined.contains("\n\n\n") {
-        return joined;
+    output.push_str(&text[pending..]);
+    if !output.contains("\n\n\n") {
+        return output;
     }
     // Cap every newline run at two, the fixpoint of "\n\n\n" -> "\n\n".
-    let mut output = String::with_capacity(joined.len());
+    let mut capped = String::with_capacity(output.len());
     let mut run = 0usize;
-    for ch in joined.chars() {
+    for ch in output.chars() {
         if ch == '\n' {
             run += 1;
             if run > 2 {
@@ -835,9 +993,9 @@ fn normalize_whitespace(text: &str) -> String {
         } else {
             run = 0;
         }
-        output.push(ch);
+        capped.push(ch);
     }
-    output
+    capped
 }
 
 /// Compresses prose while preserving fenced and inline code, `http` and `https` URLs, numbered `§` tags, recognized prefixed identifiers, hashes, paths ending in a short extension, and `U: ` lines.
@@ -930,6 +1088,493 @@ mod tests {
                 case.text
             );
         }
+    }
+
+    /// Character-by-character forms of the passes, kept as the specification the byte-oriented
+    /// passes are checked against.
+    mod pass_reference {
+        use super::super::{
+            PreservedRegion, Regex, ascii_eq_at, has_word_boundary_after, has_word_boundary_before,
+            matches_participle, next_char, previous_char, sorted_auxiliaries,
+        };
+        use std::sync::OnceLock;
+
+        pub(super) fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
+            let mut preserved = Vec::new();
+            let mut working = text.to_string();
+
+            // Input that already spells a placeholder (`\0EIDNARA_PRES_<n>\0`) is
+            // captured first, as its own literal region, so restoration cannot mistake
+            // it for a region minted below.
+            working = protect_literal_placeholders(&working, &mut preserved);
+
+            static FENCED: OnceLock<Regex> = OnceLock::new();
+            static INLINE: OnceLock<Regex> = OnceLock::new();
+            static URL: OnceLock<Regex> = OnceLock::new();
+            static TAG: OnceLock<Regex> = OnceLock::new();
+            static PATH: OnceLock<Regex> = OnceLock::new();
+            working = protect_regex(
+                &working,
+                FENCED.get_or_init(|| Regex::new(r"(?s)```.*?```").unwrap()),
+                &mut preserved,
+            );
+            working = protect_regex(
+                &working,
+                INLINE.get_or_init(|| Regex::new(r"`[^`\n]+`").unwrap()),
+                &mut preserved,
+            );
+            working = protect_regex(
+                &working,
+                URL.get_or_init(|| Regex::new(r"https?://\S+").unwrap()),
+                &mut preserved,
+            );
+            working = protect_regex(
+                &working,
+                TAG.get_or_init(|| Regex::new(r"§[0-9]+§").unwrap()),
+                &mut preserved,
+            );
+            working = protect_identifier_regions(&working, &mut preserved);
+            working = protect_regex(
+                &working,
+                PATH.get_or_init(|| {
+                    Regex::new(
+                        r"(?:\.{1,2}/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_]{1,6}",
+                    )
+                    .unwrap()
+                }),
+                &mut preserved,
+            );
+            working = protect_hash_regions(&working, &mut preserved);
+            (working, preserved)
+        }
+
+        fn protect_regex(
+            text: &str,
+            regex: &Regex,
+            preserved: &mut Vec<PreservedRegion>,
+        ) -> String {
+            protect_regex_filtered(text, regex, preserved, false, |_, _, _| true)
+        }
+
+        fn protect_literal_placeholders(
+            text: &str,
+            preserved: &mut Vec<PreservedRegion>,
+        ) -> String {
+            static LITERAL_PLACEHOLDER: OnceLock<Regex> = OnceLock::new();
+            protect_regex_filtered(
+                text,
+                LITERAL_PLACEHOLDER
+                    .get_or_init(|| Regex::new("\u{0}EIDNARA_PRES_[0-9]+\u{0}").unwrap()),
+                preserved,
+                true,
+                |_, _, _| true,
+            )
+        }
+
+        fn protect_regex_filtered(
+            text: &str,
+            regex: &Regex,
+            preserved: &mut Vec<PreservedRegion>,
+            literal: bool,
+            accept: impl Fn(&str, usize, usize) -> bool,
+        ) -> String {
+            let mut output = String::with_capacity(text.len());
+            let mut cursor = 0;
+            for matched in regex.find_iter(text) {
+                if !accept(text, matched.start(), matched.end()) {
+                    continue;
+                }
+                output.push_str(&text[cursor..matched.start()]);
+                let placeholder = format!("\u{0}EIDNARA_PRES_{}\u{0}", preserved.len());
+                preserved.push(PreservedRegion {
+                    placeholder: placeholder.clone(),
+                    original: matched.as_str().to_string(),
+                    literal,
+                });
+                output.push_str(&placeholder);
+                cursor = matched.end();
+            }
+            output.push_str(&text[cursor..]);
+            output
+        }
+
+        fn protect_identifier_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+            static IDENTIFIER: OnceLock<Regex> = OnceLock::new();
+            let regex =
+                IDENTIFIER.get_or_init(|| Regex::new(r"(?:msg|ses|toolu)_[A-Za-z0-9]+").unwrap());
+            protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
+                has_word_boundary_before(text, start) && has_word_boundary_after(text, end)
+            })
+        }
+
+        fn protect_hash_regions(text: &str, preserved: &mut Vec<PreservedRegion>) -> String {
+            static HASH: OnceLock<Regex> = OnceLock::new();
+            let regex = HASH.get_or_init(|| Regex::new(r"[0-9a-fA-F]{7,40}").unwrap());
+            protect_regex_filtered(text, regex, preserved, false, |text, start, end| {
+                !previous_char(text, start).is_some_and(|ch| ch.is_ascii_alphanumeric())
+                    && !next_char(text, end).is_some_and(|ch| ch.is_ascii_alphanumeric())
+            })
+        }
+
+        pub(super) fn drop_articles(text: &str) -> String {
+            let mut output = String::with_capacity(text.len());
+            let mut cursor = 0;
+            while cursor < text.len() {
+                let Some(ch) = next_char(text, cursor) else {
+                    break;
+                };
+                if (ch == 't' || ch == 'T' || ch == 'a' || ch == 'A')
+                    && has_word_boundary_before(text, cursor)
+                {
+                    let word = if ascii_eq_at(text, cursor, "the") {
+                        "the"
+                    } else if ascii_eq_at(text, cursor, "an") {
+                        "an"
+                    } else if ascii_eq_at(text, cursor, "a") {
+                        "a"
+                    } else {
+                        ""
+                    };
+                    if !word.is_empty() && has_word_boundary_after(text, cursor + word.len()) {
+                        let mut end = cursor + word.len();
+                        if end < text.len() && next_char(text, end).is_some_and(char::is_whitespace)
+                        {
+                            while end < text.len()
+                                && next_char(text, end).is_some_and(char::is_whitespace)
+                            {
+                                end += next_char(text, end).unwrap().len_utf8();
+                            }
+                            cursor = end;
+                            continue;
+                        }
+                    }
+                }
+                output.push(ch);
+                cursor += ch.len_utf8();
+            }
+            collapse_ascii_spaces(&output)
+        }
+
+        pub(super) fn collapse_ascii_spaces(text: &str) -> String {
+            let mut output = String::with_capacity(text.len());
+            let mut previous_space = false;
+            for ch in text.chars() {
+                if ch == ' ' {
+                    if previous_space {
+                        continue;
+                    }
+                    previous_space = true;
+                } else {
+                    previous_space = false;
+                }
+                output.push(ch);
+            }
+            output
+        }
+
+        pub(super) fn drop_auxiliaries(text: &str) -> String {
+            let auxiliaries = sorted_auxiliaries();
+
+            let mut output = String::with_capacity(text.len());
+            let mut cursor = 0;
+            while cursor < text.len() {
+                let Some(ch) = next_char(text, cursor) else {
+                    break;
+                };
+                if ch.is_whitespace() {
+                    let mut whitespace_end = cursor;
+                    while whitespace_end < text.len()
+                        && next_char(text, whitespace_end).is_some_and(char::is_whitespace)
+                    {
+                        whitespace_end += next_char(text, whitespace_end).unwrap().len_utf8();
+                    }
+                    let Some(aux) = auxiliaries.iter().find(|aux| {
+                        ascii_eq_at(text, whitespace_end, aux)
+                            && has_word_boundary_before(text, whitespace_end)
+                            && has_word_boundary_after(text, whitespace_end + aux.len())
+                    }) else {
+                        output.push_str(&text[cursor..whitespace_end]);
+                        cursor = whitespace_end;
+                        continue;
+                    };
+                    let mut aux_end = whitespace_end + aux.len();
+                    if aux_end >= text.len()
+                        || !next_char(text, aux_end).is_some_and(char::is_whitespace)
+                    {
+                        output.push_str(&text[cursor..aux_end]);
+                        cursor = aux_end;
+                        continue;
+                    }
+                    while aux_end < text.len()
+                        && next_char(text, aux_end).is_some_and(char::is_whitespace)
+                    {
+                        aux_end += next_char(text, aux_end).unwrap().len_utf8();
+                    }
+                    if matches_participle(text, aux_end) {
+                        output.push(' ');
+                        cursor = aux_end;
+                        continue;
+                    }
+                    output.push_str(&text[cursor..aux_end]);
+                    cursor = aux_end;
+                    continue;
+                }
+                output.push(ch);
+                cursor += ch.len_utf8();
+            }
+            collapse_ascii_spaces(&output)
+        }
+
+        pub(super) fn transform_preserving_user_lines(
+            text: &str,
+            transform: impl Fn(&str) -> String,
+        ) -> String {
+            let lines: Vec<&str> = text.split('\n').collect();
+            let mut output = Vec::with_capacity(lines.len());
+            let mut buffer = Vec::new();
+            for line in lines {
+                if line.starts_with("U: ") {
+                    if !buffer.is_empty() {
+                        output.push(transform(&buffer.join("\n")));
+                        buffer.clear();
+                    }
+                    output.push(line.to_string());
+                } else {
+                    buffer.push(line);
+                }
+            }
+            if !buffer.is_empty() {
+                output.push(transform(&buffer.join("\n")));
+            }
+            output.join("\n")
+        }
+
+        pub(super) fn normalize_whitespace(text: &str) -> String {
+            let mut lines = Vec::new();
+            for line in text.split('\n') {
+                let mut normalized = String::with_capacity(line.len());
+                let mut previous_space = false;
+                for ch in line.chars() {
+                    if ch == ' ' || ch == '\t' {
+                        if previous_space {
+                            continue;
+                        }
+                        normalized.push(' ');
+                        previous_space = true;
+                    } else {
+                        normalized.push(ch);
+                        previous_space = false;
+                    }
+                }
+                while normalized.ends_with([' ', '\t']) {
+                    normalized.pop();
+                }
+                lines.push(normalized);
+            }
+            let joined = lines.join("\n");
+            if !joined.contains("\n\n\n") {
+                return joined;
+            }
+            // Cap every newline run at two, the fixpoint of "\n\n\n" -> "\n\n".
+            let mut output = String::with_capacity(joined.len());
+            let mut run = 0usize;
+            for ch in joined.chars() {
+                if ch == '\n' {
+                    run += 1;
+                    if run > 2 {
+                        continue;
+                    }
+                } else {
+                    run = 0;
+                }
+                output.push(ch);
+            }
+            output
+        }
+    }
+
+    const PASS_VOCABULARY: &[&str] = &[
+        "the",
+        "The",
+        "THE",
+        "a",
+        "A",
+        "an",
+        "An",
+        "and",
+        "or",
+        "is",
+        "was",
+        "were",
+        "has been",
+        "have been",
+        "will be",
+        "could be",
+        "Been",
+        "being",
+        "am",
+        "be",
+        "implemented",
+        "configured",
+        "running",
+        "ized",
+        "walked",
+        "open",
+        "config",
+        "configuration",
+        "message",
+        "messages",
+        "session",
+        "history_segment",
+        "context",
+        "repository",
+        "directory",
+        "just",
+        "really",
+        "basically",
+        "i think",
+        "probably",
+        "please",
+        "thanks",
+        "in order to",
+        "at the moment",
+        "and then",
+        "because of",
+        "however",
+        "as well as",
+        " ",
+        "  ",
+        "\t",
+        "\n",
+        "\n\n",
+        "\n\n\n",
+        "\u{a0}",
+        "\u{2003}",
+        "\u{0B}",
+        "\r\n",
+        "\u{85}",
+        "deadbeef",
+        "0123456",
+        "abcdef0123456789abcdef0123456789abcdef01",
+        "0123456789abcdef0123456789abcdef0123456789abcdef",
+        "x1234567",
+        "1234567x",
+        "ab12",
+        "`code`",
+        "```fenced\nblock```",
+        "```open",
+        "https://x.y/z",
+        "§12§",
+        "msg_abc",
+        "toolu_1",
+        "ses_",
+        "src/lib.rs",
+        "./a/b.c",
+        "../x.y",
+        "a/b",
+        "U: hello",
+        "\nU: there",
+        "\u{0}EIDNARA_PRES_0\u{0}",
+        "日本語",
+        "é",
+        "İ",
+        "ΣΑΣ",
+        "-",
+        "_",
+        ".",
+        ",",
+        "!",
+        "to",
+        "the_",
+        "_the",
+        "thea",
+        "a_b",
+        "an.",
+        "a\n",
+    ];
+
+    fn vocabulary_text() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::strategy::Strategy;
+        proptest::collection::vec(
+            (
+                proptest::sample::select(PASS_VOCABULARY),
+                proptest::bool::ANY,
+            ),
+            0..40,
+        )
+        .prop_map(|pieces| {
+            let mut text = String::new();
+            for (piece, space) in pieces {
+                text.push_str(piece);
+                if space {
+                    text.push(' ');
+                }
+            }
+            text
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2000))]
+
+        #[test]
+        fn byte_passes_match_the_character_passes(text in vocabulary_text()) {
+            use proptest::prelude::*;
+            prop_assert_eq!(drop_articles(&text), pass_reference::drop_articles(&text));
+            prop_assert_eq!(drop_auxiliaries(&text), pass_reference::drop_auxiliaries(&text));
+            prop_assert_eq!(collapse_ascii_spaces(&text), pass_reference::collapse_ascii_spaces(&text));
+            prop_assert_eq!(normalize_whitespace(&text), pass_reference::normalize_whitespace(&text));
+            let (protected, preserved) = protect_regions(&text);
+            let (reference_protected, reference_preserved) = pass_reference::protect_regions(&text);
+            prop_assert_eq!(protected, reference_protected);
+            prop_assert_eq!(
+                preserved.iter().map(|region| (&region.placeholder, &region.original, region.literal)).collect::<Vec<_>>(),
+                reference_preserved.iter().map(|region| (&region.placeholder, &region.original, region.literal)).collect::<Vec<_>>()
+            );
+            let upper = |chunk: &str| chunk.to_ascii_uppercase();
+            prop_assert_eq!(
+                transform_preserving_user_lines(&text, upper),
+                pass_reference::transform_preserving_user_lines(&text, upper)
+            );
+            for level in [
+                TerseTextCompressionLevel::Lite,
+                TerseTextCompressionLevel::Full,
+                TerseTextCompressionLevel::Ultra,
+            ] {
+                prop_assert_eq!(compress(&text, level), reference_compress(&text, level));
+            }
+        }
+    }
+
+    /// `compress` over the character-by-character passes.
+    fn reference_compress(text: &str, level: TerseTextCompressionLevel) -> String {
+        if text.is_empty() {
+            return text.to_string();
+        }
+        let (protected_text, preserved) = pass_reference::protect_regions(text);
+        let transformed =
+            pass_reference::transform_preserving_user_lines(&protected_text, |chunk| {
+                let a = drop_phrases(chunk, filler_automaton());
+                let b = drop_phrases(&a, hedging_automaton());
+                let c = drop_phrases(&b, pleasantries_automaton());
+                let mut buf = ShadowedText::new(c.into_owned());
+                apply_phrase_shortenings(&mut buf);
+                if matches!(
+                    level,
+                    TerseTextCompressionLevel::Full | TerseTextCompressionLevel::Ultra
+                ) {
+                    let working = pass_reference::drop_auxiliaries(&buf.text);
+                    buf = ShadowedText::new(pass_reference::drop_articles(&working));
+                }
+                if level == TerseTextCompressionLevel::Ultra {
+                    apply_ultra_connectives(&mut buf);
+                    apply_ultra_abbreviations(&mut buf);
+                }
+                buf.text
+            });
+        pass_reference::normalize_whitespace(&restore_regions(&transformed, &preserved))
+            .trim()
+            .to_string()
     }
 
     /// `drop_phrases` relies on leftmost-first automaton semantics matching a
