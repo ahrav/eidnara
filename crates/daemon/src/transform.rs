@@ -111,7 +111,8 @@ const USER_HINT_TOTAL_CHAR_CAP: usize = 800;
 const USER_HINT_CANDIDATE_LIMIT: usize = 100;
 const USER_HINT_TOKEN_CAP: usize = 24;
 const USER_HINT_RESULT_LIMIT: usize = 3;
-/// Follows the fragments when any of them was cut to fit the fragment cap.
+/// Follows the fragments when any of them starts or ends with `…`, the mark the search window
+/// and the fragment cap leave where they cut longer text.
 const USER_HINT_CUT_NOTE: &str = "A fragment that starts or ends with … is cut from longer text and may omit a qualifier such as a negation or a rejection.";
 const USER_HINT_MIN_MATCHED_TOKENS: usize = 2;
 

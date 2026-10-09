@@ -9,19 +9,19 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 
 ## Evidence trail
 
-- [transform.rs:109-116](../../../../../crates/daemon/src/transform.rs#L109-L116)
+- [transform.rs:109-117](../../../../../crates/daemon/src/transform.rs#L109-L117)
   sets 100 candidates, 24 lexical tokens, three results, two matched tokens,
   an 80-unit fragment cap, and an 800-unit total cap.
-- [transform.rs:8192-8239](../../../../../crates/daemon/src/transform.rs#L8192-L8239)
+- [transform.rs:8193-8240](../../../../../crates/daemon/src/transform.rs#L8193-L8240)
   requires an eligible new authored tail, no prior decision/frontier exclusion,
   no stacked augmentation, and sufficient sanitized prompt length.
-- [transform.rs:8288-8317](../../../../../crates/daemon/src/transform.rs#L8288-L8317)
+- [transform.rs:8289-8318](../../../../../crates/daemon/src/transform.rs#L8289-L8318)
   concatenates title, flat content, and all populated tiers from stored history.
   It does not restrict selection to the body actually rendered in m0.
-- [transform.rs:8341-8394](../../../../../crates/daemon/src/transform.rs#L8341-L8394)
+- [transform.rs:8342-8395](../../../../../crates/daemon/src/transform.rs#L8342-L8395)
   requires two matched terms and one appearing in fewer than half the candidate
   rows. Only the top score is compared with the configured threshold.
-- [transform.rs:8611-8645,8648-8657](../../../../../crates/daemon/src/transform.rs#L8611-L8668)
+- [transform.rs:8612-8646,8648-8657](../../../../../crates/daemon/src/transform.rs#L8612-L8669)
   applies Ultra compression, normalizes whitespace, and truncates fragments in
   UTF-16 units. It also drops formatted lines of at most two bytes: an empty
   fragment produces only `- `. Nonempty one- or two-character fragments survive
@@ -33,11 +33,11 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   [compression pass](../../../../../crates/daemon/src/terse_text_compression.rs#L848-L856)
   removes. Filler-only selected content is a construction lead for total drop,
   not evidence of a material semantic failure.
-- [transform.rs:22976-22995](../../../../../crates/daemon/src/transform.rs#L22976-L22995)
+- [transform.rs:22977-22996](../../../../../crates/daemon/src/transform.rs#L22977-L22996)
   asserts one lexical query across repeated empty decisions; status unaudited.
 - [opencode-transform-adapter.ts:477](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L477)
   defaults auto-search enabled. The daemon
-  [gate](../../../../../crates/daemon/src/transform.rs#L3512-L3513) excludes
+  [gate](../../../../../crates/daemon/src/transform.rs#L3513-L3514) excludes
   subagent requests. Reachability is **default-production** for eligible main
   requests; the disabled variant needs explicit configuration.
 

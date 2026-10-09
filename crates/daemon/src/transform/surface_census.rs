@@ -423,6 +423,38 @@ fn a_cut_fragment_discloses_that_a_qualifier_may_be_missing() {
     assert!(body[note + 1].contains("eidnara_search"), "{cut}");
     assert!(utf16_len(cut.trim_start()) <= USER_HINT_TOTAL_CHAR_CAP);
     assert!(utf16_len(fragment) <= USER_HINT_FRAGMENT_CHAR_CAP);
+
+    // A search window that starts inside the text and reaches its end is cut at the start only.
+    let lead_cut = render_user_hint(&[hint_result("…rejected option B")]).unwrap();
+    let lead = hint_fragment_lines(&lead_cut)[0];
+    assert!(lead.starts_with('…') && !lead.ends_with('…'), "{lead}");
+    assert_eq!(
+        lead_cut.matches(USER_HINT_CUT_NOTE).count(),
+        1,
+        "{lead_cut}"
+    );
+
+    // One cut fragment among whole ones adds the note once, after every fragment.
+    let mixed = render_user_hint(&[
+        hint_result("quasar nebula pulsar"),
+        hint_result(&long),
+        hint_result("survey cadence"),
+    ])
+    .unwrap();
+    let lines: Vec<&str> = mixed.lines().collect();
+    assert_eq!(mixed.matches(USER_HINT_CUT_NOTE).count(), 1, "{mixed}");
+    let note = lines
+        .iter()
+        .position(|line| *line == USER_HINT_CUT_NOTE)
+        .unwrap();
+    assert_eq!(
+        lines[..note]
+            .iter()
+            .filter(|line| line.starts_with("- "))
+            .count(),
+        3,
+        "{mixed}"
+    );
 }
 
 fn hint_fragment_lines(rendered: &str) -> Vec<&str> {
