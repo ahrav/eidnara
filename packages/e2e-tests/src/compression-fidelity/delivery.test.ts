@@ -6,7 +6,16 @@ import type { RetainedCapture, RustPassLine } from "../rust-harness";
 import { parseRustPassLine } from "../rust-harness";
 import type { ScriptSource } from "../rust-runner/hermetic-host";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "./corpus";
-import { emitObservation, judgeDelivery, planSeed, reviewedTiers, servedTier } from "./delivery";
+import {
+    emitObservation,
+    historyHeadings,
+    judgeDelivery,
+    planSeed,
+    publishedOf,
+    reviewedTiers,
+    servedTier,
+    stageOf,
+} from "./delivery";
 
 const TITLE = "Pooling-first rejected";
 const BODIES = ["full P1 body", "condensed P2", "short P3"];
@@ -21,7 +30,7 @@ function capture(messages: string[]): RetainedCapture {
             receivedAt: 0,
             method: "POST",
             path: "/v1/messages",
-            headers: { "x-opencode-session-id": "ses_a" },
+            headers: { "x-session-id": "ses_a" },
             body: { messages: messages.map((text) => ({ role: "user", content: text })) },
         },
     };
@@ -136,13 +145,49 @@ describe("compression fidelity delivery judgment", () => {
         ).toBe("p1");
         const mentioned = `<session-history>\n## 1-2 · Other\n${TITLE} came up here\n</session-history>`;
         expect(servedTier([mentioned], TITLE, BODIES)).toBe("p5");
+        const since = `<session-history-since>\n## 1-6 · ${TITLE}\n${BODIES[0]}\n</session-history-since>`;
+        expect(servedTier([since, "follow-up"], TITLE, BODIES)).toBe("p1");
     });
 
-    it("scans the m1 window and system text for leaks, not only later messages", () => {
-        const folded = `${history(BODIES[0] ?? "")}\n${PROBE} restated in m1`;
+    it("reads the stage from the case heading, not from a mention of the title", () => {
+        const m1Mention = `<session-history-since>\n## 7-8 · Newer\n${TITLE} came up again\n</session-history-since>`;
+        const m0Case = history(BODIES[0] ?? "");
+        expect(stageOf([`${m1Mention}\n${m0Case}`, "follow-up"], TITLE)).toBe("m0");
+        expect(stageOf([m1Mention, "follow-up"], TITLE)).toBe("absent");
+        const mentioned = `<session-history>\n## 1-2 · Other\n${TITLE} came up here\n</session-history>`;
+        expect(stageOf([mentioned], TITLE)).toBe("absent");
+        const m1Case = `<session-history-since>\n## 1-6 · ${TITLE}\n${BODIES[0]}\n</session-history-since>`;
+        expect(stageOf([m1Case], TITLE)).toBe("m1");
+        expect(stageOf([`## 1-6 · ${TITLE}\n${BODIES[0]}`], TITLE)).toBe("absent");
+    });
+
+    it("lists the headings inside the history wrappers only", () => {
+        const m1 = `<session-history-since>\n## 7-8 · Newer\nbody\n</session-history-since>`;
+        const m0 = `<session-history>\n## 1-6 · ${TITLE}\n## 9-9 · Other\n</session-history>`;
+        expect(historyHeadings([`${m1}\n${m0}\n## 10-10 · Unwrapped`, "follow-up"])).toEqual([
+            "## 7-8 · Newer",
+            `## 1-6 · ${TITLE}`,
+            "## 9-9 · Other",
+        ]);
+        expect(
+            historyHeadings(["## 1-1 · Unwrapped", "<session-history>\n</session-history>"]),
+        ).toEqual([]);
+    });
+
+    it("scans outside both history wrappers, the system text included", () => {
+        const m1 = `<session-history-since>\n## 1-6 · ${TITLE}\n${PROBE} quoted in m1\n</session-history-since>`;
         expect(
             judgeDelivery({
-                capture: capture([folded, "follow-up"]),
+                capture: capture([`${m1}\nfollow-up`]),
+                pass: APPLIED,
+                title: TITLE,
+                bodies: BODIES,
+                leakProbes: [PROBE],
+            }).leaks,
+        ).toEqual([]);
+        expect(
+            judgeDelivery({
+                capture: capture([`${history(BODIES[0] ?? "")}\n${PROBE} after the wrapper`]),
                 pass: APPLIED,
                 title: TITLE,
                 bodies: BODIES,
@@ -211,12 +256,27 @@ describe("compression fidelity delivery judgment", () => {
         expect(rows[3]?.parts[0]?.data).toMatchObject({ type: "text" });
     });
 
+    it("reads the published counter and rejects a status without one", () => {
+        expect(publishedOf({ history_summarizer: { counters: { published: 0 } } })).toBe(0);
+        expect(publishedOf({ history_summarizer: { counters: { published: 3 } } })).toBe(3);
+        for (const status of [
+            {},
+            { history_summarizer: {} },
+            { history_summarizer: { counters: {} } },
+        ]) {
+            expect(() => publishedOf(status)).toThrow("history_summarizer.counters.published");
+        }
+    });
+
     it("reads the title and tier bodies of a reviewed output", () => {
         expect(
             reviewedTiers(
-                '<history_segment start="1" end="2" title="T"><p1>one</p1><p2>two</p2><p3>three</p3><p4 /></history_segment>',
+                '<history_segment start="1" end="2" title="T" importance="70"><p1>one</p1><p2>two</p2><p3>three</p3><p4 /></history_segment>',
             ),
-        ).toEqual({ title: "T", bodies: ["one", "two", "three"] });
+        ).toEqual({ title: "T", importance: 70, bodies: ["one", "two", "three"] });
+        expect(() =>
+            reviewedTiers('<history_segment title="T"><p1>a</p1><p2>b</p2><p3>c</p3>'),
+        ).toThrow("importance");
     });
 
     it("writes an owner-only observation only when a directory is named", () => {

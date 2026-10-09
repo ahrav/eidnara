@@ -106,11 +106,15 @@ export function buildBinaries(): Promise<Binaries> {
     );
 }
 
-/** Seeds `sessions` into a fresh store under `root`, then starts the fixture over it. */
+/**
+ * Seeds `sessions` into a fresh store under `root`, `segments` two-message segments each, then
+ * starts the fixture over it.
+ */
 export async function startFixture(
     binaries: Binaries,
     sessions: string[],
     root = realpathSync(mkdtempSync(join(tmpdir(), "eidnara-pi-rust-"))),
+    segments = COVERED / 2,
 ): Promise<{ root: string; stack: HermeticHostStack }> {
     const { fixtureBin, evalRunner } = binaries;
     const dataDir = join(root, `data-${Date.now()}`);
@@ -125,7 +129,7 @@ export async function startFixture(
                 "--session",
                 session,
                 "--segments",
-                String(COVERED / 2),
+                String(segments),
             ],
             { encoding: "utf8" },
         );
@@ -178,7 +182,7 @@ export interface PiRun {
             messages: unknown[];
             navigateTree(id: string): Promise<unknown>;
         };
-        requests: { messages: unknown[] }[];
+        requests: { messages: unknown[]; systemPrompt: string | undefined }[];
         dispose(): Promise<void>;
     };
     close(): Promise<void>;

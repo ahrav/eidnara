@@ -99,6 +99,9 @@ export interface ScriptStatus {
     filled: number;
     mismatched: number;
     exhausted: number;
+    /** The importance the fixture gives filler and lead-in segments, and echo segments. */
+    fillerImportance: number;
+    echoImportance: number;
     bindings: ScriptBinding[];
 }
 
@@ -423,8 +426,10 @@ function parseScriptStatus(value: unknown): ScriptStatus {
             "bindings",
             "bound",
             "corpus_sha256",
+            "echo_importance",
             "exhausted",
             "filled",
+            "filler_importance",
             "mismatched",
             "remaining",
         ]) ||
@@ -435,6 +440,8 @@ function parseScriptStatus(value: unknown): ScriptStatus {
         !isCount(object.filled) ||
         !isCount(object.mismatched) ||
         !isCount(object.exhausted) ||
+        !isCount(object.filler_importance) ||
+        !isCount(object.echo_importance) ||
         !Array.isArray(object.bindings)
     ) {
         throw new Error("fixture control script status was malformed");
@@ -447,6 +454,8 @@ function parseScriptStatus(value: unknown): ScriptStatus {
         filled: object.filled,
         mismatched: object.mismatched,
         exhausted: object.exhausted,
+        fillerImportance: object.filler_importance,
+        echoImportance: object.echo_importance,
         bindings: object.bindings.map(parseScriptBinding),
     };
 }

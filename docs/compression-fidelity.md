@@ -167,6 +167,63 @@ served history, and covered native text only inside the `<session-history>`
 wrapper. A missing capture, an empty capture, a raw pass-through, or a leak
 is a refusal, not a pass.
 
+### Delivery campaign
+
+The fixture's queue also takes `filler:N`, which answers one request with
+at most `N` compact fixture-authored rows, `echo`, which answers with the
+fixture's default segments whose bodies repeat the presented text, and a
+scenario ID with an `@p1-only` suffix, which serves the approved example
+without its P2 and P3 bodies. `script-status` counts filler and echo answers
+as `filled` and reports the importance each kind of fixture row carries.
+
+`packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` drives each
+source through `src/compression-fidelity/campaign.ts` in one OpenCode session
+per source. Each case owns its OpenCode, direct host, and mock provider, so
+the cases run as concurrent tests up to the runner's `--max-concurrency`
+(`test:rust` passes 6). Each turn waits until no summarizer firing is live,
+so no pass commits while a firing publishes.
+
+- A baseline of fixture-authored rows publishes first, then the scripted case.
+  The next provider request serves the case's P1 body in the m1 window
+  (`<session-history-since>`), a second request repeats those bytes warm, and
+  a restart under the aging budget with a changed prompt surface
+  rematerializes the same body into m0 on a `HARD` pass. Every source serves
+  these three rows; their observations carry the source's m1 scenario when
+  the corpus declares one and the source ID otherwise.
+- Natural decay adds counted fixture rows after the case under a 562-token
+  history budget and serves each P2, P3, P4, and P5 scenario row on a `HARD`
+  pass that rebuilds m0 in the running OpenCode: the session's requests carry
+  new system text, so the next pass sees a changed render config. Each served
+  tier must equal the tier `src/compression-fidelity/decay-oracle.ts` computes
+  from the row count, the importances, and the budget the pass line reports,
+  so a guard demotion or a retry fails the row. P4 rows serve the title-only
+  heading, and P5 rows serve no segment text.
+- C1.S5 and C3.S5 publish newer rows with large bodies under a 225-token
+  budget. The served tier must be sparser than the curve tier at that budget,
+  which the curve alone would still render. The served tier is recorded
+  beside the corpus tier.
+- A `C1.S2@p1-only` publication serves its P1 body at a P2 curve position,
+  the parser's fallback.
+- The first m1 request pins the capability surface
+  (`src/compression-fidelity/capabilities.ts`): the four Eidnara tools,
+  `eidnara_search` sources `["memory"]`, no exact-expansion tool, and
+  `PI_TRANSFORM_AVAILABLE`. Its unit test shows an added expansion tool, a
+  widened source enum, a missing tool, and a disabled Pi transform each
+  report drift.
+
+Every row is judged as in the qualification test: an applied transform pass,
+a reviewed body, and leak probes only inside the `<session-history>` and
+`<session-history-since>` wrappers. The OpenCode pass line now records the
+final-array admission branch (`fits`, `shrinks`, `limit_unknown`, or
+`declined`), the candidate's canonical bytes and heuristic charged tokens, and
+the history budget the request carried; the rows record them with the
+estimator name.
+
+`packages/e2e-tests/tests/compression-fidelity-pi.test.ts` drives C1 through
+the Pi plugin's `context` handler against the direct-host fixture: a seeded
+baseline, the scripted publication, P1 in m1, and P1 in m0 after a restart.
+Pi carries C1's tool part as assistant text.
+
 ## What is unsupported
 
 - **Consumer exact expansion.** No registered tool returns native source
@@ -174,15 +231,19 @@ is a refusal, not a pass.
   or rationale but not exact transcript bytes. C6's exact read is an internal
   daemon witness, and the consumer disposition for exact bytes is
   `unavailable` in every C6 scenario.
-- **Pi fidelity.** The Pi plugin folds history through the window protocol,
-  but the corpus is OpenCode-native and no fidelity scenario replays Pi. The
-  evaluation makes no Pi P1 to P5 claim.
+- **Pi decay tiers.** The Pi delivery test covers C1 at P1 in m1 and m0. No
+  Pi row covers P2 to P5, and Pi carries corpus tool parts as text.
 - **Record-and-forward provider mode.** The e2e Messages mock serves scripted
   responses, and its cassette modes record or replay those scripted
   exchanges. No mode forwards a captured request to a real provider.
-- **Delivery campaign and semantic review.** The qualification test captures
-  one OpenCode provider invocation for one scenario. The per-scenario
-  delivery campaign and human semantic judgments do not exist yet.
+- **Memory, hint, and recovery rows.** The admitted-memory and exclusion
+  pairs (C3.S6, C3.S7), the hint rows (C4.S6), and the `eidnara_search`
+  recovery loop are not yet driven through a provider request.
+- **Legacy rows and invalid recipes.** The campaign cannot store a legacy row
+  through the producer, and it constructs no invalid recipe; the U2 replay
+  and the plugin's own tests cover both. The delivery judge refuses a raw
+  pass-through.
+- **Semantic review.** No human semantic judgment exists for any row.
 
 ## Planned `eval:compression-fidelity` command
 

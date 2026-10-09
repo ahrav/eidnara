@@ -22,7 +22,7 @@ const VALID_TEST_SOURCE = 'import { it } from "bun:test";\nit("x", () => {});\n'
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(26);
+        expect(validation.files.length).toBe(28);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -39,6 +39,7 @@ describe("mode manifest validator", () => {
         tiers.delete("tests/pi-smoke.test.ts");
         for (const path of [
             "tests/bedrock-only-pi.test.ts",
+            "tests/compression-fidelity-pi.test.ts",
             "tests/pi-rust-eviction.test.ts",
             "tests/pi-rust-folding.test.ts",
         ]) {

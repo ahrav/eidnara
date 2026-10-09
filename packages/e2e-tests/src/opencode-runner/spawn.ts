@@ -99,12 +99,23 @@ export interface SpawnOptions {
     bedrock?: { baseURL: string; region: string; model: string; anthropicSentinelURL: string };
 }
 
+/**
+ * Ports this process has picked. A picked port stays unbound until its `opencode serve` binds it,
+ * so a concurrent spawn in the same process could otherwise pick it again and reach the other
+ * spawn's server.
+ */
+const pickedPorts = new Set<number>();
+
 async function pickFreePort(): Promise<number> {
-    const server = Bun.serve({ port: 0, fetch: () => new Response() });
-    const port: number = server.port ?? 0;
-    server.stop(true);
-    if (!port) throw new Error("could not allocate a free port");
-    return port;
+    for (;;) {
+        const server = Bun.serve({ port: 0, fetch: () => new Response() });
+        const port: number = server.port ?? 0;
+        server.stop(true);
+        if (!port) throw new Error("could not allocate a free port");
+        if (pickedPorts.has(port)) continue;
+        pickedPorts.add(port);
+        return port;
+    }
 }
 
 /**

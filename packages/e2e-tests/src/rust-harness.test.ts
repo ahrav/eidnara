@@ -12,7 +12,8 @@ import {
 // instead of silently zeroing a timing the perf suite bounds.
 const PASS_LINE =
     "[eidnara] rust pass: decision=DEFER reason=steady served_from=transform in=12 out=12 " +
-    "applied=true row_version=7 emergency_wait=1234.5 rediscovered=false elapsed=41.7 ms module=23.4 ms " +
+    "applied=true row_version=7 emergency_wait=1234.5 rediscovered=false admission=shrinks " +
+    "invocation_bytes=9000 invocation_charged=3215 history_budget=750 elapsed=41.7 ms module=23.4 ms " +
     "stages=prefix_guard:6.2 clone:0.4 wire_build:3.9 wire_messages:3 transport:9.8 " +
     "transport_pages:1 transport_bytes:20480 apply:1.2 other:0.8 work=scanned:3 charged:4096 retained:512";
 
@@ -24,6 +25,10 @@ describe("parseRustPassLine", () => {
             decision: "DEFER",
             reason: "steady",
             emergencyWaitMs: 1234.5,
+            admission: "shrinks",
+            invocationBytes: 9000,
+            invocationCharged: 3215,
+            historyBudget: 750,
             servedFrom: "transform",
             inputCount: 12,
             outputCount: 12,
@@ -87,7 +92,7 @@ describe("CaptureLedger", () => {
     async function post(baseURL: string, session: string): Promise<void> {
         await fetch(`${baseURL}/v1/messages`, {
             method: "POST",
-            headers: { "content-type": "application/json", "x-opencode-session-id": session },
+            headers: { "content-type": "application/json", "x-session-id": session },
             body: JSON.stringify({ model: "m", messages: [{ role: "user", content: session }] }),
         }).then((response) => response.text());
     }
@@ -116,7 +121,7 @@ describe("CaptureLedger", () => {
                 "C1.S1",
                 "C1.S2",
             ]);
-            expect(retained[0]?.request.headers["x-opencode-session-id"]).toBe("ses_a");
+            expect(retained[0]?.request.headers["x-session-id"]).toBe("ses_a");
             // ses_b's requests arrived before ses_b was tagged, so none is filed under it.
             ledger.tag({ sessionId: "ses_b", caseId: "C2", scenarioId: "C2.S1" });
             expect(ledger.captures({ sessionId: "ses_b" })).toEqual([]);

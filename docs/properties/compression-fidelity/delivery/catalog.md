@@ -116,8 +116,11 @@ Reachability: default-production
 Status: active
 Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` serves each published
 approved example at P1 in m1 and m0 and at P2-P4 under natural decay, judged
-against the approved bodies (U2, #719). Provider capture and human review are
-absent.
+against the approved bodies (U2, #719).
+`packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` captures the
+same rows in OpenCode provider requests for every source, and
+`compression-fidelity-pi.test.ts` captures C1 at P1 in m1 and m0 through Pi
+(U3). Human review is absent.
 Guarantee: Each served P1-P4 capsule preserves the material meaning required
 at that tier without strengthening or contradicting the source.
 Check: `always` - for every qualified case/scenario and material obligation,
@@ -149,8 +152,10 @@ Reachability: default-production
 Status: active
 Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` observes natural P5
 omission for every source and positive-budget pressure for C1 (P4) and C3
-(importance 90, P5) with a generous-budget retention control (U2, #719). The
-invocation-level disposition check belongs to U3.
+(importance 90, P5) with a generous-budget retention control (U2, #719).
+`packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` serves each
+P5 scenario and the C1.S5 and C3.S5 guard-pressure rows in OpenCode provider
+requests (U3). The invocation-level disposition judgment is human review.
 Guarantee: Natural or pressure-induced omission exposes lost required meaning
 without hiding it behind unavailable evidence, safe abstention, or budget savings.
 Check: `always` - for each natural or guard-induced omission, bind the omitted
@@ -241,7 +246,11 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - the combined offline qualification check is not present.
+Exercised: partial - `packages/e2e-tests/src/compression-fidelity/delivery.ts`
+`judgeDelivery` refuses each invocation's missing or empty capture, missing or
+unapplied pass, raw pass-through, absent or unmatched body, and leak, and every
+delivery row applies it (U3, #720). No identity-bound fixture receipt is
+consumed; each row re-judges its own capture.
 Guarantee: Each credited invocation has a valid fixture-qualification receipt
 and its own matching range replacement, successful application, and provider capture.
 Check: `always` - consume a successful receipt from
@@ -276,9 +285,15 @@ Open questions:
 Type: reachability
 Reachability: test-only
 Status: active
-Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` fires the internal situations (m1, m0, natural
-and pressure tiers, P5, legacy and sparse rows); provider-delivery situations
-belong to U3.
+Exercised: partial - `crates/daemon/src/compression_fidelity_replay_tests.rs` fires the internal
+situations (m1, m0, natural and pressure tiers, P5, legacy and sparse rows).
+`packages/e2e-tests/tests/compression-fidelity-delivery.test.ts` witnesses the
+provider-delivery markers `m1-published-input`, `m0-tier-inputs` per case and
+tier, `natural-archive-input`, `high-importance-pressure-input` (C3.S5),
+`parser-fallback-input`, `empty-p4-input`, `warm-repeat-input`, and
+`missing-capture-input`. `legacy-input`, `raw-fallback-input`,
+`hint-fragment-input`, `hints-disabled-input`, and both memory markers remain
+missing.
 Guarantee: The declared delivery campaign constructs every required
 independent serving situation before claiming its coverage.
 Check: `sometimes` - evaluate and report each of the 14 constant situation

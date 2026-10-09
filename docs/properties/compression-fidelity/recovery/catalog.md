@@ -272,8 +272,13 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - capability inventory has been read, but no revision-bound
-replay report has been checked against registered tools and the Pi entrypoint.
+Exercised: partial - `packages/e2e-tests/src/compression-fidelity/capabilities.ts`
+pins the four Eidnara tools, `eidnara_search` sources `["memory"]`, no
+exact-expansion tool, and `PI_TRANSFORM_AVAILABLE`; the delivery campaign checks
+each case's captured m1 request against the pin, and its unit test shows drift
+for an added expansion tool, a widened source enum, a missing tool, and a
+disabled Pi transform (U3, #720). The registered search route to `kernel.read`
+is not yet replayed through a tool call.
 Guarantee: Recovery and tier-coverage claims reflect shipped capabilities,
 not privileged helpers, same-named daemon facades, or unsupported Pi transforms.
 Check: `always` - compare each replay report with its captured registry inputs,

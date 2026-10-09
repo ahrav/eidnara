@@ -437,6 +437,8 @@ describe("direct host fixture contract", () => {
                     filled: 0,
                     mismatched: 0,
                     exhausted: 0,
+                    fillerImportance: 30,
+                    echoImportance: 50,
                     bindings: [],
                 };
                 expect(await stack.scriptStatus()).toEqual(idle);

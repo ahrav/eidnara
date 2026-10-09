@@ -77,6 +77,13 @@ export interface RustPassLine {
     rowVersion: number;
     /** Time the daemon spent awaiting or running a summarizer at the emergency wall, across reruns. */
     emergencyWaitMs: number;
+    /** The final-array admission branch: `fits`, `shrinks`, `limit_unknown`, `declined`, or `none`. */
+    admission: string;
+    /** The admitted candidate's canonical bytes and heuristic charged tokens. */
+    invocationBytes: number;
+    invocationCharged: number;
+    /** The history body budget the request carried, or `null` when it carried none. */
+    historyBudget: number | null;
     raw: string;
 }
 
@@ -173,6 +180,12 @@ export function parseRustPassLine(line: string): RustPassLine | null {
         transportBytes: Number(stageField(body, "transport_bytes") || "0"),
         rowVersion: Number(field(body, "row_version") || "0"),
         emergencyWaitMs: Number(field(body, "emergency_wait") || "0"),
+        admission: field(body, "admission") || "none",
+        invocationBytes: Number(field(body, "invocation_bytes") || "0"),
+        invocationCharged: Number(field(body, "invocation_charged") || "0"),
+        historyBudget: /^\d+$/.test(field(body, "history_budget"))
+            ? Number(field(body, "history_budget"))
+            : null,
         raw: line,
     };
 }
@@ -442,7 +455,7 @@ export class RustTestHarness {
     async sendPrompt(
         sessionId: string,
         text: string,
-        options: { agent?: string; timeoutMs?: number } = {},
+        options: { agent?: string; system?: string; timeoutMs?: number } = {},
     ): Promise<unknown> {
         const timeoutMs = options.timeoutMs ?? 180_000;
         const promptPromise = this.clientInstance.session.prompt({
@@ -451,6 +464,7 @@ export class RustTestHarness {
                 model: { providerID: "mock-anthropic", modelID: "mock-sonnet" },
                 parts: [{ type: "text", text }],
                 ...(options.agent ? { agent: options.agent } : {}),
+                ...(options.system ? { system: options.system } : {}),
             },
         });
         const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));

@@ -39,7 +39,8 @@ The package is private and never published.
 ## Retained suite
 
 `mode-manifest.json` lists every test file under `tests/`; each Rust-mode
-entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`. Each
+entry is `tier: "rust-only"`, `compression-fidelity-pi` is `tier: "pi-rust"`,
+and `pi-smoke` is `tier: "pi-smoke"`. Each
 entry names the contracts it covers in `contract_refs`: the port suites carry
 `["U5-PORT"]`, and `compression-fidelity-qualification` carries its
 property-catalog records `cf-fixture-script-qualification` and
@@ -52,7 +53,7 @@ prints the quarantines it validated so a green `test:rust` never hides
 them. The retained set is:
 
 ```
-compression-fidelity-qualification
+compression-fidelity-delivery   compression-fidelity-pi   compression-fidelity-qualification
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal
 cache-stability             rust-fm-oc-3                 rust-removal-self-heal
 incident-pool-green         rust-fm-oc-5                 rust-smoke
@@ -62,7 +63,8 @@ rust-multi-frame-delta      rust-stale-preference        thinking-block-safety
 pi-smoke
 ```
 
-Nineteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
+Twenty Rust-mode tests plus `compression-fidelity-pi` and `pi-smoke`.
+`rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
 
 ## Compression fidelity delivery
@@ -81,6 +83,10 @@ Three control commands drive it:
   `fixture_script_mismatch`, and a request after the queue is empty fails as
   `fixture_script_exhausted`; neither returns default text. A scheduled
   `typed-failure` consumes no entry.
+- `filler:N` answers one request with at most `N` compact rows, `echo`
+  answers with the default segments whose bodies repeat the presented text,
+  and a scenario ID with `@p1-only` serves its approved example without the
+  P2 and P3 bodies.
 - `script-status` reports the queue and the lifetime bound, filled,
   mismatched, and exhausted counts. Its `bindings` list the current
   selection's delivered answers: scenario, ordinal range, and answer digest.
@@ -89,6 +95,16 @@ Three control commands drive it:
   probes. `src/compression-fidelity/delivery.ts` seeds the records into
   OpenCode's own `opencode.db`; the TypeScript side never reads native text
   from the corpus file.
+
+`compression-fidelity-delivery` runs the campaign in
+`src/compression-fidelity/campaign.ts`: m1, warm, cold m0, natural decay to
+P2 through P5 checked against `decay-oracle.ts`, guard pressure for C1.S5 and
+C3.S5, a parser-fallback row, and the capability pins in `capabilities.ts`.
+Each case runs against its own harness as a concurrent test, and `test:rust`
+passes `--max-concurrency 6`, the limit Bun applies to concurrent tests.
+`compression-fidelity-pi` serves C1 through the Pi `context` handler at P1 in
+m1 and m0. The pass line's `admission`, `invocation_bytes`,
+`invocation_charged`, and `history_budget` fields feed both.
 
 `compression-fidelity-qualification` drives one scripted case to accepted
 publication and judges the next session-correlated provider request: the

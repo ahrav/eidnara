@@ -51,16 +51,22 @@ function collapse(text: string): string {
     return text.split(/\s+/).filter(Boolean).join(" ");
 }
 
-/** The title and P1-P3 bodies of a reviewed output's case segment. */
-export function reviewedTiers(reviewedOutput: string): { title: string; bodies: string[] } {
+/** The title, importance, and P1-P3 bodies of a reviewed output's case segment. */
+export function reviewedTiers(reviewedOutput: string): {
+    title: string;
+    importance: number;
+    bodies: string[];
+} {
     const title = /title="([^"]*)"/.exec(reviewedOutput)?.[1];
     if (title === undefined) throw new Error("reviewed output has no title");
+    const importance = /importance="(\d+)"/.exec(reviewedOutput)?.[1];
+    if (importance === undefined) throw new Error("reviewed output has no importance");
     const bodies = REVIEWED_TIERS.map((tag) => {
         const body = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(reviewedOutput)?.[1];
         if (body === undefined) throw new Error(`reviewed output has no ${tag}`);
         return body;
     });
-    return { title, bodies };
+    return { title, importance: Number(importance), bodies };
 }
 
 /**
@@ -186,17 +192,28 @@ export function seedSource(
     }
 }
 
+/**
+ * The published history-segment count in a `session.status` response. The daemon serializes the
+ * counter on every response, zero included, so a response without it is malformed.
+ */
+export function publishedOf(status: Record<string, unknown>): number {
+    const summarizer = status.history_summarizer as
+        | { counters?: { published?: unknown } }
+        | undefined;
+    const published = summarizer?.counters?.published;
+    if (typeof published !== "number") {
+        throw new Error(
+            `session.status has no history_summarizer.counters.published: ${JSON.stringify(status)}`,
+        );
+    }
+    return published;
+}
+
 /** The daemon's published history-segment count for the session. */
 export async function publishedCount(harness: RustTestHarness, sessionId: string): Promise<number> {
-    const status = await harness.host.primaryStatus(
-        sessionId,
-        harness.env.workdir,
-        "session.status",
+    return publishedOf(
+        await harness.host.primaryStatus(sessionId, harness.env.workdir, "session.status"),
     );
-    const summarizer = status.history_summarizer as
-        | { counters?: { published?: number } }
-        | undefined;
-    return summarizer?.counters?.published ?? 0;
 }
 
 /** The text content of one provider message or system field. */
@@ -219,34 +236,55 @@ export function captureTexts(capture: RetainedCapture): string[] {
     return (capture.request.body.messages ?? []).map(messageText);
 }
 
-const HISTORY_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/g;
+/** The m0 history wrapper and the m1 window's wrapper of rows published since. */
+const M0_WRAPPER = /<session-history>[\s\S]*?<\/session-history>/g;
+const M1_WRAPPER = /<session-history-since>[\s\S]*?<\/session-history-since>/g;
 
-function caseSegment(texts: readonly string[], title: string): string[] | undefined {
+/** Every m1 and m0 wrapper in `text`, m1 first. */
+function historyWrappers(text: string): string[] {
+    return [...(text.match(M1_WRAPPER) ?? []), ...(text.match(M0_WRAPPER) ?? [])];
+}
+
+const STAGE_WRAPPERS = [
+    ["m1", M1_WRAPPER],
+    ["m0", M0_WRAPPER],
+] as const;
+
+/**
+ * The case segment headed `## a-b · title` inside a history wrapper, with the stage of the
+ * wrapper that carries it. The segment runs to the next heading or the wrapper's closing tag.
+ */
+function caseSegment(
+    texts: readonly string[],
+    title: string,
+): { stage: "m1" | "m0"; lines: string[] } | undefined {
     const suffix = ` · ${title}`;
     for (const text of texts) {
-        for (const wrapper of text.match(HISTORY_WRAPPER) ?? []) {
-            const lines = wrapper.split("\n");
-            const heading = lines.findIndex(
-                (line) => line.startsWith("## ") && line.endsWith(suffix),
-            );
-            if (heading < 0) continue;
-            const next = lines.findIndex(
-                (line, index) =>
-                    index > heading && (line.startsWith("## ") || line.startsWith("</")),
-            );
-            return lines.slice(heading, next < 0 ? undefined : next);
+        for (const [stage, pattern] of STAGE_WRAPPERS) {
+            for (const wrapper of text.match(pattern) ?? []) {
+                const lines = wrapper.split("\n");
+                const heading = lines.findIndex(
+                    (line) => line.startsWith("## ") && line.endsWith(suffix),
+                );
+                if (heading < 0) continue;
+                const next = lines.findIndex(
+                    (line, index) =>
+                        index > heading && (line.startsWith("## ") || line.startsWith("</")),
+                );
+                return { stage, lines: lines.slice(heading, next < 0 ? undefined : next) };
+            }
         }
     }
     return undefined;
 }
 
-/** A case heading outside every `<session-history>` wrapper reads as P5. */
+/** A case heading outside every history wrapper reads as P5. */
 export function servedTier(
     texts: readonly string[],
     title: string,
     bodies: readonly string[],
 ): ServedTier | "unmatched" {
-    const lines = caseSegment(texts, title);
+    const lines = caseSegment(texts, title)?.lines;
     if (lines === undefined) return "p5";
     const segment = lines.join("\n");
     const carried = bodies.findIndex((body) => segment.includes(body));
@@ -255,19 +293,37 @@ export function servedTier(
     return segment.trim().split("\n").length === 1 ? "p4" : "unmatched";
 }
 
-/**
- * Leak probes found anywhere in the request outside the `<session-history>` wrapper: the system
- * text and every message, including the m1 window and the live tail.
- */
-export function rawTailLeaks(capture: RetainedCapture, probes: readonly string[]): string[] {
-    const system = capture.request.body.system;
-    const outside = [
-        typeof system === "string" ? system : messageText({ content: system }),
-        ...captureTexts(capture),
-    ]
-        .map((text) => collapse(text.replace(HISTORY_WRAPPER, "")))
+/** The `## ` headings inside every history wrapper in `texts`, in served order. */
+export function historyHeadings(texts: readonly string[]): string[] {
+    return texts
+        .flatMap(historyWrappers)
+        .flatMap((wrapper) => wrapper.split("\n"))
+        .filter((line) => line.startsWith("## "));
+}
+
+/** Where served texts carry the case segment headed by `title`. */
+export function stageOf(texts: readonly string[], title: string): "m1" | "m0" | "absent" {
+    return caseSegment(texts, title)?.stage ?? "absent";
+}
+
+/** Leak probes found in `texts` outside both history wrappers. */
+export function leaksOutside(texts: readonly string[], probes: readonly string[]): string[] {
+    const outside = texts
+        .map((text) => collapse(text.replace(M0_WRAPPER, "").replace(M1_WRAPPER, "")))
         .join("\n");
     return probes.filter((probe) => outside.includes(probe));
+}
+
+/** Leak probes in the request's system text or any message, outside the history wrappers. */
+export function rawTailLeaks(capture: RetainedCapture, probes: readonly string[]): string[] {
+    const system = capture.request.body.system;
+    return leaksOutside(
+        [
+            typeof system === "string" ? system : messageText({ content: system }),
+            ...captureTexts(capture),
+        ],
+        probes,
+    );
 }
 
 /** Every pass line logged for `sessionId`, oldest first. */
@@ -303,7 +359,7 @@ export interface DeliveryVerdict {
 /**
  * Judges one provider capture for compression credit: a captured nonempty request, an applied
  * recipe served from the transform, the case segment at a reviewed tier, and covered native text
- * only inside the history wrapper. Each failed precondition is its own refusal; P5 absence is
+ * only inside the history wrappers. Each failed precondition is its own refusal; P5 absence is
  * `history_absent`, which a scenario expecting omission reads as its result.
  */
 export function judgeDelivery(input: DeliveryInput): DeliveryVerdict {
