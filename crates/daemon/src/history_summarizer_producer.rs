@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -759,6 +759,133 @@ pub struct HistorySummarizerProducer {
     subscribe_route: Option<BoundRoute>,
 }
 
+const SWAR_ONES: u64 = 0x0101_0101_0101_0101;
+const SWAR_HIGHS: u64 = 0x8080_8080_8080_8080;
+
+/// Sets the high bit of each byte of `word` that JSON escapes: a control byte below 0x20, `"`,
+/// or `\`. Subtraction borrows can also set bits above the lowest marked byte, so only the
+/// lowest set bit locates an escaped byte.
+fn json_escape_marks(word: u64) -> u64 {
+    let quote = word ^ (SWAR_ONES * u64::from(b'"'));
+    let backslash = word ^ (SWAR_ONES * u64::from(b'\\'));
+    ((word.wrapping_sub(SWAR_ONES * 0x20) & !word)
+        | (quote.wrapping_sub(SWAR_ONES) & !quote)
+        | (backslash.wrapping_sub(SWAR_ONES) & !backslash))
+        & SWAR_HIGHS
+}
+
+/// The escape `serde_json` writes for `byte`, padded to six bytes, and its length.
+fn json_escape(byte: u8) -> ([u8; 6], usize) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let short = |code: u8| ([b'\\', code, 0, 0, 0, 0], 2);
+    match byte {
+        b'"' => short(b'"'),
+        b'\\' => short(b'\\'),
+        0x08 => short(b'b'),
+        b'\t' => short(b't'),
+        b'\n' => short(b'n'),
+        0x0c => short(b'f'),
+        b'\r' => short(b'r'),
+        _ => (
+            [
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[usize::from(byte >> 4)],
+                HEX[usize::from(byte & 0x0f)],
+            ],
+            6,
+        ),
+    }
+}
+
+/// Appends `text` as a JSON string with the bytes `serde_json::to_writer` produces.
+///
+/// Each step copies eight bytes, then cuts the copy back at the first byte that needs an
+/// escape and writes the escape in its place.
+fn push_json_string(out: &mut Vec<u8>, text: &str) {
+    let src = text.as_bytes();
+    out.reserve(src.len() + src.len() / 8 + 16);
+    out.push(b'"');
+    let mut i = 0;
+    while let Some(chunk) = src.get(i..i + 8) {
+        let word: [u8; 8] = chunk.try_into().expect("an eight-byte slice");
+        out.extend_from_slice(&word);
+        let marks = json_escape_marks(u64::from_le_bytes(word));
+        if marks == 0 {
+            i += 8;
+            continue;
+        }
+        let at = (marks.trailing_zeros() / 8) as usize;
+        let kept = out.len() - 8 + at;
+        let (escape, len) = json_escape(word[at]);
+        out.truncate(kept);
+        out.extend_from_slice(&escape);
+        out.truncate(kept + len);
+        i += at + 1;
+    }
+    for &byte in &src[i..] {
+        if byte < 0x20 || byte == b'"' || byte == b'\\' {
+            let (escape, len) = json_escape(byte);
+            out.extend_from_slice(&escape[..len]);
+        } else {
+            out.push(byte);
+        }
+    }
+    out.push(b'"');
+}
+
+/// Appends `system` as a JSON string. Every firing sends the same summarizer system prompt, so
+/// its escaped form is built once and copied.
+fn push_json_system(out: &mut Vec<u8>, system: &str) {
+    use crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT;
+    static ESCAPED_SUMMARIZER_SYSTEM: OnceLock<Vec<u8>> = OnceLock::new();
+    if std::ptr::eq(system, HISTORY_SUMMARIZER_SYSTEM_PROMPT)
+        || system == HISTORY_SUMMARIZER_SYSTEM_PROMPT
+    {
+        out.extend_from_slice(ESCAPED_SUMMARIZER_SYSTEM.get_or_init(|| {
+            let mut escaped = Vec::new();
+            push_json_string(&mut escaped, HISTORY_SUMMARIZER_SYSTEM_PROMPT);
+            escaped
+        }));
+    } else {
+        push_json_string(out, system);
+    }
+}
+
+/// Writes the frame a `serde_json::Map` of these fields serializes to: keys in sorted order and
+/// `system` omitted when empty.
+pub(crate) fn session_send_frame(
+    system: &str,
+    prompt: &str,
+    provider: &str,
+    model_name: &str,
+    max_output_tokens: u32,
+    temperature: f64,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let text_len = system.len() + prompt.len() + provider.len() + model_name.len();
+    let mut frame = Vec::with_capacity(text_len + text_len / 8 + 256);
+    frame.extend_from_slice(
+        br#"{"method":"session.send","params":{"generation":{"max_output_tokens":"#,
+    );
+    serde_json::to_writer(&mut frame, &max_output_tokens)?;
+    frame.extend_from_slice(br#","temperature":"#);
+    serde_json::to_writer(&mut frame, &temperature)?;
+    frame.extend_from_slice(br#"},"model":{"model":"#);
+    push_json_string(&mut frame, model_name);
+    frame.extend_from_slice(br#","provider":"#);
+    push_json_string(&mut frame, provider);
+    frame.extend_from_slice(br#"},"prompt":"#);
+    push_json_string(&mut frame, prompt);
+    if !system.is_empty() {
+        frame.extend_from_slice(br#","system":"#);
+        push_json_system(&mut frame, system);
+    }
+    frame.extend_from_slice(br#","tools":[]}}"#);
+    Ok(frame)
+}
+
 impl HistorySummarizerProducer {
     pub async fn connect(
         config: HistorySummarizerProducerConfig,
@@ -831,27 +958,14 @@ impl HistorySummarizerProducer {
                 format!("model '{model}' is not in canonical provider/model form"),
             ))
         })?;
-        let mut params = serde_json::Map::new();
-        params.insert("prompt".into(), json!(prompt));
-        params.insert(
-            "model".into(),
-            json!({ "provider": provider, "model": model_name }),
-        );
-        params.insert("tools".into(), json!([]));
-        params.insert(
-            "generation".into(),
-            json!({
-                "max_output_tokens": max_output_tokens,
-                "temperature": temperature,
-            }),
-        );
-        if !system.is_empty() {
-            params.insert("system".into(), json!(system));
-        }
-        let frozen = serde_json::to_vec(&json!({
-            "method": "session.send",
-            "params": params,
-        }))?;
+        let frozen = session_send_frame(
+            system,
+            prompt,
+            provider,
+            model_name,
+            max_output_tokens,
+            temperature,
+        )?;
         let frozen_identity = self.semantic_identity()?;
         let frozen_daemon = self.connection.daemon_id();
         let response = match self.send_frozen_once(&frozen).await {
@@ -1518,6 +1632,116 @@ mod tests {
     use super::*;
     use std::collections::{HashSet, VecDeque};
     use std::sync::Mutex;
+
+    /// The `session.send` encoding the producer used before `session_send_frame`: a
+    /// `serde_json::Map` of the same fields.
+    fn value_tree_frame(
+        system: &str,
+        prompt: &str,
+        provider: &str,
+        model_name: &str,
+        max_output_tokens: u32,
+        temperature: f64,
+    ) -> Vec<u8> {
+        let mut params = serde_json::Map::new();
+        params.insert("prompt".into(), json!(prompt));
+        params.insert(
+            "model".into(),
+            json!({ "provider": provider, "model": model_name }),
+        );
+        params.insert("tools".into(), json!([]));
+        params.insert(
+            "generation".into(),
+            json!({
+                "max_output_tokens": max_output_tokens,
+                "temperature": temperature,
+            }),
+        );
+        if !system.is_empty() {
+            params.insert("system".into(), json!(system));
+        }
+        serde_json::to_vec(&json!({ "method": "session.send", "params": params })).unwrap()
+    }
+
+    #[test]
+    fn the_session_send_frame_matches_the_value_tree_encoding() {
+        use crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT as SYSTEM;
+        let every_ascii: String = (0u8..=0x7f).map(char::from).collect();
+        let texts = [
+            String::new(),
+            "plain".to_owned(),
+            every_ascii.clone(),
+            every_ascii.repeat(3),
+            "\\\\\"\"\\n\u{2028}\u{2029}\u{7f}\u{80}\u{ff}\u{fffd}\u{10ffff}\u{1f642}\u{a7}"
+                .to_owned(),
+            "a\\".repeat(97),
+            "\"".repeat(65),
+            format!(
+                "{}\n{}\u{1f}{}\"",
+                "x".repeat(15),
+                "y".repeat(16),
+                "z".repeat(33)
+            ),
+            format!("{}\t\r\u{0}\u{1}\u{8}\u{c}\u{b}", "\u{e9}".repeat(41)),
+            SYSTEM[..SYSTEM.len() / 3].to_owned(),
+            // Equal to the summarizer prompt at another address, so the frame takes the
+            // content comparison instead of the pointer check.
+            SYSTEM.to_owned(),
+        ];
+        let temperatures = [
+            HISTORY_SUMMARIZER_TEMPERATURE,
+            0.0,
+            -0.0,
+            1.0,
+            1e-7,
+            123_456_789.125,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            5e-324,
+        ];
+        let limits = [0, 1, HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS, u32::MAX];
+        let names = ["", "provider", "pro\"vider\\\n", "\u{65e5}\u{672c}"];
+        let systems = texts.iter().map(String::as_str).chain([SYSTEM]);
+        for (i, system) in systems.enumerate() {
+            for (j, prompt) in texts.iter().enumerate() {
+                let temperature = temperatures[(i * 5 + j) % temperatures.len()];
+                let limit = limits[(i + j) % limits.len()];
+                let provider = names[i % names.len()];
+                let model = names[(j + 1) % names.len()];
+                assert_eq!(
+                    session_send_frame(system, prompt, provider, model, limit, temperature)
+                        .unwrap(),
+                    value_tree_frame(system, prompt, provider, model, limit, temperature),
+                    "system #{i}, prompt #{j}"
+                );
+            }
+        }
+
+        let alphabet: Vec<char> = "ab \"\\\n\t\r\u{0}\u{1f}\u{7f}\u{e9}\u{65e5}\u{1f642}<>&'/"
+            .chars()
+            .collect();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..2_000 {
+            let len = (next() % 300) as usize;
+            let text: String = (0..len)
+                .map(|_| alphabet.get((next() % 48) as usize).copied().unwrap_or('q'))
+                .collect();
+            let system = if round % 3 == 0 { "" } else { text.as_str() };
+            assert_eq!(
+                session_send_frame(system, &text, "p", "m", 7, 0.25).unwrap(),
+                value_tree_frame(system, &text, "p", "m", 7, 0.25),
+                "{text:?}"
+            );
+        }
+    }
 
     #[derive(Clone)]
     struct FakeConnection {

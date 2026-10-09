@@ -89,7 +89,7 @@ pub struct ReferenceBlocks {
 ///
 /// This vendored text stays byte-identical to the TypeScript plugin output. The generator
 /// under `gen/` updates it, and `--check` reports drift.
-pub const HISTORY_SUMMARIZER_SYSTEM_PROMPT: &str =
+pub static HISTORY_SUMMARIZER_SYSTEM_PROMPT: &str =
     include_str!("../testdata/history_summarizer-system-prompt.txt");
 
 /// Pre-rendered sections and mode flags for one history_summarizer user prompt.
@@ -164,9 +164,9 @@ fn push_escaped_xml_content(out: &mut String, s: &str) {
 ///
 /// The same session chunk can be retried after a transient failure; a stable hash keeps
 /// the calibration examples unchanged so the history_summarizer rerun sees the same prompt bytes.
-pub fn fnv1a(input: &str) -> u32 {
+fn fnv1a_units(units: impl Iterator<Item = u16>) -> u32 {
     let mut h = 0x811c_9dc5_u32;
-    for unit in input.encode_utf16() {
+    for unit in units {
         h ^= u32::from(unit);
         h = h
             .wrapping_add(h.wrapping_shl(1))
@@ -200,6 +200,30 @@ fn seeds_by_band(corpus: &[ReferenceSeed]) -> Vec<Vec<usize>> {
     bands
 }
 
+/// [`fnv1a_units`] over the UTF-16 units of `"{session_id}:{chunk_start}"`, hashed without
+/// building the string.
+fn seed_hash(session_id: &str, chunk_start: i64) -> u32 {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = chunk_start.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let sign: &[u8] = if chunk_start < 0 { b"-" } else { b"" };
+    let units = session_id.encode_utf16().chain(
+        b":".iter()
+            .chain(sign)
+            .chain(&digits[at..])
+            .map(|&byte| u16::from(byte)),
+    );
+    fnv1a_units(units)
+}
+
 fn select_seed_indices(
     corpus: &[ReferenceSeed],
     session_id: &str,
@@ -211,13 +235,12 @@ fn select_seed_indices(
     }
 
     let bands = seeds_by_band(corpus);
-    let seed = fnv1a(&format!("{session_id}:{chunk_start}"));
+    let seed = seed_hash(session_id, chunk_start);
     let seed_usize = seed as usize;
     let mut picks = Vec::with_capacity(count.min(corpus.len()));
 
-    let band_order: Vec<usize> = (0..SEED_BANDS.len())
-        .map(|i| (i + (seed_usize % SEED_BANDS.len())) % SEED_BANDS.len())
-        .collect();
+    let band_order: [usize; SEED_BANDS.len()] =
+        std::array::from_fn(|i| (i + (seed_usize % SEED_BANDS.len())) % SEED_BANDS.len());
 
     let mut bi = 0;
     let mut guard = 0;
@@ -383,7 +406,10 @@ pub fn build_reference_blocks_from_stored(
     chunk_start: i64,
     session_history_segments: &[StoredHistorySegment],
 ) -> ReferenceBlocks {
-    let refs: Vec<ReferenceHistorySegment> = session_history_segments
+    let window_start = session_history_segments
+        .len()
+        .saturating_sub(SESSION_REF_WINDOW);
+    let refs: Vec<ReferenceHistorySegment> = session_history_segments[window_start..]
         .iter()
         .map(ReferenceHistorySegment::from)
         .collect();
@@ -514,6 +540,66 @@ mod tests {
         let mut out = String::new();
         push_escaped_xml_attr(&mut out, s);
         out
+    }
+
+    #[test]
+    fn the_seed_hash_matches_fnv1a_over_the_formatted_key() {
+        for session_id in [
+            "",
+            "ses",
+            "ses_large_\u{e0}_\u{65e5}\u{672c}",
+            "\u{1f642}:x",
+        ] {
+            for chunk_start in [0, 7, -1, 1_640, -16_001, i64::MAX, i64::MIN] {
+                let key = format!("{session_id}:{chunk_start}");
+                assert_eq!(
+                    seed_hash(session_id, chunk_start),
+                    fnv1a_units(key.encode_utf16()),
+                    "{key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_reference_blocks_match_the_blocks_of_every_stored_segment() {
+        let stored: Vec<StoredHistorySegment> = (0..SESSION_REF_WINDOW as i64 * 3)
+            .map(|seq| {
+                let tiered = seq % 4 != 0;
+                let tier = |name: &str| tiered.then(|| format!("{name} of {seq} & <x>"));
+                StoredHistorySegment {
+                    sequence: seq,
+                    start_message: seq * 10,
+                    end_message: seq * 10 + 9,
+                    start_message_id: format!("msg_{seq}_a"),
+                    end_message_id: format!("msg_{seq}_b"),
+                    start_date: None,
+                    end_date: None,
+                    title: format!("Segment \"{seq}\" & 'more'"),
+                    content: format!("body {seq}"),
+                    p1: tier("p1"),
+                    p2: tier("p2"),
+                    p3: tier("p3"),
+                    p4: tier("p4"),
+                    importance: (seq as i32 * 7) % 100,
+                    episode_type: tiered.then(|| "design".to_owned()),
+                    legacy: i32::from(!tiered),
+                    created_at: seq,
+                    claims: Vec::new(),
+                }
+            })
+            .collect();
+        for len in 0..=stored.len() {
+            let every: Vec<ReferenceHistorySegment> = stored[..len]
+                .iter()
+                .map(ReferenceHistorySegment::from)
+                .collect();
+            assert_eq!(
+                build_reference_blocks_from_stored("ses", 40, &stored[..len]),
+                build_reference_blocks("ses", 40, &every),
+                "{len} stored segments"
+            );
+        }
     }
 
     #[test]

@@ -13,17 +13,46 @@ pub const M1_PLACEHOLDER: &str = "(no new content since last materialization)";
 /// Default pre-pressure token budget for rendered session history.
 pub const DEFAULT_HISTORY_BUDGET_TOKENS: f64 = 60_000.0;
 
-fn escape_xml_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+fn escape_xml_content(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    push_escaped_xml_content(&mut out, s);
+    out
 }
 
-fn escape_xml_content(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+/// Appends `s` with `&`, `<`, and `>` replaced by their XML entities.
+fn push_escaped_xml_content(out: &mut String, s: &str) {
+    let bytes = s.as_bytes();
+    let mut copied = 0;
+    for i in memchr::memchr3_iter(b'&', b'<', b'>', bytes) {
+        // Every escaped byte is ASCII, so `i` and `i + 1` are char boundaries.
+        out.push_str(&s[copied..i]);
+        out.push_str(match bytes[i] {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            _ => "&gt;",
+        });
+        copied = i + 1;
+    }
+    out.push_str(&s[copied..]);
+}
+
+/// Appends `s` with `&`, `<`, `>`, and `"` replaced by their XML entities.
+fn push_escaped_xml_attr(out: &mut String, s: &str) {
+    let mut copied = 0;
+    for (i, byte) in s.bytes().enumerate() {
+        let entity = match byte {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => continue,
+        };
+        // Every escaped byte is ASCII, so `i` and `i + 1` are char boundaries.
+        out.push_str(&s[copied..i]);
+        out.push_str(entity);
+        copied = i + 1;
+    }
+    out.push_str(&s[copied..]);
 }
 
 /// `MEMORY_CATEGORY_ORDER` defines the canonical project-memory categories in render order.
@@ -54,38 +83,69 @@ pub(crate) fn is_positive_memory_category(category: &str) -> bool {
     POSITIVE_MEMORY_CATEGORIES.contains(&category)
 }
 
-fn memory_render_order(left: &CanonicalMemory, right: &CanonicalMemory) -> Ordering {
-    let left_priority = MEMORY_CATEGORY_ORDER
+/// Sort rank of a positive category: its index in [`MEMORY_CATEGORY_ORDER`], or one rank after
+/// them for the other positive categories. `None` marks a category the native surfaces drop.
+///
+/// [`MEMORY_CATEGORY_ORDER`] is a prefix of [`POSITIVE_MEMORY_CATEGORIES`], so one index serves
+/// both lists.
+fn memory_category_rank(category: &str) -> Option<usize> {
+    let position = POSITIVE_MEMORY_CATEGORIES
         .iter()
-        .position(|category| *category == left.category);
-    let right_priority = MEMORY_CATEGORY_ORDER
-        .iter()
-        .position(|category| *category == right.category);
-    match (left_priority, right_priority) {
-        (Some(left_rank), Some(right_rank)) => left_rank
-            .cmp(&right_rank)
-            .then_with(|| left.object_id.cmp(&right.object_id)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => left
-            .category
-            .cmp(&right.category)
-            .then_with(|| left.object_id.cmp(&right.object_id)),
+        .position(|positive| *positive == category)?;
+    Some(position.min(MEMORY_CATEGORY_ORDER.len()))
+}
+
+/// Ranked categories sort by rank, the rest by name after them, and ties by object id.
+fn memory_render_order(
+    (left_rank, left): &(usize, &CanonicalMemory),
+    (right_rank, right): &(usize, &CanonicalMemory),
+) -> Ordering {
+    left_rank
+        .cmp(right_rank)
+        .then_with(|| {
+            if *left_rank == MEMORY_CATEGORY_ORDER.len() {
+                left.category.cmp(&right.category)
+            } else {
+                Ordering::Equal
+            }
+        })
+        .then_with(|| left.object_id.cmp(&right.object_id))
+}
+
+/// Content cut to at most 64 KiB at a UTF-8 boundary.
+fn memory_line_content(memory: &CanonicalMemory) -> &str {
+    let mut end = memory.content.len().min(64 * 1024);
+    while !memory.content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &memory.content[..end]
+}
+
+fn push_memory_line(out: &mut String, memory: &CanonicalMemory) {
+    // The object id is caller-supplied text; escaping it and folding line breaks keeps it from closing the block or forging a sibling element.
+    for (i, piece) in memory.object_id.split(['\n', '\r']).enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        push_escaped_xml_content(out, piece);
+    }
+    out.push_str(": ");
+    // `<project-memory>` continuation lines must remain indented because m0 byte accounting and the prompt cache depend on its line structure.
+    for (i, line) in memory_line_content(memory).split('\n').enumerate() {
+        if i > 0 {
+            out.push_str("\n  ");
+        }
+        push_escaped_xml_content(out, line);
     }
 }
 
 /// Renders one memory line, escaping XML content and truncating content to at
 /// most 64 KiB without splitting a UTF-8 code point.
 pub fn render_memory_line(memory: &CanonicalMemory) -> String {
-    let mut end = memory.content.len().min(64 * 1024);
-    while !memory.content.is_char_boundary(end) {
-        end -= 1;
-    }
-    // `<project-memory>` continuation lines must remain indented because m0 byte accounting and the prompt cache depend on its line structure.
-    let content = escape_xml_content(&memory.content[..end]).replace('\n', "\n  ");
-    // The object id is caller-supplied text; escaping it and folding line breaks keeps it from closing the block or forging a sibling element.
-    let object_id = escape_xml_content(&memory.object_id).replace(['\n', '\r'], " ");
-    format!("{object_id}: {content}")
+    let mut line =
+        String::with_capacity(memory.object_id.len() + memory_line_content(memory).len() + 8);
+    push_memory_line(&mut line, memory);
+    line
 }
 
 /// Renders positive memories grouped in deterministic category and object-id order.
@@ -97,30 +157,53 @@ pub fn render_memory_line(memory: &CanonicalMemory) -> String {
 pub fn render_memory_block(memories: &[CanonicalMemory], wrapper: &str) -> String {
     let mut ordered = memories
         .iter()
-        .filter(|memory| is_positive_memory_category(&memory.category))
+        .filter_map(|memory| Some((memory_category_rank(&memory.category)?, memory)))
         .collect::<Vec<_>>();
     if ordered.is_empty() {
         return String::new();
     }
-    ordered.sort_by(|left, right| memory_render_order(left, right));
-    let mut lines = Vec::with_capacity(ordered.len() * 2 + 2);
-    lines.push(format!("<{wrapper}>"));
+    ordered.sort_by(memory_render_order);
+    // Unescaped bytes, with every row opening and closing its category; escapes can grow past it.
+    let len_hint = ordered
+        .iter()
+        .map(|(_, memory)| {
+            memory.object_id.len()
+                + memory_line_content(memory).len()
+                + 2 * memory.category.len()
+                + 9
+        })
+        .sum::<usize>()
+        + 2 * wrapper.len()
+        + 5;
+    let mut block = String::with_capacity(len_hint);
+    block.push('<');
+    block.push_str(wrapper);
+    block.push('>');
     let mut open_category: Option<&str> = None;
-    for memory in ordered {
+    for (_, memory) in ordered {
         if open_category != Some(memory.category.as_str()) {
             if let Some(category) = open_category {
-                lines.push(format!("</{}>", escape_xml_attr(category)));
+                block.push_str("\n</");
+                push_escaped_xml_attr(&mut block, category);
+                block.push('>');
             }
             open_category = Some(&memory.category);
-            lines.push(format!("<{}>", escape_xml_attr(&memory.category)));
+            block.push_str("\n<");
+            push_escaped_xml_attr(&mut block, &memory.category);
+            block.push('>');
         }
-        lines.push(render_memory_line(memory));
+        block.push('\n');
+        push_memory_line(&mut block, memory);
     }
     if let Some(category) = open_category {
-        lines.push(format!("</{}>", escape_xml_attr(category)));
+        block.push_str("\n</");
+        push_escaped_xml_attr(&mut block, category);
+        block.push('>');
     }
-    lines.push(format!("</{wrapper}>"));
-    lines.join("\n")
+    block.push_str("\n</");
+    block.push_str(wrapper);
+    block.push('>');
+    block
 }
 
 /// The caller token-trims user memories; an empty set renders as an empty string.
@@ -251,6 +334,144 @@ pub fn render_new_history_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `render_memory_block` and `render_memory_line` as they read before the single-buffer
+    /// rewrite: replace chains, a `Vec<String>` of lines, and a stable sort that scans the
+    /// category order on every comparison.
+    mod replace_chain {
+        use super::super::{
+            CanonicalMemory, MEMORY_CATEGORY_ORDER, Ordering, is_positive_memory_category,
+        };
+
+        fn escape_xml_attr(s: &str) -> String {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+        }
+
+        fn escape_xml_content(s: &str) -> String {
+            s.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        }
+
+        fn order(left: &CanonicalMemory, right: &CanonicalMemory) -> Ordering {
+            let rank = |memory: &CanonicalMemory| {
+                MEMORY_CATEGORY_ORDER
+                    .iter()
+                    .position(|category| *category == memory.category)
+            };
+            match (rank(left), rank(right)) {
+                (Some(left_rank), Some(right_rank)) => left_rank
+                    .cmp(&right_rank)
+                    .then_with(|| left.object_id.cmp(&right.object_id)),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => left
+                    .category
+                    .cmp(&right.category)
+                    .then_with(|| left.object_id.cmp(&right.object_id)),
+            }
+        }
+
+        pub(super) fn line(memory: &CanonicalMemory) -> String {
+            let mut end = memory.content.len().min(64 * 1024);
+            while !memory.content.is_char_boundary(end) {
+                end -= 1;
+            }
+            let content = escape_xml_content(&memory.content[..end]).replace('\n', "\n  ");
+            let object_id = escape_xml_content(&memory.object_id).replace(['\n', '\r'], " ");
+            format!("{object_id}: {content}")
+        }
+
+        pub(super) fn block(memories: &[CanonicalMemory], wrapper: &str) -> String {
+            let mut ordered = memories
+                .iter()
+                .filter(|memory| is_positive_memory_category(&memory.category))
+                .collect::<Vec<_>>();
+            if ordered.is_empty() {
+                return String::new();
+            }
+            ordered.sort_by(|left, right| order(left, right));
+            let mut lines = vec![format!("<{wrapper}>")];
+            let mut open_category: Option<&str> = None;
+            for memory in ordered {
+                if open_category != Some(memory.category.as_str()) {
+                    if let Some(category) = open_category {
+                        lines.push(format!("</{}>", escape_xml_attr(category)));
+                    }
+                    open_category = Some(&memory.category);
+                    lines.push(format!("<{}>", escape_xml_attr(&memory.category)));
+                }
+                lines.push(line(memory));
+            }
+            if let Some(category) = open_category {
+                lines.push(format!("</{}>", escape_xml_attr(category)));
+            }
+            lines.push(format!("</{wrapper}>"));
+            lines.join("\n")
+        }
+    }
+
+    #[test]
+    fn the_memory_block_matches_the_replace_chain_renderer() {
+        let categories = [
+            "NAMING",
+            "PROJECT_RULES",
+            "KNOWN_ISSUES",
+            "CONFIG_VALUES",
+            "REJECTED_APPROACH",
+            "USER_DIRECTIVES",
+            "ARCHITECTURE",
+            "ENVIRONMENT",
+            "CONSTRAINTS",
+            "FUTURE_NEGATIVE_CATEGORY",
+        ];
+        let ids = [
+            "mem_00000000000000000000000000000007",
+            "mem_00000000000000000000000000000003",
+            "mem_0000000000000000000000000000000a",
+            "mem_",
+            "",
+            "id & <x>\nnext\r\nline",
+            "\u{e9}t\u{e9}",
+            "mem_00000000000000000000000000000003",
+        ];
+        let contents = [
+            String::new(),
+            "plain fact".to_owned(),
+            "a & b < c > d\nsecond line\n\nfourth & <tag/>".to_owned(),
+            "\n\n&&&<<<>>>\r\n".to_owned(),
+            format!("{}\u{e9}after the cap", "x".repeat(64 * 1024 - 1)),
+            "\u{65e5}\u{672c}\u{8a9e} & \u{1f642}\nline".repeat(9),
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize
+        };
+        for round in 0..200 {
+            let count = next() % 24;
+            let memories: Vec<CanonicalMemory> = (0..count)
+                .map(|_| CanonicalMemory {
+                    object_id: ids[next() % ids.len()].to_owned(),
+                    category: categories[next() % categories.len()].to_owned(),
+                    content: contents[next() % contents.len()].clone(),
+                })
+                .collect();
+            assert_eq!(
+                render_memory_block(&memories, "project-memory"),
+                replace_chain::block(&memories, "project-memory"),
+                "round {round}"
+            );
+            for memory in &memories {
+                assert_eq!(render_memory_line(memory), replace_chain::line(memory));
+            }
+        }
+    }
 
     #[test]
     fn render_boundary_drops_non_positive_categories() {
