@@ -1,0 +1,450 @@
+/**
+ * Record-and-forward mode for the Messages mock: each request OpenCode sends is forwarded,
+ * byte for byte, to one explicitly selected HTTPS Messages endpoint, and the provider's response
+ * goes back to OpenCode. Every send is admitted against limits frozen at construction: a call
+ * count, the largest `max_tokens` a request may carry, a per-send timeout, and a total spend cap
+ * that every send, retry, and fallback counts against. A failed, timed-out, or refused send stops
+ * the run; later requests are refused without a send.
+ *
+ * Credentials come from a callback at send time and reach only the outbound request headers.
+ * Captures hold the exact forwarded bytes, redacted headers, and the bounded response bytes, and
+ * publish privately outside the repository.
+ */
+
+import { createHash } from "node:crypto";
+import { mkdirSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { publishJsonAtomically } from "../atomic-publish";
+import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
+
+export interface ForwardLimits {
+    /** Sends the run may attempt, retries and fallbacks included. */
+    maxCalls: number;
+    /** The largest `max_tokens` a forwarded request may carry. */
+    maxOutputTokens: number;
+    /** Deadline for one send, response body included. */
+    timeoutMs: number;
+    /** USD every send's cost, known or bounded, counts against. */
+    spendCapUsd: number;
+}
+
+export interface ForwardConfig {
+    /** The HTTPS Messages endpoint, such as `https://api.anthropic.com/v1/messages`. */
+    upstreamURL: string;
+    /** The model OpenCode was configured with; a request naming another model is refused. */
+    model: string;
+    /**
+     * The SHA-256 of the reviewed synthetic corpus the run serves; any other value is refused,
+     * so forwarding carries only reviewed corpus input.
+     */
+    corpusSha256: string;
+    /**
+     * USD per million tokens. `inputPerMTok` must be the highest input-side price the model
+     * charges (cache writes included), so a bound built from it never undercounts.
+     */
+    pricing: { inputPerMTok: number; outputPerMTok: number };
+    limits: ForwardLimits;
+    /** Outbound credential headers, read once per send and never stored. */
+    credentials: () => Record<string, string>;
+    /** Outbound transport; the global `fetch` when absent. */
+    fetch?: (url: string, init: RequestInit) => Promise<Response>;
+}
+
+/** Response bytes kept per exchange; a longer response is served whole and captured truncated. */
+export const MAX_CAPTURED_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+const REDACTED_HEADERS = new Set([
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "anthropic-api-key",
+    "cookie",
+    "set-cookie",
+    "x-amz-security-token",
+]);
+/** Request headers the provider needs; everything else, the client's own key included, stays. */
+const FORWARDED_HEADERS = ["content-type", "accept", "anthropic-version", "anthropic-beta"];
+
+export type SendOutcome = "acknowledged" | "provider_error" | "ambiguous";
+
+export interface ForwardedExchange {
+    index: number;
+    request: {
+        headers: Record<string, string>;
+        /** SHA-256 of the bytes the mock received, which are the bytes it sent. */
+        body_sha256: string;
+        body_bytes: number;
+        body_text: string;
+        reserved_usd: number;
+    };
+    response: {
+        outcome: SendOutcome;
+        status: number | null;
+        headers: Record<string, string>;
+        body_sha256: string | null;
+        body_bytes: number;
+        body_text: string;
+        truncated: boolean;
+        stop_reason: string | null;
+        usage: Usage | null;
+        /** The cost charged against the cap: from usage when known, else the reservation. */
+        cost_usd: number;
+        cost_known: boolean;
+    } | null;
+}
+
+export interface Usage {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+}
+
+export interface ForwardingReport {
+    /** Distinguishes forwarded execution from scripted responses, whatever model a body names. */
+    mode: "forward";
+    upstream_url: string;
+    corpus_sha256: string;
+    model: string;
+    limits: ForwardLimits;
+    pricing: ForwardConfig["pricing"];
+    attempted_sends: number;
+    acknowledged_responses: number;
+    spent_usd: number;
+    stopped: string | null;
+    refusals: string[];
+    complete: boolean;
+    incomplete_reasons: string[];
+    exchanges: ForwardedExchange[];
+}
+
+function positive(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+/** Rejects a config that lacks an HTTPS Messages endpoint, a model, prices, or any limit. */
+export function validateForwardConfig(config: ForwardConfig): Readonly<ForwardConfig> {
+    let url: URL;
+    try {
+        url = new URL(config.upstreamURL);
+    } catch {
+        throw new Error("forwarding needs an explicit upstream URL");
+    }
+    if (url.protocol !== "https:") throw new Error("forwarding accepts only an HTTPS provider");
+    if (!url.pathname.endsWith("/messages")) {
+        throw new Error("forwarding accepts only a Messages endpoint");
+    }
+    if (typeof config.model !== "string" || config.model === "") {
+        throw new Error("forwarding needs an explicit model");
+    }
+    if (config.corpusSha256 !== COMPRESSION_FIDELITY_CORPUS_SHA256) {
+        throw new Error("forwarding serves only the reviewed synthetic corpus");
+    }
+    const limits = config.limits ?? ({} as ForwardLimits);
+    for (const name of ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const) {
+        if (!positive(limits[name])) throw new Error(`forwarding needs a positive limits.${name}`);
+    }
+    if (!Number.isInteger(limits.maxCalls) || !Number.isInteger(limits.maxOutputTokens)) {
+        throw new Error("limits.maxCalls and limits.maxOutputTokens are whole numbers");
+    }
+    if (!positive(config.pricing?.inputPerMTok) || !positive(config.pricing?.outputPerMTok)) {
+        throw new Error("forwarding needs positive input and output prices");
+    }
+    if (typeof config.credentials !== "function") {
+        throw new Error("forwarding needs a credential callback");
+    }
+    return Object.freeze({
+        ...config,
+        limits: Object.freeze({ ...limits }),
+        pricing: Object.freeze({ ...config.pricing }),
+    });
+}
+
+function sha256(bytes: Uint8Array): string {
+    return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** `headers` with credential-bearing values replaced. */
+export function redact(headers: Record<string, string>): Record<string, string> {
+    const kept: Record<string, string> = {};
+    for (const [name, value] of Object.entries(headers)) {
+        kept[name.toLowerCase()] = REDACTED_HEADERS.has(name.toLowerCase()) ? "[redacted]" : value;
+    }
+    return kept;
+}
+
+function headerRecord(headers: Headers): Record<string, string> {
+    const record: Record<string, string> = {};
+    headers.forEach((value, key) => {
+        record[key] = value;
+    });
+    return record;
+}
+
+function isCount(value: unknown): value is number {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * The usage and stop reason of a JSON or SSE Messages response. Usage is `null` unless the
+ * response states input and output counts; absent cache counts are zero.
+ */
+export function readUsage(
+    contentType: string,
+    text: string,
+): {
+    usage: Usage | null;
+    stopReason: string | null;
+} {
+    const fields: Record<string, unknown> = {};
+    let stopReason: string | null = null;
+    const take = (usage: unknown) => {
+        if (usage && typeof usage === "object") Object.assign(fields, usage);
+    };
+    if (contentType.includes("text/event-stream")) {
+        for (const line of text.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            let event: Record<string, unknown>;
+            try {
+                event = JSON.parse(line.slice(5));
+            } catch {
+                continue;
+            }
+            const message = event.message as Record<string, unknown> | undefined;
+            take(message?.usage);
+            take(event.usage);
+            const delta = event.delta as Record<string, unknown> | undefined;
+            if (typeof delta?.stop_reason === "string") stopReason = delta.stop_reason;
+        }
+    } else {
+        try {
+            const body = JSON.parse(text) as Record<string, unknown>;
+            take(body.usage);
+            if (typeof body.stop_reason === "string") stopReason = body.stop_reason;
+        } catch {
+            return { usage: null, stopReason: null };
+        }
+    }
+    const cacheWrite = fields.cache_creation_input_tokens ?? 0;
+    const cacheRead = fields.cache_read_input_tokens ?? 0;
+    if (
+        !isCount(fields.input_tokens) ||
+        !isCount(fields.output_tokens) ||
+        !isCount(cacheWrite) ||
+        !isCount(cacheRead)
+    ) {
+        return { usage: null, stopReason };
+    }
+    return {
+        usage: {
+            input_tokens: fields.input_tokens,
+            output_tokens: fields.output_tokens,
+            cache_creation_input_tokens: cacheWrite,
+            cache_read_input_tokens: cacheRead,
+        },
+        stopReason,
+    };
+}
+
+function errorResponse(type: string, message: string): Response {
+    return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+    });
+}
+
+export class Forwarder {
+    private readonly config: Readonly<ForwardConfig>;
+    private readonly exchanges: ForwardedExchange[] = [];
+    private readonly refusals: string[] = [];
+    private spent = 0;
+    private stopped: string | null = null;
+
+    constructor(config: ForwardConfig) {
+        this.config = validateForwardConfig(config);
+    }
+
+    private refuse(reason: string): Response {
+        this.refusals.push(reason);
+        this.stopped ??= reason;
+        return errorResponse("forwarding_refused", reason);
+    }
+
+    private price(inputTokens: number, outputTokens: number): number {
+        const { inputPerMTok, outputPerMTok } = this.config.pricing;
+        return (inputTokens * inputPerMTok + outputTokens * outputPerMTok) / 1_000_000;
+    }
+
+    /**
+     * Forwards `body` and returns the provider's response, or a non-retryable refusal when a
+     * limit, the model, or an earlier stop forbids the send.
+     */
+    async forward(
+        body: Uint8Array<ArrayBuffer>,
+        headers: Record<string, string>,
+    ): Promise<Response> {
+        if (this.stopped) return this.refuse(`stopped: ${this.stopped}`);
+        const { limits, model } = this.config;
+        let parsed: Record<string, unknown>;
+        try {
+            parsed = JSON.parse(new TextDecoder().decode(body));
+        } catch {
+            return this.refuse("unreadable request body");
+        }
+        if (parsed.model !== model)
+            return this.refuse(`request names model ${String(parsed.model)}`);
+        if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
+            return this.refuse("max_tokens is absent or above limits.maxOutputTokens");
+        }
+        if (this.exchanges.length >= limits.maxCalls) return this.refuse("limits.maxCalls reached");
+        // Each token spans at least one body byte, so the body length bounds input tokens.
+        const reserved = this.price(body.byteLength, parsed.max_tokens);
+        if (this.spent + reserved > limits.spendCapUsd) {
+            return this.refuse("limits.spendCapUsd would be exceeded");
+        }
+        const outbound: Record<string, string> = {};
+        for (const name of FORWARDED_HEADERS) {
+            if (headers[name] !== undefined) outbound[name] = headers[name];
+        }
+        const exchange: ForwardedExchange = {
+            index: this.exchanges.length,
+            request: {
+                headers: redact(headers),
+                body_sha256: sha256(body),
+                body_bytes: body.byteLength,
+                body_text: new TextDecoder().decode(body),
+                reserved_usd: reserved,
+            },
+            response: null,
+        };
+        this.exchanges.push(exchange);
+        // The reservation counts until the response settles the real cost.
+        this.spent += reserved;
+        const send = this.config.fetch ?? fetch;
+        let response: Response;
+        let bytes: Uint8Array<ArrayBuffer>;
+        const deadline = AbortSignal.timeout(limits.timeoutMs);
+        const expired = new Promise<never>((_, reject) => {
+            deadline.addEventListener("abort", () => reject(deadline.reason), { once: true });
+        });
+        // A send that settles first leaves the deadline to fire unobserved.
+        expired.catch(() => {});
+        try {
+            [response, bytes] = await Promise.race([
+                (async () => {
+                    const sent = await send(this.config.upstreamURL, {
+                        method: "POST",
+                        headers: { ...outbound, ...this.config.credentials() },
+                        body,
+                        signal: deadline,
+                        // A redirect would move the send to an unselected target.
+                        redirect: "error",
+                    });
+                    return [sent, new Uint8Array(await sent.arrayBuffer())] as const;
+                })(),
+                expired,
+            ]);
+        } catch (error) {
+            const name = error instanceof Error ? error.name : "Error";
+            exchange.response = {
+                outcome: "ambiguous",
+                status: null,
+                headers: {},
+                body_sha256: null,
+                body_bytes: 0,
+                body_text: "",
+                truncated: false,
+                stop_reason: null,
+                usage: null,
+                cost_usd: reserved,
+                cost_known: false,
+            };
+            this.stopped = `send ${exchange.index} ended without a response (${name})`;
+            return errorResponse("forwarding_failed", this.stopped);
+        }
+        const contentType = response.headers.get("content-type") ?? "";
+        const text = new TextDecoder().decode(bytes);
+        const { usage, stopReason } = readUsage(contentType, text);
+        const cost = usage
+            ? this.price(
+                  usage.input_tokens +
+                      usage.cache_creation_input_tokens +
+                      usage.cache_read_input_tokens,
+                  usage.output_tokens,
+              )
+            : reserved;
+        this.spent += cost - reserved;
+        const captured = bytes.subarray(0, MAX_CAPTURED_RESPONSE_BYTES);
+        exchange.response = {
+            outcome: response.ok ? "acknowledged" : "provider_error",
+            status: response.status,
+            headers: redact(headerRecord(response.headers)),
+            body_sha256: sha256(bytes),
+            body_bytes: bytes.byteLength,
+            body_text: new TextDecoder().decode(captured),
+            truncated: captured.byteLength < bytes.byteLength,
+            stop_reason: stopReason,
+            usage,
+            cost_usd: cost,
+            cost_known: usage !== null,
+        };
+        if (!response.ok) this.stopped = `send ${exchange.index} returned HTTP ${response.status}`;
+        return new Response(bytes, {
+            status: response.status,
+            headers: contentType ? { "content-type": contentType } : {},
+        });
+    }
+
+    /** The run so far: the frozen limits, every send and response, and whether it is complete. */
+    report(): ForwardingReport {
+        const acknowledged = this.exchanges.filter((e) => e.response?.outcome === "acknowledged");
+        const reasons: string[] = [];
+        if (this.stopped) reasons.push(`stopped: ${this.stopped}`);
+        if (this.exchanges.length === 0) reasons.push("no send");
+        if (this.exchanges.some((e) => e.response?.truncated)) reasons.push("capture truncated");
+        if (this.exchanges.some((e) => e.response && !e.response.cost_known)) {
+            reasons.push("cost unknown for a send");
+        }
+        const last = this.exchanges.at(-1)?.response;
+        if (last?.stop_reason === "tool_use") reasons.push("tool loop unfinished");
+        return {
+            mode: "forward",
+            upstream_url: this.config.upstreamURL,
+            corpus_sha256: this.config.corpusSha256,
+            model: this.config.model,
+            limits: { ...this.config.limits },
+            pricing: { ...this.config.pricing },
+            attempted_sends: this.exchanges.length,
+            acknowledged_responses: acknowledged.length,
+            spent_usd: this.spent,
+            stopped: this.stopped,
+            refusals: [...this.refusals],
+            complete: reasons.length === 0,
+            incomplete_reasons: reasons,
+            exchanges: structuredClone(this.exchanges),
+        };
+    }
+}
+
+/** The repository root: captures never land beneath it. */
+const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
+
+/**
+ * Publishes `report` as `<dir>/forwarding-<label>.json` with mode `0600` inside a `0700`
+ * directory, refusing a directory inside the repository.
+ */
+export function publishForwardingReport(
+    report: ForwardingReport,
+    dir: string,
+    label: string,
+): string {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const real = realpathSync(dir);
+    const inside = relative(realpathSync(REPOSITORY_ROOT), real);
+    if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) {
+        throw new Error(`${real} is inside the repository`);
+    }
+    const path = join(real, `forwarding-${label}.json`);
+    publishJsonAtomically(report, path, { mode: 0o600 });
+    return path;
+}

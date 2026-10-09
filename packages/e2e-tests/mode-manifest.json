@@ -43,6 +43,15 @@
             ]
         },
         {
+            "path": "tests/compression-fidelity-forwarding.test.ts",
+            "tier": "rust-only",
+            "rationale": "record-and-forward through OpenCode: the mock forwards each request byte for byte to an in-process HTTPS provider double under frozen call, output, timeout, and spend limits; the double's tool call runs through OpenCode's registered read tool, the tool-result turn is forwarded and captured, the final answer reaches the session, and the canary credential appears only on outbound requests",
+            "contract_refs": [
+                "cf-bounded-record-and-forward",
+                "cf-evaluation-cost-completeness"
+            ]
+        },
+        {
             "path": "tests/compression-fidelity-delivery.test.ts",
             "tier": "rust-only",
             "rationale": "compression fidelity delivery campaign: each corpus source publishes through the case script and serves P1 in m1, a warm repeat, a cold m0, and its natural P2-P5 decay rows matched against the decay oracle at the pass's history budget; C1.S5 and C3.S5 serve guard-demoted rows; a P1-only publication serves the parser's inherited body; provider requests pin the shipped capability surface and every pass line records its admission branch and size",

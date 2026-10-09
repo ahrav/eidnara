@@ -27,10 +27,12 @@ import {
     type SdkClientCore,
     type SharedHarnessOptions,
 } from "./harness-primitives";
+import type { ForwardConfig } from "./mock-provider/forward";
 import { type CapturedRequest, MockProvider } from "./mock-provider/server";
 import {
     createIsolatedEnv,
     type IsolatedEnv,
+    MOCK_MODEL_ID,
     type SpawnedOpencode,
     spawnOpencode,
 } from "./opencode-runner/spawn";
@@ -46,6 +48,11 @@ export interface RustTestHarnessOptions extends SharedHarnessOptions {
     eidnaraConfig?: Record<string, unknown>;
     /** Extra environment for the fixture daemon only. */
     daemonEnv?: Record<string, string>;
+    /**
+     * Record-and-forward mode: the mock forwards every request to this provider, OpenCode runs
+     * `forward.model` under `modelContextLimit`, and the mock serves no script or default.
+     */
+    forward?: ForwardConfig;
 }
 
 export interface SdkClient extends SdkClientCore {
@@ -193,6 +200,7 @@ export class RustTestHarness {
     private clientInstance: SdkClient;
     private readonly ledger = new CaptureLedger(() => this.mainRequests());
     private modelContextLimit: number | undefined;
+    private readonly modelId: string;
     private readonly mockBaseURL: string;
 
     private constructor(args: {
@@ -204,6 +212,7 @@ export class RustTestHarness {
         client: SdkClient;
         logPath: string;
         modelContextLimit: number | undefined;
+        modelId: string;
     }) {
         this.mock = args.mock;
         this.mockBaseURL = args.mockBaseURL;
@@ -213,6 +222,7 @@ export class RustTestHarness {
         this.clientInstance = args.client;
         this.logPath = args.logPath;
         this.modelContextLimit = args.modelContextLimit;
+        this.modelId = args.modelId;
     }
 
     static detectPrereqs(): RustModePrereqs {
@@ -230,10 +240,9 @@ export class RustTestHarness {
 
         const fixtureBin = await buildDirectHostFixture();
 
-        const mock = new MockProvider();
+        const mock = new MockProvider(options.forward ? { forward: options.forward } : {});
         const { baseURL } = await mock.start();
-        const mockDefault = options.mockDefault ?? DEFAULT_MOCK_RESPONSE;
-        mock.setDefault(mockDefault);
+        if (!options.forward) mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
 
         const env = createIsolatedEnv();
         const logPath = join(managedSubtreePath(env.dataDir), "eidnara-e2e.log");
@@ -252,6 +261,7 @@ export class RustTestHarness {
                 connectionFile: host.connectionFile,
                 logPath,
                 options,
+                modelId: options.forward?.model ?? MOCK_MODEL_ID,
             });
         } catch (error) {
             await RustTestHarness.teardownStack(mock, host, env);
@@ -273,6 +283,7 @@ export class RustTestHarness {
             client,
             logPath,
             modelContextLimit: options.modelContextLimit,
+            modelId: options.forward?.model ?? MOCK_MODEL_ID,
         });
     }
 
@@ -283,11 +294,13 @@ export class RustTestHarness {
         connectionFile: string;
         logPath: string;
         options: RustTestHarnessOptions;
+        modelId: string;
     }): Promise<SpawnedOpencode> {
         return spawnOpencode({
             mockProviderURL: args.mockURL,
             existingEnv: args.env,
             modelContextLimit: args.options.modelContextLimit,
+            modelId: args.modelId,
             openCodeConfigExtra: args.options.openCodeConfigExtra,
             eidnaraConfig: args.options.eidnaraConfig,
             userHostConnectionFile: args.connectionFile,
@@ -318,6 +331,7 @@ export class RustTestHarness {
                 modelContextLimit: this.modelContextLimit,
                 eidnaraConfig: opts.eidnaraConfig,
             },
+            modelId: this.modelId,
         });
         const sdk = await import("@opencode-ai/sdk");
         // SAFETY: SdkClient is bounded subset of createOpencodeClient used by this harness.
@@ -455,7 +469,7 @@ export class RustTestHarness {
         const promptPromise = this.clientInstance.session.prompt({
             path: { id: sessionId },
             body: {
-                model: { providerID: "mock-anthropic", modelID: "mock-sonnet" },
+                model: { providerID: "mock-anthropic", modelID: this.modelId },
                 parts: [{ type: "text", text }],
                 ...(options.agent ? { agent: options.agent } : {}),
             },

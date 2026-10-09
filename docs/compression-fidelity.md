@@ -239,6 +239,70 @@ memory, hint, and recovery rows:
   auto-search off, the same request carries no hint and the host decides
   none.
 
+### Opt-in real capture
+
+Two paths capture real model output. Neither runs by default, and no default
+test sends a request off the host.
+
+**Real producer capture.** The ignored daemon test
+`real_producer_capture_of_every_corpus_source` in
+`crates/daemon/src/compression_fidelity_replay_tests.rs` folds every corpus
+source once through the host's existing producer execution. It reads four
+environment variables, all required:
+
+| Variable | Meaning |
+| --- | --- |
+| `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model |
+| `EIDNARA_FIDELITY_REAL_MODEL` | The model id the history summarizer runs, as the only model in its chain |
+| `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source's firing may take to settle |
+| `EIDNARA_FIDELITY_OBSERVATIONS_DIR` | A private directory outside the repository |
+
+Run it with
+`cargo +1.98 test -p daemon --lib --locked real_producer_capture -- --ignored`.
+Each source yields one `daemon.compression_fidelity.real_capture` record,
+written with mode `0600` in a `0700` directory. The record names the model,
+the output origin, whether the firing settled, the attempt count, and every
+attempt's complete system prompt, user prompt, generation settings, and
+drained output or error, followed by the published rows. The host's model
+execution protocol reports no token usage, so each record carries
+`usage: null` and `usage_reported: false`; its cost is unknown. The test
+reads no credential: the host owns them.
+`a_capture_records_the_model_attempts_usage_and_complete_input` runs the
+same capture over the scripted producer in the default suite.
+
+**Record-and-forward provider mode.** `new MockProvider({ forward })` in
+`packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends
+to one Messages endpoint and returns the provider's response to OpenCode.
+`RustTestHarness.create({ forward, modelContextLimit })` builds it and runs
+OpenCode on `forward.model` at that context limit, so the forwarded body
+already names the selected model. Construction requires:
+
+- an `https:` URL whose path ends in `/messages`;
+- the model, which every request must name;
+- the reviewed corpus digest;
+- input and output prices in USD per million tokens, with the input price
+  at least the model's highest input-side price;
+- four limits: `maxCalls`, `maxOutputTokens`, `timeoutMs`, and
+  `spendCapUsd`;
+- a credential callback.
+
+Scripted responses and forwarding are exclusive: passing both, or scripting
+a forwarding mock, throws. Before each send the forwarder checks the model,
+the request's `max_tokens`, the call count, and the spend cap. The spend
+check reserves the body's byte length as input tokens plus `max_tokens` as
+output. A response with usage charges its stated tokens; a response without
+usage, or a send without a response, charges the reservation. A refused
+send, a non-2xx response, a timeout, or a redirect stops the run, and every
+later request is refused without a send. The forwarder sends the received
+bytes unchanged, adds the callback's headers to the outbound request only,
+and records each exchange with redacted headers and the bounded response
+bytes. `forwardingReport()` keeps attempted sends and acknowledged responses
+apart, and marks the run incomplete on a stop, a truncated capture, an
+unknown cost, or a last response that still asks for a tool.
+`publishForwardingReport` writes it with mode `0600` in a `0700` directory
+outside the repository. `tests/compression-fidelity-forwarding.test.ts`
+runs the whole loop through OpenCode against an in-process provider double.
+
 ## What is unsupported
 
 - **Consumer exact expansion.** No registered tool returns native source
@@ -248,9 +312,6 @@ memory, hint, and recovery rows:
   `unavailable` in every C6 scenario.
 - **Pi decay tiers.** The Pi delivery test covers C1 at P1 in m1 and m0. No
   Pi row covers P2 to P5, and Pi carries corpus tool parts as text.
-- **Record-and-forward provider mode.** The e2e Messages mock serves scripted
-  responses, and its cassette modes record or replay those scripted
-  exchanges. No mode forwards a captured request to a real provider.
 - **Truncated-away memory.** A rendered memory line is capped at 64 KiB, far
   above the injection budget, so no admitted row can render with its
   decisive qualifier truncated away. The budget-excluded variant drops the
@@ -282,8 +343,8 @@ This command is planned, not delivered. It will be a script in
   derived from and keeps execution, deterministic result, preservation,
   recovery, consumer safety, semantic review, and cost as separate columns.
 - **Limits.** Scripted mode makes no outbound provider call, including when
-  scripts exhaust or setup fails. Forwarding stops at its first exhausted
-  limit and treats an ambiguous send as spent.
+  scripts exhaust or setup fails. Live mode reuses the record-and-forward
+  provider mode and its limits.
 - **Review prerequisites.** Two people approve the corpus before any
   candidate output is inspected, and the first semantic baseline before it
   is accepted. Without an authorized provider or reviewers, semantic

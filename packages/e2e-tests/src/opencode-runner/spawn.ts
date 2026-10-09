@@ -34,6 +34,9 @@ export function pluginEntryPath(): string {
     return PLUGIN_DIST_ENTRY;
 }
 
+/** The mock provider's default model id. */
+export const MOCK_MODEL_ID = "mock-sonnet";
+
 export interface IsolatedEnv {
     configDir: string;
     dataDir: string;
@@ -71,6 +74,8 @@ export interface SpawnOptions {
     openCodeConfigExtra?: Record<string, unknown>;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
+    /** The mock provider's model id; a forwarding run names the real model here. */
+    modelId?: string;
     /** Reuse an isolated env so direct host starts before OpenCode and survives serve restarts. */
     existingEnv?: IsolatedEnv;
     /** User-tier host connection file. When set, the user config carries `host.connection_file`. */
@@ -181,8 +186,8 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
                       baseURL: mockProviderURL,
                   },
                   models: {
-                      "mock-sonnet": {
-                          id: "mock-sonnet",
+                      [opts.modelId ?? MOCK_MODEL_ID]: {
+                          id: opts.modelId ?? MOCK_MODEL_ID,
                           name: "Mock Sonnet",
                           cost: { input: 0, output: 0 },
                           limit,

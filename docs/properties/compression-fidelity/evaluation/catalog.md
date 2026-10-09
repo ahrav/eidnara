@@ -84,7 +84,7 @@ separate from the reachability classification.
 | [cf-semantic-control-discrimination](#cf-semantic-control-discrimination) | safety | test-only | always | not yet |
 | [cf-evaluation-cost-completeness](#cf-evaluation-cost-completeness) | safety | test-only | always | not yet |
 | [cf-reviewed-semantic-batch-reached](#cf-reviewed-semantic-batch-reached) | reachability | test-only | sometimes | not yet |
-| [cf-bounded-record-and-forward](#cf-bounded-record-and-forward) | safety | test-only | always-or-unreached | not yet |
+| [cf-bounded-record-and-forward](#cf-bounded-record-and-forward) | safety | test-only | always-or-unreached | partial |
 
 ## Records
 
@@ -346,8 +346,10 @@ Open questions:
 Type: safety
 Reachability: test-only
 Status: active
-Exercised: not yet - the optional forwarding branch and its limit/security
-checks are absent.
+Exercised: partial - the forwarding branch runs against an in-process
+provider double with a canary credential, through OpenCode's registered tool
+loop and through each limit and failure boundary; no authorized live provider
+run exists.
 Guarantee: Optional live evaluation forwards only authorized synthetic requests
 to the selected HTTPS provider, returns matching responses through the real tool
 loop, excludes credentials from artifacts, and stays within frozen run limits.
@@ -367,15 +369,21 @@ configured forwarding branch with canary credentials, request/response and tool
 correlation, and each limit or failure boundary using controlled provider input.
 Confidence: high - [evidence](evidence/cf-bounded-record-and-forward.md). Plan
 U4 supplies the claim; inspected mock/harness code supplies only offline seams.
-Existing check: None found for forwarding. Related fixture redaction and
-incident isolation checks are `unaudited`; neither establishes live safety.
+Existing check: `packages/e2e-tests/src/mock-provider/forward.test.ts` covers
+zero outbound sends in scripted mode when scripts exhaust, scripts are invalid,
+or the cassette refuses; the construction errors for scripted plus forwarding
+and for a missing HTTPS Messages target, model, corpus digest, price, or
+limit; byte-equal forwarding, the returned response, and the captured
+tool-result turn; a stop at each limit, a timeout, and a provider error;
+reservation-priced unknown cost; an unfinished tool loop; and a canary
+credential absent from the report, captures, and generated configuration.
+`packages/e2e-tests/tests/compression-fidelity-forwarding.test.ts` runs the
+loop through OpenCode, whose model is `forward.model` at the configured
+context limit. The report's `mode: "forward"` and upstream URL record
+forwarded execution apart from scripted responses. Status: `unaudited`.
 Impact: Live evaluation can leak credentials, spend beyond authorization, or
 judge an invocation different from the one the agent actually received.
-Open questions:
-- How will the selected real model enter OpenCode before capture, given the
-  harness's hardcoded `mock-sonnet` selection?
-- How will recorded mode and actual dispatch evidence prevent scripted responses
-  from acquiring a real-model label? The model field alone is forgeable.
+Open questions: None.
 
 ## Relationships and handoff
 

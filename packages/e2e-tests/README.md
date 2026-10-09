@@ -21,7 +21,11 @@ The package is private and never published.
   assertions.
 - **Mock provider.** `src/mock-provider/server.ts` serves the Anthropic
   Messages API shape (streaming and error bodies) so no test needs a real
-  model.
+  model. `new MockProvider({ forward })` instead forwards every request to one
+  selected HTTPS Messages endpoint under frozen call, output, timeout, and
+  spend limits (`src/mock-provider/forward.ts`); scripting is unavailable in
+  that mode. `RustTestHarness.create({ forward })` runs OpenCode on
+  `forward.model`.
 - **Bedrock-only callers.** `bedrock-only-opencode` and `bedrock-only-pi` run
   a deployment whose only model credential is the `amazon-bedrock` row and
   whose environments carry no `ANTHROPIC_*` variable. Memory capture, the
@@ -50,7 +54,7 @@ them. The retained set is:
 
 ```
 compression-fidelity-delivery   compression-fidelity-memory   compression-fidelity-pi
-compression-fidelity-qualification
+compression-fidelity-qualification   compression-fidelity-forwarding
 cache-invariants            rust-fm-oc-2                 rust-park-self-heal
 cache-stability             rust-fm-oc-3                 rust-removal-self-heal
 incident-pool-green         rust-fm-oc-5                 rust-smoke
@@ -107,6 +111,11 @@ verified project memory into an existing decision's scope,
 `user-hint-outcome`, which returns the newest auto-search decision and its
 ranking trace. The pass line's `admission`, `invocation_bytes`,
 `invocation_charged`, and `history_budget` fields feed both.
+
+`compression-fidelity-forwarding` runs one OpenCode turn through the
+forwarding mock to an in-process provider double: the double calls `read`, the
+tool-result turn is forwarded and captured, the final answer reaches the
+session, and the canary credential appears only on outbound requests.
 
 `compression-fidelity-qualification` drives one scripted case to accepted
 publication and judges the next session-correlated provider request: the
