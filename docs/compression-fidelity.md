@@ -335,8 +335,14 @@ requires:
 Scripted responses and forwarding are exclusive: passing both, or scripting
 a forwarding mock, throws. A forwarding mock accepts only requests carrying
 its per-mock `inboundKey`, which the harness writes into OpenCode's provider
-config, so no other local process can spend its budget; that `opencode.json`
-is written `0600` in an owner-only `0700` isolated tree. `forward.contextLimit`
+config, so no other local process can spend its budget through the mock; that
+`opencode.json` is written `0600` in an owner-only `0700` isolated tree. The
+harness also starts a forwarding run's OpenCode serve API behind HTTP Basic
+auth (`OPENCODE_SERVER_USERNAME` and a random `OPENCODE_SERVER_PASSWORD` in
+the child's environment only, matched by the SDK client's `authorization`
+header), so another local process cannot drive sessions that spend the
+budget through OpenCode; a scripted run keeps the unauthenticated loopback
+API. `forward.contextLimit`
 is the context limit OpenCode is configured with. Before each send the
 forwarder checks that the body is a JSON object, the model,
 the request's `max_tokens`, the call count, and the spend cap. The spend

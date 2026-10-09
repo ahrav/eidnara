@@ -22460,6 +22460,8 @@ mod tests {
             if let Some(hook) = self.state.on_start.lock().expect("start hook mutex").take() {
                 hook();
             }
+            // The real producer's `start` binds the session it starts in.
+            self.bound_session = Some(session_id.to_string());
             self.state
                 .attempts
                 .lock()
