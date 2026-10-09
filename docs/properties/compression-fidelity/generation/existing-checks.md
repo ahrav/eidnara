@@ -74,7 +74,7 @@ retry, tier-floor, and renderer checks retain their endpoint ownership.
 | [tool-registry.test.ts:272-319][registry-tests], `keeps guidance within the registered memory address and search-source contracts` | Checks memory addresses and memory-only search guidance in four named daemon assets. The summarizer prompt and generated hint footer are not among those assets. | unaudited |
 | [search tools.test.ts:151-182,202-232][search-tests] | Empty sources issue no read, unsupported sources report errors, and text search ranks canonical memory summaries through `explicit_search`. | unaudited |
 | [search tools.test.ts:428-439][search-tests], `advertises only the memory source in both the full and light descriptions` | Pins memory-only description strings. It does not establish arbitrary guidance meaning or exact-source recovery. | unaudited |
-| [transform.rs:8716-8741][transform], `render_user_hint` | The UTF-16 cap assertion bounds hint size. Since #926 the footer offers a project-memory search for the fragments' topic instead of full-context recovery; the cap does not validate the footer's meaning. | unaudited |
+| [transform.rs:8721-8746][transform], `render_user_hint` | The UTF-16 cap assertion bounds hint size. Since #926 the footer offers a project-memory search for the fragments' topic instead of full-context recovery; the cap does not validate the footer's meaning. | unaudited |
 | [history_summarizer.rs:3186-3219][driver], `stored_history_segment_importance_is_clamped_before_narrowing` | Checks default/clamp conversion of importance. It does not compare real importance outputs or effective serving after rubric changes. | unaudited |
 
 The contradiction is inspected, not inferred from test names: prompt lines

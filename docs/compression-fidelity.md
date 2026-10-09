@@ -255,8 +255,9 @@ memory, hint, and recovery rows:
   selected first while distractor rows also matched. A separate truncation
   row records the fragment, cut at both ends by the fragment limit, whether
   it kept the source's qualifier, and whether the hint disclosed the cut. A
-  hint whose fragments start or end with `…` carries a note that a cut
-  fragment may omit a qualifier such as a negation or a rejection. With
+  hint with a fragment the daemon cut, at the fragment cap or at a search
+  window, carries a note that a cut fragment may omit a qualifier such as a
+  negation or a rejection. With
   auto-search off, the same request carries no hint and the host decides
   none.
 

@@ -60,7 +60,7 @@ All references read back at `HEAD` `e447c927`, in
 
 The references above stay at `e447c927`. This section and the arithmetic below
 read back at this branch's HEAD, where `render_user_hint` sits at
-`transform.rs:9228-9292`. #926 replaces its footer line with:
+`transform.rs:9233-9295`. #926 replaces its footer line with:
 
 ```
 9109:    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
@@ -69,7 +69,7 @@ read back at this branch's HEAD, where `render_user_hint` sits at
 ### The arithmetic
 
 Measured in UTF-16 code units, which is what `utf16_len`
-(`transform.rs:9093-9095`) counts. Every row was re-measured
+(`transform.rs:9098-9100`) counts. Every row was re-measured
 against the #926 footer and the wrapper strings:
 
 | Component | Units |
@@ -87,16 +87,17 @@ against the #926 footer and the wrapper strings:
 | **total** | **604** |
 
 604 against a cap of 800. #723 adds the cut note, `USER_HINT_CUT_NOTE`, after
-the fragments whenever a fragment starts or ends with `…`; a hint with only
-whole fragments still totals at most 482. There is no input that raises it: `take(3)` bounds the
+the fragments whenever a fragment was cut at the fragment cap or at a search
+window (`UserHintFragment::cut`); a hint with only whole fragments still totals
+at most 482. There is no input that raises it: `take(3)` bounds the
 line count, `one_line_fragment` bounds each line, and the header, footer and
 wrapper are constants apart from the line count digit, which is at most one
 character for a maximum of three.
 
-So the branch at `:9295` — `if utf16_len(wrapped) <= limit { return
+So the branch at `:9298` — `if utf16_len(wrapped) <= limit { return
 wrapped.to_string(); }` — always returns early, and the body of
-`truncate_hint_to_total_cap` (`:9298-9302`) is dead. The `debug_assert!` at
-`:9290` is trivially satisfied for the same reason.
+`truncate_hint_to_total_cap` (`:9301-9305`) is dead. The `debug_assert!` at
+`:9293` is trivially satisfied for the same reason.
 
 ### No other caller
 
@@ -156,7 +157,7 @@ None. This is arithmetic over compile-time constants.
 ### Q: Can `terse_text_compression::compress` produce a fragment longer than the cap?
 
 - Sources examined: `crates/daemon/src/terse_text_compression.rs:1-30` (the header and
-  `TerseTextCompressionLevel`), `transform.rs:9229-9234`.
+  `TerseTextCompressionLevel`), `transform.rs:9234-9242`.
 - Findings: irrelevant to the bound. Whatever `compress` returns is passed through
   `one_line_fragment`, which caps it at 80 UTF-16 units. `compress` is a
   shortening transform, so it cannot grow the input either, but the cap does not
@@ -174,7 +175,7 @@ None. This is arithmetic over compile-time constants.
 
 ### Q: Is the header's one-fragment wording shorter, and does it change the bound?
 
-- Sources examined: `transform.rs:9262-9270`.
+- Sources examined: `transform.rs:9265-9273`.
 - Findings: with one line the header is 43 units and there is one line rather than
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.

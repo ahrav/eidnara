@@ -28,16 +28,16 @@ details do not authorize a weaker acceptance threshold.
   defines the hint limits; its
   [eligibility/query gate](../../../../../crates/daemon/src/transform.rs#L8193-L8240)
   avoids queries for already decided, ineligible, short, or augmented input.
-- [transform.rs:8352-8390](../../../../../crates/daemon/src/transform.rs#L8352-L8390)
+- [transform.rs:8357-8395](../../../../../crates/daemon/src/transform.rs#L8357-L8395)
   enforces matched-term/rareness admission, the top-score threshold, and the
   result limit. Fidelity wording changes do not authorize broader searches.
 - [lib.rs:9257-9271](../../../../../crates/daemon/src/lib.rs#L9257-L9271)
   pins one canonical read for the pass. The
   [reader](../../../../../crates/daemon/src/canonical_memory.rs#L147-L211)
   applies freshness, scope, category, and budget selection before rendering.
-- [transform.rs:23140-23159,21111-21216](../../../../../crates/daemon/src/transform.rs#L23140-L23159)
+- [transform.rs:23143-23162,21111-21216](../../../../../crates/daemon/src/transform.rs#L23143-L23162)
   checks empty-hint query reuse; the
-  [SOFT/replay test](../../../../../crates/daemon/src/transform.rs#L21286-L21391)
+  [SOFT/replay test](../../../../../crates/daemon/src/transform.rs#L21289-L21394)
   checks frozen m0/m1 bytes. Both are unaudited component checks.
 - [transform-session-client.ts:72,1552-1556](../../../../../packages/opencode-plugin/src/hooks/context/transform-session-client.ts#L72) with the [adapter profile](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L351)
   sets headroom to 250 permille; the

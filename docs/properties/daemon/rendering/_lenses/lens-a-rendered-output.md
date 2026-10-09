@@ -31,7 +31,7 @@ recorded under [Contract-vs-code leads](#contract-vs-code-leads).
 
 ### Inputs
 
-`build_output_with_tags_inner` (`transform.rs:11853-12331`) is the single
+`build_output_with_tags_inner` (`transform.rs:11856-12334`) is the single
 byte-producing splice. Its inputs are:
 
 | Input | Origin | Mutability |
@@ -200,38 +200,38 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
 
 `file:line` for everything. All read back at `HEAD` `e447c927`.
 
-1. `transform.rs:11346` — `assert_no_orphaned_tool_arcs` carries `#[cfg(test)]`,
+1. `transform.rs:11349` — `assert_no_orphaned_tool_arcs` carries `#[cfg(test)]`,
    and its only non-test-module call site is also `#[cfg(test)]`
    (`:5486-5487`). It cannot execute in a production build. The scope map calls
    it a production guard.
-2. `transform.rs:11426` and `:11303-11304` — `enforce_unique_tool_use_ids`
+2. `transform.rs:11429` and `:11303-11304` — `enforce_unique_tool_use_ids`
    behaves differently per build profile. Debug builds panic on the
    `debug_assert!` at `:11246-11249`; release builds run the repair block and
    return a modified array. The two arms are mutually exclusive, so exactly one
    of them is compiled.
-3. `transform.rs:11472-11474` — the release repair drops a whole message from the
+3. `transform.rs:11475-11477` — the release repair drops a whole message from the
    array when the block removal empties it. The only report is the `eprintln!`
    at `:11241-11245`; nothing in `BuiltOutput` records it.
-4. `transform.rs:12179-12198` then `:12024-12031` — the full-drop filter rebuilds
+4. `transform.rs:12182-12201` then `:12024-12031` — the full-drop filter rebuilds
    `rebuilt.content` with `filter_map`, which re-indexes it, and the overlay that
    follows still addresses blocks by their pre-removal `block_index`.
-5. `transform.rs:10563-10566` — `apply_surface_strips` can replace the whole
+5. `transform.rs:10566-10569` — `apply_surface_strips` can replace the whole
    `content` with a single sentinel block, shrinking the array before the same
    two index-based consumers run.
-6. `transform.rs:12212-12214` — `present` is false when `content` is empty, the
+6. `transform.rs:12215-12217` — `present` is false when `content` is empty, the
    message is not synthetic, and the mid *is* in `blocks_by_mid`; `:12085-12087`
    then `continue`s. A retained tail message can leave the array with no error
    and no field in the response naming it.
-7. `transform.rs:12252-12259` versus `:12147` — every `record_output_item` call
+7. `transform.rs:12255-12262` versus `:12147` — every `record_output_item` call
    happens before `enforce_unique_tool_use_ids` runs, so a `tail:{mid}` cache
    entry can hold the pre-repair message while the served array holds the
    repaired one. On a later pass the repair re-runs over the rebuilt array, so
    the served bytes stay consistent, but the cache entry is not what was served.
    See the open questions.
-8. `transform.rs:11273-11284` — `cached_output_item` returns
+8. `transform.rs:11276-11287` — `cached_output_item` returns
    `Option<Option<ServedMessage>>`. The inner `None` is a cached "renders to
    nothing", so a drop decision is itself cached and replayed.
-9. `transform.rs:11189-11271` — `message_output_identity` folds in the four
+9. `transform.rs:11192-11274` — `message_output_identity` folds in the four
    overlay strings per block (`:11077-11086`), the message tag number
    (`:11059-11060`), the reasoning-watermark verdict (`:11061-11064`), and every
    frozen unit targeting this mid (`:11067-11071`). Nothing in it is
@@ -240,7 +240,7 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
    in projection order (`:12520-12531`).
 10. `transform.rs:1722-1728` — `TagOverlayState`'s four maps are all `BTreeMap`,
     so every overlay iteration is key-ordered.
-11. `transform.rs:9419` and `:9275` — the hygiene and nudge tag lists are sorted
+11. `transform.rs:9422` and `:9275` — the hygiene and nudge tag lists are sorted
     explicitly by `tag_number` after being built.
 12. `tail_hygiene.rs:364` — `for (call_id, rows) in orphan_rows` iterates a
     `HashMap`, and the loop body reads state it also writes
@@ -252,17 +252,17 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
     blocks. It is render-aware for `red:` units (`:474`, `:508`), `cav:` units
     (`:526`, `:422-429`), Channel-1 reminder spans (`:527`, `:554`) and drop
     sentinels (`:528`, `:555`). There is no `strip:` prefix anywhere in the file.
-14. `transform.rs:10065-10071` — a surface strip replaces content with `""` or
+14. `transform.rs:10068-10074` — a surface strip replaces content with `""` or
     `"[dropped]"`. Neither is visible to the hygiene metric, so tokens the render
     removed are still counted in `t`.
-15. `transform.rs:9284-9290` — `render_user_hint` truncates to
+15. `transform.rs:9287-9293` — `render_user_hint` truncates to
     `USER_HINT_TOTAL_CHAR_CAP` (800, `:110`) and `debug_assert!`s the result. The
     inputs are capped at 3 fragments (`:113`, applied `:9097`) of 80 UTF-16 units
     each (`:109`, applied `:9098`), so the wrapped maximum is 604 UTF-16 units.
     The 800 cap cannot bind. Record 10.
-16. `transform.rs:9099-9111` — `utf16_prefix` measures in UTF-16 units but slices
+16. `transform.rs:9104-9116` — `utf16_prefix` measures in UTF-16 units but slices
     on whole scalars, so no truncation can emit a lone surrogate.
-17. `transform.rs:9294-9303` — `truncate_hint_to_total_cap` rebuilds the
+17. `transform.rs:9297-9306` — `truncate_hint_to_total_cap` rebuilds the
     `<eidnara-search-hint>` envelope around the truncated body, so a truncated hint
     is still a balanced element. Same for `one_line_fragment` (`:9130-9140`),
     which appends `…` inside the list item.
@@ -279,7 +279,7 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
 20. `memory_render.rs:8-14` — `M0_EMPTY_BODY` and `M1_PLACEHOLDER` exist so the
     m0 and m1 blocks are never absent or empty, because an absent block would
     shift later bytes and bust the provider prefix cache. This is the fidelity
-    contract the splice at `transform.rs:11884-11930` depends on: it pushes m0
+    contract the splice at `transform.rs:11887-11933` depends on: it pushes m0
     and m1 only if the frozen units exist, so an absent unit means an absent
     block, not an empty one.
 21. `decay_render.rs:330-348` — the history budget guard demotes tiers
@@ -296,13 +296,13 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `historical_full_drop_replays_byte_identically_through_output_cache` (`transform.rs:27325`) and `tag_overlay_replays_stably_and_new_tail_gets_next_number` (`:23307`) assert byte equality of whole renders, which would catch a duplicated or reordered unit. Neither asserts the ordering rule directly, and neither runs in CI.
+Exercised: partial — `historical_full_drop_replays_byte_identically_through_output_cache` (`transform.rs:27328`) and `tag_overlay_replays_stably_and_new_tail_gets_next_number` (`:23307`) assert byte equality of whole renders, which would catch a duplicated or reordered unit. Neither asserts the ordering rule directly, and neither runs in CI.
 Guarantee: The served array is `m0?`, `m1?`, then the retained non-synthetic tail in request order, with each retained unit present exactly once and the synthetic todo pair placed at exactly one position.
 Check: `always` — for every accepted pass, assert the emitted sequence's non-synthetic elements are a subsequence of `req.messages` in the same relative order, that no `mid` appears twice, and that the synthetic todo pair appears exactly zero or one time. `always` because a reorder or a duplicate is wrong on every pass, not only under an interleaving.
 Fault/timing angle: None. The splice is single-threaded over borrowed inputs.
 Required faults and enabling state: None. Any transform pass exercises it.
 Confidence: high — [evidence](evidence/render-a-composition-order-is-fixed-and-each-unit-appears-once.md). Read the whole of `build_output_with_tags_inner` and confirmed `out.push` happens at exactly five sites (`:11733`, `:11754`, `:11830`, `:12089`, `:12117`), all inside straight-line control flow over `req.messages`.
-Existing check: `transform.rs:27325`, `:23307`; both inline, neither runs in CI.
+Existing check: `transform.rs:27328`, `:23307`; both inline, neither runs in CI.
 Impact: A duplicated or reordered message is a provider-visible prefix change, which busts the prompt cache at best and produces an invalid conversation at worst.
 Open questions:
 
@@ -330,13 +330,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `duplicate_tool_full_drop_replays_byte_identically_through_output_cache` (`transform.rs:27391`) and `non_reasoning_adjacency_keeps_full_drop_mode` (`:27131`) exercise the full-drop path, but neither constructs a message with two overlay-eligible blocks after a dropped index.
+Exercised: partial — `duplicate_tool_full_drop_replays_byte_identically_through_output_cache` (`transform.rs:27394`) and `non_reasoning_adjacency_keeps_full_drop_mode` (`:27131`) exercise the full-drop path, but neither constructs a message with two overlay-eligible blocks after a dropped index.
 Guarantee: Every overlay string is applied to the block whose id it was computed for.
 Check: `always` — after `apply_tag_overlay_to_message` returns, assert that for every `(block_id, overlay_string)` the overlay applied, the receiving block's projected id equals `block_id`. `always` because an overlay on the wrong block misattributes content every time it happens.
 Fault/timing angle: None. The hazard is a within-message index shift, not a race.
 Required faults and enabling state: One message must contain a block that the full-drop filter removes (`full_drop_tool_ids` returns its tool id, `:10839-10891`, which needs a frozen `red:` unit of kind `drop`) followed by at least two overlay-eligible blocks. Whether that shape occurs is the open question. A whole-message strip collapsing `content` to one block (`:10388`) creates the same shift with a smaller footprint. The `block_index >= content.len()` guards at `:8227` and `:10400` convert the out-of-range half of the hazard into a silently skipped overlay, which is a separate failure mode with the same cause.
 Confidence: medium — [evidence](evidence/render-a-overlay-targets-stale-indices-after-full-drop-filter.md). The index shift is verified from source: `filter_map` rebuilds `content` at `:12014-12021` and the overlay at `:12024-12031` passes the same unmodified `blocks` slice. What is not established is whether a real harness emits a message with a full-drop tool block followed by two taggable blocks.
-Existing check: `transform.rs:27391`, `:27131`; neither runs in CI.
+Existing check: `transform.rs:27394`, `:27131`; neither runs in CI.
 Impact: A `§N§` prefix on the wrong block breaks the tag-to-block mapping that `eidnara_reduce` resolves against, so the agent's reduce request hits content it did not choose. The bytes are already frozen into the provider prefix by the time it could be noticed.
 Open questions:
 
@@ -347,13 +347,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `duplicate_tool_use_belt_panics_in_test_builds` (`transform.rs:21679`) covers the debug arm. `duplicate_tool_use_belt_drops_later_owner_and_result_in_release` (`:21514`) covers the release arm but carries `#[cfg(not(debug_assertions))]` (`:21512`), so it does not compile under a default `cargo test`, and no `daemon` lib test runs in CI at all.
+Exercised: partial — `duplicate_tool_use_belt_panics_in_test_builds` (`transform.rs:21682`) covers the debug arm. `duplicate_tool_use_belt_drops_later_owner_and_result_in_release` (`:21514`) covers the release arm but carries `#[cfg(not(debug_assertions))]` (`:21512`), so it does not compile under a default `cargo test`, and no `daemon` lib test runs in CI at all.
 Guarantee: The served array contains no duplicate `tool_use` id, and the repair that guarantees it removes only the later owner and its otherwise-orphaned result.
 Check: `always` — on every accepted pass, assert `duplicate_tool_use_locations(&messages).is_empty()` for the returned array. `always` because a duplicate id is a deterministic provider rejection every time. Pair it with a coverage check asserting the independent preconditions: a pass observed in which `duplicate_tool_use_locations` returned non-empty *before* `:12147`, and the build profile under test.
 Fault/timing angle: None. The belt runs once, at the end of the splice.
 Required faults and enabling state: Two `ToolCall` blocks with the same id reaching `:12147`. The doc comment at `:11227-11230` states the normal ingress and render paths must keep them unique, so this is a last-resort belt whose trigger is another path's defect.
 Confidence: high — [evidence](evidence/render-a-duplicate-tool-use-repair-is-release-only.md). Verified the `#[cfg]` split at `:11251` and `:11303-11304`, verified the release arm drops an emptied message at `:11297-11299`, and verified the release test's own `#[cfg]` gate at `:21512`.
-Existing check: `transform.rs:21679` (debug only), `:21514` (release only, does not compile in a debug test run).
+Existing check: `transform.rs:21682` (debug only), `:21514` (release only, does not compile in a debug test run).
 Impact: The two profiles disagree about what a duplicate does: debug aborts the pass, release silently removes content and continues. Whichever profile ships is the only one whose behaviour was ever executed, and today neither arm's test runs in CI.
 Open questions:
 
@@ -364,7 +364,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — `assert_no_orphaned_tool_arcs` is asserted on real render output at `transform.rs:14511` and `:27418`, `:27427`, and negatively at `:14314`, `:14321`. All of it is inline test code that CI does not run.
+Exercised: partial — `assert_no_orphaned_tool_arcs` is asserted on real render output at `transform.rs:14514` and `:27418`, `:27427`, and negatively at `:14314`, `:14321`. All of it is inline test code that CI does not run.
 Guarantee: The served array never contains a `tool_result` without a preceding `tool_use` of the same id, and never a `tool_use` whose result is not in the same or the next message.
 Check: `always(!orphan)` — assert the pairing condition over the emitted array. `always(!X)` and not `unreachable`, because the forbidden thing is a state of the output array and there is no production code point that must not be entered; per METHOD.md the `unreachable` form is only for a code location.
 Fault/timing angle: None.
@@ -398,7 +398,7 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: not yet — `nudge_formula_tests` (`transform.rs:9803-9958`) covers the band arithmetic, not the hint's tag numbers.
+Exercised: not yet — `nudge_formula_tests` (`transform.rs:9806-9961`) covers the band arithmetic, not the hint's tag numbers.
 Guarantee: Every `§N§` a nudge or directive renders names a tag number the agent can use, meaning one that a `tags` row holds for the block the text is pointing at.
 Check: `always` — whenever `format_reclaimable_hint` produces a non-empty string, assert each rendered `N` matches a durable `tags.tag_number` for this session. `always` because a directive naming a non-existent handle is wrong every time it is rendered.
 Fault/timing angle: None.
@@ -419,7 +419,7 @@ Exercised: partial — `recurring_raw_call_id_orphan_is_conservative_t_only` (`t
 Guarantee: The tail-hygiene metric's total `t` counts only tokens the render actually serves.
 Check: `always` — for a pass with at least one `strip:` frozen unit whose target is in the measured tail, assert `measure_tail_hygiene`'s `t` excludes the stripped block's original tokens. `always` because the number is wrong on every pass where a strip is active.
 Fault/timing angle: None; both are computed in the same pass from the same `core`.
-Required faults and enabling state: Any frozen unit keyed `strip:placeholder:`, `strip:system_injected:`, `strip:system_injected_block:`, `strip:stale_reduce:` or `strip:processed_image:` whose target block is inside the measured tail. `new_frozen_strip_units` (`transform.rs:10356-10514`) is the producer.
+Required faults and enabling state: Any frozen unit keyed `strip:placeholder:`, `strip:system_injected:`, `strip:system_injected_block:`, `strip:stale_reduce:` or `strip:processed_image:` whose target block is inside the measured tail. `new_frozen_strip_units` (`transform.rs:10359-10517`) is the producer.
 Confidence: high — [evidence](evidence/render-a-hygiene-metric-ignores-surface-strips.md). Verified `measure_tail_hygiene`'s exclusion set at `:499-512` and its per-kind arms at `:522-587`, and verified by grep that `tail_hygiene.rs` contains no `strip:` literal anywhere.
 Existing check: `tail_hygiene.rs:1211` and its neighbours; none run in CI.
 Impact: `t` and possibly `u` overstate the served tail, so `hygiene_band` (`:704`) and both nudge gates fire on a tail that is smaller than measured. The agent is told about tokens that are not there.
@@ -432,13 +432,13 @@ Open questions:
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial — the byte-equality replay tests (`transform.rs:27325`, `:27216`, `:23307`, `:28622`) all assert determinism across passes within one process. Nothing asserts it across processes, which is where a `HashMap` seed would differ.
+Exercised: partial — the byte-equality replay tests (`transform.rs:27328`, `:27216`, `:23307`, `:28622`) all assert determinism across passes within one process. Nothing asserts it across processes, which is where a `HashMap` seed would differ.
 Guarantee: Identical `(core, meta, projection, req, overlay, tag_numbers)` renders byte-identical output, in any process.
 Check: `always` — render the same fixed inputs in two independently seeded processes and assert byte equality of the served array and of every overlay-bearing block. `always` because a seed-dependent render busts the prefix cache on the very next pass.
 Fault/timing angle: None for the splice. The one audited order-sensitive site is `tail_hygiene.rs:364`, whose loop body reads `by_arc` at `:373` and writes it at `:394`.
 Required faults and enabling state: To make the `tail_hygiene.rs:364` site actually order-dependent you would need two distinct orphan raw call ids whose single unclaimed candidate arc is the same arc. `wire.rs:441-445` assigns a singleton call's arc id as the call block's own block id and a repeated call's arc id as `mid#call:{id}`, so all blocks in one arc carry one `tool_call_id` and the candidate sets are disjoint. The order therefore does not matter today, but nothing local enforces that.
 Confidence: high — [evidence](evidence/render-a-render-is-deterministic-over-fixed-inputs.md). Audited every collection in the splice: `TagOverlayState` is four `BTreeMap`s (`:1722-1728`), `projection_blocks_by_mid_for_output` returns a `BTreeMap` of projection-ordered `Vec`s (`:12520-12531`), `reduced` is a `BTreeMap` (`:11924`), the nudge lists are explicitly sorted (`:9244`, `:9275`), and every `HashSet`/`HashMap` in the splice is used only for `contains`, `get`, or an order-independent `any`.
-Existing check: `transform.rs:27325`, `:27216`, `:23307`, `:28622`; none run in CI.
+Existing check: `transform.rs:27328`, `:27216`, `:23307`, `:28622`; none run in CI.
 Impact: The whole cache discipline in the module header (`transform.rs:1-16`) rests on a replay producing identical bytes. A seed-dependent render would bust the provider prefix cache on every process restart.
 Open questions:
 
@@ -449,9 +449,9 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: not yet — `user_hint_query_keeps_terms_beyond_the_old_character_cap` (`transform.rs:23303`) covers the query path, not the render cap.
+Exercised: not yet — `user_hint_query_keeps_terms_beyond_the_old_character_cap` (`transform.rs:23306`) covers the query path, not the render cap.
 Guarantee: `truncate_hint_to_total_cap` is never entered from `render_user_hint`, because the composed hint cannot exceed `USER_HINT_TOTAL_CHAR_CAP`.
-Check: `unreachable` — instrument the `utf16_len(wrapped) > limit` branch of `truncate_hint_to_total_cap` (`:9294-9303`) and assert it is never taken. `unreachable` and not `always`, because the subject is a specific code location that the arithmetic says cannot execute.
+Check: `unreachable` — instrument the `utf16_len(wrapped) > limit` branch of `truncate_hint_to_total_cap` (`:9297-9306`) and assert it is never taken. `unreachable` and not `always`, because the subject is a specific code location that the arithmetic says cannot execute.
 Fault/timing angle: None.
 Required faults and enabling state: `auto_search_active`, which is `!req.is_subagent && req.auto_search_enabled` (`:3519`) and defaults to `true` on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped producer (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010`).
 Confidence: high — [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 + 2 + 1 + 1 + 121 (cut note, #723) + 143 (footer, #926) + 23 = 604 UTF-16 units against a cap of 800. `USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment` caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced `:9148-9155`).
@@ -502,9 +502,9 @@ Open questions:
    Contract side:
    [`../../_lenses/scope-map-and-risk-ranking.md:441-443`](../../_lenses/scope-map-and-risk-ranking.md)
    — "Two production guards worth naming now because they are explicit fail-loud
-   checks on the output path: `transform.rs:11347-11400 assert_no_orphaned_tool_arcs`
-   and `transform.rs:11406-11480 enforce_unique_tool_use_ids`."
-   Code side: `transform.rs:11346` is `#[cfg(test)]`, and the only non-test-module
+   checks on the output path: `transform.rs:11350-11403 assert_no_orphaned_tool_arcs`
+   and `transform.rs:11409-11483 enforce_unique_tool_use_ids`."
+   Code side: `transform.rs:11349` is `#[cfg(test)]`, and the only non-test-module
    call site is guarded by `#[cfg(test)]` at `:5486`. The second function named
    is genuinely production, so the sentence is half right. Do not resolve in
    favour of the map: the code wins here and record 5 carries the consequence.
@@ -572,7 +572,7 @@ Open questions:
 - METHOD.md's `Exercised` vocabulary does not fit this part cleanly. Every
   existing check in 4e is an inline test that CI never runs
   (`scope-map-and-risk-ranking.md:409-430`), and one of them
-  (`transform.rs:21689`) does not even compile under a default `cargo test`. This
+  (`transform.rs:21692`) does not even compile under a default `cargo test`. This
   lens used `partial` for "a test exists and would catch it" and named the CI gap
   in the same line. The scope map already queued this as needing a ruling
   (`scope-map-and-risk-ranking.md:681`); it is still open.

@@ -8282,8 +8282,13 @@ struct UserHintSelection {
     fragment: UserHintFragment,
 }
 
+/// `cut` records a cut the daemon made, at the fragment cap or at a search window; a literal `…`
+/// in stored text is content and leaves it `false`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UserHintFragment(String);
+struct UserHintFragment {
+    text: String,
+    cut: bool,
+}
 
 fn run_user_hint_lexical_search(
     store: &MemoryStore,
@@ -9158,16 +9163,18 @@ fn user_hint_served_fragment(body: &str, anchors: &[&str]) -> UserHintFragment {
             continue;
         };
         let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(body));
-        if first_whole_word(&prefix.0, anchor).is_some() {
+        if first_whole_word(&prefix.text, anchor).is_some() {
             break;
         }
         // The rendered window is `…` + left context + anchor + `…`, so a long anchor gets less context.
         // Bytes bound UTF-16 units from above, so the byte length is a safe stand-in.
         let context = (USER_HINT_FRAGMENT_CHAR_CAP / 2)
             .min((USER_HINT_FRAGMENT_CHAR_CAP - 2).saturating_sub(hit.len()));
-        let window = crate::memory_tool::snippet_around_match(body, hit, context);
-        let fragment = user_hint_fragment(&window);
-        if first_whole_word(&fragment.0, anchor).is_some() {
+        let (window, window_cut) =
+            crate::memory_tool::snippet_window_around_match(body, hit, context);
+        let mut fragment = user_hint_fragment(&window);
+        fragment.cut |= window_cut;
+        if first_whole_word(&fragment.text, anchor).is_some() {
             return fragment;
         }
     }
@@ -9192,21 +9199,19 @@ fn user_hint_fragment(snippet: &str) -> UserHintFragment {
             .find(|(offset, character)| *offset >= PREFIX_BYTES && character.is_whitespace())
             .map(|(offset, _)| offset)
     {
-        let (fragment, truncated) = one_line_fragment(
+        let (text, truncated) = one_line_fragment(
             &neutralize_user_hint_markup(&compressed[..cut]),
             USER_HINT_FRAGMENT_CHAR_CAP,
         );
         if truncated {
-            return UserHintFragment(fragment);
+            return UserHintFragment { text, cut: true };
         }
     }
-    UserHintFragment(
-        one_line_fragment(
-            &neutralize_user_hint_markup(&compressed),
-            USER_HINT_FRAGMENT_CHAR_CAP,
-        )
-        .0,
-    )
+    let (text, cut) = one_line_fragment(
+        &neutralize_user_hint_markup(&compressed),
+        USER_HINT_FRAGMENT_CHAR_CAP,
+    );
+    UserHintFragment { text, cut }
 }
 
 /// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
@@ -9229,10 +9234,10 @@ fn render_user_hint(selected: &[UserHintSelection]) -> Option<String> {
     if selected.is_empty() {
         return None;
     }
+    let selected = &selected[..selected.len().min(USER_HINT_RESULT_LIMIT)];
     let fragments = selected
         .iter()
-        .take(USER_HINT_RESULT_LIMIT)
-        .map(|selection| selection.fragment.0.as_str())
+        .map(|selection| selection.fragment.text.as_str())
         .filter(|fragment| !fragment.is_empty())
         .collect::<Vec<_>>();
     if fragments.is_empty() {
@@ -9243,10 +9248,8 @@ fn render_user_hint(selected: &[UserHintSelection]) -> Option<String> {
     const CLOSE: &str = "\n</eidnara-search-hint>";
     const HEADER_BYTES: usize = 64;
     const FOOTER: &str = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
-    // A cut fragment carries `…` where the cut fell; the note says a cut can drop a qualifier.
-    let cut = fragments
-        .iter()
-        .any(|fragment| fragment.starts_with('…') || fragment.ends_with('…'));
+    // The note says a cut can drop a qualifier.
+    let cut = selected.iter().any(|selection| selection.fragment.cut);
     let fragment_bytes: usize = fragments.iter().map(|fragment| fragment.len() + 3).sum();
     let mut hint = String::with_capacity(
         SEPARATOR.len()

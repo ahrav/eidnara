@@ -425,7 +425,9 @@ fn a_cut_fragment_discloses_that_a_qualifier_may_be_missing() {
     assert!(utf16_len(fragment) <= USER_HINT_FRAGMENT_CHAR_CAP);
 
     // A search window that starts inside the text and reaches its end is cut at the start only.
-    let lead_cut = render_user_hint(&[hint_result("…rejected option B")]).unwrap();
+    let body = format!("{} rejected option B", [FILLER; 6].join(" "));
+    let lead_cut =
+        render_user_hint(&[selection(user_hint_served_fragment(&body, &["rejected"]))]).unwrap();
     let lead = hint_fragment_lines(&lead_cut)[0];
     assert!(lead.starts_with('…') && !lead.ends_with('…'), "{lead}");
     assert_eq!(
@@ -455,6 +457,29 @@ fn a_cut_fragment_discloses_that_a_qualifier_may_be_missing() {
         3,
         "{mixed}"
     );
+}
+
+#[test]
+fn a_literal_ellipsis_in_a_whole_fragment_adds_no_cut_note() {
+    for text in ["quasar nebula…", "…quasar nebula", "…quasar nebula…"] {
+        let rendered = render_user_hint(&[hint_result(text)]).unwrap();
+        assert_eq!(hint_fragment_lines(&rendered), vec![text], "{rendered}");
+        assert!(!rendered.contains(USER_HINT_CUT_NOTE), "{rendered}");
+    }
+
+    let body = format!("C1 quasar nebula {}", [FILLER; 6].join(" "));
+    let window = render_user_hint(&[selection(user_hint_served_fragment(&body, &["nebula"]))]);
+    assert!(window.unwrap().contains(USER_HINT_CUT_NOTE));
+    let body = format!(
+        "{} zephyrine {}",
+        [FILLER; 6].join(" "),
+        [FILLER; 6].join(" ")
+    );
+    let window =
+        render_user_hint(&[selection(user_hint_served_fragment(&body, &["zephyrine"]))]).unwrap();
+    let line = hint_fragment_lines(&window)[0];
+    assert!(line.starts_with('…') && line.ends_with('…'), "{line}");
+    assert_eq!(window.matches(USER_HINT_CUT_NOTE).count(), 1, "{window}");
 }
 
 #[test]
@@ -950,7 +975,7 @@ fn a_literal_ellipsis_at_the_prefix_cut_does_not_end_the_fragment() {
         format!("x {}wait… tail words here", "§1§".repeat(64)),
     ] {
         assert_eq!(
-            user_hint_fragment(&text).0,
+            user_hint_fragment(&text).text,
             whole_text_fragment(&text),
             "{text:?}"
         );
@@ -971,6 +996,6 @@ proptest::proptest! {
         ),
     ) {
         let text = pieces.join("");
-        proptest::prop_assert_eq!(user_hint_fragment(&text).0, whole_text_fragment(&text));
+        proptest::prop_assert_eq!(user_hint_fragment(&text).text, whole_text_fragment(&text));
     }
 }

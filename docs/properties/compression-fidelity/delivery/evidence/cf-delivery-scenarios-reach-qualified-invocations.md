@@ -18,10 +18,10 @@ and final wildcard passes produced this record. Inspected 2026-09-19 at
 - [hermetic-host.test.ts:225-307](../../../../../packages/e2e-tests/src/rust-runner/hermetic-host.test.ts#L225-L307)
   checks readiness/control and completion counters. It does not establish a
   published nonempty history segment. Status of all these checks: unaudited.
-- [transform.rs:21286-21391](../../../../../crates/daemon/src/transform.rs#L21286-L21391)
+- [transform.rs:21289-21394](../../../../../crates/daemon/src/transform.rs#L21289-L21394)
   supplies a seeded baseline/later-segment SOFT example with warm replay.
   It is a construction lead for m1, not end-to-end producer qualification.
-- [transform.rs:8352-8363](../../../../../crates/daemon/src/transform.rs#L8352-L8363)
+- [transform.rs:8357-8368](../../../../../crates/daemon/src/transform.rs#L8357-L8368)
   makes hint rarity an independent prerequisite. A singleton candidate fixture
   cannot reach selection just by containing the query words.
 - [canonical_memory.rs:195-211](../../../../../crates/daemon/src/canonical_memory.rs#L195-L211)
