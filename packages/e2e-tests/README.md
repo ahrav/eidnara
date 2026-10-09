@@ -179,6 +179,8 @@ bun run test:incidents:rust       # the incident pool over the Rust harness
 bun run validate-mode-manifest    # every test file has an entry and every entry a file
 bun run validate:incident-history # catalog, adjudications, and source inventory agree
 bun run mutation:rust-fm          # apply each FM-OC mutation, run its test, revert
+bun run eval:compression-fidelity --baseline <dir> --candidate <dir> --out <dir>
+                                  # assemble fidelity evidence into a private manifest and report
 ```
 
 `test` builds `packages/opencode-plugin/dist/index.js` when it is absent.

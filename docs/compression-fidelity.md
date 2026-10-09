@@ -390,9 +390,10 @@ spend above the cap, or a tool call that no later request answers with its
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
 directory outside the repository whose existing ancestors are owned by the
 operator or root and closed to group and other writes unless sticky, checked
-before and again after creation, refusing
-a shared existing directory, an untrusted ancestor, or a label that is not a
-plain file name. `tests/compression-fidelity-forwarding.test.ts`
+before and again after creation, and whose created components are directories
+the operator owns and not symbolic links, refusing
+a shared existing directory, an untrusted ancestor, a link raced into the
+created path, or a label that is not a plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
 
 ## What is unsupported
@@ -417,10 +418,176 @@ runs the whole loop through OpenCode against an in-process provider double.
   pass-through.
 - **Semantic review.** No human semantic judgment exists for any row.
 
-## Planned `eval:compression-fidelity` command
+## `eval:compression-fidelity`
 
-The evaluation command is planned, not delivered. Its contract (inputs,
-outputs, limits, and review prerequisites) is specified in the
-[Compression Fidelity Contract](https://github.com/ahrav/eidnara/issues/707)
-under milestone U4 and tracked there; this document describes it once it
-exists.
+`bun run --cwd packages/e2e-tests eval:compression-fidelity` assembles one
+baseline and one candidate evidence directory into a private manifest and a
+per-scenario report (`scripts/eval-compression-fidelity.ts`,
+`src/compression-fidelity/evidence.ts`). It reads files and writes two;
+it sends no request in either mode.
+
+```
+eval:compression-fidelity --baseline <dir> --candidate <dir>
+  --out <private dir> [--corpus <path>] [--mode offline|live]
+```
+
+**Inputs.**
+
+- `--corpus`: the corpus file, the committed one by default, read only when
+  its bytes hash to the pinned digest.
+- `--baseline` and `--candidate`: each an evidence directory. It holds the
+  owner observations the witnesses wrote with
+  `EIDNARA_FIDELITY_OBSERVATIONS_DIR` set:
+  `daemon.compression_fidelity.replay`,
+  `daemon.harness_sources.c6_exact_read`,
+  `daemon.compression_fidelity.real_capture`, and `opencode-delivery`. It
+  also holds any `forwarding-*.json` reports and an `arm.json`
+  (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
+  the SHA-256 of its history summarizer system prompt as 64 lowercase hex
+  digits, its model, provider, version, settings, and limits, and whether
+  its generation origin is `scripted` or `real`.
+
+**Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
+an owner-only `0700` directory outside the repository whose existing ancestors
+are owned by the operator or root and closed to group and other writes unless
+sticky. `--out` must resolve, through symlinks, to a directory other than
+either arm; an arm directory is refused before any write, and a component of
+`--out` that resolves elsewhere by publication time is refused as well.
+
+- **Manifest.** It records once:
+  - the repository revision, suffixed `-dirty` when the worktree held
+    uncommitted or untracked changes;
+  - the corpus path and digest;
+  - each arm's configuration;
+  - every file read, with its SHA-256, including files the identity check
+    refused; the report names each refusal;
+  - every accepted observation and forwarding report with its file SHA-256,
+    and the model, upstream endpoint, context limit, and prices each
+    forwarding report forwarded with.
+- **Report.** It holds, per arm:
+  - identity errors;
+  - reached and missing scenarios;
+  - one row per corpus scenario with the columns below, where every column
+    derives from that arm's observations;
+  - the reasons acceptance is withheld.
+
+  It then holds the comparison's refusals and whether the comparison is a
+  treatment, and `manifest_sha256`, the SHA-256 of the manifest file it was
+  assembled with, so a report beside another manifest is detectable. It
+  assembles no review, control, or cost evidence, so it accepts no arm.
+
+| Column | Values and source |
+| --- | --- |
+| `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal; `executed` means every judging observation ended in a terminal its owner counts as executed: the delivery witness's `served`, `excluded`, or `discoverable`, the replay's `published` or `served`, `read_exact`, or the capture's `published` |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier; a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
+
+**Identity.** The assembler recomputes every file's SHA-256. It refuses:
+
+- an observation bound to another corpus;
+- an unknown owner;
+- a case or scenario outside the corpus;
+- a scenario observation whose source is not the source its corpus scenario
+  is on;
+- a duplicate observation of one owner, case, source, scenario, and stage;
+- an observation with no `stage`, no `terminal`, a `terminal` its owner does
+  not emit (`opencode-delivery`: `served`, `unqualified`, and on a
+  `memory_excluded` scenario `excluded` and `discoverable`; the replay:
+  `published`, `served`, `validation_rejected`, `discarded_coverage`,
+  `drift_rejected`, `input_truncated`, `unsettled`; the C6 witness:
+  `read_exact`; the real capture: `published`, `unsettled`,
+  `validation_rejected`), or a `detail` that is not an object;
+- an `opencode-delivery` observation without a scenario label, or marked
+  `detail.judge_control` other than at stage `missing-capture` on `C1.S2`,
+  the delivery witness's judge self-test;
+- a `daemon.harness_sources.c6_exact_read` observation naming a scenario
+  whose serving path is not `exact_read`;
+- a scenario variant no witness emits: `opencode-delivery` emits `p1-only`
+  for `C1.S2`;
+- a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
+  other files that are not `.json` are skipped;
+- a system prompt the arm did not declare, or an attempt whose prompt text
+  and recorded digest disagree, for the system prompt or the user prompt;
+- a published generation record with an attempt that records no system
+  prompt, no user prompt, a model other than the arm's, or a digest field
+  that is not 64 lowercase hex digits;
+- a published generation record that records no system prompt, or a source
+  with no published generation record: a real capture in an arm labeled
+  `real`, the U2 replay's `generation` stage with scripted output in an arm
+  labeled `scripted`;
+- in an arm labeled `scripted`, an output origin other than
+  `scripted approved example`, the literal the U2 replay writes, whether
+  `detail.output_origin` or an attempt's `output_origin` records it, or a
+  replay generation attempt whose `output_sha256` is not the SHA-256 of the
+  source's approved example;
+- forwarding exchange text that does not match its recorded hash. The
+  hashed representation is the request body as UTF-8 bytes;
+- a forwarding report without the four finite limits the forwarder enforces
+  (whole call and token counts), finite positive prices, a nonnegative spend, string
+  incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
+  Messages endpoint free of credential and query, or whose exchange tool ids
+  are not string arrays or whose exchange indices are not their positions;
+- a forwarding report with more exchanges than its `maxCalls`, whose
+  `spent_usd` differs from the sum of its exchanges' `cost_usd`, or whose
+  `attempted_sends` and `acknowledged_responses` differ from its exchanges;
+- a forwarding report marked complete that lists an incomplete reason or a
+  refusal, records a stop, no send, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
+  answers, has no response, a response whose outcome is other than
+  `acknowledged`, a response with no stop reason or naming no model or a
+  model other than the report's, a truncated response, an unknown cost, or a
+  response without a hash; these are the completeness reasons the forwarder
+  derives, recomputed from the report's own fields;
+- a generation record, a real capture or the U2 replay's `generation` stage,
+  that names a scenario; generation is source-level;
+- a `daemon.compression_fidelity.real_capture` observation at a stage other
+  than `capture`.
+
+In an arm labeled `real`:
+- an output origin other than `real producer through the host`, the literal
+  the real capture writes, is an identity error, whether `detail.output_origin`
+  or an attempt's `output_origin` in `detail.attempts` records it;
+- every source needs a published real capture whose `detail.model` is the
+  arm's model; a capture recorded under another model is an identity error;
+- a published real capture records `settled: true`, an attempt output with
+  text, nonempty `published_rows` of titled rows with integer `start` and
+  `end`, and an `attempt_count` equal to its retained attempts, the state the
+  capture writer publishes;
+- `arm.json` `settings` declare a finite `temperature` and a positive
+  whole-number `max_output_tokens`, and each attempt of a published real
+  capture records those values and its system and user prompts as text;
+- every serving observation, one that records `detail.served_tier` or
+  `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
+  hash of the published real capture of its source whose output it served.
+
+A scenario label `<scenario>@<variant>` belongs to its scenario's case. A
+label that is a corpus source ID, which the delivery witness writes for the
+`m1`, `warm`, and `cold-m0` stages of a source with no m1 scenario, must equal
+the observation's `source` and makes the observation source-level evidence;
+a source label from another owner, stage, or source is an identity error.
+Observations of a variant and observations marked `detail.judge_control`,
+which test the delivery judge itself, appear in the row's outcomes and judge
+nothing.
+
+**Comparison.**
+
+- The comparison is refused when an arm is bound to another corpus or has
+  identity errors, when the arms reached different scenario sets, when they
+  differ in model, provider, version, settings, limits, or generation origin,
+  or when the distinct user prompts their published generation records for a
+  source record differ. Held fields
+  compare as JSON with keys in UTF-16 code-unit order.
+- In live mode, the comparison is also refused when the arms' forwarding
+  reports forwarded to different models, upstream endpoints, context limits,
+  or prices. The
+  forwarded model is OpenCode's, a role apart from the summarizer model
+  `arm.json` declares, so it is held equal through the reports rather than
+  bound to `arm.json`.
+- Differing prompt hashes mark it a treatment comparison.
+
+Missing scenarios block full acceptance, and the report names them.
+
+**Modes.** `offline`, the default, assembles the directories as they are.
+`live` additionally requires each arm to carry complete forwarding reports
+from the record-and-forward provider mode whose limits equal the arm's
+`limits`, so live evidence inherits that mode's limits, and all of an arm's
+reports to have forwarded to one model at one upstream endpoint, context
+limit, and price.

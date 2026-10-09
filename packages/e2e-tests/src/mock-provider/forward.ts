@@ -12,9 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { publishJsonAtomically } from "../atomic-publish";
+import { publishPrivateJson } from "../atomic-publish";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 
 export interface ForwardLimits {
@@ -686,34 +684,9 @@ export class Forwarder {
     }
 }
 
-/** The repository root: captures never land beneath it. */
-const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
-
 /**
- * Every existing ancestor of `real` is owned by this user or root and is either closed to
- * group and other writes or sticky, so no other local user can rename the checked directory
- * away between its check and the write. It runs before creation and again after, so a
- * component another user created in between is refused rather than trusted.
- */
-function requireTrustedAncestors(real: string): void {
-    const uid = process.getuid?.();
-    let existing = real;
-    while (!existsSync(existing)) existing = dirname(existing);
-    for (let ancestor = existing; ; ancestor = dirname(ancestor)) {
-        const stat = statSync(ancestor);
-        const ownedByTrusted = stat.uid === uid || stat.uid === 0;
-        const othersWrite = (stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0;
-        if (!ownedByTrusted || othersWrite) {
-            throw new Error(`${ancestor} is writable by others or not owned by this user or root`);
-        }
-        if (ancestor === dirname(ancestor)) break;
-    }
-}
-
-/**
- * Publishes `report` as `<dir>/forwarding-<label>.json` with mode `0600` in an owner-only
- * directory outside the repository. The directory is created `0700` when absent; an existing
- * one must already be `0700` and owned by this user, and every ancestor must be trusted.
+ * Publishes `report` as `<dir>/forwarding-<label>.json` through `publishPrivateJson`: mode
+ * `0600` in an owner-only directory outside the repository. `label` is a plain file label.
  */
 export function publishForwardingReport(
     report: ForwardingReport,
@@ -723,26 +696,5 @@ export function publishForwardingReport(
     if (!/^[A-Za-z0-9._-]+$/.test(label) || label.startsWith(".")) {
         throw new Error(`${label} is not a plain file label`);
     }
-    if (dir.split(/[\\/]/).includes("..")) throw new Error(`${dir} names a parent directory`);
-    const target = resolve(dir);
-    let existing = target;
-    while (!existsSync(existing)) existing = dirname(existing);
-    const real = join(realpathSync(existing), relative(existing, target));
-    const inside = relative(realpathSync(REPOSITORY_ROOT), real);
-    if (
-        inside === "" ||
-        (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
-    ) {
-        throw new Error(`${real} is inside the repository`);
-    }
-    requireTrustedAncestors(real);
-    mkdirSync(real, { recursive: true, mode: 0o700 });
-    requireTrustedAncestors(real);
-    const stat = statSync(real);
-    if ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) {
-        throw new Error(`${real} is not an owner-only directory`);
-    }
-    const path = join(real, `forwarding-${label}.json`);
-    publishJsonAtomically(report, path, { mode: 0o600 });
-    return path;
+    return publishPrivateJson(report, dir, `forwarding-${label}.json`);
 }

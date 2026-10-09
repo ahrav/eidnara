@@ -249,7 +249,7 @@ async function fallbackCampaign(h: RustTestHarness): Promise<void> {
         stage: "missing-capture",
         terminal: "unqualified",
         markers: ["cf-delivery-missing-capture-input"],
-        detail: { refusals: missing.refusals },
+        detail: { refusals: missing.refusals, judge_control: true },
     });
 }
 
