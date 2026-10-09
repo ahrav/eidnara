@@ -490,7 +490,7 @@ either arm; an arm directory is refused before any write, and a component of
 
 | Column | Values and source |
 | --- | --- |
-| `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal; `executed` means every judging observation ended in a terminal its owner counts as executed: the delivery witness's `served`, `discoverable`, or `excluded`, the replay's `published`, `read_exact`, or the capture's `published` |
+| `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal; `executed` means every judging observation ended in a terminal its owner counts as executed: the delivery witness's `served`, `excluded`, or `discoverable`, the replay's `published` or `served`, `read_exact`, or the capture's `published` |
 | `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
@@ -507,7 +507,8 @@ either arm; an arm directory is refused before any write, and a component of
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
 - an observation with no `stage`, no `terminal`, a `terminal` its owner does
-  not emit (`opencode-delivery`: `served`, `unqualified`; the replay:
+  not emit (`opencode-delivery`: `served`, `excluded`, `discoverable`,
+  `unqualified`; the replay:
   `published`, `served`, `validation_rejected`, `discarded_coverage`,
   `drift_rejected`, `input_truncated`, `unsettled`; the C6 witness:
   `read_exact`; the real capture: `published`, `unsettled`,
@@ -538,7 +539,7 @@ either arm; an arm directory is refused before any write, and a component of
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four finite limits the forwarder enforces
-  (whole call and token counts), positive prices, a nonnegative spend, string
+  (whole call and token counts), finite positive prices, a nonnegative spend, string
   incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
   Messages endpoint free of credential and query, or whose exchange tool ids
   are not string arrays or whose exchange indices are not their positions;
