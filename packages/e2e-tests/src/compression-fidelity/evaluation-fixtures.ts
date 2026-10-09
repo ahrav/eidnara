@@ -21,6 +21,10 @@ export const sha256 = (text: string | Buffer) => createHash("sha256").update(tex
 export const allScenarios = corpus.cases.flatMap((c) =>
     c.scenarios.map((s) => ({ case: c.id, s })),
 );
+/** A natural m0 scenario: its row holds one delivery, so breaking that file empties the row. */
+export const M0_SCENARIO =
+    allScenarios.find(({ s }) => s.serving.path === "natural" && s.serving.stage === "m0")?.s.id ??
+    "";
 
 const dirs: string[] = [];
 export function scratch(): string {
@@ -38,10 +42,30 @@ export function write(dir: string, name: string, value: unknown): string {
     return sha256(text);
 }
 
+export const SETTINGS = { temperature: 0.1, max_output_tokens: 1024 };
+
+/** The extra `warm` and `cold-m0` delivery files `writeArm` writes beside each m1 scenario's m1 one. */
+export const M1_STAGE_FILES =
+    2 * corpus.cases.flatMap((c) => c.scenarios.filter((s) => s.serving.stage === "m1")).length;
+
+/** The source-level delivery files `writeArm` writes: three stages per source with no m1 scenario. */
+export const SOURCE_LEVEL_FILES =
+    3 *
+    corpus.cases
+        .flatMap((c) => c.sources.map((v) => v.id))
+        .filter(
+            (id) =>
+                !corpus.cases.some((c) =>
+                    c.scenarios.some((s) => s.source === id && s.serving.stage === "m1"),
+                ),
+        ).length;
+
 export const SERVING = {
     request_body_utf8_bytes: 40_000,
+    admission: "fits",
     invocation_bytes: 39_000,
-    invocation_charged_tokens: 11_000,
+    // ceil(ceil(39_000 / 3.5) * 1.25): the admission estimator's charge for those bytes.
+    invocation_charged_tokens: 13_929,
     estimator: "opencode-heuristic utf8-bytes-div-3.5-v1",
     transform_elapsed_ms: 12,
     raw_source_leaks: 0,
@@ -57,7 +81,17 @@ export interface ArmOptions {
     serving?: Record<string, unknown>;
     tier?: (scenario: string) => string | undefined;
     unlinked?: boolean;
+    /** Omit the source-level deliveries of sources with no m1 scenario. */
+    skipSourceLevel?: boolean;
     model?: string;
+    captureModel?: string;
+    attempt?: Record<string, unknown> | null;
+    /** Replaces the single default attempt with the attempts this returns. */
+    attempts?: (attempt: Record<string, unknown>) => unknown[];
+    capture?: Record<string, unknown>;
+    settings?: Record<string, unknown>;
+    promptSha256?: string;
+    generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
 }
 
@@ -68,16 +102,17 @@ export function writeArm(
     const dir = join(root, options.label);
     mkdirSync(dir);
     const system = options.system ?? "summarizer system prompt";
+    const model = options.model ?? "anthropic/claude-test";
     write(dir, "arm.json", {
         schema: ARM_SCHEMA,
         label: options.label,
-        prompt_sha256: sha256(system),
-        model: options.model ?? "anthropic/claude-test",
+        prompt_sha256: options.promptSha256 ?? sha256(system),
+        model,
         provider: "anthropic",
         version: "2026-01-01",
-        settings: { temperature: 0.1 },
+        settings: options.settings ?? SETTINGS,
         limits: options.limits ?? { maxCalls: 40 },
-        generation_origin: "real",
+        generation_origin: options.generationOrigin ?? "real",
     });
     const files = new Map<string, string>();
     const base = (c: string, source: string) => ({
@@ -88,8 +123,41 @@ export function writeArm(
         markers: [],
     });
     const captures = new Map<string, string>();
+    const scripted = options.generationOrigin === "scripted";
+    const attemptsOf = (attempt: Record<string, unknown>): unknown[] => {
+        if (options.attempt === null) return [];
+        const merged = { ...attempt, ...options.attempt };
+        return options.attempts ? options.attempts(merged) : [merged];
+    };
     for (const c of corpus.cases) {
         for (const source of c.sources) {
+            if (scripted) {
+                write(dir, `generation.${source.id}.json`, {
+                    ...base(c.id, source.id),
+                    owner: "daemon.compression_fidelity.replay",
+                    scenario: null,
+                    stage: "generation",
+                    terminal: "published",
+                    detail: {
+                        attempts: attemptsOf({
+                            attempt: 1,
+                            model,
+                            system_sha256: sha256(system),
+                            prompt_sha256: sha256("p"),
+                            output_sha256: sha256(source.reviewedOutput),
+                            output_origin: "scripted approved example",
+                        }),
+                    },
+                });
+                continue;
+            }
+            const attempts = attemptsOf({
+                model,
+                system,
+                prompt: "p",
+                ...SETTINGS,
+                outputs: [{ text: "x" }],
+            });
             const capture = write(dir, `real.${source.id}.json`, {
                 ...base(c.id, source.id),
                 owner: "daemon.compression_fidelity.real_capture",
@@ -97,9 +165,14 @@ export function writeArm(
                 stage: "capture",
                 terminal: "published",
                 detail: {
+                    model: options.captureModel ?? model,
                     output_origin: options.origin ?? "real producer through the host",
-                    attempts: [{ system, prompt: "p", outputs: [{ text: "x" }] }],
+                    attempts,
                     usage: { input_tokens: 900, output_tokens: 300 },
+                    settled: true,
+                    attempt_count: attempts.length,
+                    published_rows: [{ start: 1, end: 2, title: "t", p1: "p1" }],
+                    ...options.capture,
                 },
             });
             captures.set(source.id, capture);
@@ -108,26 +181,79 @@ export function writeArm(
     for (const { case: c, s } of allScenarios) {
         if (s.id === options.skipScenario) continue;
         const exact = s.serving.path === "exact_read";
+        const m1 = s.serving.stage === "m1";
+        const delivery = (stage: string, kind?: string) => ({
+            ...base(c, s.source),
+            owner: "opencode-delivery",
+            scenario: s.id,
+            stage,
+            terminal: "served",
+            detail: {
+                served_tier: options.tier?.(s.id) ?? s.serving.tier,
+                // A pressure delivery serves sparser than the curve it was under.
+                ...(s.serving.path === "pressure" ? { curve_tier: "p1" } : {}),
+                serving: {
+                    ...(options.serving ?? SERVING),
+                    ...(kind ? { serving_kind: kind } : {}),
+                },
+                generation_capture_sha256: options.unlinked ? undefined : captures.get(s.source),
+            },
+        });
+        // The delivery witness writes a source's m1, warm, and cold-m0 deliveries onto its m1
+        // scenario; `delivery.<id>.json` is the m1 one, so tests that edit it keep working.
+        if (m1) {
+            write(dir, `delivery.${s.id}.warm.json`, delivery("warm", "warm_repeat"));
+            write(dir, `delivery.${s.id}.cold-m0.json`, delivery("cold-m0", "cold"));
+        }
         const name = `delivery.${s.id}.json`;
         files.set(
             s.id,
-            write(dir, name, {
-                ...base(c, s.source),
-                owner: exact ? "daemon.harness_sources.c6_exact_read" : "opencode-delivery",
-                scenario: s.id,
-                stage: exact ? "exact_read" : "served",
-                terminal: exact ? "read_exact" : "served",
-                detail: exact
-                    ? { sha256: "0".repeat(64) }
-                    : {
-                          served_tier: options.tier?.(s.id) ?? s.serving.tier,
-                          serving: options.serving ?? SERVING,
-                          generation_capture_sha256: options.unlinked
-                              ? undefined
-                              : captures.get(s.source),
-                      },
-            }),
+            write(
+                dir,
+                name,
+                exact
+                    ? {
+                          ...base(c, s.source),
+                          owner: "daemon.harness_sources.c6_exact_read",
+                          scenario: s.id,
+                          stage: "exact_read",
+                          terminal: "read_exact",
+                          detail: { sha256: "0".repeat(64), byte_length: 144 },
+                      }
+                    : delivery(m1 ? "m1" : "served"),
+            ),
         );
+    }
+    // The delivery witness labels a source with no m1 scenario by its source ID at its m1, warm,
+    // and cold-m0 stages; the arm carries those source-level serving observations too.
+    const m1Sources = new Set(
+        corpus.cases.flatMap((c) =>
+            c.scenarios.filter((s) => s.serving.stage === "m1").map((s) => s.source),
+        ),
+    );
+    for (const c of corpus.cases) {
+        for (const source of c.sources) {
+            if (m1Sources.has(source.id) || options.skipSourceLevel) continue;
+            for (const stage of ["m1", "warm", "cold-m0"]) {
+                write(dir, `source.${source.id}.${stage}.json`, {
+                    ...base(c.id, source.id),
+                    owner: "opencode-delivery",
+                    scenario: source.id,
+                    stage,
+                    terminal: "served",
+                    detail: {
+                        served_tier: "p1",
+                        serving: {
+                            ...(options.serving ?? SERVING),
+                            serving_kind: stage === "warm" ? "warm_repeat" : "cold",
+                        },
+                        generation_capture_sha256: options.unlinked
+                            ? undefined
+                            : captures.get(source.id),
+                    },
+                });
+            }
+        }
     }
     return { dir, files };
 }

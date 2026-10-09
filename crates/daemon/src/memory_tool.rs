@@ -211,6 +211,15 @@ const SEARCH_SNIPPET_CONTEXT: usize = 100;
 ///
 /// An ellipsis marks each side where the window cuts `text`.
 pub(crate) fn snippet_around_match(text: &str, hit: Range<usize>, context: usize) -> String {
+    snippet_window_around_match(text, hit, context).0
+}
+
+/// `snippet_around_match` with `true` when the window cut `text` at either side.
+pub(crate) fn snippet_window_around_match(
+    text: &str,
+    hit: Range<usize>,
+    context: usize,
+) -> (String, bool) {
     debug_assert!(hit.start <= hit.end && hit.end <= text.len());
     debug_assert!(text.is_char_boundary(hit.start) && text.is_char_boundary(hit.end));
 
@@ -225,7 +234,10 @@ pub(crate) fn snippet_around_match(text: &str, hit: Range<usize>, context: usize
 
     let prefix = if start > 0 { "…" } else { "" };
     let suffix = if end < text.len() { "…" } else { "" };
-    format!("{prefix}{}{suffix}", text[start..end].trim())
+    (
+        format!("{prefix}{}{suffix}", text[start..end].trim()),
+        start > 0 || end < text.len(),
+    )
 }
 
 #[cfg(test)]

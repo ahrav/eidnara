@@ -75,6 +75,8 @@ export interface SpawnOptions {
     openCodeConfigExtra?: Record<string, unknown>;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
+    /** Override the mock model's output token limit, which OpenCode sends as `max_tokens`. Default 8192. */
+    modelOutputLimit?: number;
     /** The mock provider's model id; a forwarding run names the real model here. */
     modelId?: string;
     /** The key OpenCode sends to the mock provider; the fixture key by default. */
@@ -139,6 +141,8 @@ export function createIsolatedEnv(): IsolatedEnv {
     const dataDir = join(base, "data");
     const cacheDir = join(base, "cache");
     const workdir = join(base, "work");
+    // `opencode.json` carries the mock provider's inbound key, so the tree is owner-only.
+    mkdirSync(base, { mode: 0o700 });
     for (const d of [configDir, dataDir, cacheDir, workdir]) {
         mkdirSync(d, { recursive: true });
     }
@@ -180,7 +184,10 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
     const extraWithoutProvider = { ...extra };
     delete extraWithoutProvider.provider;
 
-    const limit = { context: opts.modelContextLimit ?? 200000, output: 8192 };
+    const limit = {
+        context: opts.modelContextLimit ?? 200000,
+        output: opts.modelOutputLimit ?? 8192,
+    };
     const harnessProviders: Record<string, unknown> = opts.bedrock
         ? {
               "amazon-bedrock": {
@@ -253,7 +260,9 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         Object.assign(eidnara, { host: { connection_file: opts.userHostConnectionFile } });
     }
 
-    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
+    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2), {
+        mode: 0o600,
+    });
 
     //
     const userConfigPath = userEidnaraConfigPath(env);

@@ -60,16 +60,16 @@ All references read back at `HEAD` `e447c927`, in
 
 The references above stay at `e447c927`. This section and the arithmetic below
 read back at this branch's HEAD, where `render_user_hint` sits at
-`transform.rs:9091-9117`. #926 replaces its footer line with:
+`transform.rs:9234-9296`. #926 replaces its footer line with:
 
 ```
-9109:    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
+9251:    const FOOTER: &str = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
 ```
 
 ### The arithmetic
 
 Measured in UTF-16 code units, which is what `utf16_len`
-(`transform.rs:8961-8963`) counts. Every row was re-measured
+(`transform.rs:9099-9101`) counts. Every row was re-measured
 against the #926 footer and the wrapper strings:
 
 | Component | Units |
@@ -80,23 +80,24 @@ against the #926 footer and the wrapper strings:
 | three lines of `"- "` + 80 | 3 × 82 = 246 |
 | two `\n` from `lines.join("\n")` | 2 |
 | the second `\n` from the outer join | 1 |
-| the cut note, present when any fragment is cut (#723) | 121 |
+| the cut note, present when any fragment is cut (#723) | 106 |
 | the `\n` before the cut note | 1 |
 | footer | 143 |
 | `"\n</eidnara-search-hint>"` | 23 |
-| **total** | **604** |
+| **total** | **589** |
 
-604 against a cap of 800. #723 adds the cut note, `USER_HINT_CUT_NOTE`, after
-the fragments whenever a fragment starts or ends with `…`; a hint with only
-whole fragments still totals at most 482. There is no input that raises it: `take(3)` bounds the
+589 against a cap of 800. #723 adds the cut note, `USER_HINT_CUT_NOTE`, after
+the fragments whenever a fragment was cut at the fragment cap or at a search
+window (`UserHintFragment::cut`); a hint with only whole fragments still totals
+at most 482. There is no input that raises it: `take(3)` bounds the
 line count, `one_line_fragment` bounds each line, and the header, footer and
 wrapper are constants apart from the line count digit, which is at most one
 character for a maximum of three.
 
-So the branch at `:9120` — `if utf16_len(wrapped) <= limit { return
+So the branch at `:9299` — `if utf16_len(wrapped) <= limit { return
 wrapped.to_string(); }` — always returns early, and the body of
-`truncate_hint_to_total_cap` (`:9123-9127`) is dead. The `debug_assert!` at
-`:9115` is trivially satisfied for the same reason.
+`truncate_hint_to_total_cap` (`:9302-9306`) is dead. The `debug_assert!` at
+`:9294` is trivially satisfied for the same reason.
 
 ### No other caller
 
@@ -141,7 +142,8 @@ None. This is arithmetic over compile-time constants.
    `truncate_hint_to_total_cap` and assert it is never taken across the campaign.
 2. A guard that fails loudly if the constants drift: assert
    `22 + 44 + 1 + USER_HINT_RESULT_LIMIT * (USER_HINT_FRAGMENT_CHAR_CAP + 2) +
-   (USER_HINT_RESULT_LIMIT - 1) + 1 + 143 + 23 <= USER_HINT_TOTAL_CHAR_CAP`, so
+   (USER_HINT_RESULT_LIMIT - 1) + 1 + utf16_len(USER_HINT_CUT_NOTE) + 1 + 143 + 23 <=
+   USER_HINT_TOTAL_CHAR_CAP` (the cut note is 106 units at HEAD), so
    the day someone raises a limit the relationship is restated rather than
    silently inverted. If the intent is that the total cap *should* be able to bind,
    that assertion is the place to invert.
@@ -178,4 +180,5 @@ None. This is arithmetic over compile-time constants.
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.
 - Missing evidence: none.
-- Conclusion: resolved with answer — 604 is the maximum, 482 without the cut note.
+- Conclusion: resolved with answer — 482 is the maximum at `e447c927`; with the
+  #723 cut note it is 589 at this branch's HEAD.

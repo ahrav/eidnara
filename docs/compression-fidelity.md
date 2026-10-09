@@ -255,8 +255,9 @@ memory, hint, and recovery rows:
   selected first while distractor rows also matched. A separate truncation
   row records the fragment, cut at both ends by the fragment limit, whether
   it kept the source's qualifier, and whether the hint disclosed the cut. A
-  hint whose fragments start or end with `…` carries a note that a cut
-  fragment may omit a qualifier such as a negation or a rejection. With
+  hint with a fragment the daemon cut, at the fragment cap or at a search
+  window, carries a note that a cut fragment may omit a qualifier such as a
+  negation or a rejection. With
   auto-search off, the same request carries no hint and the host decides
   none.
 
@@ -275,20 +276,52 @@ environment variables, all required:
 | --- | --- |
 | `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model and verifies no credential claims |
 | `EIDNARA_FIDELITY_REAL_MODEL` | The model id the history summarizer runs, as the only model in its chain |
-| `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source's firing may take to settle |
+| `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source may take, from its transform call, which awaits the emergency firing inline, through its settled firing |
 | `EIDNARA_FIDELITY_OBSERVATIONS_DIR` | A private directory outside the repository |
 
 Run it with
 `cargo +1.98 test -p daemon --lib --locked real_producer_capture -- --ignored`.
+The capture route binds harness `opencode`, the harness the host's model
+execution binds, and presents no credential source claims, so the host must be
+one that verifies none: a host started with no envelope credentials and no AWS
+profile source. A claim-verifying host refuses each start, and the record
+keeps the refusal as that attempt's start error.
 Each source yields one `daemon.compression_fidelity.real_capture` record,
 written with mode `0600` in an owner-only `0700` directory that the test
 creates or requires, outside the repository. Its terminal is `published`,
 `validation_rejected` for a settled firing that drained model output but
-published no rows, or `unsettled` for a firing that did not settle within
-the wait, never started a producer, or drained no model output;
-the test fails after writing every record when any source is unsettled. The
-record names the model,
-the output origin, whether the firing settled, the attempt count, and every
+published no rows, or `unsettled` for a source whose transform call or firing
+did not finish within the wait, that never started a producer, or that drained
+no model output;
+the test fails after writing every record when any source is unsettled. For
+an unsettled source the capture waits up to 75 s (one `connect` and one
+`start` at the producer's 30 s request timeout each, with margin) for any
+firing that has connected to return its first run handle, holding 2 s for a
+firing spawned just before the deadline to call `connect`. It then binds each
+started run's session and cancels, through a second connection, every run
+that drained no model output and whose own cancel the host did not confirm,
+before the next source begins, because the host keeps a run alive after its
+waiter is dropped until `run.cancel` ends it. Each attempt records the
+firing's own cancel under `cancel`, the record lists each cancel's run id and
+outcome under `cancelled_runs` and any firing still before its first start
+under `firings_before_first_start_at_cancel`. A cancel the host does not
+confirm, or a firing still before its first start, sets `capture_stopped` on
+that record and ends the capture before another source can start a run.
+Every source derives the same producer session id, and the host keeps a
+session after its connection closes, so after each source the capture deletes
+every producer session its attempts used (`purged_sessions`) before the next
+source starts; this keeps one source's conversation out of the next source's
+model call and ends any run a start error left unnamed (one that is neither
+`NotSent` nor a host terminal). A purge the host does not confirm also sets
+`capture_stopped`. After a confirmed cancel the capture waits up to
+10 s for the firing to record the terminal it provoked, so the record carries
+that drained error and the firing's own cancel. The capture directory and
+every existing ancestor must be owned by the operator or root and closed to
+group and other writes unless sticky, checked before and again after the
+directory is created. The
+record names the model, the harness,
+the output origin, whether the transform call returned and the firing settled,
+the attempt count, and every
 attempt's complete system prompt, user prompt, generation settings, start
 error, and every drained output or error, followed by the published rows. The host's model
 execution protocol reports no token usage, so each record carries
@@ -296,15 +329,12 @@ execution protocol reports no token usage, so each record carries
 reads no credential: the host owns them.
 `a_capture_records_the_model_attempts_usage_and_complete_input` runs the
 same capture over the scripted producer in the default suite.
-The capture binds its session under the `opencode` harness, which the host's
-ModelExecution route admits, with an empty `credential_fingerprints` map. The
-capture therefore runs against a host whose ModelExecution route verifies no
-credential claims: `direct_host_fixture` without `--harness-runtime`, or an
-`eidnara_host` started with an envelope that carries no credentials and no
-AWS source. A credential-verifying host checks the route's fingerprints at
-`CredentialVerifier::verify` before each send and answers
-`harness_unavailable` / `credential_snapshot_mismatch` for the empty map.
-`direct_host_fixture` serves the capture when
+The refusal a claim-verifying host returns comes from
+`CredentialVerifier::verify`, which checks the route's empty
+`credential_fingerprints` map before each send and answers
+`harness_unavailable` / `credential_snapshot_mismatch`.
+`direct_host_fixture` without `--harness-runtime` verifies no claims and
+serves the capture when
 `EIDNARA_FIXTURE_SUMMARIZER_COMMAND` names a command that answers each
 summarizer prompt from a real model, such as
 `packages/e2e-tests/scripts/bedrock-summarizer.ts`.
@@ -328,11 +358,15 @@ leaves the prompt's wording correct.
 `packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends
 to one Messages endpoint and returns the provider's response to OpenCode.
 `RustTestHarness.create({ forward })` builds it and runs OpenCode on
-`forward.model` at `forward.contextLimit`, so the forwarded body already
-names the selected model. Construction requires:
+`forward.model` at `forward.contextLimit` with an output limit of
+`forward.limits.maxOutputTokens`, so the forwarded body already names the
+selected model and carries a `max_tokens` the forwarder admits. Construction
+requires:
 
-- an `https:` URL whose path ends in `/messages`, with no user info or query;
-- the model, which every request must name, and its context limit;
+- an `https:` URL whose path ends in `/messages`, with no user info, query,
+  or fragment;
+- the model, as the provider echoes it in responses, which every request
+  must name, and its context limit;
 - the reviewed corpus digest;
 - input and output prices in USD per million tokens, with the input price
   at least the model's highest input-side price;
@@ -343,28 +377,50 @@ names the selected model. Construction requires:
 Scripted responses and forwarding are exclusive: passing both, or scripting
 a forwarding mock, throws. A forwarding mock accepts only requests carrying
 its per-mock `inboundKey`, which the harness writes into OpenCode's provider
-config, so no other local process can spend its budget. `forward.contextLimit`
+config, so no other local process can spend its budget through the mock; that
+`opencode.json` is written `0600` in an owner-only `0700` isolated tree. The
+harness also starts a forwarding run's OpenCode serve API behind HTTP Basic
+auth (`OPENCODE_SERVER_USERNAME` and a random `OPENCODE_SERVER_PASSWORD` in
+the child's environment only, matched by the SDK client's `authorization`
+header), so another local process cannot drive sessions that spend the
+budget through OpenCode; a scripted run keeps the unauthenticated loopback
+API. `forward.contextLimit`
 is the context limit OpenCode is configured with. Before each send the
-forwarder checks the model,
+forwarder checks that the body is a JSON object, the model,
 the request's `max_tokens`, the call count, and the spend cap. The spend
 check reserves the body's byte length as input tokens plus `max_tokens` as
 output. A response with usage charges its stated tokens; a response without
-usage, or a send without a response, charges the reservation. A refused
-send, a non-2xx response, a timeout, a redirect, a failed credential
-callback, or a response whose usage costs more than its reservation stops
-the run, and every later request is refused without a send. The input price
+usage, or a send without a response, charges the reservation. A streamed
+response states usage only when it reaches `message_stop` with a
+`message_delta` carrying usage and no `error` event, because `message_start`
+carries provisional counts. A refused send, a non-2xx response, a streamed
+response cut before `message_stop` or carrying an `error` event, a timeout, a
+redirect, a failed credential callback, a response that is not a Messages
+message (no JSON `type: "message"` with a `content` array, or no SSE
+`message_start`), a response naming another model or none, a response above
+16 MiB, which is cut off and charged its reservation, or a response whose
+usage costs more than its reservation stops the run, and every later request
+is refused without a send. Each exchange records the model its response
+names. The input price
 must cover any pricing the client's `anthropic-beta` header enables. The forwarder sends the received
 bytes unchanged, adds the callback's headers to the outbound request only,
 and records each exchange with redacted headers and the bounded response
 bytes. `forwardingReport()` keeps attempted sends and acknowledged responses
-apart, and marks the run incomplete on a stop, a send in flight, a truncated
+apart, counts every refused request in `refused` while retaining at most 32
+refusal reasons in `refusals`, refuses a request after a stop before reading
+its body so the mock retains nothing further, and marks the run incomplete on
+a stop, a send in flight, a truncated
 capture, an unknown cost, an acknowledged response without a stop reason,
 spend above the cap, or a tool call that no later request answers with its
 `tool_result`. The limits, spend, and stop span the mock's life, across
 `reset()`.
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
-directory outside the repository, refusing a shared existing directory or a
-label that is not a plain file name. `tests/compression-fidelity-forwarding.test.ts`
+directory outside the repository whose existing ancestors are owned by the
+operator or root and closed to group and other writes unless sticky, checked
+before and again after creation, and whose created components are directories
+the operator owns and not symbolic links, refusing
+a shared existing directory, an untrusted ancestor, a link raced into the
+created path, or a label that is not a plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
 
 ## What is unsupported
@@ -394,7 +450,7 @@ runs the whole loop through OpenCode against an in-process provider double.
 `bun run --cwd packages/e2e-tests eval:compression-fidelity` assembles one
 baseline and one candidate evidence directory into a private manifest and a
 per-scenario report (`scripts/eval-compression-fidelity.ts`,
-`src/compression-fidelity/evaluation.ts`). It reads files and writes two;
+`src/compression-fidelity/evidence.ts`). It reads files and writes two;
 it sends no request in either mode.
 
 ```
@@ -414,69 +470,165 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
   `daemon.compression_fidelity.real_capture`, and `opencode-delivery`. It
   also holds any `forwarding-*.json` reports and an `arm.json`
   (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
-  the SHA-256 of its history summarizer system prompt, its model, provider,
-  version, settings, and limits, and whether its generation origin is
+  the SHA-256 of its history summarizer system prompt as 64 lowercase hex
+  digits, its model, provider, version, settings, and limits, each identifier
+  a non-blank string and `settings` carrying a numeric `temperature` and a
+  positive integer `max_output_tokens`, and whether its generation origin is
   `scripted` or `real`.
 - `--reviews`: two review records.
   - `controls.json` (`eidnara.compression-fidelity-controls/v1`) holds the
     sealed control labels, the batch, and its approvers.
   - `judgments.json` (`eidnara.compression-fidelity-judgments/v1`) holds the
     human control verdicts, per-scenario judgments, and disputes for the
-    same corpus digest and batch.
+    same corpus digest and batch. Both records name the batch as a non-blank
+    string, and each list field is a list.
   - A judgment names its arm, scenario, kind (`human` or `model`), and the
     SHA-256 of the observation file it judged. It also gives each
-    obligation's disposition and whether the answer preserved it, any
-    forbidden conclusion it drew, and whether it abstained. A model
-    judgment carries citations and an uncertainty, and it never counts as
-    review.
+    obligation's disposition and whether the answer preserved it, once per
+    obligation; the list of forbidden conclusions it drew, possibly empty;
+    and whether it abstained. Its reviewer, like every control reviewer, is a
+    non-blank name. A model judgment carries at least one non-blank citation and a
+    non-blank uncertainty, or it is a review error; it never counts as review.
+  - Approvers are named by non-blank identity; names that differ only by
+    surrounding whitespace are one approver, and any other entry in
+    `approved_by` is a review error.
 
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
-an owner-only `0700` directory outside the repository.
+an owner-only `0700` directory outside the repository whose existing ancestors
+are owned by the operator or root and closed to group and other writes unless
+sticky. `--out` must resolve, through symlinks, to a directory other than
+either arm; an arm directory is refused before any write, and a component of
+`--out` that resolves elsewhere by publication time is refused as well.
 
 - **Manifest.** It records once:
-  - the repository revision;
+  - the repository revision, suffixed `-dirty` when the worktree held
+    uncommitted or untracked changes;
   - the corpus path and digest;
   - each arm's configuration;
-  - every observation and forwarding report with its file SHA-256;
-  - the review records' digests, batch, and approvers.
+  - every file read, with its SHA-256, including files the identity check
+    refused; the report names each refusal;
+  - every accepted observation and forwarding report with its file SHA-256,
+    and the model, upstream endpoint, context limit, and prices each
+    forwarding report forwarded with;
+  - the review records' batch, approvers, and digests; a record whose bytes
+    were read keeps its digest even when it is refused, and an unreadable one
+    records an empty digest.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
+  - the validated forwarding reports' count, sends, and `spent_usd`, at arm
+    scope, since sends belong to the arm rather than to a scenario;
+  - the serving cost rows of its source-level observations (the `m1`,
+    `warm`, and `cold-m0` deliveries the witness labels by source ID for a
+    source with no m1 scenario), validated as a row's serving costs are;
+    every such source carries all three stages serving `p1`, as the witness
+    asserts, and a missing, incomplete, or sparser one, or one that ended in
+    a failed terminal, withholds acceptance;
   - one row per corpus scenario with the columns below, where every column
     derives from that arm's observations and bound judgments;
   - the reasons acceptance is withheld.
 
-  It then holds the control qualification and the comparison.
+  It then holds the control qualification and the comparison, and
+  `manifest_sha256`, the SHA-256 of the manifest file it was assembled with,
+  so a report beside another manifest is detectable.
 
 | Column | Values and source |
 | --- | --- |
-| `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or C6's exact read |
+| `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal; `executed` means every judging observation ended in a terminal its owner counts as executed: the delivery witness's `served`, `excluded`, or `discoverable`, the replay's `published` or `served`, `read_exact`, or the capture's `published` |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (the delivery witness's tier is its `served_tier` and the replay's is its `tier`, each read whatever it holds; a served result whose tier is absent or no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
-| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation |
-| `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed` |
+| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs the memory witness's recovery observation: `opencode-delivery` at stage `recovery-eidnara-search` with terminal `discoverable`, recording `detail.tool` as `eidnara_search` with `memory` among its `arguments.sources`, with `detail.result_carries_memory` true and positive whole-number `calls` and `result_utf8_bytes` |
+| `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, estimator, transform time, raw-source leak count, and whether it was a cold serve or a warm repeat; each recovery needs its calls and output bytes; generation needs attempts and usage. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation, an `opencode-delivery` observation that records `detail.served_tier` or ends `served` (a served delivery naming no tier is incomplete; the memory witness's `hint-truncation` record on C4.S6 is an auxiliary artifact of its `hint-on` delivery and serves nothing), other than the qualification witness's `qualification` and the Pi witness's `pi-*` stages on C1.S1 (those serve through fixtures with no OpenCode admission estimator and carry no cost; the U2 replay's `tier` observations serve through the daemon and carry none either), carries `detail.serving` with its request bytes (a positive whole number), invocation bytes (positive: zero bytes is the shape of a pass that ran no admission), charged tokens (whole numbers; under the `opencode-heuristic utf8-bytes-div-3.5-v1` estimator the charge is ceil(ceil(bytes / 3.5) × 1.25) of the invocation bytes), transform time, and raw-source leak count as non-negative numbers (the leak count zero: a leaking pass is never a served one), its estimator (`opencode-heuristic utf8-bytes-div-3.5-v1`, the producer's), and a `serving_kind` of `cold` or `warm_repeat`, `warm_repeat` exactly on the campaign's `warm` stage; its `admission` is a branch that admitted the invocation (`fits`, `shrinks`, or `limit_unknown`; a `declined` pass is never a served one); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. The cost row's `stage` is the observation's own, whatever the serving record carries. A row with no serving observation is incomplete, whatever recoveries it holds; an m1 scenario's row carries the witness's `m1`, `warm`, and `cold-m0` deliveries, and lacks cost without each. A served delivery recording a refusal other than `history_absent` in `detail.refusals` is incomplete, since the witness marks such a pass `unqualified`. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a usage record counting `input_tokens` and `output_tokens` as non-negative numbers; a `real` arm credits generation only from its published real captures of the row's source. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
 - an observation bound to another corpus;
 - an unknown owner;
 - a case or scenario outside the corpus;
+- a scenario observation whose source is not the source its corpus scenario
+  is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
+- an observation with no `stage`, no `terminal`, a `terminal` its owner does
+  not emit (`opencode-delivery`: `served`, `unqualified`, and on a
+  `memory_excluded` scenario `excluded` and `discoverable`; the replay:
+  `published`, `served`, `validation_rejected`, `discarded_coverage`,
+  `drift_rejected`, `input_truncated`, `unsettled`; the C6 witness:
+  `read_exact`; the real capture: `published`, `unsettled`,
+  `validation_rejected`), or a `detail` that is not an object;
+- an `opencode-delivery` observation without a scenario label, or marked
+  `detail.judge_control` other than at stage `missing-capture` on `C1.S2`,
+  the delivery witness's judge self-test;
+- a `daemon.harness_sources.c6_exact_read` observation naming a scenario
+  whose serving path is not `exact_read`;
+- a scenario variant no witness emits: `opencode-delivery` emits `p1-only`
+  for `C1.S2`;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
-- a system prompt the arm did not declare;
+  other files that are not `.json` are skipped;
+- a system prompt the arm did not declare, or an attempt whose prompt text
+  and recorded digest disagree, for the system prompt or the user prompt;
+- a published generation record with an attempt that records no system
+  prompt, no user prompt, a model other than the arm's, or a digest field
+  that is not 64 lowercase hex digits;
+- a published generation record that records no system prompt, or a source
+  with no published generation record: a real capture in an arm labeled
+  `real`, the U2 replay's `generation` stage with scripted output in an arm
+  labeled `scripted`;
+- in an arm labeled `scripted`, an output origin other than
+  `scripted approved example`, the literal the U2 replay writes, whether
+  `detail.output_origin` or an attempt's `output_origin` records it, or a
+  replay generation attempt whose `output_sha256` is not the SHA-256 of the
+  source's approved example;
 - forwarding exchange text that does not match its recorded hash. The
-  hashed representation is the request body as UTF-8 bytes.
+  hashed representation is the request body as UTF-8 bytes;
+- a forwarding report without the four finite limits the forwarder enforces
+  (whole call and token counts), finite positive prices, a nonnegative spend, string
+  incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
+  Messages endpoint free of credential and query, or whose exchange tool ids
+  are not string arrays or whose exchange indices are not their positions;
+- a forwarding report with more exchanges than its `maxCalls`, whose
+  `spent_usd` differs from the sum of its exchanges' `cost_usd`, or whose
+  `attempted_sends` and `acknowledged_responses` differ from its exchanges;
+- a forwarding report marked complete that lists an incomplete reason or a
+  refusal, records a stop, no send, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
+  answers, has no response, a response whose outcome is other than
+  `acknowledged`, a response with no stop reason or naming no model or a
+  model other than the report's, a known cost without usage, usage other
+  than four whole-number counters, a `cost_usd` other than the report's
+  prices applied to that usage, a truncated response, an unknown cost, a
+  response without a hash, or a `tool_use` id that no later exchange answers
+  in its `tool_results`; these are the completeness reasons the forwarder
+  derives, recomputed from the report's own fields;
+- a generation record, a real capture or the U2 replay's `generation` stage,
+  that names a scenario; generation is source-level;
+- a `daemon.compression_fidelity.real_capture` observation at a stage other
+  than `capture`.
 
 In an arm labeled `real`:
-- scripted output is an identity error;
-- every source needs a published real capture;
-- every serving observation must name, in `detail.generation_capture_sha256`,
-  the file hash of the published real capture of its source whose output it
-  served.
+- an output origin other than `real producer through the host`, the literal
+  the real capture writes, is an identity error, whether `detail.output_origin`
+  or an attempt's `output_origin` in `detail.attempts` records it;
+- every source needs a published real capture whose `detail.model` is the
+  arm's model; a capture recorded under another model is an identity error.
+  The capture records at least one complete attempt: the arm's model, a
+  system prompt or its hash, a prompt, and a non-empty text output;
+- a published real capture records `settled: true`, an attempt output with
+  text, nonempty `published_rows` of titled rows with integer `start` and
+  `end`, and an `attempt_count` equal to its retained attempts, the state the
+  capture writer publishes;
+- `arm.json` `settings` declare a finite `temperature` and a positive
+  whole-number `max_output_tokens`, and each attempt of a published real
+  capture records those values and its system and user prompts as text;
+- every serving observation, one that records `detail.served_tier` or
+  `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
+  hash of the published real capture of its source whose output it served.
 
-A scenario label `<scenario>@<variant>` belongs to its scenario's case.
+A scenario label `<scenario>@<variant>` belongs to its scenario's case. A
+label that is a corpus source ID, which the delivery witness writes for the
+`m1`, `warm`, and `cold-m0` stages of a source with no m1 scenario, must equal
+the observation's `source` and makes the observation source-level evidence;
+a source label from another owner, stage, or source is an identity error.
 Observations of a variant and observations marked `detail.judge_control`,
 which test the delivery judge itself, appear in the row's outcomes and judge
 nothing.
@@ -486,22 +638,36 @@ nothing.
 `wrong_identity`, `lost_hint_qualifier`, labeled `violation`) and the
 positive controls (`meaning_preserving_paraphrase`, `successful_deployment`,
 labeled `acceptable`). Each needs exactly one human verdict equal to its
-label. A duplicate or undeclared control, a verdict for an undeclared
+label. Each kind is sealed exactly once. A duplicate or undeclared control, a verdict for an undeclared
 control, a model verdict, or a missing, misclassified, always-accept, or
-always-abstain verdict set leaves review unqualified. Human judgments of one
-scenario that disagree count as a dispute.
+always-abstain verdict set leaves review unqualified, and so does a review
+record bound to another corpus or batch or holding a malformed entry. An
+unqualified review binds no judgment or dispute, so every row stays
+`unreviewed`. Human judgments of one scenario that disagree count as a
+dispute.
 
 **Comparison and acceptance.**
 
-- The comparison is refused when an arm is bound to another corpus, when the
-  arms reached different scenario sets, or when they differ in model,
-  provider, version, settings, or limits.
+- The comparison is refused when the arms share a label, when an arm is
+  bound to another corpus or has identity errors, when the arms reached
+  different scenario sets, when they differ in model, provider, version,
+  settings, limits, or generation origin, or when the distinct user prompts
+  their published generation records for a source record differ. Held fields compare as JSON with
+  keys in UTF-16 code-unit order.
+- In live mode, the comparison is also refused when the arms' forwarding
+  reports forwarded to different models, upstream endpoints, context limits,
+  or prices. The
+  forwarded model is OpenCode's, a role apart from the summarizer model
+  `arm.json` declares, so it is held equal through the reports rather than
+  bound to `arm.json`.
 - Differing prompt hashes mark it a treatment comparison.
 - Each scenario gets `expected_green`, `regression`,
   `resolution_candidate`, `expected_red`, or `unscored`.
 - An arm is accepted only when all of these hold: it has no identity
-  error; review is qualified; the batch names two distinct approvers; its
-  origin is `real`; no scenario is missing; every row passes every column.
+  error; review is qualified; every judgment and dispute names a compared arm and a
+  corpus scenario, every judged obligation is one the scenario declares, and
+  every judgment's artifact hash names an observation of its row; the batch names two distinct approvers; its origin is
+  `real`; no scenario is missing; every row passes every column.
 
 Missing scenarios block full acceptance, and the report names them. The
 command records approvals; it does not grant them.
@@ -509,7 +675,9 @@ command records approvals; it does not grant them.
 **Modes.** `offline`, the default, assembles the directories as they are.
 `live` additionally requires each arm to carry complete forwarding reports
 from the record-and-forward provider mode whose limits equal the arm's
-`limits`, so live evidence inherits that mode's limits.
+`limits`, so live evidence inherits that mode's limits, and all of an arm's
+reports to have forwarded to one model at one upstream endpoint, context
+limit (a positive integer), and price.
 
 **Review prerequisites.** Two people approve the corpus before any candidate
 output is inspected, and the first semantic baseline before it is

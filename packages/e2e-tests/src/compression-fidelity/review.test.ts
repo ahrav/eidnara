@@ -1,14 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
-import { parseArgs, run } from "../../scripts/eval-compression-fidelity";
+import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
+import { parseRustPassLine } from "../rust-harness";
+import { type Delivery, servingCost } from "./campaign";
 import {
     type ArmOptions,
     allScenarios,
     CORPUS_PATH,
     corpus,
+    M0_SCENARIO,
+    M1_STAGE_FILES,
     SERVING,
     SHA,
+    SOURCE_LEVEL_FILES,
     scratch,
     sha256,
     write,
@@ -100,7 +114,7 @@ function writeReviews(root: string, options: ReviewOptions): string {
     return dir;
 }
 
-function evaluate(
+async function evaluate(
     root: string,
     options: {
         baseline?: Partial<ArmOptions>;
@@ -129,15 +143,42 @@ function evaluate(
         corpusSha256: SHA,
         revision: "rev",
         mode: "offline",
-        baseline: loadArm(baseline.dir, corpus, SHA),
-        candidate: loadArm(candidate.dir, corpus, SHA),
-        reviews: loadReviews(reviews, SHA),
+        baseline: await loadArm(baseline.dir, corpus, SHA),
+        candidate: await loadArm(candidate.dir, corpus, SHA),
+        reviews: await loadReviews(reviews, SHA),
     });
 }
 
+/** The one scenario the memory witness ends in `discoverable` and `excluded` terminals. */
+const memoryExcluded = allScenarios.find(({ s }) => s.serving.path === "memory_excluded");
+/** A recovery observation's detail as the memory witness writes it. */
+const RECOVERY_DETAIL = {
+    tool: "eidnara_search",
+    arguments: { query: "manifest cache resident", sources: ["memory"] },
+    calls: 1,
+    result_utf8_bytes: 400,
+    result_carries_memory: true,
+};
+
+/** Rewrites the source's real capture and points its serving observations at the new hash. */
+function recapture(dir: string, source: string, edit: (capture: Record<string, unknown>) => void) {
+    const path = join(dir, `real.${source}.json`);
+    const capture = JSON.parse(readFileSync(path, "utf8"));
+    edit(capture);
+    const relinked = write(dir, `real.${source}.json`, capture);
+    for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+        const file = join(dir, `delivery.${s.id}.json`);
+        const observation = JSON.parse(readFileSync(file, "utf8"));
+        if (observation.detail.generation_capture_sha256 === undefined) continue;
+        observation.detail.generation_capture_sha256 = relinked;
+        writeFileSync(file, JSON.stringify(observation));
+    }
+    return capture;
+}
+
 describe("eval:compression-fidelity assembly", () => {
-    test("a complete reviewed evidence set yields every column, a manifest, and a treatment comparison", () => {
-        const { manifest, report } = evaluate(scratch());
+    test("a complete reviewed evidence set yields every column, a manifest, and a treatment comparison", async () => {
+        const { manifest, report } = await evaluate(scratch());
         expect(report.arms.map((a) => a.identity_errors)).toEqual([[], []]);
         expect(report.controls.qualified).toBe(true);
         for (const arm of report.arms) {
@@ -158,21 +199,24 @@ describe("eval:compression-fidelity assembly", () => {
         expect(rows.every((r) => r.comparison === "expected_green")).toBe(true);
         expect(report.accepted).toBe(true);
         expect(manifest.arms[0]?.observations.length).toBe(
-            allScenarios.length + corpus.cases.flatMap((c) => c.sources).length,
+            allScenarios.length +
+                corpus.cases.flatMap((c) => c.sources).length +
+                SOURCE_LEVEL_FILES +
+                M1_STAGE_FILES,
         );
         expect(manifest.corpus.sha256).toBe(SHA);
     });
 
-    test("nothing is acceptable without human review", () => {
-        const { report } = evaluate(scratch(), { reviews: { skipJudgments: true } });
+    test("nothing is acceptable without human review", async () => {
+        const { report } = await evaluate(scratch(), { reviews: { skipJudgments: true } });
         expect(report.arms.every((a) => !a.accepted)).toBe(true);
         expect(report.arms[0]?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
         expect(report.accepted).toBe(false);
     });
 
-    test("a mutated capture byte unbinds its judgment", () => {
+    test("a mutated capture byte unbinds its judgment", async () => {
         const scenario = allScenarios[0]?.s.id ?? "";
-        const { report } = evaluate(scratch(), {
+        const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${scenario}.json`);
                 writeFileSync(path, `${readFileSync(path, "utf8")} `);
@@ -183,24 +227,63 @@ describe("eval:compression-fidelity assembly", () => {
         expect(report.arms[0]?.accepted).toBe(false);
     });
 
-    test("judgments bound to another corpus or batch are refused", () => {
+    test("a review record that fails to read still leaves its peer's digest and its own bytes' digest", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const dir = writeReviews(root, {
+            arms: [
+                { label: "baseline", files: baseline.files },
+                { label: "candidate", files: candidate.files },
+            ],
+        });
+        const controlsBytes = readFileSync(join(dir, "controls.json"));
+        writeFileSync(join(dir, "judgments.json"), "{");
+        const broken = await loadReviews(dir, SHA);
+        expect(broken.errors.join("\n")).toContain("is not JSON");
+        expect(broken.sha256.controls).toBe(sha256(controlsBytes));
+        expect(broken.sha256.judgments).toBe(sha256("{"));
+        rmSync(join(dir, "judgments.json"));
+        const missing = await loadReviews(dir, SHA);
+        expect(missing.sha256.controls).toBe(sha256(controlsBytes));
+        expect(missing.sha256.judgments).toBe("");
+    });
+
+    test("judgments bound to another corpus or batch are refused", async () => {
         for (const reviews of [{ corpusSha256: "0".repeat(64) }, { batch: "batch-2" }]) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.accepted).toBe(false);
         }
     });
 
-    test("a missing scenario withholds acceptance and refuses the comparison", () => {
+    test("refused or unqualified review records bind no judgment to any row", async () => {
+        const cases: Array<Partial<ReviewOptions>> = [
+            { batch: "batch-2" },
+            { corpusSha256: "0".repeat(64) },
+            { verdict: () => "acceptable" },
+        ];
+        for (const reviews of cases) {
+            const { report } = await evaluate(scratch(), { reviews });
+            expect(report.controls.qualified).toBe(false);
+            for (const arm of report.arms) {
+                expect(arm.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+                expect(arm.rows.every((r) => r.consumer_safety === "unreviewed")).toBe(true);
+            }
+            expect(report.comparison.rows.every((r) => r.comparison === "expected_red")).toBe(true);
+        }
+    });
+
+    test("a missing scenario withholds acceptance and refuses the comparison", async () => {
         const missing = allScenarios[3]?.s.id ?? "";
-        const { report } = evaluate(scratch(), { baseline: { skipScenario: missing } });
+        const { report } = await evaluate(scratch(), { baseline: { skipScenario: missing } });
         expect(report.arms[0]?.missing_scenarios).toEqual([missing]);
         expect(report.arms[0]?.withheld.join("\n")).toContain(`missing scenarios: ${missing}`);
         expect(report.comparison.refused).toContain("the arms reached different scenario sets");
         expect(report.accepted).toBe(false);
     });
 
-    test("a missing control verdict or an always-accept, always-abstain, or always-reject set leaves review unqualified", () => {
+    test("a missing control verdict or an always-accept, always-abstain, or always-reject set leaves review unqualified", async () => {
         const cases: Array<Partial<ReviewOptions>> = [
             { dropVerdict: "ctl-reversed_negation" },
             { verdict: () => "acceptable" },
@@ -208,15 +291,15 @@ describe("eval:compression-fidelity assembly", () => {
             { verdict: () => "violation" },
         ];
         for (const reviews of cases) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.accepted).toBe(false);
         }
     });
 
-    test("a missing cost field leaves cost incomplete, never zero", () => {
+    test("a missing cost field leaves cost incomplete, never zero", async () => {
         const { transform_elapsed_ms: _, ...serving } = SERVING;
-        const { report } = evaluate(scratch(), { baseline: { serving } });
+        const { report } = await evaluate(scratch(), { baseline: { serving } });
         const row = report.arms[0]?.rows.find((r) => r.cost.status !== "complete");
         expect(row?.cost.missing.join("\n")).toContain("transform_elapsed_ms");
         expect(report.arms[0]?.accepted).toBe(false);
@@ -224,7 +307,7 @@ describe("eval:compression-fidelity assembly", () => {
 });
 
 describe("eval:compression-fidelity gates", () => {
-    test("controls must be exactly the sealed set, each with one matching human verdict", () => {
+    test("controls must be exactly the sealed set, each with one matching human verdict", async () => {
         const cases: Array<[Partial<ReviewOptions>, string]> = [
             [
                 {
@@ -240,6 +323,24 @@ describe("eval:compression-fidelity gates", () => {
                 "no sealed wrong_identity",
             ],
             [{ editControls: (c) => [...c, { ...(c[0] ?? {}) }] }, "sealed more than once"],
+            [
+                {
+                    editControls: (c) => [
+                        ...c,
+                        { id: "ctl-second", kind: "reversed_negation", label: "violation" },
+                    ],
+                    editVerdicts: (v) => [
+                        ...v,
+                        {
+                            control: "ctl-second",
+                            verdict: "violation",
+                            reviewer: "reviewer-c",
+                            kind: "human",
+                        },
+                    ],
+                },
+                "reversed_negation is sealed 2 times",
+            ],
             [
                 {
                     editControls: (c) => [
@@ -275,21 +376,29 @@ describe("eval:compression-fidelity gates", () => {
             ],
         ];
         for (const [reviews, problem] of cases) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.controls.problems.join("\n")).toContain(problem);
         }
-        const { report } = evaluate(scratch(), { reviews: { controlsCorpus: "3".repeat(64) } });
+        const { report } = await evaluate(scratch(), {
+            reviews: { controlsCorpus: "3".repeat(64) },
+        });
         expect(report.controls.qualified).toBe(false);
     });
 
-    test("malformed control, verdict, and dispute entries are review errors", () => {
+    test("malformed control, verdict, and dispute entries are review errors", async () => {
         const cases: Array<Partial<ReviewOptions>> = [
             { editControls: (c) => [...c, { id: "ctl-x", kind: "reversed_negation" }] },
             { editVerdicts: (v) => [...v, { control: "ctl-x", verdict: "violation" }] },
+            {
+                editVerdicts: (v) =>
+                    v.map((x) =>
+                        x.control === "ctl-wrong_identity" ? { ...x, reviewer: "  " } : x,
+                    ),
+            },
         ];
         for (const reviews of cases) {
-            const { report } = evaluate(scratch(), { reviews });
+            const { report } = await evaluate(scratch(), { reviews });
             expect(report.controls.qualified).toBe(false);
             expect(report.arms[0]?.withheld.join("\n")).toContain("does not match its schema");
         }
@@ -306,77 +415,446 @@ describe("eval:compression-fidelity gates", () => {
         const judgments = JSON.parse(readFileSync(path, "utf8"));
         judgments.disputes.push({ arm: "baseline", scenario: allScenarios[0]?.s.id });
         writeFileSync(path, JSON.stringify(judgments));
-        const reviews = loadReviews(dir, SHA);
+        const reviews = await loadReviews(dir, SHA);
         expect(reviews.errors.join("\n")).toContain("a dispute does not match its schema");
     });
 
-    test("fewer than two approvers withhold acceptance", () => {
-        const { report } = evaluate(scratch(), {
-            reviews: { approvers: ["reviewer-a", "reviewer-a"] },
-        });
-        expect(report.arms[0]?.withheld).toContain("the batch has 1 of 2 approvers");
-        expect(report.accepted).toBe(false);
+    test("a review record with a blank or coerced batch, or a list field that is no list, is a review error", async () => {
+        const cases: Array<
+            [
+                (controls: Record<string, unknown>, judgments: Record<string, unknown>) => void,
+                string,
+            ]
+        > = [
+            [
+                (c, j) => {
+                    c.batch = {};
+                    j.batch = "[object Object]";
+                },
+                "controls.json names no batch",
+            ],
+            [
+                (c, j) => {
+                    c.batch = "";
+                    j.batch = "";
+                },
+                "names no batch",
+            ],
+            [
+                (_, j) => {
+                    j.disputes = {};
+                },
+                "disputes is not a list",
+            ],
+            [
+                (_, j) => {
+                    j.judgments = "none";
+                },
+                "judgments is not a list",
+            ],
+            [
+                (c) => {
+                    c.controls = {};
+                },
+                "controls is not a list",
+            ],
+            [
+                (_, j) => {
+                    j.control_verdicts = null;
+                },
+                "control_verdicts is not a list",
+            ],
+            [
+                (c) => {
+                    c.approved_by = "reviewer-a, reviewer-b";
+                },
+                "approved_by is not a list",
+            ],
+            [
+                (c) => {
+                    c.approved_by = ["reviewer-a", "reviewer-b", 7];
+                },
+                "an approver does not match its schema",
+            ],
+        ];
+        for (const [edit, error] of cases) {
+            const root = scratch();
+            const baseline = writeArm(root, { label: "baseline" });
+            const candidate = writeArm(root, { label: "candidate" });
+            const dir = writeReviews(root, {
+                arms: [
+                    { label: "baseline", files: baseline.files },
+                    { label: "candidate", files: candidate.files },
+                ],
+            });
+            const controls = JSON.parse(readFileSync(join(dir, "controls.json"), "utf8"));
+            const judgments = JSON.parse(readFileSync(join(dir, "judgments.json"), "utf8"));
+            edit(controls, judgments);
+            writeFileSync(join(dir, "controls.json"), JSON.stringify(controls));
+            writeFileSync(join(dir, "judgments.json"), JSON.stringify(judgments));
+            const reviews = await loadReviews(dir, SHA);
+            expect(reviews.errors.join("\n")).toContain(error);
+        }
     });
 
-    test("the comparison names regressions and resolution candidates, and a same-prompt pair is no treatment", () => {
+    test("fewer than two approvers withhold acceptance", async () => {
+        for (const approvers of [
+            ["reviewer-a", "reviewer-a"],
+            ["reviewer-a", ""],
+            ["reviewer-a", "   "],
+            ["reviewer-a", " reviewer-a "],
+        ]) {
+            const { report } = await evaluate(scratch(), { reviews: { approvers } });
+            expect(report.arms[0]?.withheld).toContain("the batch has 1 of 2 approvers");
+            expect(report.accepted).toBe(false);
+        }
+    });
+
+    test("the comparison names regressions and resolution candidates, and a same-prompt pair is no treatment", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.tier === "p1")?.s.id ?? "";
         const wrong = (id: string) => (id === scenario ? "p3" : undefined);
-        const comparisonOf = (report: ReturnType<typeof evaluate>["report"]) =>
+        const comparisonOf = (report: Awaited<ReturnType<typeof evaluate>>["report"]) =>
             report.comparison.rows.find((r) => r.scenario === scenario)?.comparison;
-        expect(comparisonOf(evaluate(scratch(), { candidate: { tier: wrong } }).report)).toBe(
-            "regression",
-        );
-        expect(comparisonOf(evaluate(scratch(), { baseline: { tier: wrong } }).report)).toBe(
-            "resolution_candidate",
-        );
-        const same = evaluate(scratch(), {
-            candidate: { system: "summarizer system prompt" },
-        }).report;
+        expect(
+            comparisonOf((await evaluate(scratch(), { candidate: { tier: wrong } })).report),
+        ).toBe("regression");
+        expect(
+            comparisonOf((await evaluate(scratch(), { baseline: { tier: wrong } })).report),
+        ).toBe("resolution_candidate");
+        const same = (
+            await evaluate(scratch(), {
+                candidate: { system: "summarizer system prompt" },
+            })
+        ).report;
         expect(same.comparison.treatment).toBe(false);
     });
 
-    test("unreported generation usage, an unknown send cost, or an unmeasured recovery leaves cost incomplete", () => {
-        const root = scratch();
-        const { report } = evaluate(root, {
-            tamper: (dir) => {
-                const source = corpus.cases[0]?.sources[0]?.id ?? "";
-                const path = join(dir, `real.${source}.json`);
-                const value = JSON.parse(readFileSync(path, "utf8"));
-                value.detail.usage = null;
-                writeFileSync(path, JSON.stringify(value));
-            },
-        });
-        const generation = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
-        expect(generation?.cost.missing.join("\n")).toContain("generation usage unreported");
+    test("unreported generation usage, an unknown send cost, or an unmeasured recovery leaves cost incomplete", async () => {
+        for (const usage of [
+            null,
+            {},
+            "reported",
+            0,
+            { note: "reported" },
+            { input_tokens: -1, output_tokens: 3 },
+            { input_tokens: 900 },
+        ]) {
+            const { report } = await evaluate(scratch(), {
+                tamper: (dir) => {
+                    const source = corpus.cases[0]?.sources[0]?.id ?? "";
+                    recapture(dir, source, (capture) => {
+                        (capture.detail as Record<string, unknown>).usage = usage;
+                    });
+                },
+            });
+            const generation = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
+            expect(generation?.cost.missing.join("\n")).toContain("generation usage unreported");
+        }
 
-        const forwarded = evaluate(scratch(), {
+        const forwarded = (
+            await evaluate(scratch(), {
+                tamper: (dir) => {
+                    write(dir, "forwarding-0.json", {
+                        mode: "forward",
+                        corpus_sha256: SHA,
+                        model: "claude-live",
+                        upstream_url: "https://api.example.test/v1/messages",
+                        pricing: { inputPerMTok: 3, outputPerMTok: 15 },
+                        context_limit: 200_000,
+                        spent_usd: 0.25,
+                        limits: {
+                            maxCalls: 40,
+                            maxOutputTokens: 1024,
+                            timeoutMs: 1000,
+                            spendCapUsd: 1,
+                        },
+                        stopped: null,
+                        attempted_sends: 1,
+                        acknowledged_responses: 1,
+                        complete: false,
+                        incomplete_reasons: ["cost unknown for a send"],
+                        refusals: [],
+                        exchanges: [
+                            {
+                                index: 0,
+                                tool_results: [],
+                                tool_uses: [],
+                                request: { body_text: "{}", body_sha256: sha256("{}") },
+                                response: {
+                                    outcome: "acknowledged",
+                                    model: "claude-live",
+                                    stop_reason: "end_turn",
+                                    truncated: false,
+                                    body_text: "",
+                                    body_sha256: null,
+                                    usage: null,
+                                    cost_usd: 0.25,
+                                    cost_known: false,
+                                },
+                            },
+                        ],
+                    });
+                },
+            })
+        ).report;
+        expect(forwarded.arms[0]?.rows[0]?.cost.missing.join("\n")).toContain("unknown send cost");
+
+        const recovery = (
+            await evaluate(scratch(), {
+                tamper: (dir) => {
+                    const entry = memoryExcluded;
+                    write(dir, "recovery.json", {
+                        schema_version: 1,
+                        corpus_sha256: SHA,
+                        owner: "opencode-delivery",
+                        case: entry?.case,
+                        source: entry?.s.source,
+                        scenario: entry?.s.id,
+                        stage: "recovery-eidnara-search",
+                        terminal: "discoverable",
+                        markers: [],
+                        detail: { tool: "eidnara_search" },
+                    });
+                },
+            })
+        ).report;
+        const row = recovery.arms[0]?.rows.find((r) => r.scenario === memoryExcluded?.s.id);
+        expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
+    });
+
+    test("the report carries each arm's validated forwarding spend", async () => {
+        const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
                 write(dir, "forwarding-0.json", {
                     mode: "forward",
                     corpus_sha256: SHA,
-                    limits: { maxCalls: 40 },
-                    complete: false,
-                    incomplete_reasons: ["cost unknown for a send"],
+                    model: "claude-live",
+                    upstream_url: "https://api.example.test/v1/messages",
+                    pricing: { inputPerMTok: 3, outputPerMTok: 15 },
+                    context_limit: 200_000,
+                    spent_usd: 0.6,
+                    limits: {
+                        maxCalls: 40,
+                        maxOutputTokens: 1024,
+                        timeoutMs: 1000,
+                        spendCapUsd: 1,
+                    },
+                    stopped: null,
+                    attempted_sends: 1,
+                    acknowledged_responses: 1,
+                    complete: true,
+                    incomplete_reasons: [],
+                    refusals: [],
                     exchanges: [
                         {
                             index: 0,
+                            tool_results: [],
+                            tool_uses: [],
                             request: { body_text: "{}", body_sha256: sha256("{}") },
                             response: {
+                                outcome: "acknowledged",
+                                model: "claude-live",
+                                stop_reason: "end_turn",
                                 truncated: false,
-                                body_text: "",
-                                body_sha256: null,
-                                cost_known: false,
+                                body_text: "ok",
+                                body_sha256: sha256("ok"),
+                                usage: {
+                                    input_tokens: 100_000,
+                                    output_tokens: 20_000,
+                                    cache_creation_input_tokens: 0,
+                                    cache_read_input_tokens: 0,
+                                },
+                                cost_usd: 0.6,
+                                cost_known: true,
                             },
                         },
                     ],
                 });
             },
-        }).report;
-        expect(forwarded.arms[0]?.rows[0]?.cost.missing.join("\n")).toContain("unknown send cost");
+        });
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(report.arms[0]?.forwarding).toEqual({ reports: 1, sends: 1, spent_usd: 0.6 });
+        expect(report.arms[1]?.forwarding).toEqual({ reports: 0, sends: 0, spent_usd: 0 });
+    });
 
-        const recovery = evaluate(scratch(), {
+    test("a served delivery recording a refusal other than history_absent is not a served cost", async () => {
+        const entry = allScenarios.find(
+            ({ s }) => s.serving.path === "natural" && s.serving.stage === "m0",
+        );
+        const scenario = entry?.s.id ?? "";
+        for (const [refusals, incomplete] of [
+            [["raw_tail_leak"], true],
+            [["not_applied"], true],
+            [["history_absent"], false],
+            [[], false],
+        ] as Array<[string[], boolean]>) {
+            const { report } = await evaluate(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${scenario}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.detail.refusals = refusals;
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+            const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+            expect(report.arms[0]?.identity_errors).toEqual([]);
+            expect(row?.cost.missing.includes(`delivery.${scenario}.json: refusals`)).toBe(
+                incomplete,
+            );
+        }
+    });
+
+    test("an m1 scenario row carries the witness's m1, warm, and cold-m0 deliveries", async () => {
+        const m1 = allScenarios.find(({ s }) => s.serving.stage === "m1")?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => rmSync(join(dir, `delivery.${m1}.warm.json`)),
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === m1);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("no warm serving observation");
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("source-level serving observations are costed at arm scope", async () => {
+        // C2.V2 has no m1 scenario, so the delivery witness labels its m1, warm, and cold-m0
+        // observations with the source ID; their cost belongs to the arm, not to a row.
+        const c = corpus.cases.find((k) => k.sources.some((v) => v.id === "C2.V2"));
+        const sourceLevel = (dir: string, serving: Record<string, unknown>) => {
+            const served = JSON.parse(readFileSync(join(dir, "delivery.C2.S6.json"), "utf8"));
+            for (const stage of ["m1", "warm", "cold-m0"]) {
+                write(dir, `source.${stage}.json`, {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: c?.id,
+                    source: "C2.V2",
+                    scenario: "C2.V2",
+                    stage,
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        served_tier: "p1",
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                        serving: {
+                            ...serving,
+                            serving_kind: stage === "warm" ? "warm_repeat" : "cold",
+                        },
+                    },
+                });
+            }
+        };
+        const costed = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => sourceLevel(dir, SERVING),
+        });
+        expect(costed.report.arms[0]?.identity_errors).toEqual([]);
+        expect(costed.report.arms[0]?.source_serving.map((r) => r.stage)).toEqual([
+            "cold-m0",
+            "m1",
+            "warm",
+        ]);
+        expect(costed.report.arms[0]?.accepted).toBe(true);
+        const uncosted = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => sourceLevel(dir, { ...SERVING, estimator: "   " }),
+        });
+        expect(uncosted.report.arms[0]?.withheld.join("\n")).toContain(
+            "source-level serving cost incomplete: source.cold-m0.json: estimator",
+        );
+        expect(uncosted.report.arms[0]?.accepted).toBe(false);
+        const absent = await evaluate(scratch(), { baseline: { skipSourceLevel: true } });
+        expect(absent.report.arms[0]?.withheld).toContain(
+            "source-level delivery of C2.V2 lacks its m1, warm, cold-m0 stages",
+        );
+        expect(absent.report.arms[0]?.accepted).toBe(false);
+        const partial = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
             tamper: (dir) => {
-                const entry = allScenarios[1];
+                sourceLevel(dir, SERVING);
+                rmSync(join(dir, "source.warm.json"));
+            },
+        });
+        expect(partial.report.arms[0]?.withheld).toContain(
+            "source-level delivery of C2.V2 lacks its warm stage",
+        );
+        const sparse = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => {
+                sourceLevel(dir, SERVING);
+                const path = join(dir, "source.cold-m0.json");
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = "p5";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(sparse.report.arms[0]?.withheld).toContain(
+            "source-level delivery source.cold-m0.json served p5, where the witness serves p1",
+        );
+        const failed = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => {
+                sourceLevel(dir, SERVING);
+                const path = join(dir, "source.warm.json");
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.terminal = "unqualified";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(failed.report.arms[0]?.identity_errors).toEqual([]);
+        expect(failed.report.arms[0]?.withheld).toContain(
+            "source-level delivery source.warm.json ended unqualified",
+        );
+        expect(failed.report.arms[0]?.accepted).toBe(false);
+    });
+
+    test("a real capture with no attempt earns no generation cost", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                recapture(dir, source, (capture) => {
+                    (capture.detail as Record<string, unknown>).attempts = [];
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
+        expect(row?.cost.missing.join("\n")).toContain(
+            `real.${source}.json: no generation attempt`,
+        );
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("a real arm credits generation only from a published real capture", async () => {
+        // The delivery witness labels a source only when it has no m1 scenario; C2.V2 is that
+        // source, so its source-level observation is accepted and tests the credit rule.
+        const c = corpus.cases.find((k) => k.sources.some((v) => v.id === "C2.V2"));
+        const source = "C2.V2";
+        const { report } = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => {
+                write(dir, "padding.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: c?.id,
+                    source,
+                    scenario: source,
+                    stage: "m1",
+                    terminal: "served",
+                    markers: [],
+                    detail: { attempts: [{}] },
+                });
+            },
+        });
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        const served = allScenarios.find(({ s }) => s.source === source)?.s.id;
+        const row = report.arms[0]?.rows.find((r) => r.scenario === served);
+        expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
+    });
+
+    test("a negative recovery measurement leaves cost incomplete", async () => {
+        const entry = memoryExcluded;
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
                 write(dir, "recovery.json", {
                     schema_version: 1,
                     corpus_sha256: SHA,
@@ -384,22 +862,346 @@ describe("eval:compression-fidelity gates", () => {
                     case: entry?.case,
                     source: entry?.s.source,
                     scenario: entry?.s.id,
-                    stage: "served-again",
+                    stage: "recovery-eidnara-search",
                     terminal: "discoverable",
-                    markers: ["cf-recovery-search"],
-                    detail: {},
+                    markers: [],
+                    detail: { ...RECOVERY_DETAIL, calls: -1, result_utf8_bytes: -400 },
                 });
             },
-        }).report;
-        const row = recovery.arms[0]?.rows.find((r) => r.scenario === allScenarios[1]?.s.id);
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === entry?.s.id);
         expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("a serving record names the producer's estimator", async () => {
+        const serving = {
+            ...SERVING,
+            estimator: "another-estimator v2",
+            invocation_charged_tokens: 0,
+        };
+        const { report } = await evaluate(scratch(), {
+            baseline: { serving },
+            candidate: { serving },
+        });
+        expect(report.arms.every((a) => a.identity_errors.length === 0)).toBe(true);
+        const row = report.arms[0]?.rows.find((r) => r.cost.status !== "complete");
+        expect(row?.cost.missing.join("\n")).toContain("estimator");
+        expect(report.accepted).toBe(false);
+    });
+
+    test("arms sharing a label are refused", async () => {
+        const baseline = writeArm(scratch(), { label: "shared" });
+        const candidate = writeArm(scratch(), {
+            label: "shared",
+            system: "candidate system prompt",
+        });
+        const reviews = writeReviews(scratch(), {
+            arms: [{ label: "shared", files: baseline.files }],
+        });
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: await loadArm(baseline.dir, corpus, SHA),
+            candidate: await loadArm(candidate.dir, corpus, SHA),
+            reviews: await loadReviews(reviews, SHA),
+        });
+        expect(report.comparison.refused).toContain("the arms share the label shared");
+        expect(report.accepted).toBe(false);
+    });
+
+    test("a pass line that measured no admission or no elapsed time records those costs as unreported", () => {
+        const delivery = (line: string) =>
+            ({
+                label: "cold-m0",
+                pass: parseRustPassLine(line),
+                capture: { request: { body: { messages: [] } } },
+                verdict: { leaks: [] },
+            }) as unknown as Delivery;
+        const head =
+            "[eidnara] rust pass: decision=DEFER reason=steady served_from=transform in=12 out=12 applied=true";
+        const measured = servingCost(
+            delivery(
+                `${head} admission=fits invocation_bytes=9000 invocation_charged=3215 elapsed=41.7 ms module=23.4 ms`,
+            ),
+        );
+        expect(measured.invocation_charged_tokens).toBe(3215);
+        expect(measured.transform_elapsed_ms).toBe(41.7);
+        const unadmitted = servingCost(
+            delivery(
+                `${head} admission=none invocation_bytes=0 invocation_charged=0 elapsed=3.0 ms module=1.0 ms`,
+            ),
+        );
+        expect(unadmitted.invocation_charged_tokens).toBeNull();
+        expect(unadmitted.invocation_bytes).toBeNull();
+        const untimed = servingCost(
+            delivery(`${head} admission=fits invocation_bytes=9000 invocation_charged=3215`),
+        );
+        expect(untimed.transform_elapsed_ms).toBeNull();
+        const uncharged = servingCost(
+            delivery(`${head} admission=fits elapsed=3.0 ms module=1.0 ms`),
+        );
+        expect(uncharged.invocation_charged_tokens).toBeNull();
+        expect(uncharged.invocation_bytes).toBeNull();
+    });
+
+    test("a serving cost that is not a measurement leaves cost incomplete", async () => {
+        const cases: Array<[Record<string, unknown>, string]> = [
+            [{ ...SERVING, invocation_charged_tokens: "unreported" }, "invocation_charged_tokens"],
+            [{ ...SERVING, invocation_bytes: null }, "invocation_bytes"],
+            [{ ...SERVING, admission: "none" }, "admission"],
+            [{ ...SERVING, admission: "declined" }, "admission"],
+            [{ ...SERVING, admission: "maybe" }, "admission"],
+            [{ ...SERVING, raw_source_leaks: 1 }, "raw_source_leaks"],
+            [{ ...SERVING, invocation_charged_tokens: 11_000 }, "invocation_charged_tokens"],
+            [{ ...SERVING, invocation_bytes: 0, invocation_charged_tokens: 0 }, "invocation_bytes"],
+            [{ ...SERVING, request_body_utf8_bytes: 0 }, "request_body_utf8_bytes"],
+            [{ ...SERVING, request_body_utf8_bytes: 40_000.5 }, "request_body_utf8_bytes"],
+            [{ ...SERVING, invocation_bytes: 39_000.5 }, "invocation_bytes"],
+            [{ ...SERVING, serving_kind: "warm_repeat" }, "serving_kind"],
+            [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
+            [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
+            [{ ...SERVING, estimator: "" }, "estimator"],
+            [{ ...SERVING, estimator: "   " }, "estimator"],
+            [{ ...SERVING, serving_kind: "lukewarm" }, "serving_kind"],
+        ];
+        for (const [serving, field] of cases) {
+            const { report } = await evaluate(scratch(), { baseline: { serving } });
+            const row = report.arms[0]?.rows.find((r) => r.cost.status !== "complete");
+            expect(row?.cost.missing.join("\n")).toContain(field);
+            expect(report.arms[0]?.accepted).toBe(false);
+        }
+    });
+
+    test("a recovery observation does not stand in for a missing serving cost", async () => {
+        const entry = memoryExcluded;
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                delete value.detail.serving;
+                writeFileSync(path, JSON.stringify(value));
+                write(dir, "recovery.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "recovery-eidnara-search",
+                    terminal: "discoverable",
+                    markers: [],
+                    detail: RECOVERY_DETAIL,
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(row?.cost.missing).toContain(`delivery.${scenario}.json: serving`);
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("a serving record's own stage field cannot relabel the observation in the cost row", async () => {
+        const { report } = await evaluate(scratch(), {
+            baseline: { serving: { ...SERVING, stage: "warm" } },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === M0_SCENARIO);
+        expect(row?.cost.serving[0]?.stage).toBe("served");
+    });
+
+    test("the qualification and Pi witnesses serve tiers without an OpenCode cost record", async () => {
+        const entry = allScenarios.find(({ s }) => s.id === "C1.S1");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                for (const stage of ["qualification", "pi-m1"]) {
+                    write(dir, `${stage}.json`, {
+                        schema_version: 1,
+                        corpus_sha256: SHA,
+                        owner: "opencode-delivery",
+                        case: entry?.case,
+                        source: entry?.s.source,
+                        scenario,
+                        stage,
+                        terminal: "served",
+                        markers: [],
+                        detail: {
+                            served_tier: served.detail.served_tier,
+                            generation_capture_sha256: served.detail.generation_capture_sha256,
+                        },
+                    });
+                }
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.status).toBe("complete");
+        expect(row?.cost.serving.length).toBe(3);
+    });
+
+    test("the replay's tier observations carry no OpenCode serving cost", async () => {
+        const entry = allScenarios.find(({ s }) => s.id === M0_SCENARIO);
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "replay.m1.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "daemon.compression_fidelity.replay",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "m1",
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        tier: entry?.s.serving.tier,
+                        path: "natural",
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).not.toContain("replay.m1.json: serving");
+        expect(row?.cost.serving.length).toBe(1);
+    });
+
+    test("a stage named after an exempt witness on another scenario still needs its cost", async () => {
+        const entry = allScenarios.find(({ s }) => s.id === "C1.S3");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "spoof.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "qualification",
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        served_tier: served.detail.served_tier,
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("spoof.json: serving");
+    });
+
+    test("the hint-truncation artifact of C4.S6 is neither served nor costed", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "hint_truncated");
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                write(dir, "hint-truncation.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: scenario?.case,
+                    source: scenario?.s.source,
+                    scenario: scenario?.s.id,
+                    stage: "hint-truncation",
+                    terminal: "served",
+                    markers: ["cf-delivery-hint-fragment-input"],
+                    detail: {
+                        case_fragment: "- …x…",
+                        fragment_utf16_units: 5,
+                        qualifier_kept: true,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario?.s.id);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.deterministic).toBe("pass");
+        expect(row?.cost.status).toBe("complete");
+        expect(row?.cost.serving.length).toBe(1);
+    });
+
+    test("a served delivery observation without a tier is costed as missing its tier", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "untiered.json", {
+                    ...served,
+                    stage: "served-again",
+                    detail: {
+                        serving: served.detail.serving,
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("untiered.json: served_tier");
+    });
+
+    test("every serving observation needs its cost, whatever its siblings record", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "served-again.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "served-again",
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        served_tier: served.detail.served_tier,
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("served-again.json: serving");
+        expect(row?.cost.status).toBe("incomplete");
     });
 });
 
 describe("eval:compression-fidelity judgments", () => {
-    const discoverableFirst = allScenarios.find(({ s }) =>
-        (s.expectations[0]?.accepted as readonly string[] | undefined)?.includes("discoverable"),
-    )?.s;
+    const discoverableFirst = memoryExcluded?.s;
+    /** Marks the first obligation whose expectation accepts `discoverable` as recovered. */
+    const markDiscoverable = (judgment: Record<string, unknown>) => {
+        const index = discoverableFirst?.expectations.findIndex((e) =>
+            (e.accepted as readonly string[]).includes("discoverable"),
+        );
+        judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
+            (o, i) => (i === index ? { ...o, disposition: "discoverable" } : o),
+        );
+    };
 
     function rewrite(
         root: string,
@@ -423,16 +1225,16 @@ describe("eval:compression-fidelity judgments", () => {
         return { baseline, reviewsDir };
     }
 
-    function rowOf(root: string, baselineDir: string, reviewsDir: string, scenario: string) {
+    async function rowOf(root: string, baselineDir: string, reviewsDir: string, scenario: string) {
         const { report } = assemble({
             corpus,
             corpusPath: "corpus.json",
             corpusSha256: SHA,
             revision: "rev",
             mode: "offline",
-            baseline: loadArm(baselineDir, corpus, SHA),
-            candidate: loadArm(join(root, "candidate"), corpus, SHA),
-            reviews: loadReviews(reviewsDir, SHA),
+            baseline: await loadArm(baselineDir, corpus, SHA),
+            candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
         });
         return report.arms[0]?.rows.find((r) => r.scenario === scenario);
     }
@@ -442,17 +1244,14 @@ describe("eval:compression-fidelity judgments", () => {
         scenario: string,
     ) => judgments.judgments.find((j) => j.arm === "baseline" && j.scenario === scenario) ?? {};
 
-    test("a discoverable obligation needs a recovery observation", () => {
+    test("a discoverable obligation needs a recovery observation", async () => {
         const scenario = discoverableFirst;
         expect(scenario).toBeDefined();
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
-            const judgment = judgmentFor(j, scenario?.id ?? "");
-            judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
-                (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
-            );
+            markDiscoverable(judgmentFor(j, scenario?.id ?? ""));
         });
-        expect(rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "")?.recovery).toBe(
+        expect((await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? ""))?.recovery).toBe(
             "unverified",
         );
         write(baseline.dir, "recovery.json", {
@@ -465,14 +1264,86 @@ describe("eval:compression-fidelity judgments", () => {
             stage: "recovery-eidnara-search",
             terminal: "discoverable",
             markers: [],
-            detail: { calls: 1, result_utf8_bytes: 400 },
+            detail: RECOVERY_DETAIL,
         });
-        const row = rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.recovery).toBe("witnessed");
         expect(row?.cost.status).toBe("complete");
     });
 
-    test("a lost obligation or a disposition outside the accepted set is recall", () => {
+    test("a recovery whose result carries no memory witnesses nothing", async () => {
+        const scenario = discoverableFirst;
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            markDiscoverable(judgmentFor(j, scenario?.id ?? ""));
+        });
+        for (const detail of [
+            { ...RECOVERY_DETAIL, result_carries_memory: false },
+            { ...RECOVERY_DETAIL, result_carries_memory: undefined },
+            { ...RECOVERY_DETAIL, calls: 0 },
+            { ...RECOVERY_DETAIL, result_utf8_bytes: 0 },
+            { ...RECOVERY_DETAIL, tool: undefined },
+            { ...RECOVERY_DETAIL, tool: "read" },
+            { ...RECOVERY_DETAIL, arguments: { query: "manifest", sources: ["project"] } },
+            { ...RECOVERY_DETAIL, arguments: undefined },
+        ]) {
+            write(baseline.dir, "recovery.json", {
+                schema_version: 1,
+                corpus_sha256: SHA,
+                owner: "opencode-delivery",
+                case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+                source: scenario?.source,
+                scenario: scenario?.id,
+                stage: "recovery-eidnara-search",
+                terminal: "discoverable",
+                markers: [],
+                detail,
+            });
+            const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+            expect(row?.recovery).toBe("unverified");
+            expect(row?.withheld).toContain("recovery unverified");
+        }
+    });
+
+    test("a stage that merely contains search or recover witnesses no recovery", async () => {
+        const scenario = discoverableFirst;
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            markDiscoverable(judgmentFor(j, scenario?.id ?? ""));
+        });
+        write(baseline.dir, "note.json", {
+            schema_version: 1,
+            corpus_sha256: SHA,
+            owner: "opencode-delivery",
+            case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+            source: scenario?.source,
+            scenario: scenario?.id,
+            stage: "research-note",
+            terminal: "served",
+            markers: ["unrecoverable"],
+            detail: RECOVERY_DETAIL,
+        });
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        expect(row?.recovery).toBe("unverified");
+        expect(row?.cost.recovery).toEqual([]);
+        write(baseline.dir, "served.json", {
+            schema_version: 1,
+            corpus_sha256: SHA,
+            owner: "opencode-delivery",
+            case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+            source: scenario?.source,
+            scenario: scenario?.id,
+            stage: "recovery-eidnara-search",
+            terminal: "served",
+            markers: [],
+            detail: RECOVERY_DETAIL,
+        });
+        const served = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        expect(served?.recovery).toBe("unverified");
+        expect(served?.cost.recovery).toEqual([]);
+    });
+
+    test("a lost obligation or a disposition outside the accepted set is recall", async () => {
         const scenario = allScenarios.find(
             ({ s }) =>
                 s.expectations.length >= 3 &&
@@ -493,7 +1364,7 @@ describe("eval:compression-fidelity judgments", () => {
                           : o,
             );
         });
-        const row = rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.preservation.map((p) => p.status)).toEqual([
             "recall",
             "recall",
@@ -502,7 +1373,56 @@ describe("eval:compression-fidelity judgments", () => {
         expect(row?.withheld).toContain("preservation");
     });
 
-    test("agreeing human judgments in any obligation order are reviewed", () => {
+    test("a judgment that repeats an obligation or misstates its forbidden conclusions is a review error", async () => {
+        const scenario = allScenarios.find(({ s }) => s.forbidden.length > 0)?.s;
+        expect(scenario).toBeDefined();
+        const edits: Array<(judgment: Record<string, unknown>) => void> = [
+            (judgment) => {
+                const [first] = judgment.obligations as Array<Record<string, unknown>>;
+                judgment.obligations = [
+                    ...(judgment.obligations as unknown[]),
+                    { ...first, preserved: false },
+                ];
+            },
+            (judgment) => {
+                judgment.forbidden_violated = scenario?.forbidden[0];
+            },
+            (judgment) => {
+                delete judgment.forbidden_violated;
+            },
+            (judgment) => {
+                judgment.citations = "C1.V1#0";
+            },
+            (judgment) => {
+                judgment.reviewer = "   ";
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", uncertainty: "low" });
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", citations: ["C1.V1#0"] });
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", citations: [], uncertainty: "low" });
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", citations: [" "], uncertainty: "low" });
+            },
+        ];
+        for (const edit of edits) {
+            const root = scratch();
+            const { baseline, reviewsDir } = rewrite(root, (j) =>
+                edit(judgmentFor(j, scenario?.id ?? "")),
+            );
+            const reviews = await loadReviews(reviewsDir, SHA);
+            expect(reviews.errors.join("\n")).toContain("a judgment does not match its schema");
+            const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+            expect(row?.semantic_review).toBe("unreviewed");
+            expect(row?.consumer_safety).toBe("unreviewed");
+        }
+    });
+
+    test("agreeing human judgments in any obligation order are reviewed", async () => {
         const scenario = allScenarios.find(({ s }) => s.expectations.length >= 2)?.s;
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
@@ -514,12 +1434,131 @@ describe("eval:compression-fidelity judgments", () => {
                 obligations: [...(original.obligations as unknown[])].reverse(),
             });
         });
-        expect(rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "")?.semantic_review).toBe(
-            "reviewed",
-        );
+        expect(
+            (await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? ""))?.semantic_review,
+        ).toBe("reviewed");
     });
 
-    test("disagreeing human judgments and an open dispute are disputed; a resolved dispute is not", () => {
+    test("a judgment binds only to the arm it names, even over byte-identical artifacts", async () => {
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            j.judgments = j.judgments.filter((judgment) => judgment.arm === "baseline");
+        });
+        const baseArm = await loadArm(baseline.dir, corpus, SHA);
+        const candArm = await loadArm(join(root, "candidate"), corpus, SHA);
+        expect(candArm.evidence.map((e) => e.sha256)).toEqual(
+            baseArm.evidence.map((e) => e.sha256),
+        );
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: baseArm,
+            candidate: candArm,
+            reviews: await loadReviews(reviewsDir, SHA),
+        });
+        const [base, cand] = report.arms;
+        expect(base?.rows.every((r) => r.semantic_review === "reviewed")).toBe(true);
+        expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+    });
+
+    test("a judgment whose artifact hash matches no observation of its row withholds acceptance", async () => {
+        const scenario = allScenarios[0]?.s.id ?? "";
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            j.judgments.push({
+                ...judgmentFor(j, scenario),
+                id: "stale-dissent",
+                reviewer: "reviewer-d",
+                artifact_sha256: "f".repeat(64),
+                abstained: true,
+            });
+        });
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: await loadArm(baseline.dir, corpus, SHA),
+            candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
+        });
+        expect(report.arms[0]?.withheld).toContain(
+            `a judgment names unknown artifact ${"f".repeat(64)} for baseline/${scenario}`,
+        );
+        expect(report.accepted).toBe(false);
+    });
+
+    test("a judgment naming an undeclared obligation withholds acceptance", async () => {
+        const scenario = allScenarios[0]?.s.id ?? "";
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            const judgment = judgmentFor(j, scenario);
+            judgment.obligations = [
+                ...(judgment.obligations as unknown[]),
+                { obligation: "C9.O9", disposition: "visible", preserved: false },
+            ];
+        });
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: await loadArm(baseline.dir, corpus, SHA),
+            candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
+        });
+        expect(report.arms[0]?.withheld).toContain(
+            `a judgment names unknown obligation C9.O9 for ${scenario}`,
+        );
+        expect(report.accepted).toBe(false);
+    });
+
+    test("a judgment or dispute naming an unknown arm or scenario withholds acceptance", async () => {
+        const scenario = allScenarios[0]?.s.id ?? "";
+        for (const stray of [
+            { kind: "dispute", arm: "basline", scenario },
+            { kind: "dispute", arm: "baseline", scenario: "C9.S9" },
+            { kind: "judgment", arm: "basline", scenario },
+            { kind: "judgment", arm: "baseline", scenario: "C9.S9" },
+        ]) {
+            const root = scratch();
+            const { baseline, reviewsDir } = rewrite(root, (j) => {
+                if (stray.kind === "dispute") {
+                    j.disputes.push({ arm: stray.arm, scenario: stray.scenario, resolved: false });
+                } else {
+                    j.judgments.push({
+                        ...judgmentFor(j, scenario),
+                        id: "dissent",
+                        reviewer: "reviewer-d",
+                        arm: stray.arm,
+                        scenario: stray.scenario,
+                        abstained: true,
+                    });
+                }
+            });
+            const { report } = assemble({
+                corpus,
+                corpusPath: "corpus.json",
+                corpusSha256: SHA,
+                revision: "rev",
+                mode: "offline",
+                baseline: await loadArm(baseline.dir, corpus, SHA),
+                candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+                reviews: await loadReviews(reviewsDir, SHA),
+            });
+            expect(report.arms[0]?.withheld).toContain(
+                `a ${stray.kind} names unknown arm or scenario ${stray.arm}/${stray.scenario}`,
+            );
+            expect(report.accepted).toBe(false);
+        }
+    });
+
+    test("disagreeing human judgments and an open dispute are disputed; a resolved dispute is not", async () => {
         const [first, second, third] = allScenarios.map(({ s }) => s);
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
@@ -534,14 +1573,14 @@ describe("eval:compression-fidelity judgments", () => {
             j.disputes.push({ arm: "baseline", scenario: third?.id, resolved: true });
         });
         const row = (s?: { id: string }) => rowOf(root, baseline.dir, reviewsDir, s?.id ?? "");
-        expect(row(first)?.semantic_review).toBe("disputed");
-        expect(row(first)?.consumer_safety).toBe("unreviewed");
-        expect(row(second)?.semantic_review).toBe("disputed");
-        expect(row(second)?.withheld).toContain("semantic review disputed");
-        expect(row(third)?.semantic_review).toBe("reviewed");
+        expect((await row(first))?.semantic_review).toBe("disputed");
+        expect((await row(first))?.consumer_safety).toBe("unreviewed");
+        expect((await row(second))?.semantic_review).toBe("disputed");
+        expect((await row(second))?.withheld).toContain("semantic review disputed");
+        expect((await row(third))?.semantic_review).toBe("reviewed");
     });
 
-    test("abstention, forbidden conclusions, model-only judgments, and disputes withhold credit", () => {
+    test("abstention, forbidden conclusions, model-only judgments, and disputes withhold credit", async () => {
         const permitted = allScenarios.find(
             ({ s }) =>
                 s.abstention === "permitted" &&
@@ -569,16 +1608,30 @@ describe("eval:compression-fidelity judgments", () => {
             j.disputes.push({ arm: "baseline", scenario: disputed?.id, resolved: false });
         });
         const row = (s?: { id: string }) => rowOf(root, baseline.dir, reviewsDir, s?.id ?? "");
-        expect(row(permitted)?.consumer_safety).toBe("abstained");
-        expect(row(forbidden)?.consumer_safety).toBe("false-authoritative");
-        expect(row(withForbidden)?.consumer_safety).toBe("false-authoritative");
-        expect(row(modelOnly)?.semantic_review).toBe("model_only");
-        expect(row(disputed)?.semantic_review).toBe("disputed");
-        const abstainedUnavailable = row(permitted)?.preservation.filter(
+        expect((await row(permitted))?.consumer_safety).toBe("abstained");
+        expect((await row(forbidden))?.consumer_safety).toBe("false-authoritative");
+        expect((await row(withForbidden))?.consumer_safety).toBe("false-authoritative");
+        expect((await row(withForbidden))?.withheld).toContain(
+            "consumer safety false-authoritative",
+        );
+        expect((await row(modelOnly))?.semantic_review).toBe("model_only");
+        expect((await row(disputed))?.semantic_review).toBe("disputed");
+        const abstainedUnavailable = (await row(permitted))?.preservation.filter(
             (p) => p.disposition === "unavailable",
         );
         expect(abstainedUnavailable?.length).toBeGreaterThan(0);
         expect(abstainedUnavailable?.every((p) => p.status === "recall")).toBe(true);
+    });
+
+    test("a forbidden conclusion the scenario does not declare still withholds safety", async () => {
+        const scenario = allScenarios[0]?.s;
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            judgmentFor(j, scenario?.id ?? "").forbidden_violated = ["C9.X9"];
+        });
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        expect(row?.consumer_safety).toBe("false-authoritative");
+        expect(row?.withheld).toContain("consumer safety false-authoritative");
     });
 });
 
@@ -592,7 +1645,7 @@ describe("eval:compression-fidelity command", () => {
         expect(() => parseArgs(base.slice(2))).toThrow("--baseline is required");
     });
 
-    test("the default run sends nothing and writes only owner-only files outside the repository", () => {
+    test("the default run sends nothing and writes only owner-only files outside the repository", async () => {
         const root = scratch();
         const baseline = writeArm(root, { label: "baseline" });
         const candidate = writeArm(root, { label: "candidate" });
@@ -610,9 +1663,9 @@ describe("eval:compression-fidelity command", () => {
         };
         globalThis.fetch = Object.assign(spy, { preconnect: original.preconnect });
         const out = join(root, "out");
-        let written: ReturnType<typeof run> | undefined;
+        let written: Awaited<ReturnType<typeof run>> | undefined;
         try {
-            written = run({
+            written = await run({
                 baseline: baseline.dir,
                 candidate: candidate.dir,
                 reviews,
@@ -628,8 +1681,10 @@ describe("eval:compression-fidelity command", () => {
         expect(readdirSync(out).sort()).toEqual(["manifest.json", "report.json"]);
         expect(statSync(out).mode & 0o777).toBe(0o700);
         expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
+        const published = JSON.parse(readFileSync(written?.report ?? "", "utf8"));
+        expect(published.manifest_sha256).toBe(sha256(readFileSync(written?.manifest ?? "")));
         const inside = resolve(import.meta.dir, "eval-out");
-        expect(() =>
+        await expect(
             run({
                 baseline: baseline.dir,
                 candidate: candidate.dir,
@@ -638,6 +1693,141 @@ describe("eval:compression-fidelity command", () => {
                 corpus: CORPUS_PATH,
                 mode: "offline",
             }),
-        ).toThrow("inside the repository");
+        ).rejects.toThrow("inside the repository");
     });
+
+    test("evidence arms may be named through parent-relative paths", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const reviews = writeReviews(root, {
+            arms: [
+                { label: "baseline", files: baseline.files },
+                { label: "candidate", files: candidate.files },
+            ],
+        });
+        const written = await run({
+            baseline: `${root}/candidate/../baseline`,
+            candidate: `${candidate.dir}/./`,
+            reviews,
+            out: join(root, "out"),
+            corpus: CORPUS_PATH,
+            mode: "offline",
+        });
+        const manifest = JSON.parse(readFileSync(written.manifest, "utf8"));
+        expect(manifest.arms.map((a: { label: string }) => a.label)).toEqual([
+            "baseline",
+            "candidate",
+        ]);
+        expect(statSync(baseline.dir).isDirectory()).toBe(true);
+    });
+
+    test("an output directory that is an evidence arm is refused before any write", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const reviews = writeReviews(root, {
+            arms: [
+                { label: "baseline", files: baseline.files },
+                { label: "candidate", files: candidate.files },
+            ],
+        });
+        chmodSync(baseline.dir, 0o700);
+        chmodSync(candidate.dir, 0o700);
+        for (const out of [baseline.dir, join(candidate.dir, ".", "")]) {
+            await expect(
+                run({
+                    baseline: baseline.dir,
+                    candidate: candidate.dir,
+                    reviews,
+                    out,
+                    corpus: CORPUS_PATH,
+                    mode: "offline",
+                }),
+            ).rejects.toThrow("--out is an evidence arm");
+        }
+        const link = join(root, "link");
+        symlinkSync(baseline.dir, link);
+        await expect(
+            run({
+                baseline: baseline.dir,
+                candidate: candidate.dir,
+                reviews,
+                out: join(link, "nested", ".."),
+                corpus: CORPUS_PATH,
+                mode: "offline",
+            }),
+        ).rejects.toThrow("--out is an evidence arm");
+        expect(readdirSync(baseline.dir)).not.toContain("manifest.json");
+        expect(readdirSync(candidate.dir)).not.toContain("report.json");
+    });
+
+    // With a discovery variable set, git and the reader both defer to it, so the fixture
+    // repositories below would not be the ones resolved.
+    const discovery = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"];
+    test.skipIf(discovery.some((name) => process.env[name] !== undefined))(
+        "the repository revision is the commit git rev-parse HEAD names in every layout",
+        async () => {
+            const root = scratch();
+            // A git hook exports variables such as GIT_INDEX_FILE that would redirect the
+            // fixture commands into the enclosing repository.
+            const env = Object.fromEntries(
+                Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+            );
+            const git = (cwd: string, ...args: string[]) => {
+                const result = Bun.spawnSync(["git", ...args], { cwd, env, stderr: "pipe" });
+                if (!result.success) throw new Error(result.stderr.toString());
+                return result.stdout.toString().trim();
+            };
+            const commit = (cwd: string, message: string) =>
+                git(
+                    cwd,
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                );
+            const matches = async (cwd: string) =>
+                expect(await repositoryRevision(cwd)).toBe(git(cwd, "rev-parse", "HEAD"));
+            const repo = join(root, "repo");
+            const nested = join(repo, "a", "b");
+            const worktree = join(root, "worktree");
+            mkdirSync(nested, { recursive: true });
+            git(repo, "init", "-q", "-b", "main");
+            expect(await repositoryRevision(repo)).toBe("unknown");
+            commit(repo, "one");
+            await matches(repo);
+            await matches(nested);
+            git(repo, "worktree", "add", "-q", "-b", "side", worktree);
+            commit(worktree, "two");
+            await matches(worktree);
+            git(repo, "pack-refs", "--all");
+            expect(readdirSync(join(repo, ".git", "refs", "heads"))).toEqual([]);
+            await matches(repo);
+            await matches(worktree);
+            git(repo, "checkout", "-q", "--detach");
+            await matches(repo);
+            // HEAD naming a ref outside refs/heads is resolved by git itself.
+            git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+            git(repo, "symbolic-ref", "HEAD", "refs/remotes/origin/main");
+            await matches(repo);
+            expect(await repositoryRevision(root)).toBe("unknown");
+            const head = git(repo, "rev-parse", "HEAD");
+            writeFileSync(join(repo, "untracked.txt"), "u\n");
+            expect(await repositoryRevision(repo)).toBe(`${head}-dirty`);
+            git(repo, "add", "untracked.txt");
+            expect(await repositoryRevision(repo)).toBe(`${head}-dirty`);
+            commit(repo, "three");
+            expect(await repositoryRevision(repo)).toBe(git(repo, "rev-parse", "HEAD"));
+        },
+    );
 });

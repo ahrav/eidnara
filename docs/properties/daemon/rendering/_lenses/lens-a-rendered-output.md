@@ -258,7 +258,7 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
 15. `transform.rs:9114-9115` — `render_user_hint` truncates to
     `USER_HINT_TOTAL_CHAR_CAP` (800, `:110`) and `debug_assert!`s the result. The
     inputs are capped at 3 fragments (`:113`, applied `:9097`) of 80 UTF-16 units
-    each (`:109`, applied `:9098`), so the wrapped maximum is 604 UTF-16 units.
+    each (`:109`, applied `:9098`), so the wrapped maximum is 589 UTF-16 units.
     The 800 cap cannot bind. Record 10.
 16. `transform.rs:9070-9082` — `utf16_prefix` measures in UTF-16 units but slices
     on whole scalars, so no truncation can emit a lone surrogate.
@@ -454,7 +454,7 @@ Guarantee: `truncate_hint_to_total_cap` is never entered from `render_user_hint`
 Check: `unreachable` — instrument the `utf16_len(wrapped) > limit` branch of `truncate_hint_to_total_cap` (`:9120-9127`) and assert it is never taken. `unreachable` and not `always`, because the subject is a specific code location that the arithmetic says cannot execute.
 Fault/timing angle: None.
 Required faults and enabling state: `auto_search_active`, which is `!req.is_subagent && req.auto_search_enabled` (`:3519`) and defaults to `true` on the wire (`default_auto_search_enabled`, `:865-867`) and in the shipped producer (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010`).
-Confidence: high — [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 + 2 + 1 + 1 + 121 (cut note, #723) + 143 (footer, #926) + 23 = 604 UTF-16 units against a cap of 800. `USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment` caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced `:9148-9155`).
+Confidence: high — [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 + 2 + 1 + 1 + 106 (cut note, #723) + 143 (footer, #926) + 23 = 589 UTF-16 units against a cap of 800. `USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment` caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced `:9148-9155`).
 Existing check: none. The only guard is the `debug_assert!` at `:9115`, which is trivially satisfied.
 Impact: A dead truncation path plus a `debug_assert` that can never fail. It is also a latent trap: raising `USER_HINT_RESULT_LIMIT` or the fragment cap silently activates a path that has never executed.
 Open questions:

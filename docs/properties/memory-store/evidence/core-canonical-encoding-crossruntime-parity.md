@@ -205,11 +205,11 @@ optional path and no situation to reach, only an input domain to cover.
 
 - Sources examined: a repository-wide search for `canonicalJsonEncode`,
   `compareCodePoints`, and `canonical-json-contract-v1.json` outside
-  `crates/context-core`; `packages/e2e-tests/src/incident-pool/history.ts:29`
+  `crates/context-core`; `packages/e2e-tests/src/canonical-json.ts:2`
   (`canonicalJson`); the module header at
   `crates/context-core/src/canonical_json.rs:1-4`.
 - Findings: no TypeScript encoder reads the fixture. The only TypeScript
-  canonical-JSON function in the tree, `history.ts:29`, is an incident-pool
+  canonical-JSON function in the tree, `canonical-json.ts:2`, is an e2e-tests
   harness helper: it sorts keys with JavaScript `<` (UTF-16 code-unit order),
   escapes through `JSON.stringify`, and accepts any number, so it is not the
   twin this record was raised against and shares no vocabulary with it. The

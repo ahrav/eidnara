@@ -847,7 +847,7 @@ Open questions:
 
 ## Group D: documented paths the build makes unreachable
 
-Three dead paths with three different keepers: a computed maximum of 604 UTF-16
+Three dead paths with three different keepers: a computed maximum of 589 UTF-16
 units against a cap of 800, two `Option` constants that are unconditionally
 `Some`, and a normalizing wrapper that collapses an `Option` before the documented
 fail-open branch can see it. The grouping earns its place because a reviewer
@@ -879,7 +879,7 @@ producer
 (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD)).
 Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
 maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
-2 + 1 + 1 + 121 (cut note, #723) + 143 (footer, #926) + 23 = 604 UTF-16 units against a cap of 800.
+2 + 1 + 1 + 106 (cut note, #723) + 143 (footer, #926) + 23 = 589 UTF-16 units against a cap of 800.
 `USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment`
 caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced
 `:9148-9155`).
@@ -1848,7 +1848,7 @@ dominance statement is a hypothesis, not a finding.
   [render-a-user-hint-total-cap-cannot-bind](#render-a-user-hint-total-cap-cannot-bind),
   [render-a-light-surface-fallback-notice-never-served](#render-a-light-surface-fallback-notice-never-served),
   [nudge-b-todo-availability-fail-open-is-unreachable](#nudge-b-todo-availability-fail-open-is-unreachable).
-  Three dead paths with three different keepers: a computed maximum of 604 UTF-16
+  Three dead paths with three different keepers: a computed maximum of 589 UTF-16
   units against a cap of 800, two `Option` constants that are unconditionally
   `Some`, and a normalizing wrapper (`todo_synthesis_verdict`,
   `transform.rs:2626-2630`) that collapses the `Option` before the documented

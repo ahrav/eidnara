@@ -111,9 +111,10 @@ const USER_HINT_TOTAL_CHAR_CAP: usize = 800;
 const USER_HINT_CANDIDATE_LIMIT: usize = 100;
 const USER_HINT_TOKEN_CAP: usize = 24;
 const USER_HINT_RESULT_LIMIT: usize = 3;
-/// Follows the fragments when any of them starts or ends with `…`, the mark the search window
-/// and the fragment cap leave where they cut longer text.
-const USER_HINT_CUT_NOTE: &str = "A fragment that starts or ends with … is cut from longer text and may omit a qualifier such as a negation or a rejection.";
+/// Follows the fragments when the search window or the fragment cap cut any of them. The note
+/// speaks of the hint as a whole: a stored text can carry its own `…`, so the mark alone does not
+/// name the cut fragment.
+const USER_HINT_CUT_NOTE: &str = "One or more fragments are cut from longer text and may omit a qualifier such as a negation or a rejection.";
 const USER_HINT_MIN_MATCHED_TOKENS: usize = 2;
 
 /// What each auto-search stage kept for one live user tail, as the stages
@@ -1797,7 +1798,7 @@ fn revision_signal_for_context(
 fn compose_m0_for_context(
     store: &MemoryStore,
     inputs: &crate::m0_compose::M0ComposeInputs<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
     ctx: &ProducerContext<'_>,
 ) -> Result<crate::m0_compose::M0Composition, MemoryStoreError> {
     compose_m0(store, inputs, ctx.project_memory_rows(), estimate_tokens)
@@ -1844,14 +1845,14 @@ pub(crate) fn transform_with_projection(
 }
 
 /// The production pipeline entry. The name is historical: the pass takes no cache now, and the
-/// property catalogs cite it by this name.
+/// property catalogs cite it by this name. It counts with the exact tokenizer, whose counts
+/// follow the paragraph-join identity the history renderer relies on.
 pub(crate) fn transform_with_projection_cached(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
 ) -> Result<TransformWithProjection, TransformError> {
-    let result =
-        apply_once_with_estimator(store, req, ctx, crate::token_cache::cached_estimate_tokens);
+    let result = apply_once_with_estimator(store, req, ctx, crate::token_cache::ExactTokens);
     record_stable_pass_trace(store, req, &result);
     result
 }
@@ -2024,7 +2025,7 @@ fn apply_once_with_estimator(
     store: &MemoryStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<TransformWithProjection, TransformError> {
     let mut attempt = 0;
     let mut reset_row_version = None;
@@ -2676,7 +2677,7 @@ struct AdditiveM0Composition {
 fn compose_additive_m0(
     store: &MemoryStore,
     ctx: &ProducerContext<'_>,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<AdditiveM0Composition, TransformError> {
     let selected_memories = if ctx.memory_enabled {
         ctx.project_memory_rows()
@@ -2691,7 +2692,7 @@ fn compose_additive_m0(
     let user_profile = trim_user_profile_to_budget(
         user_profile,
         ctx.user_profile_budget_tokens,
-        estimate_tokens,
+        crate::decay_render::counting(estimate_tokens),
     );
     let docs = if ctx.inject_docs {
         read_project_docs_canonical(ctx.project_directory)
@@ -2707,7 +2708,7 @@ fn compose_additive_m0(
             history_budget_tokens: 0.0,
             decay_pressure_multiplier: 1.0,
         },
-        estimate_tokens,
+        crate::decay_render::counting(estimate_tokens),
     );
     let project_memory = render_memory_block(selected_memories, "project-memory");
     if !project_memory.is_empty() {
@@ -2722,7 +2723,7 @@ fn apply_additive_only(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     authority: &FoldAuthorityPlan,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
     let projection_started_at = Instant::now();
@@ -3221,7 +3222,7 @@ fn apply_once(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     authority: &FoldAuthorityPlan,
-    estimate_tokens: impl Fn(&str) -> usize + Copy,
+    estimate_tokens: impl crate::decay_render::TokenCount + Copy,
     mut coverage_row_version: Option<u64>,
 ) -> Result<TransformWithProjection, TransformError> {
     if !authority.eidnara_folds && !(req.lineage_switched && req.is_subagent) {
@@ -4620,7 +4621,7 @@ fn apply_once(
                         &core.frozen_units,
                         body,
                         ctx.history_budget_tokens,
-                        estimate_tokens,
+                        crate::decay_render::counting(estimate_tokens),
                     )
                 });
                 // An unserved body folds; the empty default is never rendered.
@@ -4862,7 +4863,7 @@ fn apply_once(
             &live,
             context_limit_tokens,
             ctx.execute_threshold_percentage,
-            estimate_tokens,
+            crate::decay_render::counting(estimate_tokens),
         ));
     }
     if lineage_anchor_failure {
@@ -8229,14 +8230,14 @@ fn maybe_decide_live_user_hint(
     let hint_text = if !trace.suppression || !trace.length {
         String::new()
     } else {
-        let results = run_user_hint_lexical_search(
+        let selected = run_user_hint_lexical_search(
             store,
             &req.session_id,
             &raw_prompt,
             req.auto_search_score_threshold,
             &mut trace,
         )?;
-        render_user_hint(&results).unwrap_or_default()
+        render_user_hint(&selected).unwrap_or_default()
     };
     Ok(Ok((
         UserHintDecisionInput {
@@ -8276,13 +8277,27 @@ fn lexical_tokens(text: &str) -> BTreeSet<String> {
     smallest.into_iter().map(str::to_string).collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserHintSelection {
+    sequence: i64,
+    fragment: UserHintFragment,
+}
+
+/// `cut` records a cut the daemon made, at the fragment cap or at a search window; a literal `…`
+/// in stored text is content and leaves it `false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserHintFragment {
+    text: String,
+    cut: bool,
+}
+
 fn run_user_hint_lexical_search(
     store: &MemoryStore,
     session_id: &str,
     query: &str,
     score_threshold: f64,
     trace: &mut UserHintTrace,
-) -> Result<Vec<crate::memory_tool::MemorySearchResult>, TransformError> {
+) -> Result<Vec<UserHintSelection>, TransformError> {
     #[cfg(test)]
     USER_HINT_LEXICAL_QUERY_COUNT.with(|count| count.set(count.get() + 1));
 
@@ -8300,6 +8315,7 @@ fn run_user_hint_lexical_search(
     let query_tokens = query_tokens.into_iter().collect::<Vec<_>>();
     let hint_query = HintQuery::new(&query_tokens);
     let mut candidates = Vec::new();
+    let mut lowered = String::new();
     for row in store.load_history_segment_candidates(session_id, USER_HINT_CANDIDATE_LIMIT)? {
         trace.window.push(row.sequence);
         // Tokens never span the space between parts, so a part that repeats an earlier part byte
@@ -8312,7 +8328,7 @@ fn run_user_hint_lexical_search(
                 distinct += 1;
             }
         }
-        let matched = hint_query.matched_in_parts(&distinct_parts[..distinct]);
+        let matched = hint_query.matched_in_parts_with(&distinct_parts[..distinct], &mut lowered);
         candidates.push(Candidate { row, matched });
     }
     if candidates.is_empty() {
@@ -8350,19 +8366,7 @@ fn run_user_hint_lexical_search(
                 .map(|index| token_weight(*index))
                 .sum::<f64>();
             let normalized = score / total_query_weight.max(f64::EPSILON);
-            let row = candidate.row;
-            let body = hint_body(&row);
-            let result = crate::memory_tool::MemorySearchResult {
-                source_kind: crate::memory_tool::MemorySearchSourceKind::HistorySegmentBody,
-                id: row.sequence,
-                snippet: body,
-                category: None,
-                sequence: Some(row.sequence),
-                title: Some(row.title),
-                note_status: None,
-                surface_condition: None,
-            };
-            Some((normalized, matched.len(), row.created_at, result, matched))
+            Some((normalized, matched.len(), candidate.row, matched))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
@@ -8370,34 +8374,36 @@ fn run_user_hint_lexical_search(
             .0
             .total_cmp(&left.0)
             .then_with(|| right.1.cmp(&left.1))
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| left.3.id.cmp(&right.3.id))
+            .then_with(|| right.2.created_at.cmp(&left.2.created_at))
+            .then_with(|| left.2.sequence.cmp(&right.2.sequence))
     });
-    trace.matched = scored
-        .iter()
-        .map(|(_, _, _, result, _)| result.id)
-        .collect();
+    trace.matched = scored.iter().map(|(_, _, row, _)| row.sequence).collect();
     trace.threshold = scored
         .first()
-        .is_some_and(|(score, _, _, _, _)| *score >= score_threshold);
+        .is_some_and(|(score, _, _, _)| *score >= score_threshold);
     if !trace.threshold {
         return Ok(Vec::new());
     }
     let selected: Vec<_> = scored
         .into_iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|(_, _, _, mut result, mut matched)| {
+        .map(|(_, _, row, mut matched)| {
             // Matched tokens are in sorted order, so the stable sort puts the rarest first and breaks ties by that order.
             matched.sort_by_key(|index| document_frequency[*index]);
             let anchors = matched
                 .iter()
                 .map(|index| query_tokens[*index].as_str())
                 .collect::<Vec<_>>();
-            result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchors);
-            result
+            UserHintSelection {
+                sequence: row.sequence,
+                fragment: user_hint_served_fragment(&hint_body(&row), &anchors),
+            }
         })
         .collect();
-    trace.selected = selected.iter().map(|result| result.id).collect();
+    trace.selected = selected
+        .iter()
+        .map(|selection| selection.sequence)
+        .collect();
     Ok(selected)
 }
 
@@ -8457,18 +8463,32 @@ const HINT_SEEN_TRIM: usize = 32;
 const SWAR_LOW_BITS: u64 = 0x0101_0101_0101_0101;
 const SWAR_HIGH_BITS: u64 = 0x8080_8080_8080_8080;
 
-/// Big-endian key of the first eight bytes, zero-padded, so key order equals byte order on the
-/// prefix.
+/// Big-endian key of the first eight bytes after ASCII lowercasing, zero-padded, so key order
+/// equals the byte order of the lowercased prefix.
 fn hint_prefix_key(token: &[u8]) -> u64 {
     let mut key = 0u64;
     for &byte in token.iter().take(8) {
-        key = (key << 8) | byte as u64;
+        key = (key << 8) | byte.to_ascii_lowercase() as u64;
     }
     key << (8 * (8 - token.len().min(8)))
 }
 
+/// Byte order of the tokens after ASCII lowercasing. Body tokens taken from an all-ASCII part
+/// keep the case of the stored text; query tokens and tokens from lowercased parts are lowercase.
 fn hint_token_cmp(left_key: u64, left: &[u8], right_key: u64, right: &[u8]) -> std::cmp::Ordering {
-    left_key.cmp(&right_key).then_with(|| left.cmp(right))
+    left_key
+        .cmp(&right_key)
+        .then_with(|| cmp_ascii_lowercase(left, right))
+}
+
+fn cmp_ascii_lowercase(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let (left, right) = (left.to_ascii_lowercase(), right.to_ascii_lowercase());
+        if left != right {
+            return left.cmp(&right);
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 const fn hint_stopword_count(len: usize) -> usize {
@@ -8514,8 +8534,18 @@ const HINT_STOPWORD_KEYS_4: [u32; hint_stopword_count(4)] = hint_stopword_keys(4
 
 fn is_hint_stopword(token: &[u8]) -> bool {
     match *token {
-        [a, b, c] => HINT_STOPWORD_KEYS_3.contains(&u32::from_be_bytes([0, a, b, c])),
-        [a, b, c, d] => HINT_STOPWORD_KEYS_4.contains(&u32::from_be_bytes([a, b, c, d])),
+        [a, b, c] => HINT_STOPWORD_KEYS_3.contains(&u32::from_be_bytes([
+            0,
+            a.to_ascii_lowercase(),
+            b.to_ascii_lowercase(),
+            c.to_ascii_lowercase(),
+        ])),
+        [a, b, c, d] => HINT_STOPWORD_KEYS_4.contains(&u32::from_be_bytes([
+            a.to_ascii_lowercase(),
+            b.to_ascii_lowercase(),
+            c.to_ascii_lowercase(),
+            d.to_ascii_lowercase(),
+        ])),
         _ => false,
     }
 }
@@ -8535,16 +8565,44 @@ fn swar_pack_lane_flags(flags: u64) -> u64 {
     ((flags >> 7).wrapping_mul(0x0102_0408_1020_4080)) >> 56
 }
 
-/// Word and at-or-below-cut flags for 64 lowercase bytes; `false` when a byte is non-ASCII.
+/// Lowercases the ASCII uppercase lanes; lanes must be below 0x80.
+fn swar_fold_lower(lanes: u64) -> u64 {
+    let upper = swar_lane_at_least(lanes, b'A') & swar_lane_at_most(lanes, b'Z');
+    lanes | (upper >> 2)
+}
+
+/// Word and at-or-below-cut flags for 64 ASCII bytes after lowercasing; `false` when a byte is
+/// non-ASCII.
+///
+/// A candidate token start is a word byte in `b'0'..=cut`. Below `SPARSE_CUT` such bytes are
+/// rare in prose, so the block is first screened for any byte in that range; a block without one
+/// keeps only the word flag of its last byte, which the next block's start detection reads.
 fn ascii_word_flags(block: &[u8], cut: u8, words: &mut u64, below_cut: &mut u64) -> bool {
+    let cut = cut.min(0x7f);
+    if cut < SPARSE_CUT {
+        let mut in_range = false;
+        for lane in block.as_chunks::<8>().0 {
+            let lanes = u64::from_le_bytes(*lane);
+            if lanes & SWAR_HIGH_BITS != 0 {
+                return false;
+            }
+            let lanes = swar_fold_lower(lanes);
+            in_range |= swar_lane_at_least(lanes, b'0') & swar_lane_at_most(lanes, cut) != 0;
+        }
+        if !in_range {
+            *words = (block[block.len() - 1].is_ascii_alphanumeric() as u64) << (block.len() - 1);
+            *below_cut = 0;
+            return true;
+        }
+    }
     let mut word_flags = 0u64;
     let mut cut_flags = 0u64;
-    let cut = cut.min(0x7f);
     for (index, lane) in block.as_chunks::<8>().0.iter().enumerate() {
         let lanes = u64::from_le_bytes(*lane);
         if lanes & SWAR_HIGH_BITS != 0 {
             return false;
         }
+        let lanes = swar_fold_lower(lanes);
         let digit = swar_lane_at_least(lanes, b'0') & swar_lane_at_most(lanes, b'9');
         let lower = swar_lane_at_least(lanes, b'a') & swar_lane_at_most(lanes, b'z');
         word_flags |= swar_pack_lane_flags(digit | lower) << (8 * index);
@@ -8555,8 +8613,58 @@ fn ascii_word_flags(block: &[u8], cut: u8, words: &mut u64, below_cut: &mut u64)
     true
 }
 
-fn is_lowercase_word_byte(byte: u8) -> bool {
-    byte.is_ascii_digit() || byte.is_ascii_lowercase()
+/// Cut byte below which `ascii_word_flags` screens a block for candidate bytes first.
+const SPARSE_CUT: u8 = b'e';
+
+/// `hint_lowercase` produces the same text as `str::to_lowercase`.
+#[cfg(test)]
+fn hint_lowercase(text: &str) -> Cow<'_, str> {
+    if !text
+        .bytes()
+        .any(|byte| byte.is_ascii_uppercase() || byte >= 0x80)
+    {
+        return Cow::Borrowed(text);
+    }
+    let mut lowered = String::with_capacity(text.len());
+    hint_lowercase_into(text, &mut lowered);
+    Cow::Owned(lowered)
+}
+
+/// Length of the leading run of ASCII bytes.
+fn ascii_run_len(bytes: &[u8]) -> usize {
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let lanes = u64::from_le_bytes(*chunk);
+        if lanes & SWAR_HIGH_BITS != 0 {
+            return index * 8 + ((lanes & SWAR_HIGH_BITS).trailing_zeros() / 8) as usize;
+        }
+    }
+    chunks.len() * 8 + rest.iter().take_while(|byte| **byte < 0x80).count()
+}
+
+/// Appends `str::to_lowercase(text)` to `lowered`. `char::to_lowercase` is the mapping
+/// `str::to_lowercase` applies to every scalar except U+03A3, whose final-sigma rule reads the
+/// surrounding word, so text containing U+03A3 goes through `str::to_lowercase` itself.
+fn hint_lowercase_into(text: &str, lowered: &mut String) {
+    if text.contains('\u{3a3}') {
+        lowered.push_str(&text.to_lowercase());
+        return;
+    }
+    let bytes = text.as_bytes();
+    let mut position = 0usize;
+    while position < bytes.len() {
+        let run_end = position + ascii_run_len(&bytes[position..]);
+        if run_end > position {
+            let start = lowered.len();
+            lowered.push_str(&text[position..run_end]);
+            lowered[start..].make_ascii_lowercase();
+            position = run_end;
+            continue;
+        }
+        let character = text[position..].chars().next().expect("char boundary");
+        lowered.extend(character.to_lowercase());
+        position += character.len_utf8();
+    }
 }
 
 impl<'a> HintSeen<'a> {
@@ -8584,7 +8692,9 @@ impl<'a> HintSeen<'a> {
             if self.keys[index - 1] == key {
                 // Equal keys cover the first eight bytes, so only longer tokens compare further.
                 let stored = self.tokens[index - 1];
-                if stored.len() == token.len() && (token.len() <= 8 || stored[8..] == token[8..]) {
+                if stored.len() == token.len()
+                    && (token.len() <= 8 || stored[8..].eq_ignore_ascii_case(&token[8..]))
+                {
                     return true;
                 }
             }
@@ -8677,7 +8787,15 @@ impl<'q> HintQuery<'q> {
     /// bounds every query token that can still match, so the cut drops to the largest query token
     /// at or below it and the buffer is trimmed. Later trims run once the buffer holds
     /// `HINT_SEEN_TRIM` tokens.
+    #[cfg(test)]
     fn matched_in_parts(&self, parts: &[&str]) -> u32 {
+        self.matched_in_parts_with(parts, &mut String::new())
+    }
+
+    /// `matched_in_parts` with `lowered` as the scratch buffer for parts that carry non-ASCII
+    /// text. An all-ASCII part is scanned in place: the flag computation lowercases its lanes,
+    /// token keys lowercase their bytes, and token comparisons ignore ASCII case.
+    fn matched_in_parts_with(&self, parts: &[&str], lowered: &mut String) -> u32 {
         if self.tokens.is_empty() {
             return 0;
         }
@@ -8686,11 +8804,23 @@ impl<'q> HintQuery<'q> {
         let mut cut_key = self.keys[top];
         let mut cut = self.tokens[top];
         let mut trim_at = HINT_SEEN_BUFFER;
-        let lowered = parts
-            .iter()
-            .map(|part| part.to_lowercase())
-            .collect::<Vec<_>>();
-        for lowered in &lowered {
+        // A segment has at most six parts: title, content, and the four tiers.
+        assert!(parts.len() <= 6, "at most six hint body parts");
+        lowered.clear();
+        let mut lowered_ranges = [None; 6];
+        for (part, range) in parts.iter().zip(lowered_ranges.iter_mut()) {
+            if !part.is_ascii() {
+                let start = lowered.len();
+                hint_lowercase_into(part, lowered);
+                *range = Some((start, lowered.len()));
+            }
+        }
+        let lowered: &str = lowered;
+        for (part, range) in parts.iter().zip(&lowered_ranges) {
+            let lowered: &str = match range {
+                Some((start, end)) => &lowered[*start..*end],
+                None => part,
+            };
             let bytes = lowered.as_bytes();
             let total = bytes.len();
             let mut position = 0usize;
@@ -8722,8 +8852,8 @@ impl<'q> HintQuery<'q> {
                         let byte = bytes[index];
                         let offset = index - position;
                         if byte < 0x80 {
-                            words |= (is_lowercase_word_byte(byte) as u64) << offset;
-                            below_cut |= ((byte <= cut_byte) as u64) << offset;
+                            words |= (byte.is_ascii_alphanumeric() as u64) << offset;
+                            below_cut |= ((byte.to_ascii_lowercase() <= cut_byte) as u64) << offset;
                             index += 1;
                         } else {
                             let character = lowered[index..].chars().next().expect("char boundary");
@@ -8760,7 +8890,7 @@ impl<'q> HintQuery<'q> {
                         while end < total {
                             let byte = bytes[end];
                             if byte < 0x80 {
-                                if !is_lowercase_word_byte(byte) {
+                                if !byte.is_ascii_alphanumeric() {
                                     break;
                                 }
                                 end += 1;
@@ -8782,6 +8912,11 @@ impl<'q> HintQuery<'q> {
                         let word = u64::from_be_bytes(
                             bytes[start..start + 8].try_into().expect("eight bytes"),
                         );
+                        let word = if word & SWAR_HIGH_BITS == 0 {
+                            swar_fold_lower(word)
+                        } else {
+                            hint_prefix_key(&bytes[start..start + 8])
+                        };
                         if token.len() >= 8 {
                             word
                         } else {
@@ -8825,7 +8960,7 @@ impl<'q> HintQuery<'q> {
                             while rest != 0 {
                                 let other = rest.trailing_zeros() as usize;
                                 rest &= rest - 1;
-                                if bytes[position + other] <= cut[0] {
+                                if bytes[position + other].to_ascii_lowercase() <= cut[0] {
                                     kept |= 1u64 << other;
                                 }
                             }
@@ -9018,33 +9153,38 @@ fn is_whole_word_char(ch: char) -> bool {
     }
 }
 
-/// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
+/// Anchors are ordered rarest first; the first anchor the served fragment can show decides the fragment.
 /// Whether a fragment shows the anchor is judged on the rendered text: escaping can push a match past the cap
 /// that the raw text kept, and compression drops filler words and compresses code whose fences fall outside
 /// the window. A window without its anchor carries less evidence than the prefix.
-fn user_hint_snippet(body: String, anchors: &[&str]) -> String {
-    let mut prefix_fragment = None;
+fn user_hint_served_fragment(body: &str, anchors: &[&str]) -> UserHintFragment {
+    let mut prefix_fragment: Option<UserHintFragment> = None;
     for anchor in anchors {
-        let Some(hit) = first_whole_word(&body, anchor) else {
+        let Some(hit) = first_whole_word(body, anchor) else {
             continue;
         };
-        let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(&body));
-        if first_whole_word(prefix, anchor).is_some() {
-            return body;
+        let prefix = prefix_fragment.get_or_insert_with(|| user_hint_fragment(body));
+        if first_whole_word(&prefix.text, anchor).is_some() {
+            break;
         }
         // The rendered window is `…` + left context + anchor + `…`, so a long anchor gets less context.
         // Bytes bound UTF-16 units from above, so the byte length is a safe stand-in.
         let context = (USER_HINT_FRAGMENT_CHAR_CAP / 2)
             .min((USER_HINT_FRAGMENT_CHAR_CAP - 2).saturating_sub(hit.len()));
-        let window = crate::memory_tool::snippet_around_match(&body, hit, context);
-        if first_whole_word(&user_hint_fragment(&window), anchor).is_some() {
-            return window;
+        let (window, window_cut) =
+            crate::memory_tool::snippet_window_around_match(body, hit, context);
+        let mut fragment = user_hint_fragment(&window);
+        fragment.cut |= window_cut;
+        if first_whole_word(&fragment.text, anchor).is_some() {
+            return fragment;
         }
     }
-    body
+    prefix_fragment.unwrap_or_else(|| user_hint_fragment(body))
 }
 
-fn user_hint_fragment(snippet: &str) -> String {
+/// The served form of `snippet`: Ultra-compressed, markup-neutralized, joined on single spaces,
+/// and cut to `USER_HINT_FRAGMENT_CHAR_CAP` UTF-16 units with a trailing `…` where the cut fell.
+fn user_hint_fragment(snippet: &str) -> UserHintFragment {
     let compressed = crate::terse_text_compression::compress(
         snippet,
         crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
@@ -9060,19 +9200,19 @@ fn user_hint_fragment(snippet: &str) -> String {
             .find(|(offset, character)| *offset >= PREFIX_BYTES && character.is_whitespace())
             .map(|(offset, _)| offset)
     {
-        let (fragment, truncated) = one_line_fragment(
+        let (text, truncated) = one_line_fragment(
             &neutralize_user_hint_markup(&compressed[..cut]),
             USER_HINT_FRAGMENT_CHAR_CAP,
         );
         if truncated {
-            return fragment;
+            return UserHintFragment { text, cut: true };
         }
     }
-    one_line_fragment(
+    let (text, cut) = one_line_fragment(
         &neutralize_user_hint_markup(&compressed),
         USER_HINT_FRAGMENT_CHAR_CAP,
-    )
-    .0
+    );
+    UserHintFragment { text, cut }
 }
 
 /// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
@@ -9091,41 +9231,68 @@ fn neutralize_user_hint_markup(text: &str) -> Cow<'_, str> {
     }
 }
 
-fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Option<String> {
-    if results.is_empty() {
+fn render_user_hint(selected: &[UserHintSelection]) -> Option<String> {
+    if selected.is_empty() {
         return None;
     }
-    let lines = results
+    let selected = &selected[..selected.len().min(USER_HINT_RESULT_LIMIT)];
+    let fragments = selected
         .iter()
-        .take(USER_HINT_RESULT_LIMIT)
-        .map(|result| format!("- {}", user_hint_fragment(&result.snippet)))
-        .filter(|line| line.len() > 2)
+        .map(|selection| selection.fragment.text.as_str())
+        .filter(|fragment| !fragment.is_empty())
         .collect::<Vec<_>>();
-    if lines.is_empty() {
+    if fragments.is_empty() {
         return None;
     }
-    let header = if lines.len() == 1 {
-        "Your memory may contain 1 related fragment:".to_string()
+    const SEPARATOR: &str = "\n\n";
+    const OPEN: &str = "<eidnara-search-hint>\n";
+    const CLOSE: &str = "\n</eidnara-search-hint>";
+    const HEADER_BYTES: usize = 64;
+    const FOOTER: &str = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
+    // The note says a cut can drop a qualifier.
+    let cut = selected.iter().any(|selection| selection.fragment.cut);
+    let fragment_bytes: usize = fragments.iter().map(|fragment| fragment.len() + 3).sum();
+    let mut hint = String::with_capacity(
+        SEPARATOR.len()
+            + OPEN.len()
+            + HEADER_BYTES
+            + fragment_bytes
+            + USER_HINT_CUT_NOTE.len()
+            + FOOTER.len()
+            + CLOSE.len(),
+    );
+    hint.push_str(SEPARATOR);
+    hint.push_str(OPEN);
+    if fragments.len() == 1 {
+        hint.push_str("Your memory may contain 1 related fragment:");
     } else {
-        format!("Your memory may contain {} related fragments:", lines.len())
-    };
-    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
-    // A cut fragment carries `…` where the cut fell; the note says a cut can drop a qualifier.
-    let cut = lines
-        .iter()
-        .any(|line| line.starts_with("- …") || line.ends_with('…'));
-    let mut parts = vec![header, lines.join("\n")];
-    if cut {
-        parts.push(USER_HINT_CUT_NOTE.to_string());
+        let _ = write!(
+            hint,
+            "Your memory may contain {} related fragments:",
+            fragments.len()
+        );
     }
-    parts.push(footer.to_string());
-    let body = parts.join("\n");
-    let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");
-    // Native search returns only memory and history_segment results.
-    // A result without commit provenance has no commit SHA or age metadata.
-    let wrapped = truncate_hint_to_total_cap(&wrapped, USER_HINT_TOTAL_CHAR_CAP);
-    debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP);
-    Some(format!("\n\n{wrapped}"))
+    for fragment in &fragments {
+        hint.push_str("\n- ");
+        hint.push_str(fragment);
+    }
+    if cut {
+        hint.push('\n');
+        hint.push_str(USER_HINT_CUT_NOTE);
+    }
+    hint.push('\n');
+    hint.push_str(FOOTER);
+    hint.push_str(CLOSE);
+    // UTF-8 encodes each scalar in at least as many bytes as its UTF-16 units, so a hint within the
+    // cap in bytes is within it in units.
+    if hint.len() - SEPARATOR.len() > USER_HINT_TOTAL_CHAR_CAP {
+        let wrapped =
+            truncate_hint_to_total_cap(&hint[SEPARATOR.len()..], USER_HINT_TOTAL_CHAR_CAP);
+        hint.truncate(SEPARATOR.len());
+        hint.push_str(&wrapped);
+    }
+    debug_assert!(utf16_len(&hint[SEPARATOR.len()..]) <= USER_HINT_TOTAL_CHAR_CAP);
+    Some(hint)
 }
 
 fn truncate_hint_to_total_cap(wrapped: &str, limit: usize) -> String {

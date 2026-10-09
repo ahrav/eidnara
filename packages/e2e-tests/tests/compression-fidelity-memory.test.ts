@@ -27,7 +27,7 @@ import { runScriptedToolCall } from "../src/scripted-tool-call";
 
 /** The note the daemon appends to a hint whose fragments were cut (`USER_HINT_CUT_NOTE`). */
 const HINT_CUT_NOTE =
-    "A fragment that starts or ends with … is cut from longer text and may omit a qualifier such as a negation or a rejection.";
+    "One or more fragments are cut from longer text and may omit a qualifier such as a negation or a rejection.";
 
 const QUALIFICATION_REQUIRED = process.env.EIDNARA_E2E_REQUIRE_FIDELITY === "1";
 const CASE_TIMEOUT_MS = 540_000;

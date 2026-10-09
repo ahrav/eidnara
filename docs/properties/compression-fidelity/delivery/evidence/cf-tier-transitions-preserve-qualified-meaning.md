@@ -18,17 +18,17 @@ integrity, lifecycle, compatibility. Inspected 2026-09-19 at
   checks P1-only acceptance and these exact fallback values; status unaudited.
 - [m1_compose.rs:202-207](../../../../../crates/daemon/src/m1_compose.rs#L202-L207)
   selects rows beyond `folded_history_segment_seq`.
-  [memory_render.rs:233-248](../../../../../crates/daemon/src/memory_render.rs#L233-L248)
+  [memory_render.rs:261-276](../../../../../crates/daemon/src/memory_render.rs#L261-L276)
   renders those new rows at explicit P1 without an age-based choice.
-- [m0_compose.rs:183-233](../../../../../crates/daemon/src/m0_compose.rs#L183-L233)
+- [m0_compose.rs:188-238](../../../../../crates/daemon/src/m0_compose.rs#L188-L238)
   reloads durable history and composes the decayed baseline.
-- [decay_render.rs:355-374,413-440](../../../../../crates/daemon/src/decay_render.rs#L355-L440)
+- [decay_render.rs:510-529,568-585](../../../../../crates/daemon/src/decay_render.rs#L510-L585)
   distinguishes missing bodies from present empty bodies. Missing requested
   tiers fall back toward denser populated tiers; empty bodies render headings.
-- [decay_render.rs:385-403,419-427](../../../../../crates/daemon/src/decay_render.rs#L385-L427)
+- [decay_render.rs:540-549,573-580](../../../../../crates/daemon/src/decay_render.rs#L540-L580)
   uses flat content for legacy/non-tiered rows, with 1,200/420-character
   truncation at P2/P3 and heading-only output at P4.
-- [transform.rs:21123-21228](../../../../../crates/daemon/src/transform.rs#L21123-L21228)
+- [transform.rs:21111-21216](../../../../../crates/daemon/src/transform.rs#L21111-L21216)
   checks seeded later publication, P1 m1 placement, covered-tail removal, and
   warm m0/m1 replay; status unaudited. It does not execute the producer.
 

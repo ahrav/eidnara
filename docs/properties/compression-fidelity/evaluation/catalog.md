@@ -45,7 +45,7 @@ provider adapter, or production constraint is proposed.
 
 | Focus | Verified model or preserved lead |
 | --- | --- |
-| Architecture and dependencies | The direct-host fixture supplies producer ModelExecution; the Messages mock captures OpenCode consumer requests. They are separate boundaries. The mock has no record-and-forward mode. |
+| Architecture and dependencies | The direct-host fixture supplies producer ModelExecution; the Messages mock captures OpenCode consumer requests. They are separate boundaries. `new MockProvider({ forward })` is the mock's opt-in record-and-forward mode (`packages/e2e-tests/src/mock-provider/forward.ts`); scripted and forwarding construction are exclusive. |
 | State, persistence, and concurrency | Fixture behavior resets to `Success` on consumption. Mock captures are cleared by `reset`. `DiagnosticSink` supplies bounded private diagnostic writes; JSON publication needs an explicit `mode: 0o600`. Neither proves complete capture retention or crash durability. |
 | Safety and liveness claims | KTD1/KTD7 require one byte identity and one evidence assembler. U3 requires qualified publication. U4 requires bounded capture and human review. No executing semantic evaluator or successful-completion deadline was found. |
 | History and existing checks | Local commit `de84c0d0` narrows incident result lanes to green. Current report validators still expose broader comparison terminology. Old evaluator counts and CI claims are not imported. |
@@ -70,10 +70,11 @@ outside this part. Working lens material stays outside repository docs.
 ## Reachability and index
 
 Reachability is assigned per record. `test-only` describes the existing fixture
-and proposed evaluation/test boundaries. The evaluator and forwarding paths are
-absent at HEAD, so no existing configured production path is claimed. Future
-real capture remains opt-in under the plan; that configuration requirement is
-separate from the reachability classification.
+and proposed evaluation/test boundaries. The evaluator path is absent at HEAD,
+and the forwarding path exists only behind an explicit `forward` construction
+argument in the e2e mock, so no existing configured production path is
+claimed. Real capture is opt-in; that configuration requirement is separate
+from the reachability classification.
 
 | Slug | Type | Reachability | Semantics | Exercise |
 | --- | --- | --- | --- | --- |
@@ -303,7 +304,7 @@ Confidence: high - [evidence](evidence/cf-evaluation-cost-completeness.md).
 Plan lines 271,278-285 require these observations and fixed limits; mock counters
 and zero prices are not actual provider-cost evidence.
 Existing check: None found for complete fidelity cost accounting. Mock usage
-guards at `packages/e2e-tests/src/mock-provider/server.ts:287-294` are `unaudited`
+guards at `packages/e2e-tests/src/mock-provider/server.ts:355-370` are `unaudited`
 and enforce only scripted-response shape.
 Impact: A comparison can hide wasted attempts, overstate savings, or spend beyond
 the approved run limits while showing a complete cost result.
@@ -353,8 +354,11 @@ Reachability: test-only
 Status: active
 Exercised: partial - the forwarding branch runs against an in-process
 provider double with a canary credential, through OpenCode's registered tool
-loop and through each limit and failure boundary; no authorized live provider
-run exists.
+loop and through each limit and the timeout, provider-error, malformed-body,
+model-mismatch, oversized-response, and unfinished-loop boundaries; the
+redirect boundary is asserted only as the `redirect: "error"` option on the
+outbound request, since the double returns its scripted response without
+following redirects, and no authorized live provider run exists.
 Guarantee: Optional live evaluation forwards only authorized synthetic requests
 to the selected HTTPS provider, returns matching responses through the real tool
 loop, excludes credentials from artifacts, and stays within frozen run limits.
@@ -379,16 +383,23 @@ zero outbound sends in scripted mode when scripts exhaust, scripts are invalid,
 or the cassette refuses; the construction errors for scripted plus forwarding
 and for a missing HTTPS Messages target, model, corpus digest, price, or
 limit; byte-equal forwarding, the returned response, and the captured
-tool-result turn; a stop at each limit, a timeout, and a provider error;
-reservation-priced unknown cost; an unfinished tool loop; and a canary
-credential absent from the report, captures, and generated configuration.
+tool-result turn; a stop at each limit, a timeout, a provider error, a
+response naming another model or none, a response that is not a Messages
+message, a response above the 16 MiB read bound, and a request body that is
+not a JSON object; reservation-priced unknown cost,
+including an SSE stream cut before `message_stop` or carrying an `error` event,
+which also stops the run; an unfinished tool loop; and a canary credential
+absent from the report, captures, and generated configuration, whose
+`opencode.json` holding the mock's inbound key is `0600` in a `0700` tree.
 `packages/e2e-tests/tests/compression-fidelity-forwarding.test.ts` runs the
 loop through OpenCode, whose model is `forward.model` at the configured
 context limit. The report's `mode: "forward"` and upstream URL record
 forwarded execution apart from scripted responses. Status: `unaudited`.
 Impact: Live evaluation can leak credentials, spend beyond authorization, or
 judge an invocation different from the one the agent actually received.
-Open questions: None.
+Open questions: Whether the reviewed corpus digest should bind forwarded
+request content per request or remain a construction-time attestation with
+this guarantee reworded; open on #953 and in the evidence log.
 
 ## Relationships and handoff
 

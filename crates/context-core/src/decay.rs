@@ -54,7 +54,6 @@ impl Tier {
 #[inline]
 fn z_value(history_segment_index: u32, importance: i32, budget_pressure: f64) -> f64 {
     let a = (history_segment_index.max(1) - 1) as f64;
-    let imp = importance.clamp(1, 100) as f64;
     // `f64::clamp` preserves NaN, so `p` maps NaN to `P_FLOOR`.
     // An infinite pressure gives `h == 0.0`, and `0.0 / 0.0` matches no tier boundary.
     let p = if budget_pressure.is_nan() {
@@ -62,9 +61,20 @@ fn z_value(history_segment_index: u32, importance: i32, budget_pressure: f64) ->
     } else {
         budget_pressure.clamp(P_FLOOR, f64::MAX)
     };
-    let f = 2f64.powf((imp - 50.0) / D);
-    let h = (H50 * f) / p;
+    let h = (H50 * half_life_factor(importance)) / p;
     a / h
+}
+
+/// `2^((importance - 50) / D)` for `importance` clamped to 1 through 100, computed once
+/// per importance.
+fn half_life_factor(importance: i32) -> f64 {
+    static FACTORS: std::sync::LazyLock<[f64; 100]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|index| {
+            let imp = (index + 1) as f64;
+            2f64.powf((imp - 50.0) / D)
+        })
+    });
+    FACTORS[(importance.clamp(1, 100) - 1) as usize]
 }
 
 /// Maps a decay position onto the fixed tier ladder.

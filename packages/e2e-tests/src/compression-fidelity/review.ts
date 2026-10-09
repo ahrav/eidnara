@@ -15,13 +15,19 @@ import {
     assembleEvidence,
     type Evidence,
     type EvidenceRow,
+    executed,
+    isHintTruncation,
     type Json,
+    named,
     REAL_CAPTURE,
     REPORT_SCHEMA,
     readJson,
     record,
+    SOURCE_LABEL_STAGES,
+    scenarios,
+    servedTierOf,
     sha256,
-    strings,
+    sourceLabelSources,
     text,
 } from "./evidence";
 
@@ -95,6 +101,7 @@ export interface ScenarioRow {
         status: "complete" | "incomplete";
         missing: string[];
         serving: Json[];
+        recovery: Json[];
         generation: Json[];
     };
     withheld: string[];
@@ -102,21 +109,39 @@ export interface ScenarioRow {
 
 const DISPOSITION_VALUES: readonly string[] = ["visible", "discoverable", "unavailable"];
 
-/** `value` as a judgment, or `null` when a field is absent or mistyped. */
+function stringList(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+function list(value: unknown, where: string, errors: string[]): unknown[] {
+    if (Array.isArray(value)) return value;
+    errors.push(`${where} is not a list`);
+    return [];
+}
+
+/** `judgmentOf` rejects repeated obligations to prevent conflicting verdicts. */
 function judgmentOf(value: unknown): Judgment | null {
     if (!record(value)) return null;
     const { id, kind, reviewer, arm, scenario, artifact_sha256, obligations, abstained } = value;
-    if (!text(id) || !text(reviewer) || !text(arm) || !text(scenario) || !text(artifact_sha256)) {
+    if (!text(id) || !named(reviewer) || !text(arm) || !text(scenario) || !text(artifact_sha256)) {
         return null;
     }
     if ((kind !== "human" && kind !== "model") || typeof abstained !== "boolean") return null;
-    if (!Array.isArray(obligations)) return null;
+    if (!Array.isArray(obligations) || !stringList(value.forbidden_violated)) return null;
+    if (value.citations !== undefined && !stringList(value.citations)) return null;
+    // A model judgment carries the citations and uncertainty a reader needs to weigh it.
+    if (kind === "model" && (!value.citations?.length || !value.citations.every(named)))
+        return null;
+    if (kind === "model" && !named(value.uncertainty)) return null;
     const judged: ObligationJudgment[] = [];
+    const seen = new Set<string>();
     for (const o of obligations) {
         if (!record(o) || !text(o.obligation) || typeof o.preserved !== "boolean") return null;
         if (typeof o.disposition !== "string" || !DISPOSITION_VALUES.includes(o.disposition)) {
             return null;
         }
+        if (seen.has(o.obligation)) return null;
+        seen.add(o.obligation);
         judged.push({
             obligation: o.obligation,
             disposition: o.disposition as Disposition,
@@ -131,23 +156,23 @@ function judgmentOf(value: unknown): Judgment | null {
         scenario,
         artifact_sha256,
         obligations: judged,
-        forbidden_violated: strings(value.forbidden_violated),
+        forbidden_violated: value.forbidden_violated,
         abstained,
-        citations: Array.isArray(value.citations) ? strings(value.citations) : undefined,
+        citations: value.citations,
         uncertainty: typeof value.uncertainty === "string" ? value.uncertainty : undefined,
     };
 }
 
 /** Records in `list` whose every `fields` entry is a string, plus one error per other entry. */
 function stringRecords<K extends string>(
-    list: unknown,
+    entries: unknown,
     fields: readonly K[],
     where: string,
     errors: string[],
 ): Array<Record<K, string>> {
     const kept: Array<Record<K, string>> = [];
-    for (const value of Array.isArray(list) ? list : []) {
-        if (record(value) && fields.every((field) => typeof value[field] === "string")) {
+    for (const value of list(entries, where, errors)) {
+        if (record(value) && fields.every((field) => named(value[field]))) {
             kept.push(
                 Object.fromEntries(fields.map((f) => [f, value[f] as string])) as Record<K, string>,
             );
@@ -159,7 +184,7 @@ function stringRecords<K extends string>(
 }
 
 /** Reads the sealed control labels and the judgments, refusing anything bound elsewhere. */
-export function loadReviews(dir: string, corpusSha256: string): Reviews {
+export async function loadReviews(dir: string, corpusSha256: string): Promise<Reviews> {
     const reviews: Reviews = {
         batch: "",
         approvals: [],
@@ -170,14 +195,21 @@ export function loadReviews(dir: string, corpusSha256: string): Reviews {
         sha256: { controls: "", judgments: "" },
         errors: [],
     };
-    const controls = readJson(join(dir, "controls.json"));
-    const judgments = readJson(join(dir, "judgments.json"));
+    const [controls, judgments] = await Promise.all([
+        readJson(join(dir, "controls.json")),
+        readJson(join(dir, "judgments.json")),
+    ]);
+    // Each record's digest is recorded whenever its bytes were read, so a manifest names the
+    // bytes behind a refused review as well as an accepted one.
+    reviews.sha256 = {
+        controls: controls.bytes ? sha256(controls.bytes) : "",
+        judgments: judgments.bytes ? sha256(judgments.bytes) : "",
+    };
     if ("error" in controls || "error" in judgments) {
         if ("error" in controls) reviews.errors.push(controls.error);
         if ("error" in judgments) reviews.errors.push(judgments.error);
         return reviews;
     }
-    reviews.sha256 = { controls: sha256(controls.bytes), judgments: sha256(judgments.bytes) };
     const c = record(controls.value) ? controls.value : {};
     const j = record(judgments.value) ? judgments.value : {};
     if (c.schema !== CONTROLS_SCHEMA || j.schema !== JUDGMENTS_SCHEMA) {
@@ -190,10 +222,21 @@ export function loadReviews(dir: string, corpusSha256: string): Reviews {
     ] as const) {
         if (value.corpus_sha256 !== corpusSha256)
             reviews.errors.push(`${name} is bound to another corpus`);
+        if (!named(value.batch)) reviews.errors.push(`${name} names no batch`);
     }
-    reviews.batch = String(c.batch ?? "");
-    if (j.batch !== reviews.batch) reviews.errors.push("judgments.json is bound to another batch");
-    reviews.approvals = [...new Set(strings(c.approved_by))];
+    reviews.batch = named(c.batch) ? c.batch : "";
+    if (named(j.batch) && j.batch !== reviews.batch) {
+        reviews.errors.push("judgments.json is bound to another batch");
+    }
+    const approvers = list(c.approved_by, "approved_by", reviews.errors);
+    for (const approver of approvers) {
+        if (!named(approver)) {
+            reviews.errors.push(
+                `an approver does not match its schema: ${JSON.stringify(approver)}`,
+            );
+        }
+    }
+    reviews.approvals = [...new Set(approvers.filter(named).map((approver) => approver.trim()))];
     reviews.controls = stringRecords(
         c.controls,
         ["id", "kind", "label"],
@@ -206,12 +249,12 @@ export function loadReviews(dir: string, corpusSha256: string): Reviews {
         "control_verdicts",
         reviews.errors,
     );
-    for (const value of Array.isArray(j.judgments) ? j.judgments : []) {
+    for (const value of list(j.judgments, "judgments", reviews.errors)) {
         const judgment = judgmentOf(value);
         if (judgment) reviews.judgments.push(judgment);
         else reviews.errors.push(`a judgment does not match its schema: ${JSON.stringify(value)}`);
     }
-    for (const value of Array.isArray(j.disputes) ? j.disputes : []) {
+    for (const value of list(j.disputes, "disputes", reviews.errors)) {
         if (
             record(value) &&
             text(value.arm) &&
@@ -259,8 +302,9 @@ export function controlQualification(reviews: Reviews): { qualified: boolean; pr
         }
     }
     for (const kind of expected.keys()) {
-        if (!reviews.controls.some((control) => control.kind === kind))
-            problems.push(`no sealed ${kind} control`);
+        const sealed = reviews.controls.filter((control) => control.kind === kind).length;
+        if (sealed === 0) problems.push(`no sealed ${kind} control`);
+        else if (sealed > 1) problems.push(`${kind} is sealed ${sealed} times`);
     }
     for (const verdict of reviews.verdicts) {
         if (!ids.includes(verdict.control))
@@ -269,56 +313,166 @@ export function controlQualification(reviews: Reviews): { qualified: boolean; pr
     return { qualified: problems.length === 0 && reviews.errors.length === 0, problems };
 }
 
+/** The memory witness's recovery observation: an `eidnara_search` call that ended `discoverable`. */
 function isRecovery(evidence: Evidence): boolean {
     return (
-        /recover|search/.test(evidence.stage) ||
-        evidence.markers.some((m) => /recover|search/.test(m))
+        evidence.owner === "opencode-delivery" &&
+        evidence.stage === "recovery-eidnara-search" &&
+        evidence.terminal === "discoverable"
     );
 }
 
-const SERVING_FIELDS = [
-    "request_body_utf8_bytes",
-    "invocation_charged_tokens",
-    "estimator",
-    "transform_elapsed_ms",
-    "raw_source_leaks",
-    "serving_kind",
-] as const;
+/** The witness searched memory through `eidnara_search`, as its recorded tool call shows. */
+function searchedMemory(detail: Json): boolean {
+    const args = detail.arguments;
+    return (
+        detail.tool === "eidnara_search" &&
+        record(args) &&
+        Array.isArray(args.sources) &&
+        args.sources.includes("memory")
+    );
+}
 
-function costOf(evidence: Evidence[], arm: Arm, exactRead: boolean): ScenarioRow["cost"] {
+const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+/**
+ * The qualification and Pi witnesses serve C1.S1 through fixtures that run no OpenCode admission
+ * estimator, so their observations carry no serving cost and stay out of the cost column. The
+ * U2 replay serves through the daemon, never through OpenCode, so its tier observations do too.
+ */
+function uncosted(e: Evidence): boolean {
+    if (e.owner === "daemon.compression_fidelity.replay" || isHintTruncation(e)) return true;
+    return (
+        e.owner === "opencode-delivery" &&
+        e.scenario === "C1.S1" &&
+        (e.stage === "qualification" || e.stage.startsWith("pi-"))
+    );
+}
+
+/** The admission estimator's charge for `bytes`: ceil(bytes / 3.5) with 25% headroom. */
+const OPENCODE_ESTIMATOR = "opencode-heuristic utf8-bytes-div-3.5-v1";
+const chargeFor = (bytes: number) => Math.ceil((Math.ceil(bytes / 3.5) * 1250) / 1000);
+const count = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+/** The admission branches that ran an admission check; `none` ran none and charges nothing. */
+const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown"];
+const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+    // A request the producer measured with `Buffer.byteLength` is a positive whole number.
+    ["request_body_utf8_bytes", (v) => count(v) && v > 0],
+    ["admission", (v) => typeof v === "string" && ADMISSIONS.includes(v)],
+    ["invocation_bytes", count],
+    ["invocation_charged_tokens", count],
+    ["estimator", (v) => v === OPENCODE_ESTIMATOR],
+    ["transform_elapsed_ms", measurement],
+    // A served observation leaked no raw source; the producer marks a leaking pass unqualified.
+    ["raw_source_leaks", (v) => v === 0],
+    ["serving_kind", (v) => v === "cold" || v === "warm_repeat"],
+];
+
+/**
+ * The source-level generation records of `arm`. A real arm credits only its published real
+ * captures; a scripted arm credits any owner's attempts.
+ */
+function generationsOf(arm: Arm): Evidence[] {
+    const real = arm.config?.generation_origin === "real";
+    return arm.evidence.filter(
+        (e) =>
+            e.scenario === null &&
+            Array.isArray(e.detail.attempts) &&
+            (!real || (e.owner === REAL_CAPTURE && e.terminal === "published")),
+    );
+}
+
+/** A usage record counts input and output tokens as non-negative numbers. */
+function reportedUsage(e: Evidence): Json | null {
+    const usage = e.detail.usage;
+    if (e.detail.usage_reported === false || !record(usage)) return null;
+    return measurement(usage.input_tokens) && measurement(usage.output_tokens) ? usage : null;
+}
+
+/** The validated serving cost rows among `evidence`, and what each costed observation lacks. */
+function servingCosts(evidence: readonly Evidence[]): { serving: Json[]; missing: string[] } {
     const missing: string[] = [];
     const serving: Json[] = [];
-    for (const e of evidence.filter((e) => record(e.detail.serving))) {
-        const row: Json = { stage: e.stage, ...(e.detail.serving as Json) };
-        for (const field of SERVING_FIELDS) {
-            if (row[field] === undefined || row[field] === null)
-                missing.push(`${e.file}: ${field}`);
+    // Every served delivery is a serving observation, whether or not it names its tier.
+    const costed = (e: Evidence) =>
+        !uncosted(e) &&
+        (servedTierOf(e) !== undefined ||
+            (e.owner === "opencode-delivery" && e.terminal === "served"));
+    for (const e of evidence.filter(costed)) {
+        if (e.owner === "opencode-delivery" && typeof e.detail.served_tier !== "string") {
+            missing.push(`${e.file}: served_tier`);
         }
+        // A served pass recorded no refusal besides the deliberate `history_absent` omission.
+        if (
+            Array.isArray(e.detail.refusals) &&
+            e.detail.refusals.some((refusal) => refusal !== "history_absent")
+        ) {
+            missing.push(`${e.file}: refusals`);
+        }
+        if (!record(e.detail.serving)) {
+            missing.push(`${e.file}: serving`);
+            continue;
+        }
+        // The observation's stage is authoritative; a `stage` inside the serving record is ignored.
+        const row: Json = { ...e.detail.serving, stage: e.stage };
+        for (const [field, valid] of SERVING_FIELDS) {
+            if (!valid(row[field])) missing.push(`${e.file}: ${field}`);
+        }
+        // The campaign's `warm` stage repeats the previous request; every other stage serves cold.
+        if ((row.serving_kind === "warm_repeat") !== (e.stage === "warm")) {
+            missing.push(`${e.file}: serving_kind`);
+        }
+        if (
+            row.estimator === OPENCODE_ESTIMATOR &&
+            count(row.invocation_bytes) &&
+            row.invocation_charged_tokens !== chargeFor(row.invocation_bytes)
+        ) {
+            missing.push(`${e.file}: invocation_charged_tokens`);
+        }
+        // An admitting branch measured an invocation; zero bytes is the producer's `none` shape.
+        if (row.invocation_bytes === 0) missing.push(`${e.file}: invocation_bytes`);
         serving.push(row);
     }
+    return { serving, missing };
+}
+
+function costOf(
+    evidence: Evidence[],
+    arm: Arm,
+    exactRead: boolean,
+    m1Scenario: boolean,
+    generations: readonly Evidence[],
+): ScenarioRow["cost"] {
+    const { serving, missing } = servingCosts(evidence);
+    if (serving.length === 0 && !exactRead) missing.push("no serving observation");
+    // The delivery witness writes a source's m1, warm, and cold-m0 deliveries onto its m1 scenario.
+    for (const stage of m1Scenario ? SOURCE_LABEL_STAGES : []) {
+        if (!serving.some((row) => row.stage === stage)) {
+            missing.push(`no ${stage} serving observation`);
+        }
+    }
+    const recovery: Json[] = [];
     for (const e of evidence.filter(isRecovery)) {
-        if (typeof e.detail.calls !== "number" || typeof e.detail.result_utf8_bytes !== "number") {
+        if (!measurement(e.detail.calls) || !measurement(e.detail.result_utf8_bytes)) {
             missing.push(`${e.file}: recovery calls or output bytes`);
         }
-        serving.push({
+        recovery.push({
             stage: e.stage,
             recovery_calls: e.detail.calls,
             recovery_output_utf8_bytes: e.detail.result_utf8_bytes,
         });
     }
-    // An exact read is an internal witness; it serves nothing to a provider.
-    if (serving.length === 0 && !exactRead) missing.push("no serving observation");
-    const generation: Json[] = arm.evidence
-        .filter((e) => e.scenario === null && Array.isArray(e.detail.attempts))
+    const generation: Json[] = generations
         .filter((e) => evidence.some((s) => s.source === e.source))
         .map((e) => ({
             file: e.file,
             owner: e.owner,
-            attempts: (e.detail.attempts as unknown[]).length,
-            usage: e.owner === REAL_CAPTURE ? (e.detail.usage ?? null) : "scripted",
+            attempts: (e.detail.attempts as unknown[]).filter(record).length,
+            usage: e.owner === REAL_CAPTURE ? reportedUsage(e) : "scripted",
         }));
     if (generation.length === 0) missing.push("no generation observation");
     for (const g of generation) {
+        if (g.attempts === 0) missing.push(`${String(g.file)}: no generation attempt`);
         if (g.usage === null) missing.push(`${String(g.file)}: generation usage unreported`);
     }
     if (arm.config?.generation_origin === "real") {
@@ -331,20 +485,42 @@ function costOf(evidence: Evidence[], arm: Arm, exactRead: boolean): ScenarioRow
         status: missing.length === 0 ? "complete" : "incomplete",
         missing,
         serving,
+        recovery,
         generation,
     };
 }
 
+/** Orders obligation judgments by obligation ID, comparing UTF-16 code units. */
+const byObligation = (a: ObligationJudgment, b: ObligationJudgment) =>
+    a.obligation < b.obligation ? -1 : a.obligation > b.obligation ? 1 : 0;
+
+/** A judgment's verdict as a string equal for equal verdicts listed in any order. */
+function verdict(j: Judgment): string {
+    return JSON.stringify([
+        [...j.obligations].sort(byObligation),
+        [...j.forbidden_violated].sort(),
+        j.abstained,
+    ]);
+}
+
 /** The verdict a set of human judgments agrees on, or `null` when any two disagree. */
 function agreed(judgments: Judgment[]): Judgment | null {
-    const verdict = (j: Judgment) =>
-        JSON.stringify([
-            [...j.obligations].sort((a, b) => a.obligation.localeCompare(b.obligation)),
-            [...j.forbidden_violated].sort(),
-            j.abstained,
-        ]);
-    const first = judgments[0];
-    return first && judgments.every((j) => verdict(j) === verdict(first)) ? first : null;
+    const [first, ...rest] = judgments;
+    if (!first || rest.length === 0) return first ?? null;
+    const expected = verdict(first);
+    return rest.every((j) => verdict(j) === expected) ? first : null;
+}
+
+function byArmAndScenario(judgments: readonly Judgment[]): Map<string, Map<string, Judgment[]>> {
+    const groups = new Map<string, Map<string, Judgment[]>>();
+    for (const judgment of judgments) {
+        const arm = groups.get(judgment.arm) ?? new Map<string, Judgment[]>();
+        groups.set(judgment.arm, arm);
+        const group = arm.get(judgment.scenario);
+        if (group) group.push(judgment);
+        else arm.set(judgment.scenario, [judgment]);
+    }
+    return groups;
 }
 
 /** The review, preservation, recovery, safety, and cost columns of `row` for `arm`. */
@@ -353,11 +529,15 @@ export function scenarioRow(
     arm: Arm,
     label: string,
     reviews: Reviews,
+    candidates: readonly Judgment[] = reviews.judgments,
+    generations: readonly Evidence[] = generationsOf(arm),
 ): ScenarioRow {
     const { scenario, evidence } = row;
-    const hashes = new Set(evidence.map((e) => e.sha256));
-    const bound = reviews.judgments.filter(
-        (j) => j.arm === label && j.scenario === scenario.id && hashes.has(j.artifact_sha256),
+    const bound = candidates.filter(
+        (j) =>
+            j.arm === label &&
+            j.scenario === scenario.id &&
+            evidence.some((e) => e.sha256 === j.artifact_sha256),
     );
     const human = bound.filter((j) => j.kind === "human");
     const judgment = agreed(human);
@@ -394,19 +574,36 @@ export function scenarioRow(
     const discoverable = preservation.some((p) => p.disposition === "discoverable");
     const recovery = !discoverable
         ? "not_required"
-        : evidence.some(isRecovery)
+        : evidence.some(
+                (e) =>
+                    isRecovery(e) &&
+                    searchedMemory(e.detail) &&
+                    e.detail.result_carries_memory === true &&
+                    count(e.detail.calls) &&
+                    e.detail.calls > 0 &&
+                    count(e.detail.result_utf8_bytes) &&
+                    e.detail.result_utf8_bytes > 0,
+            )
           ? "witnessed"
           : "unverified";
     let consumer_safety: ScenarioRow["consumer_safety"] = "unreviewed";
     if (usable) {
-        const violated = usable.forbidden_violated.some((x) => scenario.forbidden.includes(x));
+        // Every reviewer-reported forbidden conclusion counts as a violation, including an ID
+        // outside the scenario's declared set.
+        const violated = usable.forbidden_violated.length > 0;
         if (violated || (usable.abstained && scenario.abstention === "forbidden")) {
             consumer_safety = "false-authoritative";
         } else {
             consumer_safety = usable.abstained ? "abstained" : "safe";
         }
     }
-    const cost = costOf(evidence, arm, scenario.serving.path === "exact_read");
+    const cost = costOf(
+        evidence,
+        arm,
+        scenario.serving.path === "exact_read",
+        scenario.serving.stage === "m1",
+        generations,
+    );
 
     const withheld: string[] = [];
     if (row.execution.status !== "executed") withheld.push(`execution ${row.execution.status}`);
@@ -457,13 +654,96 @@ export function evaluate(input: {
     const { reviews } = input;
     const assembled = assembleEvidence(input);
     const controls = controlQualification(reviews);
+    const binding = controls.qualified ? reviews : { ...reviews, judgments: [], disputes: [] };
+    const grouped = byArmAndScenario(binding.judgments);
+    const labels = new Set(assembled.arms.map((side) => side.label));
+    const expectations = new Map(
+        scenarios(input.corpus).map((s) => [
+            s.scenario.id,
+            new Set(s.scenario.expectations.map((e) => e.obligation)),
+        ]),
+    );
+    const stray = [
+        ...reviews.judgments.map((j) => ["judgment", j.arm, j.scenario] as const),
+        ...reviews.disputes.map((d) => ["dispute", d.arm, d.scenario] as const),
+    ]
+        .filter(([, arm, scenario]) => !labels.has(arm) || !expectations.has(scenario))
+        .map(
+            ([what, arm, scenario]) => `a ${what} names unknown arm or scenario ${arm}/${scenario}`,
+        );
+    const artifacts = new Map(
+        assembled.arms.map((side) => [
+            side.label,
+            new Map(side.rows.map((row) => [row.scenario.id, row.evidence.map((e) => e.sha256)])),
+        ]),
+    );
+    for (const j of reviews.judgments) {
+        const declared = expectations.get(j.scenario);
+        if (!declared) continue;
+        for (const o of j.obligations) {
+            if (!declared.has(o.obligation)) {
+                stray.push(`a judgment names unknown obligation ${o.obligation} for ${j.scenario}`);
+            }
+        }
+        const row = artifacts.get(j.arm)?.get(j.scenario);
+        if (row && !row.includes(j.artifact_sha256)) {
+            stray.push(
+                `a judgment names unknown artifact ${j.artifact_sha256} for ${j.arm}/${j.scenario}`,
+            );
+        }
+    }
     const arms = assembled.arms.map((side) => {
-        const rows = side.rows.map((row) => scenarioRow(row, side.arm, side.label, reviews));
+        const judged = grouped.get(side.label);
+        const generations = generationsOf(side.arm);
+        const rows = side.rows.map((row) =>
+            scenarioRow(
+                row,
+                side.arm,
+                side.label,
+                binding,
+                judged?.get(row.scenario.id) ?? [],
+                generations,
+            ),
+        );
+        // The delivery witness labels a source with no m1 scenario by its source ID; those
+        // serving observations belong to the arm and are costed here rather than on a row.
+        const sourceLevel = side.arm.evidence.filter(
+            (e) => e.scenario === null && e.owner === "opencode-delivery",
+        );
+        const sourceServing = servingCosts(sourceLevel);
+        const failedDeliveries = sourceLevel
+            .filter((e) => !executed(e))
+            .map((e) => `source-level delivery ${e.file} ended ${e.terminal}`);
+        // The witness serves p1 at every source-level stage and asserts it before recording.
+        const sparseDeliveries = sourceLevel
+            .filter((e) => executed(e) && servedTierOf(e) !== "p1")
+            .map(
+                (e) =>
+                    `source-level delivery ${e.file} served ${String(servedTierOf(e))}, where the witness serves p1`,
+            );
+        // The witness writes all three stages for each source with no m1 scenario.
+        const absentDeliveries = sourceLabelSources(input.corpus).flatMap((source) => {
+            const lacking = SOURCE_LABEL_STAGES.filter(
+                (stage) => !sourceLevel.some((e) => e.source === source && e.stage === stage),
+            );
+            return lacking.length > 0
+                ? [
+                      `source-level delivery of ${source} lacks its ${lacking.join(", ")} stage${lacking.length > 1 ? "s" : ""}`,
+                  ]
+                : [];
+        });
         const approvers = reviews.approvals.length;
         const reasons = [
             ...side.identity_errors,
             ...reviews.errors,
             ...controls.problems.map((p) => `controls: ${p}`),
+            ...stray,
+            ...absentDeliveries,
+            ...failedDeliveries,
+            ...sparseDeliveries,
+            ...(sourceServing.missing.length > 0
+                ? [`source-level serving cost incomplete: ${sourceServing.missing.join(", ")}`]
+                : []),
             ...(approvers < REQUIRED_APPROVERS
                 ? [`the batch has ${approvers} of ${REQUIRED_APPROVERS} approvers`]
                 : []),
@@ -475,22 +755,34 @@ export function evaluate(input: {
                 .filter((r) => r.withheld.length > 0)
                 .map((r) => `${r.scenario}: ${r.withheld.join(", ")}`),
         ];
+        // The validated forwarding reports' spend, at arm scope: sends are per arm, not per row.
+        const forwarding = side.arm.forwarding.reduce(
+            (sum, { report }) => ({
+                reports: sum.reports + 1,
+                sends: sum.sends + report.exchanges.length,
+                spent_usd: sum.spent_usd + report.spent_usd,
+            }),
+            { reports: 0, sends: 0, spent_usd: 0 },
+        );
         return {
             label: side.label,
             identity_errors: side.identity_errors,
             reached_scenarios: side.reached_scenarios,
             missing_scenarios: side.missing_scenarios,
             rows,
+            source_serving: sourceServing.serving,
+            forwarding,
             accepted: reasons.length === 0,
             withheld: reasons,
         };
     });
     const [base, cand] = arms as [(typeof arms)[0], (typeof arms)[0]];
+    const refused = assembled.refused;
     const comparison = {
-        refused: assembled.refused,
+        refused,
         treatment: assembled.treatment,
         rows:
-            assembled.refused.length > 0
+            refused.length > 0
                 ? []
                 : base.rows.map((row, i) => ({
                       scenario: row.scenario,
@@ -512,7 +804,7 @@ export function evaluate(input: {
         controls,
         arms,
         comparison,
-        accepted: assembled.refused.length === 0 && arms.every((a) => a.accepted),
+        accepted: refused.length === 0 && arms.every((a) => a.accepted),
     };
     return { manifest, report };
 }

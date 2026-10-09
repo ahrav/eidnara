@@ -137,7 +137,7 @@ source from the tail; construct fallback and stored-legacy controls separately.
 Confidence: medium - [evidence](evidence/cf-tier-transitions-preserve-qualified-meaning.md).
 Parser, m1, and renderer mechanisms are verified; semantic satisfaction is not.
 Existing check: `history_summarizer_validate.rs:1656-1730` checks parser
-fallback; `transform.rs:21123-21228` checks seeded m1 and replay; both are
+fallback; `transform.rs:21111-21216` checks seeded m1 and replay; both are
 unaudited and do not establish end-to-end meaning.
 Impact: Rejection can become acceptance, planned work can become completed
 work, or a task-scoped constraint can become a project-wide assertion.
@@ -171,7 +171,7 @@ removal of a high-importance row; inspect the whole invocation and any executed
 recovery evidence with covered raw source absent.
 Confidence: medium - [evidence](evidence/cf-pressure-omission-discloses-evidence-loss.md).
 P5 omission, oldest-first demotion, and zero daemon anchor overlap are verified.
-Existing check: `decay_render.rs:765-777,835-852` checks omission and budget
+Existing check: `decay_render.rs:950-962,1020-1037` checks omission and budget
 mechanics; status unaudited. No complete-invocation disposition check was found.
 Impact: Budget savings can conceal a lost prohibition or unsupported next
 action, including when the consumer abstains safely.
@@ -245,8 +245,8 @@ scenarios without changing the selection gate.
 Confidence: medium - [evidence](evidence/cf-hints-do-not-strengthen-source-claims.md).
 Selection, truncation, freeze, and the memory-search footer (#926) are verified;
 semantic loss needs an independently reviewed witness.
-Existing check: `transform.rs:8645` bounds the wrapper in debug builds;
-`transform.rs:22930-22996` checks query preservation and empty-decision reuse;
+Existing check: `transform.rs:8633` bounds the wrapper in debug builds;
+`transform.rs:22918-22984` checks query preservation and empty-decision reuse;
 status unaudited. No semantic hint-fidelity check was found.
 Impact: An omitted rejected decision can return as an affirmative hint, or
 repeated misleading summaries can appear to supply independent evidence.
@@ -363,8 +363,8 @@ memory. Record each surface's estimator and actual provider/raw-fallback outcome
 Confidence: high - [evidence](evidence/cf-serving-resource-boundaries.md).
 The body guard, separate wrapper retries, hint bounds, pinned read, and cache
 checks are verified in source; compliance with R9 remains a claim under test.
-Existing check: `crates/daemon/src/decay_render.rs:835-852,1213-1384`,
-`crates/daemon/src/transform.rs:22977-22996,21111-21216`, and
+Existing check: `crates/daemon/src/decay_render.rs:1020-1037,1599-1770`,
+`crates/daemon/src/transform.rs:22965-22984,21111-21216`, and
 `crates/daemon/tests/transform_canonical_memory.rs:48-217,243-449`, plus
 `packages/opencode-plugin/src/hooks/context/invocation-budget.test.ts:7-55`;
 status unaudited. No joined check for all R9 serving-work restrictions was found.

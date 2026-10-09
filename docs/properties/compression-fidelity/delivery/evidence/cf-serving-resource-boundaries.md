@@ -11,33 +11,33 @@ details do not authorize a weaker acceptance threshold.
 
 ## Evidence trail
 
-- [decay_render.rs:547-661](../../../../../crates/daemon/src/decay_render.rs#L547-L661)
+- [decay_render.rs:701-841](../../../../../crates/daemon/src/decay_render.rs#L701-L841)
   returns the unwrapped history body. Its positive-budget guard demotes
   oldest-first, bounded by `history_segments.len() * 5`, until the body fits
   its effective budget or is empty. This is the absolute body-budget boundary.
-- [memory_render.rs:191-198](../../../../../crates/daemon/src/memory_render.rs#L191-L198)
+- [memory_render.rs:206-215](../../../../../crates/daemon/src/memory_render.rs#L206-L215)
   divides the requested budget by the pressure multiplier before calling the
   renderer, then adds the session-history wrapper or its empty placeholder.
   [memory_render.rs:7-12](../../../../../crates/daemon/src/memory_render.rs#L7-L12)
   keeps the empty wrapper deliberately for prompt-cache stability.
-- [m0_compose.rs:131-168](../../../../../crates/daemon/src/m0_compose.rs#L131-L168)
+- [m0_compose.rs:134-173](../../../../../crates/daemon/src/m0_compose.rs#L134-L173)
   measures that wrapped history slice. Above `requested_budget * 1.05`, it
   increases pressure by 1.15 and retries at most three times. It returns the
   last render even if the trigger remains true. The trigger is not a cap.
-- [transform.rs:109-117,8190-8237](../../../../../crates/daemon/src/transform.rs#L109-L117)
+- [transform.rs:109-114,8190-8237](../../../../../crates/daemon/src/transform.rs#L109-L114)
   defines the hint limits; its
-  [eligibility/query gate](../../../../../crates/daemon/src/transform.rs#L8193-L8240)
+  [eligibility/query gate](../../../../../crates/daemon/src/transform.rs#L8190-L8237)
   avoids queries for already decided, ineligible, short, or augmented input.
-- [transform.rs:8342-8395](../../../../../crates/daemon/src/transform.rs#L8342-L8395)
+- [transform.rs:8339-8392](../../../../../crates/daemon/src/transform.rs#L8339-L8392)
   enforces matched-term/rareness admission, the top-score threshold, and the
   result limit. Fidelity wording changes do not authorize broader searches.
 - [lib.rs:9257-9271](../../../../../crates/daemon/src/lib.rs#L9257-L9271)
   pins one canonical read for the pass. The
   [reader](../../../../../crates/daemon/src/canonical_memory.rs#L147-L211)
   applies freshness, scope, category, and budget selection before rendering.
-- [transform.rs:22977-22996,21111-21216](../../../../../crates/daemon/src/transform.rs#L22977-L22996)
+- [transform.rs:22965-22984,21111-21216](../../../../../crates/daemon/src/transform.rs#L22965-L22984)
   checks empty-hint query reuse; the
-  [SOFT/replay test](../../../../../crates/daemon/src/transform.rs#L21123-L21228)
+  [SOFT/replay test](../../../../../crates/daemon/src/transform.rs#L21111-L21216)
   checks frozen m0/m1 bytes. Both are unaudited component checks.
 - [transform-session-client.ts:72,1552-1556](../../../../../packages/opencode-plugin/src/hooks/context/transform-session-client.ts#L72) with the [adapter profile](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L351)
   sets headroom to 250 permille; the

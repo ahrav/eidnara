@@ -10,11 +10,13 @@
  * record-and-forward provider mode published, with the limits that mode enforced.
  */
 
-import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { canonicalJson } from "../canonical-json";
 import type { BEHAVIORAL_VERDICTS } from "../incident-pool/report";
 import type { FidelityCorpus, FidelityScenario } from "./corpus";
+
+// Loaded through `getBuiltinModule` for the startup cost noted in `../atomic-publish`.
+const fs = process.getBuiltinModule("node:fs");
 
 export const ARM_SCHEMA = "eidnara.compression-fidelity-arm/v1";
 export const MANIFEST_SCHEMA = "eidnara.compression-fidelity-manifest/v1";
@@ -28,10 +30,71 @@ export const OWNERS = [
     "opencode-delivery",
 ] as const;
 export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
+const REPLAY = "daemon.compression_fidelity.replay";
+/** The output origins the real capture and the U2 replay write, as literals. */
+const REAL_ORIGIN = "real producer through the host";
+const SCRIPTED_ORIGIN = "scripted approved example";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
-const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
+/** The terminals each witness emits, and which of them mean the scenario executed. */
+const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly string[] }> = {
+    // The memory campaign records a credited negative case as `excluded` and a recovered
+    // memory as `discoverable`.
+    "opencode-delivery": {
+        executed: ["served", "excluded", "discoverable"],
+        failed: ["unqualified"],
+    },
+    "daemon.compression_fidelity.replay": {
+        executed: ["published", "served"],
+        failed: [
+            "validation_rejected",
+            "discarded_coverage",
+            "drift_rejected",
+            "input_truncated",
+            "unsettled",
+        ],
+    },
+    "daemon.harness_sources.c6_exact_read": { executed: ["read_exact"], failed: [] },
+    "daemon.compression_fidelity.real_capture": {
+        executed: ["published"],
+        failed: ["unsettled", "validation_rejected"],
+    },
+};
+/** The delivery terminals the memory campaign emits on its `memory_excluded` scenario alone. */
+const MEMORY_TERMINALS = ["excluded", "discoverable"];
+export const executed = (e: { owner: string; terminal: string }) =>
+    TERMINALS[e.owner]?.executed.includes(e.terminal) ?? false;
+const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
+/** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
+const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
+/** The delivery stages labeled with a source id when the source has no m1 scenario. */
+/** The delivery witness's stages for a source with no m1 scenario, labeled by source ID. */
+export const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"] as const;
+/** The delivery witness's judge self-test; a judge control elsewhere is refused. */
+const JUDGE_CONTROL = { stage: "missing-capture", scenario: "C1.S2" } as const;
+/**
+ * The memory witness's record of the truncated hint fragment on the hint-truncated scenario: an
+ * auxiliary artifact of the preceding `hint-on` delivery, serving no tier and charging no cost.
+ */
+export function isHintTruncation(e: { owner: string; stage: string; scenario: string | null }) {
+    return (
+        e.owner === "opencode-delivery" && e.stage === "hint-truncation" && e.scenario === "C4.S6"
+    );
+}
+/** The scenario variants a witness emits, by owner and scenario; any other label is refused. */
+const VARIANTS: Record<string, ReadonlyArray<{ scenario: string; variant: string }>> = {
+    "opencode-delivery": [{ scenario: "C1.S2", variant: "p1-only" }],
+};
+/** The generation settings every real capture attempt records and the arm's `settings` declare. */
+const ATTEMPT_SETTINGS = ["temperature", "max_output_tokens"] as const;
 /** The arm fields a comparison holds equal; only the prompt may differ, as the treatment. */
-const HELD_EQUAL = ["model", "provider", "version", "settings", "limits"] as const;
+const HELD_EQUAL = [
+    "model",
+    "provider",
+    "version",
+    "settings",
+    "limits",
+    "generation_origin",
+] as const;
 
 export type Json = Record<string, unknown>;
 type Deterministic = (typeof BEHAVIORAL_VERDICTS)[number];
@@ -68,17 +131,44 @@ export interface Evidence {
 export interface ForwardingEvidence {
     mode: "forward";
     corpus_sha256: string;
+    /** The model OpenCode ran, as the provider echoes it. */
+    model: string;
+    /** The Messages endpoint the forwarder sent to. */
+    upstream_url: string;
+    /** The context window OpenCode was configured with. */
+    context_limit: number;
+    /** The prices the forwarder reserved and charged with, in USD per million tokens. */
+    pricing: { inputPerMTok: number; outputPerMTok: number };
     limits: Json;
+    /** The reason the forwarder stopped, when it did. */
+    stopped: string | null;
+    /** The requests the forwarder refused to send. */
+    refusals: string[];
+    attempted_sends: number;
+    acknowledged_responses: number;
+    spent_usd: number;
     complete: boolean;
     incomplete_reasons: string[];
     exchanges: Array<{
         index: number;
+        /** The `tool_result` ids the request answers. */
+        tool_results: string[];
+        /** The `tool_use` ids the response asks for. */
+        tool_uses: string[];
         request: { body_text: string; body_sha256: string };
         response: {
+            outcome: string;
+            /** The cost charged against the cap for this send. */
+            cost_usd: number;
+            /** The model the response names; `null` when it names none. */
+            model: string | null;
+            stop_reason: string | null;
             truncated: boolean;
             body_text: string;
             body_sha256: string | null;
             cost_known: boolean;
+            /** The provider's token usage, `null` when the response reported none. */
+            usage: Json | null;
         } | null;
     }>;
 }
@@ -86,6 +176,8 @@ export interface ForwardingEvidence {
 export interface Arm {
     dir: string;
     config: ArmConfig | null;
+    /** Every file read, with its hash; `null` for a file that could not be read. */
+    files: Array<{ file: string; sha256: string | null }>;
     evidence: Evidence[];
     forwarding: Array<{ file: string; sha256: string; report: ForwardingEvidence }>;
     errors: string[];
@@ -104,7 +196,7 @@ export interface EvidenceRow {
 }
 
 export function sha256(bytes: Uint8Array | string): string {
-    return createHash("sha256").update(bytes).digest("hex");
+    return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 }
 
 export function record(value: unknown): value is Json {
@@ -115,21 +207,50 @@ export function text(value: unknown): value is string {
     return typeof value === "string" && value !== "";
 }
 
+export function named(value: unknown): value is string {
+    return typeof value === "string" && value.trim() !== "";
+}
+
+/** The four token counters the forwarder records from a provider response, as whole numbers. */
+const USAGE_COUNTERS = [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+] as const;
+
+function usageOf(value: unknown): value is Record<(typeof USAGE_COUNTERS)[number], number> {
+    return (
+        record(value) &&
+        USAGE_COUNTERS.every((counter) => {
+            const n = value[counter];
+            return typeof n === "number" && Number.isInteger(n) && n >= 0;
+        })
+    );
+}
+
+/** A lowercase hex SHA-256 digest. */
+export function digest(value: unknown): value is string {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
 export function strings(value: unknown): string[] {
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
-export function readJson(path: string): { bytes: Buffer; value: unknown } | { error: string } {
+export async function readJson(
+    path: string,
+): Promise<{ bytes: Buffer; value: unknown } | { bytes: Buffer | null; error: string }> {
     let bytes: Buffer;
     try {
-        bytes = readFileSync(path);
+        bytes = await fs.promises.readFile(path);
     } catch (error) {
-        return { error: `${path} is unreadable: ${(error as Error).message}` };
+        return { bytes: null, error: `${path} is unreadable: ${(error as Error).message}` };
     }
     try {
         return { bytes, value: JSON.parse(bytes.toString("utf8")) };
     } catch {
-        return { error: `${path} is not JSON` };
+        return { bytes, error: `${path} is not JSON` };
     }
 }
 
@@ -143,13 +264,16 @@ export function scenarios(
     return corpus.cases.flatMap((c) => c.scenarios.map((scenario) => ({ case: c.id, scenario })));
 }
 
-/** `value` as JSON with object keys sorted, so equal values compare equal. */
-export function canonical(value: unknown): string {
-    return JSON.stringify(value, (_key, v) =>
-        record(v)
-            ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
-            : v,
+/** The sources the delivery witness labels by source ID: those with no m1 scenario. */
+export function sourceLabelSources(corpus: FidelityCorpus): string[] {
+    const m1 = new Set(
+        scenarios(corpus)
+            .filter((s) => s.scenario.serving.stage === "m1")
+            .map((s) => s.scenario.source),
     );
+    return sources(corpus)
+        .map((s) => s.source)
+        .filter((source) => !m1.has(source));
 }
 
 export function armLabel(arm: Arm): string {
@@ -161,10 +285,21 @@ function armConfig(value: unknown): ArmConfig | null {
     if (!record(value) || value.schema !== ARM_SCHEMA) return null;
     const { label, prompt_sha256, model, provider, version, settings, limits, generation_origin } =
         value;
-    if (!text(label) || !text(prompt_sha256) || !text(model) || !text(provider) || !text(version)) {
+    if (
+        !named(label) ||
+        !digest(prompt_sha256) ||
+        !named(model) ||
+        !named(provider) ||
+        !named(version)
+    ) {
         return null;
     }
     if (!record(settings) || !(limits === null || record(limits))) return null;
+    if (typeof settings.temperature !== "number" || !Number.isFinite(settings.temperature)) {
+        return null;
+    }
+    const tokens = settings.max_output_tokens;
+    if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens <= 0) return null;
     if (generation_origin !== "scripted" && generation_origin !== "real") return null;
     return {
         schema: ARM_SCHEMA,
@@ -179,14 +314,76 @@ function armConfig(value: unknown): ArmConfig | null {
     };
 }
 
+/** An HTTPS Messages endpoint without credential or query, the only upstream the forwarder accepts. */
+function messagesEndpoint(value: string): boolean {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+    return (
+        url.protocol === "https:" &&
+        url.pathname.endsWith("/messages") &&
+        !url.username &&
+        !url.password &&
+        !url.search
+    );
+}
+
 /** `value` as forwarding evidence, or `null` when a field the assembler reads is absent. */
 function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!record(value) || value.mode !== "forward" || !text(value.corpus_sha256)) return null;
-    if (!record(value.limits) || typeof value.complete !== "boolean") return null;
+    if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
+        return null;
+    }
+    if (!text(value.upstream_url) || !messagesEndpoint(value.upstream_url)) return null;
+    const pricing = value.pricing;
+    if (
+        !record(pricing) ||
+        typeof pricing.inputPerMTok !== "number" ||
+        typeof pricing.outputPerMTok !== "number" ||
+        !Number.isFinite(pricing.inputPerMTok) ||
+        !Number.isFinite(pricing.outputPerMTok) ||
+        pricing.inputPerMTok <= 0 ||
+        pricing.outputPerMTok <= 0
+    ) {
+        return null;
+    }
+    const limits = value.limits;
+    if (
+        FORWARD_LIMITS.some(
+            (name) =>
+                typeof limits[name] !== "number" ||
+                !Number.isFinite(limits[name]) ||
+                (limits[name] as number) <= 0,
+        )
+    ) {
+        return null;
+    }
+    if (!Number.isInteger(limits.maxCalls) || !Number.isInteger(limits.maxOutputTokens))
+        return null;
+    if (value.stopped !== null && !text(value.stopped)) return null;
+    const contextLimit = value.context_limit;
+    if (typeof contextLimit !== "number" || !Number.isInteger(contextLimit) || contextLimit <= 0) {
+        return null;
+    }
+    const spent = value.spent_usd;
+    if (typeof spent !== "number" || !Number.isFinite(spent) || spent < 0) return null;
+    const reasons = value.incomplete_reasons;
+    if (!Array.isArray(reasons) || !reasons.every((reason) => typeof reason === "string")) {
+        return null;
+    }
+    const refusals = value.refusals;
+    if (!Array.isArray(refusals) || !refusals.every((refusal) => typeof refusal === "string")) {
+        return null;
+    }
+    const count = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0;
+    if (!count(value.attempted_sends) || !count(value.acknowledged_responses)) return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
-    for (const exchange of value.exchanges) {
-        if (!record(exchange) || typeof exchange.index !== "number") return null;
+    for (const [position, exchange] of value.exchanges.entries()) {
+        if (!record(exchange) || exchange.index !== position) return null;
         const request = exchange.request;
         if (
             !record(request) ||
@@ -204,18 +401,37 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             ) {
                 return null;
             }
+            if (response.usage !== null && !usageOf(response.usage)) return null;
+            const cost = response.cost_usd;
+            if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return null;
             if (response.body_sha256 !== null && typeof response.body_sha256 !== "string")
                 return null;
+            if (!text(response.outcome)) return null;
+            if (response.stop_reason !== null && typeof response.stop_reason !== "string")
+                return null;
+            if (response.model !== null && typeof response.model !== "string") return null;
         }
+        const ids = (value: unknown) =>
+            Array.isArray(value) && value.every((id) => typeof id === "string") ? value : null;
+        const toolUses = ids(exchange.tool_uses);
+        const toolResults = ids(exchange.tool_results);
+        if (!toolUses || !toolResults) return null;
         exchanges.push({
             index: exchange.index,
+            tool_uses: toolUses,
+            tool_results: toolResults,
             request: { body_text: request.body_text, body_sha256: request.body_sha256 },
             response: response
                 ? {
+                      outcome: response.outcome as string,
+                      cost_usd: response.cost_usd as number,
+                      model: response.model as string | null,
+                      stop_reason: response.stop_reason as string | null,
                       truncated: response.truncated as boolean,
                       body_text: response.body_text as string,
                       body_sha256: response.body_sha256 as string | null,
                       cost_known: response.cost_known as boolean,
+                      usage: response.usage as Json | null,
                   }
                 : null,
         });
@@ -223,47 +439,210 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     return {
         mode: "forward",
         corpus_sha256: value.corpus_sha256,
+        model: value.model,
+        upstream_url: value.upstream_url,
+        context_limit: contextLimit,
+        pricing: { inputPerMTok: pricing.inputPerMTok, outputPerMTok: pricing.outputPerMTok },
         limits: value.limits,
+        stopped: value.stopped as string | null,
+        refusals,
+        attempted_sends: value.attempted_sends,
+        acknowledged_responses: value.acknowledged_responses,
+        spent_usd: spent,
         complete: value.complete,
-        incomplete_reasons: strings(value.incomplete_reasons),
+        incomplete_reasons: reasons,
         exchanges,
     };
 }
 
-/** The system prompt hashes an observation claims its producer ran. */
-function systemHashes(evidence: Evidence): string[] {
-    const attempts = Array.isArray(evidence.detail.attempts) ? evidence.detail.attempts : [];
-    return attempts.filter(record).flatMap((attempt) => {
-        if (typeof attempt.system_sha256 === "string") return [attempt.system_sha256];
-        if (typeof attempt.system === "string") return [sha256(attempt.system)];
-        return [];
-    });
+/**
+ * The digests of a prompt field an attempt records as text (`<field>`), as a digest
+ * (`<field>_sha256`), or both; `conflict` names an attempt whose text and digest disagree.
+ */
+function promptHashes(
+    evidence: Evidence,
+    field: "system" | "prompt",
+): { hashes: string[]; conflict: boolean; malformed: boolean } {
+    const hashes: string[] = [];
+    let conflict = false;
+    let malformed = false;
+    for (const attempt of attemptsOf(evidence)) {
+        const claimed = attempt[`${field}_sha256`];
+        const recorded = typeof attempt[field] === "string" ? sha256(attempt[field]) : null;
+        if (claimed !== undefined && !digest(claimed)) malformed = true;
+        if (recorded !== null && digest(claimed) && claimed !== recorded) conflict = true;
+        if (recorded !== null) hashes.push(recorded);
+        else if (digest(claimed)) hashes.push(claimed);
+    }
+    return { hashes, conflict, malformed };
 }
 
+/** The system prompt hashes an observation claims its producer ran. */
+function systemHashes(evidence: Evidence): string[] {
+    return promptHashes(evidence, "system").hashes;
+}
+
+function attemptsOf(evidence: Evidence): Json[] {
+    return Array.isArray(evidence.detail.attempts) ? evidence.detail.attempts.filter(record) : [];
+}
+
+function outputOrigins(evidence: Evidence): string[] {
+    return [evidence.detail, ...attemptsOf(evidence)].flatMap((holder) =>
+        typeof holder.output_origin === "string" ? [holder.output_origin] : [],
+    );
+}
+
+export function servedTierOf(evidence: Evidence): string | null | undefined {
+    // The delivery witness names its tier in `served_tier` and the U2 replay in `tier`; each
+    // owner's field is read, whatever it holds, and the other owner's field is ignored.
+    const tier = evidence.owner === REPLAY ? evidence.detail.tier : evidence.detail.served_tier;
+    if (tier === undefined) return undefined;
+    return typeof tier === "string" ? tier : null;
+}
+
+function completeRealAttempt(attempt: Json, model: string): boolean {
+    return (
+        attempt.model === model &&
+        (text(attempt.system) || digest(attempt.system_sha256)) &&
+        text(attempt.prompt) &&
+        Array.isArray(attempt.outputs) &&
+        attempt.outputs.some((output) => record(output) && text(output.text))
+    );
+}
+
+/** A source-level generation record: a real capture, or the U2 replay's generation stage. */
+function isGeneration(evidence: { owner: string; stage: string }): boolean {
+    return (
+        evidence.owner === REAL_CAPTURE ||
+        (evidence.owner === REPLAY && evidence.stage === "generation")
+    );
+}
+
+/**
+ * The hash and completeness errors of one forwarding report. A report marked complete carries
+ * the writer's completeness invariants the assembler can observe: at least one send, and for
+ * every exchange an untruncated response with a known cost and a hash of its bytes.
+ */
 function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     const errors: string[] = [];
+    const complete = (index: number, reason: string) => {
+        if (report.complete)
+            errors.push(`${file} exchange ${index} ${reason} in a complete report`);
+    };
+    if (report.complete && report.exchanges.length === 0) {
+        errors.push(`${file} complete report records no send`);
+    }
+    if (report.complete && report.stopped !== null) {
+        errors.push(`${file} complete report records a stop: ${report.stopped}`);
+    }
+    for (const reason of report.complete ? report.incomplete_reasons : []) {
+        errors.push(`${file} complete report lists an incomplete reason: ${reason}`);
+    }
+    for (const refusal of report.complete ? report.refusals : []) {
+        errors.push(`${file} complete report records a refusal: ${refusal}`);
+    }
+    // The forwarder counts sends and acknowledged responses from the exchanges it keeps.
+    const sends = report.exchanges.length;
+    if (report.attempted_sends !== sends) {
+        errors.push(
+            `${file} records ${report.attempted_sends} attempted sends over ${sends} exchange${sends === 1 ? "" : "s"}`,
+        );
+    }
+    const acknowledged = report.exchanges.filter((e) => e.response?.outcome === "acknowledged");
+    if (report.acknowledged_responses !== acknowledged.length) {
+        errors.push(
+            `${file} records ${report.acknowledged_responses} acknowledged responses over ${acknowledged.length} acknowledged exchange${acknowledged.length === 1 ? "" : "s"}`,
+        );
+    }
+    const maxCalls = report.limits.maxCalls as number;
+    if (report.exchanges.length > maxCalls) {
+        errors.push(
+            `${file} records ${report.exchanges.length} exchanges above its ${maxCalls} call cap`,
+        );
+    }
+    // Spend is the sum of every settled send's charge, as the forwarder keeps it.
+    const charged = report.exchanges.reduce((sum, e) => sum + (e.response?.cost_usd ?? 0), 0);
+    if (Math.abs(charged - report.spent_usd) > 1e-9) {
+        errors.push(
+            `${file} spent ${report.spent_usd} USD, where its exchanges cost ${charged} USD`,
+        );
+    }
+    const cap = report.limits.spendCapUsd;
+    if (report.complete && typeof cap === "number" && report.spent_usd > cap) {
+        errors.push(
+            `${file} complete report spent ${report.spent_usd} USD above its ${cap} USD cap`,
+        );
+    }
     for (const exchange of report.exchanges) {
         // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
         if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
             errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);
         }
+        for (const id of exchange.tool_uses) {
+            const answered = report.exchanges.some(
+                (later) => later.index > exchange.index && later.tool_results.includes(id),
+            );
+            if (!answered) {
+                complete(exchange.index, `asks for tool ${id} that no later request answers`);
+            }
+        }
         const response = exchange.response;
-        if (response && !response.truncated && response.body_sha256 !== null) {
-            if (sha256(response.body_text) !== response.body_sha256) {
+        if (!response) {
+            complete(exchange.index, "has no response");
+            continue;
+        }
+        if (!response.cost_known) complete(exchange.index, "cost is unknown");
+        // A known cost is the forwarder's price of the response's usage.
+        if (usageOf(response.usage)) {
+            const u = response.usage;
+            const input =
+                u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
+            const priced =
+                (input * report.pricing.inputPerMTok +
+                    u.output_tokens * report.pricing.outputPerMTok) /
+                1_000_000;
+            if (Math.abs(priced - response.cost_usd) > 1e-9) {
                 errors.push(
-                    `${file} exchange ${exchange.index} response bytes do not match their hash`,
+                    `${file} exchange ${exchange.index} costs ${response.cost_usd} USD, where its usage prices at ${priced} USD`,
                 );
             }
+        } else if (response.cost_known && response.usage === null) {
+            complete(exchange.index, "claims a known cost without usage");
+        }
+        if (response.outcome !== "acknowledged") {
+            complete(exchange.index, `response outcome is ${response.outcome}`);
+        }
+        if (response.stop_reason === null)
+            complete(exchange.index, "response states no stop reason");
+        if (response.model === null) complete(exchange.index, "response names no model");
+        else if (response.model !== report.model) {
+            complete(exchange.index, `response names model ${response.model}`);
+        }
+        if (response.truncated) {
+            complete(exchange.index, "response is truncated");
+            continue;
+        }
+        if (response.body_sha256 === null) {
+            complete(exchange.index, "response has no hash");
+        } else if (sha256(response.body_text) !== response.body_sha256) {
+            errors.push(
+                `${file} exchange ${exchange.index} response bytes do not match their hash`,
+            );
         }
     }
     return errors;
 }
 
 /** Reads one arm directory and checks every file's identity against `corpus`. */
-export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: string): Arm {
+export async function loadArm(
+    dir: string,
+    corpus: FidelityCorpus,
+    corpusSha256: string,
+): Promise<Arm> {
     const arm: Arm = {
         dir,
         config: null,
+        files: [],
         evidence: [],
         forwarding: [],
         errors: [],
@@ -271,27 +650,40 @@ export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: strin
     };
     let names: string[];
     try {
-        names = readdirSync(dir).sort();
+        names = fs.readdirSync(dir).sort();
     } catch {
         arm.errors.push(`${dir} is unreadable`);
         return arm;
     }
-    const scenarioCase = new Map(scenarios(corpus).map((s) => [s.scenario.id, s.case]));
+    const scenarioEntry = new Map(scenarios(corpus).map((s) => [s.scenario.id, s]));
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
+    const sourceLabeled = new Set(sourceLabelSources(corpus));
+    // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
+    // either left behind means a publication never finished.
+    const unpublished = (name: string) => /^\..*\.tmp$|\.tmp-[0-9a-f]+$/.test(name);
+    const reads = new Map(
+        await Promise.all(
+            names
+                .filter((name) => name.endsWith(".json") && !unpublished(name))
+                .map(async (name) => [name, await readJson(join(dir, name))] as const),
+        ),
+    );
+    arm.files = [...reads].map(([file, read]) => ({
+        file,
+        sha256: read.bytes && sha256(read.bytes),
+    }));
     const seen = new Set<string>();
     const foreign = (name: string, bound: unknown) => {
         arm.foreignCorpus = true;
         arm.errors.push(`${name} is bound to corpus ${String(bound)}`);
     };
     for (const name of names) {
-        // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
-        // either left behind means a publication never finished.
-        if (name.startsWith(".") || /\.tmp(-|$)/.test(name)) {
+        if (unpublished(name)) {
             arm.errors.push(`${name} is an unpublished temporary file`);
             continue;
         }
-        if (!name.endsWith(".json")) continue;
-        const read = readJson(join(dir, name));
+        const read = reads.get(name);
+        if (!read) continue;
         if ("error" in read) {
             arm.errors.push(read.error);
             continue;
@@ -328,10 +720,98 @@ export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: strin
             foreign(name, value.corpus_sha256);
             continue;
         }
+        if (owner === "opencode-delivery" && !text(value.scenario)) {
+            arm.errors.push(`${name} has no scenario label`);
+            continue;
+        }
         const parts = typeof value.scenario === "string" ? value.scenario.split("@") : [null];
         const [label, variant = null] = parts;
         if (parts.length > 2 || variant === "" || label === "") {
             arm.errors.push(`${name} has a malformed scenario label ${String(value.scenario)}`);
+            continue;
+        }
+        if (variant !== null) {
+            const emitted = VARIANTS[owner] ?? [];
+            if (!emitted.some((v) => v.variant === variant)) {
+                arm.errors.push(`${name} labels variant ${variant}, which no witness emits`);
+                continue;
+            }
+            if (!emitted.some((v) => v.variant === variant && v.scenario === label)) {
+                arm.errors.push(
+                    `${name} labels variant ${variant}, which no witness emits for ${label}`,
+                );
+                continue;
+            }
+        }
+        const source = String(value.source);
+        const sourceLabel = label !== null && !scenarioEntry.has(label) && sourceCase.has(label);
+        if (sourceLabel && label !== source) {
+            arm.errors.push(`${name} labels source ${label} but names source ${source}`);
+            continue;
+        }
+        if (
+            sourceLabel &&
+            !(
+                owner === "opencode-delivery" &&
+                (SOURCE_LABEL_STAGES as readonly string[]).includes(String(value.stage)) &&
+                sourceLabeled.has(label)
+            )
+        ) {
+            arm.errors.push(
+                `${name} labels source ${label}, which the delivery witness labels only for a source without an m1 scenario at its m1, warm, or cold-m0 stage`,
+            );
+            continue;
+        }
+        if (!text(value.stage) || !text(value.terminal)) {
+            arm.errors.push(`${name} has no ${text(value.stage) ? "terminal" : "stage"}`);
+            continue;
+        }
+        const terminals = TERMINALS[owner];
+        if (!terminals || ![...terminals.executed, ...terminals.failed].includes(value.terminal)) {
+            arm.errors.push(`${name} has terminal ${value.terminal}, which ${owner} does not emit`);
+            continue;
+        }
+        if (
+            MEMORY_TERMINALS.includes(value.terminal) &&
+            (label === null ||
+                scenarioEntry.get(label)?.scenario.serving.path !== "memory_excluded")
+        ) {
+            arm.errors.push(
+                `${name} has terminal ${value.terminal}, which the memory campaign emits on a memory_excluded scenario only`,
+            );
+            continue;
+        }
+        if (!record(value.detail)) {
+            arm.errors.push(`${name} has no detail record`);
+            continue;
+        }
+        const detail = value.detail;
+        if (owner === "opencode-delivery" && detail.judge_control === true) {
+            if (value.stage !== JUDGE_CONTROL.stage) {
+                arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
+                continue;
+            }
+            if (label !== JUDGE_CONTROL.scenario) {
+                arm.errors.push(
+                    `${name} marks ${label} as a judge control, which the witness tests on ${JUDGE_CONTROL.scenario}`,
+                );
+                continue;
+            }
+        }
+        const exactRead =
+            label !== null && scenarioEntry.get(label)?.scenario.serving.path === "exact_read";
+        if (owner === EXACT_READ_OWNER && label !== null && !exactRead) {
+            arm.errors.push(`${name} names scenario ${label}, which is not an exact read`);
+            continue;
+        }
+        if (owner === REAL_CAPTURE && value.stage !== "capture") {
+            arm.errors.push(`${name} is a real capture at stage ${value.stage}`);
+            continue;
+        }
+        if (label !== null && !sourceLabel && isGeneration({ owner, stage: value.stage })) {
+            arm.errors.push(
+                `${name} names scenario ${label}; a ${value.stage} stage is source-level`,
+            );
             continue;
         }
         const evidence: Evidence = {
@@ -339,20 +819,25 @@ export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: strin
             sha256: sha256(read.bytes),
             owner,
             case: String(value.case),
-            source: String(value.source),
-            scenario: label ?? null,
+            source,
+            scenario: sourceLabel ? null : (label ?? null),
             variant,
-            stage: String(value.stage),
-            terminal: String(value.terminal),
+            stage: value.stage,
+            terminal: value.terminal,
             markers: strings(value.markers),
-            detail: record(value.detail) ? value.detail : {},
+            detail,
         };
-        const caseOf = evidence.scenario
-            ? scenarioCase.get(evidence.scenario)
-            : sourceCase.get(evidence.source);
+        const entry = evidence.scenario ? scenarioEntry.get(evidence.scenario) : undefined;
+        const caseOf = evidence.scenario ? entry?.case : sourceCase.get(evidence.source);
         if (caseOf !== evidence.case) {
             arm.errors.push(
                 `${name} names case ${evidence.case}, where the item is in ${caseOf ?? "no case"}`,
+            );
+            continue;
+        }
+        if (entry && entry.scenario.source !== evidence.source) {
+            arm.errors.push(
+                `${name} names source ${evidence.source}, where ${entry.scenario.id} is on ${entry.scenario.source}`,
             );
             continue;
         }
@@ -384,24 +869,144 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     const config = arm.config;
     if (!config) return errors;
     for (const evidence of arm.evidence) {
-        for (const hash of systemHashes(evidence)) {
+        const system = promptHashes(evidence, "system");
+        if (system.malformed || promptHashes(evidence, "prompt").malformed) {
+            errors.push(`${evidence.file} records a malformed digest`);
+        }
+        if (system.conflict) {
+            errors.push(
+                `${evidence.file} records a system prompt whose digest differs from its text`,
+            );
+        }
+        for (const hash of system.hashes) {
             if (hash !== config.prompt_sha256) {
                 errors.push(`${evidence.file} ran system prompt ${hash}, not the arm's prompt`);
             }
         }
     }
-    if (config.generation_origin !== "real") return errors;
-    const captures = arm.evidence.filter(
-        (e) =>
-            e.owner === REAL_CAPTURE &&
-            e.terminal === "published" &&
-            String(e.detail.output_origin ?? "").startsWith("real"),
+    const generations = arm.evidence.filter((e) => isGeneration(e) && e.terminal === "published");
+    for (const generation of generations) {
+        const attempts = generation.detail.attempts;
+        if (!Array.isArray(attempts) || attempts.length !== attemptsOf(generation).length) {
+            errors.push(`${generation.file} records an attempt that is not a record`);
+        }
+        if (systemHashes(generation).length === 0) {
+            errors.push(`${generation.file} records no system prompt`);
+        } else if (systemHashes(generation).length < attemptsOf(generation).length) {
+            errors.push(`${generation.file} records no system prompt on an attempt`);
+        }
+        for (const attempt of attemptsOf(generation)) {
+            if (attempt.model !== config.model) {
+                errors.push(
+                    `${generation.file} attempt ran model ${String(attempt.model)}, not the arm's model`,
+                );
+            }
+        }
+        const prompt = promptHashes(generation, "prompt");
+        if (prompt.conflict) {
+            errors.push(
+                `${generation.file} records a user prompt whose digest differs from its text`,
+            );
+        }
+        if (prompt.hashes.length < attemptsOf(generation).length) {
+            errors.push(`${generation.file} records no user prompt on an attempt`);
+        }
+    }
+    if (config.generation_origin !== "real") {
+        for (const evidence of arm.evidence) {
+            for (const origin of outputOrigins(evidence)) {
+                if (origin === REAL_ORIGIN) {
+                    errors.push(`${evidence.file} carries real output in an arm labeled scripted`);
+                } else if (origin !== SCRIPTED_ORIGIN) {
+                    errors.push(
+                        `${evidence.file} carries output of origin ${JSON.stringify(origin)} in an arm labeled scripted`,
+                    );
+                }
+            }
+        }
+        const replayed = generations.filter(
+            (g) =>
+                g.owner === REPLAY && outputOrigins(g).some((origin) => origin === SCRIPTED_ORIGIN),
+        );
+        const reviewed = new Map(
+            corpus.cases.flatMap((c) => c.sources.map((s) => [s.id, sha256(s.reviewedOutput)])),
+        );
+        for (const generation of replayed) {
+            for (const attempt of attemptsOf(generation)) {
+                if (attempt.output_sha256 !== reviewed.get(generation.source)) {
+                    errors.push(
+                        `${generation.file} returned output other than the reviewed output of ${generation.source}`,
+                    );
+                }
+            }
+        }
+        for (const { source } of sources(corpus)) {
+            if (!replayed.some((g) => g.source === source)) {
+                errors.push(`no published scripted generation for ${source}`);
+            }
+        }
+        return errors;
+    }
+    const published = generations.filter((g) => g.owner === REAL_CAPTURE);
+    for (const capture of published) {
+        const retained = attemptsOf(capture).length;
+        if (capture.detail.attempt_count !== retained) {
+            errors.push(
+                `${capture.file} records attempt_count ${String(capture.detail.attempt_count)} for ${retained} retained attempt${retained === 1 ? "" : "s"}`,
+            );
+        }
+        // The capture writer publishes only a settled generation that drained text and stored
+        // rows; a published capture missing any of them was not published by it.
+        if (capture.detail.settled !== true) {
+            errors.push(`${capture.file} is published without settled generation`);
+        }
+        const drained = attemptsOf(capture).some(
+            (attempt) =>
+                Array.isArray(attempt.outputs) &&
+                attempt.outputs.some((output) => record(output) && text(output.text)),
+        );
+        if (!drained) errors.push(`${capture.file} is published without a drained text output`);
+        const rows = capture.detail.published_rows;
+        const row = (value: unknown) =>
+            record(value) &&
+            text(value.title) &&
+            Number.isInteger(value.start) &&
+            Number.isInteger(value.end);
+        if (!Array.isArray(rows) || rows.length === 0 || !rows.every(row)) {
+            errors.push(`${capture.file} is published without published rows`);
+        }
+        if (capture.detail.model !== config.model) {
+            errors.push(
+                `${capture.file} captured with model ${String(capture.detail.model)}, not the arm's model`,
+            );
+        }
+        for (const attempt of attemptsOf(capture)) {
+            if (typeof attempt.system !== "string" || typeof attempt.prompt !== "string") {
+                errors.push(`${capture.file} records a prompt as a digest without its text`);
+            }
+            for (const setting of ATTEMPT_SETTINGS) {
+                if (attempt[setting] !== config.settings[setting]) {
+                    errors.push(
+                        `${capture.file} ran ${setting} ${String(attempt[setting])}, not the arm's ${String(config.settings[setting])}`,
+                    );
+                }
+            }
+        }
+    }
+    const captures = published.filter(
+        (c) => c.detail.model === config.model && c.detail.output_origin === REAL_ORIGIN,
     );
     for (const evidence of arm.evidence) {
-        if (String(evidence.detail.output_origin ?? "").includes("scripted")) {
-            errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
+        for (const origin of outputOrigins(evidence)) {
+            if (origin === SCRIPTED_ORIGIN) {
+                errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
+            } else if (origin !== REAL_ORIGIN) {
+                errors.push(
+                    `${evidence.file} carries output of origin ${JSON.stringify(origin)} in an arm labeled real`,
+                );
+            }
         }
-        if (!record(evidence.detail.serving)) continue;
+        if (servedTierOf(evidence) === undefined) continue;
         const served = evidence.detail.generation_capture_sha256;
         if (!captures.some((c) => c.sha256 === served && c.source === evidence.source)) {
             errors.push(
@@ -414,27 +1019,48 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             errors.push(`no published real-model capture for ${source}`);
         }
     }
+    for (const capture of captures) {
+        const attempts = attemptsOf(capture);
+        if (!attempts.some((attempt) => completeRealAttempt(attempt, config.model))) {
+            errors.push(`${capture.file} records no complete real attempt`);
+        }
+    }
     return errors;
 }
 
 function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Deterministic {
     if (scenario.serving.path === "exact_read") {
-        return evidence.some((e) => e.terminal === "read_exact") ? "pass" : "not_evaluated";
+        // The C6 witness records the digest and length of the bytes it read back.
+        const read = evidence.some(
+            (e) =>
+                e.owner === EXACT_READ_OWNER &&
+                e.stage === "exact_read" &&
+                e.terminal === "read_exact" &&
+                digest(e.detail.sha256) &&
+                Number.isInteger(e.detail.byte_length) &&
+                (e.detail.byte_length as number) > 0,
+        );
+        return read ? "pass" : "not_evaluated";
     }
     // Delivery observations name the tier OpenCode served; the U2 replay names the tier its
     // serving pass rendered. A delivery under positive-budget pressure passes when it serves a
     // tier sparser than the curve's, the oracle that witness documents; every other observation
     // must serve the corpus tier.
     const results = evidence.flatMap((e) => {
-        const tier = e.detail.served_tier ?? e.detail.tier;
-        if (typeof tier !== "string") return [];
+        const tier = servedTierOf(e);
+        // A served result names its tier; one that is absent or no string fails the column.
+        if (tier === undefined)
+            return e.terminal === "served" && !isHintTruncation(e) ? [false] : [];
+        if (tier === null) return [false];
         const curve = e.detail.curve_tier;
-        if (
-            scenario.serving.path === "pressure" &&
-            e.owner === "opencode-delivery" &&
-            typeof curve === "string"
-        ) {
-            return [TIERS.includes(curve) && TIERS.indexOf(tier) > TIERS.indexOf(curve)];
+        if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {
+            // Pressure demotes past the curve and at least to the scenario's declared tier.
+            return [
+                typeof curve === "string" &&
+                    TIERS.includes(curve) &&
+                    TIERS.indexOf(tier) > TIERS.indexOf(curve) &&
+                    TIERS.indexOf(tier) >= TIERS.indexOf(scenario.serving.tier ?? "p1"),
+            ];
         }
         return [tier === scenario.serving.tier];
     });
@@ -457,11 +1083,7 @@ function evidenceRow(entry: { case: string; scenario: FidelityScenario }, arm: A
         (e) => `${e.owner}:${e.variant ? `${e.variant}:` : ""}${e.stage}:${e.terminal}`,
     );
     const status =
-        evidence.length === 0
-            ? "missing"
-            : evidence.every((e) => EXECUTED.has(e.terminal))
-              ? "executed"
-              : "failed";
+        evidence.length === 0 ? "missing" : evidence.every(executed) ? "executed" : "failed";
     return {
         scenario,
         case: entry.case,
@@ -492,11 +1114,35 @@ export function assembleEvidence(input: {
         const errors = [...arm.errors, ...checkGeneration(arm, corpus)];
         if (input.mode === "live") {
             if (arm.forwarding.length === 0) errors.push("live mode found no forwarding report");
+            const first = arm.forwarding[0];
             for (const { file, report } of arm.forwarding) {
+                if (first && report.model !== first.report.model) {
+                    errors.push(
+                        `${file} forwarded to ${report.model}, where ${first.file} forwarded to ${first.report.model}`,
+                    );
+                }
+                if (first && report.upstream_url !== first.report.upstream_url) {
+                    errors.push(
+                        `${file} forwarded to ${report.upstream_url}, where ${first.file} forwarded to ${first.report.upstream_url}`,
+                    );
+                }
+                if (
+                    first &&
+                    canonicalJson(report.pricing) !== canonicalJson(first.report.pricing)
+                ) {
+                    errors.push(
+                        `${file} forwarded at prices ${canonicalJson(report.pricing)}, where ${first.file} forwarded at ${canonicalJson(first.report.pricing)}`,
+                    );
+                }
+                if (first && report.context_limit !== first.report.context_limit) {
+                    errors.push(
+                        `${file} forwarded at context limit ${report.context_limit}, where ${first.file} forwarded at ${first.report.context_limit}`,
+                    );
+                }
                 if (!report.complete) {
                     errors.push(`${file} is incomplete: ${report.incomplete_reasons.join("; ")}`);
                 }
-                if (canonical(report.limits) !== canonical(arm.config?.limits)) {
+                if (canonicalJson(report.limits) !== canonicalJson(arm.config?.limits)) {
                     errors.push(`${file} ran limits other than the arm's`);
                 }
             }
@@ -519,6 +1165,7 @@ export function assembleEvidence(input: {
     });
     const [base, cand] = arms as [(typeof arms)[0], (typeof arms)[0]];
     const refused: string[] = [];
+    if (base.label === cand.label) refused.push(`the arms share the label ${base.label}`);
     if (input.baseline.foreignCorpus || input.candidate.foreignCorpus) {
         refused.push("an arm is bound to another corpus");
     }
@@ -529,9 +1176,45 @@ export function assembleEvidence(input: {
         refused.push("the arms reached different scenario sets");
     }
     for (const field of HELD_EQUAL) {
-        const before = canonical(input.baseline.config?.[field] ?? null);
-        const after = canonical(input.candidate.config?.[field] ?? null);
+        const before = canonicalJson(input.baseline.config?.[field] ?? null);
+        const after = canonicalJson(input.candidate.config?.[field] ?? null);
         if (before !== after) refused.push(`the arms differ in ${field}`);
+    }
+    // The user prompt each source was generated from is held equal; only the system prompt is
+    // the treatment.
+    for (const { source } of sources(corpus)) {
+        // Retries repeat a prompt; the distinct prompts are what must agree.
+        const distinctPrompts = (arm: Arm) =>
+            new Set(
+                arm.evidence
+                    .filter(
+                        (e) => isGeneration(e) && e.terminal === "published" && e.source === source,
+                    )
+                    .flatMap((e) => promptHashes(e, "prompt").hashes),
+            );
+        const [before, after] = sides.map((arm) =>
+            JSON.stringify([...distinctPrompts(arm)].sort()),
+        );
+        if (before !== after) refused.push(`the arms generated ${source} from different prompts`);
+    }
+    // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
+    // declares, so live arms hold it equal through their reports.
+    const forwarded = sides.map((arm) => arm.forwarding[0]?.report ?? null);
+    if (input.mode === "live" && forwarded[0]?.model !== forwarded[1]?.model) {
+        refused.push("the arms forwarded to different models");
+    }
+    if (input.mode === "live" && forwarded[0]?.context_limit !== forwarded[1]?.context_limit) {
+        refused.push("the arms forwarded at different context limits");
+    }
+    if (input.mode === "live" && forwarded[0]?.upstream_url !== forwarded[1]?.upstream_url) {
+        refused.push("the arms forwarded to different upstream endpoints");
+    }
+    if (
+        input.mode === "live" &&
+        canonicalJson(forwarded[0]?.pricing ?? null) !==
+            canonicalJson(forwarded[1]?.pricing ?? null)
+    ) {
+        refused.push("the arms forwarded at different prices");
     }
     const manifest = {
         schema: MANIFEST_SCHEMA,
@@ -541,6 +1224,7 @@ export function assembleEvidence(input: {
         arms: sides.map((arm) => ({
             label: armLabel(arm),
             config: arm.config,
+            files: arm.files,
             observations: arm.evidence.map((e) => ({
                 file: e.file,
                 sha256: e.sha256,
@@ -552,7 +1236,14 @@ export function assembleEvidence(input: {
                 stage: e.stage,
                 terminal: e.terminal,
             })),
-            forwarding_reports: arm.forwarding.map(({ file, sha256 }) => ({ file, sha256 })),
+            forwarding_reports: arm.forwarding.map(({ file, sha256, report }) => ({
+                file,
+                sha256,
+                model: report.model,
+                upstream_url: report.upstream_url,
+                context_limit: report.context_limit,
+                pricing: report.pricing,
+            })),
         })),
     };
     return {

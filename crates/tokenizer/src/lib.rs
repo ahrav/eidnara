@@ -122,6 +122,36 @@ pub fn starts_outside_whitespace(text: &str) -> bool {
     text.chars().next().is_some_and(|c| !scan::is_whitespace(c))
 }
 
+/// The `ti + "\n"` and `tk` of the join identity on [`starts_outside_whitespace`], cut at
+/// each `"\n\n"` that a character outside the whitespace class follows: each part but the
+/// last keeps its join's first `"\n"`, and the join's second `"\n"` is the separator.
+/// [`estimate_tokens`] of `text` is therefore the parts' counts plus one
+/// `estimate_tokens("\n")` per part after the first. Empty `text` is one empty part.
+pub fn paragraph_spans(text: &str) -> impl Iterator<Item = &str> {
+    let mut start = 0;
+    let mut from = 0;
+    let mut done = false;
+    std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        while let Some(offset) = text[from..].find('\n') {
+            let second = from + offset + 1;
+            from = second;
+            if text.as_bytes().get(second) == Some(&b'\n')
+                && starts_outside_whitespace(&text[second + 1..])
+            {
+                let span = &text[start..second];
+                start = second + 1;
+                from = start;
+                return Some(span);
+            }
+        }
+        done = true;
+        Some(&text[start..])
+    })
+}
+
 fn vocab() -> &'static bpe::Vocab {
     static VOCAB: OnceLock<bpe::Vocab> = OnceLock::new();
     VOCAB.get_or_init(|| bpe::Vocab::from_blob(VOCAB_BLOB))

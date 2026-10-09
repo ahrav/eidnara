@@ -7,15 +7,15 @@
 //! match both exactly; keep the transformation order and ASCII word-boundary
 //! rules aligned with the reference.
 //!
-//! Pattern scanning uses prepared matchers: one case-insensitive Aho-Corasick
-//! automaton per dropped-phrase set, and one `memmem::Finder` per replacement
-//! pattern scanning a lowercase byte shadow of the working text. Sequential
-//! per-pattern pass order is semantically load-bearing: a pass can create
-//! text that a later pattern matches ("due in order to the fact that"
+//! Pattern scanning uses prepared matchers over a lowercase byte shadow of the
+//! working text: one packed multi-pattern searcher per dropped-phrase set and
+//! for the auxiliaries, and one `memmem::Finder` per replacement pattern.
+//! Sequential per-pattern pass order is semantically load-bearing: a pass can
+//! create text that a later pattern matches ("due in order to the fact that"
 //! shortens to "due to the fact that", which the next pattern shortens to
 //! "because"), so the passes must not be merged into one automaton.
 
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind, packed};
 use memchr::memmem::Finder;
 use regex::Regex;
 use std::borrow::Cow;
@@ -184,19 +184,123 @@ fn phrase_automaton(patterns: &[&str]) -> AhoCorasick {
         .expect("static pattern set builds")
 }
 
+#[cfg(test)]
 fn filler_automaton() -> &'static AhoCorasick {
     static A: OnceLock<AhoCorasick> = OnceLock::new();
     A.get_or_init(|| phrase_automaton(FILLER_WORDS))
 }
 
+#[cfg(test)]
 fn hedging_automaton() -> &'static AhoCorasick {
     static A: OnceLock<AhoCorasick> = OnceLock::new();
     A.get_or_init(|| phrase_automaton(HEDGING_PHRASES))
 }
 
+#[cfg(test)]
 fn pleasantries_automaton() -> &'static AhoCorasick {
     static A: OnceLock<AhoCorasick> = OnceLock::new();
     A.get_or_init(|| phrase_automaton(PLEASANTRIES))
+}
+
+/// Leftmost-first search for one dropped-phrase set over the lowercase shadow.
+///
+/// The patterns are lowercase ASCII, so an exact match on the shadow is a case-insensitive
+/// match on the text at the same offsets. The packed (Teddy) searcher is used when the
+/// crate can build one for the host; the DFA automaton over the same patterns otherwise.
+struct PhraseSearcher {
+    packed: Option<packed::Searcher>,
+    automaton: AhoCorasick,
+}
+
+impl PhraseSearcher {
+    fn new(patterns: &[&str]) -> Self {
+        let packed = packed::Config::new()
+            .match_kind(packed::MatchKind::LeftmostFirst)
+            .builder()
+            .extend(patterns)
+            .build();
+        PhraseSearcher {
+            packed,
+            automaton: phrase_automaton(patterns),
+        }
+    }
+
+    fn find(&self, shadow: &[u8]) -> Option<(usize, usize)> {
+        match &self.packed {
+            Some(searcher) => searcher.find(shadow).map(|m| (m.start(), m.end())),
+            None => self.automaton.find(shadow).map(|m| (m.start(), m.end())),
+        }
+    }
+}
+
+fn filler_searcher() -> &'static PhraseSearcher {
+    static S: OnceLock<PhraseSearcher> = OnceLock::new();
+    S.get_or_init(|| PhraseSearcher::new(FILLER_WORDS))
+}
+
+fn hedging_searcher() -> &'static PhraseSearcher {
+    static S: OnceLock<PhraseSearcher> = OnceLock::new();
+    S.get_or_init(|| PhraseSearcher::new(HEDGING_PHRASES))
+}
+
+fn pleasantries_searcher() -> &'static PhraseSearcher {
+    static S: OnceLock<PhraseSearcher> = OnceLock::new();
+    S.get_or_init(|| PhraseSearcher::new(PLEASANTRIES))
+}
+
+/// Start of the maximal Unicode-whitespace run ending at `end`, bounded below by `floor`.
+fn whitespace_run_start(text: &str, end: usize, floor: usize) -> usize {
+    let mut start = end;
+    while start > floor {
+        let ch = text[..start]
+            .chars()
+            .next_back()
+            .expect("start > 0 within text");
+        if ch.is_whitespace() {
+            start -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    start
+}
+
+/// `drop_phrases` over a shadowed buffer: the search runs on the shadow, the whitespace run
+/// before each dropped phrase is read from the text, and both buffers are rewritten together.
+fn drop_phrases_shadowed(buf: &mut ShadowedText, searcher: &PhraseSearcher) {
+    let mut out: Option<(String, Vec<u8>)> = None;
+    let mut pending = 0usize;
+    let mut search = 0usize;
+    while search < buf.shadow.len() {
+        let Some((start, end)) = searcher.find(&buf.shadow[search..]) else {
+            break;
+        };
+        let s = search + start;
+        let e = search + end;
+        let before_ok = s == 0 || !is_word_byte(buf.shadow[s - 1]);
+        let after_ok = e >= buf.shadow.len() || !is_word_byte(buf.shadow[e]);
+        if !(before_ok && after_ok) {
+            search = s + 1;
+            continue;
+        }
+        let run_start = whitespace_run_start(&buf.text, s, pending);
+        let (out_text, out_shadow) = out.get_or_insert_with(|| {
+            (
+                String::with_capacity(buf.text.len()),
+                Vec::with_capacity(buf.shadow.len()),
+            )
+        });
+        out_text.push_str(&buf.text[pending..run_start]);
+        out_shadow.extend_from_slice(&buf.shadow[pending..run_start]);
+        pending = e;
+        search = e;
+    }
+    if let Some((mut out_text, mut out_shadow)) = out {
+        out_text.push_str(&buf.text[pending..]);
+        out_shadow.extend_from_slice(&buf.shadow[pending..]);
+        buf.text = out_text;
+        buf.shadow = out_shadow;
+    }
 }
 
 /// Drops every whole-word occurrence of the automaton's phrases, along with
@@ -208,6 +312,7 @@ fn pleasantries_automaton() -> &'static AhoCorasick {
 /// the same one a position-by-position scan selects. A candidate that fails a
 /// word-boundary check restarts the search one byte later, which keeps
 /// overlapping later candidates reachable.
+#[cfg(test)]
 fn drop_phrases<'a>(text: &'a str, automaton: &AhoCorasick) -> Cow<'a, str> {
     let bytes = text.as_bytes();
     let mut out: Option<String> = None;
@@ -586,6 +691,53 @@ fn protect_hash_regions<'a>(text: &'a str, preserved: &mut Vec<PreservedRegion>)
     }
 }
 
+fn is_path_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-' | b'/')
+}
+
+/// `protect_regex` for the path pattern. A path match consists of path bytes and contains `/`,
+/// so the regex runs only over each maximal run of path bytes that contains a `/`; leftmost-first
+/// matching inside such a run equals matching over the whole text, since no match crosses a
+/// non-path byte.
+fn protect_paths<'a>(
+    text: &'a str,
+    regex: &Regex,
+    preserved: &mut Vec<PreservedRegion>,
+) -> Cow<'a, str> {
+    let bytes = text.as_bytes();
+    let mut output: Option<String> = None;
+    let mut cursor = 0;
+    let mut scanned = 0;
+    for slash in memchr::memchr_iter(b'/', bytes) {
+        if slash < scanned {
+            continue;
+        }
+        let mut run_start = slash;
+        while run_start > scanned && is_path_byte(bytes[run_start - 1]) {
+            run_start -= 1;
+        }
+        let mut run_end = slash + 1;
+        while run_end < bytes.len() && is_path_byte(bytes[run_end]) {
+            run_end += 1;
+        }
+        scanned = run_end;
+        for matched in regex.find_iter(&text[run_start..run_end]) {
+            let start = run_start + matched.start();
+            let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+            output.push_str(&text[cursor..start]);
+            output.push_str(&mint_placeholder(preserved, matched.as_str(), false));
+            cursor = run_start + matched.end();
+        }
+    }
+    match output {
+        None => Cow::Borrowed(text),
+        Some(mut output) => {
+            output.push_str(&text[cursor..]);
+            Cow::Owned(output)
+        }
+    }
+}
+
 fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
     let mut preserved = Vec::new();
     let mut working = Cow::Borrowed(text);
@@ -647,7 +799,7 @@ fn protect_regions(text: &str) -> (String, Vec<PreservedRegion>) {
     });
     if working.contains('/') {
         advance(&mut working, |text| {
-            protect_regex(
+            protect_paths(
                 text,
                 PATH.get_or_init(|| {
                     Regex::new(
@@ -873,27 +1025,48 @@ fn sorted_auxiliaries() -> &'static [&'static str] {
     })
 }
 
+#[cfg(test)]
 fn drop_auxiliaries(text: &str) -> String {
+    let shadow = text
+        .bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<u8>>();
+    drop_auxiliaries_shadowed(text, &shadow)
+}
+
+fn auxiliary_searcher() -> &'static PhraseSearcher {
+    static S: OnceLock<PhraseSearcher> = OnceLock::new();
+    S.get_or_init(|| PhraseSearcher::new(sorted_auxiliaries()))
+}
+
+/// Every drop begins at a whitespace run followed by an auxiliary, so the scan jumps from one
+/// auxiliary occurrence in the shadow to the next and applies the whole-word, longest-first,
+/// participle rule there.
+fn drop_auxiliaries_shadowed(text: &str, shadow: &[u8]) -> String {
+    debug_assert_eq!(text.len(), shadow.len());
     let auxiliaries = sorted_auxiliaries();
     let buckets = auxiliary_buckets();
+    let searcher = auxiliary_searcher();
     let bytes = text.as_bytes();
     let mut output = String::with_capacity(text.len());
     let mut pending = 0usize;
     let mut cursor = 0usize;
     while cursor < bytes.len() {
-        let byte = bytes[cursor];
-        if byte < 0x80 && !matches!(byte, b' ' | b'\t' | b'\n' | 0x0B | 0x0C | b'\r') {
-            cursor += 1;
+        let Some((offset, _)) = searcher.find(&shadow[cursor..]) else {
+            break;
+        };
+        let whitespace_end = cursor + offset;
+        // The whitespace run before the auxiliary must begin at or after `cursor`: a run that an
+        // earlier auxiliary absorbed as its trailing whitespace introduces nothing.
+        if whitespace_end == cursor
+            || !text[..whitespace_end]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            cursor = whitespace_end + 1;
             continue;
         }
-        let Some(whitespace_end) = whitespace_run_end(text, cursor) else {
-            cursor += text[cursor..]
-                .chars()
-                .next()
-                .expect("char boundary")
-                .len_utf8();
-            continue;
-        };
         let first = bytes.get(whitespace_end).map_or(0, u8::to_ascii_lowercase);
         let candidates: &[usize] = if first < 0x80 {
             &buckets[first as usize]
@@ -909,7 +1082,7 @@ fn drop_auxiliaries(text: &str) -> String {
                     && has_word_boundary_after(text, whitespace_end + aux.len())
             });
         let Some(aux) = aux else {
-            cursor = whitespace_end;
+            cursor = whitespace_end + 1;
             continue;
         };
         let aux_end = whitespace_end + aux.len();
@@ -918,7 +1091,7 @@ fn drop_auxiliaries(text: &str) -> String {
             continue;
         };
         if matches_participle(text, run_end) {
-            output.push_str(&text[pending..cursor]);
+            output.push_str(&text[pending..whitespace_run_start(text, whitespace_end, pending)]);
             output.push(' ');
             pending = run_end;
         }
@@ -1009,17 +1182,16 @@ pub fn compress(text: &str, level: TerseTextCompressionLevel) -> String {
     }
     let (protected_text, preserved) = protect_regions(text);
     let transformed = transform_preserving_user_lines(&protected_text, |chunk| {
-        let a = drop_phrases(chunk, filler_automaton());
-        let b = drop_phrases(&a, hedging_automaton());
-        let c = drop_phrases(&b, pleasantries_automaton());
-
-        let mut buf = ShadowedText::new(c.into_owned());
+        let mut buf = ShadowedText::new(chunk.to_string());
+        drop_phrases_shadowed(&mut buf, filler_searcher());
+        drop_phrases_shadowed(&mut buf, hedging_searcher());
+        drop_phrases_shadowed(&mut buf, pleasantries_searcher());
         apply_phrase_shortenings(&mut buf);
         if matches!(
             level,
             TerseTextCompressionLevel::Full | TerseTextCompressionLevel::Ultra
         ) {
-            let working = drop_auxiliaries(&buf.text);
+            let working = drop_auxiliaries_shadowed(&buf.text, &buf.shadow);
             buf = ShadowedText::new(drop_articles(&working));
         }
         if level == TerseTextCompressionLevel::Ultra {

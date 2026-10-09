@@ -25,13 +25,13 @@ independent false-success routes. Inspected 2026-09-19 at
 - [rust-mode-transform.test.ts:1733-1829](../../../../../packages/opencode-plugin/src/hooks/context/rust-mode-transform.test.ts#L1733-L1829)
   checks raw input retention on missing/invalid recipes and bad boundary;
   status unaudited.
-- [rust-harness.ts:429-453](../../../../../packages/e2e-tests/src/rust-harness.ts#L429-L453)
+- [rust-harness.ts:577-601](../../../../../packages/e2e-tests/src/rust-harness.ts#L577-L601)
   filters main requests by the Eidnara system heading. Missing capture becomes
   `[]`, zero bytes, or serialized `[]` in convenience helpers.
-- [mock-provider/server.ts:66-79,161-171,221-249](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L66-L79)
+- [mock-provider/server.ts:72-86,214-216,267-308](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L72-L86)
   defines full request captures, including system/messages/tools; its
-  [reset](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L161-L171)
-  deletes them, and its [handler](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L221-L249)
+  [reset](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L214-L216)
+  deletes them, and its [handler](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L267-L308)
   records the received body. Retain observations before scripted helper reuse.
 - [invocation-budget.ts:61-71](../../../../../packages/opencode-plugin/src/hooks/context/invocation-budget.ts#L61-L71)
   admits fitting, shrinking, and unknown-limit arrays. Preserve these existing

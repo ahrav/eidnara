@@ -29,7 +29,11 @@ export interface ForwardLimits {
 export interface ForwardConfig {
     /** The HTTPS Messages endpoint, such as `https://api.anthropic.com/v1/messages`. */
     upstreamURL: string;
-    /** The model OpenCode runs; a request naming another model is refused. */
+    /**
+     * The model id as the provider echoes it in responses. A response naming another model, or
+     * none, stops the run, so an alias the provider resolves to a dated id stops at the first
+     * response.
+     */
     model: string;
     /** The model's context window, which OpenCode is configured with. */
     contextLimit: number;
@@ -54,6 +58,10 @@ export interface ForwardConfig {
 
 /** Response bytes kept per exchange; a longer response is served whole and captured truncated. */
 export const MAX_CAPTURED_RESPONSE_BYTES = 4 * 1024 * 1024;
+/** Response bytes read per send; a longer response is cut off and the send fails. */
+export const MAX_RESPONSE_BYTES = 4 * MAX_CAPTURED_RESPONSE_BYTES;
+/** Refusal reasons kept in a report; `refused` counts every refusal, retained or not. */
+export const MAX_RETAINED_REFUSALS = 32;
 
 const REDACTED_HEADERS = new Set([
     "authorization",
@@ -92,6 +100,8 @@ export interface ForwardedExchange {
         body_text: string;
         truncated: boolean;
         stop_reason: string | null;
+        /** The model the response names; `null` when it names none. */
+        model: string | null;
         usage: Usage | null;
         /** The cost charged against the cap: from usage when known, else the reservation. */
         cost_usd: number;
@@ -119,6 +129,8 @@ export interface ForwardingReport {
     acknowledged_responses: number;
     spent_usd: number;
     stopped: string | null;
+    /** Every refused request, including those past `MAX_RETAINED_REFUSALS`. */
+    refused: number;
     refusals: string[];
     complete: boolean;
     incomplete_reasons: string[];
@@ -141,8 +153,8 @@ export function validateForwardConfig(config: ForwardConfig): Readonly<ForwardCo
     if (!url.pathname.endsWith("/messages")) {
         throw new Error("forwarding accepts only a Messages endpoint");
     }
-    if (url.username || url.password || url.search) {
-        throw new Error("the upstream URL carries no credential or query");
+    if (url.username || url.password || url.search || url.hash) {
+        throw new Error("the upstream URL carries no credential, query, or fragment");
     }
     if (typeof config.model !== "string" || config.model === "") {
         throw new Error("forwarding needs an explicit model");
@@ -201,8 +213,17 @@ function isCount(value: unknown): value is number {
 export interface ResponseFacts {
     usage: Usage | null;
     stopReason: string | null;
+    /** The `model` the JSON body or an SSE event's `message` names; `null` when none does. */
+    model: string | null;
     /** The `tool_use` ids the response asks for. */
     toolUses: string[];
+    /** Why an SSE stream is unfinished: an `error` event or no `message_stop`; `null` when finished. */
+    unfinished: string | null;
+    /**
+     * Why the body is not a Messages message: no JSON `type: "message"` with a `content` array,
+     * or no SSE `message_start` carrying a `message`; `null` when it is one.
+     */
+    malformed: string | null;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -210,12 +231,11 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The facts `readResponse` extracts live under the keys `usage`, `stop_reason`, and
- * `content_block`. JSON spells such a key either as the literal quoted name or with a `\u`
- * escape, so every `data:` line that can affect the result contains one of these four strings,
- * and parsing only those lines preserves the result.
+ * `readResponse` reads the keys `usage`, `stop_reason`, and `content_block` and the event types
+ * `message_stop` and `error`. JSON spells each as the literal quoted string or with a `\u`
+ * escape, so a `data:` line that names any of them contains one of these six patterns.
  */
-const FACT_KEY = /"usage"|"stop_reason"|"content_block"|\\u/g;
+const FACT_KEY = /"(?:usage|stop_reason|content_block|message_stop|error)"|\\u/g;
 
 function factLines(text: string): string[] {
     const starts: number[] = [];
@@ -233,18 +253,30 @@ function factLines(text: string): string[] {
 }
 
 /**
- * The usage, stop reason, and `tool_use` ids of a JSON or SSE Messages response, read in one
- * pass over its events. Usage is `null` unless the response states input and output counts;
- * absent cache counts are zero. An SSE `data:` line that is not a JSON object is skipped.
+ * The usage, stop reason, model, and `tool_use` ids of a JSON or SSE Messages response, read in
+ * one pass over its events. Usage is `null` unless the response states input and output counts;
+ * absent cache counts are zero. SSE usage needs both a `message_delta` carrying usage and a
+ * `message_stop` event, because `message_start` carries provisional counts; any `error` event
+ * makes it `null`. An SSE `data:` line that is not a JSON object is skipped.
  */
 export function readResponse(contentType: string, text: string): ResponseFacts {
     const fields: Record<string, unknown> = {};
     let stopReason: string | null = null;
+    let model: string | null = null;
+    let unfinished: string | null = null;
+    let message = false;
+    let finalUsage = true;
     const blocks: Array<Record<string, unknown>> = [];
     const take = (usage: unknown) => {
         if (isObject(usage)) Object.assign(fields, usage);
     };
-    if (contentType.includes("text/event-stream")) {
+    const name = (value: unknown) => {
+        if (typeof value === "string") model = value;
+    };
+    if (contentType.toLowerCase().includes("text/event-stream")) {
+        let stopped = false;
+        let errored = false;
+        finalUsage = false;
         for (const line of factLines(text)) {
             if (!line.startsWith("data:")) continue;
             let event: unknown;
@@ -254,38 +286,52 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
                 continue;
             }
             if (!isObject(event)) continue;
-            if (isObject(event.message)) take(event.message.usage);
+            if (isObject(event.message)) {
+                take(event.message.usage);
+                name(event.message.model);
+                if (event.type === "message_start") message = true;
+            }
             take(event.usage);
+            if (event.type === "message_delta" && isObject(event.usage)) finalUsage = true;
+            if (event.type === "message_stop") stopped = true;
+            if (event.type === "error") errored = true;
             if (isObject(event.delta) && typeof event.delta.stop_reason === "string") {
                 stopReason = event.delta.stop_reason;
             }
             if (isObject(event.content_block)) blocks.push(event.content_block);
         }
+        if (errored) unfinished = "stream carried an error event";
+        else if (!stopped) unfinished = "stream ended before message_stop";
     } else {
         let body: unknown;
         try {
             body = JSON.parse(text);
         } catch {
-            return { usage: null, stopReason: null, toolUses: [] };
+            body = undefined;
         }
         if (isObject(body)) {
             take(body.usage);
+            name(body.model);
             if (typeof body.stop_reason === "string") stopReason = body.stop_reason;
             blocks.push(...blocksOf(body.content));
+            message = body.type === "message" && Array.isArray(body.content);
         }
     }
+    const malformed = message ? null : "is not a Messages message";
     const toolUses = blocks
         .filter((block) => block.type === "tool_use" && typeof block.id === "string")
         .map((block) => block.id as string);
     const cacheWrite = fields.cache_creation_input_tokens ?? 0;
     const cacheRead = fields.cache_read_input_tokens ?? 0;
     if (
+        unfinished !== null ||
+        !finalUsage ||
         !isCount(fields.input_tokens) ||
         !isCount(fields.output_tokens) ||
         !isCount(cacheWrite) ||
         !isCount(cacheRead)
     ) {
-        return { usage: null, stopReason, toolUses };
+        return { usage: null, stopReason, model, toolUses, unfinished, malformed };
     }
     return {
         usage: {
@@ -295,8 +341,38 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
             cache_read_input_tokens: cacheRead,
         },
         stopReason,
+        model,
         toolUses,
+        unfinished,
+        malformed,
     };
+}
+
+/** The body's bytes, or a `ResponseTooLarge` error once more than `cap` bytes have arrived. */
+async function readBounded(response: Response, cap: number): Promise<Uint8Array<ArrayBuffer>> {
+    const reader = response.body?.getReader();
+    if (!reader) return new Uint8Array(0);
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > cap) {
+            await reader.cancel();
+            const error = new Error(`response above ${cap} bytes`);
+            error.name = "ResponseTooLarge";
+            throw error;
+        }
+        chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return bytes;
 }
 
 function errorResponse(type: string, message: string): Response {
@@ -331,6 +407,7 @@ function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]
         body_text: "",
         truncated: false,
         stop_reason: null,
+        model: null,
         usage: null,
         cost_usd: reserved,
         cost_known: false,
@@ -356,6 +433,9 @@ export class Forwarder {
     private readonly config: Readonly<ForwardConfig>;
     private readonly exchanges: ForwardedExchange[] = [];
     private readonly refusals: string[] = [];
+    private refused = 0;
+    /** Aborts every send still in flight when the mock stops. */
+    private readonly lifecycle = new AbortController();
     private readonly unhashed = new Map<ForwardedExchange, Uint8Array>();
     private spent = 0;
     private stopped: string | null = null;
@@ -365,7 +445,8 @@ export class Forwarder {
     }
 
     private refuse(reason: string): Response {
-        this.refusals.push(reason);
+        this.refused += 1;
+        if (this.refusals.length < MAX_RETAINED_REFUSALS) this.refusals.push(reason);
         this.stopped ??= reason;
         return errorResponse("forwarding_refused", reason);
     }
@@ -383,7 +464,10 @@ export class Forwarder {
         if (this.stopped) return { refused: `stopped: ${this.stopped}` };
         const { limits, model } = this.config;
         if (json === undefined) return { refused: "unreadable request body" };
-        const parsed = json as Record<string, unknown>;
+        if (!isObject(json) || Array.isArray(json)) {
+            return { refused: "request body is not a JSON object" };
+        }
+        const parsed = json;
         if (parsed.model !== model)
             return { refused: `request names model ${String(parsed.model)}` };
         if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
@@ -399,12 +483,31 @@ export class Forwarder {
         return { reserved, toolResults: toolResultIds(parsed) };
     }
 
-    /** Sends `body` and reads the whole response before the deadline. */
+    /**
+     * The refusal every request after a stop receives, or `null` while the run is live. The mock
+     * answers with it before reading a body, so a stopped run retains nothing further.
+     */
+    stoppedRefusal(): Response | null {
+        return this.stopped ? this.refuse(`stopped: ${this.stopped}`) : null;
+    }
+
+    /** Ends every send still in flight; the mock calls this when it stops. */
+    close(): void {
+        this.lifecycle.abort(new DOMException("the forwarding mock stopped", "AbortError"));
+    }
+
+    /**
+     * Sends `body` and reads the response, up to `MAX_RESPONSE_BYTES`, before the deadline or
+     * the mock's stop, whichever comes first.
+     */
     private async timedSend(
         body: Uint8Array<ArrayBuffer>,
         headers: Record<string, string>,
     ): Promise<readonly [Response, Uint8Array<ArrayBuffer>]> {
-        const deadline = AbortSignal.timeout(this.config.limits.timeoutMs);
+        const deadline = AbortSignal.any([
+            AbortSignal.timeout(this.config.limits.timeoutMs),
+            this.lifecycle.signal,
+        ]);
         const expired = new Promise<never>((_, reject) => {
             deadline.addEventListener("abort", () => reject(deadline.reason), { once: true });
         });
@@ -421,7 +524,7 @@ export class Forwarder {
                     // A redirect would move the send to an unselected target.
                     redirect: "error",
                 });
-                return [sent, new Uint8Array(await sent.arrayBuffer())] as const;
+                return [sent, await readBounded(sent, MAX_RESPONSE_BYTES)] as const;
             })(),
             expired,
         ]);
@@ -489,7 +592,10 @@ export class Forwarder {
         }
         const contentType = response.headers.get("content-type") ?? "";
         const responseText = new TextDecoder().decode(bytes);
-        const { usage, stopReason, toolUses } = readResponse(contentType, responseText);
+        const { usage, stopReason, model, toolUses, unfinished, malformed } = readResponse(
+            contentType,
+            responseText,
+        );
         exchange.tool_uses = toolUses;
         const cost = usage
             ? this.price(
@@ -511,12 +617,19 @@ export class Forwarder {
             body_text: truncated ? new TextDecoder().decode(captured) : responseText,
             truncated,
             stop_reason: stopReason,
+            model,
             usage,
             cost_usd: cost,
             cost_known: usage !== null,
         };
         if (!response.ok)
             this.stopped ??= `send ${exchange.index} returned HTTP ${response.status}`;
+        else if (unfinished) this.stopped ??= `send ${exchange.index} ${unfinished}`;
+        else if (malformed) this.stopped ??= `send ${exchange.index} ${malformed}`;
+        else if (model === null) this.stopped ??= `send ${exchange.index} states no model`;
+        else if (model !== this.config.model) {
+            this.stopped ??= `send ${exchange.index} names model ${model}`;
+        }
         if (cost > reserved) this.stopped ??= `send ${exchange.index} cost above its reservation`;
         return new Response(bytes, {
             status: response.status,
@@ -562,6 +675,7 @@ export class Forwarder {
             acknowledged_responses: acknowledged.length,
             spent_usd: this.spent,
             stopped: this.stopped,
+            refused: this.refused,
             refusals: [...this.refusals],
             complete: reasons.length === 0,
             incomplete_reasons: reasons,
@@ -572,12 +686,15 @@ export class Forwarder {
 
 /**
  * Publishes `report` as `<dir>/forwarding-<label>.json` through `publishPrivateJson`: mode
- * `0600` in an owner-only directory outside the repository.
+ * `0600` in an owner-only directory outside the repository. `label` is a plain file label.
  */
 export function publishForwardingReport(
     report: ForwardingReport,
     dir: string,
     label: string,
 ): string {
+    if (!/^[A-Za-z0-9._-]+$/.test(label) || label.startsWith(".")) {
+        throw new Error(`${label} is not a plain file label`);
+    }
     return publishPrivateJson(report, dir, `forwarding-${label}.json`);
 }

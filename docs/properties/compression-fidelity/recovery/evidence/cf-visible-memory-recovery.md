@@ -51,7 +51,7 @@ Do not build a second fixture or a second three-way disposition oracle.
   separates pre-pack ranking from delivered results. The
   [search tests, lines 218-255, 473-493](../../../../../packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts#L218)
   assert memory text, rationale, and packing behavior using a fake kernel.
-- [Hint rendering, lines 8609-8634](../../../../../crates/daemon/src/transform.rs#L8612)
+- [Hint rendering, lines 8609-8634](../../../../../crates/daemon/src/transform.rs#L8609)
   compresses snippets and offers a project-memory search for their topic.
   That wording is a lead to test, not evidence that the registered tool
   supplies the source.
