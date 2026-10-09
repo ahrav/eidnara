@@ -297,7 +297,11 @@ cancels every run that drained no output through a second connection before
 the next source begins, because the host keeps a run alive after its waiter is
 dropped until `run.cancel` ends it; the record lists each cancel's run id and
 outcome under `cancelled_runs` and any start still unreturned under
-`starts_in_flight_at_cancel`. The
+`starts_in_flight_at_cancel`. A cancel the host does not confirm, or a start
+still unreturned, sets `capture_stopped` on that record and ends the capture
+before another source can start a run. The capture directory and every
+existing ancestor must be owned by the operator or root and closed to group
+and other writes unless sticky. The
 record names the model, the harness,
 the output origin, whether the transform call returned and the firing settled,
 the attempt count, and every
@@ -360,8 +364,10 @@ spend above the cap, or a tool call that no later request answers with its
 `tool_result`. The limits, spend, and stop span the mock's life, across
 `reset()`.
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
-directory outside the repository, refusing a shared existing directory or a
-label that is not a plain file name. `tests/compression-fidelity-forwarding.test.ts`
+directory outside the repository whose existing ancestors are owned by the
+operator or root and closed to group and other writes unless sticky, refusing
+a shared existing directory, an untrusted ancestor, or a label that is not a
+plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
 
 ## What is unsupported

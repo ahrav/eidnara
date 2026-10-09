@@ -22382,6 +22382,8 @@ mod tests {
         close_attempts: AtomicUsize,
         block_close_attempt: std::sync::atomic::AtomicBool,
         cancels: Mutex<Vec<String>>,
+        /// Scripted `cancel` failures, served before a success.
+        cancel_errors: Mutex<VecDeque<HistorySummarizerProducerError>>,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
@@ -22638,7 +22640,16 @@ mod tests {
                 .lock()
                 .expect("cancels mutex")
                 .push(format!("{session}:{run_id}"));
-            Ok(())
+            match self
+                .state
+                .cancel_errors
+                .lock()
+                .expect("cancel errors mutex")
+                .pop_front()
+            {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
         }
 
         async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {

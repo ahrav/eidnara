@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -986,6 +987,20 @@ describe("forwarding", () => {
             expect(() =>
                 publishForwardingReport(mock.forwardingReport(), `${shared}/../x`, "x"),
             ).toThrow("parent directory");
+            // A writable, unsticky ancestor lets another local user swap the checked directory
+            // for a symlink between the check and the write.
+            chmodSync(shared, 0o777);
+            expect(() =>
+                publishForwardingReport(mock.forwardingReport(), join(shared, "private"), "x"),
+            ).toThrow("writable by others");
+            expect(existsSync(join(shared, "private"))).toBe(false);
+            // Bun's `chmodSync` masks the sticky bit, so the system `chmod` sets it.
+            execFileSync("chmod", ["1777", shared]);
+            expect(
+                statSync(
+                    publishForwardingReport(mock.forwardingReport(), join(shared, "sticky"), "x"),
+                ).mode & 0o777,
+            ).toBe(0o600);
         } finally {
             rmSync(shared, { recursive: true, force: true });
         }

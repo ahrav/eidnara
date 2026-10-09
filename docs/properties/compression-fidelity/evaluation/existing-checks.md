@@ -61,10 +61,11 @@ evidence; initial qualification does not grant permanent coverage credit.
 | Scripted model assignment, `packages/e2e-tests/src/mock-provider/server.ts:499-500` | A script can set the response model string; otherwise it echoes the request model. This is not real-execution provenance. Script/forward exclusivity is a construction error at `server.ts:140-142`. | unaudited |
 | Tool publication guard, `packages/e2e-tests/src/scripted-tool-call.ts:120-139` | Throws when the requested tool was never published in the provider request. | unaudited |
 | Tool-result guard, `packages/e2e-tests/src/scripted-tool-call.ts:62-77,140-145` | Finds a provider-visible `tool_result` by `tool_use_id`; missing result is an infrastructure error. Returned text is a projection, not raw result bytes. | unaudited |
-| Prompt error handling, `packages/e2e-tests/src/rust-harness.ts:375-406` | Timeout throws and SDK rejection is promoted to error. The `Promise.race` is not evidence that remote work stops or that cost is capped. | unaudited |
+| Mock cassette and dispatch tests, `packages/e2e-tests/src/mock-provider/server.test.ts` | Record mode hands each produced response to the oracle before serving; a request in flight across `reset()` or `useCassette()` stays with the run it began in; replay serves recorded frames byte for byte; misconfiguration is a 500 that is never recorded; scripted SSE ends in `message_stop`. No forwarding case. | unaudited |
+| Scripted tool-call helper test, `packages/e2e-tests/src/scripted-tool-call.test.ts` | `runScriptedToolCall` retains the tagged session's earlier captures across its mock reset. One case; publication and tool-result guards are exercised only through the e2e suites. | unaudited |
+| Prompt error handling, `packages/e2e-tests/src/rust-harness.ts:489-522` | Timeout throws and SDK rejection is promoted to error. The `Promise.race` is not evidence that remote work stops or that cost is capped. | unaudited |
 
-No `src/mock-provider/server.test.ts` or scripted-tool helper unit test was
-found. The forwarding mode, its limits, its captures, and its credential
+The forwarding mode, its limits, its captures, and its credential
 exclusion are covered by `src/mock-provider/forward.test.ts` and
 `tests/compression-fidelity-forwarding.test.ts`, listed under
 [cf-bounded-record-and-forward](catalog.md#cf-bounded-record-and-forward);
@@ -110,7 +111,7 @@ No complete fidelity cost check was found. Relevant prior art is narrower:
 
 | Observation or check | Condition or limitation | Status |
 | --- | --- | --- |
-| `packages/e2e-tests/src/rust-harness.ts:444-453` | Measures normalized messages from the last main request; absent requests return zero/empty output. This is not all-attempt, complete-invocation cost evidence. | unaudited |
+| `packages/e2e-tests/src/rust-harness.ts:551-569` | Measures normalized messages from the last main request; absent requests return zero/empty output. This is not all-attempt, complete-invocation cost evidence. | unaudited |
 | `packages/e2e-tests/src/mock-provider/server.ts:350-365` | Requires scripted usage unless returning an error. It does not measure actual provider charges or ambiguous attempts. | unaudited |
 | `packages/e2e-tests/src/opencode-runner/spawn.ts:174-187` | Mock model prices are zero. These configured values cannot substitute for real generation/recovery cost. | unaudited |
 

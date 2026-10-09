@@ -1685,6 +1685,12 @@ async fn capture_sources(
             let connect = recording.connected.lock().unwrap().clone();
             cancel_undrained_runs(&factory, connect, &attempts).await
         };
+        // A run the host has not confirmed stopped may still be generating, so no later source
+        // starts another one.
+        let capture_stopped = starts_in_flight > 0
+            || cancelled_runs
+                .iter()
+                .any(|outcome| outcome["cancelled"] != true);
         let answered = attempts
             .iter()
             .any(|attempt| attempt.outputs.iter().any(|output| output.text.is_some()));
@@ -1711,6 +1717,7 @@ async fn capture_sources(
                 "settled": settled,
                 "cancelled_runs": cancelled_runs,
                 "starts_in_flight_at_cancel": starts_in_flight,
+                "capture_stopped": capture_stopped,
                 "attempt_count": attempts.len(),
                 "attempts": attempts,
                 "usage": null,
@@ -1724,6 +1731,13 @@ async fn capture_sources(
                 })).collect::<Vec<_>>(),
             })),
         );
+        if capture_stopped {
+            eprintln!(
+                "compression fidelity capture: stopped after {} because a run was not confirmed cancelled",
+                source.id
+            );
+            break;
+        }
     }
     captured
 }
@@ -1842,6 +1856,19 @@ fn private_capture_dir(dir: &Path) -> PathBuf {
         "{} is inside the repository",
         real.display()
     );
+    // Every existing ancestor is owned by this user or root and is closed to group and other
+    // writes or sticky, so no other local user can swap the checked directory for a symlink
+    // between the check and the write.
+    let uid = rustix::process::getuid().as_raw();
+    for ancestor in real.ancestors().filter(|a| a.exists()) {
+        let meta = std::fs::metadata(ancestor).unwrap();
+        let mode = meta.permissions().mode();
+        assert!(
+            (meta.uid() == uid || meta.uid() == 0) && (mode & 0o022 == 0 || mode & 0o1000 != 0),
+            "{} is writable by others or not owned by this user or root",
+            ancestor.display()
+        );
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -2049,6 +2076,43 @@ async fn a_start_in_flight_at_the_deadline_is_still_cancelled() {
     producer.notify.notify_waiters();
 }
 
+/// A cancel the host does not confirm ends the capture before another source can start a run.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unconfirmed_cancellation_stops_the_capture() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    producer
+        .cancel_errors
+        .lock()
+        .unwrap()
+        .push_back(HistorySummarizerProducerError::TimedOut);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    assert!(sources().count() > 1);
+    assert_eq!(
+        records.len(),
+        1,
+        "no later source starts after a failed cancel"
+    );
+    assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(producer.cancels.lock().unwrap().len(), 1);
+    let detail = &records[0].detail;
+    assert_eq!(records[0].terminal, Terminal::Unsettled);
+    assert_eq!(detail["cancelled_runs"][0]["cancelled"], false);
+    assert_eq!(detail["cancelled_runs"][0]["error"], "TimedOut");
+    assert_eq!(detail["capture_stopped"], true);
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
 /// The recorder keeps a start error and every drained output or error of a run, in order.
 #[tokio::test(flavor = "current_thread")]
 async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
@@ -2227,6 +2291,21 @@ fn the_capture_directory_is_owner_only_and_outside_the_repository() {
     std::fs::create_dir(&shared).unwrap();
     std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(std::panic::catch_unwind(|| private_capture_dir(&shared)).is_err());
+    // A writable, unsticky ancestor lets another local user swap the checked directory for a
+    // symlink between the check and the write; a sticky one does not.
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let below = shared.join("private");
+    assert!(std::panic::catch_unwind(|| private_capture_dir(&below)).is_err());
+    assert!(!below.exists());
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    assert_eq!(
+        std::fs::metadata(private_capture_dir(&shared.join("sticky")))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
 }
 
 fn new_messages_prompt(lines: &[(u64, &str, &str)]) -> String {
