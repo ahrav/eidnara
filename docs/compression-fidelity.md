@@ -291,17 +291,29 @@ published no rows, or `unsettled` for a source whose transform call or firing
 did not finish within the wait, that never started a producer, or that drained
 no model output;
 the test fails after writing every record when any source is unsettled. For
-an unsettled source the capture waits up to 45 s for any `start` still in
-flight to return its run handle, then binds each started run's session and
-cancels every run that drained no output through a second connection before
-the next source begins, because the host keeps a run alive after its waiter is
-dropped until `run.cancel` ends it; the record lists each cancel's run id and
-outcome under `cancelled_runs` and any start still unreturned under
-`starts_in_flight_at_cancel`. A cancel the host does not confirm, or a start
-still unreturned, sets `capture_stopped` on that record and ends the capture
-before another source can start a run. The capture directory and every
-existing ancestor must be owned by the operator or root and closed to group
-and other writes unless sticky. The
+an unsettled source the capture waits up to 75 s (one `connect` and one
+`start` at the producer's 30 s request timeout each, with margin) for any
+firing that has connected to return its first run handle, holding 2 s for a
+firing spawned just before the deadline to call `connect`. It then binds each
+started run's session and cancels, through a second connection, every run
+that drained no model output and whose own cancel the host did not confirm,
+before the next source begins, because the host keeps a run alive after its
+waiter is dropped until `run.cancel` ends it. Each attempt records the
+firing's own cancel under `cancel`, the record lists each cancel's run id and
+outcome under `cancelled_runs` and any firing still before its first start
+under `firings_before_first_start_at_cancel`. A cancel the host does not
+confirm, or a firing still before its first start, sets `capture_stopped` on
+that record and ends the capture before another source can start a run. A
+start error that does not prove the host committed no run (one that is
+neither `NotSent` nor a host terminal) has no run id to cancel, so the capture
+purges that attempt's producer session instead and records it under
+`cancelled_runs` with `session_purged`; a purge the host does not confirm
+also sets `capture_stopped`. After a confirmed cancel the capture waits up to
+10 s for the firing to record the terminal it provoked, so the record carries
+that drained error and the firing's own cancel. The capture directory and
+every existing ancestor must be owned by the operator or root and closed to
+group and other writes unless sticky, checked before and again after the
+directory is created. The
 record names the model, the harness,
 the output origin, whether the transform call returned and the firing settled,
 the attempt count, and every
@@ -335,8 +347,14 @@ requires:
 Scripted responses and forwarding are exclusive: passing both, or scripting
 a forwarding mock, throws. A forwarding mock accepts only requests carrying
 its per-mock `inboundKey`, which the harness writes into OpenCode's provider
-config, so no other local process can spend its budget; that `opencode.json`
-is written `0600` in an owner-only `0700` isolated tree. `forward.contextLimit`
+config, so no other local process can spend its budget through the mock; that
+`opencode.json` is written `0600` in an owner-only `0700` isolated tree. The
+harness also starts a forwarding run's OpenCode serve API behind HTTP Basic
+auth (`OPENCODE_SERVER_USERNAME` and a random `OPENCODE_SERVER_PASSWORD` in
+the child's environment only, matched by the SDK client's `authorization`
+header), so another local process cannot drive sessions that spend the
+budget through OpenCode; a scripted run keeps the unauthenticated loopback
+API. `forward.contextLimit`
 is the context limit OpenCode is configured with. Before each send the
 forwarder checks that the body is a JSON object, the model,
 the request's `max_tokens`, the call count, and the spend cap. The spend
@@ -365,7 +383,8 @@ spend above the cap, or a tool call that no later request answers with its
 `reset()`.
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
 directory outside the repository whose existing ancestors are owned by the
-operator or root and closed to group and other writes unless sticky, refusing
+operator or root and closed to group and other writes unless sticky, checked
+before and again after creation, refusing
 a shared existing directory, an untrusted ancestor, or a label that is not a
 plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
@@ -441,15 +460,17 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository whose existing ancestors
 are owned by the operator or root and closed to group and other writes unless
-sticky. `--out` must name a directory other than either arm; an arm directory
-is refused before any write.
+sticky. `--out` must resolve, through symlinks, to a directory other than
+either arm; an arm directory is refused before any write.
 
 - **Manifest.** It records once:
   - the repository revision;
   - the corpus path and digest;
   - each arm's configuration;
-  - every observation and forwarding report with its file SHA-256;
-  - the review records' digests, batch, and approvers.
+  - every file read, with its SHA-256, including files the identity check
+    refused; the report names each refusal;
+  - every accepted observation and forwarding report with its file SHA-256,
+    and the model each forwarding report forwarded to.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
@@ -462,7 +483,7 @@ is refused before any write.
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or C6's exact read |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
@@ -477,11 +498,16 @@ is refused before any write.
 - a scenario observation whose source is not the source its corpus scenario
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
+- an observation with no `stage` or no `terminal`;
+- an `opencode-delivery` observation marked `detail.judge_control` at a stage
+  other than `missing-capture`, the delivery witness's judge self-test;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare;
-- forwarding exchange text that does not match its recorded hash, or a
-  response in a complete report that records no hash. The
-  hashed representation is the request body as UTF-8 bytes.
+- forwarding exchange text that does not match its recorded hash. The
+  hashed representation is the request body as UTF-8 bytes;
+- a forwarding report marked complete that records no send, or whose
+  exchange has no response, a truncated response, an unknown cost, or a
+  response without a hash.
 
 In an arm labeled `real`:
 - scripted output is an identity error, whether `detail.output_origin` or an
@@ -491,6 +517,9 @@ In an arm labeled `real`:
   The capture records at least one complete attempt: the arm's model, a
   system prompt or its hash, a prompt, and a text output; an attempt on
   another model is an identity error;
+- every published real capture records the system prompt it ran, and each of
+  its attempts records the `temperature` and `max_output_tokens` the arm's
+  `settings` declare;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.
@@ -523,6 +552,10 @@ dispute.
   different scenario sets, or when they differ in model, provider, version,
   settings, limits, or generation origin. Held fields compare as JSON with
   keys in UTF-16 code-unit order.
+- In live mode, the comparison is also refused when the arms' forwarding
+  reports forwarded to different models. The forwarded model is OpenCode's,
+  a role apart from the summarizer model `arm.json` declares, so it is held
+  equal through the reports rather than bound to `arm.json`.
 - Differing prompt hashes mark it a treatment comparison.
 - Each scenario gets `expected_green`, `regression`,
   `resolution_candidate`, `expected_red`, or `unscored`.
@@ -536,9 +569,9 @@ command records approvals; it does not grant them.
 
 **Modes.** `offline`, the default, assembles the directories as they are.
 `live` additionally requires each arm to carry complete forwarding reports
-from the record-and-forward provider mode, each recording at least one
-exchange, forwarded to the arm's model, with limits equal to the arm's
-`limits`, so live evidence inherits that mode's limits.
+from the record-and-forward provider mode whose limits equal the arm's
+`limits`, so live evidence inherits that mode's limits, and all of an arm's
+reports to have forwarded to one model.
 
 **Review prerequisites.** Two people approve the corpus before any candidate
 output is inspected, and the first semantic baseline before it is

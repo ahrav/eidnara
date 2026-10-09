@@ -22384,6 +22384,9 @@ mod tests {
         cancels: Mutex<Vec<String>>,
         /// Scripted `cancel` failures, served before a success.
         cancel_errors: Mutex<VecDeque<HistorySummarizerProducerError>>,
+        /// Runs a confirmed `cancel` ended; a blocked `await_output` on one of them returns a
+        /// terminal error, as the host's subscriber does.
+        cancelled_runs: Mutex<HashSet<String>>,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
@@ -22460,6 +22463,8 @@ mod tests {
             if let Some(hook) = self.state.on_start.lock().expect("start hook mutex").take() {
                 hook();
             }
+            // The real producer's `start` binds the session it starts in.
+            self.bound_session = Some(session_id.to_string());
             self.state
                 .attempts
                 .lock()
@@ -22536,7 +22541,7 @@ mod tests {
 
         async fn await_output(
             &mut self,
-            _run_id: &str,
+            run_id: &str,
         ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
             self.state.await_outputs.fetch_add(1, Ordering::SeqCst);
             if let Some(hook) = self
@@ -22549,6 +22554,20 @@ mod tests {
                 hook();
             }
             while self.state.block_output.load(Ordering::SeqCst) {
+                if self
+                    .state
+                    .cancelled_runs
+                    .lock()
+                    .expect("cancelled runs mutex")
+                    .contains(run_id)
+                {
+                    return Err(HistorySummarizerProducerError::RunFailed {
+                        run_id: run_id.to_string(),
+                        detail: "run cancelled".to_string(),
+                        classification: None,
+                        class_field_present: false,
+                    });
+                }
                 self.state.notify.notified().await;
             }
             if let Some(result) = self
@@ -22648,7 +22667,15 @@ mod tests {
                 .pop_front()
             {
                 Some(error) => Err(error),
-                None => Ok(()),
+                None => {
+                    self.state
+                        .cancelled_runs
+                        .lock()
+                        .expect("cancelled runs mutex")
+                        .insert(run_id.to_string());
+                    self.state.notify.notify_waiters();
+                    Ok(())
+                }
             }
         }
 

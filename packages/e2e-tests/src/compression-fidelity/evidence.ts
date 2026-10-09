@@ -32,6 +32,11 @@ export const OWNERS = [
 export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
+const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
+/** The delivery witness's judge self-test; a judge control at another stage is refused. */
+const JUDGE_CONTROL_STAGE = "missing-capture";
+/** The generation settings every real capture attempt records and the arm's `settings` declare. */
+const ATTEMPT_SETTINGS = ["temperature", "max_output_tokens"] as const;
 /** The arm fields a comparison holds equal; only the prompt may differ, as the treatment. */
 const HELD_EQUAL = [
     "model",
@@ -77,6 +82,7 @@ export interface Evidence {
 export interface ForwardingEvidence {
     mode: "forward";
     corpus_sha256: string;
+    /** The model OpenCode ran, as the provider echoes it. */
     model: string;
     limits: Json;
     complete: boolean;
@@ -96,6 +102,8 @@ export interface ForwardingEvidence {
 export interface Arm {
     dir: string;
     config: ArmConfig | null;
+    /** Every file read, with its hash; `null` for a file that could not be read. */
+    files: Array<{ file: string; sha256: string | null }>;
     evidence: Evidence[];
     forwarding: Array<{ file: string; sha256: string; report: ForwardingEvidence }>;
     errors: string[];
@@ -131,17 +139,17 @@ export function strings(value: unknown): string[] {
 
 export async function readJson(
     path: string,
-): Promise<{ bytes: Buffer; value: unknown } | { error: string }> {
+): Promise<{ bytes: Buffer; value: unknown } | { bytes: Buffer | null; error: string }> {
     let bytes: Buffer;
     try {
         bytes = await fs.promises.readFile(path);
     } catch (error) {
-        return { error: `${path} is unreadable: ${(error as Error).message}` };
+        return { bytes: null, error: `${path} is unreadable: ${(error as Error).message}` };
     }
     try {
         return { bytes, value: JSON.parse(bytes.toString("utf8")) };
     } catch {
-        return { error: `${path} is not JSON` };
+        return { bytes, error: `${path} is not JSON` };
     }
 }
 
@@ -271,22 +279,37 @@ function completeRealAttempt(attempt: Json, model: string): boolean {
     );
 }
 
+/**
+ * The hash and completeness errors of one forwarding report. A report marked complete carries
+ * the writer's completeness invariants the assembler can observe: at least one send, and for
+ * every exchange an untruncated response with a known cost and a hash of its bytes.
+ */
 function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     const errors: string[] = [];
+    const complete = (index: number, reason: string) => {
+        if (report.complete)
+            errors.push(`${file} exchange ${index} ${reason} in a complete report`);
+    };
+    if (report.complete && report.exchanges.length === 0) {
+        errors.push(`${file} complete report records no send`);
+    }
     for (const exchange of report.exchanges) {
         // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
         if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
             errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);
         }
         const response = exchange.response;
-        if (!response || response.truncated) continue;
-        // A null hash on an untruncated response requires `report.complete` to be false.
+        if (!response) {
+            complete(exchange.index, "has no response");
+            continue;
+        }
+        if (!response.cost_known) complete(exchange.index, "cost is unknown");
+        if (response.truncated) {
+            complete(exchange.index, "response is truncated");
+            continue;
+        }
         if (response.body_sha256 === null) {
-            if (report.complete) {
-                errors.push(
-                    `${file} exchange ${exchange.index} response has no hash in a complete report`,
-                );
-            }
+            complete(exchange.index, "response has no hash");
         } else if (sha256(response.body_text) !== response.body_sha256) {
             errors.push(
                 `${file} exchange ${exchange.index} response bytes do not match their hash`,
@@ -305,6 +328,7 @@ export async function loadArm(
     const arm: Arm = {
         dir,
         config: null,
+        files: [],
         evidence: [],
         forwarding: [],
         errors: [],
@@ -329,6 +353,10 @@ export async function loadArm(
                 .map(async (name) => [name, await readJson(join(dir, name))] as const),
         ),
     );
+    arm.files = [...reads].map(([file, read]) => ({
+        file,
+        sha256: read.bytes && sha256(read.bytes),
+    }));
     const seen = new Set<string>();
     const foreign = (name: string, bound: unknown) => {
         arm.foreignCorpus = true;
@@ -389,6 +417,19 @@ export async function loadArm(
             arm.errors.push(`${name} labels source ${label} but names source ${source}`);
             continue;
         }
+        if (!text(value.stage) || !text(value.terminal)) {
+            arm.errors.push(`${name} has no ${text(value.stage) ? "terminal" : "stage"}`);
+            continue;
+        }
+        const detail = record(value.detail) ? value.detail : {};
+        if (
+            owner === "opencode-delivery" &&
+            detail.judge_control === true &&
+            value.stage !== JUDGE_CONTROL_STAGE
+        ) {
+            arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
+            continue;
+        }
         const evidence: Evidence = {
             file: name,
             sha256: sha256(read.bytes),
@@ -397,10 +438,10 @@ export async function loadArm(
             source,
             scenario: sourceLabel ? null : (label ?? null),
             variant,
-            stage: String(value.stage),
-            terminal: String(value.terminal),
+            stage: value.stage,
+            terminal: value.terminal,
             markers: strings(value.markers),
-            detail: record(value.detail) ? value.detail : {},
+            detail,
         };
         const entry = evidence.scenario ? scenarioEntry.get(evidence.scenario) : undefined;
         const caseOf = evidence.scenario ? entry?.case : sourceCase.get(evidence.source);
@@ -463,6 +504,18 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
                 `${capture.file} captured with model ${String(capture.detail.model)}, not the arm's model`,
             );
         }
+        if (systemHashes(capture).length === 0) {
+            errors.push(`${capture.file} records no system prompt`);
+        }
+        for (const attempt of attemptsOf(capture)) {
+            for (const setting of ATTEMPT_SETTINGS) {
+                if (attempt[setting] !== config.settings[setting]) {
+                    errors.push(
+                        `${capture.file} ran ${setting} ${String(attempt[setting])}, not the arm's ${String(config.settings[setting])}`,
+                    );
+                }
+            }
+        }
     }
     const captures = published.filter((c) => c.detail.model === config.model);
     for (const evidence of arm.evidence) {
@@ -500,7 +553,9 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
 
 function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Deterministic {
     if (scenario.serving.path === "exact_read") {
-        return evidence.some((e) => e.terminal === "read_exact") ? "pass" : "not_evaluated";
+        return evidence.some((e) => e.owner === EXACT_READ_OWNER && e.terminal === "read_exact")
+            ? "pass"
+            : "not_evaluated";
     }
     // Delivery observations name the tier OpenCode served; the U2 replay names the tier its
     // serving pass rendered. A delivery under positive-budget pressure passes when it serves a
@@ -573,13 +628,15 @@ export function assembleEvidence(input: {
         const errors = [...arm.errors, ...checkGeneration(arm, corpus)];
         if (input.mode === "live") {
             if (arm.forwarding.length === 0) errors.push("live mode found no forwarding report");
+            const first = arm.forwarding[0];
             for (const { file, report } of arm.forwarding) {
+                if (first && report.model !== first.report.model) {
+                    errors.push(
+                        `${file} forwarded to ${report.model}, where ${first.file} forwarded to ${first.report.model}`,
+                    );
+                }
                 if (!report.complete) {
                     errors.push(`${file} is incomplete: ${report.incomplete_reasons.join("; ")}`);
-                }
-                if (report.exchanges.length === 0) errors.push(`${file} records no exchange`);
-                if (report.model !== arm.config?.model) {
-                    errors.push(`${file} forwarded to model ${report.model}, not the arm's`);
                 }
                 if (canonicalJson(report.limits) !== canonicalJson(arm.config?.limits)) {
                     errors.push(`${file} ran limits other than the arm's`);
@@ -619,6 +676,12 @@ export function assembleEvidence(input: {
         const after = canonicalJson(input.candidate.config?.[field] ?? null);
         if (before !== after) refused.push(`the arms differ in ${field}`);
     }
+    // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
+    // declares, so live arms hold it equal through their reports.
+    const forwarded = sides.map((arm) => arm.forwarding[0]?.report.model ?? null);
+    if (input.mode === "live" && forwarded[0] !== forwarded[1]) {
+        refused.push("the arms forwarded to different models");
+    }
     const manifest = {
         schema: MANIFEST_SCHEMA,
         repository_revision: input.revision,
@@ -627,6 +690,7 @@ export function assembleEvidence(input: {
         arms: sides.map((arm) => ({
             label: armLabel(arm),
             config: arm.config,
+            files: arm.files,
             observations: arm.evidence.map((e) => ({
                 file: e.file,
                 sha256: e.sha256,
@@ -638,7 +702,11 @@ export function assembleEvidence(input: {
                 stage: e.stage,
                 terminal: e.terminal,
             })),
-            forwarding_reports: arm.forwarding.map(({ file, sha256 }) => ({ file, sha256 })),
+            forwarding_reports: arm.forwarding.map(({ file, sha256, report }) => ({
+                file,
+                sha256,
+                model: report.model,
+            })),
         })),
     };
     return {

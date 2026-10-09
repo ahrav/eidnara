@@ -5,6 +5,7 @@ import {
     type ArmOptions,
     allScenarios,
     corpus,
+    SETTINGS,
     SHA,
     scratch,
     sha256,
@@ -65,6 +66,28 @@ describe("evidence identity and completeness", () => {
         expect(assembled.manifest.corpus.sha256).toBe(SHA);
     });
 
+    test("the manifest lists every input file read, with its hash, including refused ones", async () => {
+        const first = allScenarios[0]?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                writeFileSync(
+                    join(dir, "foreign.json"),
+                    '{"schema_version":1,"corpus_sha256":"0"}',
+                );
+                writeFileSync(join(dir, "broken.json"), "{");
+            },
+        });
+        const files = assembled.manifest.arms[0]?.files ?? [];
+        expect(files.find((f) => f.file === "foreign.json")?.sha256).toBe(
+            sha256('{"schema_version":1,"corpus_sha256":"0"}'),
+        );
+        expect(files.find((f) => f.file === "broken.json")?.sha256).toBe(sha256("{"));
+        expect(files.some((f) => f.file === `delivery.${first}.json`)).toBe(true);
+        expect(files.some((f) => f.file === "arm.json")).toBe(true);
+        expect(errorsOf(assembled)).toContain("foreign.json has unknown owner");
+        expect(errorsOf(assembled)).toContain("broken.json is not JSON");
+    });
+
     test("a missing scenario is listed and refuses the comparison", async () => {
         const missing = allScenarios[3]?.s.id ?? "";
         const assembled = await assemble(scratch(), { baseline: { skipScenario: missing } });
@@ -98,6 +121,60 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain("captured with model anthropic/other");
         expect(errorsOf(assembled)).toContain("no published real-model capture");
         expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
+    test("a published real capture must record the system prompt it ran", async () => {
+        const assembled = await assemble(scratch(), { baseline: { attempt: null } });
+        expect(errorsOf(assembled)).toContain("records no system prompt");
+        expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
+    test("a capture attempt that ran other generation settings than the arm declares is an identity error", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { attempt: { temperature: 0.7 } },
+        });
+        expect(errorsOf(assembled)).toContain("ran temperature 0.7, not the arm's 0.1");
+        const unrecorded = await assemble(scratch(), {
+            baseline: { attempt: { max_output_tokens: undefined } },
+        });
+        expect(errorsOf(unrecorded)).toContain(
+            "ran max_output_tokens undefined, not the arm's 1024",
+        );
+    });
+
+    test("an observation without a stage or terminal is an identity error", async () => {
+        const first = allScenarios[0]?.s.id ?? "";
+        const strip = (field: string) =>
+            assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${first}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    delete value[field];
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+        const noStage = await strip("stage");
+        expect(errorsOf(noStage)).toContain(`delivery.${first}.json has no stage`);
+        expect(rowOf(noStage, first)?.execution.status).toBe("missing");
+        expect(errorsOf(await strip("terminal"))).toContain(
+            `delivery.${first}.json has no terminal`,
+        );
+    });
+
+    test("a judge control outside the witness's control stage is an identity error", async () => {
+        const first = allScenarios.find(({ s }) => s.serving.path !== "exact_read")?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${first}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.terminal = "unqualified";
+                value.detail.judge_control = true;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            `delivery.${first}.json marks stage served as a judge control`,
+        );
     });
 
     test("arms with different generation origins refuse the comparison", async () => {
@@ -494,6 +571,20 @@ describe("evidence deterministic column", () => {
         expect(rowOf(judged, scenario?.s.id)?.deterministic).toBe("assertion_fail");
     });
 
+    test("an exact read passes only from the C6 witness that owns it", async () => {
+        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read")?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${exact}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.owner = "opencode-delivery";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(assembled.arms[0]?.identity_errors).toEqual([]);
+        expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
+    });
+
     test("an unknown curve tier fails the pressure oracle", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
         const assembled = await assemble(scratch(), {
@@ -520,7 +611,10 @@ describe("evidence comparison refusals", () => {
             tamper: (dir) => {
                 const path = join(dir, "arm.json");
                 const arm = JSON.parse(readFileSync(path, "utf8"));
-                writeFileSync(path, JSON.stringify({ ...arm, settings: { b: 2, a: 1 } }));
+                writeFileSync(
+                    path,
+                    JSON.stringify({ ...arm, settings: { ...SETTINGS, b: 2, a: 1 } }),
+                );
             },
         });
         expect(differs.refused).toContain("the arms differ in settings");
@@ -530,7 +624,8 @@ describe("evidence comparison refusals", () => {
                 for (const arm of [dir, join(root, "candidate")]) {
                     const path = join(arm, "arm.json");
                     const value = JSON.parse(readFileSync(path, "utf8"));
-                    const settings = arm === dir ? { b: 2, a: 1 } : { a: 1, b: 2 };
+                    const settings =
+                        arm === dir ? { ...SETTINGS, b: 2, a: 1 } : { ...SETTINGS, a: 1, b: 2 };
                     writeFileSync(path, JSON.stringify({ ...value, settings }));
                 }
             },
@@ -542,7 +637,10 @@ describe("evidence comparison refusals", () => {
                 for (const arm of [dir, join(unicode, "candidate")]) {
                     const path = join(arm, "arm.json");
                     const value = JSON.parse(readFileSync(path, "utf8"));
-                    const settings = arm === dir ? { é: 1, "e\u0301": 2 } : { "e\u0301": 2, é: 1 };
+                    const settings =
+                        arm === dir
+                            ? { ...SETTINGS, é: 1, "e\u0301": 2 }
+                            : { ...SETTINGS, "e\u0301": 2, é: 1 };
                     writeFileSync(path, JSON.stringify({ ...value, settings }));
                 }
             },
@@ -560,7 +658,7 @@ describe("evidence live mode", () => {
         return {
             mode: "forward",
             corpus_sha256: SHA,
-            model: "anthropic/claude-test",
+            model: "claude-live",
             limits: { maxCalls: 40 },
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
@@ -612,6 +710,25 @@ describe("evidence live mode", () => {
         );
         const incompleteUnhashed = { ...unhashed, complete: false, incomplete_reasons: ["x"] };
         expect(errorsOf(await live([incompleteUnhashed]))).not.toContain("has no hash");
+        const complete = forwardingReport("{}", sha256("{}"), true);
+        expect(errorsOf(await live([{ ...complete, exchanges: [] }]))).toContain(
+            "complete report records no send",
+        );
+        const unanswered = {
+            ...complete,
+            exchanges: [{ ...complete.exchanges[0], response: null }],
+        };
+        expect(errorsOf(await live([unanswered]))).toContain(
+            "exchange 0 has no response in a complete report",
+        );
+        const costless = forwardingReport("{}", sha256("{}"), true);
+        const [only] = costless.exchanges;
+        if (only) only.response = { ...only.response, cost_known: false };
+        expect(errorsOf(await live([costless]))).toContain(
+            "exchange 0 cost is unknown in a complete report",
+        );
+        const incomplete = { ...unanswered, complete: false, incomplete_reasons: ["x"] };
+        expect(errorsOf(await live([incomplete]))).not.toContain("in a complete report");
         const raised = await live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);
@@ -632,20 +749,35 @@ describe("evidence live mode", () => {
         expect(clean.refused).toEqual([]);
     });
 
-    test("a live report forwards to the arm's model and records at least one exchange", async () => {
+    test("a complete live report with no exchange is refused", async () => {
         const empty = await live([
             { ...forwardingReport("{}", sha256("{}"), true), exchanges: [] },
         ]);
-        expect(errorsOf(empty)).toContain("forwarding-0.json records no exchange");
-        const other = await live([
-            { ...forwardingReport("{}", sha256("{}"), true), model: "anthropic/other" },
-        ]);
-        expect(errorsOf(other)).toContain(
-            "forwarding-0.json forwarded to model anthropic/other, not the arm's",
+        expect(errorsOf(empty)).toContain("forwarding-0.json complete report records no send");
+    });
+
+    test("live arms whose forwarding reports ran different models are refused", async () => {
+        const root = scratch();
+        const report = forwardingReport("{}", sha256("{}"), true);
+        const assembled = await assemble(root, {
+            mode: "live",
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", report);
+                write(join(root, "candidate"), "forwarding-0.json", {
+                    ...report,
+                    model: "claude-other",
+                });
+            },
+        });
+        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(assembled.refused).toContain("the arms forwarded to different models");
+        expect(assembled.manifest.arms[1]?.forwarding_reports[0]?.model).toBe("claude-other");
+        const mixed = await live([report, { ...report, model: "claude-other" }]);
+        expect(errorsOf(mixed)).toContain(
+            "forwarding-1.json forwarded to claude-other, where forwarding-0.json forwarded to claude-live",
         );
-        const { model: _, ...unnamed } = forwardingReport("{}", sha256("{}"), true);
-        expect(errorsOf(await live([unnamed]))).toContain(
-            "forwarding-0.json does not match the forwarding report schema",
+        expect(errorsOf(await live([{ ...report, model: "" }]))).toContain(
+            "does not match the forwarding report schema",
         );
     });
 });

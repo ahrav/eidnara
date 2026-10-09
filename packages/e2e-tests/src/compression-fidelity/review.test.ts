@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
 import { parseRustPassLine } from "../rust-harness";
@@ -1164,6 +1172,18 @@ describe("eval:compression-fidelity command", () => {
                 }),
             ).rejects.toThrow("--out is an evidence arm");
         }
+        const link = join(root, "link");
+        symlinkSync(baseline.dir, link);
+        await expect(
+            run({
+                baseline: baseline.dir,
+                candidate: candidate.dir,
+                reviews,
+                out: join(link, "nested", ".."),
+                corpus: CORPUS_PATH,
+                mode: "offline",
+            }),
+        ).rejects.toThrow("--out is an evidence arm");
         expect(readdirSync(baseline.dir)).not.toContain("manifest.json");
         expect(readdirSync(candidate.dir)).not.toContain("report.json");
     });

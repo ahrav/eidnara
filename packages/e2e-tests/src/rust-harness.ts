@@ -14,6 +14,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -42,6 +43,24 @@ import {
     HermeticHostStack,
     type RustModePrereqs,
 } from "./rust-runner/hermetic-host";
+
+interface ServeAuth {
+    /** `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD` for the child. */
+    env: Record<string, string>;
+    /** The matching `authorization` header for the SDK client. */
+    headers: Record<string, string>;
+}
+
+function newServeAuth(): ServeAuth {
+    const username = "eidnara-e2e";
+    const password = randomBytes(24).toString("base64url");
+    return {
+        env: { OPENCODE_SERVER_USERNAME: username, OPENCODE_SERVER_PASSWORD: password },
+        headers: {
+            authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+        },
+    };
+}
 
 export interface RustTestHarnessOptions extends SharedHarnessOptions {
     /** Eidnara USER-tier config overrides (thresholds, memory, etc.). */
@@ -209,6 +228,8 @@ export class RustTestHarness {
     private readonly ledger = new CaptureLedger(() => this.mainRequests());
     private modelContextLimit: number | undefined;
     private readonly modelOutputLimit: number | undefined;
+    /** Basic credential the serve API requires in forwarding mode; absent otherwise. */
+    private readonly serveAuth: ServeAuth | undefined;
     private readonly modelId: string;
     private readonly mockBaseURL: string;
 
@@ -222,6 +243,7 @@ export class RustTestHarness {
         logPath: string;
         modelContextLimit: number | undefined;
         modelOutputLimit: number | undefined;
+        serveAuth: ServeAuth | undefined;
         modelId: string;
     }) {
         this.mock = args.mock;
@@ -233,6 +255,7 @@ export class RustTestHarness {
         this.logPath = args.logPath;
         this.modelContextLimit = args.modelContextLimit;
         this.modelOutputLimit = args.modelOutputLimit;
+        this.serveAuth = args.serveAuth;
         this.modelId = args.modelId;
     }
 
@@ -259,6 +282,9 @@ export class RustTestHarness {
         const modelId = options.forward?.model ?? MOCK_MODEL_ID;
         const modelContextLimit = options.forward?.contextLimit ?? options.modelContextLimit;
         const modelOutputLimit = options.forward?.limits.maxOutputTokens;
+        // A forwarding run's serve API spends the provider budget, so it takes a credential
+        // only this harness holds; a scripted run keeps the unauthenticated loopback API.
+        const serveAuth = options.forward ? newServeAuth() : undefined;
         if (!options.forward) mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
 
         const env = createIsolatedEnv();
@@ -279,6 +305,7 @@ export class RustTestHarness {
                 logPath,
                 options: { ...options, modelContextLimit },
                 modelOutputLimit,
+                serveAuth,
                 modelId,
                 mockApiKey: mock.inboundKey,
             });
@@ -291,6 +318,7 @@ export class RustTestHarness {
         // SAFETY: `SdkClient` names only the `session.*` methods the harness calls; the real client provides them.
         const client = sdk.createOpencodeClient({
             baseUrl: opencode.url,
+            headers: serveAuth?.headers,
         }) as unknown as SdkClient;
 
         return new RustTestHarness({
@@ -303,6 +331,7 @@ export class RustTestHarness {
             logPath,
             modelContextLimit,
             modelOutputLimit,
+            serveAuth,
             modelId,
         });
     }
@@ -315,6 +344,7 @@ export class RustTestHarness {
         logPath: string;
         options: RustTestHarnessOptions;
         modelOutputLimit: number | undefined;
+        serveAuth: ServeAuth | undefined;
         modelId: string;
         mockApiKey: string;
     }): Promise<SpawnedOpencode> {
@@ -328,7 +358,7 @@ export class RustTestHarness {
             openCodeConfigExtra: args.options.openCodeConfigExtra,
             eidnaraConfig: args.options.eidnaraConfig,
             userHostConnectionFile: args.connectionFile,
-            extraEnv: { EIDNARA_LOG_PATH: args.logPath },
+            extraEnv: { EIDNARA_LOG_PATH: args.logPath, ...(args.serveAuth?.env ?? {}) },
         });
     }
 
@@ -356,6 +386,7 @@ export class RustTestHarness {
                 eidnaraConfig: opts.eidnaraConfig,
             },
             modelOutputLimit: this.modelOutputLimit,
+            serveAuth: this.serveAuth,
             modelId: this.modelId,
             mockApiKey: this.mock.inboundKey,
         });
@@ -363,6 +394,7 @@ export class RustTestHarness {
         // SAFETY: SdkClient is bounded subset of createOpencodeClient used by this harness.
         this.clientInstance = sdk.createOpencodeClient({
             baseUrl: this.opencodeInstance.url,
+            headers: this.serveAuth?.headers,
         }) as unknown as SdkClient;
     }
 
