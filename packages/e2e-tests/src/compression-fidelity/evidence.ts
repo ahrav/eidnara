@@ -35,7 +35,32 @@ const REPLAY = "daemon.compression_fidelity.replay";
 const REAL_ORIGIN = "real producer through the host";
 const SCRIPTED_ORIGIN = "scripted approved example";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
-const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
+/** The terminals each witness emits, and which of them mean the scenario executed. */
+const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly string[] }> = {
+    // The memory witness ends a recovery observation in `discoverable` and a budget-excluded
+    // row's observation in `excluded`; both are executed outcomes of a served pass.
+    "opencode-delivery": {
+        executed: ["served", "discoverable", "excluded"],
+        failed: ["unqualified"],
+    },
+    "daemon.compression_fidelity.replay": {
+        executed: ["published", "served"],
+        failed: [
+            "validation_rejected",
+            "discarded_coverage",
+            "drift_rejected",
+            "input_truncated",
+            "unsettled",
+        ],
+    },
+    "daemon.harness_sources.c6_exact_read": { executed: ["read_exact"], failed: [] },
+    "daemon.compression_fidelity.real_capture": {
+        executed: ["published"],
+        failed: ["unsettled", "validation_rejected"],
+    },
+};
+const executed = (e: { owner: string; terminal: string }) =>
+    TERMINALS[e.owner]?.executed.includes(e.terminal) ?? false;
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 /** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
@@ -300,7 +325,14 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         return null;
     }
     const limits = value.limits;
-    if (FORWARD_LIMITS.some((name) => typeof limits[name] !== "number" || limits[name] <= 0)) {
+    if (
+        FORWARD_LIMITS.some(
+            (name) =>
+                typeof limits[name] !== "number" ||
+                !Number.isFinite(limits[name]) ||
+                (limits[name] as number) <= 0,
+        )
+    ) {
         return null;
     }
     if (!Number.isInteger(limits.maxCalls) || !Number.isInteger(limits.maxOutputTokens))
@@ -709,6 +741,11 @@ export async function loadArm(
             arm.errors.push(`${name} has no ${text(value.stage) ? "terminal" : "stage"}`);
             continue;
         }
+        const terminals = TERMINALS[owner];
+        if (!terminals || ![...terminals.executed, ...terminals.failed].includes(value.terminal)) {
+            arm.errors.push(`${name} has terminal ${value.terminal}, which ${owner} does not emit`);
+            continue;
+        }
         if (!record(value.detail)) {
             arm.errors.push(`${name} has no detail record`);
             continue;
@@ -909,6 +946,9 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             );
         }
         for (const attempt of attemptsOf(capture)) {
+            if (typeof attempt.system !== "string" || typeof attempt.prompt !== "string") {
+                errors.push(`${capture.file} records a prompt as a digest without its text`);
+            }
             for (const setting of ATTEMPT_SETTINGS) {
                 if (attempt[setting] !== config.settings[setting]) {
                     errors.push(
@@ -1007,11 +1047,7 @@ function evidenceRow(entry: { case: string; scenario: FidelityScenario }, arm: A
         (e) => `${e.owner}:${e.variant ? `${e.variant}:` : ""}${e.stage}:${e.terminal}`,
     );
     const status =
-        evidence.length === 0
-            ? "missing"
-            : evidence.every((e) => EXECUTED.has(e.terminal))
-              ? "executed"
-              : "failed";
+        evidence.length === 0 ? "missing" : evidence.every(executed) ? "executed" : "failed";
     return {
         scenario,
         case: entry.case,
