@@ -57,6 +57,7 @@ export interface ArmOptions {
     tier?: (scenario: string) => string | undefined;
     unlinked?: boolean;
     model?: string;
+    limits?: Record<string, number>;
 }
 
 export function writeArm(
@@ -74,7 +75,7 @@ export function writeArm(
         provider: "anthropic",
         version: "2026-01-01",
         settings: { temperature: 0.1 },
-        limits: { maxCalls: 40 },
+        limits: options.limits ?? { maxCalls: 40 },
         generation_origin: "real",
     });
     const files = new Map<string, string>();

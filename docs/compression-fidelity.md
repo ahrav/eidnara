@@ -400,7 +400,7 @@ an owner-only `0700` directory outside the repository.
 - an unknown owner;
 - a case or scenario outside the corpus;
 - a duplicate observation of one owner, case, source, scenario, and stage;
-- a leftover temporary file;
+- a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes.

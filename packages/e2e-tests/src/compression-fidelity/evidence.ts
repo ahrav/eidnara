@@ -284,7 +284,9 @@ export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: strin
         arm.errors.push(`${name} is bound to corpus ${String(bound)}`);
     };
     for (const name of names) {
-        if (name.startsWith(".")) {
+        // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
+        // either left behind means a publication never finished.
+        if (name.startsWith(".") || /\.tmp(-|$)/.test(name)) {
             arm.errors.push(`${name} is an unpublished temporary file`);
             continue;
         }
@@ -328,7 +330,7 @@ export function loadArm(dir: string, corpus: FidelityCorpus, corpusSha256: strin
         }
         const parts = typeof value.scenario === "string" ? value.scenario.split("@") : [null];
         const [label, variant = null] = parts;
-        if (parts.length > 2 || variant === "") {
+        if (parts.length > 2 || variant === "" || label === "") {
             arm.errors.push(`${name} has a malformed scenario label ${String(value.scenario)}`);
             continue;
         }
@@ -432,7 +434,7 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
             e.owner === "opencode-delivery" &&
             typeof curve === "string"
         ) {
-            return [TIERS.indexOf(tier) > TIERS.indexOf(curve)];
+            return [TIERS.includes(curve) && TIERS.indexOf(tier) > TIERS.indexOf(curve)];
         }
         return [tier === scenario.serving.tier];
     });

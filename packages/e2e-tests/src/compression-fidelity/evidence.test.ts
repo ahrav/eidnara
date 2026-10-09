@@ -72,6 +72,15 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toContain("the arms reached different scenario sets");
     });
 
+    test("identity errors on the candidate side alone refuse the comparison", () => {
+        const assembled = assemble(scratch(), {
+            candidate: { origin: "scripted approved example" },
+        });
+        expect(assembled.arms[0]?.identity_errors).toEqual([]);
+        expect(assembled.arms[1]?.identity_errors.join("\n")).toContain("scripted output");
+        expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
     test("scripted output in an arm labeled real is an identity error", () => {
         const assembled = assemble(scratch(), {
             baseline: { origin: "scripted approved example" },
@@ -113,7 +122,8 @@ describe("evidence identity and completeness", () => {
     test("an unpublished temporary file and a duplicate observation are refused", () => {
         const assembled = assemble(scratch(), {
             tamper: (dir) => {
-                writeFileSync(join(dir, ".delivery.C1.S1.json.tmp-1"), "{}");
+                writeFileSync(join(dir, ".delivery.C1.S1.json.tmp"), "{}");
+                writeFileSync(join(dir, "delivery.C1.S1.json.tmp-abc123"), "{}");
                 const first = allScenarios[0]?.s.id ?? "";
                 writeFileSync(
                     join(dir, "delivery.copy.json"),
@@ -121,7 +131,12 @@ describe("evidence identity and completeness", () => {
                 );
             },
         });
-        expect(errorsOf(assembled)).toContain("unpublished temporary file");
+        expect(errorsOf(assembled)).toContain(
+            ".delivery.C1.S1.json.tmp is an unpublished temporary file",
+        );
+        expect(errorsOf(assembled)).toContain(
+            "delivery.C1.S1.json.tmp-abc123 is an unpublished temporary file",
+        );
         expect(errorsOf(assembled)).toContain("duplicates another observation");
     });
 
@@ -149,7 +164,7 @@ describe("evidence identity and completeness", () => {
 
     test("an empty or nested variant label is an identity error", () => {
         const entry = allScenarios[0];
-        for (const label of [`${entry?.s.id}@`, `${entry?.s.id}@a@b`]) {
+        for (const label of [`${entry?.s.id}@`, `${entry?.s.id}@a@b`, "@p1-only"]) {
             const assembled = assemble(scratch(), {
                 tamper: (dir) => {
                     write(dir, "variant.json", {
@@ -252,6 +267,49 @@ describe("evidence deterministic column", () => {
         expect(rowOf(pressed("p5"), scenario?.id)?.deterministic).toBe("pass");
         expect(rowOf(pressed("p2"), scenario?.id)?.deterministic).toBe("assertion_fail");
     });
+
+    test("the pressure oracle and judge controls apply to delivery observations only", () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure");
+        const otherOwner = (detail: Record<string, unknown>) =>
+            assemble(scratch(), {
+                tamper: (dir) => {
+                    write(dir, "replay.json", {
+                        schema_version: 1,
+                        corpus_sha256: SHA,
+                        owner: "daemon.compression_fidelity.replay",
+                        case: scenario?.case,
+                        source: scenario?.s.source,
+                        scenario: scenario?.s.id,
+                        stage: "m0_pressure",
+                        terminal: "served",
+                        markers: [],
+                        detail,
+                    });
+                },
+            });
+        const sparse = otherOwner({ tier: "p5", curve_tier: "p2" });
+        expect(rowOf(sparse, scenario?.s.id)?.deterministic).toBe("assertion_fail");
+        const control = otherOwner({ tier: scenario?.s.serving.tier, judge_control: true });
+        expect(rowOf(control, scenario?.s.id)?.execution.outcomes).toContain(
+            "daemon.compression_fidelity.replay:m0_pressure:served",
+        );
+        const judged = otherOwner({ tier: "p1", judge_control: true });
+        expect(rowOf(judged, scenario?.s.id)?.deterministic).toBe("assertion_fail");
+    });
+
+    test("an unknown curve tier fails the pressure oracle", () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
+        const assembled = assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = "p5";
+                value.detail.curve_tier = "p9";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
 });
 
 describe("evidence comparison refusals", () => {
@@ -309,10 +367,12 @@ describe("evidence live mode", () => {
         };
     }
 
-    function live(reports: Array<Record<string, unknown>>) {
+    function live(reports: Array<Record<string, unknown>>, limits?: Record<string, number>) {
         const root = scratch();
         return assemble(root, {
             mode: "live",
+            baseline: { limits },
+            candidate: { limits },
             tamper: (dir) => {
                 reports.forEach((report, i) => {
                     write(dir, `forwarding-${i}.json`, report);
@@ -333,7 +393,18 @@ describe("evidence live mode", () => {
         const raised = live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);
+
         expect(errorsOf(raised)).toContain("ran limits other than the arm's");
+        const reordered = live(
+            [
+                {
+                    ...forwardingReport("{}", sha256("{}"), true),
+                    limits: { maxOutputTokens: 1024, maxCalls: 40 },
+                },
+            ],
+            { maxCalls: 40, maxOutputTokens: 1024 },
+        );
+        expect(reordered.arms[0]?.identity_errors).toEqual([]);
         const clean = live([forwardingReport("{}", sha256("{}"), true)]);
         expect(clean.arms[0]?.identity_errors).toEqual([]);
         expect(clean.refused).toEqual([]);
