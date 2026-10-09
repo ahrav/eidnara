@@ -484,7 +484,9 @@ either arm; an arm directory is refused before any write, and a component of
     derives from that arm's observations and bound judgments;
   - the reasons acceptance is withheld.
 
-  It then holds the control qualification and the comparison.
+  It then holds the control qualification and the comparison, and
+  `manifest_sha256`, the SHA-256 of the manifest file it was assembled with,
+  so a report beside another manifest is detectable.
 
 | Column | Values and source |
 | --- | --- |
@@ -505,8 +507,9 @@ either arm; an arm directory is refused before any write, and a component of
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
 - an observation with no `stage` or no `terminal`;
-- an `opencode-delivery` observation marked `detail.judge_control` at a stage
-  other than `missing-capture`, the delivery witness's judge self-test;
+- an `opencode-delivery` observation without a scenario label, or marked
+  `detail.judge_control` other than at stage `missing-capture` on `C1.S2`,
+  the delivery witness's judge self-test;
 - a `daemon.harness_sources.c6_exact_read` observation naming a scenario
   whose serving path is not `exact_read`;
 - a scenario variant no witness emits: `opencode-delivery` emits `p1-only`
@@ -528,8 +531,9 @@ either arm; an arm directory is refused before any write, and a component of
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
-  `maxCalls` and `maxOutputTokens`) or positive prices, whose incomplete
-  reasons are not strings, or whose exchange tool ids are not string arrays;
+  `maxCalls` and `maxOutputTokens`), positive prices, or an HTTPS Messages
+  endpoint free of credential and query, whose incomplete reasons are not
+  strings, or whose exchange tool ids are not string arrays;
 - a forwarding report marked complete that lists incomplete reasons or
   records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request

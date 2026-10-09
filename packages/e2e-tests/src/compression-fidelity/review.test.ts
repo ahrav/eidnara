@@ -1283,6 +1283,8 @@ describe("eval:compression-fidelity command", () => {
         expect(readdirSync(out).sort()).toEqual(["manifest.json", "report.json"]);
         expect(statSync(out).mode & 0o777).toBe(0o700);
         expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
+        const published = JSON.parse(readFileSync(written?.report ?? "", "utf8"));
+        expect(published.manifest_sha256).toBe(sha256(readFileSync(written?.manifest ?? "")));
         const inside = resolve(import.meta.dir, "eval-out");
         await expect(
             run({

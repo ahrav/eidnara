@@ -17,7 +17,7 @@ import {
     COMPRESSION_FIDELITY_CORPUS_SHA256,
     readCompressionFidelityCorpus,
 } from "../src/compression-fidelity/corpus";
-import { loadArm } from "../src/compression-fidelity/evidence";
+import { loadArm, sha256 } from "../src/compression-fidelity/evidence";
 import { evaluate, loadReviews } from "../src/compression-fidelity/review";
 
 export const USAGE =
@@ -91,9 +91,18 @@ export async function run(
         candidate,
         reviews,
     });
+    // The report names the manifest bytes it was assembled with, so a report left beside an
+    // older or newer manifest is detectable.
+    const manifestPath = publishPrivateJson(manifest, out, "manifest.json", { checked: true });
+    const manifestSha256 = sha256(readFileSync(manifestPath));
     return {
-        manifest: publishPrivateJson(manifest, out, "manifest.json", { checked: true }),
-        report: publishPrivateJson(report, out, "report.json", { checked: true }),
+        manifest: manifestPath,
+        report: publishPrivateJson(
+            { ...report, manifest_sha256: manifestSha256 },
+            out,
+            "report.json",
+            { checked: true },
+        ),
         accepted: report.accepted === true,
     };
 }

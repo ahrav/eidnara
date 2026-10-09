@@ -36,8 +36,8 @@ const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 /** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
-/** The delivery witness's judge self-test; a judge control at another stage is refused. */
-const JUDGE_CONTROL_STAGE = "missing-capture";
+/** The delivery witness's judge self-test; a judge control elsewhere is refused. */
+const JUDGE_CONTROL = { stage: "missing-capture", scenario: "C1.S2" } as const;
 /** The scenario variants a witness emits, by owner and scenario; any other label is refused. */
 const VARIANTS: Record<string, ReadonlyArray<{ scenario: string; variant: string }>> = {
     "opencode-delivery": [{ scenario: "C1.S2", variant: "p1-only" }],
@@ -234,13 +234,30 @@ function armConfig(value: unknown): ArmConfig | null {
     };
 }
 
+/** An HTTPS Messages endpoint without credential or query, the only upstream the forwarder accepts. */
+function messagesEndpoint(value: string): boolean {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+    return (
+        url.protocol === "https:" &&
+        url.pathname.endsWith("/messages") &&
+        !url.username &&
+        !url.password &&
+        !url.search
+    );
+}
+
 /** `value` as forwarding evidence, or `null` when a field the assembler reads is absent. */
 function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!record(value) || value.mode !== "forward" || !text(value.corpus_sha256)) return null;
     if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
         return null;
     }
-    if (!text(value.upstream_url)) return null;
+    if (!text(value.upstream_url) || !messagesEndpoint(value.upstream_url)) return null;
     const pricing = value.pricing;
     if (
         !record(pricing) ||
@@ -551,6 +568,10 @@ export async function loadArm(
             foreign(name, value.corpus_sha256);
             continue;
         }
+        if (owner === "opencode-delivery" && !text(value.scenario)) {
+            arm.errors.push(`${name} has no scenario label`);
+            continue;
+        }
         const parts = typeof value.scenario === "string" ? value.scenario.split("@") : [null];
         const [label, variant = null] = parts;
         if (parts.length > 2 || variant === "" || label === "") {
@@ -581,13 +602,17 @@ export async function loadArm(
             continue;
         }
         const detail = record(value.detail) ? value.detail : {};
-        if (
-            owner === "opencode-delivery" &&
-            detail.judge_control === true &&
-            value.stage !== JUDGE_CONTROL_STAGE
-        ) {
-            arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
-            continue;
+        if (owner === "opencode-delivery" && detail.judge_control === true) {
+            if (value.stage !== JUDGE_CONTROL.stage) {
+                arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
+                continue;
+            }
+            if (label !== JUDGE_CONTROL.scenario) {
+                arm.errors.push(
+                    `${name} marks ${label} as a judge control, which the witness tests on ${JUDGE_CONTROL.scenario}`,
+                );
+                continue;
+            }
         }
         const exactRead =
             label !== null && scenarioEntry.get(label)?.scenario.serving.path === "exact_read";
