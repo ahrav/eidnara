@@ -128,6 +128,13 @@ export function writeArm(
                 });
                 continue;
             }
+            const attempts = attemptsOf({
+                model,
+                system,
+                prompt: "p",
+                ...SETTINGS,
+                outputs: [{ text: "x" }],
+            });
             const capture = write(dir, `real.${source.id}.json`, {
                 ...base(c.id, source.id),
                 owner: "daemon.compression_fidelity.real_capture",
@@ -137,15 +144,10 @@ export function writeArm(
                 detail: {
                     model: options.captureModel ?? model,
                     output_origin: options.origin ?? "real producer through the host",
-                    attempts: attemptsOf({
-                        model,
-                        system,
-                        prompt: "p",
-                        ...SETTINGS,
-                        outputs: [{ text: "x" }],
-                    }),
+                    attempts,
                     usage: { input_tokens: 900, output_tokens: 300 },
                     settled: true,
+                    attempt_count: attempts.length,
                     published_rows: [{ start: 1, end: 2, title: "t", p1: "p1" }],
                     ...options.capture,
                 },
@@ -166,7 +168,7 @@ export function writeArm(
                 stage: exact ? "exact_read" : "served",
                 terminal: exact ? "read_exact" : "served",
                 detail: exact
-                    ? { sha256: "0".repeat(64) }
+                    ? { sha256: "0".repeat(64), byte_length: 144 }
                     : {
                           served_tier: options.tier?.(s.id) ?? s.serving.tier,
                           // A pressure delivery serves sparser than the curve it was under.

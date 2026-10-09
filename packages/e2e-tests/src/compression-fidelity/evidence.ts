@@ -36,6 +36,8 @@ const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 /** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
+/** The delivery stages labeled with a source id when the source has no m1 scenario. */
+const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"];
 /** The delivery witness's judge self-test; a judge control elsewhere is refused. */
 const JUDGE_CONTROL = { stage: "missing-capture", scenario: "C1.S2" } as const;
 /** The scenario variants a witness emits, by owner and scenario; any other label is refused. */
@@ -297,8 +299,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     }
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
-    for (const exchange of value.exchanges) {
-        if (!record(exchange) || typeof exchange.index !== "number") return null;
+    for (const [position, exchange] of value.exchanges.entries()) {
+        if (!record(exchange) || exchange.index !== position) return null;
         const request = exchange.request;
         if (
             !record(request) ||
@@ -540,6 +542,11 @@ export async function loadArm(
     }
     const scenarioEntry = new Map(scenarios(corpus).map((s) => [s.scenario.id, s]));
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
+    const m1Sources = new Set(
+        scenarios(corpus)
+            .filter((s) => s.scenario.serving.stage === "m1")
+            .map((s) => s.scenario.source),
+    );
     // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
     // either left behind means a publication never finished.
     const unpublished = (name: string) => /^\..*\.tmp$|\.tmp-[0-9a-f]+$/.test(name);
@@ -629,6 +636,19 @@ export async function loadArm(
         const sourceLabel = label !== null && !scenarioEntry.has(label) && sourceCase.has(label);
         if (sourceLabel && label !== source) {
             arm.errors.push(`${name} labels source ${label} but names source ${source}`);
+            continue;
+        }
+        if (
+            sourceLabel &&
+            !(
+                owner === "opencode-delivery" &&
+                SOURCE_LABEL_STAGES.includes(String(value.stage)) &&
+                !m1Sources.has(label)
+            )
+        ) {
+            arm.errors.push(
+                `${name} labels source ${label}, which the delivery witness labels only for a source without an m1 scenario at its m1, warm, or cold-m0 stage`,
+            );
             continue;
         }
         if (!text(value.stage) || !text(value.terminal)) {
@@ -794,6 +814,12 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     }
     const published = generations.filter((g) => g.owner === REAL_CAPTURE);
     for (const capture of published) {
+        const retained = attemptsOf(capture).length;
+        if (capture.detail.attempt_count !== retained) {
+            errors.push(
+                `${capture.file} records attempt_count ${String(capture.detail.attempt_count)} for ${retained} retained attempt${retained === 1 ? "" : "s"}`,
+            );
+        }
         // The capture writer publishes only a settled generation that drained text and stored
         // rows; a published capture missing any of them was not published by it.
         if (capture.detail.settled !== true) {
@@ -857,9 +883,16 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
 
 function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Deterministic {
     if (scenario.serving.path === "exact_read") {
-        return evidence.some((e) => e.owner === EXACT_READ_OWNER && e.terminal === "read_exact")
-            ? "pass"
-            : "not_evaluated";
+        // The C6 witness records the digest and length of the bytes it read back.
+        const read = evidence.some(
+            (e) =>
+                e.owner === EXACT_READ_OWNER &&
+                e.terminal === "read_exact" &&
+                digest(e.detail.sha256) &&
+                Number.isInteger(e.detail.byte_length) &&
+                (e.detail.byte_length as number) > 0,
+        );
+        return read ? "pass" : "not_evaluated";
     }
     // Delivery observations name the tier OpenCode served; the U2 replay names the tier its
     // serving pass rendered. A delivery under positive-budget pressure passes when it serves a
@@ -872,10 +905,12 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
         if (tier === null) return [false];
         const curve = e.detail.curve_tier;
         if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {
+            // Pressure demotes past the curve and at least to the scenario's declared tier.
             return [
                 typeof curve === "string" &&
                     TIERS.includes(curve) &&
-                    TIERS.indexOf(tier) > TIERS.indexOf(curve),
+                    TIERS.indexOf(tier) > TIERS.indexOf(curve) &&
+                    TIERS.indexOf(tier) >= TIERS.indexOf(scenario.serving.tier ?? "p1"),
             ];
         }
         return [tier === scenario.serving.tier];

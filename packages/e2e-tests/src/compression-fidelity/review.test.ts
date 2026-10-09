@@ -597,8 +597,10 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("a real arm credits generation only from a published real capture", async () => {
-        const c = corpus.cases[0];
-        const source = c?.sources[0]?.id ?? "";
+        // The delivery witness labels a source only when it has no m1 scenario; C2.V2 is that
+        // source, so its source-level observation is accepted and tests the credit rule.
+        const c = corpus.cases.find((k) => k.sources.some((v) => v.id === "C2.V2"));
+        const source = "C2.V2";
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
                 write(dir, "padding.json", {
@@ -616,7 +618,8 @@ describe("eval:compression-fidelity gates", () => {
             },
         });
         expect(report.arms[0]?.identity_errors).toEqual([]);
-        const row = report.arms[0]?.rows.find((r) => r.case === c?.id);
+        const served = allScenarios.find(({ s }) => s.source === source)?.s.id;
+        const row = report.arms[0]?.rows.find((r) => r.scenario === served);
         expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
     });
 

@@ -491,7 +491,7 @@ either arm; an arm directory is refused before any write, and a component of
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails), a pressure delivery's served tier sparser than its recorded `curve_tier`, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
@@ -533,10 +533,10 @@ either arm; an arm directory is refused before any write, and a component of
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
-  call and token counts), positive prices, a nonnegative spend and exchange
-  `cost_usd`, string incomplete reasons and refusals, or an HTTPS Messages
-  endpoint free of credential and query, or whose exchange tool ids are not
-  string arrays;
+  call and token counts), positive prices, a nonnegative spend, string
+  incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
+  Messages endpoint free of credential and query, or whose exchange tool ids
+  are not string arrays or whose exchange indices are not their positions;
 - a forwarding report with more exchanges than its `maxCalls`, or whose
   `spent_usd` differs from the sum of its exchanges' `cost_usd`;
 - a forwarding report marked complete that lists an incomplete reason or a
@@ -558,7 +558,8 @@ In an arm labeled `real`:
   The capture records at least one complete attempt: the arm's model, a
   system prompt or its hash, a prompt, and a non-empty text output;
 - a published real capture records `settled: true`, an attempt output with
-  text, and nonempty `published_rows`, the state the capture writer publishes;
+  text, nonempty `published_rows`, and an `attempt_count` equal to its
+  retained attempts, the state the capture writer publishes;
 - `arm.json` `settings` declare numeric `temperature` and
   `max_output_tokens`, and each attempt of a published real capture records
   those values;
@@ -568,8 +569,9 @@ In an arm labeled `real`:
 
 A scenario label `<scenario>@<variant>` belongs to its scenario's case. A
 label that is a corpus source ID, which the delivery witness writes for the
-m1, warm, and cold stages of a source with no m1 scenario, must equal the
-observation's `source` and makes the observation source-level evidence.
+`m1`, `warm`, and `cold-m0` stages of a source with no m1 scenario, must equal
+the observation's `source` and makes the observation source-level evidence;
+a source label from another owner, stage, or source is an identity error.
 Observations of a variant and observations marked `detail.judge_control`,
 which test the delivery judge itself, appear in the row's outcomes and judge
 nothing.
