@@ -52,6 +52,7 @@ pub mod history_summarizer_evaluation {
 }
 pub mod identity_sweep;
 pub mod injection;
+pub(crate) mod json_string;
 pub mod kernel_routes;
 pub mod m0_compose;
 pub(crate) mod m1_compose;
@@ -22738,6 +22739,7 @@ mod tests {
         )
     }
 
+    /// Binds the session under `harness`; a real host admits only the harnesses it serves.
     fn handler_with_factory(
         factory: Arc<dyn HistorySummarizerProducerFactory>,
         config: DaemonConfig,

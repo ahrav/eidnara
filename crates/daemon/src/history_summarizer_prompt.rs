@@ -3,6 +3,7 @@
 //! The builders in this module take already-loaded rows and strings. They do not read the
 //! store, call the clock, or inspect provider state; callers own those integration choices.
 
+use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use crate::canonical_memory::CanonicalMemory;
@@ -35,42 +36,42 @@ pub struct ReferenceSeed {
 
 /// Prior session history_segment rendered into history_summarizer reference XML.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ReferenceHistorySegment {
+pub struct ReferenceHistorySegment<'a> {
     /// First source message included in the history_segment.
     pub start_message: i64,
     /// Last source message included in the history_segment.
     pub end_message: i64,
     /// HistorySegment title.
-    pub title: String,
+    pub title: &'a str,
     /// Legacy unstructured history_segment body.
-    pub content: String,
+    pub content: &'a str,
     /// Full-detail representation of this History Segment.
-    pub p1: Option<String>,
+    pub p1: Option<&'a str>,
     /// Shorter representation of the same History Segment.
-    pub p2: Option<String>,
+    pub p2: Option<&'a str>,
     /// Compact representation of the same History Segment.
-    pub p3: Option<String>,
+    pub p3: Option<&'a str>,
     /// Minimal cue representation of the same History Segment.
-    pub p4: Option<String>,
+    pub p4: Option<&'a str>,
     /// Importance attribute, defaulting to 50 when absent.
     pub importance: Option<i32>,
     /// Optional episode type attribute.
-    pub episode_type: Option<String>,
+    pub episode_type: Option<&'a str>,
 }
 
-impl From<&StoredHistorySegment> for ReferenceHistorySegment {
-    fn from(c: &StoredHistorySegment) -> Self {
+impl<'a> From<&'a StoredHistorySegment> for ReferenceHistorySegment<'a> {
+    fn from(c: &'a StoredHistorySegment) -> Self {
         Self {
             start_message: c.start_message,
             end_message: c.end_message,
-            title: c.title.clone(),
-            content: c.content.clone(),
-            p1: c.p1.clone(),
-            p2: c.p2.clone(),
-            p3: c.p3.clone(),
-            p4: c.p4.clone(),
+            title: &c.title,
+            content: &c.content,
+            p1: c.p1.as_deref(),
+            p2: c.p2.as_deref(),
+            p3: c.p3.as_deref(),
+            p4: c.p4.as_deref(),
             importance: Some(c.importance),
-            episode_type: c.episode_type.clone(),
+            episode_type: c.episode_type.as_deref(),
         }
     }
 }
@@ -88,7 +89,7 @@ pub struct ReferenceBlocks {
 ///
 /// This vendored text stays byte-identical to the TypeScript plugin output. The generator
 /// under `gen/` updates it, and `--check` reports drift.
-pub const HISTORY_SUMMARIZER_SYSTEM_PROMPT: &str =
+pub static HISTORY_SUMMARIZER_SYSTEM_PROMPT: &str =
     include_str!("../testdata/history_summarizer-system-prompt.txt");
 
 /// Pre-rendered sections and mode flags for one history_summarizer user prompt.
@@ -116,29 +117,56 @@ pub fn reference_seeds() -> &'static [ReferenceSeed] {
         .as_slice()
 }
 
-/// Escape text for a double-quoted XML attribute.
-pub fn escape_xml_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+/// Append `s` escaped for a double-quoted XML attribute.
+fn push_escaped_xml_attr(out: &mut String, s: &str) {
+    let mut copied = 0;
+    for (i, byte) in s.bytes().enumerate() {
+        let entity = match byte {
+            b'&' => "&amp;",
+            b'"' => "&quot;",
+            b'\'' => "&apos;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            _ => continue,
+        };
+        // Every escaped byte is ASCII, so `i` and `i + 1` are char boundaries.
+        out.push_str(&s[copied..i]);
+        out.push_str(entity);
+        copied = i + 1;
+    }
+    out.push_str(&s[copied..]);
 }
 
 /// Escape text for XML element content.
 pub fn escape_xml_content(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut out = String::with_capacity(s.len());
+    push_escaped_xml_content(&mut out, s);
+    out
+}
+
+fn push_escaped_xml_content(out: &mut String, s: &str) {
+    let bytes = s.as_bytes();
+    let mut copied = 0;
+    for i in memchr::memchr3_iter(b'&', b'<', b'>', bytes) {
+        // Every escaped byte is ASCII, so `i` and `i + 1` are char boundaries.
+        out.push_str(&s[copied..i]);
+        out.push_str(match bytes[i] {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            _ => "&gt;",
+        });
+        copied = i + 1;
+    }
+    out.push_str(&s[copied..]);
 }
 
 /// The hash applies FNV-1a to JavaScript UTF-16 code units to match the prompt reference exactly.
 ///
 /// The same session chunk can be retried after a transient failure; a stable hash keeps
 /// the calibration examples unchanged so the history_summarizer rerun sees the same prompt bytes.
-pub fn fnv1a(input: &str) -> u32 {
+fn fnv1a_units(units: impl Iterator<Item = u16>) -> u32 {
     let mut h = 0x811c_9dc5_u32;
-    for unit in input.encode_utf16() {
+    for unit in units {
         h ^= u32::from(unit);
         h = h
             .wrapping_add(h.wrapping_shl(1))
@@ -172,6 +200,30 @@ fn seeds_by_band(corpus: &[ReferenceSeed]) -> Vec<Vec<usize>> {
     bands
 }
 
+/// [`fnv1a_units`] over the UTF-16 units of `"{session_id}:{chunk_start}"`, hashed without
+/// building the string.
+fn seed_hash(session_id: &str, chunk_start: i64) -> u32 {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = chunk_start.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let sign: &[u8] = if chunk_start < 0 { b"-" } else { b"" };
+    let units = session_id.encode_utf16().chain(
+        b":".iter()
+            .chain(sign)
+            .chain(&digits[at..])
+            .map(|&byte| u16::from(byte)),
+    );
+    fnv1a_units(units)
+}
+
 fn select_seed_indices(
     corpus: &[ReferenceSeed],
     session_id: &str,
@@ -183,13 +235,12 @@ fn select_seed_indices(
     }
 
     let bands = seeds_by_band(corpus);
-    let seed = fnv1a(&format!("{session_id}:{chunk_start}"));
+    let seed = seed_hash(session_id, chunk_start);
     let seed_usize = seed as usize;
     let mut picks = Vec::with_capacity(count.min(corpus.len()));
 
-    let band_order: Vec<usize> = (0..SEED_BANDS.len())
-        .map(|i| (i + (seed_usize % SEED_BANDS.len())) % SEED_BANDS.len())
-        .collect();
+    let band_order: [usize; SEED_BANDS.len()] =
+        std::array::from_fn(|i| (i + (seed_usize % SEED_BANDS.len())) % SEED_BANDS.len());
 
     let mut bi = 0;
     let mut guard = 0;
@@ -221,102 +272,126 @@ fn select_seed_indices(
 }
 
 /// Select deterministic calibration seeds for a session chunk.
-pub fn select_seeds(session_id: &str, chunk_start: i64, count: usize) -> Vec<ReferenceSeed> {
+pub fn select_seeds(
+    session_id: &str,
+    chunk_start: i64,
+    count: usize,
+) -> Vec<&'static ReferenceSeed> {
     let corpus = reference_seeds();
     select_seed_indices(corpus, session_id, chunk_start, count)
         .into_iter()
-        .map(|idx| corpus[idx].clone())
+        .map(|idx| &corpus[idx])
         .collect()
 }
 
 /// Render seeds as a calibration block, or return an empty string for no seeds.
-pub fn render_seed_examples_block(seeds: &[ReferenceSeed]) -> String {
+pub fn render_seed_examples_block(seeds: &[&ReferenceSeed]) -> String {
+    const OPEN: &str = "<history_segment_examples_from_other_projects>\n";
+    const CLOSE: &str = "\n</history_segment_examples_from_other_projects>";
     if seeds.is_empty() {
         return String::new();
     }
-    let body = seeds
-        .iter()
-        .map(|s| s.block.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!(
-        "<history_segment_examples_from_other_projects>\n{body}\n</history_segment_examples_from_other_projects>"
-    )
+    let body_len: usize = seeds.iter().map(|s| s.block.len() + 2).sum();
+    let mut out = String::with_capacity(OPEN.len() + body_len + CLOSE.len());
+    out.push_str(OPEN);
+    for (i, seed) in seeds.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(&seed.block);
+    }
+    out.push_str(CLOSE);
+    out
 }
 
-/// Render one prior history_segment with escaped XML text and attributes.
-pub fn render_session_ref_history_segment(c: &ReferenceHistorySegment) -> String {
-    let importance = c.importance.unwrap_or(50);
-    let episode_type = c
-        .episode_type
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .map(|value| format!(" episode_type=\"{}\"", escape_xml_attr(value)))
-        .unwrap_or_default();
-    let attrs = format!(
-        "start=\"{}\" end=\"{}\" title=\"{}\"{} importance=\"{}\"",
-        c.start_message,
-        c.end_message,
-        escape_xml_attr(&c.title),
-        episode_type,
-        importance
+/// Unescaped text bytes plus tag overhead; escaping can grow the result past it.
+fn session_ref_len_hint(c: &ReferenceHistorySegment<'_>) -> usize {
+    let body = if c.p1.is_some_and(|p1| !p1.is_empty()) {
+        [c.p1, c.p2, c.p3, c.p4]
+            .into_iter()
+            .flatten()
+            .map(str::len)
+            .sum()
+    } else {
+        c.content.len()
+    };
+    256 + c.title.len() + c.episode_type.map_or(0, str::len) + body
+}
+
+/// Append one prior history_segment with escaped XML text and attributes.
+fn push_session_ref_history_segment(out: &mut String, c: &ReferenceHistorySegment<'_>) {
+    let _ = write!(
+        out,
+        "<history_segment start=\"{}\" end=\"{}\" title=\"",
+        c.start_message, c.end_message
     );
-
-    if c.p1.as_deref().is_some_and(|p1| !p1.is_empty()) {
-        let p4 =
-            c.p4.as_deref()
-                .filter(|p4| !p4.is_empty())
-                .map(|p4| format!("<p4>\n{}\n</p4>", escape_xml_content(p4)))
-                .unwrap_or_else(|| "<p4/>".to_string());
-        return [
-            format!("<history_segment {attrs}>"),
-            format!(
-                "<p1>\n{}\n</p1>",
-                escape_xml_content(c.p1.as_deref().unwrap_or_default())
-            ),
-            format!(
-                "<p2>\n{}\n</p2>",
-                escape_xml_content(c.p2.as_deref().unwrap_or_default())
-            ),
-            format!(
-                "<p3>\n{}\n</p3>",
-                escape_xml_content(c.p3.as_deref().unwrap_or_default())
-            ),
-            p4,
-            "</history_segment>".to_string(),
-        ]
-        .join("\n");
+    push_escaped_xml_attr(out, c.title);
+    out.push('"');
+    if let Some(episode_type) = c.episode_type.filter(|value| !value.is_empty()) {
+        out.push_str(" episode_type=\"");
+        push_escaped_xml_attr(out, episode_type);
+        out.push('"');
     }
+    let _ = writeln!(out, " importance=\"{}\">", c.importance.unwrap_or(50));
 
-    format!(
-        "<history_segment {attrs}>\n{}\n</history_segment>",
-        escape_xml_content(&c.content)
-    )
+    match c.p1.filter(|p1| !p1.is_empty()) {
+        Some(p1) => {
+            for (open, text, close) in [
+                ("<p1>\n", p1, "\n</p1>\n"),
+                ("<p2>\n", c.p2.unwrap_or_default(), "\n</p2>\n"),
+                ("<p3>\n", c.p3.unwrap_or_default(), "\n</p3>\n"),
+            ] {
+                out.push_str(open);
+                push_escaped_xml_content(out, text);
+                out.push_str(close);
+            }
+            match c.p4.filter(|p4| !p4.is_empty()) {
+                Some(p4) => {
+                    out.push_str("<p4>\n");
+                    push_escaped_xml_content(out, p4);
+                    out.push_str("\n</p4>");
+                }
+                None => out.push_str("<p4/>"),
+            }
+        }
+        None => push_escaped_xml_content(out, c.content),
+    }
+    out.push_str("\n</history_segment>");
 }
 
 /// Render the most recent [`SESSION_REF_WINDOW`] history_segments.
 ///
 /// The trailing slice is taken as given, so `all_history_segments` must already run oldest to newest; a newest-first input renders the oldest history_segments instead.
-pub fn render_session_references_block(all_history_segments: &[ReferenceHistorySegment]) -> String {
+pub fn render_session_references_block(
+    all_history_segments: &[ReferenceHistorySegment<'_>],
+) -> String {
+    const OPEN: &str = "<session_references>\n";
+    const CLOSE: &str = "\n</session_references>";
     if all_history_segments.is_empty() {
         return String::new();
     }
     let start = all_history_segments
         .len()
         .saturating_sub(SESSION_REF_WINDOW);
-    let body = all_history_segments[start..]
-        .iter()
-        .map(render_session_ref_history_segment)
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    format!("<session_references>\n{body}\n</session_references>")
+    let window = &all_history_segments[start..];
+    let body_len: usize = window.iter().map(|c| session_ref_len_hint(c) + 2).sum();
+    let mut out = String::with_capacity(OPEN.len() + body_len + CLOSE.len());
+    out.push_str(OPEN);
+    for (i, c) in window.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        push_session_ref_history_segment(&mut out, c);
+    }
+    out.push_str(CLOSE);
+    out
 }
 
 /// Build calibration and same-session reference blocks for one chunk.
 pub fn build_reference_blocks(
     session_id: &str,
     chunk_start: i64,
-    session_history_segments: &[ReferenceHistorySegment],
+    session_history_segments: &[ReferenceHistorySegment<'_>],
 ) -> ReferenceBlocks {
     let seeds = select_seeds(session_id, chunk_start, SEED_FLOOR);
     ReferenceBlocks {
@@ -331,7 +406,10 @@ pub fn build_reference_blocks_from_stored(
     chunk_start: i64,
     session_history_segments: &[StoredHistorySegment],
 ) -> ReferenceBlocks {
-    let refs: Vec<ReferenceHistorySegment> = session_history_segments
+    let window_start = session_history_segments
+        .len()
+        .saturating_sub(SESSION_REF_WINDOW);
+    let refs: Vec<ReferenceHistorySegment> = session_history_segments[window_start..]
         .iter()
         .map(ReferenceHistorySegment::from)
         .collect();
@@ -345,26 +423,26 @@ pub fn render_history_summarizer_memory_block(memories: &[CanonicalMemory]) -> S
 
 /// Assemble the history_summarizer user prompt in its required section order.
 pub fn build_history_segment_agent_prompt(inputs: &HistorySegmentPromptInputs<'_>) -> String {
-    let mut parts = Vec::new();
+    let mut parts: Vec<&str> = Vec::with_capacity(9);
     if !inputs.seed_examples.is_empty() {
-        parts.push(inputs.seed_examples.to_string());
+        parts.push(inputs.seed_examples);
     }
     if !inputs.session_references.is_empty() {
-        parts.push(inputs.session_references.to_string());
+        parts.push(inputs.session_references);
     }
     if !inputs.project_memory.is_empty() {
-        parts.push(inputs.project_memory.to_string());
+        parts.push(inputs.project_memory);
     }
     if inputs.extraction_free {
-        parts.push(EXTRACTION_FREE_TOGGLE.to_string());
+        parts.push(EXTRACTION_FREE_TOGGLE);
     }
     if !inputs.memory_enabled {
-        parts.push(FACT_EXTRACTION_DISABLED_TOGGLE.to_string());
+        parts.push(FACT_EXTRACTION_DISABLED_TOGGLE);
     }
-    parts.push("<new_messages>".to_string());
-    parts.push(inputs.input_source.to_string());
-    parts.push("</new_messages>".to_string());
-    parts.push(HISTORY_SUMMARIZER_TRANSCRIPT_GUARD.to_string());
+    parts.push("<new_messages>");
+    parts.push(inputs.input_source);
+    parts.push("</new_messages>");
+    parts.push(HISTORY_SUMMARIZER_TRANSCRIPT_GUARD);
     parts.join("\n\n")
 }
 
@@ -403,19 +481,19 @@ mod tests {
         episode_type: Option<String>,
     }
 
-    impl From<&GoldenHistorySegment> for ReferenceHistorySegment {
-        fn from(c: &GoldenHistorySegment) -> Self {
+    impl<'a> From<&'a GoldenHistorySegment> for ReferenceHistorySegment<'a> {
+        fn from(c: &'a GoldenHistorySegment) -> Self {
             Self {
                 start_message: c.start_message,
                 end_message: c.end_message,
-                title: c.title.clone(),
-                content: c.content.clone(),
-                p1: c.p1.clone(),
-                p2: c.p2.clone(),
-                p3: c.p3.clone(),
-                p4: c.p4.clone(),
+                title: &c.title,
+                content: &c.content,
+                p1: c.p1.as_deref(),
+                p2: c.p2.as_deref(),
+                p3: c.p3.as_deref(),
+                p4: c.p4.as_deref(),
                 importance: c.importance,
-                episode_type: c.episode_type.clone(),
+                episode_type: c.episode_type.as_deref(),
             }
         }
     }
@@ -458,10 +536,94 @@ mod tests {
         }
     }
 
+    fn escape_xml_attr(s: &str) -> String {
+        let mut out = String::new();
+        push_escaped_xml_attr(&mut out, s);
+        out
+    }
+
+    #[test]
+    fn the_seed_hash_matches_fnv1a_over_the_formatted_key() {
+        for session_id in [
+            "",
+            "ses",
+            "ses_large_\u{e0}_\u{65e5}\u{672c}",
+            "\u{1f642}:x",
+        ] {
+            for chunk_start in [0, 7, -1, 1_640, -16_001, i64::MAX, i64::MIN] {
+                let key = format!("{session_id}:{chunk_start}");
+                assert_eq!(
+                    seed_hash(session_id, chunk_start),
+                    fnv1a_units(key.encode_utf16()),
+                    "{key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_reference_blocks_match_the_blocks_of_every_stored_segment() {
+        let stored: Vec<StoredHistorySegment> = (0..SESSION_REF_WINDOW as i64 * 3)
+            .map(|seq| {
+                let tiered = seq % 4 != 0;
+                let tier = |name: &str| tiered.then(|| format!("{name} of {seq} & <x>"));
+                StoredHistorySegment {
+                    sequence: seq,
+                    start_message: seq * 10,
+                    end_message: seq * 10 + 9,
+                    start_message_id: format!("msg_{seq}_a"),
+                    end_message_id: format!("msg_{seq}_b"),
+                    start_date: None,
+                    end_date: None,
+                    title: format!("Segment \"{seq}\" & 'more'"),
+                    content: format!("body {seq}"),
+                    p1: tier("p1"),
+                    p2: tier("p2"),
+                    p3: tier("p3"),
+                    p4: tier("p4"),
+                    importance: (seq as i32 * 7) % 100,
+                    episode_type: tiered.then(|| "design".to_owned()),
+                    legacy: i32::from(!tiered),
+                    created_at: seq,
+                    claims: Vec::new(),
+                }
+            })
+            .collect();
+        for len in 0..=stored.len() {
+            let every: Vec<ReferenceHistorySegment> = stored[..len]
+                .iter()
+                .map(ReferenceHistorySegment::from)
+                .collect();
+            assert_eq!(
+                build_reference_blocks_from_stored("ses", 40, &stored[..len]),
+                build_reference_blocks("ses", 40, &every),
+                "{len} stored segments"
+            );
+        }
+    }
+
     #[test]
     fn xml_escaping_matches_prompt_reference_order() {
         assert_eq!(escape_xml_attr("&\"'<>"), "&amp;&quot;&apos;&lt;&gt;");
         assert_eq!(escape_xml_content("&<>\"'"), "&amp;&lt;&gt;\"'");
+    }
+
+    #[test]
+    fn xml_escaping_matches_the_replace_chain_around_multibyte_text() {
+        for input in ["", "plain", "é&<>\"'中文&&<<🙂>>x'\"", "&amp;", "🙂"] {
+            let attr = input
+                .replace('&', "&amp;")
+                .replace('"', "&quot;")
+                .replace('\'', "&apos;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            let content = input
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            assert_eq!(escape_xml_attr(input), attr, "attr {input:?}");
+            assert_eq!(escape_xml_content(input), content, "content {input:?}");
+        }
     }
 
     /// Evaluator cassettes refuse any frame the secret scanner flags, and every summarizer
@@ -474,6 +636,28 @@ mod tests {
             HISTORY_SUMMARIZER_TRANSCRIPT_GUARD,
         ] {
             assert_eq!(redactor.redact(text).unwrap().detections, []);
+        }
+    }
+
+    #[test]
+    fn the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out() {
+        let prompt = HISTORY_SUMMARIZER_SYSTEM_PROMPT;
+        assert!(prompt.contains(
+            "Do not assume it can search summarized history or restore the original transcript."
+        ));
+        let lowered = prompt.to_lowercase();
+        for promise in [
+            "recoverable through search",
+            "recovered through search",
+            "recover it through search",
+            "retrieve full context",
+            "restores the original",
+            "from search, months later",
+        ] {
+            assert!(
+                !lowered.contains(promise),
+                "the prompt promises {promise:?}"
+            );
         }
     }
 
@@ -500,8 +684,7 @@ mod tests {
                 "seed index mismatch in '{}'",
                 case.label
             );
-            let seeds: Vec<ReferenceSeed> =
-                got_indices.iter().map(|&idx| corpus[idx].clone()).collect();
+            let seeds: Vec<&ReferenceSeed> = got_indices.iter().map(|&idx| &corpus[idx]).collect();
             let got_block = render_seed_examples_block(&seeds);
             assert_eq!(
                 got_block, case.seed_examples,

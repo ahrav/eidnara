@@ -274,7 +274,7 @@ environment variables, all required:
 
 | Variable | Meaning |
 | --- | --- |
-| `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model |
+| `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model and verifies no credential claims |
 | `EIDNARA_FIDELITY_REAL_MODEL` | The model id the history summarizer runs, as the only model in its chain |
 | `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source may take, from its transform call, which awaits the emergency firing inline, through its settled firing |
 | `EIDNARA_FIDELITY_OBSERVATIONS_DIR` | A private directory outside the repository |
@@ -329,6 +329,30 @@ execution protocol reports no token usage, so each record carries
 reads no credential: the host owns them.
 `a_capture_records_the_model_attempts_usage_and_complete_input` runs the
 same capture over the scripted producer in the default suite.
+The refusal a claim-verifying host returns comes from
+`CredentialVerifier::verify`, which checks the route's empty
+`credential_fingerprints` map before each send and answers
+`harness_unavailable` / `credential_snapshot_mismatch`.
+`direct_host_fixture` without `--harness-runtime` verifies no claims and
+serves the capture when
+`EIDNARA_FIXTURE_SUMMARIZER_COMMAND` names a command that answers each
+summarizer prompt from a real model, such as
+`packages/e2e-tests/scripts/bedrock-summarizer.ts`.
+
+**Summarizer recovery guidance.** Two separate facts bound recovery. The
+history summarizer system prompt states once that the primary agent's
+`eidnara_search` covers the sources its current tool contract exposes and
+tells the summarizer: "Do not assume it can search summarized history or
+restore the original transcript." Its importance rubric and P4 guidance make
+no search-recovery promise: P4 detail survives only in the tier text the
+summarizer writes. Separately, the current OpenCode registry exposes only the
+project-memory source through `eidnara_search`; `advertises only the memory
+source in both the full and light descriptions` in
+`packages/opencode-plugin/src/tools/eidnara-search/tools.test.ts` pins that
+scope. A tool contract that exposes other sources changes the second fact and
+leaves the prompt's wording correct.
+`the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out` in
+`history_summarizer_prompt.rs` keeps the limit and rejects the removed phrases.
 
 **Record-and-forward provider mode.** `new MockProvider({ forward })` in
 `packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends

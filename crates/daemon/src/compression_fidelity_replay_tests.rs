@@ -1382,6 +1382,8 @@ const REAL_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const REAL_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const REAL_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 const REAL_OWNER: &str = "daemon.compression_fidelity.real_capture";
+/// The harness a capture's session binds under. A real host's ModelExecution route admits only
+/// the harnesses it runs and rejects any other with `invalid_identity`.
 const CAPTURE_HARNESS: &str = "opencode";
 
 /// One producer start the recorder saw: the complete model input and every output or error
@@ -2011,9 +2013,10 @@ fn private_capture_dir(dir: &Path) -> PathBuf {
 /// Opt-in real capture of every corpus source through the host's existing producer
 /// execution, written as private capture records. Never part of a default run.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "opt-in real producer capture; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE, \
-            EIDNARA_FIDELITY_REAL_MODEL, EIDNARA_FIDELITY_REAL_WAIT_SECONDS and \
-            EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
+#[ignore = "opt-in real producer capture; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE naming a \
+            host that admits sends without a credential claim (direct_host_fixture without \
+            --harness-runtime), EIDNARA_FIDELITY_REAL_MODEL, EIDNARA_FIDELITY_REAL_WAIT_SECONDS \
+            and EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
 async fn real_producer_capture_of_every_corpus_source() {
     let required = |name: &str| {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for real capture"))
@@ -2039,6 +2042,12 @@ async fn real_producer_capture_of_every_corpus_source() {
         .map(|record| record.source.as_str())
         .collect();
     assert!(unsettled.is_empty(), "unsettled sources: {unsettled:?}");
+}
+
+/// The real capture's harness is one the host's ModelExecution route admits.
+#[test]
+fn a_capture_binds_a_harness_the_host_admits() {
+    assert!(host_runtime::model_execution::backend::Harness::parse(CAPTURE_HARNESS).is_some());
 }
 
 /// The capture records a scripted producer's run with the fields a real capture carries.

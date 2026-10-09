@@ -93,6 +93,35 @@ combined prompt/hint capability-review check at HEAD.
   human review for the applicable registry configuration.
 - Conclusion: Needs human input for wording; unresolved for the offline capture.
 
+### Q: What does the #723 correction change, and what does it leave open?
+- Sources examined: The system prompt, its new guidance-capability test, and
+  fresh real-producer captures of every corpus source under both prompts.
+- Findings: Lines 130, 212, and 214 no longer say the segment is recoverable
+  through search or recognizable from search. The 60-84 band keeps its label
+  and score range; its sentence now reads "High-fidelity recall is valuable
+  when you encounter related work." P4 detail "survives only in the tier text
+  you write." Line 132's code-reading clause stays: the primary agent reads
+  the current code through its harness tools.
+  `history_summarizer_prompt::tests::the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out`
+  pins the line 17 limit and rejects the removed recovery phrases; it fails on
+  the base prompt (`297fc28e…`) and passes on the candidate (`4d975027…`).
+  The P4 guidance at lines 214, 225, 241, 245, 369, and 387 keeps its
+  findability wording ("search hooks", "hard to find via search"). Those lines
+  describe the daemon's automatic hint search,
+  [`run_user_hint_lexical_search`][transform], which matches query tokens
+  against each history segment's title, content, and P1-P4 text. They promise
+  that a segment can be matched, which the daemon does, and no recovery of
+  detail.
+- Missing evidence: A non-author human review of the generated outputs, sealed
+  control judgments, and serving scenarios bound to the real captures. The
+  replay scenarios still serve scripted outputs, so no serving observation
+  names a real capture. The author's keyword pre-read of eight captures per
+  arm found C1's "rejected" in P2-P4 in 6 of 8 baseline captures and 4 of 8
+  candidate captures; a human reviewer judges first whether that is a C1.O1
+  regression or noise.
+- Conclusion: The deterministic check passes. Semantic acceptance stays
+  unverified until a human reviews the paired captures.
+
 [contract]: https://github.com/ahrav/eidnara/issues/707
 [system]: ../../../../../crates/daemon/testdata/history_summarizer-system-prompt.txt
 [prompt]: ../../../../../crates/daemon/src/history_summarizer_prompt.rs

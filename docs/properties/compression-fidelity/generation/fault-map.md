@@ -28,7 +28,7 @@ Synthetic semantic mutations below are acceptance controls, not incidents.
 | Length-capped output or invalid primary followed by valid fallback | Scripted producer cases exist. A fidelity observation must retain each attempt, not only the successful model. | cf-generation-stage-provenance |
 | Missing human judgment, wrong artifact linkage, scripted-as-real label | None found for the planned semantic result gate. These are offline metadata controls, not external calls. | cf-semantic-evidence-separation |
 | No models, no eligible boundary, placeholder prompt, no publication | Existing gates and private test helpers exist. No material source-to-publication situation marker exists. | cf-material-generation-reachability |
-| Unsupported prompt/hint recovery promise or changed tool registration | Prompt lines 130/212 conflict with the memory-only search route; #926 aligned the hint footer with it. Registry/schema tests exist; joint manual guidance review and artifact linkage are absent. | cf-guidance-capability-bound |
+| Unsupported prompt/hint recovery promise or changed tool registration | Prompt lines 130/212 conflicted with the memory-only search route at HEAD `99f68bd3`; #723 rewrote them and #926 aligned the hint footer. Registry/schema tests and the prompt guidance-capability test exist; joint manual guidance review and artifact linkage are absent. | cf-guidance-capability-bound |
 | Fix without prior failure, golden-only prompt change, stale review, or hidden rubric effect | U5 states the corrective evidence rule. No fidelity correction gate or fresh same-case comparison exists. | cf-witnessed-corrections |
 
 Detailed file/function evidence and failure scenarios live in each record's
