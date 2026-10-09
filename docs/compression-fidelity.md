@@ -532,8 +532,9 @@ either arm; an arm directory is refused before any write, and a component of
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
   `maxCalls` and `maxOutputTokens`), positive prices, or an HTTPS Messages
-  endpoint free of credential and query, whose incomplete reasons are not
-  strings, or whose exchange tool ids are not string arrays;
+  endpoint free of credential and query, whose spend is negative, whose
+  incomplete reasons are not strings, or whose exchange tool ids are not
+  string arrays;
 - a forwarding report marked complete that lists incomplete reasons or
   records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request

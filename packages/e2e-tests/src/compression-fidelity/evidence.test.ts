@@ -1145,6 +1145,9 @@ describe("evidence live mode", () => {
                 "does not match the forwarding report schema",
             );
         }
+        expect(errorsOf(await live([{ ...complete, spent_usd: -0.01 }]))).toContain(
+            "does not match the forwarding report schema",
+        );
         const looped = forwardingReport("{}", sha256("{}"), true);
         const [call] = looped.exchanges;
         if (call) call.tool_uses = ["toolu_1"];

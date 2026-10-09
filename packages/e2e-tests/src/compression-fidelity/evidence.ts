@@ -283,6 +283,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         return null;
     }
     if (typeof value.spent_usd !== "number" || !Number.isFinite(value.spent_usd)) return null;
+    if (value.spent_usd < 0) return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
