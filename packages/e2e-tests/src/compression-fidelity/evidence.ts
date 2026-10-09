@@ -77,6 +77,7 @@ export interface Evidence {
 export interface ForwardingEvidence {
     mode: "forward";
     corpus_sha256: string;
+    model: string;
     limits: Json;
     complete: boolean;
     incomplete_reasons: string[];
@@ -184,7 +185,9 @@ function armConfig(value: unknown): ArmConfig | null {
 /** `value` as forwarding evidence, or `null` when a field the assembler reads is absent. */
 function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!record(value) || value.mode !== "forward" || !text(value.corpus_sha256)) return null;
-    if (!record(value.limits) || typeof value.complete !== "boolean") return null;
+    if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
+        return null;
+    }
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -225,6 +228,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     return {
         mode: "forward",
         corpus_sha256: value.corpus_sha256,
+        model: value.model,
         limits: value.limits,
         complete: value.complete,
         incomplete_reasons: strings(value.incomplete_reasons),
@@ -251,7 +255,7 @@ function outputOrigins(evidence: Evidence): string[] {
     );
 }
 
-function servedTierOf(evidence: Evidence): string | null | undefined {
+export function servedTierOf(evidence: Evidence): string | null | undefined {
     const tier = evidence.detail.served_tier ?? evidence.detail.tier;
     if (tier === undefined) return undefined;
     return typeof tier === "string" ? tier : null;
@@ -572,6 +576,10 @@ export function assembleEvidence(input: {
             for (const { file, report } of arm.forwarding) {
                 if (!report.complete) {
                     errors.push(`${file} is incomplete: ${report.incomplete_reasons.join("; ")}`);
+                }
+                if (report.exchanges.length === 0) errors.push(`${file} records no exchange`);
+                if (report.model !== arm.config?.model) {
+                    errors.push(`${file} forwarded to model ${report.model}, not the arm's`);
                 }
                 if (canonicalJson(report.limits) !== canonicalJson(arm.config?.limits)) {
                     errors.push(`${file} ran limits other than the arm's`);

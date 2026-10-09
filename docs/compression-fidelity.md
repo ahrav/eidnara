@@ -435,7 +435,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
     non-blank name. A model judgment carries citations and an
     uncertainty, and it never counts as review.
   - Approvers are named by non-blank identity; names that differ only by
-    surrounding whitespace are one approver.
+    surrounding whitespace are one approver, and any other entry in
+    `approved_by` is a review error.
 
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository whose existing ancestors
@@ -466,7 +467,7 @@ is refused before any write.
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record, and a `real` arm credits generation only from its published real captures. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record, and a `real` arm credits generation only from its published real captures. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -526,7 +527,7 @@ dispute.
 - Each scenario gets `expected_green`, `regression`,
   `resolution_candidate`, `expected_red`, or `unscored`.
 - An arm is accepted only when all of these hold: it has no identity
-  error; review is qualified; every dispute names a compared arm and a
+  error; review is qualified; every judgment and dispute names a compared arm and a
   corpus scenario; the batch names two distinct approvers; its origin is
   `real`; no scenario is missing; every row passes every column.
 
@@ -535,7 +536,8 @@ command records approvals; it does not grant them.
 
 **Modes.** `offline`, the default, assembles the directories as they are.
 `live` additionally requires each arm to carry complete forwarding reports
-from the record-and-forward provider mode whose limits equal the arm's
+from the record-and-forward provider mode, each recording at least one
+exchange, forwarded to the arm's model, with limits equal to the arm's
 `limits`, so live evidence inherits that mode's limits.
 
 **Review prerequisites.** Two people approve the corpus before any candidate

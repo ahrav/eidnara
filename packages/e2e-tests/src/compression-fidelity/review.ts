@@ -21,8 +21,8 @@ import {
     readJson,
     record,
     scenarios,
+    servedTierOf,
     sha256,
-    strings,
     text,
 } from "./evidence";
 
@@ -218,13 +218,15 @@ export async function loadReviews(dir: string, corpusSha256: string): Promise<Re
     if (named(j.batch) && j.batch !== reviews.batch) {
         reviews.errors.push("judgments.json is bound to another batch");
     }
-    reviews.approvals = [
-        ...new Set(
-            strings(c.approved_by)
-                .map((approver) => approver.trim())
-                .filter((approver) => approver !== ""),
-        ),
-    ];
+    const approvers = list(c.approved_by, "approved_by", reviews.errors);
+    for (const approver of approvers) {
+        if (!named(approver)) {
+            reviews.errors.push(
+                `an approver does not match its schema: ${JSON.stringify(approver)}`,
+            );
+        }
+    }
+    reviews.approvals = [...new Set(approvers.filter(named).map((approver) => approver.trim()))];
     reviews.controls = stringRecords(
         c.controls,
         ["id", "kind", "label"],
@@ -349,8 +351,12 @@ function costOf(
 ): ScenarioRow["cost"] {
     const missing: string[] = [];
     const serving: Json[] = [];
-    for (const e of evidence.filter((e) => record(e.detail.serving))) {
-        const row: Json = { stage: e.stage, ...(e.detail.serving as Json) };
+    for (const e of evidence.filter((e) => servedTierOf(e) !== undefined)) {
+        if (!record(e.detail.serving)) {
+            missing.push(`${e.file}: serving`);
+            continue;
+        }
+        const row: Json = { stage: e.stage, ...e.detail.serving };
         for (const [field, valid] of SERVING_FIELDS) {
             if (!valid(row[field])) missing.push(`${e.file}: ${field}`);
         }
@@ -549,9 +555,14 @@ export function evaluate(input: {
     const grouped = byArmAndScenario(binding.judgments);
     const labels = new Set(assembled.arms.map((side) => side.label));
     const scenarioIds = new Set(scenarios(input.corpus).map((s) => s.scenario.id));
-    const strayDisputes = reviews.disputes
-        .filter((d) => !labels.has(d.arm) || !scenarioIds.has(d.scenario))
-        .map((d) => `a dispute names unknown arm or scenario ${d.arm}/${d.scenario}`);
+    const stray = [
+        ...reviews.judgments.map((j) => ["judgment", j.arm, j.scenario] as const),
+        ...reviews.disputes.map((d) => ["dispute", d.arm, d.scenario] as const),
+    ]
+        .filter(([, arm, scenario]) => !labels.has(arm) || !scenarioIds.has(scenario))
+        .map(
+            ([what, arm, scenario]) => `a ${what} names unknown arm or scenario ${arm}/${scenario}`,
+        );
     const arms = assembled.arms.map((side) => {
         const judged = grouped.get(side.label);
         const generations = generationsOf(side.arm);
@@ -570,7 +581,7 @@ export function evaluate(input: {
             ...side.identity_errors,
             ...reviews.errors,
             ...controls.problems.map((p) => `controls: ${p}`),
-            ...strayDisputes,
+            ...stray,
             ...(approvers < REQUIRED_APPROVERS
                 ? [`the batch has ${approvers} of ${REQUIRED_APPROVERS} approvers`]
                 : []),

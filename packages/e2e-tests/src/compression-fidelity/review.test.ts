@@ -400,6 +400,18 @@ describe("eval:compression-fidelity gates", () => {
                 },
                 "control_verdicts is not a list",
             ],
+            [
+                (c) => {
+                    c.approved_by = "reviewer-a, reviewer-b";
+                },
+                "approved_by is not a list",
+            ],
+            [
+                (c) => {
+                    c.approved_by = ["reviewer-a", "reviewer-b", 7];
+                },
+                "an approver does not match its schema",
+            ],
         ];
         for (const [edit, error] of cases) {
             const root = scratch();
@@ -474,6 +486,7 @@ describe("eval:compression-fidelity gates", () => {
                     write(dir, "forwarding-0.json", {
                         mode: "forward",
                         corpus_sha256: SHA,
+                        model: "anthropic/claude-test",
                         limits: { maxCalls: 40 },
                         complete: false,
                         incomplete_reasons: ["cost unknown for a send"],
@@ -676,7 +689,38 @@ describe("eval:compression-fidelity gates", () => {
             },
         });
         const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
-        expect(row?.cost.missing).toContain("no serving observation");
+        expect(row?.cost.missing).toContain(`delivery.${scenario}.json: serving`);
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("every serving observation needs its cost, whatever its siblings record", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "served-again.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "served-again",
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        served_tier: served.detail.served_tier,
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("served-again.json: serving");
         expect(row?.cost.status).toBe("incomplete");
     });
 });
@@ -920,15 +964,28 @@ describe("eval:compression-fidelity judgments", () => {
         expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
     });
 
-    test("a dispute naming an unknown arm or scenario withholds acceptance", async () => {
+    test("a judgment or dispute naming an unknown arm or scenario withholds acceptance", async () => {
         const scenario = allScenarios[0]?.s.id ?? "";
-        for (const dispute of [
-            { arm: "basline", scenario, resolved: false },
-            { arm: "baseline", scenario: "C9.S9", resolved: false },
+        for (const stray of [
+            { kind: "dispute", arm: "basline", scenario },
+            { kind: "dispute", arm: "baseline", scenario: "C9.S9" },
+            { kind: "judgment", arm: "basline", scenario },
+            { kind: "judgment", arm: "baseline", scenario: "C9.S9" },
         ]) {
             const root = scratch();
             const { baseline, reviewsDir } = rewrite(root, (j) => {
-                j.disputes.push(dispute);
+                if (stray.kind === "dispute") {
+                    j.disputes.push({ arm: stray.arm, scenario: stray.scenario, resolved: false });
+                } else {
+                    j.judgments.push({
+                        ...judgmentFor(j, scenario),
+                        id: "dissent",
+                        reviewer: "reviewer-d",
+                        arm: stray.arm,
+                        scenario: stray.scenario,
+                        abstained: true,
+                    });
+                }
             });
             const { report } = assemble({
                 corpus,
@@ -941,7 +998,7 @@ describe("eval:compression-fidelity judgments", () => {
                 reviews: await loadReviews(reviewsDir, SHA),
             });
             expect(report.arms[0]?.withheld).toContain(
-                `a dispute names unknown arm or scenario ${dispute.arm}/${dispute.scenario}`,
+                `a ${stray.kind} names unknown arm or scenario ${stray.arm}/${stray.scenario}`,
             );
             expect(report.accepted).toBe(false);
         }

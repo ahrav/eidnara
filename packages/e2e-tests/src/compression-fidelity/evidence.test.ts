@@ -560,6 +560,7 @@ describe("evidence live mode", () => {
         return {
             mode: "forward",
             corpus_sha256: SHA,
+            model: "anthropic/claude-test",
             limits: { maxCalls: 40 },
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
@@ -629,5 +630,22 @@ describe("evidence live mode", () => {
         const clean = await live([forwardingReport("{}", sha256("{}"), true)]);
         expect(clean.arms[0]?.identity_errors).toEqual([]);
         expect(clean.refused).toEqual([]);
+    });
+
+    test("a live report forwards to the arm's model and records at least one exchange", async () => {
+        const empty = await live([
+            { ...forwardingReport("{}", sha256("{}"), true), exchanges: [] },
+        ]);
+        expect(errorsOf(empty)).toContain("forwarding-0.json records no exchange");
+        const other = await live([
+            { ...forwardingReport("{}", sha256("{}"), true), model: "anthropic/other" },
+        ]);
+        expect(errorsOf(other)).toContain(
+            "forwarding-0.json forwarded to model anthropic/other, not the arm's",
+        );
+        const { model: _, ...unnamed } = forwardingReport("{}", sha256("{}"), true);
+        expect(errorsOf(await live([unnamed]))).toContain(
+            "forwarding-0.json does not match the forwarding report schema",
+        );
     });
 });
