@@ -151,6 +151,7 @@ const memoryExcluded = allScenarios.find(({ s }) => s.serving.path === "memory_e
 /** A recovery observation's detail as the memory witness writes it. */
 const RECOVERY_DETAIL = {
     tool: "eidnara_search",
+    arguments: { query: "manifest cache resident", sources: ["memory"] },
     calls: 1,
     result_utf8_bytes: 400,
     result_carries_memory: true,
@@ -1085,6 +1086,9 @@ describe("eval:compression-fidelity judgments", () => {
             { ...RECOVERY_DETAIL, calls: 0 },
             { ...RECOVERY_DETAIL, result_utf8_bytes: 0 },
             { ...RECOVERY_DETAIL, tool: undefined },
+            { ...RECOVERY_DETAIL, tool: "read" },
+            { ...RECOVERY_DETAIL, arguments: { query: "manifest", sources: ["project"] } },
+            { ...RECOVERY_DETAIL, arguments: undefined },
         ]) {
             write(baseline.dir, "recovery.json", {
                 schema_version: 1,

@@ -318,6 +318,17 @@ function isRecovery(evidence: Evidence): boolean {
     );
 }
 
+/** The witness searched memory through `eidnara_search`, as its recorded tool call shows. */
+function searchedMemory(detail: Json): boolean {
+    const args = detail.arguments;
+    return (
+        detail.tool === "eidnara_search" &&
+        record(args) &&
+        Array.isArray(args.sources) &&
+        args.sources.includes("memory")
+    );
+}
+
 const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 /**
  * The qualification and Pi witnesses serve C1.S1 through fixtures that run no OpenCode admission
@@ -531,7 +542,7 @@ export function scenarioRow(
         : evidence.some(
                 (e) =>
                     isRecovery(e) &&
-                    text(e.detail.tool) &&
+                    searchedMemory(e.detail) &&
                     e.detail.result_carries_memory === true &&
                     count(e.detail.calls) &&
                     e.detail.calls > 0 &&
