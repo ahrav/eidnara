@@ -385,20 +385,8 @@ function costOf(
             recovery_output_utf8_bytes: e.detail.result_utf8_bytes,
         });
     }
-    // A served row credits the captures of its source that its serving observations link to; a
-    // row with no serving observation, such as an exact read, credits every capture of its source.
-    const linked = new Set(
-        evidence
-            .filter((s) => servedTierOf(s) !== undefined)
-            .map((s) => s.detail.generation_capture_sha256)
-            .filter(text),
-    );
     const generation: Json[] = generations
-        .filter(
-            (e) =>
-                evidence.some((s) => s.source === e.source) &&
-                (linked.size === 0 || linked.has(e.sha256)),
-        )
+        .filter((e) => evidence.some((s) => s.source === e.source))
         .map((e) => ({
             file: e.file,
             owner: e.owner,

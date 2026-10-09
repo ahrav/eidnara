@@ -521,7 +521,7 @@ describe("eval:compression-fidelity gates", () => {
                         upstream_url: "https://api.example.test/v1/messages",
                         pricing: { inputPerMTok: 3, outputPerMTok: 15 },
                         context_limit: 200_000,
-                        spent_usd: 0,
+                        spent_usd: 0.25,
                         limits: {
                             maxCalls: 40,
                             maxOutputTokens: 1024,
@@ -529,6 +529,8 @@ describe("eval:compression-fidelity gates", () => {
                             spendCapUsd: 1,
                         },
                         stopped: null,
+                        attempted_sends: 1,
+                        acknowledged_responses: 1,
                         complete: false,
                         incomplete_reasons: ["cost unknown for a send"],
                         refusals: [],
@@ -621,51 +623,6 @@ describe("eval:compression-fidelity gates", () => {
         const served = allScenarios.find(({ s }) => s.source === source)?.s.id;
         const row = report.arms[0]?.rows.find((r) => r.scenario === served);
         expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
-    });
-
-    test("a served row credits generation only from the capture it links to", async () => {
-        const c = corpus.cases[0];
-        const source = c?.sources[0]?.id ?? "";
-        const served = allScenarios.find(
-            ({ s }) => s.source === source && s.serving.path !== "exact_read",
-        )?.s.id;
-        const { report } = await evaluate(scratch(), {
-            tamper: (dir) => {
-                const linked = recapture(dir, source, (capture) => {
-                    (capture.detail as Record<string, unknown>).usage = null;
-                }) as { detail: Record<string, unknown> };
-                write(dir, `real.${source}.retry.json`, {
-                    ...linked,
-                    stage: "capture-retry",
-                    detail: { ...linked.detail, usage: { input_tokens: 1, output_tokens: 1 } },
-                });
-            },
-        });
-        expect(report.arms[0]?.identity_errors).toEqual([]);
-        const row = report.arms[0]?.rows.find((r) => r.scenario === served);
-        expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
-        expect(row?.cost.missing).toContain(`real.${source}.json: generation usage unreported`);
-    });
-
-    test("an exact-read row credits only its own source's captures, whatever its witness links", async () => {
-        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read");
-        const other = corpus.cases.flatMap((c) => c.sources).find((v) => v.id !== exact?.s.source);
-        const { report } = await evaluate(scratch(), {
-            tamper: (dir) => {
-                recapture(dir, exact?.s.source ?? "", (capture) => {
-                    (capture.detail as Record<string, unknown>).usage = null;
-                });
-                const foreign = sha256(readFileSync(join(dir, `real.${other?.id}.json`)));
-                const path = join(dir, `delivery.${exact?.s.id}.json`);
-                const value = JSON.parse(readFileSync(path, "utf8"));
-                value.detail.generation_capture_sha256 = foreign;
-                writeFileSync(path, JSON.stringify(value));
-            },
-        });
-        const row = report.arms[0]?.rows.find((r) => r.scenario === exact?.s.id);
-        expect(report.arms[0]?.identity_errors).toEqual([]);
-        expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${exact?.s.source}.json`]);
-        expect(row?.cost.status).toBe("incomplete");
     });
 
     test("a negative recovery measurement leaves cost incomplete", async () => {

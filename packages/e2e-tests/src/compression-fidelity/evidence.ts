@@ -31,6 +31,9 @@ export const OWNERS = [
 ] as const;
 export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
 const REPLAY = "daemon.compression_fidelity.replay";
+/** The output origins the real capture and the U2 replay write, as literals. */
+const REAL_ORIGIN = "real producer through the host";
+const SCRIPTED_ORIGIN = "scripted approved example";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
@@ -104,6 +107,8 @@ export interface ForwardingEvidence {
     stopped: string | null;
     /** The requests the forwarder refused to send. */
     refusals: string[];
+    attempted_sends: number;
+    acknowledged_responses: number;
     spent_usd: number;
     complete: boolean;
     incomplete_reasons: string[];
@@ -297,6 +302,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!Array.isArray(refusals) || !refusals.every((refusal) => typeof refusal === "string")) {
         return null;
     }
+    const count = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0;
+    if (!count(value.attempted_sends) || !count(value.acknowledged_responses)) return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const [position, exchange] of value.exchanges.entries()) {
@@ -363,6 +370,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         limits: value.limits,
         stopped: value.stopped as string | null,
         refusals,
+        attempted_sends: value.attempted_sends,
+        acknowledged_responses: value.acknowledged_responses,
         spent_usd: spent,
         complete: value.complete,
         incomplete_reasons: reasons,
@@ -453,6 +462,19 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     }
     for (const refusal of report.complete ? report.refusals : []) {
         errors.push(`${file} complete report records a refusal: ${refusal}`);
+    }
+    // The forwarder counts sends and acknowledged responses from the exchanges it keeps.
+    const sends = report.exchanges.length;
+    if (report.attempted_sends !== sends) {
+        errors.push(
+            `${file} records ${report.attempted_sends} attempted sends over ${sends} exchange${sends === 1 ? "" : "s"}`,
+        );
+    }
+    const acknowledged = report.exchanges.filter((e) => e.response?.outcome === "acknowledged");
+    if (report.acknowledged_responses !== acknowledged.length) {
+        errors.push(
+            `${file} records ${report.acknowledged_responses} acknowledged responses over ${acknowledged.length} acknowledged exchange${acknowledged.length === 1 ? "" : "s"}`,
+        );
     }
     const maxCalls = report.limits.maxCalls as number;
     if (report.exchanges.length > maxCalls) {
@@ -678,6 +700,10 @@ export async function loadArm(
             arm.errors.push(`${name} names scenario ${label}, which is not an exact read`);
             continue;
         }
+        if (owner === REAL_CAPTURE && value.stage !== "capture") {
+            arm.errors.push(`${name} is a real capture at stage ${value.stage}`);
+            continue;
+        }
         if (label !== null && !sourceLabel && isGeneration({ owner, stage: value.stage })) {
             arm.errors.push(
                 `${name} names scenario ${label}; a ${value.stage} stage is source-level`,
@@ -784,14 +810,19 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     }
     if (config.generation_origin !== "real") {
         for (const evidence of arm.evidence) {
-            if (outputOrigins(evidence).some((origin) => origin.startsWith("real"))) {
-                errors.push(`${evidence.file} carries real output in an arm labeled scripted`);
+            for (const origin of outputOrigins(evidence)) {
+                if (origin === REAL_ORIGIN) {
+                    errors.push(`${evidence.file} carries real output in an arm labeled scripted`);
+                } else if (origin !== SCRIPTED_ORIGIN) {
+                    errors.push(
+                        `${evidence.file} carries output of origin ${JSON.stringify(origin)} in an arm labeled scripted`,
+                    );
+                }
             }
         }
         const replayed = generations.filter(
             (g) =>
-                g.owner === REPLAY &&
-                outputOrigins(g).some((origin) => origin.includes("scripted")),
+                g.owner === REPLAY && outputOrigins(g).some((origin) => origin === SCRIPTED_ORIGIN),
         );
         const reviewed = new Map(
             corpus.cases.flatMap((c) => c.sources.map((s) => [s.id, sha256(s.reviewedOutput)])),
@@ -832,7 +863,12 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         );
         if (!drained) errors.push(`${capture.file} is published without a drained text output`);
         const rows = capture.detail.published_rows;
-        if (!Array.isArray(rows) || rows.length === 0) {
+        const row = (value: unknown) =>
+            record(value) &&
+            text(value.title) &&
+            Number.isInteger(value.start) &&
+            Number.isInteger(value.end);
+        if (!Array.isArray(rows) || rows.length === 0 || !rows.every(row)) {
             errors.push(`${capture.file} is published without published rows`);
         }
         if (capture.detail.model !== config.model) {
@@ -851,13 +887,17 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         }
     }
     const captures = published.filter(
-        (c) =>
-            c.detail.model === config.model &&
-            String(c.detail.output_origin ?? "").startsWith("real"),
+        (c) => c.detail.model === config.model && c.detail.output_origin === REAL_ORIGIN,
     );
     for (const evidence of arm.evidence) {
-        if (outputOrigins(evidence).some((origin) => origin.includes("scripted"))) {
-            errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
+        for (const origin of outputOrigins(evidence)) {
+            if (origin === SCRIPTED_ORIGIN) {
+                errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
+            } else if (origin !== REAL_ORIGIN) {
+                errors.push(
+                    `${evidence.file} carries output of origin ${JSON.stringify(origin)} in an arm labeled real`,
+                );
+            }
         }
         if (servedTierOf(evidence) === undefined) continue;
         const served = evidence.detail.generation_capture_sha256;
@@ -887,6 +927,7 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
         const read = evidence.some(
             (e) =>
                 e.owner === EXACT_READ_OWNER &&
+                e.stage === "exact_read" &&
                 e.terminal === "read_exact" &&
                 digest(e.detail.sha256) &&
                 Number.isInteger(e.detail.byte_length) &&
@@ -1052,29 +1093,6 @@ export function assembleEvidence(input: {
         );
         if (before !== after) refused.push(`the arms generated ${source} from different prompts`);
     }
-    // Each row serves the captures its observations link; those prompts are held equal too, so
-    // an arm cannot hide a differently prompted serving behind a spare capture of the source.
-    const servedPrompts = (side: (typeof arms)[number], row: EvidenceRow) => {
-        const links = new Set(
-            row.evidence
-                .filter((e) => servedTierOf(e) !== undefined)
-                .map((e) => e.detail.generation_capture_sha256)
-                .filter(text),
-        );
-        // Retries repeat a prompt; the distinct prompts are what must agree.
-        const distinct = new Set(
-            side.arm.evidence
-                .filter((e) => isGeneration(e) && e.terminal === "published" && links.has(e.sha256))
-                .flatMap((e) => promptHashes(e, "prompt").hashes),
-        );
-        return JSON.stringify([...distinct].sort());
-    };
-    base.rows.forEach((row, i) => {
-        const other = cand.rows[i];
-        if (other && servedPrompts(base, row) !== servedPrompts(cand, other)) {
-            refused.push(`the arms served ${row.scenario.id} from captures with different prompts`);
-        }
-    });
     // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
     // declares, so live arms hold it equal through their reports.
     const forwarded = sides.map((arm) => arm.forwarding[0]?.report ?? null);

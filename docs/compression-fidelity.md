@@ -491,12 +491,12 @@ either arm; an arm directory is refused before any write, and a component of
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers (the leak count zero: a leaking pass is never a served one), its estimator, and a `serving_kind` of `cold` or `warm_repeat`, `warm_repeat` exactly on the campaign's `warm` stage; its `admission` is a branch that ran an admission check (`fits`, `shrinks`, `limit_unknown`, or `declined`); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a usage record counting `input_tokens` and `output_tokens` as non-negative numbers; a `real` arm credits generation only from its published real captures of the row's source, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked ones. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers (the leak count zero: a leaking pass is never a served one), its estimator, and a `serving_kind` of `cold` or `warm_repeat`, `warm_repeat` exactly on the campaign's `warm` stage; its `admission` is a branch that ran an admission check (`fits`, `shrinks`, `limit_unknown`, or `declined`); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a usage record counting `input_tokens` and `output_tokens` as non-negative numbers; a `real` arm credits generation only from its published real captures of the row's source. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -526,7 +526,8 @@ either arm; an arm directory is refused before any write, and a component of
   with no published generation record: a real capture in an arm labeled
   `real`, the U2 replay's `generation` stage with scripted output in an arm
   labeled `scripted`;
-- in an arm labeled `scripted`, output whose origin is real, whether
+- in an arm labeled `scripted`, an output origin other than
+  `scripted approved example`, the literal the U2 replay writes, whether
   `detail.output_origin` or an attempt's `output_origin` records it, or a
   replay generation attempt whose `output_sha256` is not the SHA-256 of the
   source's approved example;
@@ -537,8 +538,9 @@ either arm; an arm directory is refused before any write, and a component of
   incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
   Messages endpoint free of credential and query, or whose exchange tool ids
   are not string arrays or whose exchange indices are not their positions;
-- a forwarding report with more exchanges than its `maxCalls`, or whose
-  `spent_usd` differs from the sum of its exchanges' `cost_usd`;
+- a forwarding report with more exchanges than its `maxCalls`, whose
+  `spent_usd` differs from the sum of its exchanges' `cost_usd`, or whose
+  `attempted_sends` and `acknowledged_responses` differ from its exchanges;
 - a forwarding report marked complete that lists an incomplete reason or a
   refusal, records a stop, no send, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
@@ -548,18 +550,22 @@ either arm; an arm directory is refused before any write, and a component of
   in its `tool_results`; these are the completeness reasons the forwarder
   derives, recomputed from the report's own fields;
 - a generation record, a real capture or the U2 replay's `generation` stage,
-  that names a scenario; generation is source-level.
+  that names a scenario; generation is source-level;
+- a `daemon.compression_fidelity.real_capture` observation at a stage other
+  than `capture`.
 
 In an arm labeled `real`:
-- scripted output is an identity error, whether `detail.output_origin` or an
-  attempt's `output_origin` in `detail.attempts` records it;
+- an output origin other than `real producer through the host`, the literal
+  the real capture writes, is an identity error, whether `detail.output_origin`
+  or an attempt's `output_origin` in `detail.attempts` records it;
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error.
   The capture records at least one complete attempt: the arm's model, a
   system prompt or its hash, a prompt, and a non-empty text output;
 - a published real capture records `settled: true`, an attempt output with
-  text, nonempty `published_rows`, and an `attempt_count` equal to its
-  retained attempts, the state the capture writer publishes;
+  text, nonempty `published_rows` of titled rows with integer `start` and
+  `end`, and an `attempt_count` equal to its retained attempts, the state the
+  capture writer publishes;
 - `arm.json` `settings` declare numeric `temperature` and
   `max_output_tokens`, and each attempt of a published real capture records
   those values;
@@ -596,8 +602,7 @@ dispute.
   bound to another corpus or has identity errors, when the arms reached
   different scenario sets, when they differ in model, provider, version,
   settings, limits, or generation origin, or when the distinct user prompts
-  their published generation records for a source record differ, or the
-  distinct prompts of the captures a row's serving observations link differ. Held fields compare as JSON with
+  their published generation records for a source record differ. Held fields compare as JSON with
   keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
   reports forwarded to different models, upstream endpoints, context limits,

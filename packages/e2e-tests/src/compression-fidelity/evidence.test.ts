@@ -160,45 +160,6 @@ describe("evidence identity and completeness", () => {
         expect(retried.refused).toEqual([]);
     });
 
-    test("the prompts of the captures each row serves are held equal, whatever other captures an arm stores", async () => {
-        const source = corpus.cases[0]?.sources[0]?.id ?? "";
-        const served = allScenarios.find(
-            ({ s }) => s.source === source && s.serving.path !== "exact_read",
-        )?.s.id;
-        // Each arm stores a capture for both prompts, so the source-level bags match, but the
-        // baseline serves prompt A and the candidate serves prompt B.
-        const twoCaptures = (dir: string, servedPrompt: string, sparePrompt: string) => {
-            const path = join(dir, `real.${source}.json`);
-            const capture = JSON.parse(readFileSync(path, "utf8"));
-            const attempt = capture.detail.attempts[0];
-            capture.detail.attempts = [{ ...attempt, prompt: servedPrompt }];
-            const linked = write(dir, `real.${source}.json`, capture);
-            write(dir, `real.${source}.spare.json`, {
-                ...capture,
-                stage: "capture-spare",
-                detail: { ...capture.detail, attempts: [{ ...attempt, prompt: sparePrompt }] },
-            });
-            for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
-                const file = join(dir, `delivery.${s.id}.json`);
-                const observation = JSON.parse(readFileSync(file, "utf8"));
-                if (observation.detail.generation_capture_sha256 === undefined) continue;
-                observation.detail.generation_capture_sha256 = linked;
-                writeFileSync(file, JSON.stringify(observation));
-            }
-        };
-        const root = scratch();
-        const assembled = await assemble(root, {
-            tamper: (dir) => {
-                twoCaptures(dir, "prompt A", "prompt B");
-                twoCaptures(join(root, "candidate"), "prompt B", "prompt A");
-            },
-        });
-        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
-        expect(assembled.refused).toContain(
-            `the arms served ${served} from captures with different prompts`,
-        );
-    });
-
     test("a published real capture records settled generation, drained output, and published rows", async () => {
         const unsettled = await assemble(scratch(), { baseline: { capture: { settled: false } } });
         expect(errorsOf(unsettled)).toContain("is published without settled generation");
@@ -429,6 +390,46 @@ describe("evidence identity and completeness", () => {
             candidate: scripted,
         });
         expect(errorsOf(userPrompt)).toContain("records a malformed digest");
+    });
+
+    test("an output origin is the exact literal its producer writes", async () => {
+        const lookalike = await assemble(scratch(), {
+            baseline: { origin: "real-looking fixture" },
+        });
+        expect(errorsOf(lookalike)).toContain(
+            'carries output of origin "real-looking fixture" in an arm labeled real',
+        );
+        expect(errorsOf(lookalike)).toContain("no published real-model capture");
+        const scripted = { generationOrigin: "scripted" as const };
+        const replayLike = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { output_origin: "scripted-ish" } },
+            candidate: scripted,
+        });
+        expect(errorsOf(replayLike)).toContain(
+            'carries output of origin "scripted-ish" in an arm labeled scripted',
+        );
+        expect(errorsOf(replayLike)).toContain("no published scripted generation");
+    });
+
+    test("a real capture is emitted at the capture stage with object rows", async () => {
+        const staged = await assemble(scratch(), {
+            tamper: (dir) => {
+                const first = corpus.cases[0]?.sources[0]?.id ?? "";
+                const path = join(dir, `real.${first}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.stage = "generation";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(staged)).toContain("real.C1.V1.json is a real capture at stage generation");
+        const placeholder = await assemble(scratch(), {
+            baseline: { capture: { published_rows: [null] } },
+        });
+        expect(errorsOf(placeholder)).toContain("is published without published rows");
+        const untitled = await assemble(scratch(), {
+            baseline: { capture: { published_rows: [{ start: 1, end: 2 }] } },
+        });
+        expect(errorsOf(untitled)).toContain("is published without published rows");
     });
 
     test("a real capture's attempt count equals its retained attempts", async () => {
@@ -1024,6 +1025,19 @@ describe("evidence deterministic column", () => {
         expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
     });
 
+    test("an exact-read pass needs the witness's exact_read stage", async () => {
+        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read")?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${exact}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.stage = "replayed";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
+    });
+
     test("the exact-read witness judges only exact-read scenarios", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "natural");
         const assembled = await assemble(scratch(), {
@@ -1150,6 +1164,8 @@ describe("evidence live mode", () => {
             pricing: { inputPerMTok: 3, outputPerMTok: 15 },
             stopped: null as string | null,
             refusals: [] as string[],
+            attempted_sends: 1,
+            acknowledged_responses: 1,
             spent_usd: 0.5,
             limits: LIMITS as Record<string, number>,
             complete,
@@ -1477,6 +1493,15 @@ describe("evidence live mode", () => {
             errorsOf(await live([{ ...report, refusals: ["limits.maxCalls reached"] }])),
         ).toContain("complete report records a refusal: limits.maxCalls reached");
         expect(errorsOf(await live([{ ...report, refusals: [1] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        expect(errorsOf(await live([{ ...report, attempted_sends: 2 }]))).toContain(
+            "records 2 attempted sends over 1 exchange",
+        );
+        expect(errorsOf(await live([{ ...report, acknowledged_responses: 0 }]))).toContain(
+            "records 0 acknowledged responses over 1 acknowledged exchange",
+        );
+        expect(errorsOf(await live([{ ...report, attempted_sends: -1 }]))).toContain(
             "does not match the forwarding report schema",
         );
         const refund = { ...report.exchanges[0], index: 1 };
