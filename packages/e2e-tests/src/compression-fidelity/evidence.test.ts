@@ -370,6 +370,57 @@ describe("evidence generation origin", () => {
             "replay.generation.json carries scripted output in an arm labeled real",
         );
     });
+
+    test("a real capture must run the arm's model and record a complete attempt with text output", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const relink = (dir: string, edit: (detail: Record<string, unknown>) => void) => {
+            const path = join(dir, `real.${source}.json`);
+            const value = JSON.parse(readFileSync(path, "utf8"));
+            edit(value.detail);
+            const capture = write(dir, `real.${source}.json`, value);
+            for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+                const served = join(dir, `delivery.${s.id}.json`);
+                const observation = JSON.parse(readFileSync(served, "utf8"));
+                if (observation.detail.generation_capture_sha256 === undefined) continue;
+                observation.detail.generation_capture_sha256 = capture;
+                writeFileSync(served, JSON.stringify(observation));
+            }
+        };
+        const cases: Array<[(detail: Record<string, unknown>) => void, string]> = [
+            [
+                (detail) => {
+                    detail.model = "other/model";
+                },
+                `real.${source}.json ran model other/model, not the arm's`,
+            ],
+            [
+                (detail) => {
+                    (detail.attempts as Array<Record<string, unknown>>)[0]!.model = "other/model";
+                },
+                `real.${source}.json ran model other/model, not the arm's`,
+            ],
+            [
+                (detail) => {
+                    detail.attempts = [{}];
+                },
+                `real.${source}.json records no complete real attempt`,
+            ],
+            [
+                (detail) => {
+                    (detail.attempts as Array<Record<string, unknown>>)[0]!.outputs = [
+                        { error: "x" },
+                    ];
+                },
+                `real.${source}.json records no complete real attempt`,
+            ],
+        ];
+        for (const [edit, error] of cases) {
+            const assembled = await assemble(scratch(), { tamper: (dir) => relink(dir, edit) });
+            expect(errorsOf(assembled)).toContain(error);
+        }
+        const intact = await assemble(scratch());
+        expect(errorsOf(intact)).toBe("");
+    });
 });
 
 describe("evidence deterministic column", () => {

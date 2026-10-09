@@ -540,17 +540,6 @@ describe("eval:compression-fidelity gates", () => {
         const source = c?.sources[0]?.id ?? "";
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
-                const path = join(dir, `real.${source}.json`);
-                const value = JSON.parse(readFileSync(path, "utf8"));
-                delete value.detail.attempts;
-                const relinked = write(dir, `real.${source}.json`, value);
-                for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
-                    const served = join(dir, `delivery.${s.id}.json`);
-                    const observation = JSON.parse(readFileSync(served, "utf8"));
-                    if (observation.detail.generation_capture_sha256 === undefined) continue;
-                    observation.detail.generation_capture_sha256 = relinked;
-                    writeFileSync(served, JSON.stringify(observation));
-                }
                 write(dir, "padding.json", {
                     schema_version: 1,
                     corpus_sha256: SHA,
@@ -567,8 +556,7 @@ describe("eval:compression-fidelity gates", () => {
         });
         expect(report.arms[0]?.identity_errors).toEqual([]);
         const row = report.arms[0]?.rows.find((r) => r.case === c?.id);
-        expect(row?.cost.generation).toEqual([]);
-        expect(row?.cost.missing).toContain("no generation observation");
+        expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${source}.json`]);
     });
 
     test("a negative recovery measurement leaves cost incomplete", async () => {
@@ -762,11 +750,39 @@ describe("eval:compression-fidelity judgments", () => {
             stage: "recovery-eidnara-search",
             terminal: "discoverable",
             markers: [],
-            detail: { calls: 1, result_utf8_bytes: 400 },
+            detail: { calls: 1, result_utf8_bytes: 400, result_carries_memory: true },
         });
         const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.recovery).toBe("witnessed");
         expect(row?.cost.status).toBe("complete");
+    });
+
+    test("a recovery whose result carries no memory witnesses nothing", async () => {
+        const scenario = discoverableFirst;
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            const judgment = judgmentFor(j, scenario?.id ?? "");
+            judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
+                (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
+            );
+        });
+        for (const result of [false, undefined]) {
+            write(baseline.dir, "recovery.json", {
+                schema_version: 1,
+                corpus_sha256: SHA,
+                owner: "opencode-delivery",
+                case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+                source: scenario?.source,
+                scenario: scenario?.id,
+                stage: "recovery-eidnara-search",
+                terminal: "discoverable",
+                markers: [],
+                detail: { calls: 1, result_utf8_bytes: 400, result_carries_memory: result },
+            });
+            const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+            expect(row?.recovery).toBe("unverified");
+            expect(row?.withheld).toContain("recovery unverified");
+        }
     });
 
     test("a stage that merely contains search or recover witnesses no recovery", async () => {
@@ -902,6 +918,33 @@ describe("eval:compression-fidelity judgments", () => {
         const [base, cand] = report.arms;
         expect(base?.rows.every((r) => r.semantic_review === "reviewed")).toBe(true);
         expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+    });
+
+    test("a dispute naming an unknown arm or scenario withholds acceptance", async () => {
+        const scenario = allScenarios[0]?.s.id ?? "";
+        for (const dispute of [
+            { arm: "basline", scenario, resolved: false },
+            { arm: "baseline", scenario: "C9.S9", resolved: false },
+        ]) {
+            const root = scratch();
+            const { baseline, reviewsDir } = rewrite(root, (j) => {
+                j.disputes.push(dispute);
+            });
+            const { report } = assemble({
+                corpus,
+                corpusPath: "corpus.json",
+                corpusSha256: SHA,
+                revision: "rev",
+                mode: "offline",
+                baseline: await loadArm(baseline.dir, corpus, SHA),
+                candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+                reviews: await loadReviews(reviewsDir, SHA),
+            });
+            expect(report.arms[0]?.withheld).toContain(
+                `a dispute names unknown arm or scenario ${dispute.arm}/${dispute.scenario}`,
+            );
+            expect(report.accepted).toBe(false);
+        }
     });
 
     test("disagreeing human judgments and an open dispute are disputed; a resolved dispute is not", async () => {

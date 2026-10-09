@@ -20,6 +20,7 @@ import {
     REPORT_SCHEMA,
     readJson,
     record,
+    scenarios,
     sha256,
     strings,
     text,
@@ -479,7 +480,7 @@ export function scenarioRow(
     const discoverable = preservation.some((p) => p.disposition === "discoverable");
     const recovery = !discoverable
         ? "not_required"
-        : evidence.some(isRecovery)
+        : evidence.some((e) => isRecovery(e) && e.detail.result_carries_memory === true)
           ? "witnessed"
           : "unverified";
     let consumer_safety: ScenarioRow["consumer_safety"] = "unreviewed";
@@ -546,6 +547,11 @@ export function evaluate(input: {
     const controls = controlQualification(reviews);
     const binding = controls.qualified ? reviews : { ...reviews, judgments: [], disputes: [] };
     const grouped = byArmAndScenario(binding.judgments);
+    const labels = new Set(assembled.arms.map((side) => side.label));
+    const scenarioIds = new Set(scenarios(input.corpus).map((s) => s.scenario.id));
+    const strayDisputes = reviews.disputes
+        .filter((d) => !labels.has(d.arm) || !scenarioIds.has(d.scenario))
+        .map((d) => `a dispute names unknown arm or scenario ${d.arm}/${d.scenario}`);
     const arms = assembled.arms.map((side) => {
         const judged = grouped.get(side.label);
         const generations = generationsOf(side.arm);
@@ -564,6 +570,7 @@ export function evaluate(input: {
             ...side.identity_errors,
             ...reviews.errors,
             ...controls.problems.map((p) => `controls: ${p}`),
+            ...strayDisputes,
             ...(approvers < REQUIRED_APPROVERS
                 ? [`the batch has ${approvers} of ${REQUIRED_APPROVERS} approvers`]
                 : []),

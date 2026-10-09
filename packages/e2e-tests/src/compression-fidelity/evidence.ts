@@ -244,8 +244,20 @@ function outputOrigins(evidence: Evidence): string[] {
     );
 }
 
-function servedTierOf(evidence: Evidence): unknown {
-    return evidence.detail.served_tier ?? evidence.detail.tier;
+function servedTierOf(evidence: Evidence): string | null | undefined {
+    const tier = evidence.detail.served_tier ?? evidence.detail.tier;
+    if (tier === undefined) return undefined;
+    return typeof tier === "string" ? tier : null;
+}
+
+function completeRealAttempt(attempt: Json, model: string): boolean {
+    return (
+        attempt.model === model &&
+        (text(attempt.system) || text(attempt.system_sha256)) &&
+        text(attempt.prompt) &&
+        Array.isArray(attempt.outputs) &&
+        attempt.outputs.some((output) => record(output) && typeof output.text === "string")
+    );
 }
 
 function checkForwarding(file: string, report: ForwardingEvidence): string[] {
@@ -443,6 +455,17 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     for (const { source } of sources(corpus)) {
         if (!captures.some((c) => c.source === source)) {
             errors.push(`no published real-model capture for ${source}`);
+        }
+    }
+    for (const capture of captures) {
+        const attempts = attemptsOf(capture);
+        for (const model of [capture.detail.model, ...attempts.map((a) => a.model)]) {
+            if (model !== undefined && model !== config.model) {
+                errors.push(`${capture.file} ran model ${String(model)}, not the arm's`);
+            }
+        }
+        if (!attempts.some((attempt) => completeRealAttempt(attempt, config.model))) {
+            errors.push(`${capture.file} records no complete real attempt`);
         }
     }
     return errors;

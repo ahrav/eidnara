@@ -428,7 +428,7 @@ an owner-only `0700` directory outside the repository.
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
 | `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or C6's exact read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
-| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search` |
+| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
 | `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record, and a `real` arm credits generation only from its published real captures. Missing or unreported usage leaves cost incomplete. |
@@ -449,7 +449,10 @@ an owner-only `0700` directory outside the repository.
 In an arm labeled `real`:
 - scripted output is an identity error, whether `detail.output_origin` or an
   attempt's `output_origin` in `detail.attempts` records it;
-- every source needs a published real capture;
+- every source needs a published real capture, whose `detail.model` and every
+  attempt's `model` equal the arm's model and which records at least one
+  complete attempt: the arm's model, a system prompt or its hash, a prompt,
+  and a text output;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.
@@ -486,8 +489,9 @@ dispute.
 - Each scenario gets `expected_green`, `regression`,
   `resolution_candidate`, `expected_red`, or `unscored`.
 - An arm is accepted only when all of these hold: it has no identity
-  error; review is qualified; the batch names two distinct approvers; its
-  origin is `real`; no scenario is missing; every row passes every column.
+  error; review is qualified; every dispute names a compared arm and a
+  corpus scenario; the batch names two distinct approvers; its origin is
+  `real`; no scenario is missing; every row passes every column.
 
 Missing scenarios block full acceptance, and the report names them. The
 command records approvals; it does not grant them.
