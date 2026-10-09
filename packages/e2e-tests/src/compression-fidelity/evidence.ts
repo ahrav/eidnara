@@ -471,12 +471,9 @@ function outputOrigins(evidence: Evidence): string[] {
 }
 
 export function servedTierOf(evidence: Evidence): string | null | undefined {
-    // A present `served_tier` is the delivery witness's tier, whatever it holds; `tier` is the
-    // replay's field and stands in only when the record names no `served_tier` at all.
-    const tier =
-        evidence.detail.served_tier !== undefined
-            ? evidence.detail.served_tier
-            : evidence.detail.tier;
+    // The delivery witness names its tier in `served_tier` and the U2 replay in `tier`; each
+    // owner's field is read, whatever it holds, and the other owner's field is ignored.
+    const tier = evidence.owner === REPLAY ? evidence.detail.tier : evidence.detail.served_tier;
     if (tier === undefined) return undefined;
     return typeof tier === "string" ? tier : null;
 }

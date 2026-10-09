@@ -1024,6 +1024,20 @@ describe("evidence deterministic column", () => {
         expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
     });
 
+    test("a delivery observation names its tier in served_tier alone", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.tier = value.detail.served_tier;
+                delete value.detail.served_tier;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("not_evaluated");
+    });
+
     test("a wrong served tier fails the deterministic column", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.tier === "p1")?.s.id ?? "";
         const assembled = await assemble(scratch(), {
