@@ -13,7 +13,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { publishJsonAtomically } from "../atomic-publish";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 
@@ -73,6 +73,10 @@ export type SendOutcome = "acknowledged" | "provider_error" | "ambiguous";
 
 export interface ForwardedExchange {
     index: number;
+    /** The `tool_result` ids the request answers. */
+    tool_results: string[];
+    /** The `tool_use` ids the response asks for. */
+    tool_uses: string[];
     request: {
         headers: Record<string, string>;
         /** SHA-256 of the bytes the mock received, which are the bytes it sent. */
@@ -264,11 +268,44 @@ function errorResponse(type: string, message: string): Response {
     });
 }
 
-/** The ids of the tool calls a Messages response body asks for. */
-function toolUseIds(text: string): string[] {
-    return [...text.matchAll(/"type"\s*:\s*"tool_use"\s*,\s*"id"\s*:\s*"([^"]+)"/g)].map(
-        (match) => match[1] ?? "",
+function blocksOf(value: unknown): Array<Record<string, unknown>> {
+    return Array.isArray(value)
+        ? value.filter(
+              (block): block is Record<string, unknown> => !!block && typeof block === "object",
+          )
+        : [];
+}
+
+/** The `tool_result` ids a parsed Messages request answers. */
+function toolResultIds(request: Record<string, unknown>): string[] {
+    return blocksOf(request.messages).flatMap((message) =>
+        blocksOf(message.content)
+            .filter(
+                (block) => block.type === "tool_result" && typeof block.tool_use_id === "string",
+            )
+            .map((block) => block.tool_use_id as string),
     );
+}
+
+/** The `tool_use` ids a JSON or SSE Messages response asks for. */
+function toolUseIds(contentType: string, text: string): string[] {
+    let blocks: Array<Record<string, unknown>> = [];
+    if (contentType.includes("text/event-stream")) {
+        for (const line of text.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            try {
+                const event = JSON.parse(line.slice(5)) as Record<string, unknown>;
+                blocks = blocks.concat(blocksOf([event.content_block]));
+            } catch {}
+        }
+    } else {
+        try {
+            blocks = blocksOf((JSON.parse(text) as Record<string, unknown>).content);
+        } catch {}
+    }
+    return blocks
+        .filter((block) => block.type === "tool_use" && typeof block.id === "string")
+        .map((block) => block.id as string);
 }
 
 function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]> {
@@ -310,7 +347,10 @@ export class Forwarder {
     }
 
     /** The send's reservation, or the reason the limits refuse it. */
-    private admit(text: string, bytes: number): { reserved: number } | { refused: string } {
+    private admit(
+        text: string,
+        bytes: number,
+    ): { reserved: number; toolResults: string[] } | { refused: string } {
         if (this.stopped) return { refused: `stopped: ${this.stopped}` };
         const { limits, model } = this.config;
         let parsed: Record<string, unknown>;
@@ -325,12 +365,13 @@ export class Forwarder {
             return { refused: "max_tokens is absent or above limits.maxOutputTokens" };
         }
         if (this.exchanges.length >= limits.maxCalls) return { refused: "limits.maxCalls reached" };
-        // Each token spans at least one body byte, so the body length bounds input tokens.
+        // Body bytes bound the body's own input tokens; input the provider adds beyond the body
+        // is caught after the send, when usage above the reservation stops the run.
         const reserved = this.price(bytes, parsed.max_tokens);
         if (this.spent + reserved > limits.spendCapUsd) {
             return { refused: "limits.spendCapUsd would be exceeded" };
         }
-        return { reserved };
+        return { reserved, toolResults: toolResultIds(parsed) };
     }
 
     /** Sends `body` and reads the whole response before the deadline. */
@@ -372,7 +413,7 @@ export class Forwarder {
         const text = new TextDecoder().decode(body);
         const admitted = this.admit(text, body.byteLength);
         if ("refused" in admitted) return this.refuse(admitted.refused);
-        const { reserved } = admitted;
+        const { reserved, toolResults } = admitted;
         const outbound: Record<string, string> = {};
         for (const name of FORWARDED_HEADERS) {
             if (headers[name] !== undefined) outbound[name] = headers[name];
@@ -385,6 +426,8 @@ export class Forwarder {
         }
         const exchange: ForwardedExchange = {
             index: this.exchanges.length,
+            tool_results: toolResults,
+            tool_uses: [],
             request: {
                 headers: redact(headers),
                 body_sha256: sha256(body),
@@ -408,7 +451,9 @@ export class Forwarder {
             return errorResponse("forwarding_failed", this.stopped);
         }
         const contentType = response.headers.get("content-type") ?? "";
-        const { usage, stopReason } = readUsage(contentType, new TextDecoder().decode(bytes));
+        const responseText = new TextDecoder().decode(bytes);
+        const { usage, stopReason } = readUsage(contentType, responseText);
+        exchange.tool_uses = toolUseIds(contentType, responseText);
         const cost = usage
             ? this.price(
                   usage.input_tokens +
@@ -456,11 +501,9 @@ export class Forwarder {
         }
         if (this.spent > this.config.limits.spendCapUsd) reasons.push("spend above the cap");
         const answered = this.exchanges.every((exchange) =>
-            toolUseIds(exchange.response?.body_text ?? "").every((id) =>
+            exchange.tool_uses.every((id) =>
                 this.exchanges.some(
-                    (later) =>
-                        later.index > exchange.index &&
-                        later.request.body_text.includes(`"tool_use_id":"${id}"`),
+                    (later) => later.index > exchange.index && later.tool_results.includes(id),
                 ),
             ),
         );
@@ -501,12 +544,16 @@ export function publishForwardingReport(
     if (!/^[A-Za-z0-9._-]+$/.test(label) || label.startsWith(".")) {
         throw new Error(`${label} is not a plain file label`);
     }
+    if (dir.split(/[\\/]/).includes("..")) throw new Error(`${dir} names a parent directory`);
     const target = resolve(dir);
     let existing = target;
     while (!existsSync(existing)) existing = dirname(existing);
     const real = join(realpathSync(existing), relative(existing, target));
     const inside = relative(realpathSync(REPOSITORY_ROOT), real);
-    if (inside === "" || (!inside.startsWith("..") && !isAbsolute(inside))) {
+    if (
+        inside === "" ||
+        (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
+    ) {
         throw new Error(`${real} is inside the repository`);
     }
     mkdirSync(real, { recursive: true, mode: 0o700 });

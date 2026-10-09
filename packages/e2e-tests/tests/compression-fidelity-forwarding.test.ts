@@ -110,8 +110,12 @@ describe.skipIf(!prereqs.ok)("record-and-forward through OpenCode", () => {
             userEidnaraConfigPath(h.env),
             h.logPath,
         ]) {
-            expect(existsSync(path) ? readFileSync(path, "utf8") : "").not.toContain(CANARY);
+            expect(existsSync(path)).toBe(true);
+            expect(readFileSync(path, "utf8")).not.toContain(CANARY);
         }
+        expect(readFileSync(join(h.env.configDir, "opencode.json"), "utf8")).toContain(
+            h.mock.inboundKey,
+        );
     }, 300_000);
 });
 

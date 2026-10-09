@@ -242,8 +242,12 @@ describe("forwarding", () => {
         expect(double.received.every((r) => r.url === UPSTREAM && r.redirect === "error")).toBe(
             true,
         );
-        expect(double.received[0]?.headers["x-api-key"]).toBe(FAKE_KEY);
-        expect(double.received[0]?.headers["anthropic-version"]).toBe("2023-06-01");
+        expect(double.received[0]?.headers).toEqual({
+            accept: "*/*",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+            "x-api-key": FAKE_KEY,
+        });
         const report = mock.forwardingReport();
         expect(report.exchanges.map((e) => e.request.body_sha256)).toEqual(
             [firstBytes, secondBytes].map((bytes) =>
@@ -276,6 +280,33 @@ describe("forwarding", () => {
         expect(mock.forwardingReport().stopped).toBeNull();
     });
 
+    test("every mock draws its own inbound key", () => {
+        const keys = new Set(
+            Array.from({ length: 4 }, () => new MockProvider({ forward: config() }).inboundKey),
+        );
+        expect(keys.size).toBe(4);
+    });
+
+    test("a failing credential callback refuses the send and stops the run", async () => {
+        const double = upstreamDouble([]);
+        const mock = new MockProvider({
+            forward: config({
+                fetch: double.send,
+                credentials: () => {
+                    throw new Error("no credential");
+                },
+            }),
+        });
+        const base = await start(mock);
+        expect((await post(base, firstTurn)).status).toBe(400);
+        expect((await post(base, firstTurn)).status).toBe(400);
+        const report = mock.forwardingReport();
+        expect(double.received).toEqual([]);
+        expect(report.attempted_sends).toBe(0);
+        expect(report.spent_usd).toBe(0);
+        expect(report.stopped).toContain("credential callback");
+    });
+
     test("the spend cap totals every send and settles each to its stated usage", async () => {
         const reply =
             (usage = USAGE) =>
@@ -306,7 +337,7 @@ describe("forwarding", () => {
         const fits = new MockProvider({
             forward: config({
                 fetch: refunded.send,
-                limits: { ...config().limits, spendCapUsd: reservation + settled },
+                limits: { ...config().limits, spendCapUsd: (reservation + settled) * 1.000001 },
             }),
         });
         const fitsBase = await start(fits);
@@ -382,6 +413,40 @@ describe("forwarding", () => {
                     headers: { "content-type": "application/json" },
                 }),
         ]);
+        const answered = upstreamDouble([
+            () =>
+                new Response(
+                    JSON.stringify({
+                        content: [{ input: {}, name: "read", id: "toolu_7", type: "tool_use" }],
+                        stop_reason: "tool_use",
+                        usage: USAGE,
+                    }),
+                    { headers: { "content-type": "application/json" } },
+                ),
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const loop = new MockProvider({ forward: config({ fetch: answered.send }) });
+        const loopBase = await start(loop);
+        await (await post(loopBase, { ...firstTurn, stream: false })).text();
+        const spaced = JSON.stringify(
+            {
+                ...firstTurn,
+                messages: [
+                    {
+                        role: "user",
+                        content: [{ content: "x", tool_use_id: "toolu_7", type: "tool_result" }],
+                    },
+                ],
+            },
+            null,
+            2,
+        );
+        await (await post(loopBase, spaced)).text();
+        expect(loop.forwardingReport().complete).toBe(true);
+
         const side = new MockProvider({ forward: config({ fetch: interleaved.send }) });
         const sideBase = await start(side);
         await (await post(sideBase, firstTurn)).text();
@@ -559,6 +624,9 @@ describe("forwarding", () => {
             expect(() => publishForwardingReport(mock.forwardingReport(), shared, "../x")).toThrow(
                 "plain file label",
             );
+            expect(() =>
+                publishForwardingReport(mock.forwardingReport(), `${shared}/../x`, "x"),
+            ).toThrow("parent directory");
         } finally {
             rmSync(shared, { recursive: true, force: true });
         }
