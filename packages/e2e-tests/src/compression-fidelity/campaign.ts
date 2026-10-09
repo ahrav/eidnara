@@ -123,6 +123,9 @@ export function servingCost(delivery: Delivery): Record<string, unknown> {
         estimator: OPENCODE_ESTIMATOR,
         transform_elapsed_ms: delivery.pass.elapsedMs,
         raw_source_leaks: delivery.verdict.leaks.length,
+        // The campaign's warm observation repeats the previous request; every other
+        // observation rematerializes or first serves its history.
+        serving_kind: delivery.label === "warm" ? "warm_repeat" : "cold",
     };
 }
 

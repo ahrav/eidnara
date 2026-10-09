@@ -45,6 +45,7 @@ export const SERVING = {
     estimator: "opencode-heuristic utf8-bytes-div-3.5-v1",
     transform_elapsed_ms: 12,
     raw_source_leaks: 0,
+    serving_kind: "cold",
 };
 
 export interface ArmOptions {

@@ -282,6 +282,7 @@ const SERVING_FIELDS = [
     "estimator",
     "transform_elapsed_ms",
     "raw_source_leaks",
+    "serving_kind",
 ] as const;
 
 function costOf(evidence: Evidence[], arm: Arm, exactRead: boolean): ScenarioRow["cost"] {
@@ -366,7 +367,7 @@ export function scenarioRow(
     let semantic_review: ScenarioRow["semantic_review"] = "unreviewed";
     if (disputed) semantic_review = "disputed";
     else if (judgment) semantic_review = "reviewed";
-    else if (bound.some((j) => j.kind === "model" && j.citations && j.uncertainty)) {
+    else if (bound.some((j) => j.kind === "model" && j.citations?.length && j.uncertainty)) {
         semantic_review = "model_only";
     }
     const usable = disputed ? null : judgment;

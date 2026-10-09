@@ -408,7 +408,7 @@ an owner-only `0700` directory outside the repository.
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, estimator, transform time, and raw-source leak count; each recovery needs its calls and output bytes; generation needs attempts and usage. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, estimator, transform time, raw-source leak count, and whether it was a cold serve or a warm repeat; each recovery needs its calls and output bytes; generation needs attempts and usage. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
