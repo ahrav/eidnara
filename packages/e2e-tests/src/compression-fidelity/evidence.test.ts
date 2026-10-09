@@ -76,6 +76,28 @@ describe("evidence identity and completeness", () => {
         expect(assembled.manifest.corpus.sha256).toBe(SHA);
     });
 
+    test("the manifest lists every input file read, with its hash, including refused ones", async () => {
+        const first = allScenarios[0]?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                writeFileSync(
+                    join(dir, "foreign.json"),
+                    '{"schema_version":1,"corpus_sha256":"0"}',
+                );
+                writeFileSync(join(dir, "broken.json"), "{");
+            },
+        });
+        const files = assembled.manifest.arms[0]?.files ?? [];
+        expect(files.find((f) => f.file === "foreign.json")?.sha256).toBe(
+            sha256('{"schema_version":1,"corpus_sha256":"0"}'),
+        );
+        expect(files.find((f) => f.file === "broken.json")?.sha256).toBe(sha256("{"));
+        expect(files.some((f) => f.file === `delivery.${first}.json`)).toBe(true);
+        expect(files.some((f) => f.file === "arm.json")).toBe(true);
+        expect(errorsOf(assembled)).toContain("foreign.json has unknown owner");
+        expect(errorsOf(assembled)).toContain("broken.json is not JSON");
+    });
+
     test("a missing scenario is listed and refuses the comparison", async () => {
         const missing = allScenarios[3]?.s.id ?? "";
         const assembled = await assemble(scratch(), { baseline: { skipScenario: missing } });
@@ -595,6 +617,7 @@ describe("evidence live mode", () => {
         return {
             mode: "forward",
             corpus_sha256: SHA,
+            model: "claude-live",
             limits: { maxCalls: 40 },
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
@@ -683,6 +706,31 @@ describe("evidence live mode", () => {
         const clean = await live([forwardingReport("{}", sha256("{}"), true)]);
         expect(clean.arms[0]?.identity_errors).toEqual([]);
         expect(clean.refused).toEqual([]);
+    });
+
+    test("live arms whose forwarding reports ran different models are refused", async () => {
+        const root = scratch();
+        const report = forwardingReport("{}", sha256("{}"), true);
+        const assembled = await assemble(root, {
+            mode: "live",
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", report);
+                write(join(root, "candidate"), "forwarding-0.json", {
+                    ...report,
+                    model: "claude-other",
+                });
+            },
+        });
+        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(assembled.refused).toContain("the arms forwarded to different models");
+        expect(assembled.manifest.arms[1]?.forwarding_reports[0]?.model).toBe("claude-other");
+        const mixed = await live([report, { ...report, model: "claude-other" }]);
+        expect(errorsOf(mixed)).toContain(
+            "forwarding-1.json forwarded to claude-other, where forwarding-0.json forwarded to claude-live",
+        );
+        expect(errorsOf(await live([{ ...report, model: "" }]))).toContain(
+            "does not match the forwarding report schema",
+        );
     });
 });
 

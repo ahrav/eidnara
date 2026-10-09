@@ -82,6 +82,8 @@ export interface Evidence {
 export interface ForwardingEvidence {
     mode: "forward";
     corpus_sha256: string;
+    /** The model OpenCode ran, as the provider echoes it. */
+    model: string;
     limits: Json;
     complete: boolean;
     incomplete_reasons: string[];
@@ -100,6 +102,8 @@ export interface ForwardingEvidence {
 export interface Arm {
     dir: string;
     config: ArmConfig | null;
+    /** Every file read, with its hash; `null` for a file that could not be read. */
+    files: Array<{ file: string; sha256: string | null }>;
     evidence: Evidence[];
     forwarding: Array<{ file: string; sha256: string; report: ForwardingEvidence }>;
     errors: string[];
@@ -135,17 +139,17 @@ export function strings(value: unknown): string[] {
 
 export async function readJson(
     path: string,
-): Promise<{ bytes: Buffer; value: unknown } | { error: string }> {
+): Promise<{ bytes: Buffer; value: unknown } | { bytes: Buffer | null; error: string }> {
     let bytes: Buffer;
     try {
         bytes = await fs.promises.readFile(path);
     } catch (error) {
-        return { error: `${path} is unreadable: ${(error as Error).message}` };
+        return { bytes: null, error: `${path} is unreadable: ${(error as Error).message}` };
     }
     try {
         return { bytes, value: JSON.parse(bytes.toString("utf8")) };
     } catch {
-        return { error: `${path} is not JSON` };
+        return { bytes, error: `${path} is not JSON` };
     }
 }
 
@@ -189,7 +193,9 @@ function armConfig(value: unknown): ArmConfig | null {
 /** `value` as forwarding evidence, or `null` when a field the assembler reads is absent. */
 function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!record(value) || value.mode !== "forward" || !text(value.corpus_sha256)) return null;
-    if (!record(value.limits) || typeof value.complete !== "boolean") return null;
+    if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
+        return null;
+    }
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -230,6 +236,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     return {
         mode: "forward",
         corpus_sha256: value.corpus_sha256,
+        model: value.model,
         limits: value.limits,
         complete: value.complete,
         incomplete_reasons: strings(value.incomplete_reasons),
@@ -309,6 +316,7 @@ export async function loadArm(
     const arm: Arm = {
         dir,
         config: null,
+        files: [],
         evidence: [],
         forwarding: [],
         errors: [],
@@ -333,6 +341,10 @@ export async function loadArm(
                 .map(async (name) => [name, await readJson(join(dir, name))] as const),
         ),
     );
+    arm.files = [...reads].map(([file, read]) => ({
+        file,
+        sha256: read.bytes && sha256(read.bytes),
+    }));
     const seen = new Set<string>();
     const foreign = (name: string, bound: unknown) => {
         arm.foreignCorpus = true;
@@ -591,7 +603,13 @@ export function assembleEvidence(input: {
         const errors = [...arm.errors, ...checkGeneration(arm, corpus)];
         if (input.mode === "live") {
             if (arm.forwarding.length === 0) errors.push("live mode found no forwarding report");
+            const first = arm.forwarding[0];
             for (const { file, report } of arm.forwarding) {
+                if (first && report.model !== first.report.model) {
+                    errors.push(
+                        `${file} forwarded to ${report.model}, where ${first.file} forwarded to ${first.report.model}`,
+                    );
+                }
                 if (!report.complete) {
                     errors.push(`${file} is incomplete: ${report.incomplete_reasons.join("; ")}`);
                 }
@@ -632,6 +650,12 @@ export function assembleEvidence(input: {
         const after = canonicalJson(input.candidate.config?.[field] ?? null);
         if (before !== after) refused.push(`the arms differ in ${field}`);
     }
+    // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
+    // declares, so live arms hold it equal through their reports.
+    const forwarded = sides.map((arm) => arm.forwarding[0]?.report.model ?? null);
+    if (input.mode === "live" && forwarded[0] !== forwarded[1]) {
+        refused.push("the arms forwarded to different models");
+    }
     const manifest = {
         schema: MANIFEST_SCHEMA,
         repository_revision: input.revision,
@@ -640,6 +664,7 @@ export function assembleEvidence(input: {
         arms: sides.map((arm) => ({
             label: armLabel(arm),
             config: arm.config,
+            files: arm.files,
             observations: arm.evidence.map((e) => ({
                 file: e.file,
                 sha256: e.sha256,
@@ -651,7 +676,11 @@ export function assembleEvidence(input: {
                 stage: e.stage,
                 terminal: e.terminal,
             })),
-            forwarding_reports: arm.forwarding.map(({ file, sha256 }) => ({ file, sha256 })),
+            forwarding_reports: arm.forwarding.map(({ file, sha256, report }) => ({
+                file,
+                sha256,
+                model: report.model,
+            })),
         })),
     };
     return {

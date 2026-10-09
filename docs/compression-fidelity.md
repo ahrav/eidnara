@@ -450,7 +450,10 @@ either arm; an arm directory is refused before any write.
   - the repository revision;
   - the corpus path and digest;
   - each arm's configuration;
-  - every observation and forwarding report with its file SHA-256.
+  - every file read, with its SHA-256, including files the identity check
+    refused; the report names each refusal;
+  - every accepted observation and forwarding report with its file SHA-256,
+    and the model each forwarding report forwarded to.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
@@ -513,6 +516,10 @@ nothing.
   they differ in model, provider, version, settings, limits, or generation
   origin. Held fields
   compare as JSON with keys in UTF-16 code-unit order.
+- In live mode, the comparison is also refused when the arms' forwarding
+  reports forwarded to different models. The forwarded model is OpenCode's,
+  a role apart from the summarizer model `arm.json` declares, so it is held
+  equal through the reports rather than bound to `arm.json`.
 - Differing prompt hashes mark it a treatment comparison.
 
 Missing scenarios block full acceptance, and the report names them.
@@ -520,4 +527,5 @@ Missing scenarios block full acceptance, and the report names them.
 **Modes.** `offline`, the default, assembles the directories as they are.
 `live` additionally requires each arm to carry complete forwarding reports
 from the record-and-forward provider mode whose limits equal the arm's
-`limits`, so live evidence inherits that mode's limits.
+`limits`, so live evidence inherits that mode's limits, and all of an arm's
+reports to have forwarded to one model.
