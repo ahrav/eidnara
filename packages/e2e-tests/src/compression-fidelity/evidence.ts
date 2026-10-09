@@ -104,6 +104,8 @@ export interface ForwardingEvidence {
     stopped: string | null;
     /** The requests the forwarder refused to send. */
     refusals: string[];
+    attempted_sends: number;
+    acknowledged_responses: number;
     spent_usd: number;
     complete: boolean;
     incomplete_reasons: string[];
@@ -284,6 +286,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!Array.isArray(refusals) || !refusals.every((refusal) => typeof refusal === "string")) {
         return null;
     }
+    const count = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0;
+    if (!count(value.attempted_sends) || !count(value.acknowledged_responses)) return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const [position, exchange] of value.exchanges.entries()) {
@@ -353,6 +357,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         limits: value.limits,
         stopped: value.stopped as string | null,
         refusals,
+        attempted_sends: value.attempted_sends,
+        acknowledged_responses: value.acknowledged_responses,
         spent_usd: spent,
         complete: value.complete,
         incomplete_reasons: reasons,
@@ -431,6 +437,19 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     }
     for (const refusal of report.complete ? report.refusals : []) {
         errors.push(`${file} complete report records a refusal: ${refusal}`);
+    }
+    // The forwarder counts sends and acknowledged responses from the exchanges it keeps.
+    const sends = report.exchanges.length;
+    if (report.attempted_sends !== sends) {
+        errors.push(
+            `${file} records ${report.attempted_sends} attempted sends over ${sends} exchange${sends === 1 ? "" : "s"}`,
+        );
+    }
+    const acknowledged = report.exchanges.filter((e) => e.response?.outcome === "acknowledged");
+    if (report.acknowledged_responses !== acknowledged.length) {
+        errors.push(
+            `${file} records ${report.acknowledged_responses} acknowledged responses over ${acknowledged.length} acknowledged exchange${acknowledged.length === 1 ? "" : "s"}`,
+        );
     }
     const maxCalls = report.limits.maxCalls as number;
     if (report.exchanges.length > maxCalls) {
@@ -654,6 +673,10 @@ export async function loadArm(
             arm.errors.push(`${name} names scenario ${label}, which is not an exact read`);
             continue;
         }
+        if (owner === REAL_CAPTURE && value.stage !== "capture") {
+            arm.errors.push(`${name} is a real capture at stage ${value.stage}`);
+            continue;
+        }
         if (label !== null && !sourceLabel && isGeneration({ owner, stage: value.stage })) {
             arm.errors.push(
                 `${name} names scenario ${label}; a ${value.stage} stage is source-level`,
@@ -813,7 +836,12 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         );
         if (!drained) errors.push(`${capture.file} is published without a drained text output`);
         const rows = capture.detail.published_rows;
-        if (!Array.isArray(rows) || rows.length === 0) {
+        const row = (value: unknown) =>
+            record(value) &&
+            text(value.title) &&
+            Number.isInteger(value.start) &&
+            Number.isInteger(value.end);
+        if (!Array.isArray(rows) || rows.length === 0 || !rows.every(row)) {
             errors.push(`${capture.file} is published without published rows`);
         }
         if (capture.detail.model !== config.model) {

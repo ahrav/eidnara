@@ -404,6 +404,27 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(userPrompt)).toContain("records a malformed digest");
     });
 
+    test("a real capture is emitted at the capture stage with object rows", async () => {
+        const staged = await assemble(scratch(), {
+            tamper: (dir) => {
+                const first = corpus.cases[0]?.sources[0]?.id ?? "";
+                const path = join(dir, `real.${first}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.stage = "generation";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(staged)).toContain("real.C1.V1.json is a real capture at stage generation");
+        const placeholder = await assemble(scratch(), {
+            baseline: { capture: { published_rows: [null] } },
+        });
+        expect(errorsOf(placeholder)).toContain("is published without published rows");
+        const untitled = await assemble(scratch(), {
+            baseline: { capture: { published_rows: [{ start: 1, end: 2 }] } },
+        });
+        expect(errorsOf(untitled)).toContain("is published without published rows");
+    });
+
     test("a real capture's attempt count equals its retained attempts", async () => {
         const assembled = await assemble(scratch(), {
             baseline: { capture: { attempt_count: 2 } },
@@ -982,6 +1003,8 @@ describe("evidence live mode", () => {
             pricing: { inputPerMTok: 3, outputPerMTok: 15 },
             stopped: null as string | null,
             refusals: [] as string[],
+            attempted_sends: 1,
+            acknowledged_responses: 1,
             spent_usd: 0.5,
             limits: LIMITS as Record<string, number>,
             complete,
@@ -1253,6 +1276,15 @@ describe("evidence live mode", () => {
             errorsOf(await live([{ ...report, refusals: ["limits.maxCalls reached"] }])),
         ).toContain("complete report records a refusal: limits.maxCalls reached");
         expect(errorsOf(await live([{ ...report, refusals: [1] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        expect(errorsOf(await live([{ ...report, attempted_sends: 2 }]))).toContain(
+            "records 2 attempted sends over 1 exchange",
+        );
+        expect(errorsOf(await live([{ ...report, acknowledged_responses: 0 }]))).toContain(
+            "records 0 acknowledged responses over 1 acknowledged exchange",
+        );
+        expect(errorsOf(await live([{ ...report, attempted_sends: -1 }]))).toContain(
             "does not match the forwarding report schema",
         );
         const refund = { ...report.exchanges[0], index: 1 };

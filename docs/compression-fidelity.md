@@ -514,8 +514,9 @@ either arm; an arm directory is refused before any write, and a component of
   incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
   Messages endpoint free of credential and query, or whose exchange tool ids
   are not string arrays or whose exchange indices are not their positions;
-- a forwarding report with more exchanges than its `maxCalls`, or whose
-  `spent_usd` differs from the sum of its exchanges' `cost_usd`;
+- a forwarding report with more exchanges than its `maxCalls`, whose
+  `spent_usd` differs from the sum of its exchanges' `cost_usd`, or whose
+  `attempted_sends` and `acknowledged_responses` differ from its exchanges;
 - a forwarding report marked complete that lists an incomplete reason or a
   refusal, records a stop, no send, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
@@ -524,7 +525,9 @@ either arm; an arm directory is refused before any write, and a component of
   response without a hash; these are the completeness reasons the forwarder
   derives, recomputed from the report's own fields;
 - a generation record, a real capture or the U2 replay's `generation` stage,
-  that names a scenario; generation is source-level.
+  that names a scenario; generation is source-level;
+- a `daemon.compression_fidelity.real_capture` observation at a stage other
+  than `capture`.
 
 In an arm labeled `real`:
 - scripted output is an identity error, whether `detail.output_origin` or an
@@ -532,8 +535,9 @@ In an arm labeled `real`:
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error;
 - a published real capture records `settled: true`, an attempt output with
-  text, nonempty `published_rows`, and an `attempt_count` equal to its
-  retained attempts, the state the capture writer publishes;
+  text, nonempty `published_rows` of titled rows with integer `start` and
+  `end`, and an `attempt_count` equal to its retained attempts, the state the
+  capture writer publishes;
 - `arm.json` `settings` declare numeric `temperature` and
   `max_output_tokens`, and each attempt of a published real capture records
   those values;
