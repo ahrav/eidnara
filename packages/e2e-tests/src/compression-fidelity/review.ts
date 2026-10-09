@@ -315,6 +315,12 @@ function isRecovery(evidence: Evidence): boolean {
 }
 
 const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+/**
+ * The qualification and Pi witnesses serve a tier through fixtures that run no OpenCode admission
+ * estimator, so their stages carry no serving cost and stay out of the cost column.
+ */
+const uncosted = (stage: string) => stage === "qualification" || stage.startsWith("pi-");
+
 /** The admission branches that ran an admission check; `none` ran none and charges nothing. */
 const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown", "declined"];
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
@@ -358,7 +364,7 @@ function costOf(
 ): ScenarioRow["cost"] {
     const missing: string[] = [];
     const serving: Json[] = [];
-    for (const e of evidence.filter((e) => servedTierOf(e) !== undefined)) {
+    for (const e of evidence.filter((e) => servedTierOf(e) !== undefined && !uncosted(e.stage))) {
         if (!record(e.detail.serving)) {
             missing.push(`${e.file}: serving`);
             continue;

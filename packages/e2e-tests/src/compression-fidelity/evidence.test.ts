@@ -1166,7 +1166,7 @@ describe("evidence live mode", () => {
             refusals: [] as string[],
             attempted_sends: 1,
             acknowledged_responses: 1,
-            spent_usd: 0.5,
+            spent_usd: 0.6,
             limits: LIMITS as Record<string, number>,
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
@@ -1178,15 +1178,16 @@ describe("evidence live mode", () => {
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
                         outcome: "acknowledged",
-                        cost_usd: 0.5,
+                        cost_usd: 0.6,
                         model: "claude-live" as string | null,
                         stop_reason: "end_turn" as string | null,
                         truncated: false,
                         body_text: "ok",
                         body_sha256: sha256("ok") as string | null,
+                        // 100k input at 3 USD/MTok and 20k output at 15 USD/MTok cost 0.6 USD.
                         usage: {
-                            input_tokens: 100,
-                            output_tokens: 20,
+                            input_tokens: 100_000,
+                            output_tokens: 20_000,
                             cache_creation_input_tokens: 0,
                             cache_read_input_tokens: 0,
                         } as Record<string, number> | null,
@@ -1293,6 +1294,18 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([{ ...complete, spent_usd: -0.01 }]))).toContain(
             "does not match the forwarding report schema",
         );
+        const partial = forwardingReport("{}", sha256("{}"), true);
+        const [counted] = partial.exchanges;
+        if (counted) counted.response = { ...counted.response, usage: { input_tokens: 1 } };
+        expect(errorsOf(await live([partial]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const mispriced = forwardingReport("{}", sha256("{}"), true);
+        const [priced] = mispriced.exchanges;
+        if (priced) priced.response = { ...priced.response, cost_usd: 0.5 };
+        expect(errorsOf(await live([{ ...mispriced, spent_usd: 0.5 }]))).toContain(
+            "exchange 0 costs 0.5 USD, where its usage prices at 0.6 USD",
+        );
         const unmetered = forwardingReport("{}", sha256("{}"), true);
         const [metered] = unmetered.exchanges;
         if (metered) metered.response = { ...metered.response, usage: null };
@@ -1300,7 +1313,7 @@ describe("evidence live mode", () => {
             "exchange 0 claims a known cost without usage in a complete report",
         );
         expect(errorsOf(await live([{ ...complete, spent_usd: 0.75 }]))).toContain(
-            "spent 0.75 USD, where its exchanges cost 0.5 USD",
+            "spent 0.75 USD, where its exchanges cost 0.6 USD",
         );
         const uncosted = forwardingReport("{}", sha256("{}"), true);
         const [free] = uncosted.exchanges;
@@ -1487,7 +1500,7 @@ describe("evidence live mode", () => {
             "records 2 exchanges above its 1 call cap",
         );
         expect(errorsOf(await live([{ ...report, spent_usd: 0.25 }]))).toContain(
-            "spent 0.25 USD, where its exchanges cost 0.5 USD",
+            "spent 0.25 USD, where its exchanges cost 0.6 USD",
         );
         expect(
             errorsOf(await live([{ ...report, refusals: ["limits.maxCalls reached"] }])),

@@ -174,6 +174,24 @@ export function named(value: unknown): value is string {
     return typeof value === "string" && value.trim() !== "";
 }
 
+/** The four token counters the forwarder records from a provider response, as whole numbers. */
+const USAGE_COUNTERS = [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+] as const;
+
+function usageOf(value: unknown): value is Record<(typeof USAGE_COUNTERS)[number], number> {
+    return (
+        record(value) &&
+        USAGE_COUNTERS.every((counter) => {
+            const n = value[counter];
+            return typeof n === "number" && Number.isInteger(n) && n >= 0;
+        })
+    );
+}
+
 /** A lowercase hex SHA-256 digest. */
 export function digest(value: unknown): value is string {
     return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -325,7 +343,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             ) {
                 return null;
             }
-            if (response.usage !== null && !record(response.usage)) return null;
+            if (response.usage !== null && !usageOf(response.usage)) return null;
             const cost = response.cost_usd;
             if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return null;
             if (response.body_sha256 !== null && typeof response.body_sha256 !== "string")
@@ -514,7 +532,21 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
             continue;
         }
         if (!response.cost_known) complete(exchange.index, "cost is unknown");
-        else if (response.usage === null)
+        // A known cost is the forwarder's price of the response's usage.
+        if (usageOf(response.usage)) {
+            const u = response.usage;
+            const input =
+                u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
+            const priced =
+                (input * report.pricing.inputPerMTok +
+                    u.output_tokens * report.pricing.outputPerMTok) /
+                1_000_000;
+            if (Math.abs(priced - response.cost_usd) > 1e-9) {
+                errors.push(
+                    `${file} exchange ${exchange.index} costs ${response.cost_usd} USD, where its usage prices at ${priced} USD`,
+                );
+            }
+        } else if (response.usage === null)
             complete(exchange.index, "claims a known cost without usage");
         if (response.outcome !== "acknowledged") {
             complete(exchange.index, `response outcome is ${response.outcome}`);

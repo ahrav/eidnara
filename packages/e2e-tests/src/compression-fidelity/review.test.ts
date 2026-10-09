@@ -767,6 +767,39 @@ describe("eval:compression-fidelity gates", () => {
         expect(row?.cost.status).toBe("incomplete");
     });
 
+    test("the qualification and Pi witnesses serve tiers without an OpenCode cost record", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                for (const stage of ["qualification", "pi-m1"]) {
+                    write(dir, `${stage}.json`, {
+                        schema_version: 1,
+                        corpus_sha256: SHA,
+                        owner: "opencode-delivery",
+                        case: entry?.case,
+                        source: entry?.s.source,
+                        scenario,
+                        stage,
+                        terminal: "served",
+                        markers: [],
+                        detail: {
+                            served_tier: served.detail.served_tier,
+                            generation_capture_sha256: served.detail.generation_capture_sha256,
+                        },
+                    });
+                }
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.status).toBe("complete");
+        expect(row?.cost.serving.length).toBe(1);
+    });
+
     test("every serving observation needs its cost, whatever its siblings record", async () => {
         const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
         const scenario = entry?.s.id ?? "";
