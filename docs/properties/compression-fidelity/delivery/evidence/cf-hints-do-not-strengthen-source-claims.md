@@ -9,23 +9,23 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 
 ## Evidence trail
 
-- [transform.rs:109-117](../../../../../crates/daemon/src/transform.rs#L109-L117)
+- [transform.rs:109-114](../../../../../crates/daemon/src/transform.rs#L109-L114)
   sets 100 candidates, 24 lexical tokens, three results, two matched tokens,
   an 80-unit fragment cap, and an 800-unit total cap.
-- [transform.rs:8193-8240](../../../../../crates/daemon/src/transform.rs#L8193-L8240)
+- [transform.rs:8190-8237](../../../../../crates/daemon/src/transform.rs#L8190-L8237)
   requires an eligible new authored tail, no prior decision/frontier exclusion,
   no stacked augmentation, and sufficient sanitized prompt length.
-- [transform.rs:8303-8333](../../../../../crates/daemon/src/transform.rs#L8303-L8333)
+- [transform.rs:8286-8315](../../../../../crates/daemon/src/transform.rs#L8286-L8315)
   concatenates title, flat content, and all populated tiers from stored history.
   It does not restrict selection to the body actually rendered in m0.
-- [transform.rs:8357-8395](../../../../../crates/daemon/src/transform.rs#L8357-L8395)
+- [transform.rs:8339-8392](../../../../../crates/daemon/src/transform.rs#L8339-L8392)
   requires two matched terms and one appearing in fewer than half the candidate
   rows. Only the top score is compared with the configured threshold.
-- [transform.rs:9186-9210,9233-9295](../../../../../crates/daemon/src/transform.rs#L9186-L9295)
+- [transform.rs:8609-8634,8648-8657](../../../../../crates/daemon/src/transform.rs#L8609-L8657)
   applies Ultra compression, normalizes whitespace, and truncates fragments in
-  UTF-16 units. `render_user_hint` drops a fragment whose served text is empty
-  before adding the `- ` prefix. Nonempty one- or two-character fragments survive
-  this filter. If every fragment drops, the whole hint is absent. The footer tells the agent
+  UTF-16 units. It also drops formatted lines of at most two bytes: an empty
+  fragment produces only `- `. Nonempty one- or two-character fragments survive
+  this filter. If every line drops, the whole hint is absent. The footer tells the agent
   it may run `eidnara_search` to search project memory for the fragments'
   topic; #926 replaced the earlier “retrieve full context” wording.
 - [terse_text_compression.rs:41-72,848-856](../../../../../crates/daemon/src/terse_text_compression.rs#L41-L72)
@@ -33,11 +33,11 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   [compression pass](../../../../../crates/daemon/src/terse_text_compression.rs#L848-L856)
   removes. Filler-only selected content is a construction lead for total drop,
   not evidence of a material semantic failure.
-- [transform.rs:23641-23662](../../../../../crates/daemon/src/transform.rs#L23641-L23662)
+- [transform.rs:22965-22984](../../../../../crates/daemon/src/transform.rs#L22965-L22984)
   asserts one lexical query across repeated empty decisions; status unaudited.
 - [opencode-transform-adapter.ts:477](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L477)
   defaults auto-search enabled. The daemon
-  [gate](../../../../../crates/daemon/src/transform.rs#L3513-L3514) excludes
+  [gate](../../../../../crates/daemon/src/transform.rs#L3510-L3511) excludes
   subagent requests. Reachability is **default-production** for eligible main
   requests; the disabled variant needs explicit configuration.
 

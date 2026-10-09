@@ -157,7 +157,7 @@ None. This is arithmetic over compile-time constants.
 ### Q: Can `terse_text_compression::compress` produce a fragment longer than the cap?
 
 - Sources examined: `crates/daemon/src/terse_text_compression.rs:1-30` (the header and
-  `TerseTextCompressionLevel`), `transform.rs:9234-9242`.
+  `TerseTextCompressionLevel`), `transform.rs:9092-9097`.
 - Findings: irrelevant to the bound. Whatever `compress` returns is passed through
   `one_line_fragment`, which caps it at 80 UTF-16 units. `compress` is a
   shortening transform, so it cannot grow the input either, but the cap does not
@@ -175,9 +175,9 @@ None. This is arithmetic over compile-time constants.
 
 ### Q: Is the header's one-fragment wording shorter, and does it change the bound?
 
-- Sources examined: `transform.rs:9265-9273`.
+- Sources examined: `transform.rs:9104-9108`.
 - Findings: with one line the header is 43 units and there is one line rather than
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.
 - Missing evidence: none.
-- Conclusion: resolved with answer — 604 is the maximum, 482 without the cut note.
+- Conclusion: resolved with answer — 482 is the maximum.
