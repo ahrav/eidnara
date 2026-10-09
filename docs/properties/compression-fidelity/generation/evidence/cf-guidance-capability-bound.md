@@ -22,9 +22,9 @@ or related repositories are supplied. No tests or model calls run here.
   `HISTORY_SUMMARIZER_SYSTEM_PROMPT`; [chunk.rs:850-867][chunk],
   `as_fire_request`, uses it as the producer's system field. It is not merely
   a design-doc example.
-- [transform.rs:8286-8316][transform], `run_user_hint_lexical_search`, builds
+- [transform.rs:8288-8318][transform], `run_user_hint_lexical_search`, builds
   candidates from stored history content and P1-P4, not canonical memory rows.
-- [transform.rs:8609-8634][transform], `render_user_hint`, emits those
+- [transform.rs:8611-8645][transform], `render_user_hint`, emits those
   fragments with a footer that offers `eidnara_search` as a project-memory
   search; #926 removed the earlier promise that it retrieves full context.
 - [tool-registry.ts:34-60][registry], `createToolRegistry`, exposes the search

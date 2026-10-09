@@ -111,6 +111,8 @@ const USER_HINT_TOTAL_CHAR_CAP: usize = 800;
 const USER_HINT_CANDIDATE_LIMIT: usize = 100;
 const USER_HINT_TOKEN_CAP: usize = 24;
 const USER_HINT_RESULT_LIMIT: usize = 3;
+/// Follows the fragments when any of them was cut to fit the fragment cap.
+const USER_HINT_CUT_NOTE: &str = "A fragment that starts or ends with … is cut from longer text and may omit a qualifier such as a negation or a rejection.";
 const USER_HINT_MIN_MATCHED_TOKENS: usize = 2;
 
 /// What each auto-search stage kept for one live user tail, as the stages
@@ -8625,7 +8627,16 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
         format!("Your memory may contain {} related fragments:", lines.len())
     };
     let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
-    let body = [header, lines.join("\n"), footer.to_string()].join("\n");
+    // A cut fragment carries `…` where the cut fell; the note says a cut can drop a qualifier.
+    let cut = lines
+        .iter()
+        .any(|line| line.starts_with("- …") || line.ends_with('…'));
+    let mut parts = vec![header, lines.join("\n")];
+    if cut {
+        parts.push(USER_HINT_CUT_NOTE.to_string());
+    }
+    parts.push(footer.to_string());
+    let body = parts.join("\n");
     let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");
     // Native search returns only memory and history_segment results.
     // A result without commit provenance has no commit SHA or age metadata.

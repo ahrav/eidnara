@@ -80,11 +80,15 @@ against the #926 footer and the wrapper strings:
 | three lines of `"- "` + 80 | 3 × 82 = 246 |
 | two `\n` from `lines.join("\n")` | 2 |
 | the second `\n` from the outer join | 1 |
+| the cut note, present when any fragment is cut (#723) | 121 |
+| the `\n` before the cut note | 1 |
 | footer | 143 |
 | `"\n</eidnara-search-hint>"` | 23 |
-| **total** | **482** |
+| **total** | **604** |
 
-482 against a cap of 800. There is no input that raises it: `take(3)` bounds the
+604 against a cap of 800. #723 adds the cut note, `USER_HINT_CUT_NOTE`, after
+the fragments whenever a fragment starts or ends with `…`; a hint with only
+whole fragments still totals at most 482. There is no input that raises it: `take(3)` bounds the
 line count, `one_line_fragment` bounds each line, and the header, footer and
 wrapper are constants apart from the line count digit, which is at most one
 character for a maximum of three.
@@ -174,4 +178,4 @@ None. This is arithmetic over compile-time constants.
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.
 - Missing evidence: none.
-- Conclusion: resolved with answer — 482 is the maximum.
+- Conclusion: resolved with answer — 604 is the maximum, 482 without the cut note.

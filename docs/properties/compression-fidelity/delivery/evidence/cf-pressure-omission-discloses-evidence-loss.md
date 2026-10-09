@@ -27,7 +27,7 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   adds at most three pressure retries for wrapped history above 105% of budget.
   This trigger is neither a hard-budget allowance nor a guaranteed cap. The
   [resource record](../catalog.md#cf-serving-resource-boundaries) owns that distinction.
-- [transform.rs:8286-8315](../../../../../crates/daemon/src/transform.rs#L8286-L8315)
+- [transform.rs:8288-8317](../../../../../crates/daemon/src/transform.rs#L8288-L8317)
   searches stored history across bodies and tiers without consulting the
   selected render tier. An omitted segment may still contribute a hint.
 

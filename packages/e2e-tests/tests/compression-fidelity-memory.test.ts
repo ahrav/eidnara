@@ -21,6 +21,10 @@ import type { ScriptSource } from "../src/rust-runner/hermetic-host";
 import { rustPrereqs } from "../src/rust-scenario-support";
 import { runScriptedToolCall } from "../src/scripted-tool-call";
 
+/** The note the daemon appends to a hint whose fragments were cut (`USER_HINT_CUT_NOTE`). */
+const HINT_CUT_NOTE =
+    "A fragment that starts or ends with … is cut from longer text and may omit a qualifier such as a negation or a rejection.";
+
 const QUALIFICATION_REQUIRED = process.env.EIDNARA_E2E_REQUIRE_FIDELITY === "1";
 const CASE_TIMEOUT_MS = 540_000;
 const PROJECT_MEMORY = /<project-memory>[\s\S]*?<\/project-memory>/;
@@ -308,8 +312,11 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                 },
             });
 
-            // The fragment limit cuts the case row's snippet at both ends.
+            // The fragment limit cuts the case row's snippet at both ends, and the hint says a cut
+            // fragment may omit a qualifier.
             expect(caseFragment.startsWith("- …") && caseFragment.endsWith("…")).toBe(true);
+            const qualifierDisclosed = hint.split("\n").includes(HINT_CUT_NOTE);
+            expect(qualifierDisclosed).toBe(true);
             emitObservation({
                 case: "C4",
                 source: driver.sourceId,
@@ -321,6 +328,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                     case_fragment: caseFragment,
                     fragment_utf16_units: caseFragment.length,
                     qualifier_kept: qualifierKept,
+                    qualifier_loss_disclosed: qualifierDisclosed,
                 },
             });
 
@@ -343,7 +351,9 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                     serving: servingCost(off),
                 },
             });
-            console.log(`[cf-delivery] C4.S6 hint kept its qualifier: ${qualifierKept}`);
+            console.log(
+                `[cf-delivery] C4.S6 hint kept its qualifier: ${qualifierKept}; disclosed the cut: ${qualifierDisclosed}`,
+            );
         },
         CASE_TIMEOUT_MS,
     );

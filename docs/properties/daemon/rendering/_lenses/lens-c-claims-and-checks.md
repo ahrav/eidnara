@@ -221,7 +221,7 @@ Two smaller divergences on the same axis, both inside the 4e scope:
   A release build serves the violating prefix.
 - `transform.rs:9115`, `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)`.
   Compiled out of release, and trivially satisfied in debug: lens A's
-  `render-a-user-hint-total-cap-cannot-bind` computes a maximum of 482 UTF-16
+  `render-a-user-hint-total-cap-cannot-bind` computes a maximum of 604 UTF-16
   units against the cap of 800 at `:114`. Re-verified here: `:117`
   `USER_HINT_RESULT_LIMIT = 3` applied at `:9090`, `:113`
   `USER_HINT_FRAGMENT_CHAR_CAP = 80` applied at `:9096`, envelope built at
@@ -587,7 +587,7 @@ Measured over production lines only: `transform.rs:7511-12623` excluding
 | `transform.rs:11246-11250` | `debug_assert!` "served output contains duplicate tool_use ids" — the loud half of the belt | **No** |
 | `transform.rs:12139-12144` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" | **No** |
 | `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
-| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 482 against 800 | **No** |
+| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 604 against 800 | **No** |
 
 **Zero unconditional runtime assertions in 9,304 production lines.** The two
 `assert!` sites in the transform range, `:11206` and `:11219`, are inside

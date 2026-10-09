@@ -338,7 +338,7 @@ genuinely production, so the sentence is half right.
 | `transform.rs:11246` | `debug_assert!` "served output contains duplicate tool_use ids" | Repairs silently via `:11251-11302` |
 | `transform.rs:12139` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" (message at `:12143`) | Serves the violating prefix |
 | `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)`, the byte-exact-inverse claim | Unchecked. Covered by `tag_prefix_strip_is_a_byte_exact_inverse` (`:22619`) in test builds |
-| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` | Unchecked, and trivially satisfied in debug: lens A computes a maximum of 482 UTF-16 units against a cap of 800 |
+| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` | Unchecked, and trivially satisfied in debug: lens A computes a maximum of 604 UTF-16 units against a cap of 800 |
 
 The two the task singles out are `:11246` and `:12139`, because those are the two
 whose *release* behaviour differs observably rather than merely going unchecked.
@@ -602,7 +602,7 @@ range, which returns exactly `:8396`, `:9115`, `:11246` and `:12139` plus the tw
 | `transform.rs:11246` | `debug_assert!` "served output contains duplicate tool_use ids" (message `:11248`) — the loud half of the belt | **No** |
 | `transform.rs:12139` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" (message `:12143`) | **No** |
 | `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
-| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 482 against 800 | **No** |
+| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 604 against 800 | **No** |
 
 **Zero unconditional runtime assertions in 9,304 production lines.** Verified: all
 28 `assert!`/`assert_eq!`/`assert_ne!` matches in `transform.rs:7511-12623` are

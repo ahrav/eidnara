@@ -28,7 +28,7 @@ integrity, lifecycle, compatibility. Inspected 2026-09-19 at
 - [decay_render.rs:385-403,419-427](../../../../../crates/daemon/src/decay_render.rs#L385-L427)
   uses flat content for legacy/non-tiered rows, with 1,200/420-character
   truncation at P2/P3 and heading-only output at P4.
-- [transform.rs:21111-21216](../../../../../crates/daemon/src/transform.rs#L21111-L21216)
+- [transform.rs:21122-21227](../../../../../crates/daemon/src/transform.rs#L21122-L21227)
   checks seeded later publication, P1 m1 placement, covered-tail removal, and
   warm m0/m1 replay; status unaudited. It does not execute the producer.
 

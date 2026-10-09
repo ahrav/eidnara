@@ -393,6 +393,38 @@ fn the_footer_describes_eidnara_search_as_memory_search_only() {
     }
 }
 
+/// The C4 witness recorded a cut fragment that dropped the user's rejection; a hint with a cut
+/// fragment now says a cut can drop a qualifier, and a hint whose fragments are whole renders as
+/// before, within the same caps.
+#[test]
+fn a_cut_fragment_discloses_that_a_qualifier_may_be_missing() {
+    let whole = render_user_hint(&[hint_result("quasar nebula pulsar")]).unwrap();
+    assert_eq!(
+        whole,
+        "\n\n<eidnara-search-hint>\nYour memory may contain 1 related fragment:\n- quasar nebula pulsar\n\
+         If these fragments seem relevant to the current request, you may run eidnara_search to search \
+         project memory for their topic. Otherwise ignore.\n</eidnara-search-hint>"
+    );
+    assert!(!whole.contains(USER_HINT_CUT_NOTE));
+
+    let long = format!(
+        "We rejected option B and chose option A. {} My three later recaps said B was accepted.",
+        "Survey cadence detail. ".repeat(8)
+    );
+    let cut = render_user_hint(&[hint_result(&long)]).unwrap();
+    let fragment = hint_fragment_lines(&cut)[0];
+    assert!(fragment.ends_with('…'), "{fragment}");
+    let body: Vec<&str> = cut.lines().collect();
+    let note = body
+        .iter()
+        .position(|line| *line == USER_HINT_CUT_NOTE)
+        .unwrap();
+    assert!(body[note - 1].starts_with("- "), "{cut}");
+    assert!(body[note + 1].contains("eidnara_search"), "{cut}");
+    assert!(utf16_len(cut.trim_start()) <= USER_HINT_TOTAL_CHAR_CAP);
+    assert!(utf16_len(fragment) <= USER_HINT_FRAGMENT_CHAR_CAP);
+}
+
 fn hint_fragment_lines(rendered: &str) -> Vec<&str> {
     rendered
         .lines()
