@@ -187,8 +187,9 @@ so no pass commits while a firing publishes.
   The next provider request serves the case's P1 body in the m1 window
   (`<session-history-since>`), a second request repeats those bytes warm, and
   a restart under the aging budget with a changed prompt surface
-  rematerializes the same body into m0 on a `HARD` pass. A source without an
-  m1 row serves every row under the aging budget.
+  rematerializes the same body into m0 on a `HARD` pass. Every source serves
+  these three rows; their observations carry the source's m1 scenario when
+  the corpus declares one and the source ID otherwise.
 - Natural decay adds counted fixture rows after the case under a 562-token
   history budget and serves each P2, P3, P4, and P5 scenario row on a `HARD`
   pass that rebuilds m0 in the running OpenCode: the session's requests carry

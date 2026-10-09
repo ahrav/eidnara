@@ -110,8 +110,10 @@ async function expectPinnedCapabilities(delivery: Delivery): Promise<void> {
 }
 
 /**
- * A source with an m1 row starts under the m1 budget and restarts once, under the aging budget, for
- * its cold row; a source without one serves every row under the aging budget.
+ * Every source starts under the m1 budget for its m1 and warm rows and restarts once, under the
+ * aging budget, for its cold row and natural decay rows. The m1, warm, and cold observations
+ * carry the source's m1 scenario when the corpus declares one, and the source ID otherwise, as
+ * the daemon's replay witness labels them.
  */
 async function decayCampaign(caseId: string, source: string): Promise<void> {
     const fidelityCase = caseOf(caseId);
@@ -119,45 +121,39 @@ async function decayCampaign(caseId: string, source: string): Promise<void> {
     const m1Scenario = scenarios.find((scenario) => scenario.serving.stage === "m1");
     const first = m1Scenario ?? scenarios[0];
     if (!first) throw new Error(`${source} has no decay scenario`);
-    const serving = m1Scenario ? M1_SERVING : AGING_SERVING;
-    await withCaseHarness(serving, async (h) => {
-        const driver = await CaseDriver.open(h, fidelityCase, first, serving);
+    await withCaseHarness(M1_SERVING, async (h) => {
+        const driver = await CaseDriver.open(h, fidelityCase, first, M1_SERVING);
         await driver.baseline();
         await driver.seed();
         await driver.publish(first.id);
-        await observeDecayRows(driver, m1Scenario, scenarios);
+        await observeDecayRows(driver, m1Scenario?.id ?? source, scenarios);
     });
 }
 
 async function observeDecayRows(
     driver: CaseDriver,
-    m1Scenario: FidelityScenario | undefined,
+    m1Label: string,
     scenarios: FidelityScenario[],
 ): Promise<void> {
-    let budget: number;
-    if (m1Scenario) {
-        const m1 = await driver.observe("m1");
-        expectCredited(m1, "p1");
-        await expectPinnedCapabilities(m1);
-        expect([m1.stage, m1.verdict.tier]).toEqual(["m1", "p1"]);
-        observation(driver, m1Scenario.id, m1, ["cf-delivery-m1-published-input"]);
+    const m1 = await driver.observe("m1");
+    expectCredited(m1, "p1");
+    await expectPinnedCapabilities(m1);
+    expect([m1.stage, m1.verdict.tier]).toEqual(["m1", "p1"]);
+    observation(driver, m1Label, m1, ["cf-delivery-m1-published-input"]);
 
-        const warm = await driver.observe("warm");
-        expectCredited(warm, "p1");
-        expect([warm.stage, warm.newer, warm.segment]).toEqual(["m1", m1.newer, m1.segment]);
-        // A warm repeat serves the frozen window; a rematerializing pass is HARD.
-        expect(warm.pass.decision).not.toBe("HARD");
-        observation(driver, m1Scenario.id, warm, ["cf-delivery-warm-repeat-input"]);
+    const warm = await driver.observe("warm");
+    expectCredited(warm, "p1");
+    expect([warm.stage, warm.newer, warm.segment]).toEqual(["m1", m1.newer, m1.segment]);
+    // A warm repeat serves the frozen window; a rematerializing pass is HARD.
+    expect(warm.pass.decision).not.toBe("HARD");
+    observation(driver, m1Label, warm, ["cf-delivery-warm-repeat-input"]);
 
-        const cold = await driver.observeCold("cold-m0", AGING_SERVING);
-        expectCredited(cold, "p1");
-        expect([cold.stage, cold.verdict.tier, cold.pass.decision]).toEqual(["m0", "p1", "HARD"]);
-        expect(cold.segment).toBe(m1.segment);
-        observation(driver, m1Scenario.id, cold, []);
-        budget = cold.budget;
-    } else {
-        budget = (await driver.observeRebuilt("aging-budget")).budget;
-    }
+    const cold = await driver.observeCold("cold-m0", AGING_SERVING);
+    expectCredited(cold, "p1");
+    expect([cold.stage, cold.verdict.tier, cold.pass.decision]).toEqual(["m0", "p1", "HARD"]);
+    expect(cold.segment).toBe(m1.segment);
+    observation(driver, m1Label, cold, []);
+    const budget = cold.budget;
     expect(budget).toBeGreaterThan(0);
     const decayRows = scenarios
         .filter((scenario) => scenario.serving.stage === "m0")
