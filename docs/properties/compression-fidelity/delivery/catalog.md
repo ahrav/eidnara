@@ -188,9 +188,14 @@ Exercised: partial - `packages/e2e-tests/tests/compression-fidelity-memory.test.
 ages C3's case row to P3 and credits C3.M1 only when the OpenCode provider
 request's `<project-memory>` block carries it. Candidate-only, wrong-project,
 budget-excluded, withheld, and rejected variants serve the same row without
-the memory (U3). The admitted rows use a fixture-seeded repository memory, a
-truncated-away qualifier is unconstructible under the 64 KiB line cap, and
-human review is absent.
+the memory (U3). The admitted rows use a fixture-seeded repository memory.
+The truncated-away qualifier case is constructible and unexercised:
+`render_memory_line` cuts content at 64 KiB before `trim_memories_to_budget`
+counts the rendered line, and a 64 KiB run of spaces encodes to 72 tokens, so
+a verified row of 64 KiB spaces followed by its qualifier is admitted with the
+qualifier cut off. The fixture's `memory-seed` control frame is capped at
+64 KiB (`MAX_CONTROL_LINE`), so the campaign cannot seed that row yet. Human
+review is absent.
 Guarantee: Memory receives preservation credit only for qualified content
 actually included from the pass's eligible, scoped, budget-selected memory.
 Check: `always` - every memory-backed visible disposition identifies an
