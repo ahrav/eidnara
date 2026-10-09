@@ -10,7 +10,7 @@ function fakeHarness(mock: MockProvider, baseURL: string, ledger: CaptureLedger)
     const post = async (body: Record<string, unknown>) =>
         (await fetch(`${baseURL}/v1/messages`, {
             method: "POST",
-            headers: { "content-type": "application/json", "x-opencode-session-id": SESSION },
+            headers: { "content-type": "application/json", "x-session-id": SESSION },
             body: JSON.stringify({ model: "m", stream: false, ...body }),
         }).then((response) => response.json())) as { content?: { type: string; id?: string }[] };
     return {
@@ -48,7 +48,7 @@ describe("runScriptedToolCall", () => {
             mock.setDefault({ text: "ok", usage: { input_tokens: 1, output_tokens: 1 } });
             await fetch(`${baseURL}/v1/messages`, {
                 method: "POST",
-                headers: { "content-type": "application/json", "x-opencode-session-id": SESSION },
+                headers: { "content-type": "application/json", "x-session-id": SESSION },
                 body: JSON.stringify({ model: "m", stream: false, messages: [] }),
             }).then((response) => response.text());
 

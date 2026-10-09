@@ -43,6 +43,7 @@ export interface SdkClientCore {
                 model: { providerID: string; modelID: string };
                 parts: Array<{ type: "text"; text: string }>;
                 agent?: string;
+                system?: string;
             };
         }) => Promise<{ data?: unknown; error?: unknown; response?: { status?: number } }>;
         messages: (opts: { path: { id: string } }) => Promise<{ data?: unknown }>;

@@ -8245,20 +8245,32 @@ fn maybe_decide_live_user_hint(
     )))
 }
 
+const USER_HINT_STOPWORDS: &[&str] = &[
+    "and", "are", "but", "for", "from", "have", "into", "not", "that", "the", "this", "use", "was",
+    "with", "you", "your",
+];
+
 fn lexical_tokens(text: &str) -> BTreeSet<String> {
-    const STOPWORDS: &[&str] = &[
-        "and", "are", "but", "for", "from", "have", "into", "not", "that", "the", "this", "use",
-        "was", "with", "you", "your",
-    ];
     // The hint gate does not apply Unicode normalization.
-    text.to_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| token.chars().count() >= 3 && !STOPWORDS.contains(token))
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .take(USER_HINT_TOKEN_CAP)
-        .collect()
+    let lowered = text.to_lowercase();
+    // The result equals the sorted prefix of up to `USER_HINT_TOKEN_CAP` distinct tokens that pass
+    // the length and `USER_HINT_STOPWORDS` filters.
+    let mut smallest = BTreeSet::<&str>::new();
+    for token in lowered.split(|ch: char| !ch.is_alphanumeric()) {
+        if token.len() < 3
+            || (smallest.len() == USER_HINT_TOKEN_CAP
+                && smallest.last().is_some_and(|max| token >= *max))
+        {
+            continue;
+        }
+        if token.chars().count() < 3 || USER_HINT_STOPWORDS.contains(&token) {
+            continue;
+        }
+        if smallest.insert(token) && smallest.len() > USER_HINT_TOKEN_CAP {
+            smallest.pop_last();
+        }
+    }
+    smallest.into_iter().map(str::to_string).collect()
 }
 
 fn run_user_hint_lexical_search(
@@ -8272,9 +8284,9 @@ fn run_user_hint_lexical_search(
     USER_HINT_LEXICAL_QUERY_COUNT.with(|count| count.set(count.get() + 1));
 
     struct Candidate {
-        result: crate::memory_tool::MemorySearchResult,
-        tokens: BTreeSet<String>,
-        recency: i64,
+        row: memory_store::StoredHistorySegmentSearchRow,
+        /// Bit `i` is set when the `i`-th sorted query token is among the segment's hint tokens.
+        matched: u32,
     }
 
     let query_tokens = lexical_tokens(query);
@@ -8282,91 +8294,72 @@ fn run_user_hint_lexical_search(
     if !trace.tokens {
         return Ok(Vec::new());
     }
+    let query_tokens = query_tokens.into_iter().collect::<Vec<_>>();
+    let hint_query = HintQuery::new(&query_tokens);
     let mut candidates = Vec::new();
-    for history_segment in
-        store.load_history_segment_candidates(session_id, USER_HINT_CANDIDATE_LIMIT)?
-    {
-        trace.window.push(history_segment.sequence);
-        let body = [
-            Some(history_segment.title.as_str()),
-            Some(history_segment.content.as_str()),
-            history_segment.p1.as_deref(),
-            history_segment.p2.as_deref(),
-            history_segment.p3.as_deref(),
-            history_segment.p4.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-        candidates.push(Candidate {
-            tokens: lexical_tokens(&body),
-            recency: history_segment.created_at,
-            result: crate::memory_tool::MemorySearchResult {
-                source_kind: crate::memory_tool::MemorySearchSourceKind::HistorySegmentBody,
-                id: history_segment.sequence,
-                snippet: body,
-                category: None,
-                sequence: Some(history_segment.sequence),
-                title: Some(history_segment.title),
-                note_status: None,
-                surface_condition: None,
-            },
-        });
+    for row in store.load_history_segment_candidates(session_id, USER_HINT_CANDIDATE_LIMIT)? {
+        trace.window.push(row.sequence);
+        // Tokens never span the space between parts, so a part that repeats an earlier part byte
+        // for byte adds no distinct token; a v2 segment stores `content` as a copy of `p1`.
+        let mut distinct_parts = [""; 6];
+        let mut distinct = 0usize;
+        for part in hint_body_parts(&row) {
+            if !distinct_parts[..distinct].contains(&part) {
+                distinct_parts[distinct] = part;
+                distinct += 1;
+            }
+        }
+        let matched = hint_query.matched_in_parts(&distinct_parts[..distinct]);
+        candidates.push(Candidate { row, matched });
     }
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut document_frequency = HashMap::new();
-    for token in &query_tokens {
-        let count = candidates
-            .iter()
-            .filter(|candidate| candidate.tokens.contains(token))
-            .count();
-        document_frequency.insert(token, count);
+    let mut document_frequency = [0usize; USER_HINT_TOKEN_CAP];
+    for candidate in &candidates {
+        for (index, frequency) in document_frequency.iter_mut().enumerate() {
+            *frequency += ((candidate.matched >> index) & 1) as usize;
+        }
     }
     let pool_count = candidates.len();
     let pool_size = pool_count as f64;
-    let total_query_weight = query_tokens
-        .iter()
-        .map(|token| {
-            let frequency = *document_frequency.get(token).unwrap_or(&0) as f64;
-            ((pool_size + 1.0) / (frequency + 1.0)).ln() + 1.0
-        })
-        .sum::<f64>();
+    let token_weight = |index: usize| {
+        let frequency = document_frequency[index] as f64;
+        ((pool_size + 1.0) / (frequency + 1.0)).ln() + 1.0
+    };
+    let total_query_weight = (0..query_tokens.len()).map(token_weight).sum::<f64>();
     let mut scored = candidates
         .into_iter()
         .filter_map(|candidate| {
-            let matched = query_tokens
-                .iter()
-                .filter(|token| candidate.tokens.contains(*token))
+            let matched = (0..query_tokens.len())
+                .filter(|index| (candidate.matched >> index) & 1 == 1)
                 .collect::<Vec<_>>();
             if matched.len() < USER_HINT_MIN_MATCHED_TOKENS
-                || !matched.iter().any(|token| {
-                    document_frequency
-                        .get(*token)
-                        .is_some_and(|frequency| frequency.saturating_mul(2) < pool_count)
-                })
+                || !matched
+                    .iter()
+                    .any(|index| document_frequency[*index].saturating_mul(2) < pool_count)
             {
                 return None;
             }
             let score = matched
                 .iter()
-                .map(|token| {
-                    let frequency = *document_frequency.get(*token).unwrap_or(&0) as f64;
-                    ((pool_size + 1.0) / (frequency + 1.0)).ln() + 1.0
-                })
+                .map(|index| token_weight(*index))
                 .sum::<f64>();
             let normalized = score / total_query_weight.max(f64::EPSILON);
-            Some((
-                normalized,
-                matched.len(),
-                candidate.recency,
-                candidate.result,
-                matched,
-            ))
+            let row = candidate.row;
+            let body = hint_body(&row);
+            let result = crate::memory_tool::MemorySearchResult {
+                source_kind: crate::memory_tool::MemorySearchSourceKind::HistorySegmentBody,
+                id: row.sequence,
+                snippet: body,
+                category: None,
+                sequence: Some(row.sequence),
+                title: Some(row.title),
+                note_status: None,
+                surface_condition: None,
+            };
+            Some((normalized, matched.len(), row.created_at, result, matched))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
@@ -8392,10 +8385,10 @@ fn run_user_hint_lexical_search(
         .take(USER_HINT_RESULT_LIMIT)
         .map(|(_, _, _, mut result, mut matched)| {
             // Matched tokens are in sorted order, so the stable sort puts the rarest first and breaks ties by that order.
-            matched.sort_by_key(|token| *document_frequency.get(*token).unwrap_or(&0));
+            matched.sort_by_key(|index| document_frequency[*index]);
             let anchors = matched
                 .iter()
-                .map(|token| token.as_str())
+                .map(|index| query_tokens[*index].as_str())
                 .collect::<Vec<_>>();
             result.snippet = user_hint_snippet(std::mem::take(&mut result.snippet), &anchors);
             result
@@ -8403,6 +8396,468 @@ fn run_user_hint_lexical_search(
         .collect();
     trace.selected = selected.iter().map(|result| result.id).collect();
     Ok(selected)
+}
+
+/// The non-blank texts of a segment in the order the hint body joins them with single spaces.
+fn hint_body_parts(
+    row: &memory_store::StoredHistorySegmentSearchRow,
+) -> impl Iterator<Item = &str> {
+    [
+        Some(row.title.as_str()),
+        Some(row.content.as_str()),
+        row.p1.as_deref(),
+        row.p2.as_deref(),
+        row.p3.as_deref(),
+        row.p4.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|text| !text.trim().is_empty())
+}
+
+/// The hint body: the non-blank parts joined by single spaces.
+fn hint_body(row: &memory_store::StoredHistorySegmentSearchRow) -> String {
+    let mut body = String::new();
+    for part in hint_body_parts(row) {
+        if !body.is_empty() {
+            body.push(' ');
+        }
+        body.push_str(part);
+    }
+    body
+}
+
+/// The sorted query tokens with the big-endian first-eight-byte key of each.
+///
+/// `matched_in_parts` reports which query tokens `lexical_tokens` would return for the joined parts
+/// without materializing that set: a query token is one of a body's `USER_HINT_TOKEN_CAP` smallest
+/// distinct tokens exactly when it occurs in the body and fewer than `USER_HINT_TOKEN_CAP` distinct
+/// body tokens precede it.
+struct HintQuery<'q> {
+    tokens: Vec<&'q [u8]>,
+    keys: Vec<u64>,
+}
+
+/// Distinct body tokens scanned so far that lie at or below the current cut, with an open-addressing
+/// index over the first-eight-byte keys.
+struct HintSeen<'a> {
+    len: usize,
+    keys: [u64; HINT_SEEN_BUFFER],
+    tokens: [&'a [u8]; HINT_SEEN_BUFFER],
+    slots: [u8; HINT_SEEN_SLOTS],
+}
+
+const HINT_SEEN_BUFFER: usize = 48;
+const HINT_SEEN_SLOTS: usize = 128;
+/// Buffer length that triggers every trim after the first.
+const HINT_SEEN_TRIM: usize = 32;
+const SWAR_LOW_BITS: u64 = 0x0101_0101_0101_0101;
+const SWAR_HIGH_BITS: u64 = 0x8080_8080_8080_8080;
+
+/// Big-endian key of the first eight bytes, zero-padded, so key order equals byte order on the
+/// prefix.
+fn hint_prefix_key(token: &[u8]) -> u64 {
+    let mut key = 0u64;
+    for &byte in token.iter().take(8) {
+        key = (key << 8) | byte as u64;
+    }
+    key << (8 * (8 - token.len().min(8)))
+}
+
+fn hint_token_cmp(left_key: u64, left: &[u8], right_key: u64, right: &[u8]) -> std::cmp::Ordering {
+    left_key.cmp(&right_key).then_with(|| left.cmp(right))
+}
+
+const fn hint_stopword_count(len: usize) -> usize {
+    let mut count = 0;
+    let mut index = 0;
+    while index < USER_HINT_STOPWORDS.len() {
+        let word_len = USER_HINT_STOPWORDS[index].len();
+        assert!(
+            word_len == 3 || word_len == 4,
+            "is_hint_stopword encodes only three- and four-byte stopwords"
+        );
+        if word_len == len {
+            count += 1;
+        }
+        index += 1;
+    }
+    count
+}
+
+const fn hint_stopword_keys<const N: usize>(len: usize) -> [u32; N] {
+    let mut keys = [0u32; N];
+    let mut filled = 0;
+    let mut index = 0;
+    while index < USER_HINT_STOPWORDS.len() {
+        let word = USER_HINT_STOPWORDS[index].as_bytes();
+        if word.len() == len {
+            let mut key = 0u32;
+            let mut byte = 0;
+            while byte < len {
+                key = (key << 8) | word[byte] as u32;
+                byte += 1;
+            }
+            keys[filled] = key;
+            filled += 1;
+        }
+        index += 1;
+    }
+    keys
+}
+
+const HINT_STOPWORD_KEYS_3: [u32; hint_stopword_count(3)] = hint_stopword_keys(3);
+const HINT_STOPWORD_KEYS_4: [u32; hint_stopword_count(4)] = hint_stopword_keys(4);
+
+fn is_hint_stopword(token: &[u8]) -> bool {
+    match *token {
+        [a, b, c] => HINT_STOPWORD_KEYS_3.contains(&u32::from_be_bytes([0, a, b, c])),
+        [a, b, c, d] => HINT_STOPWORD_KEYS_4.contains(&u32::from_be_bytes([a, b, c, d])),
+        _ => false,
+    }
+}
+
+/// Bit 7 of each lane is set when the lane is at least `low`; lanes must be below 0x80.
+fn swar_lane_at_least(lanes: u64, low: u8) -> u64 {
+    ((lanes | SWAR_HIGH_BITS) - (low as u64) * SWAR_LOW_BITS) & SWAR_HIGH_BITS
+}
+
+/// Bit 7 of each lane is set when the lane is at most `high`; lanes must be below 0x80.
+fn swar_lane_at_most(lanes: u64, high: u8) -> u64 {
+    ((((high as u64) * SWAR_LOW_BITS) | SWAR_HIGH_BITS) - lanes) & SWAR_HIGH_BITS
+}
+
+/// Gathers bit 7 of each lane into the low eight bits.
+fn swar_pack_lane_flags(flags: u64) -> u64 {
+    ((flags >> 7).wrapping_mul(0x0102_0408_1020_4080)) >> 56
+}
+
+/// Word and at-or-below-cut flags for 64 lowercase bytes; `false` when a byte is non-ASCII.
+fn ascii_word_flags(block: &[u8], cut: u8, words: &mut u64, below_cut: &mut u64) -> bool {
+    let mut word_flags = 0u64;
+    let mut cut_flags = 0u64;
+    let cut = cut.min(0x7f);
+    for (index, lane) in block.as_chunks::<8>().0.iter().enumerate() {
+        let lanes = u64::from_le_bytes(*lane);
+        if lanes & SWAR_HIGH_BITS != 0 {
+            return false;
+        }
+        let digit = swar_lane_at_least(lanes, b'0') & swar_lane_at_most(lanes, b'9');
+        let lower = swar_lane_at_least(lanes, b'a') & swar_lane_at_most(lanes, b'z');
+        word_flags |= swar_pack_lane_flags(digit | lower) << (8 * index);
+        cut_flags |= swar_pack_lane_flags(swar_lane_at_most(lanes, cut)) << (8 * index);
+    }
+    *words = word_flags;
+    *below_cut = cut_flags;
+    true
+}
+
+fn is_lowercase_word_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || byte.is_ascii_lowercase()
+}
+
+impl<'a> HintSeen<'a> {
+    fn new() -> Self {
+        HintSeen {
+            len: 0,
+            keys: [u64::MAX; HINT_SEEN_BUFFER],
+            tokens: [b""; HINT_SEEN_BUFFER],
+            slots: [0; HINT_SEEN_SLOTS],
+        }
+    }
+
+    fn slot_of(key: u64) -> usize {
+        (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - HINT_SEEN_SLOTS.trailing_zeros()))
+            as usize
+    }
+
+    fn contains(&self, key: u64, token: &[u8]) -> bool {
+        let mut slot = Self::slot_of(key);
+        loop {
+            let index = self.slots[slot] as usize;
+            if index == 0 {
+                return false;
+            }
+            if self.keys[index - 1] == key {
+                // Equal keys cover the first eight bytes, so only longer tokens compare further.
+                let stored = self.tokens[index - 1];
+                if stored.len() == token.len() && (token.len() <= 8 || stored[8..] == token[8..]) {
+                    return true;
+                }
+            }
+            slot = (slot + 1) & (HINT_SEEN_SLOTS - 1);
+        }
+    }
+
+    fn push(&mut self, key: u64, token: &'a [u8]) {
+        self.keys[self.len] = key;
+        self.tokens[self.len] = token;
+        self.len += 1;
+        let mut slot = Self::slot_of(key);
+        while self.slots[slot] != 0 {
+            slot = (slot + 1) & (HINT_SEEN_SLOTS - 1);
+        }
+        self.slots[slot] = self.len as u8;
+    }
+
+    /// Keeps the tokens at or below the cut and rebuilds the index.
+    fn retain_at_most(&mut self, cut_key: u64, cut: &[u8]) {
+        let mut kept = 0usize;
+        for index in 0..self.len {
+            let (key, token) = (self.keys[index], self.tokens[index]);
+            if hint_token_cmp(key, token, cut_key, cut) != std::cmp::Ordering::Greater {
+                self.keys[kept] = key;
+                self.tokens[kept] = token;
+                kept += 1;
+            }
+        }
+        for index in kept..self.len {
+            self.keys[index] = u64::MAX;
+            self.tokens[index] = b"";
+        }
+        self.len = kept;
+        self.slots = [0; HINT_SEEN_SLOTS];
+        for index in 0..self.len {
+            let mut slot = Self::slot_of(self.keys[index]);
+            while self.slots[slot] != 0 {
+                slot = (slot + 1) & (HINT_SEEN_SLOTS - 1);
+            }
+            self.slots[slot] = index as u8 + 1;
+        }
+    }
+
+    /// The zero-based `rank`-th smallest token seen.
+    fn nth_smallest(&self, rank: usize) -> (u64, &'a [u8]) {
+        // Keys order tokens up to their first eight bytes, so a key unique at the rank names the
+        // token without comparing byte slices.
+        let mut keys = self.keys;
+        let (_, key, _) = keys[..self.len].select_nth_unstable(rank);
+        let key = *key;
+        if self.keys[..self.len].iter().filter(|k| **k == key).count() == 1
+            && let Some(index) = self.keys[..self.len].iter().position(|k| *k == key)
+        {
+            return (key, self.tokens[index]);
+        }
+        let mut order = [0u8; HINT_SEEN_BUFFER];
+        for (index, entry) in order.iter_mut().enumerate() {
+            *entry = index as u8;
+        }
+        let order = &mut order[..self.len];
+        let (_, nth, _) = order.select_nth_unstable_by(rank, |&left, &right| {
+            hint_token_cmp(
+                self.keys[left as usize],
+                self.tokens[left as usize],
+                self.keys[right as usize],
+                self.tokens[right as usize],
+            )
+        });
+        (self.keys[*nth as usize], self.tokens[*nth as usize])
+    }
+}
+
+impl<'q> HintQuery<'q> {
+    /// `sorted_tokens` are the distinct `lexical_tokens` of the query in ascending order.
+    fn new(sorted_tokens: &'q [String]) -> Self {
+        debug_assert!(sorted_tokens.len() <= USER_HINT_TOKEN_CAP);
+        let tokens = sorted_tokens
+            .iter()
+            .map(|token| token.as_bytes())
+            .collect::<Vec<_>>();
+        let keys = tokens.iter().map(|token| hint_prefix_key(token)).collect();
+        HintQuery { tokens, keys }
+    }
+
+    /// Which query tokens `lexical_tokens` would return for `parts` joined by single spaces.
+    ///
+    /// The scan keeps the distinct body tokens at or below a cut, initially the largest query
+    /// token. Once `HINT_SEEN_BUFFER` such tokens are seen, the `USER_HINT_TOKEN_CAP`-th smallest
+    /// bounds every query token that can still match, so the cut drops to the largest query token
+    /// at or below it and the buffer is trimmed. Later trims run once the buffer holds
+    /// `HINT_SEEN_TRIM` tokens.
+    fn matched_in_parts(&self, parts: &[&str]) -> u32 {
+        if self.tokens.is_empty() {
+            return 0;
+        }
+        let mut seen = HintSeen::new();
+        let mut top = self.tokens.len() - 1;
+        let mut cut_key = self.keys[top];
+        let mut cut = self.tokens[top];
+        let mut trim_at = HINT_SEEN_BUFFER;
+        let lowered = parts
+            .iter()
+            .map(|part| part.to_lowercase())
+            .collect::<Vec<_>>();
+        for lowered in &lowered {
+            let bytes = lowered.as_bytes();
+            let total = bytes.len();
+            let mut position = 0usize;
+            let mut previous_was_word = 0u64;
+            while position < total {
+                let cut_byte = cut[0];
+                let mut words = 0u64;
+                let mut below_cut = 0u64;
+                let block_len = if position + 64 <= total
+                    && ascii_word_flags(
+                        &bytes[position..position + 64],
+                        cut_byte,
+                        &mut words,
+                        &mut below_cut,
+                    ) {
+                    64
+                } else if position + 64 > total && bytes[position..].is_ascii() {
+                    // The final block is padded with spaces, which are never word bytes.
+                    let mut padded = [b' '; 64];
+                    padded[..total - position].copy_from_slice(&bytes[position..]);
+                    ascii_word_flags(&padded, cut_byte, &mut words, &mut below_cut);
+                    total - position
+                } else {
+                    // A block with non-ASCII bytes is classified per character and ends on a
+                    // character boundary within 64 bytes.
+                    let mut index = position;
+                    let limit = (position + 64).min(total);
+                    while index < limit {
+                        let byte = bytes[index];
+                        let offset = index - position;
+                        if byte < 0x80 {
+                            words |= (is_lowercase_word_byte(byte) as u64) << offset;
+                            below_cut |= ((byte <= cut_byte) as u64) << offset;
+                            index += 1;
+                        } else {
+                            let character = lowered[index..].chars().next().expect("char boundary");
+                            let width = character.len_utf8();
+                            if index + width > limit && index > position {
+                                break;
+                            }
+                            if character.is_alphanumeric() {
+                                for extra in 0..width {
+                                    words |= 1u64 << (offset + extra);
+                                }
+                            }
+                            below_cut |= ((byte <= cut_byte) as u64) << offset;
+                            index += width;
+                        }
+                    }
+                    index - position
+                };
+                let starts = words & !((words << 1) | previous_was_word);
+                let mut candidates = starts & below_cut;
+                while candidates != 0 {
+                    let offset = candidates.trailing_zeros() as usize;
+                    candidates &= candidates - 1;
+                    let after = !(words >> offset);
+                    let run = if after == 0 {
+                        64 - offset
+                    } else {
+                        after.trailing_zeros() as usize
+                    };
+                    let start = position + offset;
+                    let mut end = start + run;
+                    if offset + run >= block_len {
+                        end = position + block_len;
+                        while end < total {
+                            let byte = bytes[end];
+                            if byte < 0x80 {
+                                if !is_lowercase_word_byte(byte) {
+                                    break;
+                                }
+                                end += 1;
+                            } else {
+                                let character =
+                                    lowered[end..].chars().next().expect("char boundary");
+                                if !character.is_alphanumeric() {
+                                    break;
+                                }
+                                end += character.len_utf8();
+                            }
+                        }
+                    }
+                    let token = &bytes[start..end];
+                    if token.len() < 3 {
+                        continue;
+                    }
+                    let key = if start + 8 <= total {
+                        let word = u64::from_be_bytes(
+                            bytes[start..start + 8].try_into().expect("eight bytes"),
+                        );
+                        if token.len() >= 8 {
+                            word
+                        } else {
+                            word & (u64::MAX << (8 * (8 - token.len())))
+                        }
+                    } else {
+                        hint_prefix_key(token)
+                    };
+                    if hint_token_cmp(key, token, cut_key, cut) == std::cmp::Ordering::Greater {
+                        continue;
+                    }
+                    if seen.contains(key, token) {
+                        continue;
+                    }
+                    if !token.is_ascii()
+                        && std::str::from_utf8(token).map_or(0, |text| text.chars().count()) < 3
+                    {
+                        continue;
+                    }
+                    if is_hint_stopword(token) {
+                        continue;
+                    }
+                    seen.push(key, token);
+                    if seen.len == trim_at {
+                        trim_at = HINT_SEEN_TRIM;
+                        let (bound_key, bound) = seen.nth_smallest(USER_HINT_TOKEN_CAP - 1);
+                        while hint_token_cmp(self.keys[top], self.tokens[top], bound_key, bound)
+                            == std::cmp::Ordering::Greater
+                        {
+                            if top == 0 {
+                                return 0;
+                            }
+                            top -= 1;
+                        }
+                        cut_key = self.keys[top];
+                        cut = self.tokens[top];
+                        seen.retain_at_most(cut_key, cut);
+                        if cut[0] < cut_byte {
+                            let mut kept = 0u64;
+                            let mut rest = candidates;
+                            while rest != 0 {
+                                let other = rest.trailing_zeros() as usize;
+                                rest &= rest - 1;
+                                if bytes[position + other] <= cut[0] {
+                                    kept |= 1u64 << other;
+                                }
+                            }
+                            candidates = kept;
+                        }
+                    }
+                }
+                previous_was_word = if block_len == 64 {
+                    words >> 63
+                } else {
+                    (words >> (block_len - 1)) & 1
+                };
+                position += block_len;
+            }
+        }
+        let mut matched = 0u32;
+        if seen.len > USER_HINT_TOKEN_CAP {
+            let (bound_key, bound) = seen.nth_smallest(USER_HINT_TOKEN_CAP - 1);
+            for index in 0..=top {
+                let (key, token) = (self.keys[index], self.tokens[index]);
+                if hint_token_cmp(key, token, bound_key, bound) != std::cmp::Ordering::Greater
+                    && seen.contains(key, token)
+                {
+                    matched |= 1 << index;
+                }
+            }
+        } else {
+            for index in 0..=top {
+                if seen.contains(self.keys[index], self.tokens[index]) {
+                    matched |= 1 << index;
+                }
+            }
+        }
+        matched
+    }
 }
 
 #[cfg(test)]
@@ -8528,11 +8983,9 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
 /// A word ends where the tokenizer's lowercased text would split: U+0130 lowercases to `i` plus a
 /// combining dot, so it bounds a word instead of joining it.
 fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
-    let is_word_char =
-        |ch: char| ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric);
     let mut word_start = None;
     for (index, character) in text.char_indices().chain([(text.len(), ' ')]) {
-        match (is_word_char(character), word_start) {
+        match (is_whole_word_char(character), word_start) {
             (true, None) => word_start = Some(index),
             (false, Some(start)) => {
                 let word = &text[start..index];
@@ -8551,6 +9004,15 @@ fn first_whole_word(text: &str, token: &str) -> Option<std::ops::Range<usize>> {
         }
     }
     None
+}
+
+/// Each ASCII alphanumeric lowercases to an ASCII alphanumeric, so the ASCII branch skips the lowercase check.
+fn is_whole_word_char(ch: char) -> bool {
+    if ch.is_ascii() {
+        ch.is_ascii_alphanumeric()
+    } else {
+        ch.is_alphanumeric() && ch.to_lowercase().all(char::is_alphanumeric)
+    }
 }
 
 /// Anchors are ordered rarest first; the first anchor the served fragment can show decides the snippet.
@@ -8584,10 +9046,30 @@ fn user_hint_fragment(snippet: &str) -> String {
         snippet,
         crate::terse_text_compression::TerseTextCompressionLevel::Ultra,
     );
+    // Escaping, tag stripping, and whitespace joining act on whole words, so a prefix that ends
+    // at whitespace renders the same leading words as the whole text. The prefix is used when its
+    // joined words alone exceed the cap; a prefix within the cap cannot show whether more words
+    // follow, even when its last word ends in a literal `…`.
+    const PREFIX_BYTES: usize = 4 * USER_HINT_FRAGMENT_CHAR_CAP;
+    if compressed.len() > PREFIX_BYTES
+        && let Some(cut) = compressed
+            .char_indices()
+            .find(|(offset, character)| *offset >= PREFIX_BYTES && character.is_whitespace())
+            .map(|(offset, _)| offset)
+    {
+        let (fragment, truncated) = one_line_fragment(
+            &neutralize_user_hint_markup(&compressed[..cut]),
+            USER_HINT_FRAGMENT_CHAR_CAP,
+        );
+        if truncated {
+            return fragment;
+        }
+    }
     one_line_fragment(
         &neutralize_user_hint_markup(&compressed),
         USER_HINT_FRAGMENT_CHAR_CAP,
     )
+    .0
 }
 
 /// Stored segment tiers are unescaped, and the hint lands in the user's own text block.
@@ -8645,16 +9127,32 @@ fn truncate_hint_to_total_cap(wrapped: &str, limit: usize) -> String {
     format!("{open}{body}…{close}")
 }
 
-fn one_line_fragment(text: &str, limit: usize) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if utf16_len(&normalized) <= limit {
-        return normalized;
+/// The words of `text` joined by single spaces and cut to `limit` UTF-16 units, with `true` when
+/// the joined words exceed `limit` and the fragment ends in the added `…`.
+fn one_line_fragment(text: &str, limit: usize) -> (String, bool) {
+    // Words are joined by single spaces until the joined text is known to exceed the limit;
+    // the truncation below reads only the first `limit - 1` units of that prefix.
+    let mut normalized = String::new();
+    let mut units = 0usize;
+    for word in text.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+            units += 1;
+        }
+        normalized.push_str(word);
+        units += utf16_len(word);
+        if units > limit {
+            break;
+        }
+    }
+    if units <= limit {
+        return (normalized, false);
     }
     let mut truncated = utf16_prefix(&normalized, limit.saturating_sub(1))
         .trim_end()
         .to_string();
     truncated.push('…');
-    truncated
+    (truncated, true)
 }
 
 fn maybe_append_channel1_nudge(

@@ -70,7 +70,13 @@ presented fragment or an explicit omitted/filtered/truncated outcome.
 Humans decide whether transformed text exposes the required meaning; machine
 checks validate fragments and linkage. An input gap earns no generation credit
 and cannot turn an overall preservation failure into success.
-None found for this case-linked exposure harness at HEAD.
+`crates/daemon/src/compression_fidelity_replay_tests.rs` constructs this
+harness since U2 (#719): `span_exposure` locates each C1-C6 material span's
+message among the recorded `new_messages` parts, searches only the bytes
+presenting the annotated block, and records exact, transformed, or absent
+exposure, with tool-output spans recorded as omitted and the C5 oversized lead
+recorded as absent after truncation. Human review of transformed meaning
+remains outstanding.
 
 ## Investigation log
 
@@ -78,17 +84,20 @@ None found for this case-linked exposure harness at HEAD.
 - Sources examined: `extract_tool_result_summaries`, chunk.rs:1242-1259.
 - Findings: It takes call summaries by arc identity or emits the tool name;
   result payload bytes are not part of this function's output.
-- Missing evidence: Which reviewed cases depend solely on omitted payloads.
-- Conclusion: Resolved for the mechanism; case exposure needs a replay.
+- Missing evidence: None for the mechanism. The U2 replay records the
+  tool-output spans of C2.O1, C2.O3, and C5.O3 as omitted while each message's
+  text block is presented; each of those obligations also carries a text span.
+- Conclusion: Resolved; the replay witnesses the omission per case.
 
 ### Q: Which transformed fragments preserve each obligation?
 - Sources examined: The input transformations and plan:194-196.
 - Findings: Bytes and identity can be checked locally; semantic sufficiency
-  cannot be derived from normalization or citation validity alone. The existing
-  private helper records only the user prompt, not the system/model arguments.
-- Missing evidence: Human annotations and the required private recorder
-  extension capturing system, user prompt, and selected model.
-- Conclusion: Needs human input for meaning; unresolved for replay capture.
+  cannot be derived from normalization or citation validity alone. Since U2
+  (#719) the private recorder retains system text, user prompt, and selected
+  model per attempt, and the replay records each span's exposure.
+- Missing evidence: Human annotations of whether each transformed fragment
+  exposes the required meaning.
+- Conclusion: Needs human input for meaning; replay capture is resolved.
 
 [contract]: https://github.com/ahrav/eidnara/issues/707
 [chunk]: ../../../../../crates/daemon/src/history_summarizer_chunk.rs
