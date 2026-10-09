@@ -13,7 +13,12 @@ import {
     type FidelityCase,
     readCompressionFidelityCorpus,
 } from "../src/compression-fidelity/corpus";
-import { captureTexts, emitObservation, messageText } from "../src/compression-fidelity/delivery";
+import {
+    captureTexts,
+    emitObservation,
+    messageText,
+    publishedCount,
+} from "../src/compression-fidelity/delivery";
 import type { RustTestHarness } from "../src/rust-harness";
 import type { ScriptSource } from "../src/rust-runner/hermetic-host";
 import { rustPrereqs } from "../src/rust-scenario-support";
@@ -291,7 +296,13 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                 expect(outcome.hintText).toContain(hint);
                 // The case row ranks first, ahead of distractor rows that also matched the prompt.
                 const caseRow = driver.older + 1;
-                expect(outcome.selected[0]).toBe(caseRow);
+                if (outcome.selected[0] !== caseRow) {
+                    throw new Error(
+                        `hint ranked row ${String(outcome.selected[0])} ahead of the case row ${caseRow} ` +
+                            `(rows=${await publishedCount(h, driver.sessionId)}): ` +
+                            `${JSON.stringify({ hint, outcome })}`,
+                    );
+                }
                 const matchedDistractors = outcome.matched.filter((row) => row > caseRow).length;
                 expect(matchedDistractors).toBeGreaterThan(0);
                 const caseFragment = hint.split("\n").find((line) => line.startsWith("- ")) ?? "";
