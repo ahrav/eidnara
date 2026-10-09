@@ -285,7 +285,16 @@ const SERVING_FIELDS = [
     "serving_kind",
 ] as const;
 
-function costOf(evidence: Evidence[], arm: Arm, exactRead: boolean): ScenarioRow["cost"] {
+function generationsOf(arm: Arm): Evidence[] {
+    return arm.evidence.filter((e) => e.scenario === null && Array.isArray(e.detail.attempts));
+}
+
+function costOf(
+    evidence: Evidence[],
+    arm: Arm,
+    exactRead: boolean,
+    generations: readonly Evidence[],
+): ScenarioRow["cost"] {
     const missing: string[] = [];
     const serving: Json[] = [];
     for (const e of evidence.filter((e) => record(e.detail.serving))) {
@@ -308,8 +317,7 @@ function costOf(evidence: Evidence[], arm: Arm, exactRead: boolean): ScenarioRow
     }
     // An exact read is an internal witness; it serves nothing to a provider.
     if (serving.length === 0 && !exactRead) missing.push("no serving observation");
-    const generation: Json[] = arm.evidence
-        .filter((e) => e.scenario === null && Array.isArray(e.detail.attempts))
+    const generation: Json[] = generations
         .filter((e) => evidence.some((s) => s.source === e.source))
         .map((e) => ({
             file: e.file,
@@ -343,8 +351,22 @@ function agreed(judgments: Judgment[]): Judgment | null {
             [...j.forbidden_violated].sort(),
             j.abstained,
         ]);
-    const first = judgments[0];
-    return first && judgments.every((j) => verdict(j) === verdict(first)) ? first : null;
+    const [first, ...rest] = judgments;
+    if (!first || rest.length === 0) return first ?? null;
+    const expected = verdict(first);
+    return rest.every((j) => verdict(j) === expected) ? first : null;
+}
+
+function byArmAndScenario(judgments: readonly Judgment[]): Map<string, Map<string, Judgment[]>> {
+    const groups = new Map<string, Map<string, Judgment[]>>();
+    for (const judgment of judgments) {
+        const arm = groups.get(judgment.arm) ?? new Map<string, Judgment[]>();
+        groups.set(judgment.arm, arm);
+        const group = arm.get(judgment.scenario);
+        if (group) group.push(judgment);
+        else arm.set(judgment.scenario, [judgment]);
+    }
+    return groups;
 }
 
 /** The review, preservation, recovery, safety, and cost columns of `row` for `arm`. */
@@ -353,11 +375,15 @@ export function scenarioRow(
     arm: Arm,
     label: string,
     reviews: Reviews,
+    candidates: readonly Judgment[] = reviews.judgments,
+    generations: readonly Evidence[] = generationsOf(arm),
 ): ScenarioRow {
     const { scenario, evidence } = row;
-    const hashes = new Set(evidence.map((e) => e.sha256));
-    const bound = reviews.judgments.filter(
-        (j) => j.arm === label && j.scenario === scenario.id && hashes.has(j.artifact_sha256),
+    const bound = candidates.filter(
+        (j) =>
+            j.arm === label &&
+            j.scenario === scenario.id &&
+            evidence.some((e) => e.sha256 === j.artifact_sha256),
     );
     const human = bound.filter((j) => j.kind === "human");
     const judgment = agreed(human);
@@ -406,7 +432,7 @@ export function scenarioRow(
             consumer_safety = usable.abstained ? "abstained" : "safe";
         }
     }
-    const cost = costOf(evidence, arm, scenario.serving.path === "exact_read");
+    const cost = costOf(evidence, arm, scenario.serving.path === "exact_read", generations);
 
     const withheld: string[] = [];
     if (row.execution.status !== "executed") withheld.push(`execution ${row.execution.status}`);
@@ -457,8 +483,20 @@ export function evaluate(input: {
     const { reviews } = input;
     const assembled = assembleEvidence(input);
     const controls = controlQualification(reviews);
+    const grouped = byArmAndScenario(reviews.judgments);
     const arms = assembled.arms.map((side) => {
-        const rows = side.rows.map((row) => scenarioRow(row, side.arm, side.label, reviews));
+        const judged = grouped.get(side.label);
+        const generations = generationsOf(side.arm);
+        const rows = side.rows.map((row) =>
+            scenarioRow(
+                row,
+                side.arm,
+                side.label,
+                reviews,
+                judged?.get(row.scenario.id) ?? [],
+                generations,
+            ),
+        );
         const approvers = reviews.approvals.length;
         const reasons = [
             ...side.identity_errors,

@@ -519,6 +519,31 @@ describe("eval:compression-fidelity judgments", () => {
         );
     });
 
+    test("a judgment binds only to the arm it names, even over byte-identical artifacts", () => {
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            j.judgments = j.judgments.filter((judgment) => judgment.arm === "baseline");
+        });
+        const baseArm = loadArm(baseline.dir, corpus, SHA);
+        const candArm = loadArm(join(root, "candidate"), corpus, SHA);
+        expect(candArm.evidence.map((e) => e.sha256)).toEqual(
+            baseArm.evidence.map((e) => e.sha256),
+        );
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: baseArm,
+            candidate: candArm,
+            reviews: loadReviews(reviewsDir, SHA),
+        });
+        const [base, cand] = report.arms;
+        expect(base?.rows.every((r) => r.semantic_review === "reviewed")).toBe(true);
+        expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+    });
+
     test("disagreeing human judgments and an open dispute are disputed; a resolved dispute is not", () => {
         const [first, second, third] = allScenarios.map(({ s }) => s);
         const root = scratch();
