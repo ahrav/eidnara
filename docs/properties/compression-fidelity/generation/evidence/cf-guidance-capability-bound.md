@@ -93,6 +93,25 @@ combined prompt/hint capability-review check at HEAD.
   human review for the applicable registry configuration.
 - Conclusion: Needs human input for wording; unresolved for the offline capture.
 
+### Q: What does the #723 correction change, and what does it leave open?
+- Sources examined: The system prompt, its new guidance-capability test, and
+  fresh real-producer captures of every corpus source under both prompts.
+- Findings: Lines 130, 212, and 214 no longer say the segment is recoverable
+  through search or recognizable from search. The 60-84 band keeps its label
+  and score range; its sentence now reads "High-fidelity recall is valuable
+  when you encounter related work." P4 detail "survives only in the tier text
+  you write." Line 132's code-reading clause stays: the primary agent reads
+  the current code through its harness tools.
+  `history_summarizer_prompt::tests::the_summarizer_prompt_promises_no_recovery_past_the_tool_contract`
+  pins the line 17 limit and rejects the removed recovery phrases; it fails on
+  the base prompt (`297fc28e…`) and passes on the candidate (`4d975027…`).
+- Missing evidence: A non-author human review of the generated outputs, sealed
+  control judgments, and serving scenarios bound to the real captures. The
+  replay scenarios still serve scripted outputs, so no serving observation
+  names a real capture.
+- Conclusion: The deterministic check passes. Semantic acceptance stays
+  unverified until a human reviews the paired captures.
+
 [contract]: https://github.com/ahrav/eidnara/issues/707
 [system]: ../../../../../crates/daemon/testdata/history_summarizer-system-prompt.txt
 [prompt]: ../../../../../crates/daemon/src/history_summarizer_prompt.rs

@@ -22685,6 +22685,16 @@ mod tests {
         config: DaemonConfig,
         resolver: Arc<dyn SessionResolver>,
     ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
+        handler_with_factory_for_harness(factory, config, resolver, "daemon-test")
+    }
+
+    /// Binds the session under `harness`; a real host admits only the harnesses it serves.
+    fn handler_with_factory_for_harness(
+        factory: Arc<dyn HistorySummarizerProducerFactory>,
+        config: DaemonConfig,
+        resolver: Arc<dyn SessionResolver>,
+        harness: &str,
+    ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
@@ -22694,7 +22704,10 @@ mod tests {
         handler.install_store_for_test(Arc::clone(&store));
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
-        handler.bind_route(test_route(7), binding(project.to_str().unwrap(), "ses"));
+        handler.bind_route(
+            test_route(7),
+            binding_with_harness(project.to_str().unwrap(), harness, "ses"),
+        );
         (handler, store, dir, project)
     }
 

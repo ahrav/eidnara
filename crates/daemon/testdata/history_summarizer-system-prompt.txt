@@ -127,7 +127,7 @@ Concrete framing: imagine you (the same agent) open this session 3 months from n
 
 - **Need full detail indefinitely (85-100)** — this history_segment establishes a constraint, invariant, or decision that all future work in this project must respect. Losing detail means making the wrong choice in some future situation, or accidentally violating an invariant you set. The history_segment carries an irreversible architectural commitment, a security/correctness invariant other code depends on, a root-cause finding for a class of bugs, a durable user-stated principle that constrains future design.
 
-- **Need accurate recall for months (60-84)** — substantial concrete work with outcomes future-you will want to recall accurately. The history_segment is recoverable through search but high-fidelity recall is valuable when you encounter related work.
+- **Need accurate recall for months (60-84)** — substantial concrete work with outcomes future-you will want to recall accurately. High-fidelity recall is valuable when you encounter related work.
 
 - **Need rough recall for weeks (30-59)** — routine work where the outcome is already in the codebase state. The history_segment helps future-you remember "this was done" but the details are recoverable by reading the current code. Loss is acceptable because the code itself documents it.
 
@@ -209,9 +209,9 @@ P3 is your older memory. You remember the outcome and the key decision; the rest
 
 ### `<p4>` — "what we did long ago"
 
-P4 is your long-term-pointer memory. You remember that something happened, roughly when, and roughly what — the details would have to be recovered through search.
+P4 is your long-term-pointer memory. You remember that something happened, roughly when, and roughly what — the details survive only in the tier text you write.
 
-**P4 exists to make this history_segment recognizable and findable.** The question is not "should I write a sentence?" — it's "what is the minimum needed to recognize this history_segment again from search, months later?"
+**P4 exists to make this history_segment recognizable and findable.** The question is not "should I write a sentence?" — it's "what is the minimum needed to recognize this history_segment again, months later?"
 
 ### Three valid P4 shapes
 

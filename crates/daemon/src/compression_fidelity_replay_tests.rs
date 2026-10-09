@@ -1522,8 +1522,13 @@ async fn capture_sources(
             model_chain: vec![model.to_owned()],
             ..default_test_config()
         };
-        let (handler, store, _dir, _project) =
-            handler_with_factory(recording, config, Arc::new(MissingSessionResolver));
+        // The host's ModelExecution route admits only the harnesses it serves.
+        let (handler, store, _dir, _project) = handler_with_factory_for_harness(
+            recording,
+            config,
+            Arc::new(MissingSessionResolver),
+            "opencode",
+        );
         let follow_up = follow_up_for(case, source);
         let mut messages = source_ingress(case, source);
         let next = messages.len() as u64 + 1;

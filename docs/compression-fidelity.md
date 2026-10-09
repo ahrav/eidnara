@@ -277,6 +277,18 @@ execution protocol reports no token usage, so each record carries
 reads no credential: the host owns them.
 `a_capture_records_the_model_attempts_usage_and_complete_input` runs the
 same capture over the scripted producer in the default suite.
+The capture binds its session under the `opencode` harness, which the host's
+ModelExecution route admits. `direct_host_fixture` serves the capture when
+`EIDNARA_FIXTURE_SUMMARIZER_COMMAND` names a command that answers each
+summarizer prompt from a real model, such as
+`packages/e2e-tests/scripts/bedrock-summarizer.ts`.
+
+**Summarizer recovery guidance.** The history summarizer system prompt states
+once that the primary agent's `eidnara_search` searches project memory only,
+and its importance rubric and P4 guidance make no search-recovery promise:
+P4 detail survives only in the tier text the summarizer writes.
+`the_summarizer_prompt_promises_no_recovery_past_the_tool_contract` in
+`history_summarizer_prompt.rs` keeps the limit and rejects the removed phrases.
 
 **Record-and-forward provider mode.** `new MockProvider({ forward })` in
 `packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends

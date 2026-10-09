@@ -390,9 +390,12 @@ Confidence: high - [Evidence](evidence/cf-guidance-capability-bound.md).
 The prompt conflict, history-derived hint footer, and registered memory-only
 search path are inspected; this is evidence of a false premise, not a passing
 guidance review or an observed consumer incident.
-Existing check: [Registry guidance test:272-319][registry-tests] and
-[search-description test:428-439][search-tests], unaudited. They do not cover
-the summarizer prompt and hint footer together; no complete review check is found.
+Existing check: [Registry guidance test:272-319][registry-tests],
+[search-description test:428-439][search-tests], unaudited, and the
+[summarizer prompt guidance-capability test][prompt]
+`the_summarizer_prompt_promises_no_recovery_past_the_tool_contract`, which pins
+the prompt's recovery limit and rejects the search-recovery phrases #723
+removed. The human review of generated outputs stays open.
 Impact: Generation discards necessary qualifiers or detail on a recovery
 assumption the consumer cannot fulfill.
 Open questions:
