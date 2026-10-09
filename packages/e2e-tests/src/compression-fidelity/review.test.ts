@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { parseArgs, run } from "../../scripts/eval-compression-fidelity";
+import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
 import {
     type ArmOptions,
     allScenarios,
@@ -673,4 +673,66 @@ describe("eval:compression-fidelity command", () => {
             }),
         ).rejects.toThrow("inside the repository");
     });
+
+    // With a discovery variable set, git and the reader both defer to it, so the fixture
+    // repositories below would not be the ones resolved.
+    const discovery = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"];
+    test.skipIf(discovery.some((name) => process.env[name] !== undefined))(
+        "the repository revision is the commit git rev-parse HEAD names in every layout",
+        async () => {
+            const root = scratch();
+            // A git hook exports variables such as GIT_INDEX_FILE that would redirect the
+            // fixture commands into the enclosing repository.
+            const env = Object.fromEntries(
+                Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+            );
+            const git = (cwd: string, ...args: string[]) => {
+                const result = Bun.spawnSync(["git", ...args], { cwd, env, stderr: "pipe" });
+                if (!result.success) throw new Error(result.stderr.toString());
+                return result.stdout.toString().trim();
+            };
+            const commit = (cwd: string, message: string) =>
+                git(
+                    cwd,
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                );
+            const matches = async (cwd: string) =>
+                expect(await repositoryRevision(cwd)).toBe(git(cwd, "rev-parse", "HEAD"));
+            const repo = join(root, "repo");
+            const nested = join(repo, "a", "b");
+            const worktree = join(root, "worktree");
+            mkdirSync(nested, { recursive: true });
+            git(repo, "init", "-q", "-b", "main");
+            expect(await repositoryRevision(repo)).toBe("unknown");
+            commit(repo, "one");
+            await matches(repo);
+            await matches(nested);
+            git(repo, "worktree", "add", "-q", "-b", "side", worktree);
+            commit(worktree, "two");
+            await matches(worktree);
+            git(repo, "pack-refs", "--all");
+            expect(readdirSync(join(repo, ".git", "refs", "heads"))).toEqual([]);
+            await matches(repo);
+            await matches(worktree);
+            git(repo, "checkout", "-q", "--detach");
+            await matches(repo);
+            // HEAD naming a ref outside refs/heads is resolved by git itself.
+            git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+            git(repo, "symbolic-ref", "HEAD", "refs/remotes/origin/main");
+            await matches(repo);
+            expect(await repositoryRevision(root)).toBe("unknown");
+        },
+    );
 });

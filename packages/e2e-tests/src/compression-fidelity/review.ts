@@ -345,14 +345,21 @@ function costOf(
     };
 }
 
+/** Orders obligation judgments by obligation ID, comparing UTF-16 code units. */
+const byObligation = (a: ObligationJudgment, b: ObligationJudgment) =>
+    a.obligation < b.obligation ? -1 : a.obligation > b.obligation ? 1 : 0;
+
+/** A judgment's verdict as a string equal for equal verdicts listed in any order. */
+function verdict(j: Judgment): string {
+    return JSON.stringify([
+        [...j.obligations].sort(byObligation),
+        [...j.forbidden_violated].sort(),
+        j.abstained,
+    ]);
+}
+
 /** The verdict a set of human judgments agrees on, or `null` when any two disagree. */
 function agreed(judgments: Judgment[]): Judgment | null {
-    const verdict = (j: Judgment) =>
-        JSON.stringify([
-            [...j.obligations].sort((a, b) => a.obligation.localeCompare(b.obligation)),
-            [...j.forbidden_violated].sort(),
-            j.abstained,
-        ]);
     const [first, ...rest] = judgments;
     if (!first || rest.length === 0) return first ?? null;
     const expected = verdict(first);
