@@ -25,10 +25,10 @@ every other tokenizer record depends on.
 - `pattern_is_upstream_with_ecmascript_whitespace` (`:168`) derives the pattern
   from the asset and asserts `derived == CLAUDE_PAT_STR` (`:175`), then asserts
   the constant contains neither `\s` nor `\S` (`:176-177`).
-- `reference_pattern_equals_upstream_derived_pattern` (`:183`) asserts
+- `reference_pattern_equals_upstream_derived_pattern` (`:213`) asserts
   `reference_impl::CLAUDE_PAT_STR` (`src/reference_impl.rs:23-33`) equals the
   derived constant; the reference compiles that constant at `:56`.
-- `matches_reference_on_hand_cases` (`src/scan.rs:302`) compares the scanner's
+- `matches_reference_on_hand_cases` (`src/scan.rs:307`) compares the scanner's
   splits to the reference regex's spans on hand-written cases;
   `ids_match_reference_impl` (`src/parity_tests.rs:63`) compares ids on 2,000
   generated strings per run, whose whitespace arm (`:12`, `:17`) draws from all

@@ -11,7 +11,7 @@ details do not authorize a weaker acceptance threshold.
 
 ## Evidence trail
 
-- [decay_render.rs:541-583](../../../../../crates/daemon/src/decay_render.rs#L541-L583)
+- [decay_render.rs:547-661](../../../../../crates/daemon/src/decay_render.rs#L547-L661)
   returns the unwrapped history body. Its positive-budget guard demotes
   oldest-first, bounded by `history_segments.len() * 5`, until the body fits
   its effective budget or is empty. This is the absolute body-budget boundary.

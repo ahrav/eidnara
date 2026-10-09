@@ -18,10 +18,10 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 - [context-core/decay.rs:132-149](../../../../../crates/context-core/src/decay.rs#L132-L149)
   can keep a naturally archived row at P4 when anchor overlap protects it.
   This capability is not used by the daemon call above.
-- [decay_render.rs:566-581](../../../../../crates/daemon/src/decay_render.rs#L566-L581)
+- [decay_render.rs:575-596](../../../../../crates/daemon/src/decay_render.rs#L575-L596)
   demotes the oldest nonarchived row until its positive budget fits or the guard
   exhausts. The loop does not exempt high importance or the newest-tier floor.
-- [decay_render.rs:757-774](../../../../../crates/daemon/src/decay_render.rs#L757-L774)
+- [decay_render.rs:835-852](../../../../../crates/daemon/src/decay_render.rs#L835-L852)
   tests an 80-character budget with importance 50 rows; status unaudited.
 - [m0_compose.rs:138-167](../../../../../crates/daemon/src/m0_compose.rs#L138-L167)
   adds at most three pressure retries for wrapped history above 105% of budget.

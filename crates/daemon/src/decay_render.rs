@@ -538,6 +538,12 @@ fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget:
 /// and `estimate_tokens` must use the same token unit. For a positive budget, the guard demotes
 /// oldest rows first until output fits or every row reaches tier 5. Nonpositive budgets disable
 /// the guard.
+///
+/// The guard predicts the body's count from per-row counts by the join identity documented on
+/// `tokenizer::starts_outside_whitespace`. `estimate_tokens` must predict at most its count of
+/// the joined body; the guard then renders the bytes of a guard that counts the whole body
+/// after every demotion. `tokenizer::estimate_tokens` predicts exactly, so the guard counts
+/// the whole body once.
 pub fn render_decayed_history_segments(
     history_segments: &[DecayRenderHistorySegment],
     history_budget_tokens: f64,
@@ -562,24 +568,96 @@ pub fn render_decayed_history_segments(
             .collect();
         parts.join("\n\n")
     };
+    if history_budget_tokens <= 0.0 {
+        return join_body(&rendered);
+    }
 
-    let mut body = join_body(&rendered);
     // Budget guard: the curve already targets the budget, but estimate drift or a very
     // tight budget can overshoot. Demote oldest-first until it fits.
     let mut guard = history_segments.len() * 5;
-    while history_budget_tokens > 0.0
-        && estimate_tokens(&body) as f64 > history_budget_tokens
-        && guard > 0
-    {
-        let Some(i) = tiers.iter().position(|t| *t < 5) else {
+    let predicted = demote_by_row_counts(
+        history_segments,
+        &mut tiers,
+        &mut rendered,
+        &mut guard,
+        history_budget_tokens,
+        &estimate_tokens,
+    );
+    let mut body = join_body(&rendered);
+    let mut tokens = estimate_tokens(&body);
+    debug_assert!(predicted <= tokens, "rows counted above the body");
+    while tokens as f64 > history_budget_tokens && guard > 0 {
+        if demote_oldest(history_segments, &mut tiers, &mut rendered).is_none() {
             break;
-        };
-        tiers[i] += 1;
-        rendered[i] = render_one_history_segment(&history_segments[i], tiers[i]);
+        }
         body = join_body(&rendered);
+        tokens = estimate_tokens(&body);
         guard -= 1;
     }
     body
+}
+
+/// Demotes the oldest row below tier 5 and rerenders it, returning its index.
+fn demote_oldest(
+    history_segments: &[DecayRenderHistorySegment],
+    tiers: &mut [u8],
+    rendered: &mut [String],
+) -> Option<usize> {
+    let i = tiers.iter().position(|t| *t < 5)?;
+    tiers[i] += 1;
+    rendered[i] = render_one_history_segment(&history_segments[i], tiers[i]);
+    Some(i)
+}
+
+/// Runs the budget guard's demotions with one count per changed row and returns the body's
+/// predicted count where it stopped. Every rendered row opens with its `## ` heading, so the
+/// body costs each row but the last with one more `"\n"`, one `"\n"` per separator, and the
+/// last row. Demotion empties the newest row only after every older row, so the newest
+/// nonempty row at the start stays the last row of every nonempty body.
+fn demote_by_row_counts(
+    history_segments: &[DecayRenderHistorySegment],
+    tiers: &mut [u8],
+    rendered: &mut [String],
+    guard: &mut usize,
+    history_budget_tokens: f64,
+    estimate_tokens: &impl Fn(&str) -> usize,
+) -> usize {
+    let Some(last) = rendered.iter().rposition(|row| !row.is_empty()) else {
+        return 0;
+    };
+    let newline = estimate_tokens("\n");
+    let joined = |row: &str| -> usize {
+        debug_assert!(row.is_empty() || tokenizer::starts_outside_whitespace(row));
+        if row.is_empty() {
+            0
+        } else {
+            estimate_tokens(&format!("{row}\n")) + newline
+        }
+    };
+    let count = |row: &str| {
+        if row.is_empty() {
+            0
+        } else {
+            estimate_tokens(row)
+        }
+    };
+    let mut joined_counts: Vec<usize> = rendered[..last].iter().map(|row| joined(row)).collect();
+    let mut earlier: usize = joined_counts.iter().sum();
+    let mut last_tokens = count(&rendered[last]);
+    while (earlier + last_tokens) as f64 > history_budget_tokens && *guard > 0 {
+        let Some(i) = demote_oldest(history_segments, tiers, rendered) else {
+            break;
+        };
+        if i == last {
+            last_tokens = count(&rendered[last]);
+        } else if i < last {
+            earlier -= joined_counts[i];
+            joined_counts[i] = joined(&rendered[i]);
+            earlier += joined_counts[i];
+        }
+        *guard -= 1;
+    }
+    earlier + last_tokens
 }
 
 /// Returns the first complete `<tag>...</tag>` slice in byte order.
@@ -771,6 +849,204 @@ mod tests {
             chars(&out)
         );
         assert!(out.contains(" · NEW"), "newest survives: {out}");
+    }
+
+    /// The guard as a whole-body loop: measure the joined body after every demotion.
+    fn whole_body_guard(
+        history_segments: &[DecayRenderHistorySegment],
+        budget: f64,
+        estimate_tokens: impl Fn(&str) -> usize,
+    ) -> (String, usize) {
+        let mut tiers = compute_tiers(history_segments, budget);
+        let mut rendered: Vec<String> = history_segments
+            .iter()
+            .zip(&tiers)
+            .map(|(c, t)| render_one_history_segment(c, *t))
+            .collect();
+        let join = |rendered: &[String]| {
+            let parts: Vec<&str> = rendered
+                .iter()
+                .filter(|r| !r.is_empty())
+                .map(String::as_str)
+                .collect();
+            parts.join("\n\n")
+        };
+        let mut body = join(&rendered);
+        let mut guard = history_segments.len() * 5;
+        while budget > 0.0 && estimate_tokens(&body) as f64 > budget && guard > 0 {
+            let Some(i) = tiers.iter().position(|t| *t < 5) else {
+                break;
+            };
+            tiers[i] += 1;
+            rendered[i] = render_one_history_segment(&history_segments[i], tiers[i]);
+            body = join(&rendered);
+            guard -= 1;
+        }
+        (body, history_segments.len() * 5 - guard)
+    }
+
+    /// Rows whose headings end in whitespace once their bodies decay away, mixed with tiered,
+    /// non-tiered, legacy, and title-only rows.
+    fn guard_rows(rows: i64) -> Vec<DecayRenderHistorySegment> {
+        let words = ["fold", "cache", "it's", "42", "naïve", "->", "x.y", "東京"];
+        (0..rows)
+            .map(|n| {
+                let text = |len: i64| {
+                    (0..len)
+                        .map(|k| words[((n * 7 + k * 3) % words.len() as i64) as usize])
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                DecayRenderHistorySegment {
+                    start_message: 2 * n + 1,
+                    end_message: 2 * n + 2,
+                    title: match n % 6 {
+                        0 => String::new(),
+                        1 => format!("segment {n} "),
+                        2 => format!("segment {n}\u{3000}"),
+                        3 => format!("segment {n}\n"),
+                        _ => format!("segment {n}"),
+                    },
+                    content: if n % 17 == 8 { String::new() } else { text(30) },
+                    p1: (n % 4 != 1).then(|| text(60 + n % 40)),
+                    p2: Some(text(25)),
+                    p3: (n % 3 == 0).then(|| text(8)),
+                    p4: (n % 5 == 0).then(|| text(3)),
+                    importance: Some(10 + (n * 37 % 90) as i32),
+                    legacy: (n % 13 == 6).then_some(1),
+                    ..Default::default()
+                }
+            })
+            .collect()
+    }
+
+    /// The guard renders the bytes of a guard that counts the whole body after every demotion,
+    /// under the exact tokenizer and across budgets that demote rows into whitespace-ended
+    /// headings.
+    #[test]
+    fn row_counted_guard_renders_the_whole_body_guard_bytes() {
+        let mut demotions = Vec::new();
+        for (rows, budgets) in [
+            (40, [60.0, 300.0, 1_200.0, 4_000.0]),
+            (400, [500.0, 6_000.0, 20_000.0, 60_000.0]),
+        ] {
+            let segments = guard_rows(rows);
+            for budget in budgets {
+                let (expected, demoted) =
+                    whole_body_guard(&segments, budget, tokenizer::estimate_tokens);
+                assert_eq!(
+                    render_decayed_history_segments(&segments, budget, tokenizer::estimate_tokens),
+                    expected,
+                    "{rows} rows, budget {budget}"
+                );
+                demotions.push(demoted);
+            }
+        }
+        assert!(
+            demotions.iter().filter(|d| **d > 0).count() >= 4,
+            "{demotions:?}"
+        );
+    }
+
+    /// An estimator that predicts below its body count stops the row-counted demotions early,
+    /// and the whole-body guard finishes them on the same bytes.
+    #[test]
+    fn an_under_predicting_estimator_hands_the_rest_to_the_whole_body_guard() {
+        let quarter = |text: &str| text.len() / 4;
+        let segments = guard_rows(400);
+        let mut handed_over = 0;
+        for budget in [500.0, 6_000.0, 20_000.0] {
+            let (expected, whole_body_demotions) = whole_body_guard(&segments, budget, quarter);
+            assert_eq!(
+                render_decayed_history_segments(&segments, budget, quarter),
+                expected,
+                "budget {budget}"
+            );
+            let mut tiers = compute_tiers(&segments, budget);
+            let mut rendered: Vec<String> = segments
+                .iter()
+                .zip(&tiers)
+                .map(|(c, t)| render_one_history_segment(c, *t))
+                .collect();
+            let mut guard = segments.len() * 5;
+            demote_by_row_counts(
+                &segments,
+                &mut tiers,
+                &mut rendered,
+                &mut guard,
+                budget,
+                &quarter,
+            );
+            let row_demotions = segments.len() * 5 - guard;
+            assert!(row_demotions <= whole_body_demotions, "budget {budget}");
+            handed_over += usize::from(row_demotions < whole_body_demotions);
+        }
+        assert!(handed_over > 0);
+    }
+
+    /// The per-row prediction equals the exact count of the joined body, including rows that
+    /// demotion leaves as headings ending in whitespace.
+    #[test]
+    fn row_counts_predict_the_exact_body_count() {
+        let segments = guard_rows(400);
+        for budget in [500.0, 6_000.0, 20_000.0] {
+            let mut tiers = compute_tiers(&segments, budget);
+            let mut rendered: Vec<String> = segments
+                .iter()
+                .zip(&tiers)
+                .map(|(c, t)| render_one_history_segment(c, *t))
+                .collect();
+            let mut guard = segments.len() * 5;
+            let predicted = demote_by_row_counts(
+                &segments,
+                &mut tiers,
+                &mut rendered,
+                &mut guard,
+                budget,
+                &tokenizer::estimate_tokens,
+            );
+            let blank_ended = rendered
+                .iter()
+                .filter(|row| row.ends_with([' ', '\u{3000}']))
+                .count();
+            assert!(blank_ended > 0, "budget {budget}");
+            let parts: Vec<&str> = rendered
+                .iter()
+                .filter(|row| !row.is_empty())
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                predicted,
+                tokenizer::estimate_tokens(&parts.join("\n\n")),
+                "budget {budget}"
+            );
+        }
+    }
+
+    /// A guard that demotes hundreds of rows counts each row it changes and the whole body
+    /// once to confirm the fit.
+    #[test]
+    fn guard_demotions_count_changed_rows_and_the_body_once() {
+        let segments = guard_rows(2_000);
+        let row_bytes = segments
+            .iter()
+            .map(|s| render_one_history_segment(s, 1).len())
+            .max()
+            .unwrap_or(0);
+        let longer_than_a_row = std::cell::Cell::new(0usize);
+        let chars = |text: &str| {
+            if text.len() > row_bytes + 1 {
+                longer_than_a_row.set(longer_than_a_row.get() + 1);
+            }
+            text.chars().count()
+        };
+        let (expected, demoted) = whole_body_guard(&segments, 20_000.0, |t| t.chars().count());
+        assert!(demoted > 200, "{demoted} demotions");
+        assert_eq!(
+            render_decayed_history_segments(&segments, 20_000.0, chars),
+            expected
+        );
+        assert_eq!(longer_than_a_row.get(), 1);
     }
 
     #[test]
