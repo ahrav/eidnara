@@ -255,6 +255,11 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (FORWARD_LIMITS.some((name) => typeof limits[name] !== "number" || limits[name] <= 0)) {
         return null;
     }
+    if (!Number.isInteger(limits.maxCalls) || !Number.isInteger(limits.maxOutputTokens))
+        return null;
+    if (!Array.isArray(value.incomplete_reasons) || !value.incomplete_reasons.every(text)) {
+        return null;
+    }
     if (value.stopped !== null && !text(value.stopped)) return null;
     const contextLimit = value.context_limit;
     if (typeof contextLimit !== "number" || !Number.isInteger(contextLimit) || contextLimit <= 0) {
@@ -323,7 +328,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         stopped: value.stopped as string | null,
         spent_usd: value.spent_usd,
         complete: value.complete,
-        incomplete_reasons: strings(value.incomplete_reasons),
+        incomplete_reasons: value.incomplete_reasons,
         exchanges,
     };
 }
@@ -795,7 +800,9 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
     // must serve the corpus tier.
     const results = evidence.flatMap((e) => {
         const tier = servedTierOf(e);
-        if (typeof tier !== "string") return [];
+        if (tier === undefined) return [];
+        // A served tier that is present but no string names no tier at all.
+        if (tier === null) return [false];
         const curve = e.detail.curve_tier;
         if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {
             return [
@@ -941,6 +948,28 @@ export function assembleEvidence(input: {
         );
         if (before !== after) refused.push(`the arms generated ${source} from different prompts`);
     }
+    // Each row serves the captures its observations link; those prompts are held equal too, so
+    // an arm cannot hide a differently prompted serving behind a spare capture of the source.
+    const servedPrompts = (side: (typeof arms)[number], row: EvidenceRow) => {
+        const links = new Set(
+            row.evidence
+                .filter((e) => servedTierOf(e) !== undefined)
+                .map((e) => e.detail.generation_capture_sha256)
+                .filter(text),
+        );
+        return JSON.stringify(
+            side.arm.evidence
+                .filter((e) => isGeneration(e) && e.terminal === "published" && links.has(e.sha256))
+                .flatMap((e) => promptHashes(e, "prompt").hashes)
+                .sort(),
+        );
+    };
+    base.rows.forEach((row, i) => {
+        const other = cand.rows[i];
+        if (other && servedPrompts(base, row) !== servedPrompts(cand, other)) {
+            refused.push(`the arms served ${row.scenario.id} from captures with different prompts`);
+        }
+    });
     // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
     // declares, so live arms hold it equal through their reports.
     const forwarded = sides.map((arm) => arm.forwarding[0]?.report ?? null);

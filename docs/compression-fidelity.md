@@ -454,7 +454,7 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
     obligation's disposition and whether the answer preserved it, once per
     obligation; the list of forbidden conclusions it drew, possibly empty;
     and whether it abstained. Its reviewer, like every control reviewer, is a
-    non-blank name. A model judgment carries at least one citation and a
+    non-blank name. A model judgment carries at least one non-blank citation and a
     non-blank uncertainty, or it is a review error; it never counts as review.
   - Approvers are named by non-blank identity; names that differ only by
     surrounding whitespace are one approver, and any other entry in
@@ -489,12 +489,12 @@ either arm; an arm directory is refused before any write, and a component of
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, a pressure delivery's served tier sparser than its recorded `curve_tier`, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails), a pressure delivery's served tier sparser than its recorded `curve_tier`, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record; a `real` arm credits generation only from its published real captures, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked captures. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; its `admission` is a branch that ran an admission check (`fits`, `shrinks`, `limit_unknown`, or `declined`); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record; a `real` arm credits generation only from its published real captures of the row's source, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked ones. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -527,8 +527,9 @@ either arm; an arm directory is refused before any write, and a component of
   source's approved example;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
-- a forwarding report without the four limits the forwarder enforces or
-  positive prices, or whose exchange tool ids are not string arrays;
+- a forwarding report without the four limits the forwarder enforces (whole
+  `maxCalls` and `maxOutputTokens`) or positive prices, whose incomplete
+  reasons are not strings, or whose exchange tool ids are not string arrays;
 - a forwarding report marked complete that lists incomplete reasons or
   records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request
@@ -584,7 +585,8 @@ dispute.
   bound to another corpus or has identity errors, when the arms reached
   different scenario sets, when they differ in model, provider, version,
   settings, limits, or generation origin, or when their published generation
-  records for a source record different user prompts. Held fields compare
+  records for a source, or the captures a row's serving observations link,
+  record different user prompts. Held fields compare
   as JSON with keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
   reports forwarded to different models, upstream endpoints, context limits,

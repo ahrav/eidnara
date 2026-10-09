@@ -42,6 +42,7 @@ export const SETTINGS = { temperature: 0.1, max_output_tokens: 1024 };
 
 export const SERVING = {
     request_body_utf8_bytes: 40_000,
+    admission: "fits",
     invocation_bytes: 39_000,
     invocation_charged_tokens: 11_000,
     estimator: "opencode-heuristic utf8-bytes-div-3.5-v1",

@@ -126,7 +126,9 @@ function judgmentOf(value: unknown): Judgment | null {
     if (!Array.isArray(obligations) || !stringList(value.forbidden_violated)) return null;
     if (value.citations !== undefined && !stringList(value.citations)) return null;
     // A model judgment carries the citations and uncertainty a reader needs to weigh it.
-    if (kind === "model" && (!value.citations?.length || !named(value.uncertainty))) return null;
+    if (kind === "model" && (!value.citations?.length || !value.citations.every(named)))
+        return null;
+    if (kind === "model" && !named(value.uncertainty)) return null;
     const judged: ObligationJudgment[] = [];
     const seen = new Set<string>();
     for (const o of obligations) {
@@ -313,8 +315,11 @@ function isRecovery(evidence: Evidence): boolean {
 }
 
 const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+/** The admission branches that ran an admission check; `none` ran none and charges nothing. */
+const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown", "declined"];
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
     ["request_body_utf8_bytes", measurement],
+    ["admission", (v) => typeof v === "string" && ADMISSIONS.includes(v)],
     ["invocation_bytes", measurement],
     ["invocation_charged_tokens", measurement],
     ["estimator", named],
@@ -374,12 +379,19 @@ function costOf(
             recovery_output_utf8_bytes: e.detail.result_utf8_bytes,
         });
     }
-    // A served row credits the captures its serving observations link to; a row with no link,
-    // such as an exact read, credits the captures of its source.
-    const linked = new Set(evidence.map((s) => s.detail.generation_capture_sha256).filter(text));
+    // A served row credits the captures of its source that its serving observations link to; a
+    // row with no serving observation, such as an exact read, credits every capture of its source.
+    const linked = new Set(
+        evidence
+            .filter((s) => servedTierOf(s) !== undefined)
+            .map((s) => s.detail.generation_capture_sha256)
+            .filter(text),
+    );
     const generation: Json[] = generations
-        .filter((e) =>
-            linked.size > 0 ? linked.has(e.sha256) : evidence.some((s) => s.source === e.source),
+        .filter(
+            (e) =>
+                evidence.some((s) => s.source === e.source) &&
+                (linked.size === 0 || linked.has(e.sha256)),
         )
         .map((e) => ({
             file: e.file,

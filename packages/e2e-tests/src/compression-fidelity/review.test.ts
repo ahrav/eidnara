@@ -633,6 +633,27 @@ describe("eval:compression-fidelity gates", () => {
         expect(row?.cost.missing).toContain(`real.${source}.json: generation usage unreported`);
     });
 
+    test("an exact-read row credits only its own source's captures, whatever its witness links", async () => {
+        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read");
+        const other = corpus.cases.flatMap((c) => c.sources).find((v) => v.id !== exact?.s.source);
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                recapture(dir, exact?.s.source ?? "", (capture) => {
+                    (capture.detail as Record<string, unknown>).usage = null;
+                });
+                const foreign = sha256(readFileSync(join(dir, `real.${other?.id}.json`)));
+                const path = join(dir, `delivery.${exact?.s.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.generation_capture_sha256 = foreign;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === exact?.s.id);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.generation.map((g) => g.file)).toEqual([`real.${exact?.s.source}.json`]);
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
     test("a negative recovery measurement leaves cost incomplete", async () => {
         const entry = allScenarios[1];
         const { report } = await evaluate(scratch(), {
@@ -718,6 +739,8 @@ describe("eval:compression-fidelity gates", () => {
         const cases: Array<[Record<string, unknown>, string]> = [
             [{ ...SERVING, invocation_charged_tokens: "unreported" }, "invocation_charged_tokens"],
             [{ ...SERVING, invocation_bytes: null }, "invocation_bytes"],
+            [{ ...SERVING, admission: "none" }, "admission"],
+            [{ ...SERVING, admission: "maybe" }, "admission"],
             [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
             [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
             [{ ...SERVING, estimator: "" }, "estimator"],
@@ -983,6 +1006,9 @@ describe("eval:compression-fidelity judgments", () => {
             },
             (judgment) => {
                 Object.assign(judgment, { kind: "model", citations: [], uncertainty: "low" });
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", citations: [" "], uncertainty: "low" });
             },
         ];
         for (const edit of edits) {

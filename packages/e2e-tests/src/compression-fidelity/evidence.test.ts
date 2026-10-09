@@ -155,6 +155,45 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(unrecorded)).toContain("records no user prompt");
     });
 
+    test("the prompts of the captures each row serves are held equal, whatever other captures an arm stores", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const served = allScenarios.find(
+            ({ s }) => s.source === source && s.serving.path !== "exact_read",
+        )?.s.id;
+        // Each arm stores a capture for both prompts, so the source-level bags match, but the
+        // baseline serves prompt A and the candidate serves prompt B.
+        const twoCaptures = (dir: string, servedPrompt: string, sparePrompt: string) => {
+            const path = join(dir, `real.${source}.json`);
+            const capture = JSON.parse(readFileSync(path, "utf8"));
+            const attempt = capture.detail.attempts[0];
+            capture.detail.attempts = [{ ...attempt, prompt: servedPrompt }];
+            const linked = write(dir, `real.${source}.json`, capture);
+            write(dir, `real.${source}.spare.json`, {
+                ...capture,
+                stage: "capture-spare",
+                detail: { ...capture.detail, attempts: [{ ...attempt, prompt: sparePrompt }] },
+            });
+            for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+                const file = join(dir, `delivery.${s.id}.json`);
+                const observation = JSON.parse(readFileSync(file, "utf8"));
+                if (observation.detail.generation_capture_sha256 === undefined) continue;
+                observation.detail.generation_capture_sha256 = linked;
+                writeFileSync(file, JSON.stringify(observation));
+            }
+        };
+        const root = scratch();
+        const assembled = await assemble(root, {
+            tamper: (dir) => {
+                twoCaptures(dir, "prompt A", "prompt B");
+                twoCaptures(join(root, "candidate"), "prompt B", "prompt A");
+            },
+        });
+        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(assembled.refused).toContain(
+            `the arms served ${served} from captures with different prompts`,
+        );
+    });
+
     test("a published real capture records settled generation, drained output, and published rows", async () => {
         const unsettled = await assemble(scratch(), { baseline: { capture: { settled: false } } });
         expect(errorsOf(unsettled)).toContain("is published without settled generation");
@@ -782,6 +821,23 @@ describe("evidence deterministic column", () => {
         expect(rowOf(assembled, scenario)?.deterministic).toBe("assertion_fail");
     });
 
+    test("a served observation whose tier is not a string fails the deterministic column", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                write(dir, "served-again.json", {
+                    ...value,
+                    stage: "served-again",
+                    detail: { ...value.detail, served_tier: 1 },
+                });
+            },
+        });
+        expect(errorsOf(assembled)).toBe("");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
     test("a pressure delivery passes when it serves sparser than its curve tier", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
         const pressed = (served: string) =>
@@ -1052,6 +1108,17 @@ describe("evidence live mode", () => {
         expect(
             errorsOf(await live([{ ...complete, incomplete_reasons: ["a send is in flight"] }])),
         ).toContain("complete report lists incomplete reasons: a send is in flight");
+        expect(errorsOf(await live([{ ...complete, incomplete_reasons: [7] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        for (const limits of [
+            { ...LIMITS, maxCalls: 1.5 },
+            { ...LIMITS, maxOutputTokens: 10.5 },
+        ]) {
+            expect(errorsOf(await live([{ ...complete, limits }], limits))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
         for (const limit of [0, -1, 1.5]) {
             expect(errorsOf(await live([{ ...complete, context_limit: limit }]))).toContain(
                 "does not match the forwarding report schema",
