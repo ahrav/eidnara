@@ -25,7 +25,7 @@ import {
     sessionPasses,
 } from "../src/compression-fidelity/delivery";
 import { waitFor } from "../src/harness-primitives";
-import { RustTestHarness } from "../src/rust-harness";
+import { RustTestHarness, requestSessionId } from "../src/rust-harness";
 import { rustPrereqs } from "../src/rust-scenario-support";
 
 /** Set in CI, where a skipped qualification would hide a blocking runtime prerequisite. */
@@ -180,7 +180,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity: fixture qualification", 
         expect(verdict.tier).toBe("p1");
         expect(pass.decision).toMatch(/^[A-Z]+\+?$/);
         expect(pass.reason).toMatch(/^[a-z_]+$/);
-        expect(capture?.request.headers["x-opencode-session-id"]).toBe(sessionId);
+        expect(capture ? requestSessionId(capture.request) : undefined).toBe(sessionId);
         expect(capture?.caseId).toBe(CASE);
     }, 600_000);
 });

@@ -8,12 +8,13 @@
 //! same pin the TypeScript reader in `packages/e2e-tests` enforces, so a changed corpus fails
 //! until both pins move together.
 //!
-//! The module depends only on `serde`, `serde_json`, `sha2`, and the files it embeds from
-//! `testdata/`: the corpus and `memory-category-vocabulary.json`. It names no `crate::` path.
+//! Integration tests can include this module by path, so its imports stay external crates and
+//! its embedded files stay in `testdata/`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
+use aho_corasick::{AhoCorasickBuilder, AhoCorasickKind};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -25,7 +26,7 @@ pub(crate) const CORPUS_BYTES: &[u8] = include_bytes!("../testdata/compression-f
 /// re-authored and re-reviewed; `packages/e2e-tests/src/compression-fidelity/corpus.ts` pins the
 /// same value.
 pub(crate) const CORPUS_SHA256: &str =
-    "46980759b02b7696ea3be9d9b44e43603eed199a404620c3c6d952afbc153800";
+    "14ca3aa94af9d581575e6133f963e5a26ec70a98d5d8c70bf17f77f3e6445fd8";
 
 const SCHEMA: &str = "eidnara.compression-fidelity-corpus/v1";
 
@@ -40,9 +41,6 @@ const EVALUATOR_VOCABULARY: [&str; 7] = [
     "answer key",
 ];
 
-/// The corpus schema. Every string field is either provider input, collected by
-/// `provider_input`, or an evaluator label, collected by `evaluator_labels`, unless it is an ID
-/// or enum; a new string field joins one of the two.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Corpus {
@@ -772,13 +770,17 @@ fn validate_scenarios<'c>(
     exercised
 }
 
-/// Every case serves P1 at m1, P2 to P4 naturally, and at least one pressure or omission path.
 fn validate_coverage(case: &Case, out: &mut Vec<Violation>) {
-    for tier in [Tier::P1, Tier::P2, Tier::P3, Tier::P4] {
+    for (tier, stage) in [
+        (Tier::P1, Stage::M1),
+        (Tier::P2, Stage::M0),
+        (Tier::P3, Stage::M0),
+        (Tier::P4, Stage::M0),
+    ] {
         let covered = case.scenarios.iter().any(|s| {
             s.serving.path == ServingPath::Natural
                 && s.serving.tier == Some(tier)
-                && (tier != Tier::P1 || s.serving.stage == Some(Stage::M1))
+                && s.serving.stage == Some(stage)
         });
         if !covered {
             out.push(Violation::MissingTier {
@@ -877,9 +879,29 @@ fn validate_source(source: &Source, out: &mut Vec<Violation>) {
             }
         }
     }
+    let mut successor_blocks = BTreeMap::new();
     for successor in &source.successors {
         validate_message(source, successor, out);
         validate_successor(source, successor, out);
+        // A span names a block by message, index, and revision, so two successors that give one
+        // such block different bytes leave the span ambiguous.
+        let mut conflicts = false;
+        for (index, part) in successor.parts.iter().enumerate() {
+            let key = (
+                successor.info.id.as_str(),
+                index,
+                block_revision(successor, part),
+            );
+            conflicts |=
+                *successor_blocks.entry(key).or_insert(block_text(part)) != block_text(part);
+        }
+        if conflicts {
+            out.push(Violation::Successor {
+                source: source.id.clone(),
+                message_id: successor.info.id.clone(),
+                problem: "a block has one byte string at each revision",
+            });
+        }
     }
 }
 
@@ -972,8 +994,8 @@ fn validate_span(case: &Case, owner: &str, span: &Span, out: &mut Vec<Violation>
     }
 }
 
-/// The provider-reachable strings of one part: a text part's text, or a tool's name, every key
-/// and string of its input, and its output or error.
+/// The provider-reachable strings of one part: a text part's text, or a tool's call id, name,
+/// every key and string of its input, and its output or error.
 fn part_texts(part: &Part) -> Vec<String> {
     fn strings(value: &Value, into: &mut Vec<String>) {
         match value {
@@ -988,8 +1010,13 @@ fn part_texts(part: &Part) -> Vec<String> {
     }
     match part {
         Part::Text { text, .. } => vec![text.clone()],
-        Part::Tool { tool, state, .. } => {
-            let mut texts = vec![tool.clone()];
+        Part::Tool {
+            call_id,
+            tool,
+            state,
+            ..
+        } => {
+            let mut texts = vec![call_id.clone(), tool.clone()];
             strings(&state.input, &mut texts);
             texts.extend(state.output.clone());
             texts.extend(state.error.clone());
@@ -1029,15 +1056,16 @@ fn provider_input(corpus: &Corpus) -> Vec<(String, String)> {
     fields
 }
 
-/// Every answer key and evaluator label: corpus IDs, obligation and loss statements, forbidden
-/// conclusions, scenario descriptions, memory eligibility notes, and evaluation vocabulary.
 fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
     let mut labels = EVALUATOR_VOCABULARY.map(String::from).to_vec();
+    labels.push(corpus.note.clone());
     for case in &corpus.cases {
-        let ids = case
-            .sources
-            .iter()
-            .map(|s| &s.id)
+        labels.push(case.title.clone());
+        if let Provenance::Incident { reference } = &case.provenance {
+            labels.push(reference.clone());
+        }
+        let ids = std::iter::once(&case.id)
+            .chain(case.sources.iter().map(|s| &s.id))
             .chain(case.follow_ups.iter().map(|f| &f.id))
             .chain(case.memory_examples.iter().map(|m| &m.id))
             .chain(case.obligations.iter().map(|o| &o.id))
@@ -1055,23 +1083,40 @@ fn evaluator_labels(corpus: &Corpus) -> Vec<String> {
         labels.extend(case.scenarios.iter().map(|s| s.description.clone()));
         labels.extend(case.memory_examples.iter().map(|m| m.eligibility.clone()));
     }
+    labels.retain(|label| !label.trim().is_empty());
     labels
 }
 
+/// Short label seeds keep the automaton small; each seed hit is confirmed against its whole label.
+const LABEL_SEED_BYTES: usize = 8;
+
+/// Overlapping matching reports every seed occurrence, including a seed inside another label, so
+/// every label a field contains is confirmed at one of its seed hits.
 fn answer_key_exclusion(corpus: &Corpus, out: &mut Vec<Violation>) {
-    let labels: Vec<(String, String)> = evaluator_labels(corpus)
-        .into_iter()
-        .map(|label| (label.to_lowercase(), label))
-        .collect();
+    let labels = evaluator_labels(corpus);
+    let needles: Vec<String> = labels.iter().map(|label| label.to_lowercase()).collect();
+    let seeds = needles
+        .iter()
+        .map(|needle| &needle.as_bytes()[..needle.len().min(LABEL_SEED_BYTES)]);
+    let matcher = AhoCorasickBuilder::new()
+        .kind(Some(AhoCorasickKind::NoncontiguousNFA))
+        .build(seeds)
+        .expect("evaluator label seeds build one matcher");
     for (field, text) in provider_input(corpus) {
         let haystack = text.to_lowercase();
-        for (needle, label) in &labels {
-            if haystack.contains(needle.as_str()) {
-                out.push(Violation::AnswerKeyInProviderInput {
-                    field: field.clone(),
-                    label: label.clone(),
-                });
-            }
+        let found: BTreeSet<usize> = matcher
+            .find_overlapping_iter(&haystack)
+            .map(|seed| (seed.start(), seed.pattern().as_usize()))
+            .filter(|&(start, index)| {
+                haystack.as_bytes()[start..].starts_with(needles[index].as_bytes())
+            })
+            .map(|(_, index)| index)
+            .collect();
+        for index in found {
+            out.push(Violation::AnswerKeyInProviderInput {
+                field: field.clone(),
+                label: labels[index].clone(),
+            });
         }
     }
 }

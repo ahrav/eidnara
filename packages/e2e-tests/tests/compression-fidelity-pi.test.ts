@@ -6,6 +6,7 @@ import { readCompressionFidelityCorpus } from "../src/compression-fidelity/corpu
 import {
     emitObservation,
     leaksOutside,
+    publishedOf,
     reviewedTiers,
     servedTier,
     stageOf,
@@ -127,8 +128,7 @@ async function published(stack: HermeticHostStack, project: string): Promise<num
         { project_root: project, harness: "pi", session: SESSION },
         { method: "session.status", v: 1, session_id: SESSION },
     );
-    const summarizer = status.history_summarizer as { counters?: { published?: number } };
-    return summarizer?.counters?.published ?? 0;
+    return publishedOf(status);
 }
 
 describe("compression fidelity pi delivery prerequisites", () => {
@@ -222,11 +222,12 @@ describe.skipIf(!active)("compression fidelity delivery through the Pi context h
                 const before = harness.requests.length;
                 await harness.session.prompt("m1: should I implement pooling first?");
                 expect(harness.requests.length).toBeGreaterThan(before);
-                const texts = (harness.requests.at(-1)?.messages ?? []).map(textOf);
+                const request = harness.requests.at(-1);
+                const texts = (request?.messages ?? []).map(textOf);
                 const m1 = {
                     stage: stageOf(texts, title),
                     tier: servedTier(texts, title, bodies),
-                    leaks: leaksOutside(texts, source.leakProbes),
+                    leaks: leaksOutside([request?.systemPrompt ?? "", ...texts], source.leakProbes),
                 };
                 record("m1", m1.stage, m1.tier, m1.leaks, texts.length);
                 expect(m1).toEqual({ stage: "m1", tier: "p1", leaks: [] });
@@ -239,11 +240,12 @@ describe.skipIf(!active)("compression fidelity delivery through the Pi context h
                 const before = harness.requests.length;
                 await harness.session.prompt("cold: should I implement pooling first?");
                 expect(harness.requests.length).toBeGreaterThan(before);
-                const texts = (harness.requests.at(-1)?.messages ?? []).map(textOf);
+                const request = harness.requests.at(-1);
+                const texts = (request?.messages ?? []).map(textOf);
                 const cold = {
                     stage: stageOf(texts, title),
                     tier: servedTier(texts, title, bodies),
-                    leaks: leaksOutside(texts, source.leakProbes),
+                    leaks: leaksOutside([request?.systemPrompt ?? "", ...texts], source.leakProbes),
                 };
                 record("cold-m0", cold.stage, cold.tier, cold.leaks, texts.length);
                 expect(cold).toEqual({ stage: "m0", tier: "p1", leaks: [] });

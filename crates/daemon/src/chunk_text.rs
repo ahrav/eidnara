@@ -191,7 +191,7 @@ pub(crate) fn compact_role(role: &str) -> String {
 
 fn system_reminder_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?is)<system-reminder>[\s\S]*?</system-reminder>").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i:<system-reminder>)[\s\S]*?(?i:</system-reminder>)").unwrap())
 }
 
 fn commit_hash_extract_regex() -> &'static Regex {
@@ -236,7 +236,7 @@ fn space_before_punct_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_COMMITS_PER_BLOCK, merge_commit_hashes};
+    use super::{MAX_COMMITS_PER_BLOCK, clean_user_text, merge_commit_hashes};
 
     fn hashes(prefix: &str, count: usize) -> Vec<String> {
         (0..count).map(|i| format!("{prefix}{i}")).collect()
@@ -270,5 +270,22 @@ mod tests {
                 assert!(merged.len() <= MAX_COMMITS_PER_BLOCK);
             }
         }
+    }
+
+    #[test]
+    fn system_reminders_are_removed_whatever_the_tag_case_and_body() {
+        for text in [
+            "a<system-reminder>x</system-reminder>b",
+            "a<SYSTEM-REMINDER>x\n\ny</System-Reminder>b",
+            "a<\u{17f}y\u{17f}tem-reminder>x</system-reminder>b",
+            "a<system-reminder></system-reminder>b",
+            "a<system-reminder>\u{1F600} <system-reminder></system-reminder>b",
+        ] {
+            assert_eq!(clean_user_text(text), "ab", "{text:?}");
+        }
+        assert_eq!(
+            clean_user_text("a<system-reminder>unterminated b"),
+            "a<system-reminder>unterminated b"
+        );
     }
 }
