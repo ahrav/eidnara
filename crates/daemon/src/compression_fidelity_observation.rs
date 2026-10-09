@@ -23,6 +23,8 @@ pub(crate) enum Terminal {
     DriftRejected,
     InputTruncated,
     ReadExact,
+    /// The run did not settle within its wait, or never started a producer.
+    Unsettled,
 }
 
 #[derive(Debug, Serialize)]

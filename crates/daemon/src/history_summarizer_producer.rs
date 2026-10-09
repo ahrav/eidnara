@@ -27,8 +27,8 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_RUNNER_MODULE_ID: &str = "model_execution";
-const HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS: u32 = 32_000;
-const HISTORY_SUMMARIZER_TEMPERATURE: f64 = 0.1;
+pub(crate) const HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS: u32 = 32_000;
+pub(crate) const HISTORY_SUMMARIZER_TEMPERATURE: f64 = 0.1;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_AWAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const RECOVERY_REDRAIN_TIMEOUT: Duration = Duration::from_secs(60);

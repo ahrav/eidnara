@@ -1366,13 +1366,13 @@ impl RecordingDriver {
             },
         };
         let mut attempts = self.attempts.lock().unwrap();
-        if let Some(attempt) = attempts
+        attempts
             .iter_mut()
             .rev()
             .find(|a| a.run_id.as_deref() == Some(run_id))
-        {
-            attempt.outputs.push(recorded);
-        }
+            .unwrap_or_else(|| panic!("output drained for unrecorded run {run_id}"))
+            .outputs
+            .push(recorded);
         output
     }
 }
@@ -1386,6 +1386,7 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
         self.inner.bind_session(session_id).await
     }
 
+    /// Starts with the settings the real producer's `start` applies, so the record names them.
     async fn start(
         &mut self,
         session_id: &str,
@@ -1393,18 +1394,15 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
         prompt: &str,
         model: &str,
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
-        let started = self.inner.start(session_id, system, prompt, model).await;
-        self.started(
-            RecordedAttempt {
-                session_id: session_id.into(),
-                model: model.into(),
-                system: system.into(),
-                prompt: prompt.into(),
-                ..RecordedAttempt::default()
-            },
-            &started,
-        );
-        started
+        self.start_with_generation(
+            session_id,
+            system,
+            prompt,
+            model,
+            crate::history_summarizer_producer::HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS,
+            crate::history_summarizer_producer::HISTORY_SUMMARIZER_TEMPERATURE,
+        )
+        .await
     }
 
     async fn start_with_generation(
@@ -1532,24 +1530,13 @@ async fn capture_sources(
         messages.extend(live_tail(follow_up, next));
         let request = request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
         let first = call_transform_request(&handler, request).await;
-        let deadline = std::time::Instant::now() + wait;
-        let settled = loop {
-            let idle = store.load("ses").unwrap().meta.history_summarizer.state
-                == HistorySummarizerPhase::Idle;
-            if idle && !attempts.lock().unwrap().is_empty() {
-                break true;
-            }
-            if std::time::Instant::now() >= deadline {
-                break false;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        };
+        let settled = wait_settled(&store, &attempts, wait).await;
         let rows = store.load_history_segments("ses").unwrap();
         let attempts = attempts.lock().unwrap().clone();
-        let terminal = if rows.is_empty() {
-            Terminal::ValidationRejected
-        } else {
-            Terminal::Published
+        let terminal = match (settled, rows.is_empty()) {
+            (false, _) => Terminal::Unsettled,
+            (true, true) => Terminal::ValidationRejected,
+            (true, false) => Terminal::Published,
         };
         captured.push(
             Observation::new(
@@ -1582,24 +1569,54 @@ async fn capture_sources(
     captured
 }
 
-/// The directory capture records go to: required, and outside the repository.
-fn private_capture_dir() -> PathBuf {
-    let dir = PathBuf::from(
-        std::env::var_os(OBSERVATIONS_DIR)
-            .unwrap_or_else(|| panic!("{OBSERVATIONS_DIR} must name a private directory")),
-    );
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
+/// Whether the run settled: the summarizer is idle after at least one producer start.
+async fn wait_settled(store: &MemoryStore, attempts: &AttemptLog, wait: Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let idle = store.load("ses").unwrap().meta.history_summarizer.state
+            == HistorySummarizerPhase::Idle;
+        if idle && !attempts.lock().unwrap().is_empty() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// `dir` as an owner-only directory outside the repository: created with mode `0700` when
+/// absent, refused when it lies inside the repository or exists with any other mode or owner.
+fn private_capture_dir(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let absolute = std::path::absolute(dir).unwrap();
+    let existing = absolute.ancestors().find(|a| a.exists()).unwrap();
+    let real = existing
+        .canonicalize()
+        .unwrap()
+        .join(absolute.strip_prefix(existing).unwrap());
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap();
     assert!(
-        !dir.starts_with(&repository),
+        !real.starts_with(&repository),
         "{} is inside the repository",
-        dir.display()
+        real.display()
     );
-    dir
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&real)
+        .unwrap();
+    let meta = std::fs::metadata(&real).unwrap();
+    assert!(
+        meta.permissions().mode() & 0o777 == 0o700
+            && meta.uid() == rustix::process::getuid().as_raw(),
+        "{} is not an owner-only directory",
+        real.display()
+    );
+    real
 }
 
 /// Opt-in real capture of every corpus source through the host's existing producer
@@ -1615,14 +1632,24 @@ async fn real_producer_capture_of_every_corpus_source() {
     let connection_file = PathBuf::from(required(REAL_CONNECTION_FILE));
     let model = required(REAL_MODEL);
     let wait = Duration::from_secs(required(REAL_WAIT_SECONDS).parse().unwrap());
-    let dir = private_capture_dir();
+    let dir = private_capture_dir(Path::new(
+        &std::env::var_os(OBSERVATIONS_DIR)
+            .unwrap_or_else(|| panic!("{OBSERVATIONS_DIR} must name a private directory")),
+    ));
     let factory = Arc::new(RealHistorySummarizerProducerFactory {
         connection_file,
         cancellation: CancellationToken::new(),
     });
-    for record in capture_sources(factory, &model, "real producer through the host", wait).await {
+    let records = capture_sources(factory, &model, "real producer through the host", wait).await;
+    for record in &records {
         record.emit_to(&dir);
     }
+    let unsettled: Vec<&str> = records
+        .iter()
+        .filter(|record| record.terminal == Terminal::Unsettled)
+        .map(|record| record.source.as_str())
+        .collect();
+    assert!(unsettled.is_empty(), "unsettled sources: {unsettled:?}");
 }
 
 /// The capture records a scripted producer's run with the fields a real capture carries.
@@ -1650,8 +1677,10 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     )
     .await;
     assert_eq!(records.len(), sources().count());
+    let started = producer.attempts.lock().unwrap().clone();
+    assert_eq!(started.len(), records.len());
     let dir = tempfile::tempdir().unwrap();
-    for (record, (case, source)) in records.iter().zip(sources()) {
+    for ((record, (case, source)), start) in records.iter().zip(sources()).zip(&started) {
         let read: Value =
             serde_json::from_slice(&std::fs::read(record.emit_to(dir.path())).unwrap()).unwrap();
         assert_eq!(read["owner"], REAL_OWNER);
@@ -1665,24 +1694,144 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
         assert_eq!(detail["usage"], Value::Null);
         assert_eq!(detail["usage_reported"], false);
         let attempt = &detail["attempts"][0];
-        assert_eq!(attempt["model"], "probe/model");
+        assert_eq!(attempt["session_id"], start.session_id.as_str());
+        assert_eq!(attempt["model"], start.model.as_str());
+        assert_eq!(attempt["system"], start.system.as_str());
+        assert_eq!(attempt["prompt"], start.prompt.as_str(), "{}", source.id);
         assert_eq!(
-            attempt["system"],
-            crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT
+            attempt["max_output_tokens"],
+            crate::history_summarizer_producer::HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS
         );
-        let prompt = attempt["prompt"].as_str().unwrap();
         assert_eq!(
-            prompt_ordinal_range(prompt),
-            Some((1, source.messages.len() as u64)),
-            "{}: the complete chunk input",
-            source.id
+            attempt["temperature"],
+            crate::history_summarizer_producer::HISTORY_SUMMARIZER_TEMPERATURE
         );
+        assert_eq!(attempt["outputs"].as_array().unwrap().len(), 1);
         assert_eq!(
             attempt["outputs"][0]["text"],
             source.approved_example.as_str()
         );
         assert_eq!(detail["published_rows"].as_array().unwrap().len(), 1);
     }
+}
+
+/// The recorder keeps a start error and every drained output or error of a run, in order.
+#[tokio::test(flavor = "current_thread")]
+async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .start_errors
+        .lock()
+        .unwrap()
+        .push_back(Err(HistorySummarizerProducerError::Client(
+            history_summarizer_producer::HistorySummarizerClientFailure {
+                code: "probe_refused".to_owned(),
+                message: "probe".to_owned(),
+            },
+        )));
+    producer.await_results.lock().unwrap().extend([
+        Err(HistorySummarizerProducerError::Client(
+            history_summarizer_producer::HistorySummarizerClientFailure {
+                code: "probe_lost".to_owned(),
+                message: "probe".to_owned(),
+            },
+        )),
+        Ok(ProducerOutput {
+            text: "second".to_owned(),
+            length_capped: true,
+        }),
+    ]);
+    let attempts: AttemptLog = Arc::default();
+    let factory = RecordingFactory {
+        inner: Arc::new(TestProducerFactory {
+            state: Arc::clone(&producer),
+        }),
+        attempts: Arc::clone(&attempts),
+    };
+    let mut driver = factory
+        .connect(Path::new("/"), "opencode", &Default::default())
+        .await
+        .unwrap();
+    assert!(driver.start("s", "sys", "p1", "m").await.is_err());
+    let run = driver.start("s", "sys", "p2", "m").await.unwrap();
+    assert!(driver.await_output(&run.run_id).await.is_err());
+    assert_eq!(
+        driver.redrain_output(&run.run_id).await.unwrap().text,
+        "second"
+    );
+    let recorded = attempts.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2);
+    assert!(
+        recorded[0]
+            .start_error
+            .as_deref()
+            .unwrap()
+            .contains("probe_refused")
+    );
+    assert!(recorded[0].run_id.is_none() && recorded[0].outputs.is_empty());
+    assert_eq!(recorded[1].prompt, "p2");
+    assert_eq!(recorded[1].run_id.as_deref(), Some(run.run_id.as_str()));
+    let [lost, second] = recorded[1].outputs.as_slice() else {
+        panic!("two drained outcomes: {:?}", recorded[1].outputs);
+    };
+    assert!(lost.error.as_deref().unwrap().contains("probe_lost"));
+    assert_eq!(
+        (second.text.as_deref(), second.length_capped),
+        (Some("second"), Some(true))
+    );
+}
+
+/// A source whose producer never starts is recorded unsettled, not rejected.
+#[tokio::test(flavor = "current_thread")]
+async fn a_capture_whose_producer_never_starts_is_recorded_unsettled() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .connect_errors
+        .lock()
+        .unwrap()
+        .extend(sources().map(|_| {
+            HistorySummarizerProducerError::Client(
+                history_summarizer_producer::HistorySummarizerClientFailure {
+                    code: "connection_unavailable".to_owned(),
+                    message: "probe".to_owned(),
+                },
+            )
+        }));
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted",
+        Duration::from_millis(200),
+    )
+    .await;
+    assert_eq!(records.len(), sources().count());
+    for record in &records {
+        assert_eq!(record.terminal, Terminal::Unsettled, "{}", record.source);
+        assert_eq!(record.detail["settled"], false);
+        assert_eq!(record.detail["attempt_count"], 0);
+    }
+}
+
+#[test]
+fn the_capture_directory_is_owner_only_and_outside_the_repository() {
+    use std::os::unix::fs::PermissionsExt;
+    let inside = Path::new(env!("CARGO_MANIFEST_DIR")).join("target-capture-probe");
+    let refused = std::panic::catch_unwind(|| private_capture_dir(&inside));
+    assert!(refused.is_err());
+    assert!(!inside.exists());
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = private_capture_dir(&dir.path().join("captures"));
+    assert_eq!(
+        std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let shared = dir.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(std::panic::catch_unwind(|| private_capture_dir(&shared)).is_err());
 }
 
 #[test]
