@@ -531,6 +531,7 @@ describe("eval:compression-fidelity gates", () => {
                         stopped: null,
                         complete: false,
                         incomplete_reasons: ["cost unknown for a send"],
+                        refusals: [],
                         exchanges: [
                             {
                                 index: 0,

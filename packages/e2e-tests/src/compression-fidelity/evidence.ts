@@ -100,6 +100,8 @@ export interface ForwardingEvidence {
     limits: Json;
     /** The reason the forwarder stopped, when it did. */
     stopped: string | null;
+    /** The requests the forwarder refused to send. */
+    refusals: string[];
     spent_usd: number;
     complete: boolean;
     incomplete_reasons: string[];
@@ -112,6 +114,8 @@ export interface ForwardingEvidence {
         request: { body_text: string; body_sha256: string };
         response: {
             outcome: string;
+            /** The cost charged against the cap for this send. */
+            cost_usd: number;
             /** The model the response names; `null` when it names none. */
             model: string | null;
             stop_reason: string | null;
@@ -121,8 +125,6 @@ export interface ForwardingEvidence {
             cost_known: boolean;
             /** The provider's token usage, `null` when the response reported none. */
             usage: Json | null;
-            /** The cost charged against the cap: from usage when known, else the reservation. */
-            cost_usd: number;
         } | null;
     }>;
 }
@@ -289,6 +291,10 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!Array.isArray(reasons) || !reasons.every((reason) => typeof reason === "string")) {
         return null;
     }
+    const refusals = value.refusals;
+    if (!Array.isArray(refusals) || !refusals.every((refusal) => typeof refusal === "string")) {
+        return null;
+    }
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -333,6 +339,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             response: response
                 ? {
                       outcome: response.outcome as string,
+                      cost_usd: response.cost_usd as number,
                       model: response.model as string | null,
                       stop_reason: response.stop_reason as string | null,
                       truncated: response.truncated as boolean,
@@ -340,7 +347,6 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
                       body_sha256: response.body_sha256 as string | null,
                       cost_known: response.cost_known as boolean,
                       usage: response.usage as Json | null,
-                      cost_usd: response.cost_usd as number,
                   }
                 : null,
         });
@@ -354,6 +360,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         pricing: { inputPerMTok: pricing.inputPerMTok, outputPerMTok: pricing.outputPerMTok },
         limits: value.limits,
         stopped: value.stopped as string | null,
+        refusals,
         spent_usd: spent,
         complete: value.complete,
         incomplete_reasons: reasons,
@@ -442,17 +449,26 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     for (const reason of report.complete ? report.incomplete_reasons : []) {
         errors.push(`${file} complete report lists an incomplete reason: ${reason}`);
     }
+    for (const refusal of report.complete ? report.refusals : []) {
+        errors.push(`${file} complete report records a refusal: ${refusal}`);
+    }
+    const maxCalls = report.limits.maxCalls as number;
+    if (report.exchanges.length > maxCalls) {
+        errors.push(
+            `${file} records ${report.exchanges.length} exchanges above its ${maxCalls} call cap`,
+        );
+    }
+    // Spend is the sum of every settled send's charge, as the forwarder keeps it.
+    const charged = report.exchanges.reduce((sum, e) => sum + (e.response?.cost_usd ?? 0), 0);
+    if (Math.abs(charged - report.spent_usd) > 1e-9) {
+        errors.push(
+            `${file} spent ${report.spent_usd} USD, where its exchanges cost ${charged} USD`,
+        );
+    }
     const cap = report.limits.spendCapUsd;
     if (report.complete && typeof cap === "number" && report.spent_usd > cap) {
         errors.push(
             `${file} complete report spent ${report.spent_usd} USD above its ${cap} USD cap`,
-        );
-    }
-    // The forwarder's spend is the sum of its settled exchanges' costs.
-    const costs = report.exchanges.reduce((sum, x) => sum + (x.response?.cost_usd ?? 0), 0);
-    if (report.complete && Math.abs(costs - report.spent_usd) > 1e-9) {
-        errors.push(
-            `${file} complete report spent ${report.spent_usd} USD, where its exchanges cost ${costs} USD`,
         );
     }
     for (const exchange of report.exchanges) {
@@ -619,7 +635,11 @@ export async function loadArm(
             arm.errors.push(`${name} has no ${text(value.stage) ? "terminal" : "stage"}`);
             continue;
         }
-        const detail = record(value.detail) ? value.detail : {};
+        if (!record(value.detail)) {
+            arm.errors.push(`${name} has no detail record`);
+            continue;
+        }
+        const detail = value.detail;
         if (owner === "opencode-delivery" && detail.judge_control === true) {
             if (value.stage !== JUDGE_CONTROL.stage) {
                 arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
@@ -983,15 +1003,17 @@ export function assembleEvidence(input: {
     // The user prompt each source was generated from is held equal; only the system prompt is
     // the treatment.
     for (const { source } of sources(corpus)) {
-        const [before, after] = sides.map((arm) =>
-            JSON.stringify(
+        // Retries repeat a prompt; the distinct prompts are what must agree.
+        const distinctPrompts = (arm: Arm) =>
+            new Set(
                 arm.evidence
                     .filter(
                         (e) => isGeneration(e) && e.terminal === "published" && e.source === source,
                     )
-                    .flatMap((e) => promptHashes(e, "prompt").hashes)
-                    .sort(),
-            ),
+                    .flatMap((e) => promptHashes(e, "prompt").hashes),
+            );
+        const [before, after] = sides.map((arm) =>
+            JSON.stringify([...distinctPrompts(arm)].sort()),
         );
         if (before !== after) refused.push(`the arms generated ${source} from different prompts`);
     }
@@ -1004,12 +1026,13 @@ export function assembleEvidence(input: {
                 .map((e) => e.detail.generation_capture_sha256)
                 .filter(text),
         );
-        return JSON.stringify(
+        // Retries repeat a prompt; the distinct prompts are what must agree.
+        const distinct = new Set(
             side.arm.evidence
                 .filter((e) => isGeneration(e) && e.terminal === "published" && links.has(e.sha256))
-                .flatMap((e) => promptHashes(e, "prompt").hashes)
-                .sort(),
+                .flatMap((e) => promptHashes(e, "prompt").hashes),
         );
+        return JSON.stringify([...distinct].sort());
     };
     base.rows.forEach((row, i) => {
         const other = cand.rows[i];

@@ -506,7 +506,8 @@ either arm; an arm directory is refused before any write, and a component of
 - a scenario observation whose source is not the source its corpus scenario
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
-- an observation with no `stage` or no `terminal`;
+- an observation with no `stage`, no `terminal`, or a `detail` that is not an
+  object;
 - an `opencode-delivery` observation without a scenario label, or marked
   `detail.judge_control` other than at stage `missing-capture` on `C1.S2`,
   the delivery witness's judge self-test;
@@ -532,13 +533,14 @@ either arm; an arm directory is refused before any write, and a component of
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
-  `maxCalls` and `maxOutputTokens`), positive prices, a nonnegative spend and
-  exchange `cost_usd`, string incomplete reasons, or an HTTPS Messages
+  call and token counts), positive prices, a nonnegative spend and exchange
+  `cost_usd`, string incomplete reasons and refusals, or an HTTPS Messages
   endpoint free of credential and query, or whose exchange tool ids are not
   string arrays;
-- a forwarding report marked complete that lists an incomplete reason,
-  records a stop, no send, a spend other than the sum of its exchanges'
-  costs, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
+- a forwarding report with more exchanges than its `maxCalls`, or whose
+  `spent_usd` differs from the sum of its exchanges' `cost_usd`;
+- a forwarding report marked complete that lists an incomplete reason or a
+  refusal, records a stop, no send, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason or naming no model or a
   model other than the report's, a known cost without usage, a truncated response, an unknown cost, a
@@ -591,10 +593,10 @@ dispute.
   observations charge tokens under different estimators, when an arm is
   bound to another corpus or has identity errors, when the arms reached
   different scenario sets, when they differ in model, provider, version,
-  settings, limits, or generation origin, or when their published generation
-  records for a source, or the captures a row's serving observations link,
-  record different user prompts. Held fields compare
-  as JSON with keys in UTF-16 code-unit order.
+  settings, limits, or generation origin, or when the distinct user prompts
+  their published generation records for a source record differ, or the
+  distinct prompts of the captures a row's serving observations link differ. Held fields compare as JSON with
+  keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
   reports forwarded to different models, upstream endpoints, context limits,
   or prices. The

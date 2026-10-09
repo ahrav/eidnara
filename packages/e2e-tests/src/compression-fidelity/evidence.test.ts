@@ -153,6 +153,11 @@ describe("evidence identity and completeness", () => {
             baseline: { attempt: { prompt: undefined } },
         });
         expect(errorsOf(unrecorded)).toContain("records no user prompt");
+        const retried = await assemble(scratch(), {
+            baseline: { attempts: (attempt) => [attempt, attempt] },
+        });
+        expect(retried.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(retried.refused).toEqual([]);
     });
 
     test("the prompts of the captures each row serves are held equal, whatever other captures an arm stores", async () => {
@@ -255,6 +260,20 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(unrecorded)).toContain(
             "ran max_output_tokens undefined, not the arm's 1024",
         );
+    });
+
+    test("an observation whose detail is not an object is an identity error", async () => {
+        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read")?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${exact}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail = null;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toContain(`delivery.${exact}.json has no detail record`);
+        expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
     });
 
     test("an observation without a stage or terminal is an identity error", async () => {
@@ -1069,6 +1088,7 @@ describe("evidence live mode", () => {
             context_limit: 200_000,
             pricing: { inputPerMTok: 3, outputPerMTok: 15 },
             stopped: null as string | null,
+            refusals: [] as string[],
             spent_usd: 0.5,
             limits: LIMITS as Record<string, number>,
             complete,
@@ -1081,6 +1101,7 @@ describe("evidence live mode", () => {
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
                         outcome: "acknowledged",
+                        cost_usd: 0.5,
                         model: "claude-live" as string | null,
                         stop_reason: "end_turn" as string | null,
                         truncated: false,
@@ -1092,7 +1113,6 @@ describe("evidence live mode", () => {
                             cache_creation_input_tokens: 0,
                             cache_read_input_tokens: 0,
                         } as Record<string, number> | null,
-                        cost_usd: 0.5,
                         cost_known: true,
                     },
                 },
@@ -1203,7 +1223,7 @@ describe("evidence live mode", () => {
             "exchange 0 claims a known cost without usage in a complete report",
         );
         expect(errorsOf(await live([{ ...complete, spent_usd: 0.75 }]))).toContain(
-            "complete report spent 0.75 USD, where its exchanges cost 0.5 USD",
+            "spent 0.75 USD, where its exchanges cost 0.5 USD",
         );
         const uncosted = forwardingReport("{}", sha256("{}"), true);
         const [free] = uncosted.exchanges;
@@ -1373,6 +1393,29 @@ describe("evidence live mode", () => {
             errorsOf(await live([{ ...report, incomplete_reasons: ["a send is in flight"] }])),
         ).toContain("complete report lists an incomplete reason: a send is in flight");
         expect(errorsOf(await live([{ ...report, incomplete_reasons: [1] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        for (const limits of [
+            { ...LIMITS, maxCalls: 1.5 },
+            { ...LIMITS, maxOutputTokens: 1024.5 },
+        ]) {
+            expect(errorsOf(await live([{ ...report, limits }], limits))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
+        const oneCall = { ...LIMITS, maxCalls: 1 };
+        const second = { ...report.exchanges[0], index: 1 };
+        const overCap = { ...report, limits: oneCall, exchanges: [...report.exchanges, second] };
+        expect(errorsOf(await live([overCap], oneCall))).toContain(
+            "records 2 exchanges above its 1 call cap",
+        );
+        expect(errorsOf(await live([{ ...report, spent_usd: 0.25 }]))).toContain(
+            "spent 0.25 USD, where its exchanges cost 0.5 USD",
+        );
+        expect(
+            errorsOf(await live([{ ...report, refusals: ["limits.maxCalls reached"] }])),
+        ).toContain("complete report records a refusal: limits.maxCalls reached");
+        expect(errorsOf(await live([{ ...report, refusals: [1] }]))).toContain(
             "does not match the forwarding report schema",
         );
         for (const spent of [-0.01, Number.NaN, Number.POSITIVE_INFINITY]) {
