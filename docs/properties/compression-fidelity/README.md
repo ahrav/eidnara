@@ -135,8 +135,9 @@ The five added generation markers and delivery's 14-marker set cannot be
 replaced by one successful path.
 
 Reachability labels describe each record's surface, not exercise or deployed
-assertions. Absent evaluation/forwarding surfaces are `test-only`, even though
-future live capture requires explicit configuration. That does not relabel
+assertions. The absent evaluation surface and the opt-in forwarding mode of
+the e2e mock are `test-only`, even though live capture requires explicit
+configuration. That does not relabel
 the underlying production generation, storage, renderer, or registry paths.
 Production boundary documentation and the normative
 [host wire contract](../../host-wire-protocol.md) remain distinct from these

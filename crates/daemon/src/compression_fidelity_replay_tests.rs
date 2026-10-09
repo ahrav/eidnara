@@ -1382,6 +1382,7 @@ const REAL_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const REAL_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const REAL_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 const REAL_OWNER: &str = "daemon.compression_fidelity.real_capture";
+const CAPTURE_HARNESS: &str = "opencode";
 
 /// One producer start the recorder saw: the complete model input and every output or error
 /// the daemon drained for its run.
@@ -1407,10 +1408,20 @@ struct RecordedOutput {
 
 type AttemptLog = Arc<Mutex<Vec<RecordedAttempt>>>;
 
-/// Connects every producer through `inner` and records each start and output.
+/// The latest connect's arguments let a run be cancelled through a second connection, and
+/// `starts_in_flight` counts starts whose handle or error the recorder has not yet appended.
 struct RecordingFactory {
     inner: Arc<dyn HistorySummarizerProducerFactory>,
     attempts: AttemptLog,
+    connected: Mutex<Option<ConnectArgs>>,
+    starts_in_flight: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct ConnectArgs {
+    project_root: PathBuf,
+    harness: String,
+    credential_fingerprints: BTreeMap<String, String>,
 }
 
 #[async_trait]
@@ -1422,6 +1433,11 @@ impl HistorySummarizerProducerFactory for RecordingFactory {
         credential_fingerprints: &std::collections::BTreeMap<String, String>,
     ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
     {
+        *self.connected.lock().unwrap() = Some(ConnectArgs {
+            project_root: project_root.to_path_buf(),
+            harness: harness.to_owned(),
+            credential_fingerprints: credential_fingerprints.clone(),
+        });
         let inner = self
             .inner
             .connect(project_root, harness, credential_fingerprints)
@@ -1429,6 +1445,7 @@ impl HistorySummarizerProducerFactory for RecordingFactory {
         Ok(Box::new(RecordingDriver {
             inner,
             attempts: Arc::clone(&self.attempts),
+            starts_in_flight: Arc::clone(&self.starts_in_flight),
         }))
     }
 }
@@ -1436,6 +1453,7 @@ impl HistorySummarizerProducerFactory for RecordingFactory {
 struct RecordingDriver {
     inner: Box<dyn HistorySummarizerProducerDriver + Send>,
     attempts: AttemptLog,
+    starts_in_flight: Arc<AtomicUsize>,
 }
 
 impl RecordingDriver {
@@ -1517,6 +1535,7 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
         max_output_tokens: u32,
         temperature: f64,
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
+        self.starts_in_flight.fetch_add(1, Ordering::SeqCst);
         let started = self
             .inner
             .start_with_generation(
@@ -1540,6 +1559,7 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
             },
             &started,
         );
+        self.starts_in_flight.fetch_sub(1, Ordering::SeqCst);
         started
     }
 
@@ -1605,9 +1625,10 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
 }
 
 /// Folds every corpus source once through `factory` with `model` as the only summarizer model,
-/// waits up to `wait` for each firing to settle, and returns one capture observation per
-/// source: every attempt's complete input and drained outputs, the published rows, and
-/// `usage: null`, because the host's model-execution protocol reports no token usage.
+/// gives each source `wait` from its transform call to its settled firing, and returns one
+/// capture observation per source: every attempt's complete input and drained outputs, the
+/// published rows, and `usage: null`, because the host's model-execution protocol reports no
+/// token usage.
 async fn capture_sources(
     factory: Arc<dyn HistorySummarizerProducerFactory>,
     model: &str,
@@ -1620,22 +1641,56 @@ async fn capture_sources(
         let recording = Arc::new(RecordingFactory {
             inner: Arc::clone(&factory),
             attempts: Arc::clone(&attempts),
+            connected: Mutex::new(None),
+            starts_in_flight: Arc::default(),
         });
         let config = DaemonConfig {
             model_chain: vec![model.to_owned()],
             ..default_test_config()
         };
-        let (handler, store, _dir, _project) =
-            handler_with_factory(recording, config, Arc::new(MissingSessionResolver));
+        let (handler, store, _dir, _project) = handler_with_factory(
+            Arc::clone(&recording) as Arc<dyn HistorySummarizerProducerFactory>,
+            config,
+            Arc::new(MissingSessionResolver),
+            CAPTURE_HARNESS,
+        );
         let follow_up = follow_up_for(case, source);
         let mut messages = source_ingress(case, source);
         let next = messages.len() as u64 + 1;
         messages.extend(live_tail(follow_up, next));
         let request = request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
-        let first = call_transform_request(&handler, request).await;
-        let settled = wait_settled(&store, &attempts, wait).await;
+        // The transform awaits an emergency firing inline, so one deadline covers the call and
+        // the settling that follows it.
+        let deadline = tokio::time::Instant::now() + wait;
+        let first =
+            tokio::time::timeout_at(deadline, call_transform_request(&handler, request)).await;
+        let transform_returned = first.is_ok();
+        let fired = first.map_or(Value::Null, |first| {
+            first["history_summarizer"]["fired"].clone()
+        });
+        let settled = transform_returned && wait_settled(&store, &attempts, deadline).await;
+        // A start still in flight at the deadline appends its run id only when it returns, so
+        // the snapshot waits for the producer's own request timeout before cancelling.
+        let starts_in_flight = if settled {
+            0
+        } else {
+            wait_for_starts(&recording.starts_in_flight, START_QUIESCE).await
+        };
         let rows = store.load_history_segments("ses").unwrap();
         let attempts = attempts.lock().unwrap().clone();
+        // Run lifetime is detached from the waiter the timeout dropped; `run.cancel` ends it.
+        let cancelled_runs = if settled {
+            Vec::new()
+        } else {
+            let connect = recording.connected.lock().unwrap().clone();
+            cancel_undrained_runs(&factory, connect, &attempts).await
+        };
+        // A run the host has not confirmed stopped may still be generating, so no later source
+        // starts another one.
+        let capture_stopped = starts_in_flight > 0
+            || cancelled_runs
+                .iter()
+                .any(|outcome| outcome["cancelled"] != true);
         let answered = attempts
             .iter()
             .any(|attempt| attempt.outputs.iter().any(|output| output.text.is_some()));
@@ -1655,9 +1710,14 @@ async fn capture_sources(
             )
             .with(json!({
                 "model": model,
+                "harness": CAPTURE_HARNESS,
                 "output_origin": output_origin,
-                "fired": first["history_summarizer"]["fired"],
+                "fired": fired,
+                "transform_returned": transform_returned,
                 "settled": settled,
+                "cancelled_runs": cancelled_runs,
+                "starts_in_flight_at_cancel": starts_in_flight,
+                "capture_stopped": capture_stopped,
                 "attempt_count": attempts.len(),
                 "attempts": attempts,
                 "usage": null,
@@ -1671,20 +1731,99 @@ async fn capture_sources(
                 })).collect::<Vec<_>>(),
             })),
         );
+        if capture_stopped {
+            eprintln!(
+                "compression fidelity capture: stopped after {} because a run was not confirmed cancelled",
+                source.id
+            );
+            break;
+        }
     }
     captured
 }
 
-/// Whether the run settled: the summarizer is idle after at least one producer start.
-async fn wait_settled(store: &MemoryStore, attempts: &AttemptLog, wait: Duration) -> bool {
-    let deadline = std::time::Instant::now() + wait;
+/// The producer bounds one `start` by its 30 s request timeout; the margin covers reconnects.
+const START_QUIESCE: Duration = Duration::from_secs(45);
+
+/// Polls until no start is in flight or `budget` passes, and returns the count still in flight.
+async fn wait_for_starts(starts_in_flight: &AtomicUsize, budget: Duration) -> usize {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let in_flight = starts_in_flight.load(Ordering::SeqCst);
+        if in_flight == 0 || tokio::time::Instant::now() >= deadline {
+            return in_flight;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn cancel_undrained_runs(
+    factory: &Arc<dyn HistorySummarizerProducerFactory>,
+    connect: Option<ConnectArgs>,
+    attempts: &[RecordedAttempt],
+) -> Vec<Value> {
+    let undrained: Vec<(&str, &str)> = attempts
+        .iter()
+        .filter(|attempt| attempt.outputs.is_empty())
+        .filter_map(|attempt| Some((attempt.session_id.as_str(), attempt.run_id.as_deref()?)))
+        .collect();
+    if undrained.is_empty() {
+        return Vec::new();
+    }
+    let outcome = |run_id: &str, result: Result<(), HistorySummarizerProducerError>| {
+        json!({
+            "run_id": run_id,
+            "cancelled": result.is_ok(),
+            "error": result.err().map(|error| format!("{error:?}")),
+        })
+    };
+    let connect = connect.expect("a started run implies a recorded connect");
+    let mut driver = match factory
+        .connect(
+            &connect.project_root,
+            &connect.harness,
+            &connect.credential_fingerprints,
+        )
+        .await
+    {
+        Ok(driver) => driver,
+        Err(error) => {
+            let detail = format!("cancel connect: {error:?}");
+            return undrained
+                .iter()
+                .map(|(_, run_id)| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
+                .collect();
+        }
+    };
+    let mut outcomes = Vec::with_capacity(undrained.len());
+    for (session_id, run_id) in undrained {
+        // `cancel` travels the session-scoped command route, so the run's session is bound first.
+        let cancelled = match driver.bind_session(session_id).await {
+            Ok(()) => driver.cancel(run_id).await,
+            Err(error) => Err(error),
+        };
+        outcomes.push(outcome(run_id, cancelled));
+    }
+    if let Err(error) = driver.close().await {
+        eprintln!("compression fidelity capture: cancel connection close failed: {error:?}");
+    }
+    outcomes
+}
+
+/// Whether the run settled by `deadline`: the summarizer is idle after at least one producer
+/// start.
+async fn wait_settled(
+    store: &MemoryStore,
+    attempts: &AttemptLog,
+    deadline: tokio::time::Instant,
+) -> bool {
     loop {
         let idle = store.load("ses").unwrap().meta.history_summarizer.state
             == HistorySummarizerPhase::Idle;
         if idle && !attempts.lock().unwrap().is_empty() {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1717,6 +1856,19 @@ fn private_capture_dir(dir: &Path) -> PathBuf {
         "{} is inside the repository",
         real.display()
     );
+    // Every existing ancestor is owned by this user or root and is closed to group and other
+    // writes or sticky, so no other local user can swap the checked directory for a symlink
+    // between the check and the write.
+    let uid = rustix::process::getuid().as_raw();
+    for ancestor in real.ancestors().filter(|a| a.exists()) {
+        let meta = std::fs::metadata(ancestor).unwrap();
+        let mode = meta.permissions().mode();
+        assert!(
+            (meta.uid() == uid || meta.uid() == 0) && (mode & 0o022 == 0 || mode & 0o1000 != 0),
+            "{} is writable by others or not owned by this user or root",
+            ancestor.display()
+        );
+    }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -1790,6 +1942,11 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     )
     .await;
     assert_eq!(records.len(), sources().count());
+    let harnesses = producer.harnesses.lock().unwrap().clone();
+    assert!(
+        !harnesses.is_empty() && harnesses.iter().all(|harness| harness == "opencode"),
+        "the capture connects as a harness host model execution binds: {harnesses:?}"
+    );
     let started = producer.attempts.lock().unwrap().clone();
     assert_eq!(started.len(), records.len());
     let dir = tempfile::tempdir().unwrap();
@@ -1801,6 +1958,7 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
         assert_eq!(read["terminal"], "published", "{}", source.id);
         let detail = &read["detail"];
         assert_eq!(detail["model"], "probe/model");
+        assert_eq!(detail["harness"], "opencode");
         assert_eq!(detail["output_origin"], "scripted approved example");
         assert_eq!(detail["settled"], true);
         assert_eq!(detail["attempt_count"], 1);
@@ -1835,6 +1993,126 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_capture_cancels_its_started_runs() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(records.len(), sources().count());
+    let started: Vec<String> = (1..=records.len()).map(|n| format!("run-{n}")).collect();
+    let attempts = producer.attempts.lock().unwrap().clone();
+    assert_eq!(attempts.len(), records.len());
+    assert_eq!(
+        producer.cancels.lock().unwrap().clone(),
+        attempts
+            .iter()
+            .zip(&started)
+            .map(|(attempt, run_id)| format!("{}:{run_id}", attempt.session_id))
+            .collect::<Vec<_>>(),
+        "every run that outlasted its wait is cancelled once through its own session"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for (record, run_id) in records.iter().zip(&started) {
+        let read: Value =
+            serde_json::from_slice(&std::fs::read(record.emit_to(dir.path())).unwrap()).unwrap();
+        assert_eq!(read["terminal"], "unsettled");
+        let detail = &read["detail"];
+        assert_eq!(detail["settled"], false);
+        assert_eq!(
+            detail["cancelled_runs"],
+            json!([{ "run_id": run_id, "cancelled": true, "error": null }])
+        );
+    }
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
+/// A start still in flight at the deadline is waited for, so its run is cancelled too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_in_flight_at_the_deadline_is_still_cancelled() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    producer.block_start.store(true, Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let release = {
+        let producer = Arc::clone(&producer);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            producer.block_start.store(false, Ordering::SeqCst);
+            producer.notify.notify_waiters();
+        })
+    };
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    release.await.unwrap();
+    assert_eq!(records.len(), sources().count());
+    let cancels = producer.cancels.lock().unwrap().clone();
+    assert_eq!(
+        cancels.len(),
+        records.len(),
+        "the first source's start returned after its deadline and was still cancelled: {cancels:?}"
+    );
+    assert!(cancels[0].ends_with(":run-1"), "{cancels:?}");
+    let first = &records[0].detail;
+    assert_eq!(first["attempt_count"], 1);
+    assert_eq!(first["cancelled_runs"][0]["cancelled"], true);
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
+/// A cancel the host does not confirm ends the capture before another source can start a run.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unconfirmed_cancellation_stops_the_capture() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    producer
+        .cancel_errors
+        .lock()
+        .unwrap()
+        .push_back(HistorySummarizerProducerError::TimedOut);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    assert!(sources().count() > 1);
+    assert_eq!(
+        records.len(),
+        1,
+        "no later source starts after a failed cancel"
+    );
+    assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(producer.cancels.lock().unwrap().len(), 1);
+    let detail = &records[0].detail;
+    assert_eq!(records[0].terminal, Terminal::Unsettled);
+    assert_eq!(detail["cancelled_runs"][0]["cancelled"], false);
+    assert_eq!(detail["cancelled_runs"][0]["error"], "TimedOut");
+    assert_eq!(detail["capture_stopped"], true);
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
 /// The recorder keeps a start error and every drained output or error of a run, in order.
 #[tokio::test(flavor = "current_thread")]
 async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
@@ -1867,6 +2145,8 @@ async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
             state: Arc::clone(&producer),
         }),
         attempts: Arc::clone(&attempts),
+        connected: Mutex::new(None),
+        starts_in_flight: Arc::default(),
     };
     let mut driver = factory
         .connect(Path::new("/"), "opencode", &Default::default())
@@ -1963,6 +2243,35 @@ async fn a_capture_that_drains_only_errors_is_recorded_unsettled() {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn a_capture_whose_producer_outlasts_the_wait_is_recorded_unsettled_when_it_ends() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .block_output
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let wait = Duration::from_millis(300);
+    let began = std::time::Instant::now();
+    let records = tokio::time::timeout(
+        Duration::from_secs(30),
+        capture_sources(factory, "probe/model", "scripted", wait),
+    )
+    .await
+    .expect("the capture ends within its per-source waits");
+    let sources = u32::try_from(sources().count()).unwrap();
+    assert!(
+        began.elapsed() < wait * sources + Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    for record in &records {
+        assert_eq!(record.terminal, Terminal::Unsettled, "{}", record.source);
+        assert_eq!(record.detail["settled"], false, "{}", record.source);
+    }
+}
+
 #[test]
 fn the_capture_directory_is_owner_only_and_outside_the_repository() {
     use std::os::unix::fs::PermissionsExt;
@@ -1982,6 +2291,21 @@ fn the_capture_directory_is_owner_only_and_outside_the_repository() {
     std::fs::create_dir(&shared).unwrap();
     std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(std::panic::catch_unwind(|| private_capture_dir(&shared)).is_err());
+    // A writable, unsticky ancestor lets another local user swap the checked directory for a
+    // symlink between the check and the write; a sticky one does not.
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let below = shared.join("private");
+    assert!(std::panic::catch_unwind(|| private_capture_dir(&below)).is_err());
+    assert!(!below.exists());
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    assert_eq!(
+        std::fs::metadata(private_capture_dir(&shared.join("sticky")))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
 }
 
 fn new_messages_prompt(lines: &[(u64, &str, &str)]) -> String {

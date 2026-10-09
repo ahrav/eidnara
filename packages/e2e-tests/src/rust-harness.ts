@@ -50,7 +50,8 @@ export interface RustTestHarnessOptions extends SharedHarnessOptions {
     daemonEnv?: Record<string, string>;
     /**
      * Record-and-forward mode: the mock forwards every request to this provider, OpenCode runs
-     * `forward.model` at `forward.contextLimit`, and the mock serves no script or default.
+     * `forward.model` at `forward.contextLimit`, and the mock serves no script or default, so
+     * `create` rejects it beside `mockDefault`.
      */
     forward?: ForwardConfig;
 }
@@ -207,6 +208,7 @@ export class RustTestHarness {
     private clientInstance: SdkClient;
     private readonly ledger = new CaptureLedger(() => this.mainRequests());
     private modelContextLimit: number | undefined;
+    private readonly modelOutputLimit: number | undefined;
     private readonly modelId: string;
     private readonly mockBaseURL: string;
 
@@ -219,6 +221,7 @@ export class RustTestHarness {
         client: SdkClient;
         logPath: string;
         modelContextLimit: number | undefined;
+        modelOutputLimit: number | undefined;
         modelId: string;
     }) {
         this.mock = args.mock;
@@ -229,6 +232,7 @@ export class RustTestHarness {
         this.clientInstance = args.client;
         this.logPath = args.logPath;
         this.modelContextLimit = args.modelContextLimit;
+        this.modelOutputLimit = args.modelOutputLimit;
         this.modelId = args.modelId;
     }
 
@@ -237,6 +241,9 @@ export class RustTestHarness {
     }
 
     static async create(options: RustTestHarnessOptions = {}): Promise<RustTestHarness> {
+        if (options.forward && options.mockDefault) {
+            throw new Error("forwarding serves no scripted default; drop mockDefault");
+        }
         const prereqs = detectRustModePrereqs();
         if (!prereqs.ok) {
             throw new Error(
@@ -251,6 +258,7 @@ export class RustTestHarness {
         const { baseURL } = await mock.start();
         const modelId = options.forward?.model ?? MOCK_MODEL_ID;
         const modelContextLimit = options.forward?.contextLimit ?? options.modelContextLimit;
+        const modelOutputLimit = options.forward?.limits.maxOutputTokens;
         if (!options.forward) mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
 
         const env = createIsolatedEnv();
@@ -270,6 +278,7 @@ export class RustTestHarness {
                 connectionFile: host.connectionFile,
                 logPath,
                 options: { ...options, modelContextLimit },
+                modelOutputLimit,
                 modelId,
                 mockApiKey: mock.inboundKey,
             });
@@ -293,6 +302,7 @@ export class RustTestHarness {
             client,
             logPath,
             modelContextLimit,
+            modelOutputLimit,
             modelId,
         });
     }
@@ -304,6 +314,7 @@ export class RustTestHarness {
         connectionFile: string;
         logPath: string;
         options: RustTestHarnessOptions;
+        modelOutputLimit: number | undefined;
         modelId: string;
         mockApiKey: string;
     }): Promise<SpawnedOpencode> {
@@ -311,6 +322,7 @@ export class RustTestHarness {
             mockProviderURL: args.mockURL,
             existingEnv: args.env,
             modelContextLimit: args.options.modelContextLimit,
+            modelOutputLimit: args.modelOutputLimit,
             modelId: args.modelId,
             mockApiKey: args.mockApiKey,
             openCodeConfigExtra: args.options.openCodeConfigExtra,
@@ -343,6 +355,7 @@ export class RustTestHarness {
                 modelContextLimit: this.modelContextLimit,
                 eidnaraConfig: opts.eidnaraConfig,
             },
+            modelOutputLimit: this.modelOutputLimit,
             modelId: this.modelId,
             mockApiKey: this.mock.inboundKey,
         });
