@@ -146,6 +146,16 @@ async function evaluate(
     });
 }
 
+/** The one scenario the memory witness ends in `discoverable` and `excluded` terminals. */
+const memoryExcluded = allScenarios.find(({ s }) => s.serving.path === "memory_excluded");
+/** A recovery observation's detail as the memory witness writes it. */
+const RECOVERY_DETAIL = {
+    tool: "eidnara_search",
+    calls: 1,
+    result_utf8_bytes: 400,
+    result_carries_memory: true,
+};
+
 /** Rewrites the source's real capture and points its serving observations at the new hash. */
 function recapture(dir: string, source: string, edit: (capture: Record<string, unknown>) => void) {
     const path = join(dir, `real.${source}.json`);
@@ -585,7 +595,7 @@ describe("eval:compression-fidelity gates", () => {
         const recovery = (
             await evaluate(scratch(), {
                 tamper: (dir) => {
-                    const entry = allScenarios[1];
+                    const entry = memoryExcluded;
                     write(dir, "recovery.json", {
                         schema_version: 1,
                         corpus_sha256: SHA,
@@ -593,15 +603,15 @@ describe("eval:compression-fidelity gates", () => {
                         case: entry?.case,
                         source: entry?.s.source,
                         scenario: entry?.s.id,
-                        stage: "served-again",
-                        terminal: "served",
-                        markers: ["cf-recovery-search"],
-                        detail: {},
+                        stage: "recovery-eidnara-search",
+                        terminal: "discoverable",
+                        markers: [],
+                        detail: { tool: "eidnara_search" },
                     });
                 },
             })
         ).report;
-        const row = recovery.arms[0]?.rows.find((r) => r.scenario === allScenarios[1]?.s.id);
+        const row = recovery.arms[0]?.rows.find((r) => r.scenario === memoryExcluded?.s.id);
         expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
     });
 
@@ -704,7 +714,7 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("a negative recovery measurement leaves cost incomplete", async () => {
-        const entry = allScenarios[1];
+        const entry = memoryExcluded;
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
                 write(dir, "recovery.json", {
@@ -715,9 +725,9 @@ describe("eval:compression-fidelity gates", () => {
                     source: entry?.s.source,
                     scenario: entry?.s.id,
                     stage: "recovery-eidnara-search",
-                    terminal: "served",
+                    terminal: "discoverable",
                     markers: [],
-                    detail: { calls: -1, result_utf8_bytes: -400 },
+                    detail: { ...RECOVERY_DETAIL, calls: -1, result_utf8_bytes: -400 },
                 });
             },
         });
@@ -800,6 +810,7 @@ describe("eval:compression-fidelity gates", () => {
             [{ ...SERVING, invocation_charged_tokens: "unreported" }, "invocation_charged_tokens"],
             [{ ...SERVING, invocation_bytes: null }, "invocation_bytes"],
             [{ ...SERVING, admission: "none" }, "admission"],
+            [{ ...SERVING, admission: "declined" }, "admission"],
             [{ ...SERVING, admission: "maybe" }, "admission"],
             [{ ...SERVING, raw_source_leaks: 1 }, "raw_source_leaks"],
             [{ ...SERVING, invocation_charged_tokens: 11_000 }, "invocation_charged_tokens"],
@@ -820,7 +831,7 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("a recovery observation does not stand in for a missing serving cost", async () => {
-        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const entry = memoryExcluded;
         const scenario = entry?.s.id ?? "";
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {
@@ -836,15 +847,23 @@ describe("eval:compression-fidelity gates", () => {
                     source: entry?.s.source,
                     scenario,
                     stage: "recovery-eidnara-search",
-                    terminal: "served",
+                    terminal: "discoverable",
                     markers: [],
-                    detail: { calls: 1, result_utf8_bytes: 400 },
+                    detail: RECOVERY_DETAIL,
                 });
             },
         });
         const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
         expect(row?.cost.missing).toContain(`delivery.${scenario}.json: serving`);
         expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("a serving record's own stage field cannot relabel the observation in the cost row", async () => {
+        const { report } = await evaluate(scratch(), {
+            baseline: { serving: { ...SERVING, stage: "warm" } },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.cost.serving.length > 0);
+        expect(row?.cost.serving[0]?.stage).toBe("served");
     });
 
     test("the qualification and Pi witnesses serve tiers without an OpenCode cost record", async () => {
@@ -975,9 +994,16 @@ describe("eval:compression-fidelity gates", () => {
 });
 
 describe("eval:compression-fidelity judgments", () => {
-    const discoverableFirst = allScenarios.find(({ s }) =>
-        (s.expectations[0]?.accepted as readonly string[] | undefined)?.includes("discoverable"),
-    )?.s;
+    const discoverableFirst = memoryExcluded?.s;
+    /** Marks the first obligation whose expectation accepts `discoverable` as recovered. */
+    const markDiscoverable = (judgment: Record<string, unknown>) => {
+        const index = discoverableFirst?.expectations.findIndex((e) =>
+            (e.accepted as readonly string[]).includes("discoverable"),
+        );
+        judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
+            (o, i) => (i === index ? { ...o, disposition: "discoverable" } : o),
+        );
+    };
 
     function rewrite(
         root: string,
@@ -1025,10 +1051,7 @@ describe("eval:compression-fidelity judgments", () => {
         expect(scenario).toBeDefined();
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
-            const judgment = judgmentFor(j, scenario?.id ?? "");
-            judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
-                (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
-            );
+            markDiscoverable(judgmentFor(j, scenario?.id ?? ""));
         });
         expect((await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? ""))?.recovery).toBe(
             "unverified",
@@ -1041,9 +1064,9 @@ describe("eval:compression-fidelity judgments", () => {
             source: scenario?.source,
             scenario: scenario?.id,
             stage: "recovery-eidnara-search",
-            terminal: "served",
+            terminal: "discoverable",
             markers: [],
-            detail: { calls: 1, result_utf8_bytes: 400, result_carries_memory: true },
+            detail: RECOVERY_DETAIL,
         });
         const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.recovery).toBe("witnessed");
@@ -1054,16 +1077,14 @@ describe("eval:compression-fidelity judgments", () => {
         const scenario = discoverableFirst;
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
-            const judgment = judgmentFor(j, scenario?.id ?? "");
-            judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
-                (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
-            );
+            markDiscoverable(judgmentFor(j, scenario?.id ?? ""));
         });
         for (const detail of [
-            { calls: 1, result_utf8_bytes: 400, result_carries_memory: false },
-            { calls: 1, result_utf8_bytes: 400 },
-            { calls: 0, result_utf8_bytes: 400, result_carries_memory: true },
-            { calls: 1, result_utf8_bytes: 0, result_carries_memory: true },
+            { ...RECOVERY_DETAIL, result_carries_memory: false },
+            { ...RECOVERY_DETAIL, result_carries_memory: undefined },
+            { ...RECOVERY_DETAIL, calls: 0 },
+            { ...RECOVERY_DETAIL, result_utf8_bytes: 0 },
+            { ...RECOVERY_DETAIL, tool: undefined },
         ]) {
             write(baseline.dir, "recovery.json", {
                 schema_version: 1,
@@ -1073,7 +1094,7 @@ describe("eval:compression-fidelity judgments", () => {
                 source: scenario?.source,
                 scenario: scenario?.id,
                 stage: "recovery-eidnara-search",
-                terminal: "served",
+                terminal: "discoverable",
                 markers: [],
                 detail,
             });
@@ -1087,10 +1108,7 @@ describe("eval:compression-fidelity judgments", () => {
         const scenario = discoverableFirst;
         const root = scratch();
         const { baseline, reviewsDir } = rewrite(root, (j) => {
-            const judgment = judgmentFor(j, scenario?.id ?? "");
-            judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
-                (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
-            );
+            markDiscoverable(judgmentFor(j, scenario?.id ?? ""));
         });
         write(baseline.dir, "note.json", {
             schema_version: 1,
@@ -1102,11 +1120,26 @@ describe("eval:compression-fidelity judgments", () => {
             stage: "research-note",
             terminal: "served",
             markers: ["unrecoverable"],
-            detail: { calls: 1, result_utf8_bytes: 400 },
+            detail: RECOVERY_DETAIL,
         });
         const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
         expect(row?.recovery).toBe("unverified");
         expect(row?.cost.recovery).toEqual([]);
+        write(baseline.dir, "served.json", {
+            schema_version: 1,
+            corpus_sha256: SHA,
+            owner: "opencode-delivery",
+            case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+            source: scenario?.source,
+            scenario: scenario?.id,
+            stage: "recovery-eidnara-search",
+            terminal: "served",
+            markers: [],
+            detail: RECOVERY_DETAIL,
+        });
+        const served = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        expect(served?.recovery).toBe("unverified");
+        expect(served?.cost.recovery).toEqual([]);
     });
 
     test("a lost obligation or a disposition outside the accepted set is recall", async () => {

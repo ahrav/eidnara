@@ -309,13 +309,12 @@ export function controlQualification(reviews: Reviews): { qualified: boolean; pr
     return { qualified: problems.length === 0 && reviews.errors.length === 0, problems };
 }
 
-const RECOVERY_STAGE_PREFIX = "recovery-";
-const RECOVERY_MARKER = "cf-recovery-search";
-
+/** The memory witness's recovery observation: an `eidnara_search` call that ended `discoverable`. */
 function isRecovery(evidence: Evidence): boolean {
     return (
-        evidence.stage.startsWith(RECOVERY_STAGE_PREFIX) ||
-        evidence.markers.includes(RECOVERY_MARKER)
+        evidence.owner === "opencode-delivery" &&
+        evidence.stage === "recovery-eidnara-search" &&
+        evidence.terminal === "discoverable"
     );
 }
 
@@ -340,7 +339,7 @@ const chargeFor = (bytes: number) => Math.ceil((Math.ceil(bytes / 3.5) * 1250) /
 const count = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 
 /** The admission branches that ran an admission check; `none` ran none and charges nothing. */
-const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown", "declined"];
+const ADMISSIONS: readonly string[] = ["fits", "shrinks", "limit_unknown"];
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
     ["request_body_utf8_bytes", measurement],
     ["admission", (v) => typeof v === "string" && ADMISSIONS.includes(v)],
@@ -387,7 +386,8 @@ function costOf(
             missing.push(`${e.file}: serving`);
             continue;
         }
-        const row: Json = { stage: e.stage, ...e.detail.serving };
+        // The observation's stage is authoritative; a `stage` inside the serving record is ignored.
+        const row: Json = { ...e.detail.serving, stage: e.stage };
         for (const [field, valid] of SERVING_FIELDS) {
             if (!valid(row[field])) missing.push(`${e.file}: ${field}`);
         }
@@ -531,6 +531,7 @@ export function scenarioRow(
         : evidence.some(
                 (e) =>
                     isRecovery(e) &&
+                    text(e.detail.tool) &&
                     e.detail.result_carries_memory === true &&
                     count(e.detail.calls) &&
                     e.detail.calls > 0 &&
