@@ -508,6 +508,32 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(attempt)).toContain("records no complete real attempt");
     });
 
+    test("one complete real attempt carries the non-empty text output", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const split = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `real.${source}.json`);
+                const capture = JSON.parse(readFileSync(path, "utf8"));
+                const attempt = capture.detail.attempts[0];
+                // The complete attempt drained nothing; the drained text sits on an attempt
+                // that records only a prompt digest.
+                capture.detail.attempts = [
+                    { ...attempt, outputs: [{ text: "" }] },
+                    { ...attempt, prompt: undefined, prompt_sha256: sha256("p") },
+                ];
+                const relinked = write(dir, `real.${source}.json`, capture);
+                for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+                    const file = join(dir, `delivery.${s.id}.json`);
+                    const observation = JSON.parse(readFileSync(file, "utf8"));
+                    if (observation.detail.generation_capture_sha256 === undefined) continue;
+                    observation.detail.generation_capture_sha256 = relinked;
+                    writeFileSync(file, JSON.stringify(observation));
+                }
+            },
+        });
+        expect(errorsOf(split)).toContain(`real.${source}.json records no complete real attempt`);
+    });
+
     test("an arm whose settings omit the generation settings does not match the arm schema", async () => {
         for (const settings of [
             {},
@@ -1053,6 +1079,13 @@ describe("evidence live mode", () => {
                         truncated: false,
                         body_text: "ok",
                         body_sha256: sha256("ok") as string | null,
+                        usage: {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        } as Record<string, number> | null,
+                        cost_usd: 0.5,
                         cost_known: true,
                     },
                 },
@@ -1154,6 +1187,21 @@ describe("evidence live mode", () => {
             );
         }
         expect(errorsOf(await live([{ ...complete, spent_usd: -0.01 }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const unmetered = forwardingReport("{}", sha256("{}"), true);
+        const [metered] = unmetered.exchanges;
+        if (metered) metered.response = { ...metered.response, usage: null };
+        expect(errorsOf(await live([unmetered]))).toContain(
+            "exchange 0 claims a known cost without usage in a complete report",
+        );
+        expect(errorsOf(await live([{ ...complete, spent_usd: 0.75 }]))).toContain(
+            "complete report spent 0.75 USD, where its exchanges cost 0.5 USD",
+        );
+        const uncosted = forwardingReport("{}", sha256("{}"), true);
+        const [free] = uncosted.exchanges;
+        if (free) free.response = { ...free.response, cost_usd: -1 };
+        expect(errorsOf(await live([uncosted]))).toContain(
             "does not match the forwarding report schema",
         );
         const looped = forwardingReport("{}", sha256("{}"), true);

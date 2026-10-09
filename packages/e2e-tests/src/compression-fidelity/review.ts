@@ -324,7 +324,8 @@ const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolea
     ["invocation_charged_tokens", measurement],
     ["estimator", named],
     ["transform_elapsed_ms", measurement],
-    ["raw_source_leaks", measurement],
+    // A served observation leaked no raw source; the producer marks a leaking pass unqualified.
+    ["raw_source_leaks", (v) => v === 0],
     ["serving_kind", (v) => v === "cold" || v === "warm_repeat"],
 ];
 
@@ -342,10 +343,11 @@ function generationsOf(arm: Arm): Evidence[] {
     );
 }
 
+/** A usage record counts input and output tokens as non-negative numbers. */
 function reportedUsage(e: Evidence): Json | null {
     const usage = e.detail.usage;
     if (e.detail.usage_reported === false || !record(usage)) return null;
-    return Object.keys(usage).length > 0 ? usage : null;
+    return measurement(usage.input_tokens) && measurement(usage.output_tokens) ? usage : null;
 }
 
 function costOf(
@@ -364,6 +366,10 @@ function costOf(
         const row: Json = { stage: e.stage, ...e.detail.serving };
         for (const [field, valid] of SERVING_FIELDS) {
             if (!valid(row[field])) missing.push(`${e.file}: ${field}`);
+        }
+        // The campaign's `warm` stage repeats the previous request; every other stage serves cold.
+        if ((row.serving_kind === "warm_repeat") !== (e.stage === "warm")) {
+            missing.push(`${e.file}: serving_kind`);
         }
         serving.push(row);
     }
@@ -554,6 +560,20 @@ function compare(baseline: ScenarioRow, candidate: ScenarioRow): Comparison {
     return after ? "resolution_candidate" : "expected_red";
 }
 
+/** Both arms charge tokens under one estimator, or their costs do not compare. */
+function estimatorRefusal(arms: ReturnType<typeof assembleEvidence>["arms"]): string[] {
+    const estimators = new Set(
+        arms.flatMap((side) =>
+            side.arm.evidence.flatMap((e) =>
+                record(e.detail.serving) && named(e.detail.serving.estimator)
+                    ? [e.detail.serving.estimator]
+                    : [],
+            ),
+        ),
+    );
+    return estimators.size > 1 ? ["the arms charged tokens under different estimators"] : [];
+}
+
 /** Assembles the manifest and the per-scenario report for `baseline` and `candidate`. */
 export function evaluate(input: {
     corpus: FidelityCorpus;
@@ -647,11 +667,12 @@ export function evaluate(input: {
         };
     });
     const [base, cand] = arms as [(typeof arms)[0], (typeof arms)[0]];
+    const refused = [...assembled.refused, ...estimatorRefusal(assembled.arms)];
     const comparison = {
-        refused: assembled.refused,
+        refused,
         treatment: assembled.treatment,
         rows:
-            assembled.refused.length > 0
+            refused.length > 0
                 ? []
                 : base.rows.map((row, i) => ({
                       scenario: row.scenario,
@@ -673,7 +694,7 @@ export function evaluate(input: {
         controls,
         arms,
         comparison,
-        accepted: assembled.refused.length === 0 && arms.every((a) => a.accepted),
+        accepted: refused.length === 0 && arms.every((a) => a.accepted),
     };
     return { manifest, report };
 }

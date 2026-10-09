@@ -119,6 +119,10 @@ export interface ForwardingEvidence {
             body_text: string;
             body_sha256: string | null;
             cost_known: boolean;
+            /** The provider's token usage, `null` when the response reported none. */
+            usage: Json | null;
+            /** The cost charged against the cap: from usage when known, else the reservation. */
+            cost_usd: number;
         } | null;
     }>;
 }
@@ -305,6 +309,9 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             ) {
                 return null;
             }
+            if (response.usage !== null && !record(response.usage)) return null;
+            const cost = response.cost_usd;
+            if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return null;
             if (response.body_sha256 !== null && typeof response.body_sha256 !== "string")
                 return null;
             if (!text(response.outcome)) return null;
@@ -331,6 +338,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
                       body_text: response.body_text as string,
                       body_sha256: response.body_sha256 as string | null,
                       cost_known: response.cost_known as boolean,
+                      usage: response.usage as Json | null,
+                      cost_usd: response.cost_usd as number,
                   }
                 : null,
         });
@@ -400,7 +409,7 @@ function completeRealAttempt(attempt: Json, model: string): boolean {
         (text(attempt.system) || digest(attempt.system_sha256)) &&
         text(attempt.prompt) &&
         Array.isArray(attempt.outputs) &&
-        attempt.outputs.some((output) => record(output) && typeof output.text === "string")
+        attempt.outputs.some((output) => record(output) && text(output.text))
     );
 }
 
@@ -440,6 +449,13 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
             `${file} complete report spent ${report.spent_usd} USD above its ${cap} USD cap`,
         );
     }
+    // The forwarder's spend is the sum of its settled exchanges' costs.
+    const costs = report.exchanges.reduce((sum, x) => sum + (x.response?.cost_usd ?? 0), 0);
+    if (report.complete && Math.abs(costs - report.spent_usd) > 1e-9) {
+        errors.push(
+            `${file} complete report spent ${report.spent_usd} USD, where its exchanges cost ${costs} USD`,
+        );
+    }
     for (const exchange of report.exchanges) {
         // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
         if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
@@ -459,6 +475,8 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
             continue;
         }
         if (!response.cost_known) complete(exchange.index, "cost is unknown");
+        else if (response.usage === null)
+            complete(exchange.index, "claims a known cost without usage");
         if (response.outcome !== "acknowledged") {
             complete(exchange.index, `response outcome is ${response.outcome}`);
         }

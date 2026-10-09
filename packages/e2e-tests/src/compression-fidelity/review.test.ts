@@ -490,7 +490,15 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("unreported generation usage, an unknown send cost, or an unmeasured recovery leaves cost incomplete", async () => {
-        for (const usage of [null, {}, "reported", 0]) {
+        for (const usage of [
+            null,
+            {},
+            "reported",
+            0,
+            { note: "reported" },
+            { input_tokens: -1, output_tokens: 3 },
+            { input_tokens: 900 },
+        ]) {
             const { report } = await evaluate(scratch(), {
                 tamper: (dir) => {
                     const source = corpus.cases[0]?.sources[0]?.id ?? "";
@@ -536,6 +544,8 @@ describe("eval:compression-fidelity gates", () => {
                                     truncated: false,
                                     body_text: "",
                                     body_sha256: null,
+                                    usage: null,
+                                    cost_usd: 0.25,
                                     cost_known: false,
                                 },
                             },
@@ -677,6 +687,17 @@ describe("eval:compression-fidelity gates", () => {
         expect(row?.cost.status).toBe("incomplete");
     });
 
+    test("arms whose serving observations name different estimators are refused", async () => {
+        const { report } = await evaluate(scratch(), {
+            candidate: { serving: { ...SERVING, estimator: "another-estimator v2" } },
+        });
+        expect(report.arms.every((a) => a.identity_errors.length === 0)).toBe(true);
+        expect(report.comparison.refused).toContain(
+            "the arms charged tokens under different estimators",
+        );
+        expect(report.accepted).toBe(false);
+    });
+
     test("arms sharing a label are refused", async () => {
         const baseline = writeArm(scratch(), { label: "shared" });
         const candidate = writeArm(scratch(), {
@@ -741,6 +762,8 @@ describe("eval:compression-fidelity gates", () => {
             [{ ...SERVING, invocation_bytes: null }, "invocation_bytes"],
             [{ ...SERVING, admission: "none" }, "admission"],
             [{ ...SERVING, admission: "maybe" }, "admission"],
+            [{ ...SERVING, raw_source_leaks: 1 }, "raw_source_leaks"],
+            [{ ...SERVING, serving_kind: "warm_repeat" }, "serving_kind"],
             [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
             [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
             [{ ...SERVING, estimator: "" }, "estimator"],

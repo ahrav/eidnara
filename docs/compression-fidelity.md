@@ -496,7 +496,7 @@ either arm; an arm directory is refused before any write, and a component of
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; its `admission` is a branch that ran an admission check (`fits`, `shrinks`, `limit_unknown`, or `declined`); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record; a `real` arm credits generation only from its published real captures of the row's source, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked ones. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers (the leak count zero: a leaking pass is never a served one), its estimator, and a `serving_kind` of `cold` or `warm_repeat`, `warm_repeat` exactly on the campaign's `warm` stage; its `admission` is a branch that ran an admission check (`fits`, `shrinks`, `limit_unknown`, or `declined`); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a usage record counting `input_tokens` and `output_tokens` as non-negative numbers; a `real` arm credits generation only from its published real captures of the row's source, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked ones. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -532,15 +532,16 @@ either arm; an arm directory is refused before any write, and a component of
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
   `maxCalls` and `maxOutputTokens`), positive prices, or an HTTPS Messages
-  endpoint free of credential and query, whose spend is negative, whose
-  incomplete reasons are not strings, or whose exchange tool ids are not
-  string arrays;
-- a forwarding report marked complete that lists incomplete reasons or
-  records a stop, no send, or spend
+  endpoint free of credential and query, whose spend or an exchange's
+  `cost_usd` is negative, whose incomplete reasons are not strings, or whose
+  exchange tool ids are not string arrays;
+- a forwarding report marked complete that lists incomplete reasons, records
+  a stop, no send, a spend other than the sum of its exchanges' costs, or
+  spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason or naming no model or a
-  model other than the report's, a truncated response, an unknown cost, a
+  model other than the report's, a known cost without usage, a truncated response, an unknown cost, a
   response without a hash, or a `tool_use` id that no later exchange answers
   in its `tool_results`; these are the completeness reasons the forwarder
   derives, recomputed from the report's own fields;
@@ -553,7 +554,7 @@ In an arm labeled `real`:
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error.
   The capture records at least one complete attempt: the arm's model, a
-  system prompt or its hash, a prompt, and a text output;
+  system prompt or its hash, a prompt, and a non-empty text output;
 - a published real capture records `settled: true`, an attempt output with
   text, and nonempty `published_rows`, the state the capture writer publishes;
 - `arm.json` `settings` declare numeric `temperature` and
@@ -586,7 +587,8 @@ dispute.
 
 **Comparison and acceptance.**
 
-- The comparison is refused when the arms share a label, when an arm is
+- The comparison is refused when the arms share a label, when their serving
+  observations charge tokens under different estimators, when an arm is
   bound to another corpus or has identity errors, when the arms reached
   different scenario sets, when they differ in model, provider, version,
   settings, limits, or generation origin, or when their published generation
