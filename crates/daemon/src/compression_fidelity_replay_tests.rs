@@ -7,6 +7,8 @@ use super::compression_fidelity_corpus::*;
 use super::compression_fidelity_observation::{OBSERVATIONS_DIR, Observation, Terminal};
 use super::*;
 
+use std::ops::Range;
+
 use memory_store::{ExtractionFailure, MemoryReviewerNonadmissionCode};
 
 const OWNER: &str = "daemon.compression_fidelity.replay";
@@ -161,26 +163,106 @@ fn exposure(prompt: &str, span: &str) -> Exposure {
     }
 }
 
-fn record_of<'s>(source: &'s Source, span: &Span) -> &'s NativeMessage {
+fn record_of<'s>(source: &'s Source, span: &Span) -> (usize, &'s NativeMessage) {
     source
         .messages
         .iter()
-        .find(|m| m.info.id == span.message_id)
+        .enumerate()
+        .find(|(_, m)| m.info.id == span.message_id)
         .unwrap()
+}
+
+/// The text blocks the presenter renders for `record`, by block index, as the presenter rewrites
+/// them: tool blocks and empty text are left out.
+fn rendered_blocks(record: &NativeMessage) -> Vec<(usize, String)> {
+    record
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| match part {
+            Part::Text { text, .. } => Some(collapse(text))
+                .filter(|text| !text.is_empty())
+                .map(|text| (index, text)),
+            Part::Tool { .. } => None,
+        })
+        .collect()
+}
+
+const PART_SEPARATOR: &str = " / ";
+
+fn rendered_record(record: &NativeMessage) -> String {
+    rendered_blocks(record)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join(PART_SEPARATOR)
+}
+
+/// The byte range of block `block_index` inside the record's rendered part; `None` for a block
+/// the presenter leaves out.
+fn rendered_block_range(record: &NativeMessage, block_index: usize) -> Option<Range<usize>> {
+    let mut offset = 0;
+    for (index, text) in rendered_blocks(record) {
+        if index == block_index {
+            return Some(offset..offset + text.len());
+        }
+        offset += text.len() + PART_SEPARATOR.len();
+    }
+    None
+}
+
+/// The parts inside `<new_messages>` in alias order: the bytes after each `«sN»` marker up to
+/// the part separator or the next line.
+fn presented_parts(prompt: &str) -> Vec<&str> {
+    let start = prompt
+        .find("<new_messages>")
+        .map_or(0, |at| at + "<new_messages>".len());
+    let body = &prompt[start..];
+    let body = &body[..body.find("</new_messages>").unwrap_or(body.len())];
+    let marker = |n: usize| crate::history_summarizer_chunk::alias_marker(&format!("s{n}"));
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    for n in 1.. {
+        let Some(at) = body[cursor..].find(&marker(n)) else {
+            break;
+        };
+        let text_start = cursor + at + marker(n).len();
+        let text_end = body[text_start..]
+            .find(&marker(n + 1))
+            .map_or(body.len(), |at| text_start + at);
+        let line = body[text_start..text_end].split('\n').next().unwrap();
+        parts.push(line.strip_suffix(" / ").unwrap_or(line));
+        cursor = text_end;
+    }
+    parts
+}
+
+/// Whether the span's message reached the prompt whole, and the span's exposure inside the
+/// bytes presenting its annotated block. The message's part is the one at its position among the
+/// source's messages holding the message's rendered text.
+fn span_exposure(parts: &[&str], source: &Source, span: &Span) -> (bool, Exposure) {
+    let (position, record) = record_of(source, span);
+    let presented = parts
+        .get(position)
+        .copied()
+        .filter(|part| *part == rendered_record(record));
+    let seen = presented
+        .zip(rendered_block_range(record, span.block_index))
+        .map_or(Exposure::Absent, |(part, range)| {
+            exposure(&part[range], &span.text)
+        });
+    (presented.is_some(), seen)
 }
 
 /// One exposure entry per material native span of `source`, in one shape for every stage.
 fn exposures(case: &Case, source: &Source, prompt: &str) -> Vec<(Exposure, bool, bool, Value)> {
+    let parts = presented_parts(prompt);
     let mut entries = Vec::new();
     for obligation in case.obligations.iter().filter(|o| o.memory.is_none()) {
         for span in obligation.evidence.iter().filter(|s| s.source == source.id) {
-            let record = record_of(source, span);
+            let (_, record) = record_of(source, span);
             let tool = matches!(record.parts[span.block_index], Part::Tool { .. });
-            let text_presented = record.parts.iter().any(|part| match part {
-                Part::Text { text, .. } => exposure(prompt, text) != Exposure::Absent,
-                Part::Tool { .. } => false,
-            });
-            let seen = exposure(prompt, &span.text);
+            let (text_presented, seen) = span_exposure(&parts, source, span);
             entries.push((
                 seen,
                 tool,
@@ -652,6 +734,9 @@ fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [
     for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
         let tier = served_tier(&render_aged(row, newer), &row.title, approved);
         first[rank(tier)].get_or_insert(newer);
+        if first.iter().all(Option::is_some) {
+            break;
+        }
     }
     TIERS.map(|tier| {
         first[rank(tier)].unwrap_or_else(|| panic!("{id}: natural decay never served {tier:?}"))
@@ -748,17 +833,35 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
             scenario.id
         );
 
-        let mut reached = None;
-        for (step, budget) in (1..estimate(&retained)).rev().enumerate() {
-            let served = fold.pass(Some(budget as f64), &format!("cfg-{step}")).await;
+        // The search requires the served tier's rank to be nonincreasing as the budget grows.
+        let served_at = async |budget: usize, probe: usize| {
+            let served = fold
+                .pass(Some(budget as f64), &format!("cfg-{probe}"))
+                .await;
             let slice = session_history(&m0_text(&served));
-            if served_tier(history_body(&slice), &row.title, &approved) == target {
-                reached = Some((budget, slice));
-                break;
+            (
+                served_tier(history_body(&slice), &row.title, &approved),
+                slice,
+            )
+        };
+        let (mut budget, mut high) = (1, estimate(&retained));
+        let (mut tier, mut slice) = served_at(budget, 0).await;
+        let mut probes = 1;
+        while rank(tier) >= rank(target) && high > budget + 1 {
+            let middle = budget + (high - budget) / 2;
+            let (middle_tier, middle_slice) = served_at(middle, probes).await;
+            probes += 1;
+            if rank(middle_tier) >= rank(target) {
+                (budget, tier, slice) = (middle, middle_tier, middle_slice);
+            } else {
+                high = middle;
             }
         }
-        let (budget, slice) = reached
-            .unwrap_or_else(|| panic!("{}: no positive budget served {target:?}", scenario.id));
+        assert_eq!(
+            tier, target,
+            "{}: no positive budget served {target:?}",
+            scenario.id
+        );
         let body = history_body(&slice).to_owned();
         let newer_tier = served_tier(&body, newer_title, &newer_approved);
         assert!(
@@ -1894,6 +1997,82 @@ fn the_capture_directory_is_owner_only_and_outside_the_repository() {
     assert!(std::panic::catch_unwind(|| private_capture_dir(&shared)).is_err());
 }
 
+fn new_messages_prompt(lines: &[(u64, &str, &str)]) -> String {
+    let body: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (ordinal, role, text))| {
+            format!("[{ordinal}] {role}: \u{ab}s{}\u{bb}{text}", index + 1)
+        })
+        .collect();
+    format!("<new_messages>\n\n{}\n\n</new_messages>", body.join("\n"))
+}
+
+#[test]
+fn exposure_is_credited_only_within_the_annotated_block() {
+    let (case, source) = case_source("C6", "C6.V1");
+    let [m1, m2, m3, m4] = source.messages.as_slice() else {
+        panic!("C6.V1 holds four messages");
+    };
+    let [r1, r2, r3, r4] = [m1, m2, m3, m4].map(rendered_record);
+    let seen = |prompt: &str| -> Vec<(String, Exposure)> {
+        exposures(case, source, prompt)
+            .into_iter()
+            .map(|(seen, _, _, entry)| (entry["obligation"].as_str().unwrap().to_owned(), seen))
+            .collect()
+    };
+
+    let whole = new_messages_prompt(&[(1, "U", &r1), (2, "A", &r2), (3, "U", &r3), (4, "A", &r4)]);
+    assert_eq!(
+        seen(&whole),
+        [
+            ("C6.O1".to_owned(), Exposure::Exact),
+            ("C6.O2".to_owned(), Exposure::Transformed),
+        ]
+    );
+
+    // msg_cf_c6_03 pastes msg_cf_c6_02's block verbatim. When the prompt omits msg_cf_c6_02, its
+    // annotated spans are Absent while msg_cf_c6_03 still carries the copy.
+    let annotated_dropped = new_messages_prompt(&[(1, "U", &r1), (3, "U", &r3), (4, "A", &r4)]);
+    assert!(r3.contains(&r2), "the control depends on the C6 duplicate");
+    assert_eq!(
+        seen(&annotated_dropped),
+        [
+            ("C6.O1".to_owned(), Exposure::Absent),
+            ("C6.O2".to_owned(), Exposure::Absent),
+        ]
+    );
+
+    // msg_cf_c6_02's tool output repeats the summary line its text block quotes. The presenter
+    // omits tool output, so a span annotated on the tool block is Absent although the text
+    // block beside it carries the same bytes.
+    let text_span = &case.obligations[0].evidence[0];
+    assert_eq!(text_span.message_id, m2.info.id);
+    assert_eq!(text_span.block_index, 1);
+    let Part::Tool { state, .. } = &m2.parts[0] else {
+        panic!("msg_cf_c6_02 block 0 is the tool call");
+    };
+    assert!(state.output.as_deref().unwrap().contains(&text_span.text));
+    let tool_span = Span {
+        source: text_span.source.clone(),
+        message_id: text_span.message_id.clone(),
+        block_index: 0,
+        revision: text_span.revision.clone(),
+        start: 0,
+        end: text_span.text.len(),
+        text: text_span.text.clone(),
+    };
+    let parts = presented_parts(&whole);
+    assert_eq!(
+        span_exposure(&parts, source, text_span),
+        (true, Exposure::Exact)
+    );
+    assert_eq!(
+        span_exposure(&parts, source, &tool_span),
+        (true, Exposure::Absent)
+    );
+}
+
 #[test]
 fn an_observation_is_written_once_privately_and_reads_back() {
     use std::os::unix::fs::PermissionsExt;
@@ -1929,4 +2108,22 @@ fn an_observation_is_written_once_privately_and_reads_back() {
     );
     let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| record.emit_to(&target)));
     assert!(again.is_err(), "a second write of one record is refused");
+}
+
+#[test]
+fn publication_refuses_to_replace_a_completed_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record.json");
+    let temporary = dir.path().join(".record.json.tmp");
+    std::fs::write(&path, b"first").unwrap();
+    std::fs::write(&temporary, b"second").unwrap();
+    assert!(
+        super::compression_fidelity_observation::publish(&temporary, &path).is_err(),
+        "a second writer whose existence check raced the first is refused"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    assert!(
+        !temporary.exists(),
+        "the refused writer's temporary file is removed"
+    );
 }

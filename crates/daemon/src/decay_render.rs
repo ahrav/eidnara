@@ -130,11 +130,32 @@ pub(crate) fn render_rows(
     segments: &[StoredHistorySegment],
     temporal_awareness: bool,
 ) -> Vec<DecayRenderHistorySegment> {
-    segments
-        .iter()
-        .zip(corrections_for(segments))
-        .map(|(segment, corrections)| {
-            let mut row = DecayRenderHistorySegment::from(segment);
+    with_corrections(
+        segments.iter().map(DecayRenderHistorySegment::from),
+        corrections_for(segments),
+        temporal_awareness,
+    )
+}
+
+pub(crate) fn render_owned_rows(
+    segments: Vec<StoredHistorySegment>,
+    temporal_awareness: bool,
+) -> Vec<DecayRenderHistorySegment> {
+    let corrections = corrections_for(&segments);
+    with_corrections(
+        segments.into_iter().map(DecayRenderHistorySegment::from),
+        corrections,
+        temporal_awareness,
+    )
+}
+
+fn with_corrections(
+    rows: impl Iterator<Item = DecayRenderHistorySegment>,
+    corrections: Vec<Vec<Correction>>,
+    temporal_awareness: bool,
+) -> Vec<DecayRenderHistorySegment> {
+    rows.zip(corrections)
+        .map(|(mut row, corrections)| {
             if !temporal_awareness {
                 row.start_date = None;
                 row.end_date = None;
@@ -264,6 +285,28 @@ impl From<&StoredHistorySegment> for DecayRenderHistorySegment {
     }
 }
 
+impl From<StoredHistorySegment> for DecayRenderHistorySegment {
+    fn from(c: StoredHistorySegment) -> Self {
+        let archive = c.is_archive();
+        DecayRenderHistorySegment {
+            start_message: c.start_message,
+            end_message: c.end_message,
+            title: c.title,
+            content: c.content,
+            start_date: c.start_date,
+            end_date: c.end_date,
+            p1: c.p1,
+            p2: c.p2,
+            p3: c.p3,
+            p4: c.p4,
+            importance: Some(c.importance),
+            legacy: Some(c.legacy),
+            archive,
+            corrections: Vec::new(),
+        }
+    }
+}
+
 /// Projects stored rows and renders them in caller-provided chronological order.
 ///
 /// `history_budget_tokens` and `estimate_tokens` must use the same token unit. Positive budgets
@@ -337,14 +380,39 @@ fn history_segment_heading(c: &DecayRenderHistorySegment) -> String {
     )
 }
 
-pub(crate) fn guard_history_segment_body(body: &str) -> String {
-    // The renderer indents heading-like body lines so only an unindented `## ` line can start a history_segment.
-    let guarded = body.replace("\n## ", "\n ## ");
-    if guarded.starts_with("## ") {
-        format!(" {guarded}")
-    } else {
-        guarded
+pub(crate) fn guarded_body(body: &str) -> String {
+    let mut guarded = String::with_capacity(body.len() + 1);
+    push_guarded_body(&mut guarded, body);
+    guarded
+}
+
+/// Appends `body` XML-escaped. The renderer indents heading-like body lines so only an
+/// unindented `## ` line can start a history_segment.
+fn push_guarded_body(out: &mut String, body: &str) {
+    if body.starts_with("## ") {
+        out.push(' ');
     }
+    let mut copied = 0;
+    for (at, byte) in body.bytes().enumerate() {
+        let replacement = match byte {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'\n' if body[at + 1..].starts_with("## ") => "\n ",
+            _ => continue,
+        };
+        out.push_str(&body[copied..at]);
+        out.push_str(replacement);
+        copied = at + 1;
+    }
+    out.push_str(&body[copied..]);
+}
+
+fn heading_and_body(mut heading: String, body: &str) -> String {
+    heading.reserve(body.len() + 2);
+    heading.push('\n');
+    push_guarded_body(&mut heading, body);
+    heading
 }
 
 fn is_tiered_row(c: &DecayRenderHistorySegment) -> bool {
@@ -352,7 +420,7 @@ fn is_tiered_row(c: &DecayRenderHistorySegment) -> bool {
 }
 
 /// The renderer uses the requested tier, then the densest populated denser tier, then flat content.
-fn tier_body(c: &DecayRenderHistorySegment, tier: u8) -> String {
+fn tier_body(c: &DecayRenderHistorySegment, tier: u8) -> &str {
     let tiers = [
         c.p1.as_deref(),
         c.p2.as_deref(),
@@ -361,16 +429,16 @@ fn tier_body(c: &DecayRenderHistorySegment, tier: u8) -> String {
     ];
     let idx = (tier as usize).saturating_sub(1);
     if let Some(requested) = tiers.get(idx).copied().flatten() {
-        return requested.trim().to_string();
+        return requested.trim();
     }
     for i in (0..idx).rev() {
         if let Some(t) = tiers[i]
             && !t.is_empty()
         {
-            return t.trim().to_string();
+            return t.trim();
         }
     }
-    c.content.trim().to_string()
+    c.content.trim()
 }
 
 /// The truncation function limits output to `max` Unicode scalar values; on truncation, it trims trailing whitespace and appends `…`.
@@ -422,22 +490,16 @@ fn render_one_history_segment(c: &DecayRenderHistorySegment, tier: u8) -> String
         if tier >= 4 || flat.is_empty() {
             return heading;
         }
-        let body =
-            guard_history_segment_body(&escape_xml_content(&legacy_body_for_tier(flat, tier)));
-        return format!("{heading}\n{body}");
+        return heading_and_body(heading, &legacy_body_for_tier(flat, tier));
     }
 
     // Corrections splice into the unescaped body, so escaping and the heading guard apply to
     // every marker byte as well.
-    let tier_text = tier_body(c, tier);
-    let body = apply_corrections(&tier_text, &c.corrections);
+    let body = apply_corrections(tier_body(c, tier), &c.corrections);
     if body.is_empty() {
         return heading;
     }
-    format!(
-        "{heading}\n{}",
-        guard_history_segment_body(&escape_xml_content(&body))
-    )
+    heading_and_body(heading, &body)
 }
 
 /// `render_decayed_history_segments` computes pressure from non-legacy history_segments.
@@ -489,39 +551,30 @@ pub(crate) fn fold_horizon(newest_importances: &[i32], history_budget: f64) -> u
 }
 
 fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget: f64) -> Vec<u8> {
-    let v2_indices: Vec<usize> = history_segments
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.legacy != Some(1) && !c.archive)
-        .map(|(i, _)| i)
-        .collect();
-    let v2_total = v2_indices.len();
+    let is_v2 = |c: &DecayRenderHistorySegment| c.legacy != Some(1) && !c.archive;
 
     // The curve index is 1-based from the newest v2 row, so the importances
     // handed to the curve run newest first.
-    let mut curve_index_by_original = std::collections::HashMap::new();
-    let mut importances_newest_first = vec![50; v2_total];
-    for (v2_ordinal, &original_index) in v2_indices.iter().enumerate() {
-        let curve_index = (v2_total - v2_ordinal) as u32;
-        curve_index_by_original.insert(original_index, curve_index);
-        importances_newest_first[curve_index as usize - 1] = history_segments[original_index]
-            .importance
-            .unwrap_or(50)
-            .clamp(1, 100);
-    }
+    let importances_newest_first: Vec<i32> = history_segments
+        .iter()
+        .rev()
+        .filter(|c| is_v2(c))
+        .map(|c| c.importance.unwrap_or(50).clamp(1, 100))
+        .collect();
     let pressure = decay_pressure(&importances_newest_first, history_budget);
 
+    let mut curve_index = importances_newest_first.len() as u32 + 1;
     history_segments
         .iter()
-        .enumerate()
-        .map(|(i, c)| {
+        .map(|c| {
             if c.archive {
                 tier_ordinal(Tier::P5)
             } else if c.legacy == Some(1) {
                 legacy_tier(c)
             } else {
+                curve_index -= 1;
                 tier_ordinal(rendered_tier(
-                    *curve_index_by_original.get(&i).unwrap_or(&1),
+                    curve_index,
                     c.importance.unwrap_or(50),
                     pressure,
                     0.0,
@@ -586,8 +639,9 @@ pub fn render_decayed_history_segments(
     let mut body = join_body(&rendered);
     let mut tokens = estimate_tokens(&body);
     debug_assert!(predicted <= tokens, "rows counted above the body");
+    let mut oldest = 0;
     while tokens as f64 > history_budget_tokens && guard > 0 {
-        if demote_oldest(history_segments, &mut tiers, &mut rendered).is_none() {
+        if demote_oldest(history_segments, &mut tiers, &mut rendered, &mut oldest).is_none() {
             break;
         }
         body = join_body(&rendered);
@@ -597,13 +651,16 @@ pub fn render_decayed_history_segments(
     body
 }
 
-/// Demotes the oldest row below tier 5 and rerenders it, returning its index.
+/// Demotes the oldest row below tier 5 and rerenders it, returning its index. Every row
+/// before `oldest` is at tier 5, and demotion only raises tiers, so the search resumes there.
 fn demote_oldest(
     history_segments: &[DecayRenderHistorySegment],
     tiers: &mut [u8],
     rendered: &mut [String],
+    oldest: &mut usize,
 ) -> Option<usize> {
-    let i = tiers.iter().position(|t| *t < 5)?;
+    let i = *oldest + tiers[*oldest..].iter().position(|t| *t < 5)?;
+    *oldest = i;
     tiers[i] += 1;
     rendered[i] = render_one_history_segment(&history_segments[i], tiers[i]);
     Some(i)
@@ -644,8 +701,9 @@ fn demote_by_row_counts(
     let mut joined_counts: Vec<usize> = rendered[..last].iter().map(|row| joined(row)).collect();
     let mut earlier: usize = joined_counts.iter().sum();
     let mut last_tokens = count(&rendered[last]);
+    let mut oldest = 0;
     while (earlier + last_tokens) as f64 > history_budget_tokens && *guard > 0 {
-        let Some(i) = demote_oldest(history_segments, tiers, rendered) else {
+        let Some(i) = demote_oldest(history_segments, tiers, rendered, &mut oldest) else {
             break;
         };
         if i == last {
@@ -1047,6 +1105,57 @@ mod tests {
             expected
         );
         assert_eq!(longer_than_a_row.get(), 1);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn guarded_body_matches_escaping_then_indenting_headings(
+            body in "(## |\n## |\n|#|##|&|<|>|&amp;| |a|é|\u{2028})*",
+        ) {
+            let escaped = escape_xml_content(&body).replace("\n## ", "\n ## ");
+            let expected = if escaped.starts_with("## ") {
+                format!(" {escaped}")
+            } else {
+                escaped
+            };
+            proptest::prop_assert_eq!(guarded_body(&body), expected);
+        }
+    }
+
+    #[test]
+    fn owned_rows_project_as_borrowed_rows() {
+        let rows: Vec<StoredHistorySegment> = (0..12)
+            .map(|n| StoredHistorySegment {
+                sequence: n + 1,
+                start_message: 2 * n + 1,
+                end_message: 2 * n + 2,
+                title: format!("segment {n}"),
+                content: if n % 4 == 1 {
+                    String::new()
+                } else {
+                    format!("content {n}")
+                },
+                start_date: Some("2026-06-08".into()),
+                end_date: Some("2026-06-09".into()),
+                p1: (n % 3 != 0).then(|| format!("full {n}")),
+                p2: Some(format!("short {n}")),
+                importance: 10 * n as i32,
+                legacy: i32::from(n % 5 == 2),
+                episode_type: (n % 4 == 1).then(|| ARCHIVE_EPISODE_TYPE.to_string()),
+                claims: vec![claim("k.shared", &format!("v{n}"), n)],
+                ..Default::default()
+            })
+            .collect();
+        for temporal_awareness in [true, false] {
+            let borrowed = render_rows(&rows, temporal_awareness);
+            assert!(borrowed.iter().any(|row| row.archive));
+            assert!(borrowed.iter().any(|row| !row.corrections.is_empty()));
+            assert_eq!(
+                format!("{:?}", render_owned_rows(rows.clone(), temporal_awareness)),
+                format!("{borrowed:?}"),
+                "temporal awareness {temporal_awareness}"
+            );
+        }
     }
 
     #[test]
