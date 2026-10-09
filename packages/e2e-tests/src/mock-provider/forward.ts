@@ -479,14 +479,15 @@ export class Forwarder {
             : reserved;
         this.spent += cost - reserved;
         const captured = bytes.subarray(0, MAX_CAPTURED_RESPONSE_BYTES);
+        const truncated = captured.byteLength < bytes.byteLength;
         exchange.response = {
             outcome: response.ok ? "acknowledged" : "provider_error",
             status: response.status,
             headers: redact(headerRecord(response.headers)),
             body_sha256: sha256(bytes),
             body_bytes: bytes.byteLength,
-            body_text: new TextDecoder().decode(captured),
-            truncated: captured.byteLength < bytes.byteLength,
+            body_text: truncated ? new TextDecoder().decode(captured) : responseText,
+            truncated,
             stop_reason: stopReason,
             usage,
             cost_usd: cost,
