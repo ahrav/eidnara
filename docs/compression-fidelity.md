@@ -341,27 +341,92 @@ runs the whole loop through OpenCode against an in-process provider double.
   pass-through.
 - **Semantic review.** No human semantic judgment exists for any row.
 
-## Planned `eval:compression-fidelity` command
+## `eval:compression-fidelity`
 
-This command is planned, not delivered. It will be a script in
-`packages/e2e-tests` with this contract:
+`bun run --cwd packages/e2e-tests eval:compression-fidelity` assembles one
+baseline and one candidate evidence directory into a private manifest and a
+per-scenario report (`scripts/eval-compression-fidelity.ts`,
+`src/compression-fidelity/evaluation.ts`). It reads files and writes two;
+it sends no request in either mode.
 
-- **Inputs.** The corpus path, verified against the pinned digest; baseline
-  and candidate prompt identities; a mode, either scripted or forwarding,
-  with scripted as the default; for forwarding, one explicitly selected
-  HTTPS provider and model with fixed call count, maximum output, timeout,
-  and total spend limits covering the whole tool loop.
-- **Outputs.** A private output directory outside the repository, written
-  through the existing atomic JSON publisher with restrictive permissions.
-  The run manifest records the repository revision, the corpus digest, the
-  prompt hashes, the model, provider, version, and settings, and the limits
-  once. Each case and scenario row references the owner observations it was
-  derived from and keeps execution, deterministic result, preservation,
-  recovery, consumer safety, semantic review, and cost as separate columns.
-- **Limits.** Scripted mode makes no outbound provider call, including when
-  scripts exhaust or setup fails. Live mode reuses the record-and-forward
-  provider mode and its limits.
-- **Review prerequisites.** Two people approve the corpus before any
-  candidate output is inspected, and the first semantic baseline before it
-  is accepted. Without an authorized provider or reviewers, semantic
-  evidence stays unverified.
+```
+eval:compression-fidelity --baseline <dir> --candidate <dir>
+  --out <private dir> [--corpus <path>] [--mode offline|live]
+```
+
+**Inputs.**
+
+- `--corpus`: the corpus file, the committed one by default, read only when
+  its bytes hash to the pinned digest.
+- `--baseline` and `--candidate`: each an evidence directory. It holds the
+  owner observations the witnesses wrote with
+  `EIDNARA_FIDELITY_OBSERVATIONS_DIR` set:
+  `daemon.compression_fidelity.replay`,
+  `daemon.harness_sources.c6_exact_read`,
+  `daemon.compression_fidelity.real_capture`, and `opencode-delivery`. It
+  also holds any `forwarding-*.json` reports and an `arm.json`
+  (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
+  the SHA-256 of its history summarizer system prompt, its model, provider,
+  version, settings, and limits, and whether its generation origin is
+  `scripted` or `real`.
+
+**Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
+an owner-only `0700` directory outside the repository.
+
+- **Manifest.** It records once:
+  - the repository revision;
+  - the corpus path and digest;
+  - each arm's configuration;
+  - every observation and forwarding report with its file SHA-256.
+- **Report.** It holds, per arm:
+  - identity errors;
+  - reached and missing scenarios;
+  - one row per corpus scenario with the columns below, where every column
+    derives from that arm's observations;
+  - the reasons acceptance is withheld.
+
+  It then holds the comparison's refusals and whether the comparison is a
+  treatment. It assembles no review, control, or cost evidence, so it
+  accepts no arm.
+
+| Column | Values and source |
+| --- | --- |
+| `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or C6's exact read |
+
+**Identity.** The assembler recomputes every file's SHA-256. It refuses:
+
+- an observation bound to another corpus;
+- an unknown owner;
+- a case or scenario outside the corpus;
+- a duplicate observation of one owner, case, source, scenario, and stage;
+- a leftover temporary file;
+- a system prompt the arm did not declare;
+- forwarding exchange text that does not match its recorded hash. The
+  hashed representation is the request body as UTF-8 bytes.
+
+In an arm labeled `real`:
+- scripted output is an identity error;
+- every source needs a published real capture;
+- every serving observation must name, in `detail.generation_capture_sha256`,
+  the file hash of the published real capture of its source whose output it
+  served.
+
+A scenario label `<scenario>@<variant>` belongs to its scenario's case.
+Observations of a variant and observations marked `detail.judge_control`,
+which test the delivery judge itself, appear in the row's outcomes and judge
+nothing.
+
+**Comparison.**
+
+- The comparison is refused when an arm is bound to another corpus or has
+  identity errors, when the arms reached different scenario sets, or when
+  they differ in model, provider, version, settings, or limits.
+- Differing prompt hashes mark it a treatment comparison.
+
+Missing scenarios block full acceptance, and the report names them.
+
+**Modes.** `offline`, the default, assembles the directories as they are.
+`live` additionally requires each arm to carry complete forwarding reports
+from the record-and-forward provider mode whose limits equal the arm's
+`limits`, so live evidence inherits that mode's limits.

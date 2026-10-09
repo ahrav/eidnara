@@ -12,9 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { publishJsonAtomically } from "../atomic-publish";
+import { publishPrivateJson } from "../atomic-publish";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 
 export interface ForwardLimits {
@@ -528,40 +526,14 @@ export class Forwarder {
     }
 }
 
-/** The repository root: captures never land beneath it. */
-const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
-
 /**
- * Publishes `report` as `<dir>/forwarding-<label>.json` with mode `0600` in an owner-only
- * directory outside the repository. The directory is created `0700` when absent; an existing
- * one must already be `0700` and owned by this user.
+ * Publishes `report` as `<dir>/forwarding-<label>.json` through `publishPrivateJson`: mode
+ * `0600` in an owner-only directory outside the repository.
  */
 export function publishForwardingReport(
     report: ForwardingReport,
     dir: string,
     label: string,
 ): string {
-    if (!/^[A-Za-z0-9._-]+$/.test(label) || label.startsWith(".")) {
-        throw new Error(`${label} is not a plain file label`);
-    }
-    if (dir.split(/[\\/]/).includes("..")) throw new Error(`${dir} names a parent directory`);
-    const target = resolve(dir);
-    let existing = target;
-    while (!existsSync(existing)) existing = dirname(existing);
-    const real = join(realpathSync(existing), relative(existing, target));
-    const inside = relative(realpathSync(REPOSITORY_ROOT), real);
-    if (
-        inside === "" ||
-        (inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside))
-    ) {
-        throw new Error(`${real} is inside the repository`);
-    }
-    mkdirSync(real, { recursive: true, mode: 0o700 });
-    const stat = statSync(real);
-    if ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) {
-        throw new Error(`${real} is not an owner-only directory`);
-    }
-    const path = join(real, `forwarding-${label}.json`);
-    publishJsonAtomically(report, path, { mode: 0o600 });
-    return path;
+    return publishPrivateJson(report, dir, `forwarding-${label}.json`);
 }

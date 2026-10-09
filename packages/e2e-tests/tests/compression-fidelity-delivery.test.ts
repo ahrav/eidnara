@@ -273,7 +273,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity delivery campaign", () =>
                 stage: "missing-capture",
                 terminal: "unqualified",
                 markers: ["cf-delivery-missing-capture-input"],
-                detail: { refusals: missing.refusals },
+                detail: { refusals: missing.refusals, judge_control: true },
             });
         },
         CASE_TIMEOUT_MS,
