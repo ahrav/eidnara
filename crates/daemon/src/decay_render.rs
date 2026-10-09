@@ -541,9 +541,9 @@ fn compute_tiers(history_segments: &[DecayRenderHistorySegment], history_budget:
 ///
 /// The guard predicts the body's count from per-row counts by the join identity documented on
 /// `tokenizer::starts_outside_whitespace`. `estimate_tokens` must predict at most its count of
-/// the joined body; the guard then renders the bytes of a guard that counts the whole body
-/// after every demotion. `tokenizer::estimate_tokens` predicts exactly, so the guard counts
-/// the whole body once.
+/// the joined body; the output then equals what counting the whole body after every demotion
+/// produces. `tokenizer::estimate_tokens` predicts exactly, so the guard counts the whole
+/// body once.
 pub fn render_decayed_history_segments(
     history_segments: &[DecayRenderHistorySegment],
     history_budget_tokens: f64,
@@ -612,8 +612,8 @@ fn demote_oldest(
 /// Runs the budget guard's demotions with one count per changed row and returns the body's
 /// predicted count where it stopped. Every rendered row opens with its `## ` heading, so the
 /// body costs each row but the last with one more `"\n"`, one `"\n"` per separator, and the
-/// last row. Demotion empties the newest row only after every older row, so the newest
-/// nonempty row at the start stays the last row of every nonempty body.
+/// last row. Rows after the newest nonempty row stay empty, and demotion empties the newest
+/// row only after every older row, so that row stays the last row of every nonempty body.
 fn demote_by_row_counts(
     history_segments: &[DecayRenderHistorySegment],
     tiers: &mut [u8],
@@ -650,7 +650,7 @@ fn demote_by_row_counts(
         };
         if i == last {
             last_tokens = count(&rendered[last]);
-        } else if i < last {
+        } else {
             earlier -= joined_counts[i];
             joined_counts[i] = joined(&rendered[i]);
             earlier += joined_counts[i];
