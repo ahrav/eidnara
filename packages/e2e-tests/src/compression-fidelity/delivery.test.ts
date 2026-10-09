@@ -6,7 +6,14 @@ import type { RetainedCapture, RustPassLine } from "../rust-harness";
 import { parseRustPassLine } from "../rust-harness";
 import type { ScriptSource } from "../rust-runner/hermetic-host";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "./corpus";
-import { emitObservation, judgeDelivery, planSeed, reviewedTiers, servedTier } from "./delivery";
+import {
+    emitObservation,
+    judgeDelivery,
+    planSeed,
+    publishedOf,
+    reviewedTiers,
+    servedTier,
+} from "./delivery";
 
 const TITLE = "Pooling-first rejected";
 const BODIES = ["full P1 body", "condensed P2", "short P3"];
@@ -220,6 +227,18 @@ describe("compression fidelity delivery judgment", () => {
         });
         expect(rows[1]?.parts[0]?.data).not.toHaveProperty("id");
         expect(rows[3]?.parts[0]?.data).toMatchObject({ type: "text" });
+    });
+
+    it("reads the published counter and rejects a status without one", () => {
+        expect(publishedOf({ history_summarizer: { counters: { published: 0 } } })).toBe(0);
+        expect(publishedOf({ history_summarizer: { counters: { published: 3 } } })).toBe(3);
+        for (const status of [
+            {},
+            { history_summarizer: {} },
+            { history_summarizer: { counters: {} } },
+        ]) {
+            expect(() => publishedOf(status)).toThrow("history_summarizer.counters.published");
+        }
     });
 
     it("reads the title and tier bodies of a reviewed output", () => {

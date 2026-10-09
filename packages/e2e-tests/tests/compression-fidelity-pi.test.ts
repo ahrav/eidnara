@@ -6,6 +6,7 @@ import { readCompressionFidelityCorpus } from "../src/compression-fidelity/corpu
 import {
     emitObservation,
     leaksOutside,
+    publishedOf,
     reviewedTiers,
     servedTier,
     stageOf,
@@ -127,8 +128,7 @@ async function published(stack: HermeticHostStack, project: string): Promise<num
         { project_root: project, harness: "pi", session: SESSION },
         { method: "session.status", v: 1, session_id: SESSION },
     );
-    const summarizer = status.history_summarizer as { counters?: { published?: number } };
-    return summarizer?.counters?.published ?? 0;
+    return publishedOf(status);
 }
 
 describe("compression fidelity pi delivery prerequisites", () => {

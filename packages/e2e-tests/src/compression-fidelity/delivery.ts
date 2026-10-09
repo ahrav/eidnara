@@ -192,17 +192,28 @@ export function seedSource(
     }
 }
 
+/**
+ * The published history-segment count in a `session.status` response. The daemon serializes the
+ * counter on every response, zero included, so a response without it is malformed.
+ */
+export function publishedOf(status: Record<string, unknown>): number {
+    const summarizer = status.history_summarizer as
+        | { counters?: { published?: unknown } }
+        | undefined;
+    const published = summarizer?.counters?.published;
+    if (typeof published !== "number") {
+        throw new Error(
+            `session.status has no history_summarizer.counters.published: ${JSON.stringify(status)}`,
+        );
+    }
+    return published;
+}
+
 /** The daemon's published history-segment count for the session. */
 export async function publishedCount(harness: RustTestHarness, sessionId: string): Promise<number> {
-    const status = await harness.host.primaryStatus(
-        sessionId,
-        harness.env.workdir,
-        "session.status",
+    return publishedOf(
+        await harness.host.primaryStatus(sessionId, harness.env.workdir, "session.status"),
     );
-    const summarizer = status.history_summarizer as
-        | { counters?: { published?: number } }
-        | undefined;
-    return summarizer?.counters?.published ?? 0;
 }
 
 /** The text content of one provider message or system field. */
