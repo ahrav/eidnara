@@ -15,7 +15,15 @@ import {
     COMPRESSION_FIDELITY_CORPUS_SHA256,
     readCompressionFidelityCorpus,
 } from "../src/compression-fidelity/corpus";
-import { assembleEvidence, loadArm, REPORT_SCHEMA } from "../src/compression-fidelity/evidence";
+import {
+    assembleEvidence,
+    loadArm,
+    REPORT_SCHEMA,
+    sha256,
+} from "../src/compression-fidelity/evidence";
+
+// `node:fs` is loaded through `getBuiltinModule` for the startup cost noted in `../src/atomic-publish`.
+const { readFileSync } = process.getBuiltinModule("node:fs");
 
 export const USAGE =
     "eval:compression-fidelity --baseline <dir> --candidate <dir> --out <dir> [--corpus <path>] [--mode offline|live]";
@@ -110,9 +118,22 @@ export async function run(
         comparison: { refused: assembled.refused, treatment: assembled.treatment },
         accepted: false,
     };
+    // The report names the manifest bytes it was assembled with, so a report left beside an
+    // older or newer manifest is detectable.
+    const manifest = publishPrivateJson(assembled.manifest, out, "manifest.json", {
+        checked: true,
+    });
+    const manifestSha256 = sha256(readFileSync(manifest));
     return {
-        manifest: publishPrivateJson(assembled.manifest, out, "manifest.json", { checked: true }),
-        report: publishPrivateJson(report, out, "report.json", { checked: true }),
+        manifest,
+        report: publishPrivateJson(
+            { ...report, manifest_sha256: manifestSha256 },
+            out,
+            "report.json",
+            {
+                checked: true,
+            },
+        ),
         accepted: false,
     };
 }

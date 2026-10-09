@@ -466,8 +466,9 @@ either arm; an arm directory is refused before any write, and a component of
   - the reasons acceptance is withheld.
 
   It then holds the comparison's refusals and whether the comparison is a
-  treatment. It assembles no review, control, or cost evidence, so it
-  accepts no arm.
+  treatment, and `manifest_sha256`, the SHA-256 of the manifest file it was
+  assembled with, so a report beside another manifest is detectable. It
+  assembles no review, control, or cost evidence, so it accepts no arm.
 
 | Column | Values and source |
 | --- | --- |
@@ -483,8 +484,9 @@ either arm; an arm directory is refused before any write, and a component of
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
 - an observation with no `stage` or no `terminal`;
-- an `opencode-delivery` observation marked `detail.judge_control` at a stage
-  other than `missing-capture`, the delivery witness's judge self-test;
+- an `opencode-delivery` observation without a scenario label, or marked
+  `detail.judge_control` other than at stage `missing-capture` on `C1.S2`,
+  the delivery witness's judge self-test;
 - a `daemon.harness_sources.c6_exact_read` observation naming a scenario
   whose serving path is not `exact_read`;
 - a scenario variant no witness emits: `opencode-delivery` emits `p1-only`
@@ -505,8 +507,9 @@ either arm; an arm directory is refused before any write, and a component of
   source's approved example;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
-- a forwarding report without the four limits the forwarder enforces or
-  positive prices, or whose exchange tool ids are not string arrays;
+- a forwarding report without the four limits the forwarder enforces,
+  positive prices, or an HTTPS Messages endpoint free of credential and
+  query, or whose exchange tool ids are not string arrays;
 - a forwarding report marked complete that records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than

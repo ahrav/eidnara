@@ -248,20 +248,41 @@ describe("evidence identity and completeness", () => {
         );
     });
 
-    test("a judge control outside the witness's control stage is an identity error", async () => {
+    test("a judge control outside the witness's control stage or scenario is an identity error", async () => {
         const first = allScenarios.find(({ s }) => s.serving.path !== "exact_read")?.s.id ?? "";
+        const control = (scenario: string, stage?: string) =>
+            assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${scenario}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.terminal = "unqualified";
+                    value.detail.judge_control = true;
+                    if (stage) value.stage = stage;
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+        expect(errorsOf(await control(first))).toContain(
+            `delivery.${first}.json marks stage served as a judge control`,
+        );
+        expect(errorsOf(await control("C2.S1", "missing-capture"))).toContain(
+            "delivery.C2.S1.json marks C2.S1 as a judge control, which the witness tests on C1.S2",
+        );
+        const documented = await control("C1.S2", "missing-capture");
+        expect(documented.arms[0]?.identity_errors).toEqual([]);
+    });
+
+    test("a delivery observation carries a string scenario label", async () => {
+        const first = allScenarios[0]?.s.id ?? "";
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${first}.json`);
                 const value = JSON.parse(readFileSync(path, "utf8"));
-                value.terminal = "unqualified";
-                value.detail.judge_control = true;
+                value.scenario = null;
                 writeFileSync(path, JSON.stringify(value));
             },
         });
-        expect(errorsOf(assembled)).toContain(
-            `delivery.${first}.json marks stage served as a judge control`,
-        );
+        expect(errorsOf(assembled)).toContain(`delivery.${first}.json has no scenario label`);
+        expect(rowOf(assembled, first)?.execution.status).toBe("missing");
     });
 
     test("a scripted arm needs a published replay generation that records its prompt for every source", async () => {
@@ -1108,9 +1129,18 @@ describe("evidence live mode", () => {
         expect(errorsOf(relocated)).toContain(
             "forwarding-1.json forwarded to https://other.example.test/v1/messages, where forwarding-0.json forwarded to https://api.example.test/v1/messages",
         );
-        expect(errorsOf(await live([{ ...report, upstream_url: "" }]))).toContain(
-            "does not match the forwarding report schema",
-        );
+        for (const upstream of [
+            "",
+            "http://api.example.test/v1/messages",
+            "https://api.example.test/v1/complete",
+            "https://user:pw@api.example.test/v1/messages",
+            "https://api.example.test/v1/messages?x=1",
+            "not a url",
+        ]) {
+            expect(errorsOf(await live([{ ...report, upstream_url: upstream }]))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
         const mixed = await live([report, forwardedTo("claude-other")]);
         expect(errorsOf(mixed)).toContain(
             "forwarding-1.json forwarded to claude-other, where forwarding-0.json forwarded to claude-live",
@@ -1158,6 +1188,8 @@ describe("eval:compression-fidelity command", () => {
         expect(sent).toEqual([]);
         expect(written?.accepted).toBe(false);
         expect(readdirSync(out).sort()).toEqual(["manifest.json", "report.json"]);
+        const published = JSON.parse(readFileSync(written?.report ?? "", "utf8"));
+        expect(published.manifest_sha256).toBe(sha256(readFileSync(written?.manifest ?? "")));
         expect(statSync(out).mode & 0o777).toBe(0o700);
         expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
         await expect(
