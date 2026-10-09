@@ -61,7 +61,7 @@ const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly 
 };
 /** The delivery terminals the memory campaign emits on its `memory_excluded` scenario alone. */
 const MEMORY_TERMINALS = ["excluded", "discoverable"];
-const executed = (e: { owner: string; terminal: string }) =>
+export const executed = (e: { owner: string; terminal: string }) =>
     TERMINALS[e.owner]?.executed.includes(e.terminal) ?? false;
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 /** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */

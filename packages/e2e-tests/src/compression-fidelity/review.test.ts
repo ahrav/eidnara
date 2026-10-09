@@ -714,6 +714,20 @@ describe("eval:compression-fidelity gates", () => {
             "source-level serving cost incomplete: source.cold-m0.json: estimator",
         );
         expect(uncosted.report.arms[0]?.accepted).toBe(false);
+        const failed = await evaluate(scratch(), {
+            tamper: (dir) => {
+                sourceLevel(dir, SERVING);
+                const path = join(dir, "source.warm.json");
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.terminal = "unqualified";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(failed.report.arms[0]?.identity_errors).toEqual([]);
+        expect(failed.report.arms[0]?.withheld).toContain(
+            "source-level delivery source.warm.json ended unqualified",
+        );
+        expect(failed.report.arms[0]?.accepted).toBe(false);
     });
 
     test("a real capture with no attempt earns no generation cost", async () => {
@@ -1005,6 +1019,29 @@ describe("eval:compression-fidelity gates", () => {
         const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
         expect(report.arms[0]?.identity_errors).toEqual([]);
         expect(row?.cost.missing).toContain("spoof.json: serving");
+    });
+
+    test("a served delivery observation without a tier is costed as missing its tier", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const served = JSON.parse(
+                    readFileSync(join(dir, `delivery.${scenario}.json`), "utf8"),
+                );
+                write(dir, "untiered.json", {
+                    ...served,
+                    stage: "served-again",
+                    detail: {
+                        serving: served.detail.serving,
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("untiered.json: served_tier");
     });
 
     test("every serving observation needs its cost, whatever its siblings record", async () => {

@@ -15,6 +15,7 @@ import {
     assembleEvidence,
     type Evidence,
     type EvidenceRow,
+    executed,
     type Json,
     named,
     REAL_CAPTURE,
@@ -388,7 +389,15 @@ function reportedUsage(e: Evidence): Json | null {
 function servingCosts(evidence: readonly Evidence[]): { serving: Json[]; missing: string[] } {
     const missing: string[] = [];
     const serving: Json[] = [];
-    for (const e of evidence.filter((e) => servedTierOf(e) !== undefined && !uncosted(e))) {
+    // Every served delivery is a serving observation, whether or not it names its tier.
+    const costed = (e: Evidence) =>
+        !uncosted(e) &&
+        (servedTierOf(e) !== undefined ||
+            (e.owner === "opencode-delivery" && e.terminal === "served"));
+    for (const e of evidence.filter(costed)) {
+        if (e.owner === "opencode-delivery" && typeof e.detail.served_tier !== "string") {
+            missing.push(`${e.file}: served_tier`);
+        }
         if (!record(e.detail.serving)) {
             missing.push(`${e.file}: serving`);
             continue;
@@ -686,13 +695,20 @@ export function evaluate(input: {
         );
         // The delivery witness labels a source with no m1 scenario by its source ID; those
         // serving observations belong to the arm and are costed here rather than on a row.
-        const sourceServing = servingCosts(side.arm.evidence.filter((e) => e.scenario === null));
+        const sourceLevel = side.arm.evidence.filter(
+            (e) => e.scenario === null && e.owner === "opencode-delivery",
+        );
+        const sourceServing = servingCosts(sourceLevel);
+        const failedDeliveries = sourceLevel
+            .filter((e) => !executed(e))
+            .map((e) => `source-level delivery ${e.file} ended ${e.terminal}`);
         const approvers = reviews.approvals.length;
         const reasons = [
             ...side.identity_errors,
             ...reviews.errors,
             ...controls.problems.map((p) => `controls: ${p}`),
             ...stray,
+            ...failedDeliveries,
             ...(sourceServing.missing.length > 0
                 ? [`source-level serving cost incomplete: ${sourceServing.missing.join(", ")}`]
                 : []),
