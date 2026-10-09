@@ -9095,37 +9095,68 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
     if results.is_empty() {
         return None;
     }
-    let lines = results
+    let fragments = results
         .iter()
         .take(USER_HINT_RESULT_LIMIT)
-        .map(|result| format!("- {}", user_hint_fragment(&result.snippet)))
-        .filter(|line| line.len() > 2)
+        .map(|result| user_hint_fragment(&result.snippet))
+        .filter(|fragment| !fragment.is_empty())
         .collect::<Vec<_>>();
-    if lines.is_empty() {
+    if fragments.is_empty() {
         return None;
     }
-    let header = if lines.len() == 1 {
-        "Your memory may contain 1 related fragment:".to_string()
-    } else {
-        format!("Your memory may contain {} related fragments:", lines.len())
-    };
-    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
+    const SEPARATOR: &str = "\n\n";
+    const OPEN: &str = "<eidnara-search-hint>\n";
+    const CLOSE: &str = "\n</eidnara-search-hint>";
+    const HEADER_BYTES: usize = 64;
+    const FOOTER: &str = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
     // A cut fragment carries `…` where the cut fell; the note says a cut can drop a qualifier.
-    let cut = lines
+    let cut = fragments
         .iter()
-        .any(|line| line.starts_with("- …") || line.ends_with('…'));
-    let mut parts = vec![header, lines.join("\n")];
-    if cut {
-        parts.push(USER_HINT_CUT_NOTE.to_string());
+        .any(|fragment| fragment.starts_with('…') || fragment.ends_with('…'));
+    let fragment_bytes: usize = fragments.iter().map(|fragment| fragment.len() + 3).sum();
+    let mut hint = String::with_capacity(
+        SEPARATOR.len()
+            + OPEN.len()
+            + HEADER_BYTES
+            + fragment_bytes
+            + USER_HINT_CUT_NOTE.len()
+            + FOOTER.len()
+            + CLOSE.len(),
+    );
+    hint.push_str(SEPARATOR);
+    hint.push_str(OPEN);
+    if fragments.len() == 1 {
+        hint.push_str("Your memory may contain 1 related fragment:");
+    } else {
+        let _ = write!(
+            hint,
+            "Your memory may contain {} related fragments:",
+            fragments.len()
+        );
     }
-    parts.push(footer.to_string());
-    let body = parts.join("\n");
-    let wrapped = format!("<eidnara-search-hint>\n{body}\n</eidnara-search-hint>");
+    for fragment in &fragments {
+        hint.push_str("\n- ");
+        hint.push_str(fragment);
+    }
+    if cut {
+        hint.push('\n');
+        hint.push_str(USER_HINT_CUT_NOTE);
+    }
+    hint.push('\n');
+    hint.push_str(FOOTER);
+    hint.push_str(CLOSE);
     // Native search returns only memory and history_segment results.
     // A result without commit provenance has no commit SHA or age metadata.
-    let wrapped = truncate_hint_to_total_cap(&wrapped, USER_HINT_TOTAL_CHAR_CAP);
-    debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP);
-    Some(format!("\n\n{wrapped}"))
+    // UTF-8 encodes each scalar in at least as many bytes as its UTF-16 units, so a hint within the
+    // cap in bytes is within it in units.
+    if hint.len() - SEPARATOR.len() > USER_HINT_TOTAL_CHAR_CAP {
+        let wrapped =
+            truncate_hint_to_total_cap(&hint[SEPARATOR.len()..], USER_HINT_TOTAL_CHAR_CAP);
+        hint.truncate(SEPARATOR.len());
+        hint.push_str(&wrapped);
+    }
+    debug_assert!(utf16_len(&hint[SEPARATOR.len()..]) <= USER_HINT_TOTAL_CHAR_CAP);
+    Some(hint)
 }
 
 fn truncate_hint_to_total_cap(wrapped: &str, limit: usize) -> String {

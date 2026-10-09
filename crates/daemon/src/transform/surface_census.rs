@@ -457,6 +457,23 @@ fn a_cut_fragment_discloses_that_a_qualifier_may_be_missing() {
     );
 }
 
+#[test]
+fn a_hint_over_the_cap_in_bytes_and_within_it_in_units_renders_whole() {
+    let wide = hint_result(&"日本語".repeat(40));
+    let rendered = render_user_hint(&[wide.clone(), wide.clone(), wide]).unwrap();
+    let wrapped = rendered.strip_prefix("\n\n").unwrap();
+    assert!(wrapped.len() > USER_HINT_TOTAL_CHAR_CAP, "{wrapped}");
+    assert!(utf16_len(wrapped) <= USER_HINT_TOTAL_CHAR_CAP, "{wrapped}");
+    let fragments = hint_fragment_lines(&rendered);
+    assert_eq!(fragments.len(), 3, "{rendered}");
+    assert!(fragments.iter().all(|fragment| fragment.ends_with('…')));
+    assert!(wrapped.contains(&format!("\n{USER_HINT_CUT_NOTE}\n")));
+    assert!(
+        wrapped.ends_with("Otherwise ignore.\n</eidnara-search-hint>"),
+        "{wrapped}"
+    );
+}
+
 fn hint_fragment_lines(rendered: &str) -> Vec<&str> {
     rendered
         .lines()
