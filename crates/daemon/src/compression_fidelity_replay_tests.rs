@@ -1382,6 +1382,7 @@ const REAL_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const REAL_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const REAL_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 const REAL_OWNER: &str = "daemon.compression_fidelity.real_capture";
+const CAPTURE_HARNESS: &str = "opencode";
 
 /// One producer start the recorder saw: the complete model input and every output or error
 /// the daemon drained for its run.
@@ -1605,9 +1606,10 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
 }
 
 /// Folds every corpus source once through `factory` with `model` as the only summarizer model,
-/// waits up to `wait` for each firing to settle, and returns one capture observation per
-/// source: every attempt's complete input and drained outputs, the published rows, and
-/// `usage: null`, because the host's model-execution protocol reports no token usage.
+/// gives each source `wait` from its transform call to its settled firing, and returns one
+/// capture observation per source: every attempt's complete input and drained outputs, the
+/// published rows, and `usage: null`, because the host's model-execution protocol reports no
+/// token usage.
 async fn capture_sources(
     factory: Arc<dyn HistorySummarizerProducerFactory>,
     model: &str,
@@ -1625,15 +1627,27 @@ async fn capture_sources(
             model_chain: vec![model.to_owned()],
             ..default_test_config()
         };
-        let (handler, store, _dir, _project) =
-            handler_with_factory(recording, config, Arc::new(MissingSessionResolver));
+        let (handler, store, _dir, _project) = handler_with_factory(
+            recording,
+            config,
+            Arc::new(MissingSessionResolver),
+            CAPTURE_HARNESS,
+        );
         let follow_up = follow_up_for(case, source);
         let mut messages = source_ingress(case, source);
         let next = messages.len() as u64 + 1;
         messages.extend(live_tail(follow_up, next));
         let request = request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
-        let first = call_transform_request(&handler, request).await;
-        let settled = wait_settled(&store, &attempts, wait).await;
+        // The transform awaits an emergency firing inline, so one deadline covers the call and
+        // the settling that follows it.
+        let deadline = tokio::time::Instant::now() + wait;
+        let first =
+            tokio::time::timeout_at(deadline, call_transform_request(&handler, request)).await;
+        let transform_returned = first.is_ok();
+        let fired = first.map_or(Value::Null, |first| {
+            first["history_summarizer"]["fired"].clone()
+        });
+        let settled = transform_returned && wait_settled(&store, &attempts, deadline).await;
         let rows = store.load_history_segments("ses").unwrap();
         let attempts = attempts.lock().unwrap().clone();
         let answered = attempts
@@ -1655,8 +1669,10 @@ async fn capture_sources(
             )
             .with(json!({
                 "model": model,
+                "harness": CAPTURE_HARNESS,
                 "output_origin": output_origin,
-                "fired": first["history_summarizer"]["fired"],
+                "fired": fired,
+                "transform_returned": transform_returned,
                 "settled": settled,
                 "attempt_count": attempts.len(),
                 "attempts": attempts,
@@ -1675,16 +1691,20 @@ async fn capture_sources(
     captured
 }
 
-/// Whether the run settled: the summarizer is idle after at least one producer start.
-async fn wait_settled(store: &MemoryStore, attempts: &AttemptLog, wait: Duration) -> bool {
-    let deadline = std::time::Instant::now() + wait;
+/// Whether the run settled by `deadline`: the summarizer is idle after at least one producer
+/// start.
+async fn wait_settled(
+    store: &MemoryStore,
+    attempts: &AttemptLog,
+    deadline: tokio::time::Instant,
+) -> bool {
     loop {
         let idle = store.load("ses").unwrap().meta.history_summarizer.state
             == HistorySummarizerPhase::Idle;
         if idle && !attempts.lock().unwrap().is_empty() {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1790,6 +1810,11 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     )
     .await;
     assert_eq!(records.len(), sources().count());
+    let harnesses = producer.harnesses.lock().unwrap().clone();
+    assert!(
+        !harnesses.is_empty() && harnesses.iter().all(|harness| harness == "opencode"),
+        "the capture connects as a harness host model execution binds: {harnesses:?}"
+    );
     let started = producer.attempts.lock().unwrap().clone();
     assert_eq!(started.len(), records.len());
     let dir = tempfile::tempdir().unwrap();
@@ -1801,6 +1826,7 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
         assert_eq!(read["terminal"], "published", "{}", source.id);
         let detail = &read["detail"];
         assert_eq!(detail["model"], "probe/model");
+        assert_eq!(detail["harness"], "opencode");
         assert_eq!(detail["output_origin"], "scripted approved example");
         assert_eq!(detail["settled"], true);
         assert_eq!(detail["attempt_count"], 1);
@@ -1960,6 +1986,35 @@ async fn a_capture_that_drains_only_errors_is_recorded_unsettled() {
         assert_eq!(record.terminal, Terminal::Unsettled, "{}", record.source);
         assert_eq!(record.detail["settled"], true, "{}", record.source);
         assert!(record.detail["attempt_count"].as_u64().unwrap() >= 1);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_capture_whose_producer_outlasts_the_wait_is_recorded_unsettled_when_it_ends() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .block_output
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let wait = Duration::from_millis(300);
+    let began = std::time::Instant::now();
+    let records = tokio::time::timeout(
+        Duration::from_secs(30),
+        capture_sources(factory, "probe/model", "scripted", wait),
+    )
+    .await
+    .expect("the capture ends within its per-source waits");
+    let sources = u32::try_from(sources().count()).unwrap();
+    assert!(
+        began.elapsed() < wait * sources + Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    for record in &records {
+        assert_eq!(record.terminal, Terminal::Unsettled, "{}", record.source);
+        assert_eq!(record.detail["settled"], false, "{}", record.source);
     }
 }
 
