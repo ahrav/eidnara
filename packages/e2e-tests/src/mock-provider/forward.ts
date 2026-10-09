@@ -436,6 +436,8 @@ export class Forwarder {
     private readonly exchanges: ForwardedExchange[] = [];
     private readonly refusals: string[] = [];
     private refused = 0;
+    /** Aborts every send still in flight when the mock stops. */
+    private readonly lifecycle = new AbortController();
     private readonly unhashed = new Map<ForwardedExchange, Uint8Array>();
     private spent = 0;
     private stopped: string | null = null;
@@ -483,12 +485,23 @@ export class Forwarder {
         return { reserved, toolResults: toolResultIds(parsed) };
     }
 
-    /** Sends `body` and reads the response, up to `MAX_RESPONSE_BYTES`, before the deadline. */
+    /** Ends every send still in flight; the mock calls this when it stops. */
+    close(): void {
+        this.lifecycle.abort(new DOMException("the forwarding mock stopped", "AbortError"));
+    }
+
+    /**
+     * Sends `body` and reads the response, up to `MAX_RESPONSE_BYTES`, before the deadline or
+     * the mock's stop, whichever comes first.
+     */
     private async timedSend(
         body: Uint8Array<ArrayBuffer>,
         headers: Record<string, string>,
     ): Promise<readonly [Response, Uint8Array<ArrayBuffer>]> {
-        const deadline = AbortSignal.timeout(this.config.limits.timeoutMs);
+        const deadline = AbortSignal.any([
+            AbortSignal.timeout(this.config.limits.timeoutMs),
+            this.lifecycle.signal,
+        ]);
         const expired = new Promise<never>((_, reject) => {
             deadline.addEventListener("abort", () => reject(deadline.reason), { once: true });
         });

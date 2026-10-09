@@ -177,6 +177,7 @@ export class MockProvider {
     }
 
     async stop(): Promise<void> {
+        this.forwarder?.close();
         if (this.server) {
             this.server.stop(true);
             this.server = null;
@@ -270,6 +271,14 @@ export class MockProvider {
             const run = this.run;
             const session = run.cassette;
             const logs = run.logs;
+            // The key is checked before the body is read, so an unauthenticated upload never
+            // occupies the forwarding mock.
+            if (this.forwarder && req.headers.get("x-api-key") !== this.inboundKey) {
+                return new Response(errorBody("authentication_error", {}), {
+                    status: 401,
+                    headers: JSON_HEADERS,
+                });
+            }
             const bodyBytes = new Uint8Array(await req.arrayBuffer());
             const bodyText = new TextDecoder().decode(bodyBytes);
             // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
@@ -294,12 +303,6 @@ export class MockProvider {
                 headers: this.forwarder ? redact(headers) : headers,
                 body,
             };
-            if (this.forwarder && headers["x-api-key"] !== this.inboundKey) {
-                return new Response(errorBody("authentication_error", {}), {
-                    status: 401,
-                    headers: JSON_HEADERS,
-                });
-            }
             run.captured.push(captured);
             if (this.forwarder) {
                 const forwarded = await this.forwarder.forward(

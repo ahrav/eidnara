@@ -437,6 +437,48 @@ describe("forwarding", () => {
         expect(double.received).toEqual([]);
         expect(mock.forwardingReport().attempted_sends).toBe(0);
         expect(mock.forwardingReport().stopped).toBeNull();
+        // The key is checked before the body is read, so an unauthenticated caller's upload
+        // never occupies the mock: a body that never completes still gets its 401 at once.
+        const endless = new ReadableStream<Uint8Array>({
+            pull(controller) {
+                controller.enqueue(new Uint8Array(1024).fill(0x20));
+            },
+        });
+        const refused = await fetch(`${base}/v1/messages`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": "wrong" },
+            body: endless,
+            signal: AbortSignal.timeout(3_000),
+        });
+        expect(refused.status).toBe(401);
+        expect(mock.requests()).toEqual([]);
+    });
+
+    test("stopping the mock aborts a send still in flight", async () => {
+        let aborted = false;
+        let settle: (response: Response) => void = () => {};
+        const pending = upstreamDouble([
+            () =>
+                new Promise<Response>((resolve) => {
+                    settle = resolve;
+                }),
+        ]);
+        const observing = async (url: string, init: RequestInit) => {
+            init.signal?.addEventListener("abort", () => {
+                aborted = true;
+                settle(new Response(null, { status: 599 }));
+            });
+            return pending.send(url, init);
+        };
+        const mock = new MockProvider({ forward: config({ fetch: observing }) });
+        const reply = post(await start(mock), firstTurn);
+        while (pending.received.length === 0) await Bun.sleep(5);
+        await mock.stop();
+        await reply.catch(() => null);
+        expect(aborted).toBe(true);
+        const report = mock.forwardingReport();
+        expect(report.exchanges[0]?.response?.outcome).toBe("ambiguous");
+        expect(report.stopped).toContain("send 0 ended without a response");
     });
 
     test("every mock draws its own inbound key", () => {

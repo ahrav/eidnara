@@ -397,7 +397,9 @@ context limit. The report's `mode: "forward"` and upstream URL record
 forwarded execution apart from scripted responses. Status: `unaudited`.
 Impact: Live evaluation can leak credentials, spend beyond authorization, or
 judge an invocation different from the one the agent actually received.
-Open questions: None.
+Open questions: Whether the reviewed corpus digest should bind forwarded
+request content per request or remain a construction-time attestation with
+this guarantee reworded; open on #953 and in the evidence log.
 
 ## Relationships and handoff
 
