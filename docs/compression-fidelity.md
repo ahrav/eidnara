@@ -445,7 +445,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir>
 an owner-only `0700` directory outside the repository whose existing ancestors
 are owned by the operator or root and closed to group and other writes unless
 sticky. `--out` must resolve, through symlinks, to a directory other than
-either arm; an arm directory is refused before any write.
+either arm; an arm directory is refused before any write, and a component of
+`--out` that resolves elsewhere by publication time is refused as well.
 
 - **Manifest.** It records once:
   - the repository revision, suffixed `-dirty` when the worktree held
@@ -455,8 +456,8 @@ either arm; an arm directory is refused before any write.
   - every file read, with its SHA-256, including files the identity check
     refused; the report names each refusal;
   - every accepted observation and forwarding report with its file SHA-256,
-    and the model, upstream endpoint, and context limit each forwarding
-    report forwarded with.
+    and the model, upstream endpoint, context limit, and prices each
+    forwarding report forwarded with.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
@@ -486,17 +487,21 @@ either arm; an arm directory is refused before any write.
   other than `missing-capture`, the delivery witness's judge self-test;
 - a `daemon.harness_sources.c6_exact_read` observation naming a scenario
   whose serving path is not `exact_read`;
-- a scenario variant no witness emits: `opencode-delivery` emits `p1-only`;
+- a scenario variant no witness emits: `opencode-delivery` emits `p1-only`
+  for `C1.S2`;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare, or an attempt whose prompt text
   and recorded digest disagree, for the system prompt or the user prompt;
-- a published generation record with an attempt that records no user prompt;
+- a published generation record with an attempt that records no system
+  prompt, no user prompt, or a model other than the arm's;
 - a published generation record that records no system prompt, or a source
   with no published generation record: a real capture in an arm labeled
   `real`, the U2 replay's `generation` stage with scripted output in an arm
   labeled `scripted`;
 - in an arm labeled `scripted`, output whose origin is real, whether
-  `detail.output_origin` or an attempt's `output_origin` records it;
+  `detail.output_origin` or an attempt's `output_origin` records it, or a
+  replay generation attempt whose `output_sha256` is not the SHA-256 of the
+  source's approved example;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces, or
@@ -541,8 +546,8 @@ nothing.
   user prompts. Held fields
   compare as JSON with keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
-  reports forwarded to different models, upstream endpoints, or context
-  limits. The
+  reports forwarded to different models, upstream endpoints, context limits,
+  or prices. The
   forwarded model is OpenCode's, a role apart from the summarizer model
   `arm.json` declares, so it is held equal through the reports rather than
   bound to `arm.json`.
@@ -554,5 +559,5 @@ Missing scenarios block full acceptance, and the report names them.
 `live` additionally requires each arm to carry complete forwarding reports
 from the record-and-forward provider mode whose limits equal the arm's
 `limits`, so live evidence inherits that mode's limits, and all of an arm's
-reports to have forwarded to one model at one upstream endpoint and context
-limit.
+reports to have forwarded to one model at one upstream endpoint, context
+limit, and price.
