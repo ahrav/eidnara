@@ -658,12 +658,15 @@ export class Forwarder {
 
 /**
  * Publishes `report` as `<dir>/forwarding-<label>.json` through `publishPrivateJson`: mode
- * `0600` in an owner-only directory outside the repository.
+ * `0600` in an owner-only directory outside the repository. `label` is a plain file label.
  */
 export function publishForwardingReport(
     report: ForwardingReport,
     dir: string,
     label: string,
 ): string {
+    if (!/^[A-Za-z0-9._-]+$/.test(label) || label.startsWith(".")) {
+        throw new Error(`${label} is not a plain file label`);
+    }
     return publishPrivateJson(report, dir, `forwarding-${label}.json`);
 }

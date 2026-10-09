@@ -31,6 +31,9 @@ export const OWNERS = [
 ] as const;
 export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
 const REPLAY = "daemon.compression_fidelity.replay";
+/** The output origins the real capture and the U2 replay write, as literals. */
+const REAL_ORIGIN = "real producer through the host";
+const SCRIPTED_ORIGIN = "scripted approved example";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
@@ -783,14 +786,19 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     }
     if (config.generation_origin !== "real") {
         for (const evidence of arm.evidence) {
-            if (outputOrigins(evidence).some((origin) => origin.startsWith("real"))) {
-                errors.push(`${evidence.file} carries real output in an arm labeled scripted`);
+            for (const origin of outputOrigins(evidence)) {
+                if (origin === REAL_ORIGIN) {
+                    errors.push(`${evidence.file} carries real output in an arm labeled scripted`);
+                } else if (origin !== SCRIPTED_ORIGIN) {
+                    errors.push(
+                        `${evidence.file} carries output of origin ${JSON.stringify(origin)} in an arm labeled scripted`,
+                    );
+                }
             }
         }
         const replayed = generations.filter(
             (g) =>
-                g.owner === REPLAY &&
-                outputOrigins(g).some((origin) => origin.includes("scripted")),
+                g.owner === REPLAY && outputOrigins(g).some((origin) => origin === SCRIPTED_ORIGIN),
         );
         const reviewed = new Map(
             corpus.cases.flatMap((c) => c.sources.map((s) => [s.id, sha256(s.reviewedOutput)])),
@@ -860,13 +868,17 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         }
     }
     const captures = published.filter(
-        (c) =>
-            c.detail.model === config.model &&
-            String(c.detail.output_origin ?? "").startsWith("real"),
+        (c) => c.detail.model === config.model && c.detail.output_origin === REAL_ORIGIN,
     );
     for (const evidence of arm.evidence) {
-        if (outputOrigins(evidence).some((origin) => origin.includes("scripted"))) {
-            errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
+        for (const origin of outputOrigins(evidence)) {
+            if (origin === SCRIPTED_ORIGIN) {
+                errors.push(`${evidence.file} carries scripted output in an arm labeled real`);
+            } else if (origin !== REAL_ORIGIN) {
+                errors.push(
+                    `${evidence.file} carries output of origin ${JSON.stringify(origin)} in an arm labeled real`,
+                );
+            }
         }
         if (servedTierOf(evidence) === undefined) continue;
         const served = evidence.detail.generation_capture_sha256;
@@ -890,6 +902,7 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
         const read = evidence.some(
             (e) =>
                 e.owner === EXACT_READ_OWNER &&
+                e.stage === "exact_read" &&
                 e.terminal === "read_exact" &&
                 digest(e.detail.sha256) &&
                 Number.isInteger(e.detail.byte_length) &&

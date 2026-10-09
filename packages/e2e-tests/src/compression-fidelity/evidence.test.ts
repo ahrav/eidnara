@@ -404,6 +404,25 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(userPrompt)).toContain("records a malformed digest");
     });
 
+    test("an output origin is the exact literal its producer writes", async () => {
+        const lookalike = await assemble(scratch(), {
+            baseline: { origin: "real-looking fixture" },
+        });
+        expect(errorsOf(lookalike)).toContain(
+            'carries output of origin "real-looking fixture" in an arm labeled real',
+        );
+        expect(errorsOf(lookalike)).toContain("no published real-model capture");
+        const scripted = { generationOrigin: "scripted" as const };
+        const replayLike = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { output_origin: "scripted-ish" } },
+            candidate: scripted,
+        });
+        expect(errorsOf(replayLike)).toContain(
+            'carries output of origin "scripted-ish" in an arm labeled scripted',
+        );
+        expect(errorsOf(replayLike)).toContain("no published scripted generation");
+    });
+
     test("a real capture is emitted at the capture stage with object rows", async () => {
         const staged = await assemble(scratch(), {
             tamper: (dir) => {
@@ -874,6 +893,19 @@ describe("evidence deterministic column", () => {
             },
         });
         expect(assembled.arms[0]?.identity_errors).toEqual([]);
+        expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
+    });
+
+    test("an exact-read pass needs the witness's exact_read stage", async () => {
+        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read")?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${exact}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.stage = "replayed";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
         expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
     });
 

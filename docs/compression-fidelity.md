@@ -473,7 +473,7 @@ either arm; an arm directory is refused before any write, and a component of
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier; a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier; a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -503,7 +503,8 @@ either arm; an arm directory is refused before any write, and a component of
   with no published generation record: a real capture in an arm labeled
   `real`, the U2 replay's `generation` stage with scripted output in an arm
   labeled `scripted`;
-- in an arm labeled `scripted`, output whose origin is real, whether
+- in an arm labeled `scripted`, an output origin other than
+  `scripted approved example`, the literal the U2 replay writes, whether
   `detail.output_origin` or an attempt's `output_origin` records it, or a
   replay generation attempt whose `output_sha256` is not the SHA-256 of the
   source's approved example;
@@ -530,8 +531,9 @@ either arm; an arm directory is refused before any write, and a component of
   than `capture`.
 
 In an arm labeled `real`:
-- scripted output is an identity error, whether `detail.output_origin` or an
-  attempt's `output_origin` in `detail.attempts` records it;
+- an output origin other than `real producer through the host`, the literal
+  the real capture writes, is an identity error, whether `detail.output_origin`
+  or an attempt's `output_origin` in `detail.attempts` records it;
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error;
 - a published real capture records `settled: true`, an attempt output with

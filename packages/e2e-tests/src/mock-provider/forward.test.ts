@@ -984,6 +984,11 @@ describe("forwarding", () => {
             expect(() => publishForwardingReport(mock.forwardingReport(), shared, "../x")).toThrow(
                 "plain file label",
             );
+            for (const label of ["", ".hidden", "a/b"]) {
+                expect(() =>
+                    publishForwardingReport(mock.forwardingReport(), shared, label),
+                ).toThrow("plain file label");
+            }
             expect(() =>
                 publishForwardingReport(mock.forwardingReport(), `${shared}/../x`, "x"),
             ).toThrow("parent directory");
