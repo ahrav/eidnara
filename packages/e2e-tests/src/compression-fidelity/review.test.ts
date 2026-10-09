@@ -20,6 +20,7 @@ import {
     corpus,
     SERVING,
     SHA,
+    SOURCE_LEVEL_FILES,
     scratch,
     sha256,
     write,
@@ -196,7 +197,9 @@ describe("eval:compression-fidelity assembly", () => {
         expect(rows.every((r) => r.comparison === "expected_green")).toBe(true);
         expect(report.accepted).toBe(true);
         expect(manifest.arms[0]?.observations.length).toBe(
-            allScenarios.length + corpus.cases.flatMap((c) => c.sources).length,
+            allScenarios.length +
+                corpus.cases.flatMap((c) => c.sources).length +
+                SOURCE_LEVEL_FILES,
         );
         expect(manifest.corpus.sha256).toBe(SHA);
     });
@@ -699,7 +702,10 @@ describe("eval:compression-fidelity gates", () => {
                 });
             }
         };
-        const costed = await evaluate(scratch(), { tamper: (dir) => sourceLevel(dir, SERVING) });
+        const costed = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => sourceLevel(dir, SERVING),
+        });
         expect(costed.report.arms[0]?.identity_errors).toEqual([]);
         expect(costed.report.arms[0]?.source_serving.map((r) => r.stage)).toEqual([
             "cold-m0",
@@ -708,13 +714,30 @@ describe("eval:compression-fidelity gates", () => {
         ]);
         expect(costed.report.arms[0]?.accepted).toBe(true);
         const uncosted = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
             tamper: (dir) => sourceLevel(dir, { ...SERVING, estimator: "   " }),
         });
         expect(uncosted.report.arms[0]?.withheld.join("\n")).toContain(
             "source-level serving cost incomplete: source.cold-m0.json: estimator",
         );
         expect(uncosted.report.arms[0]?.accepted).toBe(false);
+        const absent = await evaluate(scratch(), { baseline: { skipSourceLevel: true } });
+        expect(absent.report.arms[0]?.withheld).toContain(
+            "source-level delivery of C2.V2 lacks its m1, warm, cold-m0 stages",
+        );
+        expect(absent.report.arms[0]?.accepted).toBe(false);
+        const partial = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => {
+                sourceLevel(dir, SERVING);
+                rmSync(join(dir, "source.warm.json"));
+            },
+        });
+        expect(partial.report.arms[0]?.withheld).toContain(
+            "source-level delivery of C2.V2 lacks its warm stage",
+        );
         const failed = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
             tamper: (dir) => {
                 sourceLevel(dir, SERVING);
                 const path = join(dir, "source.warm.json");
@@ -752,6 +775,7 @@ describe("eval:compression-fidelity gates", () => {
         const c = corpus.cases.find((k) => k.sources.some((v) => v.id === "C2.V2"));
         const source = "C2.V2";
         const { report } = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
             tamper: (dir) => {
                 write(dir, "padding.json", {
                     schema_version: 1,

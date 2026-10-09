@@ -616,6 +616,19 @@ function compare(baseline: ScenarioRow, candidate: ScenarioRow): Comparison {
     return after ? "resolution_candidate" : "expected_red";
 }
 
+/** The delivery witness's stages for a source with no m1 scenario, labeled by source ID. */
+const SOURCE_LEVEL_STAGES = ["m1", "warm", "cold-m0"] as const;
+
+/** The sources the delivery witness labels by source ID: those with no m1 scenario. */
+function sourceLevelSources(corpus: FidelityCorpus): string[] {
+    const m1 = new Set(
+        scenarios(corpus)
+            .filter((s) => s.scenario.serving.stage === "m1")
+            .map((s) => s.scenario.source),
+    );
+    return corpus.cases.flatMap((c) => c.sources.map((v) => v.id).filter((id) => !m1.has(id)));
+}
+
 /** Both arms charge tokens under one estimator, or their costs do not compare. */
 function estimatorRefusal(arms: ReturnType<typeof assembleEvidence>["arms"]): string[] {
     const estimators = new Set(
@@ -704,12 +717,24 @@ export function evaluate(input: {
         const failedDeliveries = sourceLevel
             .filter((e) => !executed(e))
             .map((e) => `source-level delivery ${e.file} ended ${e.terminal}`);
+        // The witness writes all three stages for each source with no m1 scenario.
+        const absentDeliveries = sourceLevelSources(input.corpus).flatMap((source) => {
+            const lacking = SOURCE_LEVEL_STAGES.filter(
+                (stage) => !sourceLevel.some((e) => e.source === source && e.stage === stage),
+            );
+            return lacking.length > 0
+                ? [
+                      `source-level delivery of ${source} lacks its ${lacking.join(", ")} stage${lacking.length > 1 ? "s" : ""}`,
+                  ]
+                : [];
+        });
         const approvers = reviews.approvals.length;
         const reasons = [
             ...side.identity_errors,
             ...reviews.errors,
             ...controls.problems.map((p) => `controls: ${p}`),
             ...stray,
+            ...absentDeliveries,
             ...failedDeliveries,
             ...(sourceServing.missing.length > 0
                 ? [`source-level serving cost incomplete: ${sourceServing.missing.join(", ")}`]

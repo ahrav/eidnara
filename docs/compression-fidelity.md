@@ -488,8 +488,8 @@ either arm; an arm directory is refused before any write, and a component of
   - the serving cost rows of its source-level observations (the `m1`,
     `warm`, and `cold-m0` deliveries the witness labels by source ID for a
     source with no m1 scenario), validated as a row's serving costs are;
-    an incomplete one, or one that ended in a failed terminal, withholds
-    acceptance;
+    every such source carries all three stages, and a missing or incomplete
+    one, or one that ended in a failed terminal, withholds acceptance;
   - one row per corpus scenario with the columns below, where every column
     derives from that arm's observations and bound judgments;
   - the reasons acceptance is withheld.

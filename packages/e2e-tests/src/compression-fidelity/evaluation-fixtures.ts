@@ -40,6 +40,18 @@ export function write(dir: string, name: string, value: unknown): string {
 
 export const SETTINGS = { temperature: 0.1, max_output_tokens: 1024 };
 
+/** The source-level delivery files `writeArm` writes: three stages per source with no m1 scenario. */
+export const SOURCE_LEVEL_FILES =
+    3 *
+    corpus.cases
+        .flatMap((c) => c.sources.map((v) => v.id))
+        .filter(
+            (id) =>
+                !corpus.cases.some((c) =>
+                    c.scenarios.some((s) => s.source === id && s.serving.stage === "m1"),
+                ),
+        ).length;
+
 export const SERVING = {
     request_body_utf8_bytes: 40_000,
     admission: "fits",
@@ -61,6 +73,8 @@ export interface ArmOptions {
     serving?: Record<string, unknown>;
     tier?: (scenario: string) => string | undefined;
     unlinked?: boolean;
+    /** Omit the source-level deliveries of sources with no m1 scenario. */
+    skipSourceLevel?: boolean;
     model?: string;
     captureModel?: string;
     attempt?: Record<string, unknown> | null;
@@ -181,6 +195,37 @@ export function writeArm(
                       },
             }),
         );
+    }
+    // The delivery witness labels a source with no m1 scenario by its source ID at its m1, warm,
+    // and cold-m0 stages; the arm carries those source-level serving observations too.
+    const m1Sources = new Set(
+        corpus.cases.flatMap((c) =>
+            c.scenarios.filter((s) => s.serving.stage === "m1").map((s) => s.source),
+        ),
+    );
+    for (const c of corpus.cases) {
+        for (const source of c.sources) {
+            if (m1Sources.has(source.id) || options.skipSourceLevel) continue;
+            for (const stage of ["m1", "warm", "cold-m0"]) {
+                write(dir, `source.${source.id}.${stage}.json`, {
+                    ...base(c.id, source.id),
+                    owner: "opencode-delivery",
+                    scenario: source.id,
+                    stage,
+                    terminal: "served",
+                    detail: {
+                        served_tier: "p1",
+                        serving: {
+                            ...(options.serving ?? SERVING),
+                            serving_kind: stage === "warm" ? "warm_repeat" : "cold",
+                        },
+                        generation_capture_sha256: options.unlinked
+                            ? undefined
+                            : captures.get(source.id),
+                    },
+                });
+            }
+        }
     }
     return { dir, files };
 }

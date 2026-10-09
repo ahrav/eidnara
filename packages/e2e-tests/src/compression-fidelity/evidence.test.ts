@@ -7,6 +7,7 @@ import {
     corpus,
     SETTINGS,
     SHA,
+    SOURCE_LEVEL_FILES,
     scratch,
     sha256,
     write,
@@ -61,7 +62,9 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toEqual([]);
         expect(assembled.treatment).toBe(true);
         expect(assembled.manifest.arms[0]?.observations.length).toBe(
-            allScenarios.length + corpus.cases.flatMap((c) => c.sources).length,
+            allScenarios.length +
+                corpus.cases.flatMap((c) => c.sources).length +
+                SOURCE_LEVEL_FILES,
         );
         expect(assembled.manifest.corpus.sha256).toBe(SHA);
     });
@@ -850,7 +853,10 @@ describe("evidence identity and completeness", () => {
                     generation_capture_sha256: captureOf(dir, source),
                 },
             });
-        const labeled = await assemble(scratch(), { tamper: stage("C2.V2", "C2.V2") });
+        const labeled = await assemble(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: stage("C2.V2", "C2.V2"),
+        });
         expect(labeled.arms[0]?.identity_errors).toEqual([]);
         expect(
             labeled.manifest.arms[0]?.observations.find(
