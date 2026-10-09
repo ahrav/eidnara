@@ -30,6 +30,23 @@ publish = false
 [profile.dev.package.sha2]
 opt-level = 3
 
+# `secret_scanner::EMBEDDED_RULES` compiles 240 rule regexes on first use in each process, so every test process that redacts text pays it; unoptimized regex construction takes about 0.4 s per process against 55 ms optimized.
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+# The rule set's 118 KB YAML corpus is parsed in that same construction.
+[profile.dev.package.serde_norway]
+opt-level = 3
+[profile.dev.package.unsafe-libyaml-norway]
+opt-level = 3
+
+# The bundled SQLite is C compiled at the profile's optimization level; every store open applies the 60 KB baseline schema and each transform pass commits through it, and the unoptimized library runs those several times slower.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
 [workspace.dependencies]
 storage-types = { path = "crates/storage-types" }
 cache-stability = { path = "crates/cache-stability" }

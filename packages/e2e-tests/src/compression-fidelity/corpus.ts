@@ -16,7 +16,7 @@ import { resolve } from "node:path";
 
 /** SHA-256 of the complete committed corpus file. It moves with the Rust pin, never alone. */
 export const COMPRESSION_FIDELITY_CORPUS_SHA256 =
-    "46980759b02b7696ea3be9d9b44e43603eed199a404620c3c6d952afbc153800";
+    "14ca3aa94af9d581575e6133f963e5a26ec70a98d5d8c70bf17f77f3e6445fd8";
 
 export const COMPRESSION_FIDELITY_CORPUS_PATH = resolve(
     import.meta.dir,
@@ -183,13 +183,12 @@ function readCase(value: unknown): FidelityCase {
  * Reads the corpus at `path` and returns its narrow view.
  *
  * Throws {@link CorpusIdentityError} when the file is missing or unreadable, when its bytes do
- * not hash to `expectedSha256`, or when a field this reader exposes has the wrong shape. Hashing
- * covers the complete bytes with no normalization, so whitespace-only and same-length edits are
- * rejected. Callers keep the default digest; only the reader's own shape test passes another.
+ * not hash to {@link COMPRESSION_FIDELITY_CORPUS_SHA256}, or when a field this reader exposes has
+ * the wrong shape. Hashing covers the complete bytes with no normalization, so whitespace-only and
+ * same-length edits are rejected. The pin is the module constant for every caller.
  */
 export function readCompressionFidelityCorpus(
     path: string = COMPRESSION_FIDELITY_CORPUS_PATH,
-    expectedSha256: string = COMPRESSION_FIDELITY_CORPUS_SHA256,
 ): FidelityCorpus {
     let bytes: Buffer;
     try {
@@ -198,8 +197,10 @@ export function readCompressionFidelityCorpus(
         fail(`corpus at ${path} is unreadable: ${(error as Error).message}`);
     }
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    if (sha256 !== expectedSha256) {
-        fail(`corpus at ${path} hashes to ${sha256}, expected ${expectedSha256}`);
+    if (sha256 !== COMPRESSION_FIDELITY_CORPUS_SHA256) {
+        fail(
+            `corpus at ${path} hashes to ${sha256}, expected ${COMPRESSION_FIDELITY_CORPUS_SHA256}`,
+        );
     }
     let parsed: unknown;
     try {
@@ -207,6 +208,15 @@ export function readCompressionFidelityCorpus(
     } catch (error) {
         fail(`corpus at ${path} is not JSON: ${(error as Error).message}`);
     }
+    return parseCompressionFidelityCorpus(parsed);
+}
+
+/**
+ * Narrows already-parsed corpus JSON to the exposed shape, throwing {@link CorpusIdentityError}
+ * on a field with the wrong shape. It carries no identity claim; {@link readCompressionFidelityCorpus}
+ * is the pinned reader.
+ */
+export function parseCompressionFidelityCorpus(parsed: unknown): FidelityCorpus {
     return {
         cases: array(object(parsed, "corpus").cases, "corpus.cases").map(readCase),
     };

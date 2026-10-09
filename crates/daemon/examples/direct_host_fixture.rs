@@ -39,7 +39,6 @@ mod unix {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use daemon::history_summarizer_chunk::{ALIAS_CLOSE, ALIAS_OPEN};
     use host_runtime::local_embeddings::embed_tokens::EmbedTokens;
     use host_runtime::local_embeddings::inference::InferenceError;
     use host_runtime::local_embeddings::{
@@ -48,7 +47,7 @@ mod unix {
     use host_runtime::model_execution::ModelExecutionComponent;
     use host_runtime::model_execution::backend::{
         BackendError, BackendEvent, BackendFuture, BackendRequest, BackendTerminal, ErrorClass,
-        EventSink, FinishReason, LlmExecutionBackend,
+        EventSink, FinishReason, LlmExecutionBackend, SinkStatus,
     };
     use host_runtime::{CancellationToken, HostConfig, HostInit, StaticComposite};
     use serde::{Deserialize, Serialize};
@@ -57,7 +56,9 @@ mod unix {
     use tokio::net::{UnixListener, UnixStream};
     use tokio::sync::oneshot;
 
-    use crate::case_script::{Answer, AnswerFailure, CaseScript, Record, scripted_summary};
+    use crate::case_script::{
+        Answer, AnswerFailure, CaseScript, Receipt, presented_records, scripted_summary,
+    };
     use crate::eval_cassette::CassetteBackend;
     use crate::publish::write_then_rename;
 
@@ -229,21 +230,15 @@ mod unix {
         Refused(AnswerFailure),
     }
 
-    /// The text a completing call emits: `fallback` for a non-summarizer prompt, the summary
-    /// otherwise. A refused script fails the call instead and counts it as failed.
     fn summary_text(
         summary: Option<Summary>,
         fallback: &str,
-        script: &Mutex<CaseScript>,
         counters: &BackendCounters,
-    ) -> Result<String, BackendTerminal> {
+    ) -> Result<(String, Option<Receipt>), BackendTerminal> {
         match summary {
-            None => Ok(fallback.to_owned()),
-            Some(Summary::Default(text)) => Ok(text),
-            Some(Summary::Scripted(answer)) => {
-                lock_script(script).delivered(&answer);
-                Ok(answer.text)
-            }
+            None => Ok((fallback.to_owned(), None)),
+            Some(Summary::Default(text)) => Ok((text, None)),
+            Some(Summary::Scripted(answer)) => Ok((answer.text, Some(answer.receipt))),
             Some(Summary::Refused(failure)) => {
                 counters.failed.fetch_add(1, Ordering::SeqCst);
                 Err(ControlledBackend::typed_failure(
@@ -252,6 +247,26 @@ mod unix {
                 ))
             }
         }
+    }
+
+    fn emit_summary(
+        events: &EventSink,
+        summary: Option<Summary>,
+        fallback: &str,
+        script: &Mutex<CaseScript>,
+        counters: &BackendCounters,
+    ) -> Result<(), BackendTerminal> {
+        let (text, receipt) = summary_text(summary, fallback, counters)?;
+        let status = events.emit(BackendEvent::AssistantText {
+            text,
+            finish_reason: None,
+        });
+        if let Some(receipt) = receipt
+            && status == SinkStatus::Accepted
+        {
+            lock_script(script).delivered(&receipt);
+        }
+        Ok(())
     }
 
     fn take_blocked_slot(counters: &BackendCounters) -> bool {
@@ -283,59 +298,6 @@ mod unix {
             .lock()
             .expect("fixture blocked queue mutex")
             .retain(|(queued, _)| *queued != id);
-    }
-
-    /// One presented line of the summarizer's input: `[a-b] R: part / part`,
-    /// with alias markers stripped from the parts.
-    fn presented_line(line: &str) -> Option<(u64, u64, String)> {
-        let rest = line.strip_prefix('[')?;
-        let (range, rest) = rest.split_once("] ")?;
-        let (start, end) = match range.split_once('-') {
-            Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
-            None => {
-                let ordinal = range.parse().ok()?;
-                (ordinal, ordinal)
-            }
-        };
-        let (_, parts) = rest.split_once(": ")?;
-        let text: String = parts
-            .split_whitespace()
-            .map(|token| match token.strip_prefix(ALIAS_OPEN) {
-                Some(marked) => marked
-                    .split_once(ALIAS_CLOSE)
-                    .map_or(token, |(_, rest)| rest),
-                None => token,
-            })
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        Some((start, end, text))
-    }
-
-    /// The presented records of a summarizer prompt's `<new_messages>`, or `None` for any other
-    /// prompt.
-    fn presented_records(prompt: &str) -> Option<Vec<Record>> {
-        let (_, body) = prompt.split_once("<new_messages>")?;
-        let (body, _) = body.split_once("</new_messages>")?;
-        // The transcript renders its records in ordinal order, so a header
-        // starts a record only when it continues the sequence; every other
-        // line, including one shaped like a header, is the text of the message
-        // before it, which keeps its newlines.
-        let mut lines: Vec<Record> = Vec::new();
-        for line in body.lines() {
-            let next = lines.last().map(|record| record.end + 1);
-            match (presented_line(line), lines.last_mut()) {
-                (Some((start, end, text)), _) if next.is_none_or(|next| start == next) => {
-                    lines.push(Record { start, end, text })
-                }
-                (_, Some(record)) if !line.trim().is_empty() => {
-                    record.text.push(' ');
-                    record.text.push_str(line.trim());
-                }
-                _ => {}
-            }
-        }
-        (!lines.is_empty()).then_some(lines)
     }
 
     /// Names an executable that answers summarizer prompts in place of the
@@ -503,7 +465,7 @@ mod unix {
                 }
                 match behavior {
                     NextBehavior::Success => {
-                        let text = match commanded {
+                        let summary = match commanded {
                             Some((command, input)) => {
                                 // The child is observed beside shutdown and
                                 // cancellation, as the blocked path is; losing
@@ -521,24 +483,20 @@ mod unix {
                                     answer = commanded_summary(&command, &input) => answer,
                                 };
                                 match answer {
-                                    Ok(text) => text,
+                                    Ok(text) => Some(Summary::Default(text)),
                                     Err(error) => {
                                         counters.failed.fetch_add(1, Ordering::SeqCst);
                                         return ControlledBackend::terminal_error(&error);
                                     }
                                 }
                             }
-                            None => {
-                                match summary_text(summary, "fixture-success", &script, &counters) {
-                                    Ok(text) => text,
-                                    Err(terminal) => return terminal,
-                                }
-                            }
+                            None => summary,
                         };
-                        events.emit(BackendEvent::AssistantText {
-                            text,
-                            finish_reason: None,
-                        });
+                        if let Err(terminal) =
+                            emit_summary(&events, summary, "fixture-success", &script, &counters)
+                        {
+                            return terminal;
+                        }
                         counters.completed.fetch_add(1, Ordering::SeqCst);
                         BackendTerminal::Completed {
                             finish_reason: FinishReason::Completed,
@@ -584,19 +542,15 @@ mod unix {
                                 // The acknowledgment guarantees that the release waiter observes updated counters.
                                 // the counters.
                                 let _ = ack.send(());
-                                let text = match summary_text(
+                                if let Err(terminal) = emit_summary(
+                                    &events,
                                     summary,
                                     "fixture-released",
                                     &script,
                                     &counters,
                                 ) {
-                                    Ok(text) => text,
-                                    Err(terminal) => return terminal,
-                                };
-                                events.emit(BackendEvent::AssistantText {
-                                    text,
-                                    finish_reason: None,
-                                });
+                                    return terminal;
+                                }
                                 counters.completed.fetch_add(1, Ordering::SeqCst);
                                 BackendTerminal::Completed {
                                     finish_reason: FinishReason::Completed,
@@ -1401,6 +1355,38 @@ mod unix {
         host_result?;
         ready?;
         cassette_written
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::case_script::Record;
+
+        fn sink(status: SinkStatus) -> EventSink {
+            EventSink::new(Arc::new(move |_| status))
+        }
+
+        fn filler_summary(script: &Mutex<CaseScript>) -> Option<Summary> {
+            let mut script = lock_script(script);
+            script.select(&["filler".to_owned()]).unwrap();
+            let records = [Record {
+                start: 1,
+                end: 1,
+                text: "x".to_owned(),
+            }];
+            Some(Summary::Scripted(script.answer(&records).unwrap().unwrap()))
+        }
+
+        #[test]
+        fn a_scripted_answer_counts_as_delivered_only_when_the_sink_accepts_it() {
+            for (status, filled) in [(SinkStatus::Closed, 0), (SinkStatus::Accepted, 1)] {
+                let script = Mutex::new(CaseScript::default());
+                let counters = BackendCounters::default();
+                let summary = filler_summary(&script);
+                assert!(emit_summary(&sink(status), summary, "x", &script, &counters).is_ok());
+                assert_eq!(lock_script(&script).status().filled, filled, "{status:?}");
+            }
+        }
     }
 }
 

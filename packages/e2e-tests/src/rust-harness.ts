@@ -99,8 +99,15 @@ export interface RetainedCapture extends CaptureIdentity {
     request: CapturedRequest;
 }
 
-/** OpenCode names the session each provider request serves in this header. */
-const SESSION_HEADER = "x-session-id";
+const SESSION_HEADERS = ["x-opencode-session-id", "x-session-affinity", "x-session-id"] as const;
+
+export function requestSessionId(request: CapturedRequest): string | undefined {
+    for (const header of SESSION_HEADERS) {
+        const value = request.headers[header];
+        if (value !== undefined) return value;
+    }
+    return undefined;
+}
 
 /**
  * Retains provider captures under the session and case identity they were driven under. A
@@ -129,7 +136,7 @@ export class CaptureLedger {
         for (const request of this.source()) {
             if (this.seen.has(request)) continue;
             this.seen.add(request);
-            if (request.headers[SESSION_HEADER] !== identity.sessionId) continue;
+            if (requestSessionId(request) !== identity.sessionId) continue;
             this.retained.push({ ...identity, request });
         }
     }
