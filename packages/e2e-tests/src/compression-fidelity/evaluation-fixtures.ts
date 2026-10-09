@@ -164,6 +164,8 @@ export function writeArm(
                     ? { sha256: "0".repeat(64) }
                     : {
                           served_tier: options.tier?.(s.id) ?? s.serving.tier,
+                          // A pressure delivery serves sparser than the curve it was under.
+                          ...(s.serving.path === "pressure" ? { curve_tier: "p1" } : {}),
                           serving: options.serving ?? SERVING,
                           generation_capture_sha256: options.unlinked
                               ? undefined

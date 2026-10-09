@@ -510,6 +510,8 @@ describe("eval:compression-fidelity gates", () => {
                         mode: "forward",
                         corpus_sha256: SHA,
                         model: "claude-live",
+                        context_limit: 200_000,
+                        spent_usd: 0,
                         limits: { maxCalls: 40 },
                         stopped: null,
                         complete: false,
@@ -1322,6 +1324,13 @@ describe("eval:compression-fidelity command", () => {
             git(repo, "symbolic-ref", "HEAD", "refs/remotes/origin/main");
             await matches(repo);
             expect(await repositoryRevision(root)).toBe("unknown");
+            const head = git(repo, "rev-parse", "HEAD");
+            writeFileSync(join(repo, "untracked.txt"), "u\n");
+            expect(await repositoryRevision(repo)).toBe(`${head}-dirty`);
+            git(repo, "add", "untracked.txt");
+            expect(await repositoryRevision(repo)).toBe(`${head}-dirty`);
+            commit(repo, "three");
+            expect(await repositoryRevision(repo)).toBe(git(repo, "rev-parse", "HEAD"));
         },
     );
 });

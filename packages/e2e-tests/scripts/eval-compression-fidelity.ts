@@ -108,7 +108,29 @@ const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
  * directory, and loose or packed branch refs. Any other layout runs `git rev-parse HEAD`.
  */
 export async function repositoryRevision(cwd = process.cwd()): Promise<string> {
-    return headFromFiles(cwd) ?? (await gitRevParse(cwd));
+    const head = headFromFiles(cwd) ?? (await gitRevParse(cwd));
+    if (head === "unknown") return head;
+    const dirty = await worktreeDirty(cwd);
+    return dirty === null ? "unknown" : `${head}${dirty ? "-dirty" : ""}`;
+}
+
+/**
+ * Whether `cwd`'s worktree holds uncommitted or untracked changes, so the manifest never
+ * attributes a report to code that did not produce it; `null` when git cannot say.
+ */
+async function worktreeDirty(cwd: string): Promise<boolean | null> {
+    try {
+        const git = Bun.spawn(["git", "status", "--porcelain"], {
+            cwd,
+            stdout: "pipe",
+            stderr: "ignore",
+        });
+        const output = await new Response(git.stdout).text();
+        if ((await git.exited) !== 0) return null;
+        return output.trim() !== "";
+    } catch {
+        return null;
+    }
 }
 
 function headFromFiles(cwd: string): string | null {

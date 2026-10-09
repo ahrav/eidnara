@@ -7,10 +7,11 @@ import {
     readFileSync,
     rmSync,
     statSync,
+    symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { publishJsonAtomically, publishPrivateJson } from "./atomic-publish";
+import { publishJsonAtomically, publishPrivateJson, requireOwnedPath } from "./atomic-publish";
 
 const dirs: string[] = [];
 function scratch(): string {
@@ -61,5 +62,17 @@ describe("atomic JSON publication", () => {
             publishPrivateJson({}, resolve(import.meta.dir, "publish-out"), "r.json"),
         ).toThrow("inside the repository");
         expect(readdirSync(shared)).toEqual([]);
+    });
+
+    test("the post-creation check refuses a symlink in the created path, whatever it points to", () => {
+        const root = scratch();
+        const owned = join(root, "owned");
+        mkdirSync(owned, { mode: 0o700 });
+        const link = join(root, "link");
+        symlinkSync(owned, link);
+        mkdirSync(join(owned, "nested"), { mode: 0o700 });
+        expect(() => requireOwnedPath(join(link, "nested"), root)).toThrow("is a symbolic link");
+        expect(() => requireOwnedPath(link, root)).toThrow("is a symbolic link");
+        expect(() => requireOwnedPath(owned, root)).not.toThrow();
     });
 });

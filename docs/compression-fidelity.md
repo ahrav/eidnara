@@ -384,9 +384,10 @@ spend above the cap, or a tool call that no later request answers with its
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
 directory outside the repository whose existing ancestors are owned by the
 operator or root and closed to group and other writes unless sticky, checked
-before and again after creation, refusing
-a shared existing directory, an untrusted ancestor, or a label that is not a
-plain file name. `tests/compression-fidelity-forwarding.test.ts`
+before and again after creation, and whose created components are directories
+the operator owns and not symbolic links, refusing
+a shared existing directory, an untrusted ancestor, a link raced into the
+created path, or a label that is not a plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
 
 ## What is unsupported
@@ -416,7 +417,7 @@ runs the whole loop through OpenCode against an in-process provider double.
 `bun run --cwd packages/e2e-tests eval:compression-fidelity` assembles one
 baseline and one candidate evidence directory into a private manifest and a
 per-scenario report (`scripts/eval-compression-fidelity.ts`,
-`src/compression-fidelity/evaluation.ts`). It reads files and writes two;
+`src/compression-fidelity/evidence.ts`). It reads files and writes two;
 it sends no request in either mode.
 
 ```
@@ -465,13 +466,14 @@ sticky. `--out` must resolve, through symlinks, to a directory other than
 either arm; an arm directory is refused before any write.
 
 - **Manifest.** It records once:
-  - the repository revision;
+  - the repository revision, suffixed `-dirty` when the worktree held
+    uncommitted or untracked changes;
   - the corpus path and digest;
   - each arm's configuration;
   - every file read, with its SHA-256, including files the identity check
     refused; the report names each refusal;
   - every accepted observation and forwarding report with its file SHA-256,
-    and the model each forwarding report forwarded to.
+    and the model and context limit each forwarding report forwarded with.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
@@ -484,7 +486,7 @@ either arm; an arm directory is refused before any write.
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, a pressure delivery's served tier sparser than its recorded `curve_tier`, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
@@ -506,14 +508,19 @@ either arm; an arm directory is refused before any write.
 - a system prompt the arm did not declare;
 - a published generation record that records no system prompt, or a source
   with no published generation record: a real capture in an arm labeled
-  `real`, the U2 replay's `generation` stage in an arm labeled `scripted`;
+  `real`, the U2 replay's `generation` stage with scripted output in an arm
+  labeled `scripted`;
+- in an arm labeled `scripted`, output whose origin is real, whether
+  `detail.output_origin` or an attempt's `output_origin` records it;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
-- a forwarding report marked complete that records a stop or no send, or
-  whose exchange has no response, a response whose outcome is other than
+- a forwarding report marked complete that records a stop, no send, or spend
+  above its `spendCapUsd`, or whose exchange asks for a tool no later request
+  answers, has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason, a truncated response, an
   unknown cost, a response without a hash, or a `tool_use` id that no later
-  exchange answers in its `tool_results`;
+  exchange answers in its `tool_results`; these are the completeness reasons
+  the forwarder derives, recomputed from the report's own fields;
 - a generation record, a real capture or the U2 replay's `generation` stage,
   that names a scenario; generation is source-level.
 
@@ -560,9 +567,10 @@ dispute.
   settings, limits, or generation origin. Held fields compare as JSON with
   keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
-  reports forwarded to different models. The forwarded model is OpenCode's,
-  a role apart from the summarizer model `arm.json` declares, so it is held
-  equal through the reports rather than bound to `arm.json`.
+  reports forwarded to different models or at different context limits. The
+  forwarded model is OpenCode's, a role apart from the summarizer model
+  `arm.json` declares, so it is held equal through the reports rather than
+  bound to `arm.json`.
 - Differing prompt hashes mark it a treatment comparison.
 - Each scenario gets `expected_green`, `regression`,
   `resolution_candidate`, `expected_red`, or `unscored`.
@@ -578,7 +586,7 @@ command records approvals; it does not grant them.
 `live` additionally requires each arm to carry complete forwarding reports
 from the record-and-forward provider mode whose limits equal the arm's
 `limits`, so live evidence inherits that mode's limits, and all of an arm's
-reports to have forwarded to one model.
+reports to have forwarded to one model at one context limit.
 
 **Review prerequisites.** Two people approve the corpus before any candidate
 output is inspected, and the first semantic baseline before it is

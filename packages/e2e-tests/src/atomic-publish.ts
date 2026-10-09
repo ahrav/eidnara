@@ -2,7 +2,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // `process.getBuiltinModule` returns the `node:fs` module object. Under Bun, a static `import`
 // of `node:fs` adds about 4 ms to process startup.
-const { existsSync, mkdirSync, realpathSync, renameSync, statSync, writeFileSync } =
+const { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, writeFileSync } =
     process.getBuiltinModule("node:fs");
 
 export function publishJsonAtomically(
@@ -44,6 +44,24 @@ function requireTrustedAncestors(real: string): void {
 }
 
 /**
+ * Every component of `path` below `above` is a directory this user owns and not a symbolic link.
+ * `publishPrivateJson` creates those components itself after canonicalizing `above`, so a link
+ * among them is one another local user raced into place; a write through it would follow
+ * wherever that user points it next.
+ */
+export function requireOwnedPath(path: string, above: string): void {
+    const uid = process.getuid?.();
+    for (let component = path; component !== above; component = dirname(component)) {
+        if (component === dirname(component)) break;
+        const stat = lstatSync(component);
+        if (stat.isSymbolicLink()) throw new Error(`${component} is a symbolic link`);
+        if (!stat.isDirectory() || stat.uid !== uid) {
+            throw new Error(`${component} is not a directory owned by this user`);
+        }
+    }
+}
+
+/**
  * The path `dir` resolves to once its longest existing prefix is canonicalized through
  * symlinks; the publisher writes there, so callers compare directories by this path.
  */
@@ -73,9 +91,12 @@ export function publishPrivateJson(value: unknown, dir: string, name: string): s
     ) {
         throw new Error(`${real} is inside the repository`);
     }
+    let existing = real;
+    while (!existsSync(existing)) existing = dirname(existing);
     requireTrustedAncestors(real);
     mkdirSync(real, { recursive: true, mode: 0o700 });
     requireTrustedAncestors(real);
+    requireOwnedPath(real, existing);
     const stat = statSync(real);
     if ((stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.()) {
         throw new Error(`${real} is not an owner-only directory`);

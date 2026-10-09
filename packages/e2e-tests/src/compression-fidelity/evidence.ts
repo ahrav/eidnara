@@ -85,9 +85,12 @@ export interface ForwardingEvidence {
     corpus_sha256: string;
     /** The model OpenCode ran, as the provider echoes it. */
     model: string;
+    /** The context window OpenCode was configured with. */
+    context_limit: number;
     limits: Json;
     /** The reason the forwarder stopped, when it did. */
     stopped: string | null;
+    spent_usd: number;
     complete: boolean;
     incomplete_reasons: string[];
     exchanges: Array<{
@@ -225,6 +228,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         return null;
     }
     if (value.stopped !== null && !text(value.stopped)) return null;
+    if (typeof value.context_limit !== "number" || typeof value.spent_usd !== "number") return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -274,8 +278,10 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         mode: "forward",
         corpus_sha256: value.corpus_sha256,
         model: value.model,
+        context_limit: value.context_limit,
         limits: value.limits,
         stopped: value.stopped as string | null,
+        spent_usd: value.spent_usd,
         complete: value.complete,
         incomplete_reasons: strings(value.incomplete_reasons),
         exchanges,
@@ -342,16 +348,24 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     if (report.complete && report.stopped !== null) {
         errors.push(`${file} complete report records a stop: ${report.stopped}`);
     }
+    const cap = report.limits.spendCapUsd;
+    if (report.complete && typeof cap === "number" && report.spent_usd > cap) {
+        errors.push(
+            `${file} complete report spent ${report.spent_usd} USD above its ${cap} USD cap`,
+        );
+    }
     for (const exchange of report.exchanges) {
+        // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
+        if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
+            errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);
+        }
         for (const id of exchange.tool_uses) {
             const answered = report.exchanges.some(
                 (later) => later.index > exchange.index && later.tool_results.includes(id),
             );
-            if (!answered) complete(exchange.index, `tool use ${id} is unanswered`);
-        }
-        // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
-        if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
-            errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);
+            if (!answered) {
+                complete(exchange.index, `asks for tool ${id} that no later request answers`);
+            }
         }
         const response = exchange.response;
         if (!response) {
@@ -564,8 +578,18 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         }
     }
     if (config.generation_origin !== "real") {
+        for (const evidence of arm.evidence) {
+            if (outputOrigins(evidence).some((origin) => origin.startsWith("real"))) {
+                errors.push(`${evidence.file} carries real output in an arm labeled scripted`);
+            }
+        }
+        const replayed = generations.filter(
+            (g) =>
+                g.owner === REPLAY &&
+                outputOrigins(g).some((origin) => origin.includes("scripted")),
+        );
         for (const { source } of sources(corpus)) {
-            if (!generations.some((g) => g.source === source)) {
+            if (!replayed.some((g) => g.source === source)) {
                 errors.push(`no published scripted generation for ${source}`);
             }
         }
@@ -640,12 +664,12 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
         const tier = servedTierOf(e);
         if (typeof tier !== "string") return [];
         const curve = e.detail.curve_tier;
-        if (
-            scenario.serving.path === "pressure" &&
-            e.owner === "opencode-delivery" &&
-            typeof curve === "string"
-        ) {
-            return [TIERS.includes(curve) && TIERS.indexOf(tier) > TIERS.indexOf(curve)];
+        if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {
+            return [
+                typeof curve === "string" &&
+                    TIERS.includes(curve) &&
+                    TIERS.indexOf(tier) > TIERS.indexOf(curve),
+            ];
         }
         return [tier === scenario.serving.tier];
     });
@@ -710,6 +734,11 @@ export function assembleEvidence(input: {
                         `${file} forwarded to ${report.model}, where ${first.file} forwarded to ${first.report.model}`,
                     );
                 }
+                if (first && report.context_limit !== first.report.context_limit) {
+                    errors.push(
+                        `${file} forwarded at context limit ${report.context_limit}, where ${first.file} forwarded at ${first.report.context_limit}`,
+                    );
+                }
                 if (!report.complete) {
                     errors.push(`${file} is incomplete: ${report.incomplete_reasons.join("; ")}`);
                 }
@@ -753,9 +782,12 @@ export function assembleEvidence(input: {
     }
     // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
     // declares, so live arms hold it equal through their reports.
-    const forwarded = sides.map((arm) => arm.forwarding[0]?.report.model ?? null);
-    if (input.mode === "live" && forwarded[0] !== forwarded[1]) {
+    const forwarded = sides.map((arm) => arm.forwarding[0]?.report ?? null);
+    if (input.mode === "live" && forwarded[0]?.model !== forwarded[1]?.model) {
         refused.push("the arms forwarded to different models");
+    }
+    if (input.mode === "live" && forwarded[0]?.context_limit !== forwarded[1]?.context_limit) {
+        refused.push("the arms forwarded at different context limits");
     }
     const manifest = {
         schema: MANIFEST_SCHEMA,
@@ -781,6 +813,7 @@ export function assembleEvidence(input: {
                 file,
                 sha256,
                 model: report.model,
+                context_limit: report.context_limit,
             })),
         })),
     };
