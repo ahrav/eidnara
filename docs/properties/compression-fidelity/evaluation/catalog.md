@@ -45,7 +45,7 @@ provider adapter, or production constraint is proposed.
 
 | Focus | Verified model or preserved lead |
 | --- | --- |
-| Architecture and dependencies | The direct-host fixture supplies producer ModelExecution; the Messages mock captures OpenCode consumer requests. They are separate boundaries. The mock has no record-and-forward mode. |
+| Architecture and dependencies | The direct-host fixture supplies producer ModelExecution; the Messages mock captures OpenCode consumer requests. They are separate boundaries. `new MockProvider({ forward })` is the mock's opt-in record-and-forward mode (`packages/e2e-tests/src/mock-provider/forward.ts`); scripted and forwarding construction are exclusive. |
 | State, persistence, and concurrency | Fixture behavior resets to `Success` on consumption. Mock captures are cleared by `reset`. `DiagnosticSink` supplies bounded private diagnostic writes; JSON publication needs an explicit `mode: 0o600`. Neither proves complete capture retention or crash durability. |
 | Safety and liveness claims | KTD1/KTD7 require one byte identity and one evidence assembler. U3 requires qualified publication. U4 requires bounded capture and human review. No executing semantic evaluator or successful-completion deadline was found. |
 | History and existing checks | Local commit `de84c0d0` narrows incident result lanes to green. Current report validators still expose broader comparison terminology. Old evaluator counts and CI claims are not imported. |
@@ -70,10 +70,11 @@ outside this part. Working lens material stays outside repository docs.
 ## Reachability and index
 
 Reachability is assigned per record. `test-only` describes the existing fixture
-and proposed evaluation/test boundaries. The evaluator and forwarding paths are
-absent at HEAD, so no existing configured production path is claimed. Future
-real capture remains opt-in under the plan; that configuration requirement is
-separate from the reachability classification.
+and proposed evaluation/test boundaries. The evaluator path is absent at HEAD,
+and the forwarding path exists only behind an explicit `forward` construction
+argument in the e2e mock, so no existing configured production path is
+claimed. Real capture is opt-in; that configuration requirement is separate
+from the reachability classification.
 
 | Slug | Type | Reachability | Semantics | Exercise |
 | --- | --- | --- | --- | --- |

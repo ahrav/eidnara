@@ -50,7 +50,8 @@ export interface RustTestHarnessOptions extends SharedHarnessOptions {
     daemonEnv?: Record<string, string>;
     /**
      * Record-and-forward mode: the mock forwards every request to this provider, OpenCode runs
-     * `forward.model` at `forward.contextLimit`, and the mock serves no script or default.
+     * `forward.model` at `forward.contextLimit`, and the mock serves no script or default, so
+     * `create` rejects it beside `mockDefault`.
      */
     forward?: ForwardConfig;
 }
@@ -240,6 +241,9 @@ export class RustTestHarness {
     }
 
     static async create(options: RustTestHarnessOptions = {}): Promise<RustTestHarness> {
+        if (options.forward && options.mockDefault) {
+            throw new Error("forwarding serves no scripted default; drop mockDefault");
+        }
         const prereqs = detectRustModePrereqs();
         if (!prereqs.ok) {
             throw new Error(

@@ -22624,11 +22624,15 @@ mod tests {
         }
 
         async fn cancel(&mut self, run_id: &str) -> Result<(), HistorySummarizerProducerError> {
+            // The real producer routes `cancel` through the bound session and answers `MissingSession` otherwise.
+            let Some(session) = self.bound_session.clone() else {
+                return Err(HistorySummarizerProducerError::MissingSession);
+            };
             self.state
                 .cancels
                 .lock()
                 .expect("cancels mutex")
-                .push(run_id.to_string());
+                .push(format!("{session}:{run_id}"));
             Ok(())
         }
 

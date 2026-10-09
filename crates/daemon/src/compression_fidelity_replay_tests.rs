@@ -1718,10 +1718,10 @@ async fn cancel_undrained_runs(
     connect: Option<ConnectArgs>,
     attempts: &[RecordedAttempt],
 ) -> Vec<Value> {
-    let undrained: Vec<&str> = attempts
+    let undrained: Vec<(&str, &str)> = attempts
         .iter()
         .filter(|attempt| attempt.outputs.is_empty())
-        .filter_map(|attempt| attempt.run_id.as_deref())
+        .filter_map(|attempt| Some((attempt.session_id.as_str(), attempt.run_id.as_deref()?)))
         .collect();
     if undrained.is_empty() {
         return Vec::new();
@@ -1747,13 +1747,18 @@ async fn cancel_undrained_runs(
             let detail = format!("cancel connect: {error:?}");
             return undrained
                 .iter()
-                .map(|run_id| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
+                .map(|(_, run_id)| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
                 .collect();
         }
     };
     let mut outcomes = Vec::with_capacity(undrained.len());
-    for run_id in undrained {
-        outcomes.push(outcome(run_id, driver.cancel(run_id).await));
+    for (session_id, run_id) in undrained {
+        // `cancel` travels the session-scoped command route, so the run's session is bound first.
+        let cancelled = match driver.bind_session(session_id).await {
+            Ok(()) => driver.cancel(run_id).await,
+            Err(error) => Err(error),
+        };
+        outcomes.push(outcome(run_id, cancelled));
     }
     if let Err(error) = driver.close().await {
         eprintln!("compression fidelity capture: cancel connection close failed: {error:?}");
@@ -1947,11 +1952,16 @@ async fn a_timed_out_capture_cancels_its_started_runs() {
     .await;
     assert_eq!(records.len(), sources().count());
     let started: Vec<String> = (1..=records.len()).map(|n| format!("run-{n}")).collect();
-    assert_eq!(producer.starts.load(Ordering::SeqCst), records.len());
+    let attempts = producer.attempts.lock().unwrap().clone();
+    assert_eq!(attempts.len(), records.len());
     assert_eq!(
         producer.cancels.lock().unwrap().clone(),
-        started,
-        "every run that outlasted its wait is cancelled once"
+        attempts
+            .iter()
+            .zip(&started)
+            .map(|(attempt, run_id)| format!("{}:{run_id}", attempt.session_id))
+            .collect::<Vec<_>>(),
+        "every run that outlasted its wait is cancelled once through its own session"
     );
     let dir = tempfile::tempdir().unwrap();
     for (record, run_id) in records.iter().zip(&started) {
