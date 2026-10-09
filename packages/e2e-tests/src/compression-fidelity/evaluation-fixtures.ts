@@ -62,7 +62,7 @@ export interface ArmOptions {
     captureModel?: string;
     attempt?: Record<string, unknown> | null;
     /** Replaces the single default attempt with the attempts this returns. */
-    attempts?: (attempt: Record<string, unknown>) => Record<string, unknown>[];
+    attempts?: (attempt: Record<string, unknown>) => unknown[];
     capture?: Record<string, unknown>;
     settings?: Record<string, unknown>;
     promptSha256?: string;
@@ -99,7 +99,7 @@ export function writeArm(
     });
     const captures = new Map<string, string>();
     const scripted = options.generationOrigin === "scripted";
-    const attemptsOf = (attempt: Record<string, unknown>): Record<string, unknown>[] => {
+    const attemptsOf = (attempt: Record<string, unknown>): unknown[] => {
         if (options.attempt === null) return [];
         const merged = { ...attempt, ...options.attempt };
         return options.attempts ? options.attempts(merged) : [merged];

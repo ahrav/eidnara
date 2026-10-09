@@ -262,7 +262,11 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         return null;
     }
     if (value.stopped !== null && !text(value.stopped)) return null;
-    if (typeof value.context_limit !== "number" || typeof value.spent_usd !== "number") return null;
+    const contextLimit = value.context_limit;
+    if (typeof contextLimit !== "number" || !Number.isInteger(contextLimit) || contextLimit <= 0) {
+        return null;
+    }
+    if (typeof value.spent_usd !== "number") return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -319,7 +323,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         corpus_sha256: value.corpus_sha256,
         model: value.model,
         upstream_url: value.upstream_url,
-        context_limit: value.context_limit,
+        context_limit: contextLimit,
         pricing: { inputPerMTok: pricing.inputPerMTok, outputPerMTok: pricing.outputPerMTok },
         limits: value.limits,
         stopped: value.stopped as string | null,
@@ -661,6 +665,10 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     }
     const generations = arm.evidence.filter((e) => isGeneration(e) && e.terminal === "published");
     for (const generation of generations) {
+        const attempts = generation.detail.attempts;
+        if (!Array.isArray(attempts) || attempts.length !== attemptsOf(generation).length) {
+            errors.push(`${generation.file} records an attempt that is not a record`);
+        }
         if (systemHashes(generation).length === 0) {
             errors.push(`${generation.file} records no system prompt`);
         } else if (systemHashes(generation).length < attemptsOf(generation).length) {

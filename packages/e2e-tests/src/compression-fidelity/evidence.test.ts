@@ -364,6 +364,14 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(userPrompt)).toContain("records a malformed digest");
     });
 
+    test("every entry of a generation's attempts is a record", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { attempts: (attempt) => [attempt, "retried", ["x"]] },
+        });
+        expect(errorsOf(assembled)).toContain("records an attempt that is not a record");
+        expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
     test("every generation attempt records its system prompt", async () => {
         const assembled = await assemble(scratch(), {
             baseline: {
@@ -1129,6 +1137,11 @@ describe("evidence live mode", () => {
         expect(errorsOf(relocated)).toContain(
             "forwarding-1.json forwarded to https://other.example.test/v1/messages, where forwarding-0.json forwarded to https://api.example.test/v1/messages",
         );
+        for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+            expect(errorsOf(await live([{ ...report, context_limit: limit }]))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
         for (const upstream of [
             "",
             "http://api.example.test/v1/messages",

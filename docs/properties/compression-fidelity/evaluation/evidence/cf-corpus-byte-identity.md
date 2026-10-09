@@ -84,7 +84,8 @@ digest proves shared bytes, not semantic truth or executed coverage.
 ## Investigation log
 
 ### Q: Can incident fingerprints implement the corpus identity unchanged?
-- Sources examined: `registry.ts:136-169`, `history.ts:29-39`, and
+- Sources examined: `registry.ts:136-169`, `canonical-json.ts:2-9`,
+  `history.ts:29-31`, and
   `runner.test.ts:248-284` at the inspected HEAD.
 - Findings: Both fingerprint paths add structure beyond the corpus bytes;
   semantic fingerprinting intentionally ignores formatting.
