@@ -273,13 +273,14 @@ export class MockProvider {
             const bodyBytes = new Uint8Array(await req.arrayBuffer());
             const bodyText = new TextDecoder().decode(bodyBytes);
             // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
-            let body: Record<string, unknown> = {};
+            // `JSON.parse` returns a defined value for valid JSON, so `undefined` marks a parse failure.
+            let parsed: unknown;
             try {
-                const parsed: unknown = JSON.parse(bodyText);
-                if (isRecord(parsed)) body = parsed;
+                parsed = JSON.parse(bodyText);
             } catch {
-                body = {};
+                parsed = undefined;
             }
+            const body: Record<string, unknown> = isRecord(parsed) ? parsed : {};
 
             const headers: Record<string, string> = {};
             req.headers.forEach((value, key) => {
@@ -301,7 +302,12 @@ export class MockProvider {
             }
             run.captured.push(captured);
             if (this.forwarder) {
-                const forwarded = await this.forwarder.forward(bodyBytes, headers);
+                const forwarded = await this.forwarder.forward(
+                    bodyBytes,
+                    bodyText,
+                    parsed,
+                    headers,
+                );
                 captured.responseCompletedAt = Date.now();
                 return forwarded;
             }

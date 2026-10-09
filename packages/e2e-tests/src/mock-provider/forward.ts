@@ -363,17 +363,13 @@ export class Forwarder {
 
     /** The send's reservation, or the reason the limits refuse it. */
     private admit(
-        text: string,
+        json: unknown,
         bytes: number,
     ): { reserved: number; toolResults: string[] } | { refused: string } {
         if (this.stopped) return { refused: `stopped: ${this.stopped}` };
         const { limits, model } = this.config;
-        let parsed: Record<string, unknown>;
-        try {
-            parsed = JSON.parse(text);
-        } catch {
-            return { refused: "unreadable request body" };
-        }
+        if (json === undefined) return { refused: "unreadable request body" };
+        const parsed = json as Record<string, unknown>;
         if (parsed.model !== model)
             return { refused: `request names model ${String(parsed.model)}` };
         if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
@@ -419,14 +415,16 @@ export class Forwarder {
 
     /**
      * Forwards `body` and returns the provider's response, or a non-retryable refusal when a
-     * limit, the model, or an earlier stop forbids the send.
+     * limit, the model, or an earlier stop forbids the send. `text` is `body` decoded as UTF-8
+     * and `json` is `JSON.parse(text)`, or `undefined` when `text` is not JSON.
      */
     async forward(
         body: Uint8Array<ArrayBuffer>,
+        text: string,
+        json: unknown,
         headers: Record<string, string>,
     ): Promise<Response> {
-        const text = new TextDecoder().decode(body);
-        const admitted = this.admit(text, body.byteLength);
+        const admitted = this.admit(json, body.byteLength);
         if ("refused" in admitted) return this.refuse(admitted.refused);
         const { reserved, toolResults } = admitted;
         const outbound: Record<string, string> = {};

@@ -542,6 +542,13 @@ describe("forwarding", () => {
                 stopped: "another",
             },
             {
+                forward: {},
+                body: `{"model":"${MODEL}","max_tokens":512,`,
+                replies: [],
+                sends: 0,
+                stopped: "unreadable request body",
+            },
+            {
                 forward: { limits: { ...config().limits, spendCapUsd: 0.000001 } },
                 body: firstTurn,
                 replies: [],
