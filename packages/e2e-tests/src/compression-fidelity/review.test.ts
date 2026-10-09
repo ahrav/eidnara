@@ -355,6 +355,72 @@ describe("eval:compression-fidelity gates", () => {
         expect(reviews.errors.join("\n")).toContain("a dispute does not match its schema");
     });
 
+    test("a review record with a blank or coerced batch, or a list field that is no list, is a review error", async () => {
+        const cases: Array<
+            [
+                (controls: Record<string, unknown>, judgments: Record<string, unknown>) => void,
+                string,
+            ]
+        > = [
+            [
+                (c, j) => {
+                    c.batch = {};
+                    j.batch = "[object Object]";
+                },
+                "controls.json names no batch",
+            ],
+            [
+                (c, j) => {
+                    c.batch = "";
+                    j.batch = "";
+                },
+                "names no batch",
+            ],
+            [
+                (_, j) => {
+                    j.disputes = {};
+                },
+                "disputes is not a list",
+            ],
+            [
+                (_, j) => {
+                    j.judgments = "none";
+                },
+                "judgments is not a list",
+            ],
+            [
+                (c) => {
+                    c.controls = {};
+                },
+                "controls is not a list",
+            ],
+            [
+                (_, j) => {
+                    j.control_verdicts = null;
+                },
+                "control_verdicts is not a list",
+            ],
+        ];
+        for (const [edit, error] of cases) {
+            const root = scratch();
+            const baseline = writeArm(root, { label: "baseline" });
+            const candidate = writeArm(root, { label: "candidate" });
+            const dir = writeReviews(root, {
+                arms: [
+                    { label: "baseline", files: baseline.files },
+                    { label: "candidate", files: candidate.files },
+                ],
+            });
+            const controls = JSON.parse(readFileSync(join(dir, "controls.json"), "utf8"));
+            const judgments = JSON.parse(readFileSync(join(dir, "judgments.json"), "utf8"));
+            edit(controls, judgments);
+            writeFileSync(join(dir, "controls.json"), JSON.stringify(controls));
+            writeFileSync(join(dir, "judgments.json"), JSON.stringify(judgments));
+            const reviews = await loadReviews(dir, SHA);
+            expect(reviews.errors.join("\n")).toContain(error);
+        }
+    });
+
     test("fewer than two approvers withhold acceptance", async () => {
         for (const approvers of [
             ["reviewer-a", "reviewer-a"],
@@ -469,6 +535,65 @@ describe("eval:compression-fidelity gates", () => {
         expect(row?.cost.status).toBe("incomplete");
     });
 
+    test("a real arm credits generation only from a published real capture", async () => {
+        const c = corpus.cases[0];
+        const source = c?.sources[0]?.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `real.${source}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                delete value.detail.attempts;
+                const relinked = write(dir, `real.${source}.json`, value);
+                for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+                    const served = join(dir, `delivery.${s.id}.json`);
+                    const observation = JSON.parse(readFileSync(served, "utf8"));
+                    if (observation.detail.generation_capture_sha256 === undefined) continue;
+                    observation.detail.generation_capture_sha256 = relinked;
+                    writeFileSync(served, JSON.stringify(observation));
+                }
+                write(dir, "padding.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: c?.id,
+                    source,
+                    scenario: source,
+                    stage: "m1",
+                    terminal: "served",
+                    markers: [],
+                    detail: { attempts: [{}] },
+                });
+            },
+        });
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        const row = report.arms[0]?.rows.find((r) => r.case === c?.id);
+        expect(row?.cost.generation).toEqual([]);
+        expect(row?.cost.missing).toContain("no generation observation");
+    });
+
+    test("a negative recovery measurement leaves cost incomplete", async () => {
+        const entry = allScenarios[1];
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                write(dir, "recovery.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario: entry?.s.id,
+                    stage: "recovery-eidnara-search",
+                    terminal: "discoverable",
+                    markers: [],
+                    detail: { calls: -1, result_utf8_bytes: -400 },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === entry?.s.id);
+        expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
     test("arms sharing a label are refused", async () => {
         const baseline = writeArm(scratch(), { label: "shared" });
         const candidate = writeArm(scratch(), {
@@ -528,6 +653,7 @@ describe("eval:compression-fidelity gates", () => {
             [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
             [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
             [{ ...SERVING, estimator: "" }, "estimator"],
+            [{ ...SERVING, estimator: "   " }, "estimator"],
             [{ ...SERVING, serving_kind: "lukewarm" }, "serving_kind"],
         ];
         for (const [serving, field] of cases) {

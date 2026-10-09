@@ -393,7 +393,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
     sealed control labels, the batch, and its approvers.
   - `judgments.json` (`eidnara.compression-fidelity-judgments/v1`) holds the
     human control verdicts, per-scenario judgments, and disputes for the
-    same corpus digest and batch.
+    same corpus digest and batch. Both records name the batch as a non-blank
+    string, and each list field is a list.
   - A judgment names its arm, scenario, kind (`human` or `model`), and the
     SHA-256 of the observation file it judged. It also gives each
     obligation's disposition and whether the answer preserved it, once per
@@ -430,7 +431,7 @@ an owner-only `0700` directory outside the repository.
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search` |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes; generation needs at least one attempt and a non-empty usage record. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record, and a `real` arm credits generation only from its published real captures. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 

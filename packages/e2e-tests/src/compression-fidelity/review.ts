@@ -111,6 +111,12 @@ function named(value: unknown): value is string {
     return typeof value === "string" && value.trim() !== "";
 }
 
+function list(value: unknown, where: string, errors: string[]): unknown[] {
+    if (Array.isArray(value)) return value;
+    errors.push(`${where} is not a list`);
+    return [];
+}
+
 /** `judgmentOf` rejects repeated obligations to prevent conflicting verdicts. */
 function judgmentOf(value: unknown): Judgment | null {
     if (!record(value)) return null;
@@ -153,13 +159,13 @@ function judgmentOf(value: unknown): Judgment | null {
 
 /** Records in `list` whose every `fields` entry is a string, plus one error per other entry. */
 function stringRecords<K extends string>(
-    list: unknown,
+    entries: unknown,
     fields: readonly K[],
     where: string,
     errors: string[],
 ): Array<Record<K, string>> {
     const kept: Array<Record<K, string>> = [];
-    for (const value of Array.isArray(list) ? list : []) {
+    for (const value of list(entries, where, errors)) {
         if (record(value) && fields.every((field) => named(value[field]))) {
             kept.push(
                 Object.fromEntries(fields.map((f) => [f, value[f] as string])) as Record<K, string>,
@@ -205,9 +211,12 @@ export async function loadReviews(dir: string, corpusSha256: string): Promise<Re
     ] as const) {
         if (value.corpus_sha256 !== corpusSha256)
             reviews.errors.push(`${name} is bound to another corpus`);
+        if (!named(value.batch)) reviews.errors.push(`${name} names no batch`);
     }
-    reviews.batch = String(c.batch ?? "");
-    if (j.batch !== reviews.batch) reviews.errors.push("judgments.json is bound to another batch");
+    reviews.batch = named(c.batch) ? c.batch : "";
+    if (named(j.batch) && j.batch !== reviews.batch) {
+        reviews.errors.push("judgments.json is bound to another batch");
+    }
     reviews.approvals = [
         ...new Set(
             strings(c.approved_by)
@@ -227,12 +236,12 @@ export async function loadReviews(dir: string, corpusSha256: string): Promise<Re
         "control_verdicts",
         reviews.errors,
     );
-    for (const value of Array.isArray(j.judgments) ? j.judgments : []) {
+    for (const value of list(j.judgments, "judgments", reviews.errors)) {
         const judgment = judgmentOf(value);
         if (judgment) reviews.judgments.push(judgment);
         else reviews.errors.push(`a judgment does not match its schema: ${JSON.stringify(value)}`);
     }
-    for (const value of Array.isArray(j.disputes) ? j.disputes : []) {
+    for (const value of list(j.disputes, "disputes", reviews.errors)) {
         if (
             record(value) &&
             text(value.arm) &&
@@ -305,14 +314,24 @@ const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) 
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
     ["request_body_utf8_bytes", measurement],
     ["invocation_charged_tokens", measurement],
-    ["estimator", text],
+    ["estimator", named],
     ["transform_elapsed_ms", measurement],
     ["raw_source_leaks", measurement],
     ["serving_kind", (v) => v === "cold" || v === "warm_repeat"],
 ];
 
+/**
+ * The source-level generation records of `arm`. A real arm credits only its published real
+ * captures; a scripted arm credits any owner's attempts.
+ */
 function generationsOf(arm: Arm): Evidence[] {
-    return arm.evidence.filter((e) => e.scenario === null && Array.isArray(e.detail.attempts));
+    const real = arm.config?.generation_origin === "real";
+    return arm.evidence.filter(
+        (e) =>
+            e.scenario === null &&
+            Array.isArray(e.detail.attempts) &&
+            (!real || (e.owner === REAL_CAPTURE && e.terminal === "published")),
+    );
 }
 
 function reportedUsage(e: Evidence): Json | null {
@@ -339,7 +358,7 @@ function costOf(
     if (serving.length === 0 && !exactRead) missing.push("no serving observation");
     const recovery: Json[] = [];
     for (const e of evidence.filter(isRecovery)) {
-        if (typeof e.detail.calls !== "number" || typeof e.detail.result_utf8_bytes !== "number") {
+        if (!measurement(e.detail.calls) || !measurement(e.detail.result_utf8_bytes)) {
             missing.push(`${e.file}: recovery calls or output bytes`);
         }
         recovery.push({
@@ -353,7 +372,7 @@ function costOf(
         .map((e) => ({
             file: e.file,
             owner: e.owner,
-            attempts: (e.detail.attempts as unknown[]).length,
+            attempts: (e.detail.attempts as unknown[]).filter(record).length,
             usage: e.owner === REAL_CAPTURE ? reportedUsage(e) : "scripted",
         }));
     if (generation.length === 0) missing.push("no generation observation");
