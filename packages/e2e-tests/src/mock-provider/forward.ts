@@ -200,46 +200,62 @@ function isCount(value: unknown): value is number {
     return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
-/**
- * The usage and stop reason of a JSON or SSE Messages response. Usage is `null` unless the
- * response states input and output counts; absent cache counts are zero.
- */
-export function readUsage(
-    contentType: string,
-    text: string,
-): {
+export interface ResponseFacts {
     usage: Usage | null;
     stopReason: string | null;
-} {
+    /** The `tool_use` ids the response asks for. */
+    toolUses: string[];
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === "object";
+}
+
+/**
+ * The usage, stop reason, and `tool_use` ids of a JSON or SSE Messages response, read in one
+ * pass over its events. Usage is `null` unless the response states input and output counts;
+ * absent cache counts are zero. An SSE `data:` line that is not a JSON object is skipped.
+ */
+export function readResponse(contentType: string, text: string): ResponseFacts {
     const fields: Record<string, unknown> = {};
     let stopReason: string | null = null;
+    const blocks: Array<Record<string, unknown>> = [];
     const take = (usage: unknown) => {
-        if (usage && typeof usage === "object") Object.assign(fields, usage);
+        if (isObject(usage)) Object.assign(fields, usage);
     };
     if (contentType.includes("text/event-stream")) {
         for (const line of text.split("\n")) {
             if (!line.startsWith("data:")) continue;
-            let event: Record<string, unknown>;
+            let event: unknown;
             try {
                 event = JSON.parse(line.slice(5));
             } catch {
                 continue;
             }
-            const message = event.message as Record<string, unknown> | undefined;
-            take(message?.usage);
+            if (!isObject(event)) continue;
+            if (isObject(event.message)) take(event.message.usage);
             take(event.usage);
-            const delta = event.delta as Record<string, unknown> | undefined;
-            if (typeof delta?.stop_reason === "string") stopReason = delta.stop_reason;
+            if (isObject(event.delta) && typeof event.delta.stop_reason === "string") {
+                stopReason = event.delta.stop_reason;
+            }
+            if (isObject(event.content_block)) blocks.push(event.content_block);
         }
     } else {
+        let body: unknown;
         try {
-            const body = JSON.parse(text) as Record<string, unknown>;
+            body = JSON.parse(text);
+        } catch {
+            return { usage: null, stopReason: null, toolUses: [] };
+        }
+        if (isObject(body)) {
             take(body.usage);
             if (typeof body.stop_reason === "string") stopReason = body.stop_reason;
-        } catch {
-            return { usage: null, stopReason: null };
+            blocks.push(...blocksOf(body.content));
         }
     }
+    const toolUses = blocks
+        .filter((block) => block.type === "tool_use" && typeof block.id === "string")
+        .map((block) => block.id as string);
     const cacheWrite = fields.cache_creation_input_tokens ?? 0;
     const cacheRead = fields.cache_read_input_tokens ?? 0;
     if (
@@ -248,7 +264,7 @@ export function readUsage(
         !isCount(cacheWrite) ||
         !isCount(cacheRead)
     ) {
-        return { usage: null, stopReason };
+        return { usage: null, stopReason, toolUses };
     }
     return {
         usage: {
@@ -258,6 +274,7 @@ export function readUsage(
             cache_read_input_tokens: cacheRead,
         },
         stopReason,
+        toolUses,
     };
 }
 
@@ -269,11 +286,7 @@ function errorResponse(type: string, message: string): Response {
 }
 
 function blocksOf(value: unknown): Array<Record<string, unknown>> {
-    return Array.isArray(value)
-        ? value.filter(
-              (block): block is Record<string, unknown> => !!block && typeof block === "object",
-          )
-        : [];
+    return Array.isArray(value) ? value.filter(isObject) : [];
 }
 
 /** The `tool_result` ids a parsed Messages request answers. */
@@ -285,27 +298,6 @@ function toolResultIds(request: Record<string, unknown>): string[] {
             )
             .map((block) => block.tool_use_id as string),
     );
-}
-
-/** The `tool_use` ids a JSON or SSE Messages response asks for. */
-function toolUseIds(contentType: string, text: string): string[] {
-    let blocks: Array<Record<string, unknown>> = [];
-    if (contentType.includes("text/event-stream")) {
-        for (const line of text.split("\n")) {
-            if (!line.startsWith("data:")) continue;
-            try {
-                const event = JSON.parse(line.slice(5)) as Record<string, unknown>;
-                blocks = blocks.concat(blocksOf([event.content_block]));
-            } catch {}
-        }
-    } else {
-        try {
-            blocks = blocksOf((JSON.parse(text) as Record<string, unknown>).content);
-        } catch {}
-    }
-    return blocks
-        .filter((block) => block.type === "tool_use" && typeof block.id === "string")
-        .map((block) => block.id as string);
 }
 
 function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]> {
@@ -452,8 +444,8 @@ export class Forwarder {
         }
         const contentType = response.headers.get("content-type") ?? "";
         const responseText = new TextDecoder().decode(bytes);
-        const { usage, stopReason } = readUsage(contentType, responseText);
-        exchange.tool_uses = toolUseIds(contentType, responseText);
+        const { usage, stopReason, toolUses } = readResponse(contentType, responseText);
+        exchange.tool_uses = toolUses;
         const cost = usage
             ? this.price(
                   usage.input_tokens +
