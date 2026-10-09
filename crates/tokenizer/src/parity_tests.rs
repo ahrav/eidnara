@@ -83,6 +83,99 @@ proptest! {
         split.extend(encode_ordinary(b));
         prop_assert_eq!(split, encode_ordinary(&text));
     }
+
+    /// A `"\n\n"` join of texts that each start outside the whitespace class after the first
+    /// costs every earlier text with one more `"\n"`, one `"\n"` per separator, and the last
+    /// text. Texts may end in whitespace. The reference agrees wherever every piece merges whole.
+    #[test]
+    fn paragraph_join_costs_each_text_with_its_newline(
+        first in text_strategy(),
+        rest in proptest::collection::vec(text_strategy(), 0..6),
+    ) {
+        let mut parts = vec![first.as_str()];
+        parts.extend(rest.iter().map(String::as_str).filter(|text| crate::starts_outside_whitespace(text)));
+        let joined = parts.join("\n\n");
+        prop_assert_eq!(join_cost(&parts, estimate_tokens), estimate_tokens(&joined));
+        let merged_whole = reference::piece_spans(&joined)
+            .iter()
+            .all(|&(start, end)| end - start <= crate::MAX_PIECE_BYTES);
+        if merged_whole {
+            prop_assert_eq!(join_cost(&parts, estimate_tokens), reference::estimate_tokens(&joined));
+        }
+    }
+
+    #[test]
+    fn paragraph_spans_count_as_their_text(
+        parts in proptest::collection::vec(text_strategy(), 1..6),
+        joins in proptest::collection::vec("(\n\n|\n\n\n| \n\n|\n \n\n|\n)", 0..6),
+    ) {
+        let mut text = String::new();
+        for (index, part) in parts.iter().enumerate() {
+            if index > 0 {
+                text.push_str(joins.get(index - 1).map_or("\n\n", String::as_str));
+            }
+            text.push_str(part);
+        }
+        let spans: Vec<&str> = crate::paragraph_spans(&text).collect();
+        let separators = spans.len() - 1;
+        prop_assert_eq!(spans.iter().map(|span| span.len()).sum::<usize>() + separators, text.len());
+        let summed = spans.iter().map(|span| estimate_tokens(span)).sum::<usize>()
+            + separators * estimate_tokens("\n");
+        prop_assert_eq!(summed, estimate_tokens(&text));
+        let merged_whole = reference::piece_spans(&text)
+            .iter()
+            .all(|&(start, end)| end - start <= crate::MAX_PIECE_BYTES);
+        if merged_whole {
+            prop_assert_eq!(summed, reference::estimate_tokens(&text));
+        }
+    }
+}
+
+/// The join identity `starts_outside_whitespace` states, evaluated with `count`.
+fn join_cost(parts: &[&str], count: impl Fn(&str) -> usize) -> usize {
+    let (last, earlier) = parts.split_last().expect("one part");
+    earlier
+        .iter()
+        .map(|part| count(&format!("{part}\n")) + count("\n"))
+        .sum::<usize>()
+        + count(last)
+}
+
+#[test]
+fn paragraph_joins_hold_at_class_boundaries() {
+    for opens in ["x", "#", "'s", "9", "\u{85}x", "\u{200B}", "東"] {
+        assert!(crate::starts_outside_whitespace(opens), "{opens:?}");
+    }
+    for blank in ["", " x", "\nx", "\tx", "\u{A0}x", "\u{3000}x", "\u{FEFF}x"] {
+        assert!(!crate::starts_outside_whitespace(blank), "{blank:?}");
+    }
+    let pairs = [
+        ("x", "'s"),
+        ("x", "\u{85}y"),
+        ("\u{200B}", "x"),
+        ("東", "9"),
+        ("x", "\u{300}"),
+        ("…", "x"),
+        ("## 3-4 · ", "## 5-6 · t"),
+        ("t\u{3000}", "#"),
+        ("t\u{FEFF}", "x"),
+        ("a \t ", "b"),
+        ("  ", "x"),
+    ];
+    for (before, after) in pairs {
+        let joined = format!("{before}\n\n{after}");
+        assert_eq!(
+            join_cost(&[before, after], estimate_tokens),
+            estimate_tokens(&joined),
+            "{joined:?}"
+        );
+        assert_eq!(
+            estimate_tokens(&joined),
+            reference::estimate_tokens(&joined),
+            "{joined:?}"
+        );
+    }
+    assert_eq!(estimate_tokens("\n"), 1);
 }
 
 #[test]

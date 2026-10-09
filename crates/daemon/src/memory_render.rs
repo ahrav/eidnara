@@ -1,7 +1,7 @@
 //! This module performs pure rendering for project-memory and session-history prompt surfaces.
 
 use crate::canonical_memory::CanonicalMemory;
-use crate::decay_render::{DecayRenderHistorySegment, render_decayed_history_segments};
+use crate::decay_render::{DecayRenderHistorySegment, TokenCount, render_decayed_counted};
 use std::cmp::Ordering;
 
 /// `<session-history>` is never omitted so the provider prompt-cache retains a stable breakpoint.
@@ -175,6 +175,21 @@ pub struct M0Inputs<'a> {
 
 /// `render_m0` expects the caller to pre-trim each sub-block.
 pub fn render_m0(inputs: &M0Inputs, estimate_tokens: impl Fn(&str) -> usize) -> String {
+    render_m0_counted(inputs, &estimate_tokens).0
+}
+
+const SESSION_HISTORY_OPEN: &str = "<session-history>\n";
+const SESSION_HISTORY_CLOSE: &str = "\n</session-history>";
+
+/// [`render_m0`] with the count of its first `<session-history>` block under a counter that
+/// [counts joins exactly](TokenCount::counts_joins_exactly), when that block is the rendered
+/// history: no earlier section opens the tag and the body never closes it. The history body
+/// opens with a `## ` heading, so the block counts as its opening line, the body, and its
+/// closing line apart.
+pub(crate) fn render_m0_counted(
+    inputs: &M0Inputs,
+    tokens: &impl TokenCount,
+) -> (String, Option<usize>) {
     let mut sections: Vec<String> = Vec::new();
     if !inputs.project_docs.is_empty() {
         sections.push(inputs.project_docs.to_string());
@@ -189,15 +204,28 @@ pub fn render_m0(inputs: &M0Inputs, estimate_tokens: impl Fn(&str) -> usize) -> 
     }
 
     let effective_budget = inputs.history_budget_tokens / inputs.decay_pressure_multiplier.max(1.0);
-    let session_history =
-        render_decayed_history_segments(inputs.history_segments, effective_budget, estimate_tokens);
-    sections.push(if session_history.is_empty() {
+    let (session_history, body_tokens) =
+        render_decayed_counted(inputs.history_segments, effective_budget, tokens);
+    let history = if session_history.is_empty() {
         M0_EMPTY_BODY.to_string()
     } else {
-        format!("<session-history>\n{session_history}\n</session-history>")
-    });
+        format!("{SESSION_HISTORY_OPEN}{session_history}{SESSION_HISTORY_CLOSE}")
+    };
+    let history_len = history.len();
+    sections.push(history);
 
-    sections.join("\n\n").trim().to_string()
+    let m0 = sections.join("\n\n").trim().to_string();
+    let first_block = memchr::memmem::find(m0.as_bytes(), b"<session-history>");
+    let block_tokens = body_tokens
+        .filter(|_| tokens.counts_joins_exactly() && !session_history.is_empty())
+        .filter(|_| first_block == Some(m0.len() - history_len))
+        .filter(|_| {
+            memchr::memmem::find(session_history.as_bytes(), b"</session-history>").is_none()
+        })
+        .map(|body| {
+            tokens.count(SESSION_HISTORY_OPEN) + body + tokens.count(SESSION_HISTORY_CLOSE)
+        });
+    (m0, block_tokens)
 }
 
 /// Wraps non-empty delta blocks in `<session-history-since>` in argument order.
@@ -251,6 +279,120 @@ pub fn render_new_history_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact tokenizer as a counter that follows the join identity.
+    struct Exact;
+
+    impl TokenCount for Exact {
+        fn count(&self, text: &str) -> usize {
+            tokenizer::estimate_tokens(text)
+        }
+
+        fn counts_joins_exactly(&self) -> bool {
+            true
+        }
+    }
+
+    fn history_rows(rows: usize, date: &str) -> Vec<DecayRenderHistorySegment> {
+        crate::test_support::synthetic_history::SyntheticHistory::mixed(rows)
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(n, stored)| {
+                let mut row = DecayRenderHistorySegment::from(stored);
+                row.title = match n % 5 {
+                    0 => format!("{} ", row.title),
+                    1 => format!("{}\u{3000}", row.title),
+                    2 => format!("{}\n", row.title),
+                    _ => row.title,
+                };
+                if n % 7 == 3 {
+                    row.p1 = None;
+                }
+                row.start_date = Some(date.to_string());
+                row.end_date = Some(date.to_string());
+                row
+            })
+            .collect()
+    }
+
+    /// Under an exact counter the history block counts as its parts, and the bytes match the
+    /// render that counts the extracted block. A block another section opens first, or a body
+    /// that closes the tag, falls back to counting the extracted block.
+    #[test]
+    fn an_exact_counter_counts_the_history_block_from_its_body() {
+        for (date, docs, counted) in [
+            ("2026-06-08", "", true),
+            (
+                "2026-06-08",
+                "<project-docs>\nno history here\n</project-docs>",
+                true,
+            ),
+            (
+                "2026-06-08",
+                "<project-docs>\n<session-history>\n</project-docs>",
+                false,
+            ),
+            ("</session-history>", "", false),
+        ] {
+            let rows = history_rows(600, date);
+            for budget in [400.0, 4_000.0, 20_000.0, 60_000.0] {
+                let inputs = M0Inputs {
+                    project_docs: docs,
+                    user_profile: &[],
+                    covered_system_messages: &[],
+                    history_segments: &rows,
+                    history_budget_tokens: budget,
+                    decay_pressure_multiplier: 1.0,
+                };
+                let (m0, block_tokens) = render_m0_counted(&inputs, &Exact);
+                assert_eq!(m0, render_m0(&inputs, tokenizer::estimate_tokens));
+                let block = crate::decay_render::m0_block(&m0, "session-history").unwrap();
+                if counted {
+                    assert_eq!(
+                        block_tokens,
+                        Some(tokenizer::estimate_tokens(block)),
+                        "budget {budget}"
+                    );
+                } else {
+                    assert_eq!(block_tokens, None, "{date} {docs} budget {budget}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_exact_counter_counts_a_history_block_whose_body_ends_in_whitespace() {
+        for tail in [" ", "\u{3000}", "\t", "  "] {
+            let mut rows = history_rows(5, "2026-06-08");
+            let newest = rows.last_mut().unwrap();
+            newest.title = format!("Open question{tail}");
+            newest.p1 = None;
+            newest.content = String::new();
+            let inputs = M0Inputs {
+                project_docs: "",
+                user_profile: &[],
+                covered_system_messages: &[],
+                history_segments: &rows,
+                history_budget_tokens: 60_000.0,
+                decay_pressure_multiplier: 1.0,
+            };
+            let (m0, block_tokens) = render_m0_counted(&inputs, &Exact);
+            let block = crate::decay_render::m0_block(&m0, "session-history").unwrap();
+            assert!(block.contains("Open question"));
+            assert!(
+                block
+                    .trim_end_matches("\n</session-history>")
+                    .ends_with(char::is_whitespace),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                block_tokens,
+                Some(tokenizer::estimate_tokens(block)),
+                "tail {tail:?}"
+            );
+        }
+    }
 
     #[test]
     fn render_boundary_drops_non_positive_categories() {

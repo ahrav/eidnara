@@ -5278,6 +5278,9 @@ fn prepare_claims(
 /// array, or that is not text at all (`None`), is no claims with one
 /// diagnostic line: a claims fault never fails a segment load.
 fn claims_from_cell(cell: Option<&str>) -> Vec<Claim> {
+    if cell == Some("[]") {
+        return Vec::new();
+    }
     let reason = match cell.map(serde_json::from_str::<Vec<Claim>>) {
         Some(Ok(claims)) => return claims,
         Some(Err(error)) => error.to_string(),
@@ -12104,6 +12107,48 @@ impl MemoryStore {
         })
     }
 
+    /// The fields a decay render reads from a row the window or its extension selects: its
+    /// sequence, message range, dates, title, tiers, importance, `legacy` and claims, and its
+    /// content when `p1` is empty or NULL, because a row with a nonempty `p1` renders from its
+    /// tiers. The rest keep their defaults; those reads skip archive rows, so
+    /// [`StoredHistorySegment::is_archive`] reads false as it would for the stored row.
+    fn rendered_history_segment_from_row(
+        r: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<StoredHistorySegment> {
+        let p1: Option<String> = r.get(9)?;
+        let tiered = p1.as_deref().is_some_and(|p1| !p1.is_empty());
+        Ok(StoredHistorySegment {
+            sequence: r.get(0)?,
+            start_message: r.get(1)?,
+            end_message: r.get(2)?,
+            start_date: r.get(5)?,
+            end_date: r.get(6)?,
+            title: r.get(7)?,
+            content: if tiered { String::new() } else { r.get(8)? },
+            p1,
+            p2: r.get(10)?,
+            p3: r.get(11)?,
+            p4: r.get(12)?,
+            importance: r.get::<_, Option<i64>>(13)?.unwrap_or(50) as i32,
+            legacy: r.get::<_, Option<i64>>(15)?.unwrap_or(0) as i32,
+            claims: claims_from_cell(r.get_ref(17)?.as_str().ok()),
+            ..StoredHistorySegment::default()
+        })
+    }
+
+    /// The sequence, importance and claims of a non-legacy, non-archive row that renders
+    /// empty: the fields a decay render reads from it. The rest keep their defaults.
+    fn textless_history_segment_from_row(
+        r: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<StoredHistorySegment> {
+        Ok(StoredHistorySegment {
+            sequence: r.get(0)?,
+            importance: r.get::<_, Option<i64>>(13)?.unwrap_or(50) as i32,
+            claims: claims_from_cell(r.get_ref(17)?.as_str().ok()),
+            ..StoredHistorySegment::default()
+        })
+    }
+
     /// Read a session's history_segments in chronological order (oldest first), the order
     /// the decay renderer expects (it indexes from newest internally).
     pub fn load_history_segments(
@@ -12331,7 +12376,8 @@ impl MemoryStore {
 
     /// Reads, in one snapshot, only the rows a decay fold can render. `horizon` gets the newest
     /// `pressure_window` non-legacy rows, newest first, and returns how many newest non-legacy
-    /// rows the fold needs. Archive rows render empty and carry no pressure, so neither count
+    /// rows the fold needs. Those rows carry the fields a decay render reads: ids, episode
+    /// type and `created_at` keep their defaults. Archive rows render empty and carry no pressure, so neither count
     /// includes them. Legacy rows are read by `legacy_seqs`, which must name every legacy
     /// row (extras are ignored), or by one scan when `None`; the result returns the exact list.
     /// The scan also refuses a set whose ranges do not strictly increase by sequence with
@@ -12343,6 +12389,23 @@ impl MemoryStore {
         pressure_window: usize,
         horizon: impl FnOnce(&[StoredHistorySegment]) -> usize,
     ) -> Result<HistorySegmentFold, MemoryStoreError> {
+        self.load_history_segment_fold_planned(session_id, legacy_seqs, pressure_window, |newest| {
+            (horizon(newest), |_: usize, _: i32| true)
+        })
+    }
+
+    /// [`Self::load_history_segment_fold`] whose `plan` also says which rows past the window
+    /// keep their text. `plan` gets the window and returns the row count `horizon` would,
+    /// with a predicate over a row's 1-based index from the newest non-legacy row and its
+    /// importance. A row past the window the predicate rejects comes back with only its
+    /// sequence, importance and claims.
+    pub fn load_history_segment_fold_planned<R: Fn(usize, i32) -> bool>(
+        &self,
+        session_id: &str,
+        legacy_seqs: Option<&[i64]>,
+        pressure_window: usize,
+        plan: impl FnOnce(&[StoredHistorySegment]) -> (usize, R),
+    ) -> Result<HistorySegmentFold, MemoryStoreError> {
         self.inner.with_conn(|conn| {
             let legacy_seqs = match legacy_seqs {
                 Some(seqs) => Cow::Borrowed(seqs),
@@ -12353,28 +12416,43 @@ impl MemoryStore {
             };
             let newest = history_segment_edge_tx(conn, session_id, EdgeAt::Newest)?;
             let oldest = history_segment_edge_tx(conn, session_id, EdgeAt::Oldest)?;
-            let mut rows = query_history_segments_tx(
-                conn,
-                &format!(
-                    "WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
-                     ORDER BY sequence DESC LIMIT ?2"
-                ),
-                params![session_id, sql_limit(pressure_window)],
-            )?;
-            let wanted = horizon(&rows);
+            let mut rows = conn
+                .prepare_cached(&format!(
+                    "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS} FROM history_segments
+                      WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
+                      ORDER BY sequence DESC LIMIT ?2"
+                ))?
+                .query_map(
+                    params![session_id, sql_limit(pressure_window)],
+                    Self::rendered_history_segment_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let (wanted, keeps_text) = plan(&rows);
             if let Some(last) = rows.last().map(|row| row.sequence)
                 && wanted > rows.len()
                 && rows.len() == pressure_window
             {
-                let older = query_history_segments_tx(
-                    conn,
-                    &format!(
-                        "WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
-                           AND sequence < ?2
-                         ORDER BY sequence DESC LIMIT ?3"
-                    ),
-                    params![session_id, last, sql_limit(wanted - rows.len())],
-                )?;
+                let mut index = rows.len();
+                let older = conn
+                    .prepare_cached(&format!(
+                        "SELECT {HISTORY_SEGMENT_SELECT_COLUMNS} FROM history_segments
+                          WHERE session_id = ?1 AND legacy <> 1 AND {NOT_ARCHIVE_SQL}
+                            AND sequence < ?2
+                          ORDER BY sequence DESC LIMIT ?3"
+                    ))?
+                    .query_map(
+                        params![session_id, last, sql_limit(wanted - rows.len())],
+                        |r| {
+                            index += 1;
+                            let importance = r.get::<_, Option<i64>>(13)?.unwrap_or(50) as i32;
+                            if keeps_text(index, importance) {
+                                Self::rendered_history_segment_from_row(r)
+                            } else {
+                                Self::textless_history_segment_from_row(r)
+                            }
+                        },
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
                 rows.extend(older);
             }
             let legacy = query_history_segments_tx(
@@ -24542,6 +24620,56 @@ mod tests {
             })
             .unwrap();
         assert!(fold.history_segments.is_empty() && fold.newest.is_none() && fold.oldest.is_none());
+    }
+
+    #[test]
+    fn a_planned_fold_reads_text_only_for_the_rows_its_plan_keeps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = bounded_read_store(dir.path(), 40, &[2, 30]);
+        store
+            .with_fenced_conn_for_test(|tx| {
+                tx.execute(
+                    "UPDATE history_segments SET episode_type = 'archive', p2 = 'q34', claims = ?1
+                      WHERE session_id = 'ses' AND sequence = 34",
+                    [r#"[{"key":"k","value":"v","ordinal":68,"anchor":"p34"}]"#],
+                )
+            })
+            .unwrap();
+        let full = store
+            .load_history_segment_fold("ses", None, 5, |_| 8)
+            .unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let planned = store
+            .load_history_segment_fold_planned("ses", None, 5, |newest| {
+                assert_eq!(newest.len(), 5);
+                (8, |index: usize, importance: i32| {
+                    asked.borrow_mut().push((index, importance));
+                    index != 7 && index != 8
+                })
+            })
+            .unwrap();
+        assert_eq!(*asked.borrow(), vec![(6, 50), (7, 50), (8, 50)]);
+        assert_eq!(planned.legacy_seqs, full.legacy_seqs);
+        assert_eq!(
+            (&planned.newest, &planned.oldest),
+            (&full.newest, &full.oldest)
+        );
+        assert_eq!(planned.history_segments.len(), full.history_segments.len());
+        for (planned, full) in planned.history_segments.iter().zip(&full.history_segments) {
+            if planned.sequence != 33 && planned.sequence != 34 {
+                assert_eq!(planned, full);
+                continue;
+            }
+            let textless = StoredHistorySegment {
+                sequence: full.sequence,
+                importance: full.importance,
+                claims: full.claims.clone(),
+                ..StoredHistorySegment::default()
+            };
+            assert_eq!(planned, &textless);
+            assert!(!planned.is_archive(), "row {}", planned.sequence);
+        }
+        assert_eq!(full.history_segments[3].claims.len(), 1);
     }
 
     #[test]

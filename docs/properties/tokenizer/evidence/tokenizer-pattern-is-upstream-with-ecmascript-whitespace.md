@@ -22,40 +22,24 @@ every other tokenizer record depends on.
   `piece_end` (`:202-237`) per span; the whitespace class is a literal in
   `class_from_tables` (`:71`) and `ASCII_CLASS` (`:38`), and the letter and
   number classes come from `src/unicode_tables.rs`.
-- `pattern_is_upstream_with_ecmascript_whitespace` (`:168`) derives the pattern
-  from the asset and asserts `derived == CLAUDE_PAT_STR` (`:175`), then asserts
-  the constant contains neither `\s` nor `\S` (`:176-177`).
-- `reference_pattern_equals_upstream_derived_pattern` (`:183`) asserts
+- `pattern_is_upstream_with_ecmascript_whitespace` (`:228`) derives the pattern
+  from the asset and asserts `derived == CLAUDE_PAT_STR` (`:235`), then asserts
+  the constant contains neither `\s` nor `\S` (`:236-237`).
+- `reference_pattern_equals_upstream_derived_pattern` (`:243`) asserts
   `reference_impl::CLAUDE_PAT_STR` (`src/reference_impl.rs:23-33`) equals the
   derived constant; the reference compiles that constant at `:56`.
-- `matches_reference_on_hand_cases` (`src/scan.rs:302`) compares the scanner's
+- `matches_reference_on_hand_cases` (`src/scan.rs:307`) compares the scanner's
   splits to the reference regex's spans on hand-written cases;
   `ids_match_reference_impl` (`src/parity_tests.rs:63`) compares ids on 2,000
   generated strings per run, whose whitespace arm (`:12`, `:17`) draws from all
   25 class members plus U+0085 and U+200B.
 - `unicode_tables_match_regex_syntax` (`src/unicode_gen_tests.rs:68`) pins the
   committed `\p{L}` and `\p{N}` tables to `regex-syntax`.
-- `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:188`) builds
-  `^[class]# tokenizer-pattern-is-upstream-with-ecmascript-whitespace
-
-## Discovery trigger
-
-The tokenizer portfolio evaluation found two tests attached to no record:
-`pattern_is_upstream_with_ecmascript_whitespace` and
-`whitespace_class_matches_ecmascript_not_unicode_white_space`
-(`crates/tokenizer/src/lib.rs:179`, `:192`). They pin the pre-tokenizer pattern
-every other tokenizer record depends on.
-
-## Evidence trail
-
-- `crates/tokenizer/src/lib.rs:10-13` (crate docs): the pattern rewrites
-  upstream `\s` and `\S` as explicit classes because ECMAScript includes U+FEFF
-  and excludes U+0085 while the `regex` crate does the reverse; `assets/claude.pat`
-  holds the upstream pattern and a unit test derives `CLAUDE_PAT_STR` from it.
- and asserts a match for sixteen code points (`\t`, `\n`, U+000B,
+- `whitespace_class_matches_ecmascript_not_unicode_white_space` (`:248`) builds
+  `^[class]$` and asserts a match for sixteen code points (`\t`, `\n`, U+000B,
   U+000C, `\r`, space, U+00A0, U+1680, U+2000, U+200A, U+2028, U+2029, U+202F,
   U+205F, U+3000, U+FEFF) and no match for U+0085, U+200B, `a`, U+180E
-  (`:191-205`).
+  (`:251-265`).
 - `bom_before_newline_is_preserved` (`tests/token_golden.rs:101`) encodes `"x\u{feff}\n"` and so
   reaches U+FEFF; the `nel-after-space` and `nel-runs` golden cases
   (`gen/gen-token-golden.ts:99-100`) reach U+0085.
