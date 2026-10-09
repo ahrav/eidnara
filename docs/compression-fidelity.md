@@ -418,6 +418,8 @@ an owner-only `0700` directory outside the repository.
 - an observation bound to another corpus;
 - an unknown owner;
 - a case or scenario outside the corpus;
+- a scenario observation whose source is not the source its corpus scenario
+  is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare;
@@ -425,13 +427,17 @@ an owner-only `0700` directory outside the repository.
   hashed representation is the request body as UTF-8 bytes.
 
 In an arm labeled `real`:
-- scripted output is an identity error;
+- scripted output is an identity error, whether `detail.output_origin` or an
+  attempt's `output_origin` in `detail.attempts` records it;
 - every source needs a published real capture;
-- every serving observation must name, in `detail.generation_capture_sha256`,
-  the file hash of the published real capture of its source whose output it
-  served.
+- every serving observation, one that records `detail.served_tier` or
+  `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
+  hash of the published real capture of its source whose output it served.
 
-A scenario label `<scenario>@<variant>` belongs to its scenario's case.
+A scenario label `<scenario>@<variant>` belongs to its scenario's case. A
+label that is a corpus source ID, which the delivery witness writes for the
+m1, warm, and cold stages of a source with no m1 scenario, must equal the
+observation's `source` and makes the observation source-level evidence.
 Observations of a variant and observations marked `detail.judge_control`,
 which test the delivery judge itself, appear in the row's outcomes and judge
 nothing.
@@ -440,7 +446,8 @@ nothing.
 
 - The comparison is refused when an arm is bound to another corpus or has
   identity errors, when the arms reached different scenario sets, or when
-  they differ in model, provider, version, settings, or limits.
+  they differ in model, provider, version, settings, or limits. Held fields
+  compare as JSON with keys in UTF-16 code-unit order.
 - Differing prompt hashes mark it a treatment comparison.
 
 Missing scenarios block full acceptance, and the report names them.

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { canonicalJson } from "../src/canonical-json";
 import {
     EXECUTABLE_LANES,
     type IncidentCatalog,
@@ -18,11 +19,7 @@ import {
     mutationRecordsBoundTo,
     REPO_ROOT,
 } from "../src/incident-pool/evidence";
-import {
-    canonicalJson,
-    compareWithAcceptedSnapshot,
-    type HistorySnapshot,
-} from "../src/incident-pool/history";
+import { compareWithAcceptedSnapshot, type HistorySnapshot } from "../src/incident-pool/history";
 import {
     builtinIncidentCaseRegistry,
     validateRegistryCatalogCorrespondence,
