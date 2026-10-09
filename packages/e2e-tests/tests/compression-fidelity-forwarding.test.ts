@@ -116,6 +116,10 @@ describe.skipIf(!prereqs.ok)("record-and-forward through OpenCode", () => {
         expect(readFileSync(join(h.env.configDir, "opencode.json"), "utf8")).toContain(
             h.mock.inboundKey,
         );
+        // A forwarding run's OpenCode API spends the provider budget, so a caller without the
+        // harness's credential is refused.
+        expect((await fetch(`${h.opencode.url}/session`)).status).toBe(401);
+        expect((await h.client.session.messages({ path: { id: session } })).data).toBeDefined();
     }, 300_000);
 });
 

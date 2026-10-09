@@ -291,17 +291,29 @@ published no rows, or `unsettled` for a source whose transform call or firing
 did not finish within the wait, that never started a producer, or that drained
 no model output;
 the test fails after writing every record when any source is unsettled. For
-an unsettled source the capture waits up to 45 s for any `start` still in
-flight to return its run handle, then binds each started run's session and
-cancels every run that drained no output through a second connection before
-the next source begins, because the host keeps a run alive after its waiter is
-dropped until `run.cancel` ends it; the record lists each cancel's run id and
-outcome under `cancelled_runs` and any start still unreturned under
-`starts_in_flight_at_cancel`. A cancel the host does not confirm, or a start
-still unreturned, sets `capture_stopped` on that record and ends the capture
-before another source can start a run. The capture directory and every
-existing ancestor must be owned by the operator or root and closed to group
-and other writes unless sticky. The
+an unsettled source the capture waits up to 75 s (one `connect` and one
+`start` at the producer's 30 s request timeout each, with margin) for any
+firing that has connected to return its first run handle, holding 2 s for a
+firing spawned just before the deadline to call `connect`. It then binds each
+started run's session and cancels, through a second connection, every run
+that drained no model output and whose own cancel the host did not confirm,
+before the next source begins, because the host keeps a run alive after its
+waiter is dropped until `run.cancel` ends it. Each attempt records the
+firing's own cancel under `cancel`, the record lists each cancel's run id and
+outcome under `cancelled_runs` and any firing still before its first start
+under `firings_before_first_start_at_cancel`. A cancel the host does not
+confirm, or a firing still before its first start, sets `capture_stopped` on
+that record and ends the capture before another source can start a run. A
+start error that does not prove the host committed no run (one that is
+neither `NotSent` nor a host terminal) has no run id to cancel, so the capture
+purges that attempt's producer session instead and records it under
+`cancelled_runs` with `session_purged`; a purge the host does not confirm
+also sets `capture_stopped`. After a confirmed cancel the capture waits up to
+10 s for the firing to record the terminal it provoked, so the record carries
+that drained error and the firing's own cancel. The capture directory and
+every existing ancestor must be owned by the operator or root and closed to
+group and other writes unless sticky, checked before and again after the
+directory is created. The
 record names the model, the harness,
 the output origin, whether the transform call returned and the firing settled,
 the attempt count, and every
@@ -335,8 +347,14 @@ requires:
 Scripted responses and forwarding are exclusive: passing both, or scripting
 a forwarding mock, throws. A forwarding mock accepts only requests carrying
 its per-mock `inboundKey`, which the harness writes into OpenCode's provider
-config, so no other local process can spend its budget; that `opencode.json`
-is written `0600` in an owner-only `0700` isolated tree. `forward.contextLimit`
+config, so no other local process can spend its budget through the mock; that
+`opencode.json` is written `0600` in an owner-only `0700` isolated tree. The
+harness also starts a forwarding run's OpenCode serve API behind HTTP Basic
+auth (`OPENCODE_SERVER_USERNAME` and a random `OPENCODE_SERVER_PASSWORD` in
+the child's environment only, matched by the SDK client's `authorization`
+header), so another local process cannot drive sessions that spend the
+budget through OpenCode; a scripted run keeps the unauthenticated loopback
+API. `forward.contextLimit`
 is the context limit OpenCode is configured with. Before each send the
 forwarder checks that the body is a JSON object, the model,
 the request's `max_tokens`, the call count, and the spend cap. The spend
@@ -365,7 +383,8 @@ spend above the cap, or a tool call that no later request answers with its
 `reset()`.
 `publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
 directory outside the repository whose existing ancestors are owned by the
-operator or root and closed to group and other writes unless sticky, refusing
+operator or root and closed to group and other writes unless sticky, checked
+before and again after creation, refusing
 a shared existing directory, an untrusted ancestor, or a label that is not a
 plain file name. `tests/compression-fidelity-forwarding.test.ts`
 runs the whole loop through OpenCode against an in-process provider double.
