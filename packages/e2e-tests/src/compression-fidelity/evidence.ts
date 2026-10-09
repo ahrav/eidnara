@@ -34,6 +34,8 @@ const REPLAY = "daemon.compression_fidelity.replay";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
+/** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
+const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
 /** The delivery witness's judge self-test; a judge control at another stage is refused. */
 const JUDGE_CONTROL_STAGE = "missing-capture";
 /** The generation settings every real capture attempt records and the arm's `settings` declare. */
@@ -100,6 +102,8 @@ export interface ForwardingEvidence {
         request: { body_text: string; body_sha256: string };
         response: {
             outcome: string;
+            /** The model the response names; `null` when it names none. */
+            model: string | null;
             stop_reason: string | null;
             truncated: boolean;
             body_text: string;
@@ -206,6 +210,10 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
         return null;
     }
+    const limits = value.limits;
+    if (FORWARD_LIMITS.some((name) => typeof limits[name] !== "number" || limits[name] <= 0)) {
+        return null;
+    }
     if (value.stopped !== null && !text(value.stopped)) return null;
     if (typeof value.context_limit !== "number" || typeof value.spent_usd !== "number") return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
@@ -234,15 +242,22 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             if (!text(response.outcome)) return null;
             if (response.stop_reason !== null && typeof response.stop_reason !== "string")
                 return null;
+            if (response.model !== null && typeof response.model !== "string") return null;
         }
+        const ids = (value: unknown) =>
+            Array.isArray(value) && value.every((id) => typeof id === "string") ? value : null;
+        const toolUses = ids(exchange.tool_uses);
+        const toolResults = ids(exchange.tool_results);
+        if (!toolUses || !toolResults) return null;
         exchanges.push({
             index: exchange.index,
-            tool_uses: strings(exchange.tool_uses),
-            tool_results: strings(exchange.tool_results),
+            tool_uses: toolUses,
+            tool_results: toolResults,
             request: { body_text: request.body_text, body_sha256: request.body_sha256 },
             response: response
                 ? {
                       outcome: response.outcome as string,
+                      model: response.model as string | null,
                       stop_reason: response.stop_reason as string | null,
                       truncated: response.truncated as boolean,
                       body_text: response.body_text as string,
@@ -266,13 +281,29 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     };
 }
 
+/**
+ * The digests of a prompt field an attempt records as text (`<field>`), as a digest
+ * (`<field>_sha256`), or both; `conflict` names an attempt whose text and digest disagree.
+ */
+function promptHashes(
+    evidence: Evidence,
+    field: "system" | "prompt",
+): { hashes: string[]; conflict: boolean } {
+    const hashes: string[] = [];
+    let conflict = false;
+    for (const attempt of attemptsOf(evidence)) {
+        const digest = attempt[`${field}_sha256`];
+        const recorded = typeof attempt[field] === "string" ? sha256(attempt[field]) : null;
+        if (recorded !== null && typeof digest === "string" && digest !== recorded) conflict = true;
+        if (recorded !== null) hashes.push(recorded);
+        else if (typeof digest === "string") hashes.push(digest);
+    }
+    return { hashes, conflict };
+}
+
 /** The system prompt hashes an observation claims its producer ran. */
 function systemHashes(evidence: Evidence): string[] {
-    return attemptsOf(evidence).flatMap((attempt) => {
-        if (typeof attempt.system_sha256 === "string") return [attempt.system_sha256];
-        if (typeof attempt.system === "string") return [sha256(attempt.system)];
-        return [];
-    });
+    return promptHashes(evidence, "system").hashes;
 }
 
 function attemptsOf(evidence: Evidence): Json[] {
@@ -344,6 +375,10 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
         }
         if (response.stop_reason === null)
             complete(exchange.index, "response states no stop reason");
+        if (response.model === null) complete(exchange.index, "response names no model");
+        else if (response.model !== report.model) {
+            complete(exchange.index, `response names model ${response.model}`);
+        }
         if (response.truncated) {
             complete(exchange.index, "response is truncated");
             continue;
@@ -470,6 +505,12 @@ export async function loadArm(
             arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
             continue;
         }
+        const exactRead =
+            label !== null && scenarioEntry.get(label)?.scenario.serving.path === "exact_read";
+        if (owner === EXACT_READ_OWNER && label !== null && !exactRead) {
+            arm.errors.push(`${name} names scenario ${label}, which is not an exact read`);
+            continue;
+        }
         if (label !== null && !sourceLabel && isGeneration({ owner, stage: value.stage })) {
             arm.errors.push(
                 `${name} names scenario ${label}; a ${value.stage} stage is source-level`,
@@ -531,7 +572,13 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     const config = arm.config;
     if (!config) return errors;
     for (const evidence of arm.evidence) {
-        for (const hash of systemHashes(evidence)) {
+        const system = promptHashes(evidence, "system");
+        if (system.conflict) {
+            errors.push(
+                `${evidence.file} records a system prompt whose digest differs from its text`,
+            );
+        }
+        for (const hash of system.hashes) {
             if (hash !== config.prompt_sha256) {
                 errors.push(`${evidence.file} ran system prompt ${hash}, not the arm's prompt`);
             }
@@ -541,6 +588,15 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     for (const generation of generations) {
         if (systemHashes(generation).length === 0) {
             errors.push(`${generation.file} records no system prompt`);
+        }
+        const prompt = promptHashes(generation, "prompt");
+        if (prompt.conflict) {
+            errors.push(
+                `${generation.file} records a user prompt whose digest differs from its text`,
+            );
+        }
+        if (prompt.hashes.length < attemptsOf(generation).length) {
+            errors.push(`${generation.file} records no user prompt on an attempt`);
         }
     }
     if (config.generation_origin !== "real") {
@@ -569,6 +625,11 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             );
         }
         for (const attempt of attemptsOf(capture)) {
+            if (attempt.model !== config.model) {
+                errors.push(
+                    `${capture.file} attempt ran model ${String(attempt.model)}, not the arm's model`,
+                );
+            }
             for (const setting of ATTEMPT_SETTINGS) {
                 if (attempt[setting] !== config.settings[setting]) {
                     errors.push(
@@ -731,6 +792,21 @@ export function assembleEvidence(input: {
         const before = canonicalJson(input.baseline.config?.[field] ?? null);
         const after = canonicalJson(input.candidate.config?.[field] ?? null);
         if (before !== after) refused.push(`the arms differ in ${field}`);
+    }
+    // The user prompt each source was generated from is held equal; only the system prompt is
+    // the treatment.
+    for (const { source } of sources(corpus)) {
+        const [before, after] = sides.map((arm) =>
+            JSON.stringify(
+                arm.evidence
+                    .filter(
+                        (e) => isGeneration(e) && e.terminal === "published" && e.source === source,
+                    )
+                    .flatMap((e) => promptHashes(e, "prompt").hashes)
+                    .sort(),
+            ),
+        );
+        if (before !== after) refused.push(`the arms generated ${source} from different prompts`);
     }
     // The forwarded model is OpenCode's, a role apart from the summarizer model `arm.json`
     // declares, so live arms hold it equal through their reports.

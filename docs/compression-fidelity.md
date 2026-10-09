@@ -483,8 +483,12 @@ either arm; an arm directory is refused before any write.
 - an observation with no `stage` or no `terminal`;
 - an `opencode-delivery` observation marked `detail.judge_control` at a stage
   other than `missing-capture`, the delivery witness's judge self-test;
+- a `daemon.harness_sources.c6_exact_read` observation naming a scenario
+  whose serving path is not `exact_read`;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
-- a system prompt the arm did not declare;
+- a system prompt the arm did not declare, or an attempt whose prompt text
+  and recorded digest disagree, for the system prompt or the user prompt;
+- a published generation record with an attempt that records no user prompt;
 - a published generation record that records no system prompt, or a source
   with no published generation record: a real capture in an arm labeled
   `real`, the U2 replay's `generation` stage with scripted output in an arm
@@ -493,12 +497,15 @@ either arm; an arm directory is refused before any write.
   `detail.output_origin` or an attempt's `output_origin` records it;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
+- a forwarding report without the four limits the forwarder enforces, or
+  whose exchange tool ids are not string arrays;
 - a forwarding report marked complete that records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
-  `acknowledged`, a response with no stop reason, a truncated response, an
-  unknown cost, or a response without a hash; these are the completeness
-  reasons the forwarder derives, recomputed from the report's own fields;
+  `acknowledged`, a response with no stop reason or naming no model or a
+  model other than the report's, a truncated response, an unknown cost, or a
+  response without a hash; these are the completeness reasons the forwarder
+  derives, recomputed from the report's own fields;
 - a generation record, a real capture or the U2 replay's `generation` stage,
   that names a scenario; generation is source-level.
 
@@ -507,8 +514,8 @@ In an arm labeled `real`:
   attempt's `output_origin` in `detail.attempts` records it;
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error;
-- each attempt of a published real capture records the `temperature` and
-  `max_output_tokens` the arm's `settings` declare;
+- each attempt of a published real capture names the arm's model and records
+  the `temperature` and `max_output_tokens` the arm's `settings` declare;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.
@@ -524,9 +531,10 @@ nothing.
 **Comparison.**
 
 - The comparison is refused when an arm is bound to another corpus or has
-  identity errors, when the arms reached different scenario sets, or when
-  they differ in model, provider, version, settings, limits, or generation
-  origin. Held fields
+  identity errors, when the arms reached different scenario sets, when they
+  differ in model, provider, version, settings, limits, or generation origin,
+  or when their published generation records for a source record different
+  user prompts. Held fields
   compare as JSON with keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
   reports forwarded to different models or at different context limits. The

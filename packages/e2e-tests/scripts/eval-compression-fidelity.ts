@@ -111,8 +111,8 @@ export async function run(
         accepted: false,
     };
     return {
-        manifest: publishPrivateJson(assembled.manifest, args.out, "manifest.json"),
-        report: publishPrivateJson(report, args.out, "report.json"),
+        manifest: publishPrivateJson(assembled.manifest, out, "manifest.json"),
+        report: publishPrivateJson(report, out, "report.json"),
         accepted: false,
     };
 }
