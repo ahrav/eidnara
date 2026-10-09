@@ -32,6 +32,11 @@ export const OWNERS = [
 export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
+const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
+/** The delivery witness's judge self-test; a judge control at another stage is refused. */
+const JUDGE_CONTROL_STAGE = "missing-capture";
+/** The generation settings every real capture attempt records and the arm's `settings` declare. */
+const ATTEMPT_SETTINGS = ["temperature", "max_output_tokens"] as const;
 /** The arm fields a comparison holds equal; only the prompt may differ, as the treatment. */
 const HELD_EQUAL = [
     "model",
@@ -255,22 +260,37 @@ function servedTierOf(evidence: Evidence): unknown {
     return evidence.detail.served_tier ?? evidence.detail.tier;
 }
 
+/**
+ * The hash and completeness errors of one forwarding report. A report marked complete carries
+ * the writer's completeness invariants the assembler can observe: at least one send, and for
+ * every exchange an untruncated response with a known cost and a hash of its bytes.
+ */
 function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     const errors: string[] = [];
+    const complete = (index: number, reason: string) => {
+        if (report.complete)
+            errors.push(`${file} exchange ${index} ${reason} in a complete report`);
+    };
+    if (report.complete && report.exchanges.length === 0) {
+        errors.push(`${file} complete report records no send`);
+    }
     for (const exchange of report.exchanges) {
         // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
         if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
             errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);
         }
         const response = exchange.response;
-        if (!response || response.truncated) continue;
-        // A null hash on an untruncated response requires `report.complete` to be false.
+        if (!response) {
+            complete(exchange.index, "has no response");
+            continue;
+        }
+        if (!response.cost_known) complete(exchange.index, "cost is unknown");
+        if (response.truncated) {
+            complete(exchange.index, "response is truncated");
+            continue;
+        }
         if (response.body_sha256 === null) {
-            if (report.complete) {
-                errors.push(
-                    `${file} exchange ${exchange.index} response has no hash in a complete report`,
-                );
-            }
+            complete(exchange.index, "response has no hash");
         } else if (sha256(response.body_text) !== response.body_sha256) {
             errors.push(
                 `${file} exchange ${exchange.index} response bytes do not match their hash`,
@@ -373,6 +393,19 @@ export async function loadArm(
             arm.errors.push(`${name} labels source ${label} but names source ${source}`);
             continue;
         }
+        if (!text(value.stage) || !text(value.terminal)) {
+            arm.errors.push(`${name} has no ${text(value.stage) ? "terminal" : "stage"}`);
+            continue;
+        }
+        const detail = record(value.detail) ? value.detail : {};
+        if (
+            owner === "opencode-delivery" &&
+            detail.judge_control === true &&
+            value.stage !== JUDGE_CONTROL_STAGE
+        ) {
+            arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
+            continue;
+        }
         const evidence: Evidence = {
             file: name,
             sha256: sha256(read.bytes),
@@ -381,10 +414,10 @@ export async function loadArm(
             source,
             scenario: sourceLabel ? null : (label ?? null),
             variant,
-            stage: String(value.stage),
-            terminal: String(value.terminal),
+            stage: value.stage,
+            terminal: value.terminal,
             markers: strings(value.markers),
-            detail: record(value.detail) ? value.detail : {},
+            detail,
         };
         const entry = evidence.scenario ? scenarioEntry.get(evidence.scenario) : undefined;
         const caseOf = evidence.scenario ? entry?.case : sourceCase.get(evidence.source);
@@ -447,6 +480,18 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
                 `${capture.file} captured with model ${String(capture.detail.model)}, not the arm's model`,
             );
         }
+        if (systemHashes(capture).length === 0) {
+            errors.push(`${capture.file} records no system prompt`);
+        }
+        for (const attempt of attemptsOf(capture)) {
+            for (const setting of ATTEMPT_SETTINGS) {
+                if (attempt[setting] !== config.settings[setting]) {
+                    errors.push(
+                        `${capture.file} ran ${setting} ${String(attempt[setting])}, not the arm's ${String(config.settings[setting])}`,
+                    );
+                }
+            }
+        }
     }
     const captures = published.filter((c) => c.detail.model === config.model);
     for (const evidence of arm.evidence) {
@@ -471,7 +516,9 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
 
 function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Deterministic {
     if (scenario.serving.path === "exact_read") {
-        return evidence.some((e) => e.terminal === "read_exact") ? "pass" : "not_evaluated";
+        return evidence.some((e) => e.owner === EXACT_READ_OWNER && e.terminal === "read_exact")
+            ? "pass"
+            : "not_evaluated";
     }
     // Delivery observations name the tier OpenCode served; the U2 replay names the tier its
     // serving pass rendered. A delivery under positive-budget pressure passes when it serves a

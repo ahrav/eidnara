@@ -38,6 +38,8 @@ export function write(dir: string, name: string, value: unknown): string {
     return sha256(text);
 }
 
+export const SETTINGS = { temperature: 0.1, max_output_tokens: 1024 };
+
 export const SERVING = {
     request_body_utf8_bytes: 40_000,
     invocation_bytes: 39_000,
@@ -58,6 +60,7 @@ export interface ArmOptions {
     unlinked?: boolean;
     model?: string;
     captureModel?: string;
+    attempt?: Record<string, unknown> | null;
     generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
 }
@@ -77,7 +80,7 @@ export function writeArm(
         model,
         provider: "anthropic",
         version: "2026-01-01",
-        settings: { temperature: 0.1 },
+        settings: SETTINGS,
         limits: options.limits ?? { maxCalls: 40 },
         generation_origin: options.generationOrigin ?? "real",
     });
@@ -101,7 +104,18 @@ export function writeArm(
                 detail: {
                     model: options.captureModel ?? model,
                     output_origin: options.origin ?? "real producer through the host",
-                    attempts: [{ system, prompt: "p", outputs: [{ text: "x" }] }],
+                    attempts:
+                        options.attempt === null
+                            ? []
+                            : [
+                                  {
+                                      system,
+                                      prompt: "p",
+                                      ...SETTINGS,
+                                      outputs: [{ text: "x" }],
+                                      ...options.attempt,
+                                  },
+                              ],
                     usage: { input_tokens: 900, output_tokens: 300 },
                 },
             });

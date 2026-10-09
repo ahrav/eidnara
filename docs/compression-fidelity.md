@@ -424,8 +424,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir>
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository whose existing ancestors
 are owned by the operator or root and closed to group and other writes unless
-sticky. `--out` must name a directory other than either arm; an arm directory
-is refused before any write.
+sticky. `--out` must resolve, through symlinks, to a directory other than
+either arm; an arm directory is refused before any write.
 
 - **Manifest.** It records once:
   - the repository revision;
@@ -446,7 +446,7 @@ is refused before any write.
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or C6's exact read |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -456,17 +456,25 @@ is refused before any write.
 - a scenario observation whose source is not the source its corpus scenario
   is on;
 - a duplicate observation of one owner, case, source, scenario, and stage;
+- an observation with no `stage` or no `terminal`;
+- an `opencode-delivery` observation marked `detail.judge_control` at a stage
+  other than `missing-capture`, the delivery witness's judge self-test;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare;
-- forwarding exchange text that does not match its recorded hash, or a
-  response in a complete report that records no hash. The
-  hashed representation is the request body as UTF-8 bytes.
+- forwarding exchange text that does not match its recorded hash. The
+  hashed representation is the request body as UTF-8 bytes;
+- a forwarding report marked complete that records no send, or whose
+  exchange has no response, a truncated response, an unknown cost, or a
+  response without a hash.
 
 In an arm labeled `real`:
 - scripted output is an identity error, whether `detail.output_origin` or an
   attempt's `output_origin` in `detail.attempts` records it;
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error;
+- every published real capture records the system prompt it ran, and each of
+  its attempts records the `temperature` and `max_output_tokens` the arm's
+  `settings` declare;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.

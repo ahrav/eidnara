@@ -43,6 +43,18 @@ function requireTrustedAncestors(real: string): void {
 }
 
 /**
+ * The path `dir` resolves to once its longest existing prefix is canonicalized through
+ * symlinks; the publisher writes there, so callers compare directories by this path.
+ */
+export function realDirectory(dir: string): string {
+    if (dir.split(/[\\/]/).includes("..")) throw new Error(`${dir} names a parent directory`);
+    const target = resolve(dir);
+    let existing = target;
+    while (!existsSync(existing)) existing = dirname(existing);
+    return join(realpathSync(existing), relative(existing, target));
+}
+
+/**
  * Publishes `value` as `<dir>/<name>` with mode `0600` in an owner-only directory outside the
  * repository. The directory is created `0700` when absent. An existing directory must be `0700`
  * and owned by this user, every existing ancestor must be trusted, and `name` must be a plain
@@ -52,11 +64,7 @@ export function publishPrivateJson(value: unknown, dir: string, name: string): s
     if (!/^[A-Za-z0-9._-]+$/.test(name) || name.startsWith(".")) {
         throw new Error(`${name} is not a plain file label`);
     }
-    if (dir.split(/[\\/]/).includes("..")) throw new Error(`${dir} names a parent directory`);
-    const target = resolve(dir);
-    let existing = target;
-    while (!existsSync(existing)) existing = dirname(existing);
-    const real = join(realpathSync(existing), relative(existing, target));
+    const real = realDirectory(dir);
     const inside = relative(realpathSync(REPOSITORY_ROOT), real);
     if (
         inside === "" ||
