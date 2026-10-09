@@ -362,6 +362,39 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_counter_counts_a_history_block_whose_body_ends_in_whitespace() {
+        for tail in [" ", "\u{3000}", "\t", "  "] {
+            let mut rows = history_rows(5, "2026-06-08");
+            let newest = rows.last_mut().unwrap();
+            newest.title = format!("Open question{tail}");
+            newest.p1 = None;
+            newest.content = String::new();
+            let inputs = M0Inputs {
+                project_docs: "",
+                user_profile: &[],
+                covered_system_messages: &[],
+                history_segments: &rows,
+                history_budget_tokens: 60_000.0,
+                decay_pressure_multiplier: 1.0,
+            };
+            let (m0, block_tokens) = render_m0_counted(&inputs, &Exact);
+            let block = crate::decay_render::m0_block(&m0, "session-history").unwrap();
+            assert!(block.contains("Open question"));
+            assert!(
+                block
+                    .trim_end_matches("\n</session-history>")
+                    .ends_with(char::is_whitespace),
+                "tail {tail:?}"
+            );
+            assert_eq!(
+                block_tokens,
+                Some(tokenizer::estimate_tokens(block)),
+                "tail {tail:?}"
+            );
+        }
+    }
+
+    #[test]
     fn render_boundary_drops_non_positive_categories() {
         let memory = |category: &str, content: &str| CanonicalMemory {
             object_id: format!("mem_{}", "a".repeat(32)),
