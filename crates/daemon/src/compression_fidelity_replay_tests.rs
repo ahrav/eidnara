@@ -1732,9 +1732,9 @@ async fn capture_sources(
         // Run lifetime is detached from the waiter the timeout dropped; `run.cancel` ends it.
         // A settled firing's own cancel counts only when the host confirmed it.
         let connect = recording.connected.lock().unwrap().clone();
-        let cancelled_runs = {
+        let (cancelled_runs, purged_sessions) = {
             let attempts = attempts.lock().unwrap().clone();
-            cancel_unconfirmed_runs(&factory, connect, &attempts).await
+            cancel_and_purge(&factory, connect, &attempts).await
         };
         // A confirmed cancel ends the firing's wait with a terminal, which the firing records
         // before it settles; the record is built after that settling.
@@ -1751,7 +1751,10 @@ async fn capture_sources(
         let capture_stopped = before_first_start > 0
             || cancelled_runs
                 .iter()
-                .any(|outcome| outcome["cancelled"] != true && outcome["session_purged"] != true);
+                .any(|outcome| outcome["cancelled"] != true)
+            || purged_sessions
+                .iter()
+                .any(|outcome| outcome["purged"] != true);
         let answered = attempts
             .iter()
             .any(|attempt| attempt.outputs.iter().any(|output| output.text.is_some()));
@@ -1778,6 +1781,7 @@ async fn capture_sources(
                 "settled": settled,
                 "settled_after_cancel": settled_after_cancel,
                 "cancelled_runs": cancelled_runs,
+                "purged_sessions": purged_sessions,
                 "firings_before_first_start_at_cancel": before_first_start,
                 "capture_stopped": capture_stopped,
                 "attempt_count": attempts.len(),
@@ -1834,15 +1838,17 @@ async fn wait_for_first_starts(recording: &RecordingFactory, budget: Duration) -
 }
 
 /// Through one fresh connection made with the firing's connect arguments: cancels every
-/// started run that drained no model output and whose own cancel the host did not confirm, and
-/// purges the producer session of every start error that does not prove the host committed no
-/// run, since such a run has no id to cancel.
-async fn cancel_unconfirmed_runs(
+/// started run that drained no model output and whose own cancel the host did not confirm,
+/// then deletes every producer session the source's attempts used. Every source derives the
+/// same producer session id, and the host keeps a session after its connection closes, so the
+/// purge is what keeps one source's conversation out of the next source's model call; it also
+/// ends any run a start error left unnamed.
+async fn cancel_and_purge(
     factory: &Arc<dyn HistorySummarizerProducerFactory>,
     connect: Option<ConnectArgs>,
     attempts: &[RecordedAttempt],
-) -> Vec<Value> {
-    let undrained: Vec<(&str, Option<&str>)> = attempts
+) -> (Vec<Value>, Vec<Value>) {
+    let undrained: Vec<(&str, &str)> = attempts
         .iter()
         .filter(|attempt| !attempt.outputs.iter().any(|output| output.text.is_some()))
         .filter(|attempt| {
@@ -1851,22 +1857,33 @@ async fn cancel_unconfirmed_runs(
                 .as_ref()
                 .is_some_and(|cancel| cancel.confirmed)
         })
-        .filter(|attempt| attempt.run_id.is_some() || attempt.start_effect_proven == Some(false))
-        .map(|attempt| (attempt.session_id.as_str(), attempt.run_id.as_deref()))
+        .filter_map(|attempt| Some((attempt.session_id.as_str(), attempt.run_id.as_deref()?)))
         .collect();
-    if undrained.is_empty() {
-        return Vec::new();
-    }
-    let outcome = |run_id: Option<&str>, result: Result<(), HistorySummarizerProducerError>| {
-        let error = result.as_ref().err().map(|error| format!("{error:?}"));
-        match run_id {
-            Some(run_id) => {
-                json!({ "run_id": run_id, "cancelled": result.is_ok(), "error": error })
-            }
-            None => json!({ "run_id": null, "session_purged": result.is_ok(), "error": error }),
+    let mut sessions: Vec<&str> = Vec::new();
+    for attempt in attempts {
+        if !sessions.contains(&attempt.session_id.as_str()) {
+            sessions.push(&attempt.session_id);
         }
+    }
+    if undrained.is_empty() && sessions.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let describe = |result: &Result<(), HistorySummarizerProducerError>| {
+        result.as_ref().err().map(|error| format!("{error:?}"))
     };
-    let connect = connect.expect("a started run implies a recorded connect");
+    let Some(connect) = connect else {
+        let detail = "no connect was recorded for a started attempt".to_owned();
+        return (
+            undrained
+                .iter()
+                .map(|(_, run_id)| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
+                .collect(),
+            sessions
+                .iter()
+                .map(|session_id| json!({ "session_id": session_id, "purged": false, "error": detail }))
+                .collect(),
+        );
+    };
     let mut driver = match factory
         .connect(
             &connect.project_root,
@@ -1878,34 +1895,38 @@ async fn cancel_unconfirmed_runs(
         Ok(driver) => driver,
         Err(error) => {
             let detail = format!("cancel connect: {error:?}");
-            return undrained
-                .iter()
-                .map(|(_, run_id)| {
-                    outcome(
-                        *run_id,
-                        Err(HistorySummarizerProducerError::Protocol(detail.clone())),
-                    )
-                })
-                .collect();
+            return (
+                undrained
+                    .iter()
+                    .map(|(_, run_id)| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
+                    .collect(),
+                sessions
+                    .iter()
+                    .map(|session_id| json!({ "session_id": session_id, "purged": false, "error": detail }))
+                    .collect(),
+            );
         }
     };
-    let mut outcomes = Vec::with_capacity(undrained.len());
+    let mut cancelled = Vec::with_capacity(undrained.len());
     for (session_id, run_id) in undrained {
-        let result = match run_id {
-            // `cancel` travels the session-scoped command route, so the run's session is bound
-            // first.
-            Some(run_id) => match driver.bind_session(session_id).await {
-                Ok(()) => driver.cancel(run_id).await,
-                Err(error) => Err(error),
-            },
-            None => driver.purge_session(session_id).await,
+        // `cancel` travels the session-scoped command route, so the run's session is bound first.
+        let result = match driver.bind_session(session_id).await {
+            Ok(()) => driver.cancel(run_id).await,
+            Err(error) => Err(error),
         };
-        outcomes.push(outcome(run_id, result));
+        cancelled.push(
+            json!({ "run_id": run_id, "cancelled": result.is_ok(), "error": describe(&result) }),
+        );
+    }
+    let mut purged = Vec::with_capacity(sessions.len());
+    for session_id in sessions {
+        let result = driver.purge_session(session_id).await;
+        purged.push(json!({ "session_id": session_id, "purged": result.is_ok(), "error": describe(&result) }));
     }
     if let Err(error) = driver.close().await {
         eprintln!("compression fidelity capture: cancel connection close failed: {error:?}");
     }
-    outcomes
+    (cancelled, purged)
 }
 
 /// Whether the run settled by `deadline`: the summarizer is idle after at least one producer
@@ -2052,6 +2073,30 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     );
     let started = producer.attempts.lock().unwrap().clone();
     assert_eq!(started.len(), records.len());
+    // Every source derives the same producer session id, so each source's session is deleted
+    // once it is recorded and the next source's model call inherits no earlier conversation.
+    let events = producer.session_events.lock().unwrap().clone();
+    let expected: Vec<String> = started
+        .iter()
+        .flat_map(|attempt| {
+            [
+                format!("start:{}", attempt.session_id),
+                format!("purge:{}", attempt.session_id),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        events, expected,
+        "each source's session is purged before the next starts"
+    );
+    for (record, attempt) in records.iter().zip(&started) {
+        assert_eq!(
+            record.detail["purged_sessions"],
+            json!([{ "session_id": attempt.session_id, "purged": true, "error": null }]),
+            "{}",
+            record.source
+        );
+    }
     let dir = tempfile::tempdir().unwrap();
     for ((record, (case, source)), start) in records.iter().zip(sources()).zip(&started) {
         let read: Value =
@@ -2296,14 +2341,14 @@ async fn an_unproven_start_failure_purges_the_session_before_the_next_source() {
     assert_eq!(attempt["run_id"], Value::Null);
     assert_eq!(attempt["start_error"], "TimedOut");
     assert_eq!(attempt["start_effect_proven"], false);
-    let purges = producer.purges.lock().unwrap().clone();
     assert_eq!(
-        purges,
-        vec![attempt["session_id"].as_str().unwrap().to_owned()]
+        producer.purges.lock().unwrap().first(),
+        Some(&attempt["session_id"].as_str().unwrap().to_owned())
     );
+    assert_eq!(first["cancelled_runs"], json!([]));
     assert_eq!(
-        first["cancelled_runs"],
-        json!([{ "run_id": null, "session_purged": true, "error": null }])
+        first["purged_sessions"],
+        json!([{ "session_id": attempt["session_id"], "purged": true, "error": null }])
     );
     assert_eq!(first["capture_stopped"], false);
 

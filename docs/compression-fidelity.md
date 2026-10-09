@@ -303,12 +303,14 @@ firing's own cancel under `cancel`, the record lists each cancel's run id and
 outcome under `cancelled_runs` and any firing still before its first start
 under `firings_before_first_start_at_cancel`. A cancel the host does not
 confirm, or a firing still before its first start, sets `capture_stopped` on
-that record and ends the capture before another source can start a run. A
-start error that does not prove the host committed no run (one that is
-neither `NotSent` nor a host terminal) has no run id to cancel, so the capture
-purges that attempt's producer session instead and records it under
-`cancelled_runs` with `session_purged`; a purge the host does not confirm
-also sets `capture_stopped`. After a confirmed cancel the capture waits up to
+that record and ends the capture before another source can start a run.
+Every source derives the same producer session id, and the host keeps a
+session after its connection closes, so after each source the capture deletes
+every producer session its attempts used (`purged_sessions`) before the next
+source starts; this keeps one source's conversation out of the next source's
+model call and ends any run a start error left unnamed (one that is neither
+`NotSent` nor a host terminal). A purge the host does not confirm also sets
+`capture_stopped`. After a confirmed cancel the capture waits up to
 10 s for the firing to record the terminal it provoked, so the record carries
 that drained error and the firing's own cancel. The capture directory and
 every existing ancestor must be owned by the operator or root and closed to

@@ -83,9 +83,10 @@ inspection.
   under one per-source wait; an unsettled source waits for firings before
   their first start, then
   [cancels](../../../../../crates/daemon/src/compression_fidelity_replay_tests.rs#L1840-L1909)
-  every unconfirmed run through a second connection and purges the session
-  of an unproven start error, stopping the capture when the host confirms
-  neither. Records are written through
+  every unconfirmed run through a second connection; after every source it
+  purges the producer sessions the attempts used, since each source derives
+  the same session id, stopping the capture when the host confirms neither
+  the cancel nor the purge. Records are written through
   [`private_capture_dir`](../../../../../crates/daemon/src/compression_fidelity_replay_tests.rs#L1934-L1988)
   with the same ancestor rule as the TypeScript publisher.
 - Prior art the forwarding path reuses, unchanged from the first inspection:

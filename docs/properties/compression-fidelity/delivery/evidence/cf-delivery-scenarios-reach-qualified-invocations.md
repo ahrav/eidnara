@@ -27,7 +27,7 @@ and final wildcard passes produced this record. Inspected 2026-09-19 at
 - [canonical_memory.rs:195-211](../../../../../crates/daemon/src/canonical_memory.rs#L195-L211)
   filters and trims before rendering. Negative memory states must be observed
   before the provider assertion; absence alone cannot prove which state ran.
-- [rust-harness.ts:457-496](../../../../../packages/e2e-tests/src/rust-harness.ts#L457-L496)
+- [rust-harness.ts:604-645](../../../../../packages/e2e-tests/src/rust-harness.ts#L604-L645)
   provides bounded polling. Its default timeouts are helper behavior, not an
   approved latency promise for compression or producer completion.
 
