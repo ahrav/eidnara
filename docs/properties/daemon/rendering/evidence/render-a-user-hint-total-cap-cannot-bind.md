@@ -93,10 +93,10 @@ line count, `one_line_fragment` bounds each line, and the header, footer and
 wrapper are constants apart from the line count digit, which is at most one
 character for a maximum of three.
 
-So the branch at `:9120` — `if utf16_len(wrapped) <= limit { return
+So the branch at `:9295` — `if utf16_len(wrapped) <= limit { return
 wrapped.to_string(); }` — always returns early, and the body of
-`truncate_hint_to_total_cap` (`:9123-9127`) is dead. The `debug_assert!` at
-`:9115` is trivially satisfied for the same reason.
+`truncate_hint_to_total_cap` (`:9298-9302`) is dead. The `debug_assert!` at
+`:9290` is trivially satisfied for the same reason.
 
 ### No other caller
 
@@ -141,7 +141,8 @@ None. This is arithmetic over compile-time constants.
    `truncate_hint_to_total_cap` and assert it is never taken across the campaign.
 2. A guard that fails loudly if the constants drift: assert
    `22 + 44 + 1 + USER_HINT_RESULT_LIMIT * (USER_HINT_FRAGMENT_CHAR_CAP + 2) +
-   (USER_HINT_RESULT_LIMIT - 1) + 1 + 143 + 23 <= USER_HINT_TOTAL_CHAR_CAP`, so
+   (USER_HINT_RESULT_LIMIT - 1) + 1 + utf16_len(USER_HINT_CUT_NOTE) + 1 + 143 + 23 <=
+   USER_HINT_TOTAL_CHAR_CAP` (the cut note is 121 units at HEAD), so
    the day someone raises a limit the relationship is restated rather than
    silently inverted. If the intent is that the total cap *should* be able to bind,
    that assertion is the place to invert.
@@ -155,7 +156,7 @@ None. This is arithmetic over compile-time constants.
 ### Q: Can `terse_text_compression::compress` produce a fragment longer than the cap?
 
 - Sources examined: `crates/daemon/src/terse_text_compression.rs:1-30` (the header and
-  `TerseTextCompressionLevel`), `transform.rs:9226-9231`.
+  `TerseTextCompressionLevel`), `transform.rs:9229-9234`.
 - Findings: irrelevant to the bound. Whatever `compress` returns is passed through
   `one_line_fragment`, which caps it at 80 UTF-16 units. `compress` is a
   shortening transform, so it cannot grow the input either, but the cap does not
@@ -173,7 +174,7 @@ None. This is arithmetic over compile-time constants.
 
 ### Q: Is the header's one-fragment wording shorter, and does it change the bound?
 
-- Sources examined: `transform.rs:9238-9242`.
+- Sources examined: `transform.rs:9262-9270`.
 - Findings: with one line the header is 43 units and there is one line rather than
   three, so the total is far below the three-line worst case. The maximum is the
   three-line form.

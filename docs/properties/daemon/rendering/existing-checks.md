@@ -37,7 +37,7 @@ Four corrections to references handed to this synthesis, made per METHOD.md rule
 1 and recorded rather than silently applied.
 
 - **Lens C reports `should_panic`: none found in any 4e file. That is wrong, and
-  the one that exists is load-bearing.** `transform.rs:21635` carries
+  the one that exists is load-bearing.** `transform.rs:21678` carries
   `#[should_panic(expected = "served output contains duplicate tool_use ids")]`
   on `duplicate_tool_use_belt_panics_in_test_builds` (`:21504`), which is one of
   4e's own 25 op-specific tests and the only check on the debug arm of the
@@ -145,7 +145,7 @@ rather than pin it:
 
 **First, the fixpoint tier is unusable here, and the reason is structural rather
 than accidental.** It returns 190. The shared fixture driver `run`
-(`transform.rs:14463-14470`, which calls `transform` at `:14334`) transitively
+(`transform.rs:14506-14513`, which calls `transform` at `:14334`) transitively
 names nearly every 4e symbol, because a whole pass renders output: any test that
 drives a pass reaches the splice, the overlay application, the tag caches and the
 hygiene metric. So the fixpoint promotes 165 whole-pass drivers into an
@@ -261,7 +261,7 @@ conclude that a debug build detects orphan arcs. It does not.
 
 ### The duplicate-`tool_use` belt: two arms, one compiled
 
-`enforce_unique_tool_use_ids` (`transform.rs:11363-11437`) is the last
+`enforce_unique_tool_use_ids` (`transform.rs:11406-11480`) is the last
 transformation applied to the whole array, called once at `:12147`. It contains
 two mutually exclusive arms:
 
@@ -270,7 +270,7 @@ two mutually exclusive arms:
 | debug | `debug_assert!` at `:11246`, message `"served output contains duplicate tool_use ids: {duplicates:?}"` at `:11248`; the early return is `#[cfg(debug_assertions)]` at `:11303` | Panics. The pass aborts. No array is served |
 | release | `#[cfg(not(debug_assertions))]` at `:11251`, block extending to `:11302` | Removes the later owner and its adjacent result (`:11258-11277`), drops any message the removal emptied (`:11297-11299`), and returns the modified array |
 
-**The release-only drop path is `transform.rs:11383-11434`**, verified line by
+**The release-only drop path is `transform.rs:11426-11477`**, verified line by
 line at `HEAD`, and it is the only code in 4e that removes content from the
 served array on a profile-dependent basis.
 
@@ -303,7 +303,7 @@ Four consequences:
 
 ### Orphan-arc pairing detection is `#[cfg(test)]`, and broad test coverage masks that
 
-`assert_no_orphaned_tool_arcs` is `#[cfg(test)]` at `transform.rs:11303`, and its
+`assert_no_orphaned_tool_arcs` is `#[cfg(test)]` at `transform.rs:11346`, and its
 only call site outside the test module is itself `#[cfg(test)]` at `:5486`. Both
 verified at `HEAD`. Its two assertions are at `:11206` and `:11219`, carrying the
 messages "Each `tool_result` block must have a corresponding `tool_use`."
@@ -335,10 +335,10 @@ genuinely production, so the sentence is half right.
 
 | Site | Guard | Release behaviour |
 | --- | --- | --- |
-| `transform.rs:11378` | `debug_assert!` "served output contains duplicate tool_use ids" | Repairs silently via `:11251-11302` |
-| `transform.rs:12271` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" (message at `:12143`) | Serves the violating prefix |
-| `transform.rs:8391` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)`, the byte-exact-inverse claim | Unchecked. Covered by `tag_prefix_strip_is_a_byte_exact_inverse` (`:22619`) in test builds |
-| `transform.rs:9249` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` | Unchecked, and trivially satisfied in debug: lens A computes a maximum of 604 UTF-16 units against a cap of 800 |
+| `transform.rs:11421` | `debug_assert!` "served output contains duplicate tool_use ids" | Repairs silently via `:11251-11302` |
+| `transform.rs:12314` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" (message at `:12143`) | Serves the violating prefix |
+| `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)`, the byte-exact-inverse claim | Unchecked. Covered by `tag_prefix_strip_is_a_byte_exact_inverse` (`:22619`) in test builds |
+| `transform.rs:9290` | `debug_assert!(utf16_len(&hint[SEPARATOR.len()..]) <= USER_HINT_TOTAL_CHAR_CAP)` | Unchecked, and trivially satisfied in debug: lens A computes a maximum of 604 UTF-16 units against a cap of 800 |
 
 The two the task singles out are `:11246` and `:12139`, because those are the two
 whose *release* behaviour differs observably rather than merely going unchecked.
@@ -505,7 +505,7 @@ op-specific tests do not run even under a local `cargo test`.** Invalidated in
 part: `tag_baseline_warm_hydration_50k` is deleted with the tag baseline cache. Zero `#[ignore]`
 in the other six 4e files.
 
-**`should_panic`: 1.** `transform.rs:21635`, on
+**`should_panic`: 1.** `transform.rs:21678`, on
 `duplicate_tool_use_belt_panics_in_test_builds` (`:21504`). See the correction at
 the top of this file: lens C reported none. It is the only test in scope whose
 oracle is a panic rather than a value comparison, and it is the only check on the
@@ -580,7 +580,7 @@ crate's own test modules.
    runs on no machine but a developer's, on request.
 
 **Consequence for every 4e record.** `Exercised: partial` means "a test exists on
-a developer's machine", and for `transform.rs:21646` it means "a test exists that
+a developer's machine", and for `transform.rs:21689` it means "a test exists that
 a developer's default `cargo test` does not compile". METHOD.md's `Exercised`
 vocabulary does not distinguish either from `not yet`. 4b, 4c, 4d, the scope map
 (`:681`), lens A and lens C have all raised it. It is recorded here as needing a
@@ -599,10 +599,10 @@ range, which returns exactly `:8396`, `:9115`, `:11246` and `:12139` plus the tw
 
 | Site | Guard | In release? |
 | --- | --- | --- |
-| `transform.rs:11378` | `debug_assert!` "served output contains duplicate tool_use ids" (message `:11248`) — the loud half of the belt | **No** |
-| `transform.rs:12271` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" (message `:12143`) | **No** |
-| `transform.rs:8391` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
-| `transform.rs:9249` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 604 against 800 | **No** |
+| `transform.rs:11421` | `debug_assert!` "served output contains duplicate tool_use ids" (message `:11248`) — the loud half of the belt | **No** |
+| `transform.rs:12314` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" (message `:12143`) | **No** |
+| `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
+| `transform.rs:9290` | `debug_assert!(utf16_len(&hint[SEPARATOR.len()..]) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 604 against 800 | **No** |
 
 **Zero unconditional runtime assertions in 9,304 production lines.** Verified: all
 28 `assert!`/`assert_eq!`/`assert_ne!` matches in `transform.rs:7511-12623` are
@@ -632,14 +632,14 @@ serializable"`, `"wire message metadata must serialize"` and `"one candidate arc
 The last is the assertion holding up the `HashMap` iteration discussed below.
 
 **`.unwrap()`: 20, all infallible-by-construction regex compilation.**
-`transform.rs:10059`, `:9972`, `:10154` and 17 sites in `terse_text_compression.rs` (`:180`,
+`transform.rs:10102`, `:9972`, `:10154` and 17 sites in `terse_text_compression.rs` (`:180`,
 `:204`, `:237`, `:242`, `:247` and neighbours), every one a `Regex::new(...)`
 inside a `get_or_init` over a literal pattern. Zero `.unwrap()` in
 `tail_hygiene.rs`, `decay_render.rs`, `memory_render.rs`, `classify.rs` or
 `prompt_surface.rs` production halves.
 
 **Diagnostics that replace a guard: two stderr writers.**
-`transform.rs:11373-11377` (`action=drop_later`, the only trace of a
+`transform.rs:11416-11420` (`action=drop_later`, the only trace of a
 release-build content removal) and `prompt_surface.rs:150-153` (an ignored
 tool-description override, `warn_ignored_unknown_tool_description`, which returns
 nothing). Neither has a response field and neither has a test.
@@ -651,7 +651,7 @@ range. Lower than 4c's six and 4d's three.
 **Typed rejection guards.** With no unconditional assertion anywhere, the
 enforcement in 4e is either a returned value or a diagnostic string. Two places
 return a hard error on a rendering failure: `SyntheticTodoAnchorMissing`
-(`transform.rs:12257-12265`), the only site in the splice where a placement
+(`transform.rs:12300-12308`), the only site in the splice where a placement
 failure is reported rather than absorbed, and `memory_render.rs`'s four typed
 claim rejections (`:91`, `:94`, `:101`, `:104`), which name the reason a mirrored
 claim was excluded. `classify.rs` carries the densest set, nine manifest
@@ -675,7 +675,7 @@ the determinism side.
 **Conventionally-enforced-only claims: nine**, each stated somewhere and
 mechanically checked nowhere.
 
-1. **The `* 2` tag-to-message conversion** at `transform.rs:10333`.
+1. **The `* 2` tag-to-message conversion** at `transform.rs:10376`.
    `default_protected_tags()` returns 20 (`:893-895`) and `protected_tag_numbers`
    (`tail_hygiene.rs:401-412`) takes the top 20 tag numbers, but the strip path
    converts it to a message count, `protected_start = req.messages.len() -
@@ -750,7 +750,7 @@ exercises the text arm.
 Ranked by the gap between what the code decides and what any check proves.
 
 1. **The release-only duplicate repair is the quietest decision in 4e that
-   changes served bytes.** `transform.rs:11383-11434` removes blocks and whole
+   changes served bytes.** `transform.rs:11426-11477` removes blocks and whole
    messages from the final array. Its only report is an `eprintln!`
    (`:11241-11245`). Its only test carries `#[cfg(not(debug_assertions))]`
    (`:21512`) and therefore does not compile under a default `cargo test`. Its
@@ -785,7 +785,7 @@ Ranked by the gap between what the code decides and what any check proves.
    fixture and never checked together.
 
 4. **The strip surface has no hygiene test and no strip literal anywhere in the
-   metric.** `new_frozen_strip_units` (`transform.rs:10313-10471`) produces five
+   metric.** `new_frozen_strip_units` (`transform.rs:10356-10514`) produces five
    strip classes, `apply_surface_strips` (`:10371-10458`) can collapse a whole
    message to one sentinel block (`:10388-10391`) or empty a stale reduce
    (`:10454-10457`), and `measure_tail_hygiene` knows about none of it: `strip:`
@@ -814,7 +814,7 @@ Ranked by the gap between what the code decides and what any check proves.
    validates the very assets the notice claims do not exist.
 
 7. **The Channel-2 derived tag numbering can name a handle with no durable row,
-   and nothing checks it.** `active_tags_for_channel2` (`transform.rs:9414-9445`)
+   and nothing checks it.** `active_tags_for_channel2` (`transform.rs:9457-9488`)
    numbers taggable tail blocks `1..n` when no stored row survives, deliberately
    per the comment at `:9279-9281`, and that numbering reaches agent-visible
    bytes through `oldest_channel2_hint` (`:9534-9547`, called `:9396`) and
@@ -833,7 +833,7 @@ Ranked by the gap between what the code decides and what any check proves.
 9. **`channel1_reduce_suppressed` is documented as written by `eidnara_reduce` and is
    written by nothing.** `memory-store/src/lib.rs:2458-2460` states "Set by
    eidnara_reduce after the agent has acted on a reminder." The only write to `true`
-   in the worktree is `transform.rs:23709`, inside a `#[test]`. Three production
+   in the worktree is `transform.rs:23752`, inside a `#[test]`. Three production
    reads exist (`:9156`, `:9565`, `:9593`) and one production clear to `false`
    (`:9157`). So the documented feedback loop has no producer, and the only test
    that reaches the suppression effect installs the flag by writing the store
@@ -903,7 +903,7 @@ Seven limits, stated so a later pass does not read absence as absence of risk.
   module is too (`:5486`, which is 4b's range). A count keyed on line number
   alone would have called 4e's assertion density non-zero.
 - **Whether a never-executed test counts as `Exercised: partial` is unresolved,
-  and it governs all 277 checks inventoried above.** For `transform.rs:21646` the
+  and it governs all 277 checks inventoried above.** For `transform.rs:21689` the
   question is sharper still: the test does not compile under a default
   `cargo test`. 4b, 4c, 4d, the scope map (`:681`), lens A and lens C all raised
   it. It needs a human ruling, not a synthesis decision.

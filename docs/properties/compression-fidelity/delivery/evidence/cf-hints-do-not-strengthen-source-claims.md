@@ -21,7 +21,7 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
 - [transform.rs:8352-8390](../../../../../crates/daemon/src/transform.rs#L8352-L8390)
   requires two matched terms and one appearing in fewer than half the candidate
   rows. Only the top score is compared with the configured threshold.
-- [transform.rs:8716-8750,8648-8657](../../../../../crates/daemon/src/transform.rs#L8716-L8773)
+- [transform.rs:8716-8741,8648-8657](../../../../../crates/daemon/src/transform.rs#L8716-L8764)
   applies Ultra compression, normalizes whitespace, and truncates fragments in
   UTF-16 units. It also drops formatted lines of at most two bytes: an empty
   fragment produces only `- `. Nonempty one- or two-character fragments survive
@@ -33,7 +33,7 @@ Inspected 2026-09-19 at `99f68bd37516ca5351f8aadb8b0b51cb0f13dcc8`.
   [compression pass](../../../../../crates/daemon/src/terse_text_compression.rs#L848-L856)
   removes. Filler-only selected content is a construction lead for total drop,
   not evidence of a material semantic failure.
-- [transform.rs:23109-23128](../../../../../crates/daemon/src/transform.rs#L23109-L23128)
+- [transform.rs:23140-23159](../../../../../crates/daemon/src/transform.rs#L23140-L23159)
   asserts one lexical query across repeated empty decisions; status unaudited.
 - [opencode-transform-adapter.ts:477](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L477)
   defaults auto-search enabled. The daemon

@@ -35,9 +35,9 @@ details do not authorize a weaker acceptance threshold.
   pins one canonical read for the pass. The
   [reader](../../../../../crates/daemon/src/canonical_memory.rs#L147-L211)
   applies freshness, scope, category, and budget selection before rendering.
-- [transform.rs:23109-23128,21111-21216](../../../../../crates/daemon/src/transform.rs#L23109-L23128)
+- [transform.rs:23140-23159,21111-21216](../../../../../crates/daemon/src/transform.rs#L23140-L23159)
   checks empty-hint query reuse; the
-  [SOFT/replay test](../../../../../crates/daemon/src/transform.rs#L21255-L21360)
+  [SOFT/replay test](../../../../../crates/daemon/src/transform.rs#L21286-L21391)
   checks frozen m0/m1 bytes. Both are unaudited component checks.
 - [transform-session-client.ts:72,1552-1556](../../../../../packages/opencode-plugin/src/hooks/context/transform-session-client.ts#L72) with the [adapter profile](../../../../../packages/opencode-plugin/src/hooks/context/opencode-transform-adapter.ts#L351)
   sets headroom to 250 permille; the
