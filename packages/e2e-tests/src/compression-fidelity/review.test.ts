@@ -510,6 +510,7 @@ describe("eval:compression-fidelity gates", () => {
                         mode: "forward",
                         corpus_sha256: SHA,
                         model: "claude-live",
+                        upstream_url: "https://api.example.test/v1/messages",
                         context_limit: 200_000,
                         spent_usd: 0,
                         limits: {

@@ -473,7 +473,8 @@ either arm; an arm directory is refused before any write.
   - every file read, with its SHA-256, including files the identity check
     refused; the report names each refusal;
   - every accepted observation and forwarding report with its file SHA-256,
-    and the model and context limit each forwarding report forwarded with.
+    and the model, upstream endpoint, and context limit each forwarding
+    report forwarded with.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
@@ -506,6 +507,7 @@ either arm; an arm directory is refused before any write.
   other than `missing-capture`, the delivery witness's judge self-test;
 - a `daemon.harness_sources.c6_exact_read` observation naming a scenario
   whose serving path is not `exact_read`;
+- a scenario variant no witness emits: `opencode-delivery` emits `p1-only`;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare, or an attempt whose prompt text
   and recorded digest disagree, for the system prompt or the user prompt;
@@ -538,6 +540,8 @@ In an arm labeled `real`:
   arm's model; a capture recorded under another model is an identity error.
   The capture records at least one complete attempt: the arm's model, a
   system prompt or its hash, a prompt, and a text output;
+- a published real capture records `settled: true`, an attempt output with
+  text, and nonempty `published_rows`, the state the capture writer publishes;
 - each attempt of a published real capture names the arm's model and records
   the `temperature` and `max_output_tokens` the arm's `settings` declare;
 - every serving observation, one that records `detail.served_tier` or
@@ -574,7 +578,8 @@ dispute.
   records for a source record different user prompts. Held fields compare
   as JSON with keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
-  reports forwarded to different models or at different context limits. The
+  reports forwarded to different models, upstream endpoints, or context
+  limits. The
   forwarded model is OpenCode's, a role apart from the summarizer model
   `arm.json` declares, so it is held equal through the reports rather than
   bound to `arm.json`.
@@ -593,7 +598,8 @@ command records approvals; it does not grant them.
 `live` additionally requires each arm to carry complete forwarding reports
 from the record-and-forward provider mode whose limits equal the arm's
 `limits`, so live evidence inherits that mode's limits, and all of an arm's
-reports to have forwarded to one model at one context limit.
+reports to have forwarded to one model at one upstream endpoint and context
+limit.
 
 **Review prerequisites.** Two people approve the corpus before any candidate
 output is inspected, and the first semantic baseline before it is

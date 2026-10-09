@@ -38,6 +38,8 @@ const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
 /** The delivery witness's judge self-test; a judge control at another stage is refused. */
 const JUDGE_CONTROL_STAGE = "missing-capture";
+/** The scenario variants a witness emits, by owner; a variant from any other label is refused. */
+const VARIANTS: Record<string, readonly string[]> = { "opencode-delivery": ["p1-only"] };
 /** The generation settings every real capture attempt records and the arm's `settings` declare. */
 const ATTEMPT_SETTINGS = ["temperature", "max_output_tokens"] as const;
 /** The arm fields a comparison holds equal; only the prompt may differ, as the treatment. */
@@ -87,6 +89,8 @@ export interface ForwardingEvidence {
     corpus_sha256: string;
     /** The model OpenCode ran, as the provider echoes it. */
     model: string;
+    /** The Messages endpoint the forwarder sent to. */
+    upstream_url: string;
     /** The context window OpenCode was configured with. */
     context_limit: number;
     limits: Json;
@@ -227,6 +231,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
         return null;
     }
+    if (!text(value.upstream_url)) return null;
     const limits = value.limits;
     if (FORWARD_LIMITS.some((name) => typeof limits[name] !== "number" || limits[name] <= 0)) {
         return null;
@@ -288,6 +293,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         mode: "forward",
         corpus_sha256: value.corpus_sha256,
         model: value.model,
+        upstream_url: value.upstream_url,
         context_limit: value.context_limit,
         limits: value.limits,
         stopped: value.stopped as string | null,
@@ -515,6 +521,10 @@ export async function loadArm(
             arm.errors.push(`${name} has a malformed scenario label ${String(value.scenario)}`);
             continue;
         }
+        if (variant !== null && !(VARIANTS[owner] ?? []).includes(variant)) {
+            arm.errors.push(`${name} labels variant ${variant}, which no witness emits`);
+            continue;
+        }
         const source = String(value.source);
         const sourceLabel = label !== null && !scenarioEntry.has(label) && sourceCase.has(label);
         if (sourceLabel && label !== source) {
@@ -648,6 +658,21 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     }
     const published = generations.filter((g) => g.owner === REAL_CAPTURE);
     for (const capture of published) {
+        // The capture writer publishes only a settled generation that drained text and stored
+        // rows; a published capture missing any of them was not published by it.
+        if (capture.detail.settled !== true) {
+            errors.push(`${capture.file} is published without settled generation`);
+        }
+        const drained = attemptsOf(capture).some(
+            (attempt) =>
+                Array.isArray(attempt.outputs) &&
+                attempt.outputs.some((output) => record(output) && text(output.text)),
+        );
+        if (!drained) errors.push(`${capture.file} is published without a drained text output`);
+        const rows = capture.detail.published_rows;
+        if (!Array.isArray(rows) || rows.length === 0) {
+            errors.push(`${capture.file} is published without published rows`);
+        }
         if (capture.detail.model !== config.model) {
             errors.push(
                 `${capture.file} captured with model ${String(capture.detail.model)}, not the arm's model`,
@@ -783,6 +808,11 @@ export function assembleEvidence(input: {
                         `${file} forwarded to ${report.model}, where ${first.file} forwarded to ${first.report.model}`,
                     );
                 }
+                if (first && report.upstream_url !== first.report.upstream_url) {
+                    errors.push(
+                        `${file} forwarded to ${report.upstream_url}, where ${first.file} forwarded to ${first.report.upstream_url}`,
+                    );
+                }
                 if (first && report.context_limit !== first.report.context_limit) {
                     errors.push(
                         `${file} forwarded at context limit ${report.context_limit}, where ${first.file} forwarded at ${first.report.context_limit}`,
@@ -853,6 +883,9 @@ export function assembleEvidence(input: {
     if (input.mode === "live" && forwarded[0]?.context_limit !== forwarded[1]?.context_limit) {
         refused.push("the arms forwarded at different context limits");
     }
+    if (input.mode === "live" && forwarded[0]?.upstream_url !== forwarded[1]?.upstream_url) {
+        refused.push("the arms forwarded to different upstream endpoints");
+    }
     const manifest = {
         schema: MANIFEST_SCHEMA,
         repository_revision: input.revision,
@@ -877,6 +910,7 @@ export function assembleEvidence(input: {
                 file,
                 sha256,
                 model: report.model,
+                upstream_url: report.upstream_url,
                 context_limit: report.context_limit,
             })),
         })),
