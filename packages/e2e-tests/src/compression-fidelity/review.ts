@@ -95,6 +95,7 @@ export interface ScenarioRow {
         status: "complete" | "incomplete";
         missing: string[];
         serving: Json[];
+        recovery: Json[];
         generation: Json[];
     };
     withheld: string[];
@@ -102,7 +103,11 @@ export interface ScenarioRow {
 
 const DISPOSITION_VALUES: readonly string[] = ["visible", "discoverable", "unavailable"];
 
-/** `value` as a judgment, or `null` when a field is absent or mistyped. */
+function stringList(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/** `judgmentOf` rejects repeated obligations to prevent conflicting verdicts. */
 function judgmentOf(value: unknown): Judgment | null {
     if (!record(value)) return null;
     const { id, kind, reviewer, arm, scenario, artifact_sha256, obligations, abstained } = value;
@@ -110,13 +115,17 @@ function judgmentOf(value: unknown): Judgment | null {
         return null;
     }
     if ((kind !== "human" && kind !== "model") || typeof abstained !== "boolean") return null;
-    if (!Array.isArray(obligations)) return null;
+    if (!Array.isArray(obligations) || !stringList(value.forbidden_violated)) return null;
+    if (value.citations !== undefined && !stringList(value.citations)) return null;
     const judged: ObligationJudgment[] = [];
+    const seen = new Set<string>();
     for (const o of obligations) {
         if (!record(o) || !text(o.obligation) || typeof o.preserved !== "boolean") return null;
         if (typeof o.disposition !== "string" || !DISPOSITION_VALUES.includes(o.disposition)) {
             return null;
         }
+        if (seen.has(o.obligation)) return null;
+        seen.add(o.obligation);
         judged.push({
             obligation: o.obligation,
             disposition: o.disposition as Disposition,
@@ -131,9 +140,9 @@ function judgmentOf(value: unknown): Judgment | null {
         scenario,
         artifact_sha256,
         obligations: judged,
-        forbidden_violated: strings(value.forbidden_violated),
+        forbidden_violated: value.forbidden_violated,
         abstained,
-        citations: Array.isArray(value.citations) ? strings(value.citations) : undefined,
+        citations: value.citations,
         uncertainty: typeof value.uncertainty === "string" ? value.uncertainty : undefined,
     };
 }
@@ -195,7 +204,13 @@ export async function loadReviews(dir: string, corpusSha256: string): Promise<Re
     }
     reviews.batch = String(c.batch ?? "");
     if (j.batch !== reviews.batch) reviews.errors.push("judgments.json is bound to another batch");
-    reviews.approvals = [...new Set(strings(c.approved_by))];
+    reviews.approvals = [
+        ...new Set(
+            strings(c.approved_by)
+                .map((approver) => approver.trim())
+                .filter((approver) => approver !== ""),
+        ),
+    ];
     reviews.controls = stringRecords(
         c.controls,
         ["id", "kind", "label"],
@@ -278,17 +293,24 @@ function isRecovery(evidence: Evidence): boolean {
     );
 }
 
-const SERVING_FIELDS = [
-    "request_body_utf8_bytes",
-    "invocation_charged_tokens",
-    "estimator",
-    "transform_elapsed_ms",
-    "raw_source_leaks",
-    "serving_kind",
-] as const;
+const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+    ["request_body_utf8_bytes", measurement],
+    ["invocation_charged_tokens", measurement],
+    ["estimator", text],
+    ["transform_elapsed_ms", measurement],
+    ["raw_source_leaks", measurement],
+    ["serving_kind", (v) => v === "cold" || v === "warm_repeat"],
+];
 
 function generationsOf(arm: Arm): Evidence[] {
     return arm.evidence.filter((e) => e.scenario === null && Array.isArray(e.detail.attempts));
+}
+
+function reportedUsage(e: Evidence): Json | null {
+    const usage = e.detail.usage;
+    if (e.detail.usage_reported === false || !record(usage)) return null;
+    return Object.keys(usage).length > 0 ? usage : null;
 }
 
 function costOf(
@@ -301,31 +323,30 @@ function costOf(
     const serving: Json[] = [];
     for (const e of evidence.filter((e) => record(e.detail.serving))) {
         const row: Json = { stage: e.stage, ...(e.detail.serving as Json) };
-        for (const field of SERVING_FIELDS) {
-            if (row[field] === undefined || row[field] === null)
-                missing.push(`${e.file}: ${field}`);
+        for (const [field, valid] of SERVING_FIELDS) {
+            if (!valid(row[field])) missing.push(`${e.file}: ${field}`);
         }
         serving.push(row);
     }
+    if (serving.length === 0 && !exactRead) missing.push("no serving observation");
+    const recovery: Json[] = [];
     for (const e of evidence.filter(isRecovery)) {
         if (typeof e.detail.calls !== "number" || typeof e.detail.result_utf8_bytes !== "number") {
             missing.push(`${e.file}: recovery calls or output bytes`);
         }
-        serving.push({
+        recovery.push({
             stage: e.stage,
             recovery_calls: e.detail.calls,
             recovery_output_utf8_bytes: e.detail.result_utf8_bytes,
         });
     }
-    // An exact read is an internal witness; it serves nothing to a provider.
-    if (serving.length === 0 && !exactRead) missing.push("no serving observation");
     const generation: Json[] = generations
         .filter((e) => evidence.some((s) => s.source === e.source))
         .map((e) => ({
             file: e.file,
             owner: e.owner,
             attempts: (e.detail.attempts as unknown[]).length,
-            usage: e.owner === REAL_CAPTURE ? (e.detail.usage ?? null) : "scripted",
+            usage: e.owner === REAL_CAPTURE ? reportedUsage(e) : "scripted",
         }));
     if (generation.length === 0) missing.push("no generation observation");
     for (const g of generation) {
@@ -341,6 +362,7 @@ function costOf(
         status: missing.length === 0 ? "complete" : "incomplete",
         missing,
         serving,
+        recovery,
         generation,
     };
 }
@@ -492,7 +514,8 @@ export function evaluate(input: {
     const { reviews } = input;
     const assembled = assembleEvidence(input);
     const controls = controlQualification(reviews);
-    const grouped = byArmAndScenario(reviews.judgments);
+    const binding = controls.qualified ? reviews : { ...reviews, judgments: [], disputes: [] };
+    const grouped = byArmAndScenario(binding.judgments);
     const arms = assembled.arms.map((side) => {
         const judged = grouped.get(side.label);
         const generations = generationsOf(side.arm);
@@ -501,7 +524,7 @@ export function evaluate(input: {
                 row,
                 side.arm,
                 side.label,
-                reviews,
+                binding,
                 judged?.get(row.scenario.id) ?? [],
                 generations,
             ),

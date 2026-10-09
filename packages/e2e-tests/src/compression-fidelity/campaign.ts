@@ -151,14 +151,17 @@ export interface Delivery {
 /** The OpenCode admission estimator a pass line's charged tokens come from. */
 export const OPENCODE_ESTIMATOR = "opencode-heuristic utf8-bytes-div-3.5-v1";
 
-/** The cost of serving `delivery`, which its observation records under `detail.serving`. */
+/** `null` denotes unreported invocation bytes, charged tokens, or elapsed time. */
 export function servingCost(delivery: Delivery): Record<string, unknown> {
+    const { pass } = delivery;
+    const admitted = pass.admission !== "none";
     return {
         request_body_utf8_bytes: Buffer.byteLength(JSON.stringify(delivery.capture.request.body)),
-        invocation_bytes: delivery.pass.invocationBytes,
-        invocation_charged_tokens: delivery.pass.invocationCharged,
+        admission: pass.admission,
+        invocation_bytes: admitted ? pass.invocationBytes : null,
+        invocation_charged_tokens: admitted ? pass.invocationCharged : null,
         estimator: OPENCODE_ESTIMATOR,
-        transform_elapsed_ms: delivery.pass.elapsedMs,
+        transform_elapsed_ms: /(?:^|\s)elapsed=/.test(pass.raw) ? pass.elapsedMs : null,
         raw_source_leaks: delivery.verdict.leaks.length,
         // The campaign's warm observation repeats the previous request; every other
         // observation rematerializes or first serves its history.

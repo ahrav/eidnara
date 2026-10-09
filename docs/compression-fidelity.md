@@ -396,10 +396,12 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
     same corpus digest and batch.
   - A judgment names its arm, scenario, kind (`human` or `model`), and the
     SHA-256 of the observation file it judged. It also gives each
-    obligation's disposition and whether the answer preserved it, any
-    forbidden conclusion it drew, and whether it abstained. A model
-    judgment carries citations and an uncertainty, and it never counts as
-    review.
+    obligation's disposition and whether the answer preserved it, once per
+    obligation; the list of forbidden conclusions it drew, possibly empty;
+    and whether it abstained. A model judgment carries citations and an
+    uncertainty, and it never counts as review.
+  - Approvers are named by non-blank identity; names that differ only by
+    surrounding whitespace are one approver.
 
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository.
@@ -427,7 +429,7 @@ an owner-only `0700` directory outside the repository.
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, estimator, transform time, raw-source leak count, and whether it was a cold serve or a warm repeat; each recovery needs its calls and output bytes; generation needs attempts and usage. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes; generation needs attempts and a non-empty usage record. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -459,8 +461,11 @@ positive controls (`meaning_preserving_paraphrase`, `successful_deployment`,
 labeled `acceptable`). Each needs exactly one human verdict equal to its
 label. A duplicate or undeclared control, a verdict for an undeclared
 control, a model verdict, or a missing, misclassified, always-accept, or
-always-abstain verdict set leaves review unqualified. Human judgments of one
-scenario that disagree count as a dispute.
+always-abstain verdict set leaves review unqualified, and so does a review
+record bound to another corpus or batch or holding a malformed entry. An
+unqualified review binds no judgment or dispute, so every row stays
+`unreviewed`. Human judgments of one scenario that disagree count as a
+dispute.
 
 **Comparison and acceptance.**
 

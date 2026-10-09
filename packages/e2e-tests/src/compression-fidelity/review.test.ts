@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
+import { parseRustPassLine } from "../rust-harness";
+import { type Delivery, servingCost } from "./campaign";
 import {
     type ArmOptions,
     allScenarios,
@@ -191,6 +193,23 @@ describe("eval:compression-fidelity assembly", () => {
         }
     });
 
+    test("refused or unqualified review records bind no judgment to any row", async () => {
+        const cases: Array<Partial<ReviewOptions>> = [
+            { batch: "batch-2" },
+            { corpusSha256: "0".repeat(64) },
+            { verdict: () => "acceptable" },
+        ];
+        for (const reviews of cases) {
+            const { report } = await evaluate(scratch(), { reviews });
+            expect(report.controls.qualified).toBe(false);
+            for (const arm of report.arms) {
+                expect(arm.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+                expect(arm.rows.every((r) => r.consumer_safety === "unreviewed")).toBe(true);
+            }
+            expect(report.comparison.rows.every((r) => r.comparison === "expected_red")).toBe(true);
+        }
+    });
+
     test("a missing scenario withholds acceptance and refuses the comparison", async () => {
         const missing = allScenarios[3]?.s.id ?? "";
         const { report } = await evaluate(scratch(), { baseline: { skipScenario: missing } });
@@ -313,11 +332,16 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("fewer than two approvers withhold acceptance", async () => {
-        const { report } = await evaluate(scratch(), {
-            reviews: { approvers: ["reviewer-a", "reviewer-a"] },
-        });
-        expect(report.arms[0]?.withheld).toContain("the batch has 1 of 2 approvers");
-        expect(report.accepted).toBe(false);
+        for (const approvers of [
+            ["reviewer-a", "reviewer-a"],
+            ["reviewer-a", ""],
+            ["reviewer-a", "   "],
+            ["reviewer-a", " reviewer-a "],
+        ]) {
+            const { report } = await evaluate(scratch(), { reviews: { approvers } });
+            expect(report.arms[0]?.withheld).toContain("the batch has 1 of 2 approvers");
+            expect(report.accepted).toBe(false);
+        }
     });
 
     test("the comparison names regressions and resolution candidates, and a same-prompt pair is no treatment", async () => {
@@ -340,18 +364,19 @@ describe("eval:compression-fidelity gates", () => {
     });
 
     test("unreported generation usage, an unknown send cost, or an unmeasured recovery leaves cost incomplete", async () => {
-        const root = scratch();
-        const { report } = await evaluate(root, {
-            tamper: (dir) => {
-                const source = corpus.cases[0]?.sources[0]?.id ?? "";
-                const path = join(dir, `real.${source}.json`);
-                const value = JSON.parse(readFileSync(path, "utf8"));
-                value.detail.usage = null;
-                writeFileSync(path, JSON.stringify(value));
-            },
-        });
-        const generation = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
-        expect(generation?.cost.missing.join("\n")).toContain("generation usage unreported");
+        for (const usage of [null, {}, "reported", 0]) {
+            const { report } = await evaluate(scratch(), {
+                tamper: (dir) => {
+                    const source = corpus.cases[0]?.sources[0]?.id ?? "";
+                    const path = join(dir, `real.${source}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.detail.usage = usage;
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+            const generation = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
+            expect(generation?.cost.missing.join("\n")).toContain("generation usage unreported");
+        }
 
         const forwarded = (
             await evaluate(scratch(), {
@@ -401,6 +426,80 @@ describe("eval:compression-fidelity gates", () => {
         ).report;
         const row = recovery.arms[0]?.rows.find((r) => r.scenario === allScenarios[1]?.s.id);
         expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
+    });
+
+    test("a pass line that measured no admission or no elapsed time records those costs as unreported", () => {
+        const delivery = (line: string) =>
+            ({
+                label: "cold-m0",
+                pass: parseRustPassLine(line),
+                capture: { request: { body: { messages: [] } } },
+                verdict: { leaks: [] },
+            }) as unknown as Delivery;
+        const head =
+            "[eidnara] rust pass: decision=DEFER reason=steady served_from=transform in=12 out=12 applied=true";
+        const measured = servingCost(
+            delivery(
+                `${head} admission=fits invocation_bytes=9000 invocation_charged=3215 elapsed=41.7 ms module=23.4 ms`,
+            ),
+        );
+        expect(measured.invocation_charged_tokens).toBe(3215);
+        expect(measured.transform_elapsed_ms).toBe(41.7);
+        const unadmitted = servingCost(
+            delivery(
+                `${head} admission=none invocation_bytes=0 invocation_charged=0 elapsed=3.0 ms module=1.0 ms`,
+            ),
+        );
+        expect(unadmitted.invocation_charged_tokens).toBeNull();
+        expect(unadmitted.invocation_bytes).toBeNull();
+        const untimed = servingCost(
+            delivery(`${head} admission=fits invocation_bytes=9000 invocation_charged=3215`),
+        );
+        expect(untimed.transform_elapsed_ms).toBeNull();
+    });
+
+    test("a serving cost that is not a measurement leaves cost incomplete", async () => {
+        const cases: Array<[Record<string, unknown>, string]> = [
+            [{ ...SERVING, invocation_charged_tokens: "unreported" }, "invocation_charged_tokens"],
+            [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
+            [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
+            [{ ...SERVING, estimator: "" }, "estimator"],
+            [{ ...SERVING, serving_kind: "lukewarm" }, "serving_kind"],
+        ];
+        for (const [serving, field] of cases) {
+            const { report } = await evaluate(scratch(), { baseline: { serving } });
+            const row = report.arms[0]?.rows.find((r) => r.cost.status !== "complete");
+            expect(row?.cost.missing.join("\n")).toContain(field);
+            expect(report.arms[0]?.accepted).toBe(false);
+        }
+    });
+
+    test("a recovery observation does not stand in for a missing serving cost", async () => {
+        const entry = allScenarios.find(({ s }) => s.serving.path !== "exact_read");
+        const scenario = entry?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                delete value.detail.serving;
+                writeFileSync(path, JSON.stringify(value));
+                write(dir, "recovery.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: entry?.case,
+                    source: entry?.s.source,
+                    scenario,
+                    stage: "recovery-eidnara-search",
+                    terminal: "discoverable",
+                    markers: [],
+                    detail: { calls: 1, result_utf8_bytes: 400 },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+        expect(row?.cost.missing).toContain("no serving observation");
+        expect(row?.cost.status).toBe("incomplete");
     });
 });
 
@@ -508,6 +607,40 @@ describe("eval:compression-fidelity judgments", () => {
             ...Array((scenario?.expectations.length ?? 2) - 2).fill("preserved"),
         ]);
         expect(row?.withheld).toContain("preservation");
+    });
+
+    test("a judgment that repeats an obligation or misstates its forbidden conclusions is a review error", async () => {
+        const scenario = allScenarios.find(({ s }) => s.forbidden.length > 0)?.s;
+        expect(scenario).toBeDefined();
+        const edits: Array<(judgment: Record<string, unknown>) => void> = [
+            (judgment) => {
+                const [first] = judgment.obligations as Array<Record<string, unknown>>;
+                judgment.obligations = [
+                    ...(judgment.obligations as unknown[]),
+                    { ...first, preserved: false },
+                ];
+            },
+            (judgment) => {
+                judgment.forbidden_violated = scenario?.forbidden[0];
+            },
+            (judgment) => {
+                delete judgment.forbidden_violated;
+            },
+            (judgment) => {
+                judgment.citations = "C1.V1#0";
+            },
+        ];
+        for (const edit of edits) {
+            const root = scratch();
+            const { baseline, reviewsDir } = rewrite(root, (j) =>
+                edit(judgmentFor(j, scenario?.id ?? "")),
+            );
+            const reviews = await loadReviews(reviewsDir, SHA);
+            expect(reviews.errors.join("\n")).toContain("a judgment does not match its schema");
+            const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+            expect(row?.semantic_review).toBe("unreviewed");
+            expect(row?.consumer_safety).toBe("unreviewed");
+        }
     });
 
     test("agreeing human judgments in any obligation order are reviewed", async () => {
