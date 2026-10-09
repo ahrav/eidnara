@@ -31,7 +31,11 @@ export interface ForwardLimits {
 export interface ForwardConfig {
     /** The HTTPS Messages endpoint, such as `https://api.anthropic.com/v1/messages`. */
     upstreamURL: string;
-    /** The model OpenCode runs; a request naming another model is refused. */
+    /**
+     * The model id as the provider echoes it in responses. A response naming another model, or
+     * none, stops the run, so an alias the provider resolves to a dated id stops at the first
+     * response.
+     */
     model: string;
     /** The model's context window, which OpenCode is configured with. */
     contextLimit: number;
@@ -94,6 +98,8 @@ export interface ForwardedExchange {
         body_text: string;
         truncated: boolean;
         stop_reason: string | null;
+        /** The model the response names; `null` when it names none. */
+        model: string | null;
         usage: Usage | null;
         /** The cost charged against the cap: from usage when known, else the reservation. */
         cost_usd: number;
@@ -203,6 +209,8 @@ function isCount(value: unknown): value is number {
 export interface ResponseFacts {
     usage: Usage | null;
     stopReason: string | null;
+    /** The `model` the JSON body or an SSE event's `message` names; `null` when none does. */
+    model: string | null;
     /** The `tool_use` ids the response asks for. */
     toolUses: string[];
     /** Why an SSE stream is unfinished: an `error` event or no `message_stop`; `null` when finished. */
@@ -236,8 +244,8 @@ function factLines(text: string): string[] {
 }
 
 /**
- * The usage, stop reason, and `tool_use` ids of a JSON or SSE Messages response, read in one
- * pass over its events. Usage is `null` unless the response states input and output counts;
+ * The usage, stop reason, model, and `tool_use` ids of a JSON or SSE Messages response, read in
+ * one pass over its events. Usage is `null` unless the response states input and output counts;
  * absent cache counts are zero. SSE usage needs both a `message_delta` carrying usage and a
  * `message_stop` event, because `message_start` carries provisional counts; any `error` event
  * makes it `null`. An SSE `data:` line that is not a JSON object is skipped.
@@ -245,11 +253,15 @@ function factLines(text: string): string[] {
 export function readResponse(contentType: string, text: string): ResponseFacts {
     const fields: Record<string, unknown> = {};
     let stopReason: string | null = null;
+    let model: string | null = null;
     let unfinished: string | null = null;
     let finalUsage = true;
     const blocks: Array<Record<string, unknown>> = [];
     const take = (usage: unknown) => {
         if (isObject(usage)) Object.assign(fields, usage);
+    };
+    const name = (value: unknown) => {
+        if (typeof value === "string") model = value;
     };
     if (contentType.includes("text/event-stream")) {
         let stopped = false;
@@ -264,7 +276,10 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
                 continue;
             }
             if (!isObject(event)) continue;
-            if (isObject(event.message)) take(event.message.usage);
+            if (isObject(event.message)) {
+                take(event.message.usage);
+                name(event.message.model);
+            }
             take(event.usage);
             if (event.type === "message_delta" && isObject(event.usage)) finalUsage = true;
             if (event.type === "message_stop") stopped = true;
@@ -281,10 +296,11 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         try {
             body = JSON.parse(text);
         } catch {
-            return { usage: null, stopReason: null, toolUses: [], unfinished: null };
+            return { usage: null, stopReason: null, model: null, toolUses: [], unfinished: null };
         }
         if (isObject(body)) {
             take(body.usage);
+            name(body.model);
             if (typeof body.stop_reason === "string") stopReason = body.stop_reason;
             blocks.push(...blocksOf(body.content));
         }
@@ -302,7 +318,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         !isCount(cacheWrite) ||
         !isCount(cacheRead)
     ) {
-        return { usage: null, stopReason, toolUses, unfinished };
+        return { usage: null, stopReason, model, toolUses, unfinished };
     }
     return {
         usage: {
@@ -312,6 +328,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
             cache_read_input_tokens: cacheRead,
         },
         stopReason,
+        model,
         toolUses,
         unfinished,
     };
@@ -349,6 +366,7 @@ function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]
         body_text: "",
         truncated: false,
         stop_reason: null,
+        model: null,
         usage: null,
         cost_usd: reserved,
         cost_known: false,
@@ -510,7 +528,10 @@ export class Forwarder {
         }
         const contentType = response.headers.get("content-type") ?? "";
         const responseText = new TextDecoder().decode(bytes);
-        const { usage, stopReason, toolUses, unfinished } = readResponse(contentType, responseText);
+        const { usage, stopReason, model, toolUses, unfinished } = readResponse(
+            contentType,
+            responseText,
+        );
         exchange.tool_uses = toolUses;
         const cost = usage
             ? this.price(
@@ -532,6 +553,7 @@ export class Forwarder {
             body_text: truncated ? new TextDecoder().decode(captured) : responseText,
             truncated,
             stop_reason: stopReason,
+            model,
             usage,
             cost_usd: cost,
             cost_known: usage !== null,
@@ -539,6 +561,10 @@ export class Forwarder {
         if (!response.ok)
             this.stopped ??= `send ${exchange.index} returned HTTP ${response.status}`;
         else if (unfinished) this.stopped ??= `send ${exchange.index} ${unfinished}`;
+        else if (model === null) this.stopped ??= `send ${exchange.index} states no model`;
+        else if (model !== this.config.model) {
+            this.stopped ??= `send ${exchange.index} names model ${model}`;
+        }
         if (cost > reserved) this.stopped ??= `send ${exchange.index} cost above its reservation`;
         return new Response(bytes, {
             status: response.status,

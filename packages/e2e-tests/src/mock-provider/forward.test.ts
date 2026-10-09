@@ -239,6 +239,7 @@ describe("forwarding", () => {
                 cache_read_input_tokens: 0,
             },
             stopReason: "tool_use",
+            model: null,
             toolUses: ["toolu_esc"],
             unfinished: null,
         });
@@ -247,6 +248,7 @@ describe("forwarding", () => {
         ).toEqual({
             usage: null,
             stopReason: null,
+            model: null,
             toolUses: [],
             unfinished: "stream ended before message_stop",
         });
@@ -261,6 +263,7 @@ describe("forwarding", () => {
         expect(readResponse("text/event-stream", cut)).toEqual({
             usage: null,
             stopReason: null,
+            model: null,
             toolUses: [],
             unfinished: "stream ended before message_stop",
         });
@@ -278,6 +281,7 @@ describe("forwarding", () => {
         expect(readResponse("text/event-stream", provisional)).toEqual({
             usage: null,
             stopReason: null,
+            model: null,
             toolUses: [],
             unfinished: null,
         });
@@ -493,6 +497,53 @@ describe("forwarding", () => {
         expect(fits.forwardingReport().complete).toBe(true);
     });
 
+    test("a response naming another model is recorded and stops the run", async () => {
+        const other = sse([{ type: "text", text: "x" }], "end_turn").replaceAll(
+            `"model":"${MODEL}"`,
+            '"model":"routed-elsewhere"',
+        );
+        const double = upstreamDouble([
+            () => new Response(other, { headers: { "content-type": "text/event-stream" } }),
+            () =>
+                new Response(
+                    JSON.stringify({
+                        type: "message",
+                        model: "routed-elsewhere",
+                        stop_reason: "end_turn",
+                        content: [],
+                        usage: USAGE,
+                    }),
+                    { headers: { "content-type": "application/json" } },
+                ),
+        ]);
+        const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+        const base = await start(mock);
+        expect((await post(base, firstTurn)).status).toBe(200);
+        expect((await post(base, { ...firstTurn, stream: false })).status).toBe(400);
+        const report = mock.forwardingReport();
+        expect(report.exchanges[0]?.response?.model).toBe("routed-elsewhere");
+        expect(report.stopped).toBe("send 0 names model routed-elsewhere");
+        expect(report.complete).toBe(false);
+        expect(double.received.length).toBe(1);
+
+        const unnamed = upstreamDouble([
+            () =>
+                new Response(
+                    JSON.stringify({
+                        type: "message",
+                        stop_reason: "end_turn",
+                        content: [],
+                        usage: USAGE,
+                    }),
+                    { headers: { "content-type": "application/json" } },
+                ),
+        ]);
+        const silent = new MockProvider({ forward: config({ fetch: unnamed.send }) });
+        await (await post(await start(silent), { ...firstTurn, stream: false })).text();
+        expect(silent.forwardingReport().exchanges[0]?.response?.model).toBeNull();
+        expect(silent.forwardingReport().stopped).toBe("send 0 states no model");
+    });
+
     test("a request at exactly limits.maxOutputTokens is sent", async () => {
         const double = upstreamDouble([
             () =>
@@ -599,14 +650,18 @@ describe("forwarding", () => {
                     { headers: { "content-type": "text/event-stream" } },
                 ),
             () =>
-                new Response(JSON.stringify({ type: "message", content: [], usage: USAGE }), {
-                    headers: { "content-type": "application/json" },
-                }),
+                new Response(
+                    JSON.stringify({ type: "message", model: MODEL, content: [], usage: USAGE }),
+                    {
+                        headers: { "content-type": "application/json" },
+                    },
+                ),
         ]);
         const answered = upstreamDouble([
             () =>
                 new Response(
                     JSON.stringify({
+                        model: MODEL,
                         content: [{ input: {}, name: "read", id: "toolu_7", type: "tool_use" }],
                         stop_reason: "tool_use",
                         usage: USAGE,
@@ -641,6 +696,7 @@ describe("forwarding", () => {
             () =>
                 new Response(
                     JSON.stringify({
+                        model: MODEL,
                         content: [{ input: {}, name: "read", id: "toolu_8", type: "tool_use" }],
                         stop_reason: "tool_use",
                         usage: USAGE,
@@ -767,7 +823,12 @@ describe("forwarding", () => {
     test("missing or partial usage is charged its reservation, never zero", async () => {
         const noUsage = () =>
             new Response(
-                JSON.stringify({ type: "message", stop_reason: "end_turn", content: [] }),
+                JSON.stringify({
+                    type: "message",
+                    model: MODEL,
+                    stop_reason: "end_turn",
+                    content: [],
+                }),
                 {
                     headers: { "content-type": "application/json" },
                 },
@@ -776,6 +837,7 @@ describe("forwarding", () => {
             new Response(
                 JSON.stringify({
                     type: "message",
+                    model: MODEL,
                     stop_reason: "end_turn",
                     content: [],
                     usage: { input_tokens: 40 },

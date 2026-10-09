@@ -22379,6 +22379,7 @@ mod tests {
         block_connect: std::sync::atomic::AtomicBool,
         close_attempts: AtomicUsize,
         block_close_attempt: std::sync::atomic::AtomicBool,
+        cancels: Mutex<Vec<String>>,
         /// `start` fails permanently with this host message for prompts whose chunk starts at this ordinal.
         refused_chunk: Mutex<Option<(u64, &'static str)>>,
     }
@@ -22622,7 +22623,12 @@ mod tests {
                 .unwrap_or(RunState::Active))
         }
 
-        async fn cancel(&mut self, _run_id: &str) -> Result<(), HistorySummarizerProducerError> {
+        async fn cancel(&mut self, run_id: &str) -> Result<(), HistorySummarizerProducerError> {
+            self.state
+                .cancels
+                .lock()
+                .expect("cancels mutex")
+                .push(run_id.to_string());
             Ok(())
         }
 

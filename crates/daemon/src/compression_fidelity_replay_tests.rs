@@ -1408,10 +1408,18 @@ struct RecordedOutput {
 
 type AttemptLog = Arc<Mutex<Vec<RecordedAttempt>>>;
 
-/// Connects every producer through `inner` and records each start and output.
+/// The latest connect's arguments let a run be cancelled through a second connection.
 struct RecordingFactory {
     inner: Arc<dyn HistorySummarizerProducerFactory>,
     attempts: AttemptLog,
+    connected: Mutex<Option<ConnectArgs>>,
+}
+
+#[derive(Clone)]
+struct ConnectArgs {
+    project_root: PathBuf,
+    harness: String,
+    credential_fingerprints: BTreeMap<String, String>,
 }
 
 #[async_trait]
@@ -1423,6 +1431,11 @@ impl HistorySummarizerProducerFactory for RecordingFactory {
         credential_fingerprints: &std::collections::BTreeMap<String, String>,
     ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
     {
+        *self.connected.lock().unwrap() = Some(ConnectArgs {
+            project_root: project_root.to_path_buf(),
+            harness: harness.to_owned(),
+            credential_fingerprints: credential_fingerprints.clone(),
+        });
         let inner = self
             .inner
             .connect(project_root, harness, credential_fingerprints)
@@ -1622,13 +1635,14 @@ async fn capture_sources(
         let recording = Arc::new(RecordingFactory {
             inner: Arc::clone(&factory),
             attempts: Arc::clone(&attempts),
+            connected: Mutex::new(None),
         });
         let config = DaemonConfig {
             model_chain: vec![model.to_owned()],
             ..default_test_config()
         };
         let (handler, store, _dir, _project) = handler_with_factory(
-            recording,
+            Arc::clone(&recording) as Arc<dyn HistorySummarizerProducerFactory>,
             config,
             Arc::new(MissingSessionResolver),
             CAPTURE_HARNESS,
@@ -1650,6 +1664,13 @@ async fn capture_sources(
         let settled = transform_returned && wait_settled(&store, &attempts, deadline).await;
         let rows = store.load_history_segments("ses").unwrap();
         let attempts = attempts.lock().unwrap().clone();
+        // Run lifetime is detached from the waiter the timeout dropped; `run.cancel` ends it.
+        let cancelled_runs = if settled {
+            Vec::new()
+        } else {
+            let connect = recording.connected.lock().unwrap().clone();
+            cancel_undrained_runs(&factory, connect, &attempts).await
+        };
         let answered = attempts
             .iter()
             .any(|attempt| attempt.outputs.iter().any(|output| output.text.is_some()));
@@ -1674,6 +1695,7 @@ async fn capture_sources(
                 "fired": fired,
                 "transform_returned": transform_returned,
                 "settled": settled,
+                "cancelled_runs": cancelled_runs,
                 "attempt_count": attempts.len(),
                 "attempts": attempts,
                 "usage": null,
@@ -1689,6 +1711,54 @@ async fn capture_sources(
         );
     }
     captured
+}
+
+async fn cancel_undrained_runs(
+    factory: &Arc<dyn HistorySummarizerProducerFactory>,
+    connect: Option<ConnectArgs>,
+    attempts: &[RecordedAttempt],
+) -> Vec<Value> {
+    let undrained: Vec<&str> = attempts
+        .iter()
+        .filter(|attempt| attempt.outputs.is_empty())
+        .filter_map(|attempt| attempt.run_id.as_deref())
+        .collect();
+    if undrained.is_empty() {
+        return Vec::new();
+    }
+    let outcome = |run_id: &str, result: Result<(), HistorySummarizerProducerError>| {
+        json!({
+            "run_id": run_id,
+            "cancelled": result.is_ok(),
+            "error": result.err().map(|error| format!("{error:?}")),
+        })
+    };
+    let connect = connect.expect("a started run implies a recorded connect");
+    let mut driver = match factory
+        .connect(
+            &connect.project_root,
+            &connect.harness,
+            &connect.credential_fingerprints,
+        )
+        .await
+    {
+        Ok(driver) => driver,
+        Err(error) => {
+            let detail = format!("cancel connect: {error:?}");
+            return undrained
+                .iter()
+                .map(|run_id| json!({ "run_id": run_id, "cancelled": false, "error": detail }))
+                .collect();
+        }
+    };
+    let mut outcomes = Vec::with_capacity(undrained.len());
+    for run_id in undrained {
+        outcomes.push(outcome(run_id, driver.cancel(run_id).await));
+    }
+    if let Err(error) = driver.close().await {
+        eprintln!("compression fidelity capture: cancel connection close failed: {error:?}");
+    }
+    outcomes
 }
 
 /// Whether the run settled by `deadline`: the summarizer is idle after at least one producer
@@ -1861,6 +1931,44 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_timed_out_capture_cancels_its_started_runs() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    assert_eq!(records.len(), sources().count());
+    let started: Vec<String> = (1..=records.len()).map(|n| format!("run-{n}")).collect();
+    assert_eq!(producer.starts.load(Ordering::SeqCst), records.len());
+    assert_eq!(
+        producer.cancels.lock().unwrap().clone(),
+        started,
+        "every run that outlasted its wait is cancelled once"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for (record, run_id) in records.iter().zip(&started) {
+        let read: Value =
+            serde_json::from_slice(&std::fs::read(record.emit_to(dir.path())).unwrap()).unwrap();
+        assert_eq!(read["terminal"], "unsettled");
+        let detail = &read["detail"];
+        assert_eq!(detail["settled"], false);
+        assert_eq!(
+            detail["cancelled_runs"],
+            json!([{ "run_id": run_id, "cancelled": true, "error": null }])
+        );
+    }
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
 /// The recorder keeps a start error and every drained output or error of a run, in order.
 #[tokio::test(flavor = "current_thread")]
 async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
@@ -1893,6 +2001,7 @@ async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
             state: Arc::clone(&producer),
         }),
         attempts: Arc::clone(&attempts),
+        connected: Mutex::new(None),
     };
     let mut driver = factory
         .connect(Path::new("/"), "opencode", &Default::default())

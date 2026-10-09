@@ -290,7 +290,11 @@ creates or requires, outside the repository. Its terminal is `published`,
 published no rows, or `unsettled` for a source whose transform call or firing
 did not finish within the wait, that never started a producer, or that drained
 no model output;
-the test fails after writing every record when any source is unsettled. The
+the test fails after writing every record when any source is unsettled. An
+unsettled source's started runs that drained no output are cancelled through
+a second connection before the next source begins, because the host keeps a
+run alive after its waiter is dropped until `run.cancel` ends it; the record
+lists each cancel's run id and outcome under `cancelled_runs`. The
 record names the model, the harness,
 the output origin, whether the transform call returned and the firing settled,
 the attempt count, and every
@@ -310,7 +314,8 @@ to one Messages endpoint and returns the provider's response to OpenCode.
 names the selected model. Construction requires:
 
 - an `https:` URL whose path ends in `/messages`, with no user info or query;
-- the model, which every request must name, and its context limit;
+- the model, as the provider echoes it in responses, which every request
+  must name, and its context limit;
 - the reviewed corpus digest;
 - input and output prices in USD per million tokens, with the input price
   at least the model's highest input-side price;
@@ -333,8 +338,10 @@ response states usage only when it reaches `message_stop` with a
 `message_delta` carrying usage and no `error` event, because `message_start`
 carries provisional counts. A refused send, a non-2xx response, a streamed
 response cut before `message_stop` or carrying an `error` event, a timeout, a
-redirect, a failed credential callback, or a response whose usage costs more
-than its reservation stops the run, and every later request is refused without a send. The input price
+redirect, a failed credential callback, a response naming another model or
+none, or a response whose usage costs more than its reservation stops the
+run, and every later request is refused without a send. Each exchange records
+the model its response names. The input price
 must cover any pricing the client's `anthropic-beta` header enables. The forwarder sends the received
 bytes unchanged, adds the callback's headers to the outbound request only,
 and records each exchange with redacted headers and the bounded response
