@@ -214,16 +214,24 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * The facts `readResponse` extracts live under the keys `usage`, `stop_reason`, and
  * `content_block`. JSON spells such a key either as the literal quoted name or with a `\u`
- * escape, so every `data:` line that can affect the result contains one of the four strings,
- * and skipping the parse of the other lines preserves the result.
+ * escape, so every `data:` line that can affect the result contains one of these four strings,
+ * and parsing only those lines preserves the result.
  */
-function mayCarryFacts(line: string): boolean {
-    return (
-        line.includes('"usage"') ||
-        line.includes('"stop_reason"') ||
-        line.includes('"content_block"') ||
-        line.includes("\\u")
-    );
+const FACT_KEY = /"usage"|"stop_reason"|"content_block"|\\u/g;
+
+function factLines(text: string): string[] {
+    const starts: number[] = [];
+    FACT_KEY.lastIndex = 0;
+    for (let match = FACT_KEY.exec(text); match; match = FACT_KEY.exec(text)) {
+        starts.push(text.lastIndexOf("\n", match.index) + 1);
+        const end = text.indexOf("\n", match.index);
+        if (end < 0) break;
+        FACT_KEY.lastIndex = end + 1;
+    }
+    return starts.map((start) => {
+        const end = text.indexOf("\n", start);
+        return text.slice(start, end < 0 ? text.length : end);
+    });
 }
 
 /**
@@ -239,8 +247,8 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         if (isObject(usage)) Object.assign(fields, usage);
     };
     if (contentType.includes("text/event-stream")) {
-        for (const line of text.split("\n")) {
-            if (!line.startsWith("data:") || !mayCarryFacts(line)) continue;
+        for (const line of factLines(text)) {
+            if (!line.startsWith("data:")) continue;
             let event: unknown;
             try {
                 event = JSON.parse(line.slice(5));
