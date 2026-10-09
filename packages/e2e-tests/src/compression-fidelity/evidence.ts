@@ -92,6 +92,10 @@ export interface ForwardingEvidence {
     incomplete_reasons: string[];
     exchanges: Array<{
         index: number;
+        /** The `tool_result` ids the request answers. */
+        tool_results: string[];
+        /** The `tool_use` ids the response asks for. */
+        tool_uses: string[];
         request: { body_text: string; body_sha256: string };
         response: {
             outcome: string;
@@ -142,6 +146,15 @@ export function named(value: unknown): value is string {
     return typeof value === "string" && value.trim() !== "";
 }
 
+/** A lowercase hex SHA-256 digest, the form `sha256()` produces. */
+function digest(value: unknown): value is string {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function stringList(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
 export function strings(value: unknown): string[] {
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
@@ -183,7 +196,7 @@ function armConfig(value: unknown): ArmConfig | null {
         value;
     if (
         !named(label) ||
-        !named(prompt_sha256) ||
+        !digest(prompt_sha256) ||
         !named(model) ||
         !named(provider) ||
         !named(version)
@@ -216,6 +229,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
         if (!record(exchange) || typeof exchange.index !== "number") return null;
+        if (!stringList(exchange.tool_results) || !stringList(exchange.tool_uses)) return null;
         const request = exchange.request;
         if (
             !record(request) ||
@@ -241,6 +255,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         }
         exchanges.push({
             index: exchange.index,
+            tool_results: exchange.tool_results,
+            tool_uses: exchange.tool_uses,
             request: { body_text: request.body_text, body_sha256: request.body_sha256 },
             response: response
                 ? {
@@ -294,7 +310,7 @@ export function servedTierOf(evidence: Evidence): string | null | undefined {
 function completeRealAttempt(attempt: Json, model: string): boolean {
     return (
         attempt.model === model &&
-        (text(attempt.system) || text(attempt.system_sha256)) &&
+        (text(attempt.system) || digest(attempt.system_sha256)) &&
         text(attempt.prompt) &&
         Array.isArray(attempt.outputs) &&
         attempt.outputs.some((output) => record(output) && typeof output.text === "string")
@@ -327,6 +343,12 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
         errors.push(`${file} complete report records a stop: ${report.stopped}`);
     }
     for (const exchange of report.exchanges) {
+        for (const id of exchange.tool_uses) {
+            const answered = report.exchanges.some(
+                (later) => later.index > exchange.index && later.tool_results.includes(id),
+            );
+            if (!answered) complete(exchange.index, `tool use ${id} is unanswered`);
+        }
         // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
         if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
             errors.push(`${file} exchange ${exchange.index} request bytes do not match their hash`);

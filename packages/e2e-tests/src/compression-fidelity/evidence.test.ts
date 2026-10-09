@@ -253,6 +253,21 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain("not the arm's prompt");
     });
 
+    test("a prompt digest that is not a SHA-256 hex string is refused", async () => {
+        const declared = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, "arm.json");
+                const arm = JSON.parse(readFileSync(path, "utf8"));
+                writeFileSync(path, JSON.stringify({ ...arm, prompt_sha256: "not-a-hash" }));
+            },
+        });
+        expect(errorsOf(declared)).toContain("arm.json does not match its schema");
+        const attempt = await assemble(scratch(), {
+            baseline: { attempt: { system: undefined, system_sha256: "not-a-hash" } },
+        });
+        expect(errorsOf(attempt)).toContain("records no complete real attempt");
+    });
+
     test("a blank arm.json identifier does not match the arm schema", async () => {
         for (const field of ["label", "model", "provider", "version", "prompt_sha256"]) {
             const assembled = await assemble(scratch(), {
@@ -716,6 +731,8 @@ describe("evidence live mode", () => {
             exchanges: [
                 {
                     index: 0,
+                    tool_results: [] as string[],
+                    tool_uses: [] as string[],
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
                         outcome: "acknowledged",
@@ -786,6 +803,24 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([clipped]))).toContain(
             "exchange 0 response is truncated in a complete report",
         );
+        const asked = forwardingReport("{}", sha256("{}"), true);
+        const [call] = asked.exchanges;
+        if (call) call.tool_uses = ["toolu_1"];
+        expect(errorsOf(await live([asked]))).toContain(
+            "exchange 0 tool use toolu_1 is unanswered in a complete report",
+        );
+        const answeredLater = {
+            ...asked,
+            exchanges: [
+                ...asked.exchanges,
+                {
+                    ...forwardingReport("{}", sha256("{}"), true).exchanges[0],
+                    index: 1,
+                    tool_results: ["toolu_1"],
+                },
+            ],
+        };
+        expect(errorsOf(await live([answeredLater]))).not.toContain("is unanswered");
         const incomplete = { ...unanswered, complete: false, incomplete_reasons: ["x"] };
         expect(errorsOf(await live([incomplete]))).not.toContain("in a complete report");
         const errored = forwardingReport("{}", sha256("{}"), true);

@@ -437,7 +437,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
   also holds any `forwarding-*.json` reports and an `arm.json`
   (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
   the SHA-256 of its history summarizer system prompt, its model, provider,
-  version, settings, and limits, each identifier a non-blank string, and whether its generation origin is
+  version, settings, and limits, each identifier a non-blank string and the
+  prompt digest a 64-digit hex SHA-256, and whether its generation origin is
   `scripted` or `real`.
 - `--reviews`: two review records.
   - `controls.json` (`eidnara.compression-fidelity-controls/v1`) holds the
@@ -488,7 +489,7 @@ either arm; an arm directory is refused before any write.
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record; a `real` arm credits generation only from its published real captures, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked captures. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation, one that records `detail.served_tier` or `detail.tier`, carries `detail.serving` with its request bytes, invocation bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a non-empty usage record; a `real` arm credits generation only from its published real captures, and a row whose serving observations link a capture through `generation_capture_sha256` credits only the linked captures. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -511,7 +512,8 @@ either arm; an arm directory is refused before any write.
 - a forwarding report marked complete that records a stop or no send, or
   whose exchange has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason, a truncated response, an
-  unknown cost, or a response without a hash;
+  unknown cost, a response without a hash, or a `tool_use` id that no later
+  exchange answers in its `tool_results`;
 - a generation record, a real capture or the U2 replay's `generation` stage,
   that names a scenario; generation is source-level.
 

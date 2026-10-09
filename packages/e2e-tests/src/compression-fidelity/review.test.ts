@@ -517,6 +517,8 @@ describe("eval:compression-fidelity gates", () => {
                         exchanges: [
                             {
                                 index: 0,
+                                tool_results: [],
+                                tool_uses: [],
                                 request: { body_text: "{}", body_sha256: sha256("{}") },
                                 response: {
                                     outcome: "acknowledged",
@@ -705,6 +707,7 @@ describe("eval:compression-fidelity gates", () => {
     test("a serving cost that is not a measurement leaves cost incomplete", async () => {
         const cases: Array<[Record<string, unknown>, string]> = [
             [{ ...SERVING, invocation_charged_tokens: "unreported" }, "invocation_charged_tokens"],
+            [{ ...SERVING, invocation_bytes: null }, "invocation_bytes"],
             [{ ...SERVING, transform_elapsed_ms: Number.NaN }, "transform_elapsed_ms"],
             [{ ...SERVING, raw_source_leaks: -1 }, "raw_source_leaks"],
             [{ ...SERVING, estimator: "" }, "estimator"],

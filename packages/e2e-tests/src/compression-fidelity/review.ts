@@ -313,6 +313,7 @@ function isRecovery(evidence: Evidence): boolean {
 const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
     ["request_body_utf8_bytes", measurement],
+    ["invocation_bytes", measurement],
     ["invocation_charged_tokens", measurement],
     ["estimator", named],
     ["transform_elapsed_ms", measurement],
