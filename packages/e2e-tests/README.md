@@ -39,7 +39,8 @@ The package is private and never published.
 ## Retained suite
 
 `mode-manifest.json` lists every test file under `tests/`; each Rust-mode
-entry is `tier: "rust-only"` and the Pi entry is `tier: "pi-smoke"`. Each
+entry is `tier: "rust-only"`, `compression-fidelity-pi` is `tier: "pi-rust"`,
+and `pi-smoke` is `tier: "pi-smoke"`. Each
 entry names the contracts it covers in `contract_refs`: the port suites carry
 `["U5-PORT"]`, and `compression-fidelity-qualification` carries its
 property-catalog records `cf-fixture-script-qualification` and
@@ -62,7 +63,8 @@ rust-multi-frame-delta      rust-stale-preference        thinking-block-safety
 pi-smoke
 ```
 
-Nineteen Rust-mode tests plus `pi-smoke`. `rust-stale-preference` runs only
+Twenty Rust-mode tests plus `compression-fidelity-pi` and `pi-smoke`.
+`rust-stale-preference` runs only
 under `EIDNARA_EVAL_S0_BUDGET_MS`, like the S0 campaign.
 
 ## Compression fidelity delivery
