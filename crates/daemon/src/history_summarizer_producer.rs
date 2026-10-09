@@ -26,6 +26,8 @@ use host_runtime::{
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::json_string::push_json_string;
+
 const DEFAULT_RUNNER_MODULE_ID: &str = "model_execution";
 pub(crate) const HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS: u32 = 32_000;
 pub(crate) const HISTORY_SUMMARIZER_TEMPERATURE: f64 = 0.1;
@@ -757,83 +759,6 @@ pub struct HistorySummarizerProducer {
     session_id: Option<String>,
     command_route: Option<BoundRoute>,
     subscribe_route: Option<BoundRoute>,
-}
-
-const SWAR_ONES: u64 = 0x0101_0101_0101_0101;
-const SWAR_HIGHS: u64 = 0x8080_8080_8080_8080;
-
-/// Sets the high bit of each byte of `word` that JSON escapes: a control byte below 0x20, `"`,
-/// or `\`. Subtraction borrows can also set bits above the lowest marked byte, so only the
-/// lowest set bit locates an escaped byte.
-fn json_escape_marks(word: u64) -> u64 {
-    let quote = word ^ (SWAR_ONES * u64::from(b'"'));
-    let backslash = word ^ (SWAR_ONES * u64::from(b'\\'));
-    ((word.wrapping_sub(SWAR_ONES * 0x20) & !word)
-        | (quote.wrapping_sub(SWAR_ONES) & !quote)
-        | (backslash.wrapping_sub(SWAR_ONES) & !backslash))
-        & SWAR_HIGHS
-}
-
-/// The escape `serde_json` writes for `byte`, padded to six bytes, and its length.
-fn json_escape(byte: u8) -> ([u8; 6], usize) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let short = |code: u8| ([b'\\', code, 0, 0, 0, 0], 2);
-    match byte {
-        b'"' => short(b'"'),
-        b'\\' => short(b'\\'),
-        0x08 => short(b'b'),
-        b'\t' => short(b't'),
-        b'\n' => short(b'n'),
-        0x0c => short(b'f'),
-        b'\r' => short(b'r'),
-        _ => (
-            [
-                b'\\',
-                b'u',
-                b'0',
-                b'0',
-                HEX[usize::from(byte >> 4)],
-                HEX[usize::from(byte & 0x0f)],
-            ],
-            6,
-        ),
-    }
-}
-
-/// Appends `text` as a JSON string with the bytes `serde_json::to_writer` produces.
-///
-/// Each step copies eight bytes, then cuts the copy back at the first byte that needs an
-/// escape and writes the escape in its place.
-fn push_json_string(out: &mut Vec<u8>, text: &str) {
-    let src = text.as_bytes();
-    out.reserve(src.len() + src.len() / 8 + 16);
-    out.push(b'"');
-    let mut i = 0;
-    while let Some(chunk) = src.get(i..i + 8) {
-        let word: [u8; 8] = chunk.try_into().expect("an eight-byte slice");
-        out.extend_from_slice(&word);
-        let marks = json_escape_marks(u64::from_le_bytes(word));
-        if marks == 0 {
-            i += 8;
-            continue;
-        }
-        let at = (marks.trailing_zeros() / 8) as usize;
-        let kept = out.len() - 8 + at;
-        let (escape, len) = json_escape(word[at]);
-        out.truncate(kept);
-        out.extend_from_slice(&escape);
-        out.truncate(kept + len);
-        i += at + 1;
-    }
-    for &byte in &src[i..] {
-        if byte < 0x20 || byte == b'"' || byte == b'\\' {
-            let (escape, len) = json_escape(byte);
-            out.extend_from_slice(&escape[..len]);
-        } else {
-            out.push(byte);
-        }
-    }
-    out.push(b'"');
 }
 
 /// Appends `system` as a JSON string. Every firing sends the same summarizer system prompt, so

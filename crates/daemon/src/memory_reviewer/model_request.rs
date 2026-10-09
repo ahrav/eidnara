@@ -25,6 +25,7 @@ use tokio_rustls::client::TlsStream;
 use zeroize::Zeroizing;
 
 use super::broker::check_render;
+use crate::json_string::push_json_string;
 pub use memory_store::memory_reviewer_ledger::ResponseAllowance;
 
 use super::model_response::{
@@ -758,73 +759,6 @@ fn write_body(request: &MessagesRequest, bedrock: bool) -> Result<Vec<u8>, SendE
     Ok(out)
 }
 
-/// Appends `value` to `out` as a JSON string escaped as `serde_json` escapes it: `"`, `\`, and every byte below 0x20, with the short forms `\b`, `\t`, `\n`, `\f`, and `\r` and `\u00xx` (lowercase hex) for the other controls; every other byte is copied. Eight bytes are tested at a time, and a word holding no escape is copied with its run.
-fn push_json_string(out: &mut Vec<u8>, value: &str) {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    let bytes = value.as_bytes();
-    out.push(b'"');
-    let mut run = 0;
-    let mut at = 0;
-    while let Some(chunk) = bytes.get(at..at + 8) {
-        let word = u64::from_le_bytes(chunk.try_into().unwrap_or_default());
-        let quote = word ^ (ONES * u64::from(b'"'));
-        let backslash = word ^ (ONES * u64::from(b'\\'));
-        // The high bit of a byte is set where that byte is below 0x20, `"`, or `\`; the lowest set bit marks the first such byte exactly, since a borrow only reaches higher bytes.
-        let found = (word.wrapping_sub(ONES * 0x20)
-            | (quote.wrapping_sub(ONES) & !quote)
-            | (backslash.wrapping_sub(ONES) & !backslash))
-            & !word
-            & HIGH;
-        if found == 0 {
-            at += 8;
-            continue;
-        }
-        let escape = at + (found.trailing_zeros() / 8) as usize;
-        out.extend_from_slice(&bytes[run..escape]);
-        push_json_escape(out, bytes[escape]);
-        run = escape + 1;
-        at = run;
-    }
-    for (index, &byte) in bytes.iter().enumerate().skip(at) {
-        if byte < 0x20 || byte == b'"' || byte == b'\\' {
-            out.extend_from_slice(&bytes[run..index]);
-            push_json_escape(out, byte);
-            run = index + 1;
-        }
-    }
-    out.extend_from_slice(&bytes[run..]);
-    out.push(b'"');
-}
-
-/// The second byte of each two-byte JSON escape, indexed by the escaped byte; zero where the escape is `\u00xx`.
-const SHORT_ESCAPES: [u8; 0x60] = {
-    let mut table = [0; 0x60];
-    table[0x08] = b'b';
-    table[0x09] = b't';
-    table[0x0a] = b'n';
-    table[0x0c] = b'f';
-    table[0x0d] = b'r';
-    table[0x22] = b'"';
-    table[0x5c] = b'\\';
-    table
-};
-
-fn push_json_escape(out: &mut Vec<u8>, byte: u8) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    match SHORT_ESCAPES.get(usize::from(byte)) {
-        Some(&short) if short != 0 => out.extend_from_slice(&[b'\\', short]),
-        _ => out.extend_from_slice(&[
-            b'\\',
-            b'u',
-            b'0',
-            b'0',
-            HEX[usize::from(byte >> 4)],
-            HEX[usize::from(byte & 0x0f)],
-        ]),
-    }
-}
-
 /// Serialized request bytes that passed [`Sender::body`]'s shape, token, and size bounds, with their SHA-256 digest and the `max_tokens` the bytes ask for, which sizes the completion budget. [`Sender::body`] is the only constructor and the fields stay fixed afterwards, so a handoff carries bounded bytes and the digest names exactly those bytes. Clones share the byte storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestBody {
@@ -1323,16 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn every_byte_and_run_length_escapes_as_serde_json_does() {
-        let all: String = (0u32..0x800).filter_map(char::from_u32).collect();
-        for skip in 0..64 {
-            for take in 0..40 {
-                let value: String = all.chars().skip(skip).take(take).collect();
-                let mut out = Vec::new();
-                push_json_string(&mut out, &value);
-                assert_eq!(out, serde_json::to_vec(&value).unwrap(), "{value:?}");
-            }
-        }
+    fn every_temperature_writes_as_serde_json_does() {
         for temperature in [0.0, 0.1, 0.25, 0.7, 1.0, 1e-7, 0.123_456_789_012_345_67] {
             let request = MessagesRequest {
                 model: "m".to_string(),
