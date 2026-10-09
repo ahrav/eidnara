@@ -471,7 +471,12 @@ function outputOrigins(evidence: Evidence): string[] {
 }
 
 export function servedTierOf(evidence: Evidence): string | null | undefined {
-    const tier = evidence.detail.served_tier ?? evidence.detail.tier;
+    // A present `served_tier` is the delivery witness's tier, whatever it holds; `tier` is the
+    // replay's field and stands in only when the record names no `served_tier` at all.
+    const tier =
+        evidence.detail.served_tier !== undefined
+            ? evidence.detail.served_tier
+            : evidence.detail.tier;
     if (tier === undefined) return undefined;
     return typeof tier === "string" ? tier : null;
 }

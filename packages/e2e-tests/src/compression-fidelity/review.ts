@@ -195,12 +195,17 @@ export async function loadReviews(dir: string, corpusSha256: string): Promise<Re
         readJson(join(dir, "controls.json")),
         readJson(join(dir, "judgments.json")),
     ]);
+    // Each record's digest is recorded whenever its bytes were read, so a manifest names the
+    // bytes behind a refused review as well as an accepted one.
+    reviews.sha256 = {
+        controls: controls.bytes ? sha256(controls.bytes) : "",
+        judgments: judgments.bytes ? sha256(judgments.bytes) : "",
+    };
     if ("error" in controls || "error" in judgments) {
         if ("error" in controls) reviews.errors.push(controls.error);
         if ("error" in judgments) reviews.errors.push(judgments.error);
         return reviews;
     }
-    reviews.sha256 = { controls: sha256(controls.bytes), judgments: sha256(judgments.bytes) };
     const c = record(controls.value) ? controls.value : {};
     const j = record(judgments.value) ? judgments.value : {};
     if (c.schema !== CONTROLS_SCHEMA || j.schema !== JUDGMENTS_SCHEMA) {
@@ -678,12 +683,22 @@ export function evaluate(input: {
                 .filter((r) => r.withheld.length > 0)
                 .map((r) => `${r.scenario}: ${r.withheld.join(", ")}`),
         ];
+        // The validated forwarding reports' spend, at arm scope: sends are per arm, not per row.
+        const forwarding = side.arm.forwarding.reduce(
+            (sum, { report }) => ({
+                reports: sum.reports + 1,
+                sends: sum.sends + report.exchanges.length,
+                spent_usd: sum.spent_usd + report.spent_usd,
+            }),
+            { reports: 0, sends: 0, spent_usd: 0 },
+        );
         return {
             label: side.label,
             identity_errors: side.identity_errors,
             reached_scenarios: side.reached_scenarios,
             missing_scenarios: side.missing_scenarios,
             rows,
+            forwarding,
             accepted: reasons.length === 0,
             withheld: reasons,
         };

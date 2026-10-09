@@ -476,10 +476,15 @@ either arm; an arm directory is refused before any write, and a component of
     refused; the report names each refusal;
   - every accepted observation and forwarding report with its file SHA-256,
     and the model, upstream endpoint, context limit, and prices each
-    forwarding report forwarded with.
+    forwarding report forwarded with;
+  - the review records' batch, approvers, and digests; a record whose bytes
+    were read keeps its digest even when it is refused, and an unreadable one
+    records an empty digest.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
+  - the validated forwarding reports' count, sends, and `spent_usd`, at arm
+    scope, since sends belong to the arm rather than to a scenario;
   - one row per corpus scenario with the columns below, where every column
     derives from that arm's observations and bound judgments;
   - the reasons acceptance is withheld.
@@ -491,7 +496,7 @@ either arm; an arm directory is refused before any write, and a component of
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal; `executed` means every judging observation ended in a terminal its owner counts as executed: the delivery witness's `served`, `excluded`, or `discoverable`, the replay's `published` or `served`, `read_exact`, or the capture's `published` |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a served tier that is no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (a present `served_tier` is the tier, whatever it holds, and one that is no string fails; `tier` stands in only when a record names no `served_tier`); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
 | `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search`, with `detail.result_carries_memory` true and positive whole-number `calls` and `result_utf8_bytes` |
 | `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |

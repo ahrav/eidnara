@@ -1009,6 +1009,21 @@ describe("evidence generation origin", () => {
 });
 
 describe("evidence deterministic column", () => {
+    test("a null served_tier is a malformed tier, whatever fallback tier the record carries", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = null;
+                value.detail.tier = scenario?.serving.tier;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toBe("");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
     test("a wrong served tier fails the deterministic column", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.tier === "p1")?.s.id ?? "";
         const assembled = await assemble(scratch(), {

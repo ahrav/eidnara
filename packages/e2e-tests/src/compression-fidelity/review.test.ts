@@ -4,6 +4,7 @@ import {
     mkdirSync,
     readdirSync,
     readFileSync,
+    rmSync,
     statSync,
     symlinkSync,
     writeFileSync,
@@ -207,6 +208,28 @@ describe("eval:compression-fidelity assembly", () => {
         const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
         expect(row?.semantic_review).toBe("unreviewed");
         expect(report.arms[0]?.accepted).toBe(false);
+    });
+
+    test("a review record that fails to read still leaves its peer's digest and its own bytes' digest", async () => {
+        const root = scratch();
+        const baseline = writeArm(root, { label: "baseline" });
+        const candidate = writeArm(root, { label: "candidate" });
+        const dir = writeReviews(root, {
+            arms: [
+                { label: "baseline", files: baseline.files },
+                { label: "candidate", files: candidate.files },
+            ],
+        });
+        const controlsBytes = readFileSync(join(dir, "controls.json"));
+        writeFileSync(join(dir, "judgments.json"), "{");
+        const broken = await loadReviews(dir, SHA);
+        expect(broken.errors.join("\n")).toContain("is not JSON");
+        expect(broken.sha256.controls).toBe(sha256(controlsBytes));
+        expect(broken.sha256.judgments).toBe(sha256("{"));
+        rmSync(join(dir, "judgments.json"));
+        const missing = await loadReviews(dir, SHA);
+        expect(missing.sha256.controls).toBe(sha256(controlsBytes));
+        expect(missing.sha256.judgments).toBe("");
     });
 
     test("judgments bound to another corpus or batch are refused", async () => {
@@ -580,6 +603,61 @@ describe("eval:compression-fidelity gates", () => {
         ).report;
         const row = recovery.arms[0]?.rows.find((r) => r.scenario === allScenarios[1]?.s.id);
         expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
+    });
+
+    test("the report carries each arm's validated forwarding spend", async () => {
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", {
+                    mode: "forward",
+                    corpus_sha256: SHA,
+                    model: "claude-live",
+                    upstream_url: "https://api.example.test/v1/messages",
+                    pricing: { inputPerMTok: 3, outputPerMTok: 15 },
+                    context_limit: 200_000,
+                    spent_usd: 0.6,
+                    limits: {
+                        maxCalls: 40,
+                        maxOutputTokens: 1024,
+                        timeoutMs: 1000,
+                        spendCapUsd: 1,
+                    },
+                    stopped: null,
+                    attempted_sends: 1,
+                    acknowledged_responses: 1,
+                    complete: true,
+                    incomplete_reasons: [],
+                    refusals: [],
+                    exchanges: [
+                        {
+                            index: 0,
+                            tool_results: [],
+                            tool_uses: [],
+                            request: { body_text: "{}", body_sha256: sha256("{}") },
+                            response: {
+                                outcome: "acknowledged",
+                                model: "claude-live",
+                                stop_reason: "end_turn",
+                                truncated: false,
+                                body_text: "ok",
+                                body_sha256: sha256("ok"),
+                                usage: {
+                                    input_tokens: 100_000,
+                                    output_tokens: 20_000,
+                                    cache_creation_input_tokens: 0,
+                                    cache_read_input_tokens: 0,
+                                },
+                                cost_usd: 0.6,
+                                cost_known: true,
+                            },
+                        },
+                    ],
+                });
+            },
+        });
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(report.arms[0]?.forwarding).toEqual({ reports: 1, sends: 1, spent_usd: 0.6 });
+        expect(report.arms[1]?.forwarding).toEqual({ reports: 0, sends: 0, spent_usd: 0 });
     });
 
     test("a real capture with no attempt earns no generation cost", async () => {
