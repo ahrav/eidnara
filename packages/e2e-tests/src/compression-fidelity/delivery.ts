@@ -245,20 +245,34 @@ function historyWrappers(text: string): string[] {
     return [...(text.match(M1_WRAPPER) ?? []), ...(text.match(M0_WRAPPER) ?? [])];
 }
 
-function caseSegment(texts: readonly string[], title: string): string[] | undefined {
+const STAGE_WRAPPERS = [
+    ["m1", M1_WRAPPER],
+    ["m0", M0_WRAPPER],
+] as const;
+
+/**
+ * The case segment headed `## a-b · title` inside a history wrapper, with the stage of the
+ * wrapper that carries it. The segment runs to the next heading or the wrapper's closing tag.
+ */
+function caseSegment(
+    texts: readonly string[],
+    title: string,
+): { stage: "m1" | "m0"; lines: string[] } | undefined {
     const suffix = ` · ${title}`;
     for (const text of texts) {
-        for (const wrapper of historyWrappers(text)) {
-            const lines = wrapper.split("\n");
-            const heading = lines.findIndex(
-                (line) => line.startsWith("## ") && line.endsWith(suffix),
-            );
-            if (heading < 0) continue;
-            const next = lines.findIndex(
-                (line, index) =>
-                    index > heading && (line.startsWith("## ") || line.startsWith("</")),
-            );
-            return lines.slice(heading, next < 0 ? undefined : next);
+        for (const [stage, pattern] of STAGE_WRAPPERS) {
+            for (const wrapper of text.match(pattern) ?? []) {
+                const lines = wrapper.split("\n");
+                const heading = lines.findIndex(
+                    (line) => line.startsWith("## ") && line.endsWith(suffix),
+                );
+                if (heading < 0) continue;
+                const next = lines.findIndex(
+                    (line, index) =>
+                        index > heading && (line.startsWith("## ") || line.startsWith("</")),
+                );
+                return { stage, lines: lines.slice(heading, next < 0 ? undefined : next) };
+            }
         }
     }
     return undefined;
@@ -270,7 +284,7 @@ export function servedTier(
     title: string,
     bodies: readonly string[],
 ): ServedTier | "unmatched" {
-    const lines = caseSegment(texts, title);
+    const lines = caseSegment(texts, title)?.lines;
     if (lines === undefined) return "p5";
     const segment = lines.join("\n");
     const carried = bodies.findIndex((body) => segment.includes(body));
@@ -287,13 +301,9 @@ export function historyHeadings(texts: readonly string[]): string[] {
         .filter((line) => line.startsWith("## "));
 }
 
-/** Where served texts carry the case segment titled `title`. */
+/** Where served texts carry the case segment headed by `title`. */
 export function stageOf(texts: readonly string[], title: string): "m1" | "m0" | "absent" {
-    for (const text of texts) {
-        if ((text.match(M1_WRAPPER) ?? []).some((wrapper) => wrapper.includes(title))) return "m1";
-        if ((text.match(M0_WRAPPER) ?? []).some((wrapper) => wrapper.includes(title))) return "m0";
-    }
-    return "absent";
+    return caseSegment(texts, title)?.stage ?? "absent";
 }
 
 /** Leak probes found in `texts` outside both history wrappers. */

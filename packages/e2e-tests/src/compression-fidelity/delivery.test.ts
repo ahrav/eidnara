@@ -14,6 +14,7 @@ import {
     publishedOf,
     reviewedTiers,
     servedTier,
+    stageOf,
 } from "./delivery";
 
 const TITLE = "Pooling-first rejected";
@@ -146,6 +147,18 @@ describe("compression fidelity delivery judgment", () => {
         expect(servedTier([mentioned], TITLE, BODIES)).toBe("p5");
         const since = `<session-history-since>\n## 1-6 · ${TITLE}\n${BODIES[0]}\n</session-history-since>`;
         expect(servedTier([since, "follow-up"], TITLE, BODIES)).toBe("p1");
+    });
+
+    it("reads the stage from the case heading, not from a mention of the title", () => {
+        const m1Mention = `<session-history-since>\n## 7-8 · Newer\n${TITLE} came up again\n</session-history-since>`;
+        const m0Case = history(BODIES[0] ?? "");
+        expect(stageOf([`${m1Mention}\n${m0Case}`, "follow-up"], TITLE)).toBe("m0");
+        expect(stageOf([m1Mention, "follow-up"], TITLE)).toBe("absent");
+        const mentioned = `<session-history>\n## 1-2 · Other\n${TITLE} came up here\n</session-history>`;
+        expect(stageOf([mentioned], TITLE)).toBe("absent");
+        const m1Case = `<session-history-since>\n## 1-6 · ${TITLE}\n${BODIES[0]}\n</session-history-since>`;
+        expect(stageOf([m1Case], TITLE)).toBe("m1");
+        expect(stageOf([`## 1-6 · ${TITLE}\n${BODIES[0]}`], TITLE)).toBe("absent");
     });
 
     it("lists the headings inside the history wrappers only", () => {
