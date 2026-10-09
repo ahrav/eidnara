@@ -171,28 +171,30 @@ describe("evidence identity and completeness", () => {
         }
     });
 
-    test("a variant label is accepted only from the witness that documents it", async () => {
-        const first = allScenarios.find(({ s }) => s.serving.path !== "exact_read")?.s.id ?? "";
-        const relabel = (variant: string, owner?: string) =>
+    test("a variant label is accepted only from the witness and scenario that document it", async () => {
+        const relabel = (scenario: string, variant: string, owner?: string) =>
             assemble(scratch(), {
                 tamper: (dir) => {
-                    const path = join(dir, `delivery.${first}.json`);
+                    const path = join(dir, `delivery.${scenario}.json`);
                     const value = JSON.parse(readFileSync(path, "utf8"));
-                    value.scenario = `${first}@${variant}`;
+                    value.scenario = `${scenario}@${variant}`;
                     value.terminal = "unqualified";
                     if (owner) value.owner = owner;
                     writeFileSync(join(dir, "variant.json"), JSON.stringify(value));
                 },
             });
-        expect(errorsOf(await relabel("ignored"))).toContain(
-            `variant.json labels variant ignored, which no witness emits`,
+        expect(errorsOf(await relabel("C1.S2", "ignored"))).toContain(
+            "variant.json labels variant ignored, which no witness emits",
         );
-        expect(errorsOf(await relabel("p1-only", "daemon.compression_fidelity.replay"))).toContain(
-            `variant.json labels variant p1-only, which no witness emits`,
+        expect(
+            errorsOf(await relabel("C1.S2", "p1-only", "daemon.compression_fidelity.replay")),
+        ).toContain("variant.json labels variant p1-only, which no witness emits");
+        expect(errorsOf(await relabel("C2.S1", "p1-only"))).toContain(
+            "variant.json labels variant p1-only, which no witness emits for C2.S1",
         );
-        const known = await relabel("p1-only");
+        const known = await relabel("C1.S2", "p1-only");
         expect(known.arms[0]?.identity_errors).toEqual([]);
-        expect(rowOf(known, first)?.execution.outcomes).toContain(
+        expect(rowOf(known, "C1.S2")?.execution.outcomes).toContain(
             "opencode-delivery:p1-only:served:unqualified",
         );
     });
@@ -269,6 +271,36 @@ describe("evidence identity and completeness", () => {
         });
         expect(errorsOf(absent)).toContain(`no published scripted generation for ${first}`);
         expect(absent.refused).toContain("an arm has identity errors");
+    });
+
+    test("a scripted generation attempt names the arm's model and returns the reviewed output", async () => {
+        const scripted = { generationOrigin: "scripted" as const };
+        const otherModel = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { model: "anthropic/other" } },
+            candidate: scripted,
+        });
+        expect(errorsOf(otherModel)).toContain(
+            "attempt ran model anthropic/other, not the arm's model",
+        );
+        const otherOutput = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { output_sha256: sha256("something else") } },
+            candidate: scripted,
+        });
+        expect(errorsOf(otherOutput)).toContain("returned output other than the reviewed output");
+        const unhashed = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { output_sha256: undefined } },
+            candidate: scripted,
+        });
+        expect(errorsOf(unhashed)).toContain("returned output other than the reviewed output");
+    });
+
+    test("every generation attempt records its system prompt", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: {
+                attempts: (attempt) => [attempt, { ...attempt, system: undefined }],
+            },
+        });
+        expect(errorsOf(assembled)).toContain("records no system prompt on an attempt");
     });
 
     test("real captures cannot stand in for a scripted arm's generation", async () => {
@@ -470,7 +502,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("variants and judge controls are kept as outcomes and judge no scenario", async () => {
-        const entry = allScenarios[0];
+        const entry = allScenarios.find(({ s }) => s.id === "C1.S2");
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const base = {
@@ -880,6 +912,7 @@ describe("evidence live mode", () => {
             model: "claude-live",
             upstream_url: "https://api.example.test/v1/messages",
             context_limit: 200_000,
+            pricing: { inputPerMTok: 3, outputPerMTok: 15 },
             stopped: null as string | null,
             spent_usd: 0.5,
             limits: LIMITS as Record<string, number>,
@@ -1103,6 +1136,35 @@ describe("evidence live mode", () => {
             },
         });
         expect(elsewhere.refused).toContain("the arms forwarded to different upstream endpoints");
+        const repriced = await assemble(scratch(), {
+            mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", report);
+                write(join(dir, "..", "candidate"), "forwarding-0.json", {
+                    ...report,
+                    pricing: { outputPerMTok: 15, inputPerMTok: 4 },
+                });
+            },
+        });
+        expect(repriced.refused).toContain("the arms forwarded at different prices");
+        const sameReordered = await assemble(scratch(), {
+            mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", report);
+                write(join(dir, "..", "candidate"), "forwarding-0.json", {
+                    ...report,
+                    pricing: { outputPerMTok: 15, inputPerMTok: 3 },
+                });
+            },
+        });
+        expect(sameReordered.refused).toEqual([]);
+        expect(errorsOf(await live([{ ...report, pricing: { inputPerMTok: 3 } }]))).toContain(
+            "does not match the forwarding report schema",
+        );
         expect(elsewhere.manifest.arms[1]?.forwarding_reports[0]?.upstream_url).toBe(
             "https://other.example.test/v1/messages",
         );

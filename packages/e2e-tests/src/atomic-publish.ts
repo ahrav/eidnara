@@ -77,13 +77,23 @@ export function realDirectory(dir: string): string {
  * Publishes `value` as `<dir>/<name>` with mode `0600` in an owner-only directory outside the
  * repository. The directory is created `0700` when absent. An existing directory must be `0700`
  * and owned by this user, every existing ancestor must be trusted, and `name` must be a plain
- * file name.
+ * file name. With `checked`, `dir` is a path the caller already canonicalized through
+ * `realDirectory` and validated, so a component that now resolves elsewhere is one that
+ * appeared since that check and the publication is refused.
  */
-export function publishPrivateJson(value: unknown, dir: string, name: string): string {
+export function publishPrivateJson(
+    value: unknown,
+    dir: string,
+    name: string,
+    options: { checked?: boolean } = {},
+): string {
     if (!/^[A-Za-z0-9._-]+$/.test(name) || name.startsWith(".")) {
         throw new Error(`${name} is not a plain file label`);
     }
     const real = realDirectory(dir);
+    if (options.checked && real !== resolve(dir)) {
+        throw new Error(`${dir} changed since it was checked: it now resolves to ${real}`);
+    }
     const inside = relative(realpathSync(REPOSITORY_ROOT), real);
     if (
         inside === "" ||

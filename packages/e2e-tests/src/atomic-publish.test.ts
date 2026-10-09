@@ -64,6 +64,21 @@ describe("atomic JSON publication", () => {
         expect(readdirSync(shared)).toEqual([]);
     });
 
+    test("a publication to a path checked by the caller refuses a link that appeared since", () => {
+        const root = scratch();
+        const owned = join(root, "owned");
+        mkdirSync(owned, { mode: 0o700 });
+        const checked = join(root, "out");
+        symlinkSync(owned, checked);
+        expect(() => publishPrivateJson({}, checked, "r.json", { checked: true })).toThrow(
+            "changed since it was checked",
+        );
+        expect(readdirSync(owned)).toEqual([]);
+        expect(publishPrivateJson({}, owned, "r.json", { checked: true })).toBe(
+            join(owned, "r.json"),
+        );
+    });
+
     test("the post-creation check refuses a symlink in the created path, whatever it points to", () => {
         const root = scratch();
         const owned = join(root, "owned");

@@ -38,8 +38,10 @@ const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
 /** The delivery witness's judge self-test; a judge control at another stage is refused. */
 const JUDGE_CONTROL_STAGE = "missing-capture";
-/** The scenario variants a witness emits, by owner; a variant from any other label is refused. */
-const VARIANTS: Record<string, readonly string[]> = { "opencode-delivery": ["p1-only"] };
+/** The scenario variants a witness emits, by owner and scenario; any other label is refused. */
+const VARIANTS: Record<string, ReadonlyArray<{ scenario: string; variant: string }>> = {
+    "opencode-delivery": [{ scenario: "C1.S2", variant: "p1-only" }],
+};
 /** The generation settings every real capture attempt records and the arm's `settings` declare. */
 const ATTEMPT_SETTINGS = ["temperature", "max_output_tokens"] as const;
 /** The arm fields a comparison holds equal; only the prompt may differ, as the treatment. */
@@ -93,6 +95,8 @@ export interface ForwardingEvidence {
     upstream_url: string;
     /** The context window OpenCode was configured with. */
     context_limit: number;
+    /** The prices the forwarder reserved and charged with, in USD per million tokens. */
+    pricing: { inputPerMTok: number; outputPerMTok: number };
     limits: Json;
     /** The reason the forwarder stopped, when it did. */
     stopped: string | null;
@@ -237,6 +241,14 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         return null;
     }
     if (!text(value.upstream_url)) return null;
+    const pricing = value.pricing;
+    if (
+        !record(pricing) ||
+        typeof pricing.inputPerMTok !== "number" ||
+        typeof pricing.outputPerMTok !== "number"
+    ) {
+        return null;
+    }
     const limits = value.limits;
     if (FORWARD_LIMITS.some((name) => typeof limits[name] !== "number" || limits[name] <= 0)) {
         return null;
@@ -304,6 +316,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         model: value.model,
         upstream_url: value.upstream_url,
         context_limit: contextLimit,
+        pricing: { inputPerMTok: pricing.inputPerMTok, outputPerMTok: pricing.outputPerMTok },
         limits: value.limits,
         stopped: value.stopped as string | null,
         spent_usd: value.spent_usd,
@@ -535,9 +548,18 @@ export async function loadArm(
             arm.errors.push(`${name} has a malformed scenario label ${String(value.scenario)}`);
             continue;
         }
-        if (variant !== null && !(VARIANTS[owner] ?? []).includes(variant)) {
-            arm.errors.push(`${name} labels variant ${variant}, which no witness emits`);
-            continue;
+        if (variant !== null) {
+            const emitted = VARIANTS[owner] ?? [];
+            if (!emitted.some((v) => v.variant === variant)) {
+                arm.errors.push(`${name} labels variant ${variant}, which no witness emits`);
+                continue;
+            }
+            if (!emitted.some((v) => v.variant === variant && v.scenario === label)) {
+                arm.errors.push(
+                    `${name} labels variant ${variant}, which no witness emits for ${label}`,
+                );
+                continue;
+            }
         }
         const source = String(value.source);
         const sourceLabel = label !== null && !scenarioEntry.has(label) && sourceCase.has(label);
@@ -641,6 +663,15 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     for (const generation of generations) {
         if (systemHashes(generation).length === 0) {
             errors.push(`${generation.file} records no system prompt`);
+        } else if (systemHashes(generation).length < attemptsOf(generation).length) {
+            errors.push(`${generation.file} records no system prompt on an attempt`);
+        }
+        for (const attempt of attemptsOf(generation)) {
+            if (attempt.model !== config.model) {
+                errors.push(
+                    `${generation.file} attempt ran model ${String(attempt.model)}, not the arm's model`,
+                );
+            }
         }
         const prompt = promptHashes(generation, "prompt");
         if (prompt.conflict) {
@@ -663,6 +694,18 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
                 g.owner === REPLAY &&
                 outputOrigins(g).some((origin) => origin.includes("scripted")),
         );
+        const reviewed = new Map(
+            corpus.cases.flatMap((c) => c.sources.map((s) => [s.id, sha256(s.reviewedOutput)])),
+        );
+        for (const generation of replayed) {
+            for (const attempt of attemptsOf(generation)) {
+                if (attempt.output_sha256 !== reviewed.get(generation.source)) {
+                    errors.push(
+                        `${generation.file} returned output other than the reviewed output of ${generation.source}`,
+                    );
+                }
+            }
+        }
         for (const { source } of sources(corpus)) {
             if (!replayed.some((g) => g.source === source)) {
                 errors.push(`no published scripted generation for ${source}`);
@@ -693,11 +736,6 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             );
         }
         for (const attempt of attemptsOf(capture)) {
-            if (attempt.model !== config.model) {
-                errors.push(
-                    `${capture.file} attempt ran model ${String(attempt.model)}, not the arm's model`,
-                );
-            }
             for (const setting of ATTEMPT_SETTINGS) {
                 if (attempt[setting] !== config.settings[setting]) {
                     errors.push(
@@ -827,6 +865,14 @@ export function assembleEvidence(input: {
                         `${file} forwarded to ${report.upstream_url}, where ${first.file} forwarded to ${first.report.upstream_url}`,
                     );
                 }
+                if (
+                    first &&
+                    canonicalJson(report.pricing) !== canonicalJson(first.report.pricing)
+                ) {
+                    errors.push(
+                        `${file} forwarded at prices ${canonicalJson(report.pricing)}, where ${first.file} forwarded at ${canonicalJson(first.report.pricing)}`,
+                    );
+                }
                 if (first && report.context_limit !== first.report.context_limit) {
                     errors.push(
                         `${file} forwarded at context limit ${report.context_limit}, where ${first.file} forwarded at ${first.report.context_limit}`,
@@ -900,6 +946,13 @@ export function assembleEvidence(input: {
     if (input.mode === "live" && forwarded[0]?.upstream_url !== forwarded[1]?.upstream_url) {
         refused.push("the arms forwarded to different upstream endpoints");
     }
+    if (
+        input.mode === "live" &&
+        canonicalJson(forwarded[0]?.pricing ?? null) !==
+            canonicalJson(forwarded[1]?.pricing ?? null)
+    ) {
+        refused.push("the arms forwarded at different prices");
+    }
     const manifest = {
         schema: MANIFEST_SCHEMA,
         repository_revision: input.revision,
@@ -926,6 +979,7 @@ export function assembleEvidence(input: {
                 model: report.model,
                 upstream_url: report.upstream_url,
                 context_limit: report.context_limit,
+                pricing: report.pricing,
             })),
         })),
     };

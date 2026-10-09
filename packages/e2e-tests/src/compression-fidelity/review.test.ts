@@ -511,6 +511,7 @@ describe("eval:compression-fidelity gates", () => {
                         corpus_sha256: SHA,
                         model: "claude-live",
                         upstream_url: "https://api.example.test/v1/messages",
+                        pricing: { inputPerMTok: 3, outputPerMTok: 15 },
                         context_limit: 200_000,
                         spent_usd: 0,
                         limits: {

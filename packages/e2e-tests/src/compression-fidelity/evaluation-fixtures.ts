@@ -62,6 +62,8 @@ export interface ArmOptions {
     model?: string;
     captureModel?: string;
     attempt?: Record<string, unknown> | null;
+    /** Replaces the single default attempt with the attempts this returns. */
+    attempts?: (attempt: Record<string, unknown>) => Record<string, unknown>[];
     capture?: Record<string, unknown>;
     generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
@@ -96,6 +98,11 @@ export function writeArm(
     });
     const captures = new Map<string, string>();
     const scripted = options.generationOrigin === "scripted";
+    const attemptsOf = (attempt: Record<string, unknown>): Record<string, unknown>[] => {
+        if (options.attempt === null) return [];
+        const merged = { ...attempt, ...options.attempt };
+        return options.attempts ? options.attempts(merged) : [merged];
+    };
     for (const c of corpus.cases) {
         for (const source of c.sources) {
             if (scripted) {
@@ -106,18 +113,14 @@ export function writeArm(
                     stage: "generation",
                     terminal: "published",
                     detail: {
-                        attempts:
-                            options.attempt === null
-                                ? []
-                                : [
-                                      {
-                                          attempt: 1,
-                                          model,
-                                          system_sha256: sha256(system),
-                                          prompt_sha256: sha256("p"),
-                                          output_origin: "scripted approved example",
-                                      },
-                                  ],
+                        attempts: attemptsOf({
+                            attempt: 1,
+                            model,
+                            system_sha256: sha256(system),
+                            prompt_sha256: sha256("p"),
+                            output_sha256: sha256(source.reviewedOutput),
+                            output_origin: "scripted approved example",
+                        }),
                     },
                 });
                 continue;
@@ -131,19 +134,13 @@ export function writeArm(
                 detail: {
                     model: options.captureModel ?? model,
                     output_origin: options.origin ?? "real producer through the host",
-                    attempts:
-                        options.attempt === null
-                            ? []
-                            : [
-                                  {
-                                      model,
-                                      system,
-                                      prompt: "p",
-                                      ...SETTINGS,
-                                      outputs: [{ text: "x" }],
-                                      ...options.attempt,
-                                  },
-                              ],
+                    attempts: attemptsOf({
+                        model,
+                        system,
+                        prompt: "p",
+                        ...SETTINGS,
+                        outputs: [{ text: "x" }],
+                    }),
                     usage: { input_tokens: 900, output_tokens: 300 },
                     settled: true,
                     published_rows: [{ start: 1, end: 2, title: "t", p1: "p1" }],
