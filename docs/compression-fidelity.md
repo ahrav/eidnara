@@ -427,7 +427,7 @@ per-scenario report (`scripts/eval-compression-fidelity.ts`,
 it sends no request in either mode.
 
 ```
-eval:compression-fidelity --baseline <dir> --candidate <dir>
+eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
   --out <private dir> [--corpus <path>] [--mode offline|live]
 ```
 
@@ -444,8 +444,27 @@ eval:compression-fidelity --baseline <dir> --candidate <dir>
   also holds any `forwarding-*.json` reports and an `arm.json`
   (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
   the SHA-256 of its history summarizer system prompt as 64 lowercase hex
-  digits, its model, provider, version, settings, and limits, and whether
-  its generation origin is `scripted` or `real`.
+  digits, its model, provider, version, settings, and limits, each identifier
+  a non-blank string and `settings` carrying a numeric `temperature` and a
+  positive integer `max_output_tokens`, and whether its generation origin is
+  `scripted` or `real`.
+- `--reviews`: two review records.
+  - `controls.json` (`eidnara.compression-fidelity-controls/v1`) holds the
+    sealed control labels, the batch, and its approvers.
+  - `judgments.json` (`eidnara.compression-fidelity-judgments/v1`) holds the
+    human control verdicts, per-scenario judgments, and disputes for the
+    same corpus digest and batch. Both records name the batch as a non-blank
+    string, and each list field is a list.
+  - A judgment names its arm, scenario, kind (`human` or `model`), and the
+    SHA-256 of the observation file it judged. It also gives each
+    obligation's disposition and whether the answer preserved it, once per
+    obligation; the list of forbidden conclusions it drew, possibly empty;
+    and whether it abstained. Its reviewer, like every control reviewer, is a
+    non-blank name. A model judgment carries at least one non-blank citation and a
+    non-blank uncertainty, or it is a review error; it never counts as review.
+  - Approvers are named by non-blank identity; names that differ only by
+    surrounding whitespace are one approver, and any other entry in
+    `approved_by` is a review error.
 
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository whose existing ancestors
@@ -463,23 +482,38 @@ either arm; an arm directory is refused before any write, and a component of
     refused; the report names each refusal;
   - every accepted observation and forwarding report with its file SHA-256,
     and the model, upstream endpoint, context limit, and prices each
-    forwarding report forwarded with.
+    forwarding report forwarded with;
+  - the review records' batch, approvers, and digests; a record whose bytes
+    were read keeps its digest even when it is refused, and an unreadable one
+    records an empty digest.
 - **Report.** It holds, per arm:
   - identity errors;
   - reached and missing scenarios;
+  - the validated forwarding reports' count, sends, and `spent_usd`, at arm
+    scope, since sends belong to the arm rather than to a scenario;
+  - the serving cost rows of its source-level observations (the `m1`,
+    `warm`, and `cold-m0` deliveries the witness labels by source ID for a
+    source with no m1 scenario), validated as a row's serving costs are;
+    every such source carries all three stages serving `p1`, as the witness
+    asserts, and a missing, incomplete, or sparser one, or one that ended in
+    a failed terminal, withholds acceptance;
   - one row per corpus scenario with the columns below, where every column
-    derives from that arm's observations;
+    derives from that arm's observations and bound judgments;
   - the reasons acceptance is withheld.
 
-  It then holds the comparison's refusals and whether the comparison is a
-  treatment, and `manifest_sha256`, the SHA-256 of the manifest file it was
-  assembled with, so a report beside another manifest is detectable. It
-  assembles no review, control, or cost evidence, so it accepts no arm.
+  It then holds the control qualification and the comparison, and
+  `manifest_sha256`, the SHA-256 of the manifest file it was assembled with,
+  so a report beside another manifest is detectable.
 
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal; `executed` means every judging observation ended in a terminal its owner counts as executed: the delivery witness's `served`, `excluded`, or `discoverable`, the replay's `published` or `served`, `read_exact`, or the capture's `published` |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier; a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier (the delivery witness's tier is its `served_tier` and the replay's is its `tier`, each read whatever it holds; a served result whose tier is absent or no string fails); a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal at stage `exact_read` from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
+| `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
+| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs the memory witness's recovery observation: `opencode-delivery` at stage `recovery-eidnara-search` with terminal `discoverable`, recording `detail.tool` as `eidnara_search` with `memory` among its `arguments.sources`, with `detail.result_carries_memory` true and positive whole-number `calls` and `result_utf8_bytes` |
+| `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
+| `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
+| `cost` | `complete` or `incomplete`. Each serving observation, an `opencode-delivery` observation that records `detail.served_tier` or ends `served` (a served delivery naming no tier is incomplete; the memory witness's `hint-truncation` record on C4.S6 is an auxiliary artifact of its `hint-on` delivery and serves nothing), other than the qualification witness's `qualification` and the Pi witness's `pi-*` stages on C1.S1 (those serve through fixtures with no OpenCode admission estimator and carry no cost; the U2 replay's `tier` observations serve through the daemon and carry none either), carries `detail.serving` with its request bytes (a positive whole number), invocation bytes (positive: zero bytes is the shape of a pass that ran no admission), charged tokens (whole numbers; under the `opencode-heuristic utf8-bytes-div-3.5-v1` estimator the charge is ceil(ceil(bytes / 3.5) × 1.25) of the invocation bytes), transform time, and raw-source leak count as non-negative numbers (the leak count zero: a leaking pass is never a served one), its estimator (`opencode-heuristic utf8-bytes-div-3.5-v1`, the producer's), and a `serving_kind` of `cold` or `warm_repeat`, `warm_repeat` exactly on the campaign's `warm` stage; its `admission` is a branch that admitted the invocation (`fits`, `shrinks`, or `limit_unknown`; a `declined` pass is never a served one); a pass that ran no admission check records `none` and `null` charges, and its cost stays incomplete. The cost row's `stage` is the observation's own, whatever the serving record carries. A row with no serving observation is incomplete, whatever recoveries it holds; an m1 scenario's row carries the witness's `m1`, `warm`, and `cold-m0` deliveries, and lacks cost without each. A served delivery recording a refusal other than `history_absent` in `detail.refusals` is incomplete, since the witness marks such a pass `unqualified`. Each recovery needs its calls and output bytes as non-negative numbers; generation needs at least one attempt and a usage record counting `input_tokens` and `output_tokens` as non-negative numbers; a `real` arm credits generation only from its published real captures of the row's source. A pass line that records no `invocation_bytes` or `invocation_charged` reports those costs as `null`. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -533,8 +567,11 @@ either arm; an arm directory is refused before any write, and a component of
   refusal, records a stop, no send, or spend above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason or naming no model or a
-  model other than the report's, a truncated response, an unknown cost, or a
-  response without a hash; these are the completeness reasons the forwarder
+  model other than the report's, a known cost without usage, usage other
+  than four whole-number counters, a `cost_usd` other than the report's
+  prices applied to that usage, a truncated response, an unknown cost, a
+  response without a hash, or a `tool_use` id that no later exchange answers
+  in its `tool_results`; these are the completeness reasons the forwarder
   derives, recomputed from the report's own fields;
 - a generation record, a real capture or the U2 replay's `generation` stage,
   that names a scenario; generation is source-level;
@@ -546,7 +583,9 @@ In an arm labeled `real`:
   the real capture writes, is an identity error, whether `detail.output_origin`
   or an attempt's `output_origin` in `detail.attempts` records it;
 - every source needs a published real capture whose `detail.model` is the
-  arm's model; a capture recorded under another model is an identity error;
+  arm's model; a capture recorded under another model is an identity error.
+  The capture records at least one complete attempt: the arm's model, a
+  system prompt or its hash, a prompt, and a non-empty text output;
 - a published real capture records `settled: true`, an attempt output with
   text, nonempty `published_rows` of titled rows with integer `start` and
   `end`, and an `attempt_count` equal to its retained attempts, the state the
@@ -567,14 +606,27 @@ Observations of a variant and observations marked `detail.judge_control`,
 which test the delivery judge itself, appear in the row's outcomes and judge
 nothing.
 
-**Comparison.**
+**Controls.** The sealed labels must cover the known-bad controls
+(`reversed_negation`, `planned_to_completed`, `inferred_to_observed`,
+`wrong_identity`, `lost_hint_qualifier`, labeled `violation`) and the
+positive controls (`meaning_preserving_paraphrase`, `successful_deployment`,
+labeled `acceptable`). Each needs exactly one human verdict equal to its
+label. Each kind is sealed exactly once. A duplicate or undeclared control, a verdict for an undeclared
+control, a model verdict, or a missing, misclassified, always-accept, or
+always-abstain verdict set leaves review unqualified, and so does a review
+record bound to another corpus or batch or holding a malformed entry. An
+unqualified review binds no judgment or dispute, so every row stays
+`unreviewed`. Human judgments of one scenario that disagree count as a
+dispute.
 
-- The comparison is refused when an arm is bound to another corpus or has
-  identity errors, when the arms reached different scenario sets, when they
-  differ in model, provider, version, settings, limits, or generation origin,
-  or when the distinct user prompts their published generation records for a
-  source record differ. Held fields
-  compare as JSON with keys in UTF-16 code-unit order.
+**Comparison and acceptance.**
+
+- The comparison is refused when the arms share a label, when an arm is
+  bound to another corpus or has identity errors, when the arms reached
+  different scenario sets, when they differ in model, provider, version,
+  settings, limits, or generation origin, or when the distinct user prompts
+  their published generation records for a source record differ. Held fields compare as JSON with
+  keys in UTF-16 code-unit order.
 - In live mode, the comparison is also refused when the arms' forwarding
   reports forwarded to different models, upstream endpoints, context limits,
   or prices. The
@@ -582,12 +634,27 @@ nothing.
   `arm.json` declares, so it is held equal through the reports rather than
   bound to `arm.json`.
 - Differing prompt hashes mark it a treatment comparison.
+- Each scenario gets `expected_green`, `regression`,
+  `resolution_candidate`, `expected_red`, or `unscored`.
+- An arm is accepted only when all of these hold: it has no identity
+  error; review is qualified; every judgment and dispute names a compared arm and a
+  corpus scenario, every judged obligation is one the scenario declares, and
+  every judgment's artifact hash names an observation of its row; the batch names two distinct approvers; its origin is
+  `real`; no scenario is missing; every row passes every column.
 
-Missing scenarios block full acceptance, and the report names them.
+Missing scenarios block full acceptance, and the report names them. The
+command records approvals; it does not grant them.
 
 **Modes.** `offline`, the default, assembles the directories as they are.
 `live` additionally requires each arm to carry complete forwarding reports
 from the record-and-forward provider mode whose limits equal the arm's
 `limits`, so live evidence inherits that mode's limits, and all of an arm's
 reports to have forwarded to one model at one upstream endpoint, context
-limit, and price.
+limit (a positive integer), and price.
+
+**Review prerequisites.** Two people approve the corpus before any candidate
+output is inspected, and the first semantic baseline before it is
+accepted. Later changed judgments need a non-author reviewer, and disputed
+or severe findings need another human adjudication. Without an authorized
+provider, real captures, or reviewers, every arm stays unaccepted and
+semantic evidence stays unverified.

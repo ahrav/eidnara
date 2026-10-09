@@ -61,15 +61,25 @@ const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly 
 };
 /** The delivery terminals the memory campaign emits on its `memory_excluded` scenario alone. */
 const MEMORY_TERMINALS = ["excluded", "discoverable"];
-const executed = (e: { owner: string; terminal: string }) =>
+export const executed = (e: { owner: string; terminal: string }) =>
     TERMINALS[e.owner]?.executed.includes(e.terminal) ?? false;
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
 /** The four limits the forwarder enforces; its report and the arm's `limits` carry all of them. */
 const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd"] as const;
 /** The delivery stages labeled with a source id when the source has no m1 scenario. */
-const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"];
+/** The delivery witness's stages for a source with no m1 scenario, labeled by source ID. */
+export const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"] as const;
 /** The delivery witness's judge self-test; a judge control elsewhere is refused. */
 const JUDGE_CONTROL = { stage: "missing-capture", scenario: "C1.S2" } as const;
+/**
+ * The memory witness's record of the truncated hint fragment on the hint-truncated scenario: an
+ * auxiliary artifact of the preceding `hint-on` delivery, serving no tier and charging no cost.
+ */
+export function isHintTruncation(e: { owner: string; stage: string; scenario: string | null }) {
+    return (
+        e.owner === "opencode-delivery" && e.stage === "hint-truncation" && e.scenario === "C4.S6"
+    );
+}
 /** The scenario variants a witness emits, by owner and scenario; any other label is refused. */
 const VARIANTS: Record<string, ReadonlyArray<{ scenario: string; variant: string }>> = {
     "opencode-delivery": [{ scenario: "C1.S2", variant: "p1-only" }],
@@ -141,8 +151,10 @@ export interface ForwardingEvidence {
     incomplete_reasons: string[];
     exchanges: Array<{
         index: number;
-        tool_uses: string[];
+        /** The `tool_result` ids the request answers. */
         tool_results: string[];
+        /** The `tool_use` ids the response asks for. */
+        tool_uses: string[];
         request: { body_text: string; body_sha256: string };
         response: {
             outcome: string;
@@ -155,6 +167,8 @@ export interface ForwardingEvidence {
             body_text: string;
             body_sha256: string | null;
             cost_known: boolean;
+            /** The provider's token usage, `null` when the response reported none. */
+            usage: Json | null;
         } | null;
     }>;
 }
@@ -193,6 +207,28 @@ export function text(value: unknown): value is string {
     return typeof value === "string" && value !== "";
 }
 
+export function named(value: unknown): value is string {
+    return typeof value === "string" && value.trim() !== "";
+}
+
+/** The four token counters the forwarder records from a provider response, as whole numbers. */
+const USAGE_COUNTERS = [
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+] as const;
+
+function usageOf(value: unknown): value is Record<(typeof USAGE_COUNTERS)[number], number> {
+    return (
+        record(value) &&
+        USAGE_COUNTERS.every((counter) => {
+            const n = value[counter];
+            return typeof n === "number" && Number.isInteger(n) && n >= 0;
+        })
+    );
+}
+
 /** A lowercase hex SHA-256 digest. */
 export function digest(value: unknown): value is string {
     return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
@@ -228,6 +264,18 @@ export function scenarios(
     return corpus.cases.flatMap((c) => c.scenarios.map((scenario) => ({ case: c.id, scenario })));
 }
 
+/** The sources the delivery witness labels by source ID: those with no m1 scenario. */
+export function sourceLabelSources(corpus: FidelityCorpus): string[] {
+    const m1 = new Set(
+        scenarios(corpus)
+            .filter((s) => s.scenario.serving.stage === "m1")
+            .map((s) => s.scenario.source),
+    );
+    return sources(corpus)
+        .map((s) => s.source)
+        .filter((source) => !m1.has(source));
+}
+
 export function armLabel(arm: Arm): string {
     return arm.config?.label ?? arm.dir;
 }
@@ -238,15 +286,20 @@ function armConfig(value: unknown): ArmConfig | null {
     const { label, prompt_sha256, model, provider, version, settings, limits, generation_origin } =
         value;
     if (
-        !text(label) ||
+        !named(label) ||
         !digest(prompt_sha256) ||
-        !text(model) ||
-        !text(provider) ||
-        !text(version)
+        !named(model) ||
+        !named(provider) ||
+        !named(version)
     ) {
         return null;
     }
     if (!record(settings) || !(limits === null || record(limits))) return null;
+    if (typeof settings.temperature !== "number" || !Number.isFinite(settings.temperature)) {
+        return null;
+    }
+    const tokens = settings.max_output_tokens;
+    if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens <= 0) return null;
     if (generation_origin !== "scripted" && generation_origin !== "real") return null;
     return {
         schema: ARM_SCHEMA,
@@ -348,19 +401,15 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             ) {
                 return null;
             }
+            if (response.usage !== null && !usageOf(response.usage)) return null;
+            const cost = response.cost_usd;
+            if (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0) return null;
             if (response.body_sha256 !== null && typeof response.body_sha256 !== "string")
                 return null;
             if (!text(response.outcome)) return null;
             if (response.stop_reason !== null && typeof response.stop_reason !== "string")
                 return null;
             if (response.model !== null && typeof response.model !== "string") return null;
-            if (
-                typeof response.cost_usd !== "number" ||
-                !Number.isFinite(response.cost_usd) ||
-                response.cost_usd < 0
-            ) {
-                return null;
-            }
         }
         const ids = (value: unknown) =>
             Array.isArray(value) && value.every((id) => typeof id === "string") ? value : null;
@@ -382,6 +431,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
                       body_text: response.body_text as string,
                       body_sha256: response.body_sha256 as string | null,
                       cost_known: response.cost_known as boolean,
+                      usage: response.usage as Json | null,
                   }
                 : null,
         });
@@ -442,8 +492,22 @@ function outputOrigins(evidence: Evidence): string[] {
     );
 }
 
-function servedTierOf(evidence: Evidence): unknown {
-    return evidence.detail.served_tier ?? evidence.detail.tier;
+export function servedTierOf(evidence: Evidence): string | null | undefined {
+    // The delivery witness names its tier in `served_tier` and the U2 replay in `tier`; each
+    // owner's field is read, whatever it holds, and the other owner's field is ignored.
+    const tier = evidence.owner === REPLAY ? evidence.detail.tier : evidence.detail.served_tier;
+    if (tier === undefined) return undefined;
+    return typeof tier === "string" ? tier : null;
+}
+
+function completeRealAttempt(attempt: Json, model: string): boolean {
+    return (
+        attempt.model === model &&
+        (text(attempt.system) || digest(attempt.system_sha256)) &&
+        text(attempt.prompt) &&
+        Array.isArray(attempt.outputs) &&
+        attempt.outputs.some((output) => record(output) && text(output.text))
+    );
 }
 
 /** A source-level generation record: a real capture, or the U2 replay's generation stage. */
@@ -528,6 +592,23 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
             continue;
         }
         if (!response.cost_known) complete(exchange.index, "cost is unknown");
+        // A known cost is the forwarder's price of the response's usage.
+        if (usageOf(response.usage)) {
+            const u = response.usage;
+            const input =
+                u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens;
+            const priced =
+                (input * report.pricing.inputPerMTok +
+                    u.output_tokens * report.pricing.outputPerMTok) /
+                1_000_000;
+            if (Math.abs(priced - response.cost_usd) > 1e-9) {
+                errors.push(
+                    `${file} exchange ${exchange.index} costs ${response.cost_usd} USD, where its usage prices at ${priced} USD`,
+                );
+            }
+        } else if (response.cost_known && response.usage === null) {
+            complete(exchange.index, "claims a known cost without usage");
+        }
         if (response.outcome !== "acknowledged") {
             complete(exchange.index, `response outcome is ${response.outcome}`);
         }
@@ -576,11 +657,7 @@ export async function loadArm(
     }
     const scenarioEntry = new Map(scenarios(corpus).map((s) => [s.scenario.id, s]));
     const sourceCase = new Map(sources(corpus).map((s) => [s.source, s.case]));
-    const m1Sources = new Set(
-        scenarios(corpus)
-            .filter((s) => s.scenario.serving.stage === "m1")
-            .map((s) => s.scenario.source),
-    );
+    const sourceLabeled = new Set(sourceLabelSources(corpus));
     // The Rust writer stages `.<name>.tmp` and the TypeScript writer `<name>.tmp-<hex>`;
     // either left behind means a publication never finished.
     const unpublished = (name: string) => /^\..*\.tmp$|\.tmp-[0-9a-f]+$/.test(name);
@@ -676,8 +753,8 @@ export async function loadArm(
             sourceLabel &&
             !(
                 owner === "opencode-delivery" &&
-                SOURCE_LABEL_STAGES.includes(String(value.stage)) &&
-                !m1Sources.has(label)
+                (SOURCE_LABEL_STAGES as readonly string[]).includes(String(value.stage)) &&
+                sourceLabeled.has(label)
             )
         ) {
             arm.errors.push(
@@ -870,19 +947,6 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
         }
         return errors;
     }
-    for (const setting of ATTEMPT_SETTINGS) {
-        if (typeof config.settings[setting] !== "number") {
-            errors.push(`arm.json declares no numeric ${setting}`);
-        }
-    }
-    const tokens = config.settings.max_output_tokens;
-    if (typeof tokens === "number" && (!Number.isInteger(tokens) || tokens <= 0)) {
-        errors.push("arm.json declares no whole-number max_output_tokens");
-    }
-    const temperature = config.settings.temperature;
-    if (typeof temperature === "number" && !Number.isFinite(temperature)) {
-        errors.push("arm.json declares no finite temperature");
-    }
     const published = generations.filter((g) => g.owner === REAL_CAPTURE);
     for (const capture of published) {
         const retained = attemptsOf(capture).length;
@@ -955,6 +1019,12 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             errors.push(`no published real-model capture for ${source}`);
         }
     }
+    for (const capture of captures) {
+        const attempts = attemptsOf(capture);
+        if (!attempts.some((attempt) => completeRealAttempt(attempt, config.model))) {
+            errors.push(`${capture.file} records no complete real attempt`);
+        }
+    }
     return errors;
 }
 
@@ -978,7 +1048,10 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
     // must serve the corpus tier.
     const results = evidence.flatMap((e) => {
         const tier = servedTierOf(e);
-        if (typeof tier !== "string") return [];
+        // A served result names its tier; one that is absent or no string fails the column.
+        if (tier === undefined)
+            return e.terminal === "served" && !isHintTruncation(e) ? [false] : [];
+        if (tier === null) return [false];
         const curve = e.detail.curve_tier;
         if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {
             // Pressure demotes past the curve and at least to the scenario's declared tier.
@@ -1092,6 +1165,7 @@ export function assembleEvidence(input: {
     });
     const [base, cand] = arms as [(typeof arms)[0], (typeof arms)[0]];
     const refused: string[] = [];
+    if (base.label === cand.label) refused.push(`the arms share the label ${base.label}`);
     if (input.baseline.foreignCorpus || input.candidate.foreignCorpus) {
         refused.push("an arm is bound to another corpus");
     }

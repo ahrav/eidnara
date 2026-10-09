@@ -148,6 +148,29 @@ export interface Delivery {
     capture: RetainedCapture;
 }
 
+/** The OpenCode admission estimator a pass line's charged tokens come from. */
+export const OPENCODE_ESTIMATOR = "opencode-heuristic utf8-bytes-div-3.5-v1";
+
+/** `null` denotes unreported invocation bytes, charged tokens, or elapsed time. */
+export function servingCost(delivery: Delivery): Record<string, unknown> {
+    const { pass } = delivery;
+    const admitted = pass.admission !== "none";
+    const recorded = (field: string) => new RegExp(`(?:^|\\s)${field}=`).test(pass.raw);
+    return {
+        request_body_utf8_bytes: Buffer.byteLength(JSON.stringify(delivery.capture.request.body)),
+        admission: pass.admission,
+        invocation_bytes: admitted && recorded("invocation_bytes") ? pass.invocationBytes : null,
+        invocation_charged_tokens:
+            admitted && recorded("invocation_charged") ? pass.invocationCharged : null,
+        estimator: OPENCODE_ESTIMATOR,
+        transform_elapsed_ms: /(?:^|\s)elapsed=/.test(pass.raw) ? pass.elapsedMs : null,
+        raw_source_leaks: delivery.verdict.leaks.length,
+        // The campaign's warm observation repeats the previous request; every other
+        // observation rematerializes or first serves its history.
+        serving_kind: delivery.label === "warm" ? "warm_repeat" : "cold",
+    };
+}
+
 function segmentOf(texts: readonly string[], title: string): string {
     const text = texts.find((candidate) => candidate.includes(title)) ?? "";
     const at = text.indexOf(title);

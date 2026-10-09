@@ -7,6 +7,7 @@ import {
     CaseDriver,
     type Delivery,
     M1_SERVING,
+    servingCost,
     withCaseHarness,
 } from "../src/compression-fidelity/campaign";
 import {
@@ -110,6 +111,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                             project_memory_utf8_bytes: Buffer.byteLength(memoryBlock(delivery)),
                             served_tier: delivery.verdict.tier,
                             refusals: delivery.verdict.refusals,
+                            serving: servingCost(delivery),
                         },
                     });
                 const observeExcluded = async (
@@ -322,6 +324,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                         matched_distractor_rows: matchedDistractors,
                         selected_rows: outcome.selected.length,
                         served_tier: on.verdict.tier,
+                        serving: servingCost(on),
                     },
                 });
 
@@ -354,7 +357,11 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                     stage: "hint-off",
                     terminal: "served",
                     markers: ["cf-delivery-hints-disabled-input"],
-                    detail: { hint_utf16_units: 0, served_tier: off.verdict.tier },
+                    detail: {
+                        hint_utf16_units: 0,
+                        served_tier: off.verdict.tier,
+                        serving: servingCost(off),
+                    },
                 });
                 console.log(`[cf-delivery] C4.S6 hint kept its qualifier: ${qualifierKept}`);
             }),

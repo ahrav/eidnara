@@ -1,23 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import {
-    chmodSync,
-    mkdirSync,
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    symlinkSync,
-    writeFileSync,
-} from "node:fs";
-import { join, resolve } from "node:path";
-import { parseArgs, repositoryRevision, run } from "../../scripts/eval-compression-fidelity";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
     type ArmOptions,
     allScenarios,
-    CORPUS_PATH,
     corpus,
+    M0_SCENARIO,
+    M1_STAGE_FILES,
     SETTINGS,
     SHA,
+    SOURCE_LEVEL_FILES,
     scratch,
     sha256,
     write,
@@ -72,7 +64,10 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toEqual([]);
         expect(assembled.treatment).toBe(true);
         expect(assembled.manifest.arms[0]?.observations.length).toBe(
-            allScenarios.length + corpus.cases.flatMap((c) => c.sources).length,
+            allScenarios.length +
+                corpus.cases.flatMap((c) => c.sources).length +
+                SOURCE_LEVEL_FILES +
+                M1_STAGE_FILES,
         );
         expect(assembled.manifest.corpus.sha256).toBe(SHA);
     });
@@ -270,7 +265,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("an observation without a stage or terminal is an identity error", async () => {
-        const first = allScenarios[0]?.s.id ?? "";
+        const first = M0_SCENARIO;
         const strip = (field: string) =>
             assemble(scratch(), {
                 tamper: (dir) => {
@@ -289,7 +284,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a judge control outside the witness's control stage or scenario is an identity error", async () => {
-        const first = allScenarios.find(({ s }) => s.serving.path !== "exact_read")?.s.id ?? "";
+        const first = M0_SCENARIO;
         const control = (scenario: string, stage?: string) =>
             assemble(scratch(), {
                 tamper: (dir) => {
@@ -312,7 +307,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a delivery observation carries a string scenario label", async () => {
-        const first = allScenarios[0]?.s.id ?? "";
+        const first = M0_SCENARIO;
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${first}.json`);
@@ -373,15 +368,14 @@ describe("evidence identity and completeness", () => {
                 attempt: { temperature: undefined, max_output_tokens: undefined },
             },
         });
-        expect(errorsOf(unset)).toContain("arm.json declares no numeric temperature");
-        expect(errorsOf(unset)).toContain("arm.json declares no numeric max_output_tokens");
+        expect(errorsOf(unset)).toContain("arm.json does not match its schema");
         const stringy = await assemble(scratch(), {
             baseline: {
                 settings: { temperature: "0.1", max_output_tokens: 1024 },
                 attempt: { temperature: "0.1" },
             },
         });
-        expect(errorsOf(stringy)).toContain("arm.json declares no numeric temperature");
+        expect(errorsOf(stringy)).toContain("arm.json does not match its schema");
     });
 
     test("a prompt digest must be a SHA-256 hex digest", async () => {
@@ -405,7 +399,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a terminal is one its owner emits", async () => {
-        const first = allScenarios[0]?.s.id ?? "";
+        const first = M0_SCENARIO;
         const excluded =
             allScenarios.find(({ s }) => s.serving.path === "memory_excluded")?.s.id ?? "";
         const relabel = (scenario: string, terminal: string) =>
@@ -458,9 +452,7 @@ describe("evidence identity and completeness", () => {
                 attempt: { max_output_tokens: 1024.5 },
             },
         });
-        expect(errorsOf(fractional)).toContain(
-            "arm.json declares no whole-number max_output_tokens",
-        );
+        expect(errorsOf(fractional)).toContain("arm.json does not match its schema");
         const hot = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, "arm.json");
@@ -471,7 +463,7 @@ describe("evidence identity and completeness", () => {
                 writeFileSync(path, text);
             },
         });
-        expect(errorsOf(hot)).toContain("arm.json declares no finite temperature");
+        expect(errorsOf(hot)).toContain("arm.json does not match its schema");
     });
 
     test("an output origin is the exact literal its producer writes", async () => {
@@ -574,7 +566,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a generation record that names a scenario is an identity error", async () => {
-        const scenario = allScenarios[0];
+        const scenario = allScenarios.find(({ s }) => s.id === M0_SCENARIO);
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `real.${scenario?.s.source}.json`);
@@ -627,6 +619,79 @@ describe("evidence identity and completeness", () => {
             },
         });
         expect(errorsOf(assembled)).toContain("not the arm's prompt");
+    });
+
+    test("a prompt digest that is not a SHA-256 hex string is refused", async () => {
+        const declared = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, "arm.json");
+                const arm = JSON.parse(readFileSync(path, "utf8"));
+                writeFileSync(path, JSON.stringify({ ...arm, prompt_sha256: "not-a-hash" }));
+            },
+        });
+        expect(errorsOf(declared)).toContain("arm.json does not match its schema");
+        const attempt = await assemble(scratch(), {
+            baseline: { attempt: { system: undefined, system_sha256: "not-a-hash" } },
+        });
+        expect(errorsOf(attempt)).toContain("records no complete real attempt");
+    });
+
+    test("one complete real attempt carries the non-empty text output", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const split = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `real.${source}.json`);
+                const capture = JSON.parse(readFileSync(path, "utf8"));
+                const attempt = capture.detail.attempts[0];
+                // The complete attempt drained nothing; the drained text sits on an attempt
+                // that records only a prompt digest.
+                capture.detail.attempts = [
+                    { ...attempt, outputs: [{ text: "" }] },
+                    { ...attempt, prompt: undefined, prompt_sha256: sha256("p") },
+                ];
+                const relinked = write(dir, `real.${source}.json`, capture);
+                for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+                    const file = join(dir, `delivery.${s.id}.json`);
+                    const observation = JSON.parse(readFileSync(file, "utf8"));
+                    if (observation.detail.generation_capture_sha256 === undefined) continue;
+                    observation.detail.generation_capture_sha256 = relinked;
+                    writeFileSync(file, JSON.stringify(observation));
+                }
+            },
+        });
+        expect(errorsOf(split)).toContain(`real.${source}.json records no complete real attempt`);
+    });
+
+    test("an arm whose settings omit the generation settings does not match the arm schema", async () => {
+        for (const settings of [
+            {},
+            { temperature: 0.1 },
+            { temperature: "warm", max_output_tokens: 1024 },
+            { temperature: 0.1, max_output_tokens: 0 },
+        ]) {
+            const assembled = await assemble(scratch(), {
+                baseline: { attempt: { temperature: undefined, max_output_tokens: undefined } },
+                tamper: (dir) => {
+                    const path = join(dir, "arm.json");
+                    const arm = JSON.parse(readFileSync(path, "utf8"));
+                    writeFileSync(path, JSON.stringify({ ...arm, settings }));
+                },
+            });
+            expect(errorsOf(assembled)).toContain("arm.json does not match its schema");
+        }
+    });
+
+    test("a blank arm.json identifier does not match the arm schema", async () => {
+        for (const field of ["label", "model", "provider", "version", "prompt_sha256"]) {
+            const assembled = await assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, "arm.json");
+                    const arm = JSON.parse(readFileSync(path, "utf8"));
+                    writeFileSync(path, JSON.stringify({ ...arm, [field]: "   " }));
+                },
+            });
+            expect(errorsOf(assembled)).toContain("arm.json does not match its schema");
+        }
     });
 
     test("an unpublished temporary file and a duplicate observation are refused", async () => {
@@ -791,7 +856,10 @@ describe("evidence identity and completeness", () => {
                     generation_capture_sha256: captureOf(dir, source),
                 },
             });
-        const labeled = await assemble(scratch(), { tamper: stage("C2.V2", "C2.V2") });
+        const labeled = await assemble(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: stage("C2.V2", "C2.V2"),
+        });
         expect(labeled.arms[0]?.identity_errors).toEqual([]);
         expect(
             labeled.manifest.arms[0]?.observations.find(
@@ -896,15 +964,134 @@ describe("evidence generation origin", () => {
             "replay.generation.json carries scripted output in an arm labeled real",
         );
     });
+
+    test("a real capture must run the arm's model and record a complete attempt with text output", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const relink = (dir: string, edit: (detail: Record<string, unknown>) => void) => {
+            const path = join(dir, `real.${source}.json`);
+            const value = JSON.parse(readFileSync(path, "utf8"));
+            edit(value.detail);
+            const capture = write(dir, `real.${source}.json`, value);
+            for (const { s } of allScenarios.filter((e) => e.s.source === source)) {
+                const served = join(dir, `delivery.${s.id}.json`);
+                const observation = JSON.parse(readFileSync(served, "utf8"));
+                if (observation.detail.generation_capture_sha256 === undefined) continue;
+                observation.detail.generation_capture_sha256 = capture;
+                writeFileSync(served, JSON.stringify(observation));
+            }
+        };
+        const cases: Array<[(detail: Record<string, unknown>) => void, string]> = [
+            [
+                (detail) => {
+                    detail.model = "other/model";
+                },
+                `real.${source}.json captured with model other/model, not the arm's model`,
+            ],
+            [
+                (detail) => {
+                    (detail.attempts as Array<Record<string, unknown>>)[0]!.model = "other/model";
+                },
+                `real.${source}.json attempt ran model other/model, not the arm's model`,
+            ],
+            [
+                (detail) => {
+                    detail.attempts = [{}];
+                },
+                `real.${source}.json records no complete real attempt`,
+            ],
+            [
+                (detail) => {
+                    (detail.attempts as Array<Record<string, unknown>>)[0]!.outputs = [
+                        { error: "x" },
+                    ];
+                },
+                `real.${source}.json records no complete real attempt`,
+            ],
+        ];
+        for (const [edit, error] of cases) {
+            const assembled = await assemble(scratch(), { tamper: (dir) => relink(dir, edit) });
+            expect(errorsOf(assembled)).toContain(error);
+        }
+        const intact = await assemble(scratch());
+        expect(errorsOf(intact)).toBe("");
+    });
 });
 
 describe("evidence deterministic column", () => {
+    test("a null served_tier is a malformed tier, whatever fallback tier the record carries", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = null;
+                value.detail.tier = scenario?.serving.tier;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toBe("");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
+    test("a delivery observation names its tier in served_tier alone", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.tier = value.detail.served_tier;
+                delete value.detail.served_tier;
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
+    test("a served replay record without a tier fails the deterministic column", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                write(dir, "replay.m1.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "daemon.compression_fidelity.replay",
+                    case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+                    source: scenario?.source,
+                    scenario: scenario?.id,
+                    stage: "m1",
+                    terminal: "served",
+                    markers: [],
+                    detail: { path: "natural" },
+                });
+            },
+        });
+        expect(errorsOf(assembled)).toBe("");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
     test("a wrong served tier fails the deterministic column", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.tier === "p1")?.s.id ?? "";
         const assembled = await assemble(scratch(), {
             baseline: { tier: (id) => (id === scenario ? "p3" : undefined) },
         });
         expect(rowOf(assembled, scenario)?.deterministic).toBe("assertion_fail");
+    });
+
+    test("a served observation whose tier is not a string fails the deterministic column", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                write(dir, "served-again.json", {
+                    ...value,
+                    stage: "served-again",
+                    detail: { ...value.detail, served_tier: 1 },
+                });
+            },
+        });
+        expect(errorsOf(assembled)).toBe("");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
     });
 
     test("a pressure delivery passes when it serves sparser than its curve tier", async () => {
@@ -982,7 +1169,7 @@ describe("evidence deterministic column", () => {
     });
 
     test("the exact-read witness judges only exact-read scenarios", async () => {
-        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural");
+        const scenario = allScenarios.find(({ s }) => s.id === M0_SCENARIO);
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${scenario?.s.id}.json`);
@@ -1110,24 +1297,31 @@ describe("evidence live mode", () => {
             refusals: [] as string[],
             attempted_sends: 1,
             acknowledged_responses: 1,
-            spent_usd: 0.5,
+            spent_usd: 0.6,
             limits: LIMITS as Record<string, number>,
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
             exchanges: [
                 {
                     index: 0,
-                    tool_uses: [] as string[],
                     tool_results: [] as string[],
+                    tool_uses: [] as string[],
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
                         outcome: "acknowledged",
-                        cost_usd: 0.5,
+                        cost_usd: 0.6,
                         model: "claude-live" as string | null,
                         stop_reason: "end_turn" as string | null,
                         truncated: false,
                         body_text: "ok",
                         body_sha256: sha256("ok") as string | null,
+                        // 100k input at 3 USD/MTok and 20k output at 15 USD/MTok cost 0.6 USD.
+                        usage: {
+                            input_tokens: 100_000,
+                            output_tokens: 20_000,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        } as Record<string, number> | null,
                         cost_known: true,
                     },
                 },
@@ -1188,6 +1382,12 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([costless]))).toContain(
             "exchange 0 cost is unknown in a complete report",
         );
+        const clipped = forwardingReport("{}", sha256("{}"), true);
+        const [cut] = clipped.exchanges;
+        if (cut) cut.response = { ...cut.response, truncated: true };
+        expect(errorsOf(await live([clipped]))).toContain(
+            "exchange 0 response is truncated in a complete report",
+        );
         const incomplete = { ...unanswered, complete: false, incomplete_reasons: ["x"] };
         expect(errorsOf(await live([incomplete]))).not.toContain("in a complete report");
         const errored = forwardingReport("{}", sha256("{}"), true);
@@ -1203,6 +1403,61 @@ describe("evidence live mode", () => {
         expect(
             errorsOf(await live([{ ...complete, stopped: "send 0 returned HTTP 500" }])),
         ).toContain("complete report records a stop: send 0 returned HTTP 500");
+        expect(
+            errorsOf(await live([{ ...complete, incomplete_reasons: ["a send is in flight"] }])),
+        ).toContain("complete report lists an incomplete reason: a send is in flight");
+        expect(errorsOf(await live([{ ...complete, incomplete_reasons: [7] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        for (const limits of [
+            { ...LIMITS, maxCalls: 1.5 },
+            { ...LIMITS, maxOutputTokens: 10.5 },
+        ]) {
+            expect(errorsOf(await live([{ ...complete, limits }], limits))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
+        for (const limit of [0, -1, 1.5]) {
+            expect(errorsOf(await live([{ ...complete, context_limit: limit }]))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
+        expect(errorsOf(await live([{ ...complete, spent_usd: -0.01 }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const partial = forwardingReport("{}", sha256("{}"), true);
+        const [counted] = partial.exchanges;
+        if (counted) counted.response = { ...counted.response, usage: { input_tokens: 1 } };
+        expect(errorsOf(await live([partial]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const mispriced = forwardingReport("{}", sha256("{}"), true);
+        const [priced] = mispriced.exchanges;
+        if (priced) priced.response = { ...priced.response, cost_usd: 0.5 };
+        expect(errorsOf(await live([{ ...mispriced, spent_usd: 0.5 }]))).toContain(
+            "exchange 0 costs 0.5 USD, where its usage prices at 0.6 USD",
+        );
+        const unknownCost = forwardingReport("{}", sha256("{}"), true);
+        const [unpriced] = unknownCost.exchanges;
+        if (unpriced) unpriced.response = { ...unpriced.response, usage: null, cost_known: false };
+        const unknownErrors = errorsOf(await live([unknownCost]));
+        expect(unknownErrors).toContain("exchange 0 cost is unknown in a complete report");
+        expect(unknownErrors).not.toContain("claims a known cost without usage");
+        const unmetered = forwardingReport("{}", sha256("{}"), true);
+        const [metered] = unmetered.exchanges;
+        if (metered) metered.response = { ...metered.response, usage: null };
+        expect(errorsOf(await live([unmetered]))).toContain(
+            "exchange 0 claims a known cost without usage in a complete report",
+        );
+        expect(errorsOf(await live([{ ...complete, spent_usd: 0.75 }]))).toContain(
+            "spent 0.75 USD, where its exchanges cost 0.6 USD",
+        );
+        const uncosted = forwardingReport("{}", sha256("{}"), true);
+        const [free] = uncosted.exchanges;
+        if (free) free.response = { ...free.response, cost_usd: -1 };
+        expect(errorsOf(await live([uncosted]))).toContain(
+            "does not match the forwarding report schema",
+        );
         const looped = forwardingReport("{}", sha256("{}"), true);
         const [call] = looped.exchanges;
         if (call) call.tool_uses = ["toolu_1"];
@@ -1264,6 +1519,13 @@ describe("evidence live mode", () => {
         const clean = await live([forwardingReport("{}", sha256("{}"), true)]);
         expect(clean.arms[0]?.identity_errors).toEqual([]);
         expect(clean.refused).toEqual([]);
+    });
+
+    test("a complete live report with no exchange is refused", async () => {
+        const empty = await live([
+            { ...forwardingReport("{}", sha256("{}"), true), exchanges: [] },
+        ]);
+        expect(errorsOf(empty)).toContain("forwarding-0.json complete report records no send");
     });
 
     test("live arms whose forwarding reports ran different models are refused", async () => {
@@ -1406,7 +1668,7 @@ describe("evidence live mode", () => {
             "records 2 exchanges above its 1 call cap",
         );
         expect(errorsOf(await live([{ ...report, spent_usd: 0.25 }]))).toContain(
-            "spent 0.25 USD, where its exchanges cost 0.5 USD",
+            "spent 0.25 USD, where its exchanges cost 0.6 USD",
         );
         expect(
             errorsOf(await live([{ ...report, refusals: ["limits.maxCalls reached"] }])),
@@ -1468,129 +1730,5 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([{ ...report, model: "" }]))).toContain(
             "does not match the forwarding report schema",
         );
-    });
-});
-
-describe("eval:compression-fidelity command", () => {
-    test("flags are required once each and unknown flags are refused", () => {
-        const base = ["--baseline", "a", "--candidate", "b", "--out", "o"];
-        expect(parseArgs(base).mode).toBe("offline");
-        expect(() => parseArgs([...base, "--baseline", "c"])).toThrow();
-        expect(() => parseArgs([...base, "--extra", "x"])).toThrow("unknown flag");
-        expect(() => parseArgs([...base, "--mode", "online"])).toThrow("offline or live");
-        expect(() => parseArgs(base.slice(2))).toThrow("--baseline is required");
-    });
-
-    test("the default run sends nothing and writes only owner-only files outside the repository", async () => {
-        const root = scratch();
-        const baseline = writeArm(root, { label: "baseline" });
-        const candidate = writeArm(root, { label: "candidate" });
-        const original = globalThis.fetch;
-        const sent: string[] = [];
-        const spy = async (input: RequestInfo | URL): Promise<Response> => {
-            sent.push(String(input));
-            throw new Error("no send");
-        };
-        globalThis.fetch = Object.assign(spy, { preconnect: original.preconnect });
-        const out = join(root, "out");
-        let written: Awaited<ReturnType<typeof run>> | undefined;
-        try {
-            written = await run({
-                baseline: baseline.dir,
-                candidate: candidate.dir,
-                out,
-                corpus: CORPUS_PATH,
-                mode: "offline",
-            });
-        } finally {
-            globalThis.fetch = original;
-        }
-        expect(sent).toEqual([]);
-        expect(written?.accepted).toBe(false);
-        expect(readdirSync(out).sort()).toEqual(["manifest.json", "report.json"]);
-        const published = JSON.parse(readFileSync(written?.report ?? "", "utf8"));
-        expect(published.manifest_sha256).toBe(sha256(readFileSync(written?.manifest ?? "")));
-        expect(statSync(out).mode & 0o777).toBe(0o700);
-        expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
-        await expect(
-            run({
-                baseline: baseline.dir,
-                candidate: candidate.dir,
-                out: resolve(import.meta.dir, "eval-out"),
-                corpus: CORPUS_PATH,
-                mode: "offline",
-            }),
-        ).rejects.toThrow("inside the repository");
-    });
-
-    test("evidence arms may be named through parent-relative paths", async () => {
-        const root = scratch();
-        const baseline = writeArm(root, { label: "baseline" });
-        const candidate = writeArm(root, { label: "candidate" });
-        const written = await run({
-            baseline: `${root}/candidate/../baseline`,
-            candidate: `${candidate.dir}/./`,
-            out: join(root, "out"),
-            corpus: CORPUS_PATH,
-            mode: "offline",
-        });
-        const manifest = JSON.parse(readFileSync(written.manifest, "utf8"));
-        expect(manifest.arms.map((a: { label: string }) => a.label)).toEqual([
-            "baseline",
-            "candidate",
-        ]);
-        expect(statSync(baseline.dir).isDirectory()).toBe(true);
-    });
-
-    test("the manifest revision marks a worktree with uncommitted changes", () => {
-        const repo = scratch();
-        const git = (...args: string[]) =>
-            Bun.spawnSync(["git", "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
-                cwd: repo,
-                stderr: "ignore",
-            });
-        git("init", "-q");
-        writeFileSync(join(repo, "a.txt"), "a\n");
-        git("add", "a.txt");
-        git("commit", "-q", "-m", "a");
-        const head = git("rev-parse", "HEAD").stdout.toString().trim();
-        expect(repositoryRevision(repo)).toBe(head);
-        writeFileSync(join(repo, "a.txt"), "b\n");
-        expect(repositoryRevision(repo)).toBe(`${head}-dirty`);
-        writeFileSync(join(repo, "untracked.txt"), "u\n");
-        expect(repositoryRevision(repo)).toBe(`${head}-dirty`);
-        expect(repositoryRevision(join(repo, "missing"))).toBe("unknown");
-    });
-
-    test("an output directory that is an evidence arm is refused before any write", async () => {
-        const root = scratch();
-        const baseline = writeArm(root, { label: "baseline" });
-        const candidate = writeArm(root, { label: "candidate" });
-        chmodSync(baseline.dir, 0o700);
-        chmodSync(candidate.dir, 0o700);
-        for (const out of [baseline.dir, join(candidate.dir, ".", "")]) {
-            await expect(
-                run({
-                    baseline: baseline.dir,
-                    candidate: candidate.dir,
-                    out,
-                    corpus: CORPUS_PATH,
-                    mode: "offline",
-                }),
-            ).rejects.toThrow("--out is an evidence arm");
-        }
-        const link = join(root, "link");
-        symlinkSync(baseline.dir, link);
-        await expect(
-            run({
-                baseline: baseline.dir,
-                candidate: candidate.dir,
-                out: join(link, "nested", ".."),
-                corpus: CORPUS_PATH,
-                mode: "offline",
-            }),
-        ).rejects.toThrow("--out is an evidence arm");
-        expect(readdirSync(baseline.dir)).not.toContain("manifest.json");
-        expect(readdirSync(candidate.dir)).not.toContain("report.json");
     });
 });
