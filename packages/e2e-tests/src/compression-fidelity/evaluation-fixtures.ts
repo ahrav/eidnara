@@ -21,6 +21,10 @@ export const sha256 = (text: string | Buffer) => createHash("sha256").update(tex
 export const allScenarios = corpus.cases.flatMap((c) =>
     c.scenarios.map((s) => ({ case: c.id, s })),
 );
+/** A natural m0 scenario: its row holds one delivery, so breaking that file empties the row. */
+export const M0_SCENARIO =
+    allScenarios.find(({ s }) => s.serving.path === "natural" && s.serving.stage === "m0")?.s.id ??
+    "";
 
 const dirs: string[] = [];
 export function scratch(): string {
@@ -39,6 +43,10 @@ export function write(dir: string, name: string, value: unknown): string {
 }
 
 export const SETTINGS = { temperature: 0.1, max_output_tokens: 1024 };
+
+/** The extra `warm` and `cold-m0` delivery files `writeArm` writes beside each m1 scenario's m1 one. */
+export const M1_STAGE_FILES =
+    2 * corpus.cases.flatMap((c) => c.scenarios.filter((s) => s.serving.stage === "m1")).length;
 
 /** The source-level delivery files `writeArm` writes: three stages per source with no m1 scenario. */
 export const SOURCE_LEVEL_FILES =
@@ -173,27 +181,47 @@ export function writeArm(
     for (const { case: c, s } of allScenarios) {
         if (s.id === options.skipScenario) continue;
         const exact = s.serving.path === "exact_read";
+        const m1 = s.serving.stage === "m1";
+        const delivery = (stage: string, kind?: string) => ({
+            ...base(c, s.source),
+            owner: "opencode-delivery",
+            scenario: s.id,
+            stage,
+            terminal: "served",
+            detail: {
+                served_tier: options.tier?.(s.id) ?? s.serving.tier,
+                // A pressure delivery serves sparser than the curve it was under.
+                ...(s.serving.path === "pressure" ? { curve_tier: "p1" } : {}),
+                serving: {
+                    ...(options.serving ?? SERVING),
+                    ...(kind ? { serving_kind: kind } : {}),
+                },
+                generation_capture_sha256: options.unlinked ? undefined : captures.get(s.source),
+            },
+        });
+        // The delivery witness writes a source's m1, warm, and cold-m0 deliveries onto its m1
+        // scenario; `delivery.<id>.json` is the m1 one, so tests that edit it keep working.
+        if (m1) {
+            write(dir, `delivery.${s.id}.warm.json`, delivery("warm", "warm_repeat"));
+            write(dir, `delivery.${s.id}.cold-m0.json`, delivery("cold-m0", "cold"));
+        }
         const name = `delivery.${s.id}.json`;
         files.set(
             s.id,
-            write(dir, name, {
-                ...base(c, s.source),
-                owner: exact ? "daemon.harness_sources.c6_exact_read" : "opencode-delivery",
-                scenario: s.id,
-                stage: exact ? "exact_read" : "served",
-                terminal: exact ? "read_exact" : "served",
-                detail: exact
-                    ? { sha256: "0".repeat(64), byte_length: 144 }
-                    : {
-                          served_tier: options.tier?.(s.id) ?? s.serving.tier,
-                          // A pressure delivery serves sparser than the curve it was under.
-                          ...(s.serving.path === "pressure" ? { curve_tier: "p1" } : {}),
-                          serving: options.serving ?? SERVING,
-                          generation_capture_sha256: options.unlinked
-                              ? undefined
-                              : captures.get(s.source),
-                      },
-            }),
+            write(
+                dir,
+                name,
+                exact
+                    ? {
+                          ...base(c, s.source),
+                          owner: "daemon.harness_sources.c6_exact_read",
+                          scenario: s.id,
+                          stage: "exact_read",
+                          terminal: "read_exact",
+                          detail: { sha256: "0".repeat(64), byte_length: 144 },
+                      }
+                    : delivery(m1 ? "m1" : "served"),
+            ),
         );
     }
     // The delivery witness labels a source with no m1 scenario by its source ID at its m1, warm,

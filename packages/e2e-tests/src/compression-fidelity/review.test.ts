@@ -18,6 +18,8 @@ import {
     allScenarios,
     CORPUS_PATH,
     corpus,
+    M0_SCENARIO,
+    M1_STAGE_FILES,
     SERVING,
     SHA,
     SOURCE_LEVEL_FILES,
@@ -199,7 +201,8 @@ describe("eval:compression-fidelity assembly", () => {
         expect(manifest.arms[0]?.observations.length).toBe(
             allScenarios.length +
                 corpus.cases.flatMap((c) => c.sources).length +
-                SOURCE_LEVEL_FILES,
+                SOURCE_LEVEL_FILES +
+                M1_STAGE_FILES,
         );
         expect(manifest.corpus.sha256).toBe(SHA);
     });
@@ -674,6 +677,44 @@ describe("eval:compression-fidelity gates", () => {
         expect(report.arms[1]?.forwarding).toEqual({ reports: 0, sends: 0, spent_usd: 0 });
     });
 
+    test("a served delivery recording a refusal other than history_absent is not a served cost", async () => {
+        const entry = allScenarios.find(
+            ({ s }) => s.serving.path === "natural" && s.serving.stage === "m0",
+        );
+        const scenario = entry?.s.id ?? "";
+        for (const [refusals, incomplete] of [
+            [["raw_tail_leak"], true],
+            [["not_applied"], true],
+            [["history_absent"], false],
+            [[], false],
+        ] as Array<[string[], boolean]>) {
+            const { report } = await evaluate(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${scenario}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.detail.refusals = refusals;
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+            const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
+            expect(report.arms[0]?.identity_errors).toEqual([]);
+            expect(row?.cost.missing.includes(`delivery.${scenario}.json: refusals`)).toBe(
+                incomplete,
+            );
+        }
+    });
+
+    test("an m1 scenario row carries the witness's m1, warm, and cold-m0 deliveries", async () => {
+        const m1 = allScenarios.find(({ s }) => s.serving.stage === "m1")?.s.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => rmSync(join(dir, `delivery.${m1}.warm.json`)),
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === m1);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.cost.missing).toContain("no warm serving observation");
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
     test("source-level serving observations are costed at arm scope", async () => {
         // C2.V2 has no m1 scenario, so the delivery witness labels its m1, warm, and cold-m0
         // observations with the source ID; their cost belongs to the arm, not to a row.
@@ -833,14 +874,19 @@ describe("eval:compression-fidelity gates", () => {
         expect(row?.cost.status).toBe("incomplete");
     });
 
-    test("arms whose serving observations name different estimators are refused", async () => {
+    test("a serving record names the producer's estimator", async () => {
+        const serving = {
+            ...SERVING,
+            estimator: "another-estimator v2",
+            invocation_charged_tokens: 0,
+        };
         const { report } = await evaluate(scratch(), {
-            candidate: { serving: { ...SERVING, estimator: "another-estimator v2" } },
+            baseline: { serving },
+            candidate: { serving },
         });
         expect(report.arms.every((a) => a.identity_errors.length === 0)).toBe(true);
-        expect(report.comparison.refused).toContain(
-            "the arms charged tokens under different estimators",
-        );
+        const row = report.arms[0]?.rows.find((r) => r.cost.status !== "complete");
+        expect(row?.cost.missing.join("\n")).toContain("estimator");
         expect(report.accepted).toBe(false);
     });
 
@@ -962,7 +1008,7 @@ describe("eval:compression-fidelity gates", () => {
         const { report } = await evaluate(scratch(), {
             baseline: { serving: { ...SERVING, stage: "warm" } },
         });
-        const row = report.arms[0]?.rows.find((r) => r.cost.serving.length > 0);
+        const row = report.arms[0]?.rows.find((r) => r.scenario === M0_SCENARIO);
         expect(row?.cost.serving[0]?.stage).toBe("served");
     });
 
@@ -996,11 +1042,11 @@ describe("eval:compression-fidelity gates", () => {
         const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
         expect(report.arms[0]?.identity_errors).toEqual([]);
         expect(row?.cost.status).toBe("complete");
-        expect(row?.cost.serving.length).toBe(1);
+        expect(row?.cost.serving.length).toBe(3);
     });
 
     test("the replay's tier observations carry no OpenCode serving cost", async () => {
-        const entry = allScenarios.find(({ s }) => s.serving.path === "natural");
+        const entry = allScenarios.find(({ s }) => s.id === M0_SCENARIO);
         const scenario = entry?.s.id ?? "";
         const { report } = await evaluate(scratch(), {
             tamper: (dir) => {

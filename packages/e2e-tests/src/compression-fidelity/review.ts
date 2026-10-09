@@ -361,7 +361,7 @@ const SERVING_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolea
     ["admission", (v) => typeof v === "string" && ADMISSIONS.includes(v)],
     ["invocation_bytes", count],
     ["invocation_charged_tokens", count],
-    ["estimator", named],
+    ["estimator", (v) => v === OPENCODE_ESTIMATOR],
     ["transform_elapsed_ms", measurement],
     // A served observation leaked no raw source; the producer marks a leaking pass unqualified.
     ["raw_source_leaks", (v) => v === 0],
@@ -402,6 +402,13 @@ function servingCosts(evidence: readonly Evidence[]): { serving: Json[]; missing
         if (e.owner === "opencode-delivery" && typeof e.detail.served_tier !== "string") {
             missing.push(`${e.file}: served_tier`);
         }
+        // A served pass recorded no refusal besides the deliberate `history_absent` omission.
+        if (
+            Array.isArray(e.detail.refusals) &&
+            e.detail.refusals.some((refusal) => refusal !== "history_absent")
+        ) {
+            missing.push(`${e.file}: refusals`);
+        }
         if (!record(e.detail.serving)) {
             missing.push(`${e.file}: serving`);
             continue;
@@ -433,10 +440,17 @@ function costOf(
     evidence: Evidence[],
     arm: Arm,
     exactRead: boolean,
+    m1Scenario: boolean,
     generations: readonly Evidence[],
 ): ScenarioRow["cost"] {
     const { serving, missing } = servingCosts(evidence);
     if (serving.length === 0 && !exactRead) missing.push("no serving observation");
+    // The delivery witness writes a source's m1, warm, and cold-m0 deliveries onto its m1 scenario.
+    for (const stage of m1Scenario ? SOURCE_LABEL_STAGES : []) {
+        if (!serving.some((row) => row.stage === stage)) {
+            missing.push(`no ${stage} serving observation`);
+        }
+    }
     const recovery: Json[] = [];
     for (const e of evidence.filter(isRecovery)) {
         if (!measurement(e.detail.calls) || !measurement(e.detail.result_utf8_bytes)) {
@@ -583,7 +597,13 @@ export function scenarioRow(
             consumer_safety = usable.abstained ? "abstained" : "safe";
         }
     }
-    const cost = costOf(evidence, arm, scenario.serving.path === "exact_read", generations);
+    const cost = costOf(
+        evidence,
+        arm,
+        scenario.serving.path === "exact_read",
+        scenario.serving.stage === "m1",
+        generations,
+    );
 
     const withheld: string[] = [];
     if (row.execution.status !== "executed") withheld.push(`execution ${row.execution.status}`);
@@ -618,20 +638,6 @@ function compare(baseline: ScenarioRow, candidate: ScenarioRow): Comparison {
     if (before && after) return "expected_green";
     if (before) return "regression";
     return after ? "resolution_candidate" : "expected_red";
-}
-
-/** Both arms charge tokens under one estimator, or their costs do not compare. */
-function estimatorRefusal(arms: ReturnType<typeof assembleEvidence>["arms"]): string[] {
-    const estimators = new Set(
-        arms.flatMap((side) =>
-            side.arm.evidence.flatMap((e) =>
-                record(e.detail.serving) && named(e.detail.serving.estimator)
-                    ? [e.detail.serving.estimator]
-                    : [],
-            ),
-        ),
-    );
-    return estimators.size > 1 ? ["the arms charged tokens under different estimators"] : [];
 }
 
 /** Assembles the manifest and the per-scenario report for `baseline` and `candidate`. */
@@ -771,7 +777,7 @@ export function evaluate(input: {
         };
     });
     const [base, cand] = arms as [(typeof arms)[0], (typeof arms)[0]];
-    const refused = [...assembled.refused, ...estimatorRefusal(assembled.arms)];
+    const refused = assembled.refused;
     const comparison = {
         refused,
         treatment: assembled.treatment,

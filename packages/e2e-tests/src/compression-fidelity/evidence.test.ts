@@ -5,6 +5,8 @@ import {
     type ArmOptions,
     allScenarios,
     corpus,
+    M0_SCENARIO,
+    M1_STAGE_FILES,
     SETTINGS,
     SHA,
     SOURCE_LEVEL_FILES,
@@ -64,7 +66,8 @@ describe("evidence identity and completeness", () => {
         expect(assembled.manifest.arms[0]?.observations.length).toBe(
             allScenarios.length +
                 corpus.cases.flatMap((c) => c.sources).length +
-                SOURCE_LEVEL_FILES,
+                SOURCE_LEVEL_FILES +
+                M1_STAGE_FILES,
         );
         expect(assembled.manifest.corpus.sha256).toBe(SHA);
     });
@@ -262,7 +265,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("an observation without a stage or terminal is an identity error", async () => {
-        const first = allScenarios[0]?.s.id ?? "";
+        const first = M0_SCENARIO;
         const strip = (field: string) =>
             assemble(scratch(), {
                 tamper: (dir) => {
@@ -281,7 +284,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a judge control outside the witness's control stage or scenario is an identity error", async () => {
-        const first = allScenarios.find(({ s }) => s.serving.path !== "exact_read")?.s.id ?? "";
+        const first = M0_SCENARIO;
         const control = (scenario: string, stage?: string) =>
             assemble(scratch(), {
                 tamper: (dir) => {
@@ -304,7 +307,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a delivery observation carries a string scenario label", async () => {
-        const first = allScenarios[0]?.s.id ?? "";
+        const first = M0_SCENARIO;
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${first}.json`);
@@ -396,7 +399,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a terminal is one its owner emits", async () => {
-        const first = allScenarios[0]?.s.id ?? "";
+        const first = M0_SCENARIO;
         const excluded =
             allScenarios.find(({ s }) => s.serving.path === "memory_excluded")?.s.id ?? "";
         const relabel = (scenario: string, terminal: string) =>
@@ -563,7 +566,7 @@ describe("evidence identity and completeness", () => {
     });
 
     test("a generation record that names a scenario is an identity error", async () => {
-        const scenario = allScenarios[0];
+        const scenario = allScenarios.find(({ s }) => s.id === M0_SCENARIO);
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `real.${scenario?.s.source}.json`);
@@ -1166,7 +1169,7 @@ describe("evidence deterministic column", () => {
     });
 
     test("the exact-read witness judges only exact-read scenarios", async () => {
-        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural");
+        const scenario = allScenarios.find(({ s }) => s.id === M0_SCENARIO);
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${scenario?.s.id}.json`);
