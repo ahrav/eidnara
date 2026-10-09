@@ -212,6 +212,21 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The facts `readResponse` extracts live under the keys `usage`, `stop_reason`, and
+ * `content_block`. JSON spells such a key either as the literal quoted name or with a `\u`
+ * escape, so every `data:` line that can affect the result contains one of the four strings,
+ * and skipping the parse of the other lines preserves the result.
+ */
+function mayCarryFacts(line: string): boolean {
+    return (
+        line.includes('"usage"') ||
+        line.includes('"stop_reason"') ||
+        line.includes('"content_block"') ||
+        line.includes("\\u")
+    );
+}
+
+/**
  * The usage, stop reason, and `tool_use` ids of a JSON or SSE Messages response, read in one
  * pass over its events. Usage is `null` unless the response states input and output counts;
  * absent cache counts are zero. An SSE `data:` line that is not a JSON object is skipped.
@@ -225,7 +240,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
     };
     if (contentType.includes("text/event-stream")) {
         for (const line of text.split("\n")) {
-            if (!line.startsWith("data:")) continue;
+            if (!line.startsWith("data:") || !mayCarryFacts(line)) continue;
             let event: unknown;
             try {
                 event = JSON.parse(line.slice(5));

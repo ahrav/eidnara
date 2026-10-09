@@ -5,7 +5,12 @@ import { join, resolve } from "node:path";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "../compression-fidelity/corpus";
 import { __spawnOpencodeTest, createIsolatedEnv } from "../opencode-runner/spawn";
 import type { CassetteOracle } from "./cassette-oracle";
-import { type ForwardConfig, publishForwardingReport, validateForwardConfig } from "./forward";
+import {
+    type ForwardConfig,
+    publishForwardingReport,
+    readResponse,
+    validateForwardConfig,
+} from "./forward";
 import { MockProvider } from "./server";
 
 const UPSTREAM = "https://provider.test/v1/messages";
@@ -215,6 +220,31 @@ describe("construction", () => {
 });
 
 describe("forwarding", () => {
+    test("a response is read from its events however their keys are spelled", () => {
+        const stream = [
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":40,"output_tokens":0}}}',
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"the \\"usage\\" word"}}',
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"plain"}}',
+            'data: {"type":"content_block_start","content_bloc\\u006b":{"type":"tool_use","id":"toolu_esc"}}',
+            'data: {"type":"message_delta","delta":{"stop_reaso\\u006e":"tool_use"},"\\u0075sage":{"output_tokens":6}}',
+            "data: 7",
+            "data: not json",
+        ].join("\n");
+        expect(readResponse("text/event-stream", stream)).toEqual({
+            usage: {
+                input_tokens: 40,
+                output_tokens: 6,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            stopReason: "tool_use",
+            toolUses: ["toolu_esc"],
+        });
+        expect(
+            readResponse("text/event-stream", stream.split("\n").slice(1, 3).join("\n")),
+        ).toEqual({ usage: null, stopReason: null, toolUses: [] });
+    });
+
     test("forwards the received bytes, returns the provider's response, and captures the tool-result turn", async () => {
         const toolUse = sse(
             [{ type: "tool_use", id: "toolu_1", name: "read", input: {} }],
