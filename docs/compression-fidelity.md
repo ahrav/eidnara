@@ -398,7 +398,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
     SHA-256 of the observation file it judged. It also gives each
     obligation's disposition and whether the answer preserved it, once per
     obligation; the list of forbidden conclusions it drew, possibly empty;
-    and whether it abstained. A model judgment carries citations and an
+    and whether it abstained. Its reviewer, like every control reviewer, is a
+    non-blank name. A model judgment carries citations and an
     uncertainty, and it never counts as review.
   - Approvers are named by non-blank identity; names that differ only by
     surrounding whitespace are one approver.
@@ -426,10 +427,10 @@ an owner-only `0700` directory outside the repository.
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
 | `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, or C6's exact read |
 | `preservation` | `preserved`, `recall`, or `unreviewed`, per obligation, from the bound human judgment; an abstained answer earns no `unavailable` credit |
-| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation |
-| `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed` |
+| `recovery` | `witnessed`, `not_required`, or `unverified`: a judged `discoverable` obligation needs a recovery observation, one whose stage starts with `recovery-` or whose markers include `cf-recovery-search` |
+| `consumer_safety` | `safe`, `abstained` (permitted abstention only), `false-authoritative`, or `unreviewed`; any forbidden conclusion the judgment lists, declared by the scenario or not, is `false-authoritative` |
 | `semantic_review` | `reviewed`, `model_only`, `disputed`, or `unreviewed` |
-| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes; generation needs attempts and a non-empty usage record. Missing or unreported usage leaves cost incomplete. |
+| `cost` | `complete` or `incomplete`. Each serving observation needs its request bytes, charged tokens, transform time, and raw-source leak count as non-negative numbers, its estimator, and a `serving_kind` of `cold` or `warm_repeat`; a pass that ran no admission check records its charged tokens as `null`. A row with no serving observation is incomplete, whatever recoveries it holds. Each recovery needs its calls and output bytes; generation needs at least one attempt and a non-empty usage record. Missing or unreported usage leaves cost incomplete. |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -459,7 +460,7 @@ nothing.
 `wrong_identity`, `lost_hint_qualifier`, labeled `violation`) and the
 positive controls (`meaning_preserving_paraphrase`, `successful_deployment`,
 labeled `acceptable`). Each needs exactly one human verdict equal to its
-label. A duplicate or undeclared control, a verdict for an undeclared
+label. Each kind is sealed exactly once. A duplicate or undeclared control, a verdict for an undeclared
 control, a model verdict, or a missing, misclassified, always-accept, or
 always-abstain verdict set leaves review unqualified, and so does a review
 record bound to another corpus or batch or holding a malformed entry. An
@@ -469,7 +470,8 @@ dispute.
 
 **Comparison and acceptance.**
 
-- The comparison is refused when an arm is bound to another corpus, when the
+- The comparison is refused when the arms share a label, when an arm is
+  bound to another corpus, when the
   arms reached different scenario sets, or when they differ in model,
   provider, version, settings, or limits.
 - Differing prompt hashes mark it a treatment comparison.

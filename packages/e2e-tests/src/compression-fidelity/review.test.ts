@@ -263,6 +263,24 @@ describe("eval:compression-fidelity gates", () => {
                 {
                     editControls: (c) => [
                         ...c,
+                        { id: "ctl-second", kind: "reversed_negation", label: "violation" },
+                    ],
+                    editVerdicts: (v) => [
+                        ...v,
+                        {
+                            control: "ctl-second",
+                            verdict: "violation",
+                            reviewer: "reviewer-c",
+                            kind: "human",
+                        },
+                    ],
+                },
+                "reversed_negation is sealed 2 times",
+            ],
+            [
+                {
+                    editControls: (c) => [
+                        ...c,
                         { id: "ctl-extra", kind: "invented", label: "violation" },
                     ],
                 },
@@ -308,6 +326,12 @@ describe("eval:compression-fidelity gates", () => {
         const cases: Array<Partial<ReviewOptions>> = [
             { editControls: (c) => [...c, { id: "ctl-x", kind: "reversed_negation" }] },
             { editVerdicts: (v) => [...v, { control: "ctl-x", verdict: "violation" }] },
+            {
+                editVerdicts: (v) =>
+                    v.map((x) =>
+                        x.control === "ctl-wrong_identity" ? { ...x, reviewer: "  " } : x,
+                    ),
+            },
         ];
         for (const reviews of cases) {
             const { report } = await evaluate(scratch(), { reviews });
@@ -426,6 +450,46 @@ describe("eval:compression-fidelity gates", () => {
         ).report;
         const row = recovery.arms[0]?.rows.find((r) => r.scenario === allScenarios[1]?.s.id);
         expect(row?.cost.missing.join("\n")).toContain("recovery calls or output bytes");
+    });
+
+    test("a real capture with no attempt earns no generation cost", async () => {
+        const source = corpus.cases[0]?.sources[0]?.id ?? "";
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `real.${source}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.attempts = [];
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.case === corpus.cases[0]?.id);
+        expect(row?.cost.missing.join("\n")).toContain(
+            `real.${source}.json: no generation attempt`,
+        );
+        expect(row?.cost.status).toBe("incomplete");
+    });
+
+    test("arms sharing a label are refused", async () => {
+        const baseline = writeArm(scratch(), { label: "shared" });
+        const candidate = writeArm(scratch(), {
+            label: "shared",
+            system: "candidate system prompt",
+        });
+        const reviews = writeReviews(scratch(), {
+            arms: [{ label: "shared", files: baseline.files }],
+        });
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: await loadArm(baseline.dir, corpus, SHA),
+            candidate: await loadArm(candidate.dir, corpus, SHA),
+            reviews: await loadReviews(reviews, SHA),
+        });
+        expect(report.comparison.refused).toContain("the arms share the label shared");
+        expect(report.accepted).toBe(false);
     });
 
     test("a pass line that measured no admission or no elapsed time records those costs as unreported", () => {
@@ -579,6 +643,32 @@ describe("eval:compression-fidelity judgments", () => {
         expect(row?.cost.status).toBe("complete");
     });
 
+    test("a stage that merely contains search or recover witnesses no recovery", async () => {
+        const scenario = discoverableFirst;
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            const judgment = judgmentFor(j, scenario?.id ?? "");
+            judgment.obligations = (judgment.obligations as Array<Record<string, unknown>>).map(
+                (o, i) => (i === 0 ? { ...o, disposition: "discoverable" } : o),
+            );
+        });
+        write(baseline.dir, "note.json", {
+            schema_version: 1,
+            corpus_sha256: SHA,
+            owner: "opencode-delivery",
+            case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+            source: scenario?.source,
+            scenario: scenario?.id,
+            stage: "research-note",
+            terminal: "served",
+            markers: ["unrecoverable"],
+            detail: { calls: 1, result_utf8_bytes: 400 },
+        });
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        expect(row?.recovery).toBe("unverified");
+        expect(row?.cost.recovery).toEqual([]);
+    });
+
     test("a lost obligation or a disposition outside the accepted set is recall", async () => {
         const scenario = allScenarios.find(
             ({ s }) =>
@@ -628,6 +718,9 @@ describe("eval:compression-fidelity judgments", () => {
             },
             (judgment) => {
                 judgment.citations = "C1.V1#0";
+            },
+            (judgment) => {
+                judgment.reviewer = "   ";
             },
         ];
         for (const edit of edits) {
@@ -738,6 +831,9 @@ describe("eval:compression-fidelity judgments", () => {
         expect((await row(permitted))?.consumer_safety).toBe("abstained");
         expect((await row(forbidden))?.consumer_safety).toBe("false-authoritative");
         expect((await row(withForbidden))?.consumer_safety).toBe("false-authoritative");
+        expect((await row(withForbidden))?.withheld).toContain(
+            "consumer safety false-authoritative",
+        );
         expect((await row(modelOnly))?.semantic_review).toBe("model_only");
         expect((await row(disputed))?.semantic_review).toBe("disputed");
         const abstainedUnavailable = (await row(permitted))?.preservation.filter(
@@ -745,6 +841,17 @@ describe("eval:compression-fidelity judgments", () => {
         );
         expect(abstainedUnavailable?.length).toBeGreaterThan(0);
         expect(abstainedUnavailable?.every((p) => p.status === "recall")).toBe(true);
+    });
+
+    test("a forbidden conclusion the scenario does not declare still withholds safety", async () => {
+        const scenario = allScenarios[0]?.s;
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            judgmentFor(j, scenario?.id ?? "").forbidden_violated = ["C9.X9"];
+        });
+        const row = await rowOf(root, baseline.dir, reviewsDir, scenario?.id ?? "");
+        expect(row?.consumer_safety).toBe("false-authoritative");
+        expect(row?.withheld).toContain("consumer safety false-authoritative");
     });
 });
 

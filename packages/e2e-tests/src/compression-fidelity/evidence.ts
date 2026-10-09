@@ -533,6 +533,7 @@ export function assembleEvidence(input: {
     });
     const [base, cand] = arms as [(typeof arms)[0], (typeof arms)[0]];
     const refused: string[] = [];
+    if (base.label === cand.label) refused.push(`the arms share the label ${base.label}`);
     if (input.baseline.foreignCorpus || input.candidate.foreignCorpus) {
         refused.push("an arm is bound to another corpus");
     }

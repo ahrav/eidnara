@@ -107,11 +107,15 @@ function stringList(value: unknown): value is string[] {
     return Array.isArray(value) && value.every((v) => typeof v === "string");
 }
 
+function named(value: unknown): value is string {
+    return typeof value === "string" && value.trim() !== "";
+}
+
 /** `judgmentOf` rejects repeated obligations to prevent conflicting verdicts. */
 function judgmentOf(value: unknown): Judgment | null {
     if (!record(value)) return null;
     const { id, kind, reviewer, arm, scenario, artifact_sha256, obligations, abstained } = value;
-    if (!text(id) || !text(reviewer) || !text(arm) || !text(scenario) || !text(artifact_sha256)) {
+    if (!text(id) || !named(reviewer) || !text(arm) || !text(scenario) || !text(artifact_sha256)) {
         return null;
     }
     if ((kind !== "human" && kind !== "model") || typeof abstained !== "boolean") return null;
@@ -156,7 +160,7 @@ function stringRecords<K extends string>(
 ): Array<Record<K, string>> {
     const kept: Array<Record<K, string>> = [];
     for (const value of Array.isArray(list) ? list : []) {
-        if (record(value) && fields.every((field) => typeof value[field] === "string")) {
+        if (record(value) && fields.every((field) => named(value[field]))) {
             kept.push(
                 Object.fromEntries(fields.map((f) => [f, value[f] as string])) as Record<K, string>,
             );
@@ -276,8 +280,9 @@ export function controlQualification(reviews: Reviews): { qualified: boolean; pr
         }
     }
     for (const kind of expected.keys()) {
-        if (!reviews.controls.some((control) => control.kind === kind))
-            problems.push(`no sealed ${kind} control`);
+        const sealed = reviews.controls.filter((control) => control.kind === kind).length;
+        if (sealed === 0) problems.push(`no sealed ${kind} control`);
+        else if (sealed > 1) problems.push(`${kind} is sealed ${sealed} times`);
     }
     for (const verdict of reviews.verdicts) {
         if (!ids.includes(verdict.control))
@@ -286,10 +291,13 @@ export function controlQualification(reviews: Reviews): { qualified: boolean; pr
     return { qualified: problems.length === 0 && reviews.errors.length === 0, problems };
 }
 
+const RECOVERY_STAGE_PREFIX = "recovery-";
+const RECOVERY_MARKER = "cf-recovery-search";
+
 function isRecovery(evidence: Evidence): boolean {
     return (
-        /recover|search/.test(evidence.stage) ||
-        evidence.markers.some((m) => /recover|search/.test(m))
+        evidence.stage.startsWith(RECOVERY_STAGE_PREFIX) ||
+        evidence.markers.includes(RECOVERY_MARKER)
     );
 }
 
@@ -350,6 +358,7 @@ function costOf(
         }));
     if (generation.length === 0) missing.push("no generation observation");
     for (const g of generation) {
+        if (g.attempts === 0) missing.push(`${String(g.file)}: no generation attempt`);
         if (g.usage === null) missing.push(`${String(g.file)}: generation usage unreported`);
     }
     if (arm.config?.generation_origin === "real") {
@@ -456,7 +465,9 @@ export function scenarioRow(
           : "unverified";
     let consumer_safety: ScenarioRow["consumer_safety"] = "unreviewed";
     if (usable) {
-        const violated = usable.forbidden_violated.some((x) => scenario.forbidden.includes(x));
+        // Every reviewer-reported forbidden conclusion counts as a violation, including an ID
+        // outside the scenario's declared set.
+        const violated = usable.forbidden_violated.length > 0;
         if (violated || (usable.abstained && scenario.abstention === "forbidden")) {
             consumer_safety = "false-authoritative";
         } else {
