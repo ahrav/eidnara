@@ -671,6 +671,51 @@ describe("eval:compression-fidelity gates", () => {
         expect(report.arms[1]?.forwarding).toEqual({ reports: 0, sends: 0, spent_usd: 0 });
     });
 
+    test("source-level serving observations are costed at arm scope", async () => {
+        // C2.V2 has no m1 scenario, so the delivery witness labels its m1, warm, and cold-m0
+        // observations with the source ID; their cost belongs to the arm, not to a row.
+        const c = corpus.cases.find((k) => k.sources.some((v) => v.id === "C2.V2"));
+        const sourceLevel = (dir: string, serving: Record<string, unknown>) => {
+            const served = JSON.parse(readFileSync(join(dir, "delivery.C2.S6.json"), "utf8"));
+            for (const stage of ["m1", "warm", "cold-m0"]) {
+                write(dir, `source.${stage}.json`, {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: c?.id,
+                    source: "C2.V2",
+                    scenario: "C2.V2",
+                    stage,
+                    terminal: "served",
+                    markers: [],
+                    detail: {
+                        served_tier: "p1",
+                        generation_capture_sha256: served.detail.generation_capture_sha256,
+                        serving: {
+                            ...serving,
+                            serving_kind: stage === "warm" ? "warm_repeat" : "cold",
+                        },
+                    },
+                });
+            }
+        };
+        const costed = await evaluate(scratch(), { tamper: (dir) => sourceLevel(dir, SERVING) });
+        expect(costed.report.arms[0]?.identity_errors).toEqual([]);
+        expect(costed.report.arms[0]?.source_serving.map((r) => r.stage)).toEqual([
+            "cold-m0",
+            "m1",
+            "warm",
+        ]);
+        expect(costed.report.arms[0]?.accepted).toBe(true);
+        const uncosted = await evaluate(scratch(), {
+            tamper: (dir) => sourceLevel(dir, { ...SERVING, estimator: "   " }),
+        });
+        expect(uncosted.report.arms[0]?.withheld.join("\n")).toContain(
+            "source-level serving cost incomplete: source.cold-m0.json: estimator",
+        );
+        expect(uncosted.report.arms[0]?.accepted).toBe(false);
+    });
+
     test("a real capture with no attempt earns no generation cost", async () => {
         const source = corpus.cases[0]?.sources[0]?.id ?? "";
         const { report } = await evaluate(scratch(), {

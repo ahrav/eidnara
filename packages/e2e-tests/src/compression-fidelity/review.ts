@@ -384,12 +384,8 @@ function reportedUsage(e: Evidence): Json | null {
     return measurement(usage.input_tokens) && measurement(usage.output_tokens) ? usage : null;
 }
 
-function costOf(
-    evidence: Evidence[],
-    arm: Arm,
-    exactRead: boolean,
-    generations: readonly Evidence[],
-): ScenarioRow["cost"] {
+/** The validated serving cost rows among `evidence`, and what each costed observation lacks. */
+function servingCosts(evidence: readonly Evidence[]): { serving: Json[]; missing: string[] } {
     const missing: string[] = [];
     const serving: Json[] = [];
     for (const e of evidence.filter((e) => servedTierOf(e) !== undefined && !uncosted(e))) {
@@ -415,6 +411,16 @@ function costOf(
         }
         serving.push(row);
     }
+    return { serving, missing };
+}
+
+function costOf(
+    evidence: Evidence[],
+    arm: Arm,
+    exactRead: boolean,
+    generations: readonly Evidence[],
+): ScenarioRow["cost"] {
+    const { serving, missing } = servingCosts(evidence);
     if (serving.length === 0 && !exactRead) missing.push("no serving observation");
     const recovery: Json[] = [];
     for (const e of evidence.filter(isRecovery)) {
@@ -678,12 +684,18 @@ export function evaluate(input: {
                 generations,
             ),
         );
+        // The delivery witness labels a source with no m1 scenario by its source ID; those
+        // serving observations belong to the arm and are costed here rather than on a row.
+        const sourceServing = servingCosts(side.arm.evidence.filter((e) => e.scenario === null));
         const approvers = reviews.approvals.length;
         const reasons = [
             ...side.identity_errors,
             ...reviews.errors,
             ...controls.problems.map((p) => `controls: ${p}`),
             ...stray,
+            ...(sourceServing.missing.length > 0
+                ? [`source-level serving cost incomplete: ${sourceServing.missing.join(", ")}`]
+                : []),
             ...(approvers < REQUIRED_APPROVERS
                 ? [`the batch has ${approvers} of ${REQUIRED_APPROVERS} approvers`]
                 : []),
@@ -710,6 +722,7 @@ export function evaluate(input: {
             reached_scenarios: side.reached_scenarios,
             missing_scenarios: side.missing_scenarios,
             rows,
+            source_serving: sourceServing.serving,
             forwarding,
             accepted: reasons.length === 0,
             withheld: reasons,

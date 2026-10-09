@@ -485,6 +485,10 @@ either arm; an arm directory is refused before any write, and a component of
   - reached and missing scenarios;
   - the validated forwarding reports' count, sends, and `spent_usd`, at arm
     scope, since sends belong to the arm rather than to a scenario;
+  - the serving cost rows of its source-level observations (the `m1`,
+    `warm`, and `cold-m0` deliveries the witness labels by source ID for a
+    source with no m1 scenario), validated as a row's serving costs are;
+    an incomplete one withholds acceptance;
   - one row per corpus scenario with the columns below, where every column
     derives from that arm's observations and bound judgments;
   - the reasons acceptance is withheld.
