@@ -61,6 +61,7 @@ export interface ArmOptions {
     model?: string;
     captureModel?: string;
     attempt?: Record<string, unknown> | null;
+    capture?: Record<string, unknown>;
     generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
 }
@@ -143,6 +144,9 @@ export function writeArm(
                                   },
                               ],
                     usage: { input_tokens: 900, output_tokens: 300 },
+                    settled: true,
+                    published_rows: [{ start: 1, end: 2, title: "t", p1: "p1" }],
+                    ...options.capture,
                 },
             });
             captures.set(source.id, capture);

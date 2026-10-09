@@ -166,6 +166,48 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(unrecorded)).toContain("records no user prompt");
     });
 
+    test("a published real capture records settled generation, drained output, and published rows", async () => {
+        const unsettled = await assemble(scratch(), { baseline: { capture: { settled: false } } });
+        expect(errorsOf(unsettled)).toContain("is published without settled generation");
+        const silent = await assemble(scratch(), {
+            baseline: { attempt: { outputs: [{ text: null, error: "timeout" }] } },
+        });
+        expect(errorsOf(silent)).toContain("is published without a drained text output");
+        const rowless = await assemble(scratch(), {
+            baseline: { capture: { published_rows: [] } },
+        });
+        expect(errorsOf(rowless)).toContain("is published without published rows");
+        for (const assembled of [unsettled, silent, rowless]) {
+            expect(assembled.refused).toContain("an arm has identity errors");
+        }
+    });
+
+    test("a variant label is accepted only from the witness that documents it", async () => {
+        const first = allScenarios.find(({ s }) => s.serving.path !== "exact_read")?.s.id ?? "";
+        const relabel = (variant: string, owner?: string) =>
+            assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${first}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.scenario = `${first}@${variant}`;
+                    value.terminal = "unqualified";
+                    if (owner) value.owner = owner;
+                    writeFileSync(join(dir, "variant.json"), JSON.stringify(value));
+                },
+            });
+        expect(errorsOf(await relabel("ignored"))).toContain(
+            `variant.json labels variant ignored, which no witness emits`,
+        );
+        expect(errorsOf(await relabel("p1-only", "daemon.compression_fidelity.replay"))).toContain(
+            `variant.json labels variant p1-only, which no witness emits`,
+        );
+        const known = await relabel("p1-only");
+        expect(known.arms[0]?.identity_errors).toEqual([]);
+        expect(rowOf(known, first)?.execution.outcomes).toContain(
+            "opencode-delivery:p1-only:served:unqualified",
+        );
+    });
+
     test("a published real capture must record the system prompt it ran", async () => {
         const assembled = await assemble(scratch(), { baseline: { attempt: null } });
         expect(errorsOf(assembled)).toContain("records no system prompt");
@@ -749,6 +791,7 @@ describe("evidence live mode", () => {
             mode: "forward",
             corpus_sha256: SHA,
             model: "claude-live",
+            upstream_url: "https://api.example.test/v1/messages",
             context_limit: 200_000,
             stopped: null as string | null,
             spent_usd: 0.5,
@@ -939,6 +982,32 @@ describe("evidence live mode", () => {
             },
         });
         expect(limited.refused).toContain("the arms forwarded at different context limits");
+        const elsewhere = await assemble(scratch(), {
+            mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
+            tamper: (dir) => {
+                write(dir, "forwarding-0.json", report);
+                write(join(dir, "..", "candidate"), "forwarding-0.json", {
+                    ...report,
+                    upstream_url: "https://other.example.test/v1/messages",
+                });
+            },
+        });
+        expect(elsewhere.refused).toContain("the arms forwarded to different upstream endpoints");
+        expect(elsewhere.manifest.arms[1]?.forwarding_reports[0]?.upstream_url).toBe(
+            "https://other.example.test/v1/messages",
+        );
+        const relocated = await live([
+            report,
+            { ...report, upstream_url: "https://other.example.test/v1/messages" },
+        ]);
+        expect(errorsOf(relocated)).toContain(
+            "forwarding-1.json forwarded to https://other.example.test/v1/messages, where forwarding-0.json forwarded to https://api.example.test/v1/messages",
+        );
+        expect(errorsOf(await live([{ ...report, upstream_url: "" }]))).toContain(
+            "does not match the forwarding report schema",
+        );
         const mixed = await live([report, forwardedTo("claude-other")]);
         expect(errorsOf(mixed)).toContain(
             "forwarding-1.json forwarded to claude-other, where forwarding-0.json forwarded to claude-live",
