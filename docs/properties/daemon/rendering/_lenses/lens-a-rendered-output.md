@@ -258,7 +258,7 @@ which is what keeps `newest_active_tag_block_ids`'s `source_bytes` comparison at
 15. `transform.rs:9114-9115` — `render_user_hint` truncates to
     `USER_HINT_TOTAL_CHAR_CAP` (800, `:110`) and `debug_assert!`s the result. The
     inputs are capped at 3 fragments (`:113`, applied `:9097`) of 80 UTF-16 units
-    each (`:109`, applied `:9098`), so the wrapped maximum is 604 UTF-16 units.
+    each (`:109`, applied `:9098`), so the wrapped maximum is 589 UTF-16 units.
     The 800 cap cannot bind. Record 10.
 16. `transform.rs:9070-9082` — `utf16_prefix` measures in UTF-16 units but slices
     on whole scalars, so no truncation can emit a lone surrogate.

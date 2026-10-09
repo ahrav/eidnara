@@ -847,7 +847,7 @@ Open questions:
 
 ## Group D: documented paths the build makes unreachable
 
-Three dead paths with three different keepers: a computed maximum of 604 UTF-16
+Three dead paths with three different keepers: a computed maximum of 589 UTF-16
 units against a cap of 800, two `Option` constants that are unconditionally
 `Some`, and a normalizing wrapper that collapses an `Option` before the documented
 fail-open branch can see it. The grouping earns its place because a reviewer
@@ -1848,7 +1848,7 @@ dominance statement is a hypothesis, not a finding.
   [render-a-user-hint-total-cap-cannot-bind](#render-a-user-hint-total-cap-cannot-bind),
   [render-a-light-surface-fallback-notice-never-served](#render-a-light-surface-fallback-notice-never-served),
   [nudge-b-todo-availability-fail-open-is-unreachable](#nudge-b-todo-availability-fail-open-is-unreachable).
-  Three dead paths with three different keepers: a computed maximum of 604 UTF-16
+  Three dead paths with three different keepers: a computed maximum of 589 UTF-16
   units against a cap of 800, two `Option` constants that are unconditionally
   `Some`, and a normalizing wrapper (`todo_synthesis_verdict`,
   `transform.rs:2626-2630`) that collapses the `Option` before the documented

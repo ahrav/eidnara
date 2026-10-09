@@ -111,9 +111,10 @@ const USER_HINT_TOTAL_CHAR_CAP: usize = 800;
 const USER_HINT_CANDIDATE_LIMIT: usize = 100;
 const USER_HINT_TOKEN_CAP: usize = 24;
 const USER_HINT_RESULT_LIMIT: usize = 3;
-/// Follows the fragments when any of them starts or ends with `…`, the mark the search window
-/// and the fragment cap leave where they cut longer text.
-const USER_HINT_CUT_NOTE: &str = "A fragment that starts or ends with … is cut from longer text and may omit a qualifier such as a negation or a rejection.";
+/// Follows the fragments when the search window or the fragment cap cut any of them. The note
+/// speaks of the hint as a whole: a stored text can carry its own `…`, so the mark alone does not
+/// name the cut fragment.
+const USER_HINT_CUT_NOTE: &str = "One or more fragments are cut from longer text and may omit a qualifier such as a negation or a rejection.";
 const USER_HINT_MIN_MATCHED_TOKENS: usize = 2;
 
 /// What each auto-search stage kept for one live user tail, as the stages

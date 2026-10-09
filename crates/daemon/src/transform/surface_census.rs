@@ -480,6 +480,17 @@ fn a_literal_ellipsis_in_a_whole_fragment_adds_no_cut_note() {
     let line = hint_fragment_lines(&window)[0];
     assert!(line.starts_with('…') && line.ends_with('…'), "{line}");
     assert_eq!(window.matches(USER_HINT_CUT_NOTE).count(), 1, "{window}");
+
+    let mixed = render_user_hint(&[
+        selection(user_hint_served_fragment(&body, &["zephyrine"])),
+        hint_result("quasar nebula…"),
+    ])
+    .unwrap();
+    assert_eq!(mixed.matches(USER_HINT_CUT_NOTE).count(), 1, "{mixed}");
+    assert!(
+        !USER_HINT_CUT_NOTE.contains('…'),
+        "the note names no mark, so a whole fragment's own `…` is not read as a cut: {USER_HINT_CUT_NOTE}"
+    );
 }
 
 #[test]

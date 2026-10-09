@@ -221,7 +221,7 @@ Two smaller divergences on the same axis, both inside the 4e scope:
   A release build serves the violating prefix.
 - `transform.rs:9115`, `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)`.
   Compiled out of release, and trivially satisfied in debug: lens A's
-  `render-a-user-hint-total-cap-cannot-bind` computes a maximum of 604 UTF-16
+  `render-a-user-hint-total-cap-cannot-bind` computes a maximum of 589 UTF-16
   units against the cap of 800 at `:110`. Re-verified here: `:113`
   `USER_HINT_RESULT_LIMIT = 3` applied at `:9097`, `:109`
   `USER_HINT_FRAGMENT_CHAR_CAP = 80` applied at `:9098`, envelope built at
