@@ -639,9 +639,6 @@ mod tests {
         }
     }
 
-    /// The prompt tells the summarizer that `eidnara_search` covers the sources the primary
-    /// agent's current tool contract exposes; the current OpenCode registry separately scopes
-    /// `eidnara_search` to project memory.
     #[test]
     fn the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out() {
         let prompt = HISTORY_SUMMARIZER_SYSTEM_PROMPT;
