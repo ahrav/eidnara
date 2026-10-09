@@ -371,6 +371,25 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(attempt)).toContain("records no complete real attempt");
     });
 
+    test("an arm whose settings omit the generation settings does not match the arm schema", async () => {
+        for (const settings of [
+            {},
+            { temperature: 0.1 },
+            { temperature: "warm", max_output_tokens: 1024 },
+            { temperature: 0.1, max_output_tokens: 0 },
+        ]) {
+            const assembled = await assemble(scratch(), {
+                baseline: { attempt: { temperature: undefined, max_output_tokens: undefined } },
+                tamper: (dir) => {
+                    const path = join(dir, "arm.json");
+                    const arm = JSON.parse(readFileSync(path, "utf8"));
+                    writeFileSync(path, JSON.stringify({ ...arm, settings }));
+                },
+            });
+            expect(errorsOf(assembled)).toContain("arm.json does not match its schema");
+        }
+    });
+
     test("a blank arm.json identifier does not match the arm schema", async () => {
         for (const field of ["label", "model", "provider", "version", "prompt_sha256"]) {
             const assembled = await assemble(scratch(), {
@@ -960,6 +979,14 @@ describe("evidence live mode", () => {
         expect(
             errorsOf(await live([{ ...complete, stopped: "send 0 returned HTTP 500" }])),
         ).toContain("complete report records a stop: send 0 returned HTTP 500");
+        expect(
+            errorsOf(await live([{ ...complete, incomplete_reasons: ["a send is in flight"] }])),
+        ).toContain("complete report lists incomplete reasons: a send is in flight");
+        for (const limit of [0, -1, 1.5]) {
+            expect(errorsOf(await live([{ ...complete, context_limit: limit }]))).toContain(
+                "does not match the forwarding report schema",
+            );
+        }
         const looped = forwardingReport("{}", sha256("{}"), true);
         const [call] = looped.exchanges;
         if (call) call.tool_uses = ["toolu_1"];

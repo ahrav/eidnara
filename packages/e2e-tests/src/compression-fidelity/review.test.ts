@@ -974,6 +974,15 @@ describe("eval:compression-fidelity judgments", () => {
             (judgment) => {
                 judgment.reviewer = "   ";
             },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", uncertainty: "low" });
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", citations: ["C1.V1#0"] });
+            },
+            (judgment) => {
+                Object.assign(judgment, { kind: "model", citations: [], uncertainty: "low" });
+            },
         ];
         for (const edit of edits) {
             const root = scratch();
@@ -1028,6 +1037,34 @@ describe("eval:compression-fidelity judgments", () => {
         const [base, cand] = report.arms;
         expect(base?.rows.every((r) => r.semantic_review === "reviewed")).toBe(true);
         expect(cand?.rows.every((r) => r.semantic_review === "unreviewed")).toBe(true);
+    });
+
+    test("a judgment whose artifact hash matches no observation of its row withholds acceptance", async () => {
+        const scenario = allScenarios[0]?.s.id ?? "";
+        const root = scratch();
+        const { baseline, reviewsDir } = rewrite(root, (j) => {
+            j.judgments.push({
+                ...judgmentFor(j, scenario),
+                id: "stale-dissent",
+                reviewer: "reviewer-d",
+                artifact_sha256: "f".repeat(64),
+                abstained: true,
+            });
+        });
+        const { report } = assemble({
+            corpus,
+            corpusPath: "corpus.json",
+            corpusSha256: SHA,
+            revision: "rev",
+            mode: "offline",
+            baseline: await loadArm(baseline.dir, corpus, SHA),
+            candidate: await loadArm(join(root, "candidate"), corpus, SHA),
+            reviews: await loadReviews(reviewsDir, SHA),
+        });
+        expect(report.arms[0]?.withheld).toContain(
+            `a judgment names unknown artifact ${"f".repeat(64)} for baseline/${scenario}`,
+        );
+        expect(report.accepted).toBe(false);
     });
 
     test("a judgment naming an undeclared obligation withholds acceptance", async () => {

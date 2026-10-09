@@ -211,6 +211,11 @@ function armConfig(value: unknown): ArmConfig | null {
         return null;
     }
     if (!record(settings) || !(limits === null || record(limits))) return null;
+    if (typeof settings.temperature !== "number" || !Number.isFinite(settings.temperature)) {
+        return null;
+    }
+    const tokens = settings.max_output_tokens;
+    if (typeof tokens !== "number" || !Number.isInteger(tokens) || tokens <= 0) return null;
     if (generation_origin !== "scripted" && generation_origin !== "real") return null;
     return {
         schema: ARM_SCHEMA,
@@ -237,7 +242,11 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         return null;
     }
     if (value.stopped !== null && !text(value.stopped)) return null;
-    if (typeof value.context_limit !== "number" || typeof value.spent_usd !== "number") return null;
+    const contextLimit = value.context_limit;
+    if (typeof contextLimit !== "number" || !Number.isInteger(contextLimit) || contextLimit <= 0) {
+        return null;
+    }
+    if (typeof value.spent_usd !== "number" || !Number.isFinite(value.spent_usd)) return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -294,7 +303,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         corpus_sha256: value.corpus_sha256,
         model: value.model,
         upstream_url: value.upstream_url,
-        context_limit: value.context_limit,
+        context_limit: contextLimit,
         limits: value.limits,
         stopped: value.stopped as string | null,
         spent_usd: value.spent_usd,
@@ -379,6 +388,11 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     }
     if (report.complete && report.stopped !== null) {
         errors.push(`${file} complete report records a stop: ${report.stopped}`);
+    }
+    if (report.complete && report.incomplete_reasons.length > 0) {
+        errors.push(
+            `${file} complete report lists incomplete reasons: ${report.incomplete_reasons.join("; ")}`,
+        );
     }
     const cap = report.limits.spendCapUsd;
     if (report.complete && typeof cap === "number" && report.spent_usd > cap) {

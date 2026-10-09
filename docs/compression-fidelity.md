@@ -438,8 +438,9 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
   also holds any `forwarding-*.json` reports and an `arm.json`
   (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
   the SHA-256 of its history summarizer system prompt, its model, provider,
-  version, settings, and limits, each identifier a non-blank string and the
-  prompt digest a 64-digit hex SHA-256, and whether its generation origin is
+  version, settings, and limits, each identifier a non-blank string, the
+  prompt digest a 64-digit hex SHA-256, and `settings` carrying a numeric
+  `temperature` and a positive integer `max_output_tokens`, and whether its generation origin is
   `scripted` or `real`.
 - `--reviews`: two review records.
   - `controls.json` (`eidnara.compression-fidelity-controls/v1`) holds the
@@ -453,8 +454,8 @@ eval:compression-fidelity --baseline <dir> --candidate <dir> --reviews <dir>
     obligation's disposition and whether the answer preserved it, once per
     obligation; the list of forbidden conclusions it drew, possibly empty;
     and whether it abstained. Its reviewer, like every control reviewer, is a
-    non-blank name. A model judgment carries citations and an
-    uncertainty, and it never counts as review.
+    non-blank name. A model judgment carries at least one citation and a
+    non-blank uncertainty, or it is a review error; it never counts as review.
   - Approvers are named by non-blank identity; names that differ only by
     surrounding whitespace are one approver, and any other entry in
     `approved_by` is a review error.
@@ -522,7 +523,8 @@ either arm; an arm directory is refused before any write.
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces, or
   whose exchange tool ids are not string arrays;
-- a forwarding report marked complete that records a stop, no send, or spend
+- a forwarding report marked complete that lists incomplete reasons or
+  records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
   `acknowledged`, a response with no stop reason or naming no model or a
@@ -588,7 +590,8 @@ dispute.
   `resolution_candidate`, `expected_red`, or `unscored`.
 - An arm is accepted only when all of these hold: it has no identity
   error; review is qualified; every judgment and dispute names a compared arm and a
-  corpus scenario, and every judged obligation is one the scenario declares; the batch names two distinct approvers; its origin is
+  corpus scenario, every judged obligation is one the scenario declares, and
+  every judgment's artifact hash names an observation of its row; the batch names two distinct approvers; its origin is
   `real`; no scenario is missing; every row passes every column.
 
 Missing scenarios block full acceptance, and the report names them. The
@@ -599,7 +602,7 @@ command records approvals; it does not grant them.
 from the record-and-forward provider mode whose limits equal the arm's
 `limits`, so live evidence inherits that mode's limits, and all of an arm's
 reports to have forwarded to one model at one upstream endpoint and context
-limit.
+limit, a positive integer.
 
 **Review prerequisites.** Two people approve the corpus before any candidate
 output is inspected, and the first semantic baseline before it is

@@ -125,6 +125,8 @@ function judgmentOf(value: unknown): Judgment | null {
     if ((kind !== "human" && kind !== "model") || typeof abstained !== "boolean") return null;
     if (!Array.isArray(obligations) || !stringList(value.forbidden_violated)) return null;
     if (value.citations !== undefined && !stringList(value.citations)) return null;
+    // A model judgment carries the citations and uncertainty a reader needs to weigh it.
+    if (kind === "model" && (!value.citations?.length || !named(value.uncertainty))) return null;
     const judged: ObligationJudgment[] = [];
     const seen = new Set<string>();
     for (const o of obligations) {
@@ -571,6 +573,12 @@ export function evaluate(input: {
         .map(
             ([what, arm, scenario]) => `a ${what} names unknown arm or scenario ${arm}/${scenario}`,
         );
+    const artifacts = new Map(
+        assembled.arms.map((side) => [
+            side.label,
+            new Map(side.rows.map((row) => [row.scenario.id, row.evidence.map((e) => e.sha256)])),
+        ]),
+    );
     for (const j of reviews.judgments) {
         const declared = expectations.get(j.scenario);
         if (!declared) continue;
@@ -578,6 +586,12 @@ export function evaluate(input: {
             if (!declared.has(o.obligation)) {
                 stray.push(`a judgment names unknown obligation ${o.obligation} for ${j.scenario}`);
             }
+        }
+        const row = artifacts.get(j.arm)?.get(j.scenario);
+        if (row && !row.includes(j.artifact_sha256)) {
+            stray.push(
+                `a judgment names unknown artifact ${j.artifact_sha256} for ${j.arm}/${j.scenario}`,
+            );
         }
     }
     const arms = assembled.arms.map((side) => {
