@@ -699,6 +699,10 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     }
     const generations = arm.evidence.filter((e) => isGeneration(e) && e.terminal === "published");
     for (const generation of generations) {
+        const attempts = generation.detail.attempts;
+        if (!Array.isArray(attempts) || attempts.length !== attemptsOf(generation).length) {
+            errors.push(`${generation.file} records an attempt that is not a record`);
+        }
         if (systemHashes(generation).length === 0) {
             errors.push(`${generation.file} records no system prompt`);
         } else if (systemHashes(generation).length < attemptsOf(generation).length) {

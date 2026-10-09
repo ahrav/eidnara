@@ -1864,7 +1864,7 @@ pinned canonical output is in code-point order, which UTF-16 order would reverse
 for the last two. The TypeScript twin this record was raised against
 (`packages/plugin/src/features/eidnara/memory/claim-operation-contract.ts`
 (source-catalog path, not present at HEAD)) is not in this repository, and
-`packages/e2e-tests/src/incident-pool/history.ts:29` `canonicalJson` is an
+`packages/e2e-tests/src/canonical-json.ts:2` `canonicalJson` is an
 unrelated harness helper with JavaScript `<` key order and `JSON.stringify`
 escaping under no shared fixture, so this record is a Rust byte-stability and
 digest-formula check until an encoder under the same fixture exists here.

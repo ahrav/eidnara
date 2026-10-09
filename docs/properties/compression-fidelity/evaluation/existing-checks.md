@@ -15,7 +15,7 @@ relative and were checked against HEAD.
 
 | Check and location | Condition or diagnostic | Status |
 | --- | --- | --- |
-| `semanticFingerprint`, `packages/e2e-tests/src/incident-pool/registry.ts:136-148`; `history.ts:29-39` | Hashes canonical structured meaning with an incident contract tag, not the raw corpus file. | unaudited |
+| `semanticFingerprint`, `packages/e2e-tests/src/incident-pool/registry.ts:136-148`; `canonical-json.ts:2-9`; `history.ts:29-31` | Hashes canonical structured meaning with an incident contract tag, not the raw corpus file. | unaudited |
 | Fingerprint tests, `packages/e2e-tests/src/incident-pool/runner.test.ts:248-274` | Formatting/key order preserve the fingerprint; changes to owning semantic fields alter it. | unaudited |
 | `implementationBundleDigest`, `packages/e2e-tests/src/incident-pool/registry.ts:152-169`; tests at `runner.test.ts:276-290` | Hashes domain tag, sorted paths, lengths, and bytes; rejects non-root-confined or empty file lists. This is not plain corpus SHA-256. | unaudited |
 | Ledger fingerprint test, `packages/e2e-tests/src/incident-pool/runner.test.ts:293-297` | Appending a baseline event changes the ledger fingerprint. | unaudited |
