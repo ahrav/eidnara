@@ -13,8 +13,10 @@ The [catalog](catalog.md) contains eight active records, seven unexercised and
 cf-corpus-byte-identity partial after U1, and eight
 matching evidence files. Seven are safety records and one is reachability.
 Semantics are six `always`, one `sometimes`, and one `always-or-unreached`.
-All eight surfaces are `test-only`: the proposed evaluator and forwarding path
-are absent, not configured production capabilities. This classification does
+All eight surfaces are `test-only`: the proposed evaluator is absent and the
+forwarding path exists only behind the e2e mock's explicit `forward`
+construction argument; neither is a configured production capability. This
+classification does
 not relabel the production surfaces whose observations they consume. All
 [existing checks](existing-checks.md) remain unaudited.
 

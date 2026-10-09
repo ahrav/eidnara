@@ -258,6 +258,143 @@ memory, hint, and recovery rows:
   auto-search off, the same request carries no hint and the host decides
   none.
 
+### Opt-in real capture
+
+Two paths capture real model output. Neither runs by default, and no default
+test sends a request off the host.
+
+**Real producer capture.** The ignored daemon test
+`real_producer_capture_of_every_corpus_source` in
+`crates/daemon/src/compression_fidelity_replay_tests.rs` folds every corpus
+source once through the host's existing producer execution. It reads four
+environment variables, all required:
+
+| Variable | Meaning |
+| --- | --- |
+| `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model |
+| `EIDNARA_FIDELITY_REAL_MODEL` | The model id the history summarizer runs, as the only model in its chain |
+| `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source may take, from its transform call, which awaits the emergency firing inline, through its settled firing |
+| `EIDNARA_FIDELITY_OBSERVATIONS_DIR` | A private directory outside the repository |
+
+Run it with
+`cargo +1.98 test -p daemon --lib --locked real_producer_capture -- --ignored`.
+The capture route binds harness `opencode`, the harness the host's model
+execution binds, and presents no credential source claims, so the host must be
+one that verifies none: a host started with no envelope credentials and no AWS
+profile source. A claim-verifying host refuses each start, and the record
+keeps the refusal as that attempt's start error.
+Each source yields one `daemon.compression_fidelity.real_capture` record,
+written with mode `0600` in an owner-only `0700` directory that the test
+creates or requires, outside the repository. Its terminal is `published`,
+`validation_rejected` for a settled firing that drained model output but
+published no rows, or `unsettled` for a source whose transform call or firing
+did not finish within the wait, that never started a producer, or that drained
+no model output;
+the test fails after writing every record when any source is unsettled. For
+an unsettled source the capture waits up to 75 s (one `connect` and one
+`start` at the producer's 30 s request timeout each, with margin) for any
+firing that has connected to return its first run handle, holding 2 s for a
+firing spawned just before the deadline to call `connect`. It then binds each
+started run's session and cancels, through a second connection, every run
+that drained no model output and whose own cancel the host did not confirm,
+before the next source begins, because the host keeps a run alive after its
+waiter is dropped until `run.cancel` ends it. Each attempt records the
+firing's own cancel under `cancel`, the record lists each cancel's run id and
+outcome under `cancelled_runs` and any firing still before its first start
+under `firings_before_first_start_at_cancel`. A cancel the host does not
+confirm, or a firing still before its first start, sets `capture_stopped` on
+that record and ends the capture before another source can start a run.
+Every source derives the same producer session id, and the host keeps a
+session after its connection closes, so after each source the capture deletes
+every producer session its attempts used (`purged_sessions`) before the next
+source starts; this keeps one source's conversation out of the next source's
+model call and ends any run a start error left unnamed (one that is neither
+`NotSent` nor a host terminal). A purge the host does not confirm also sets
+`capture_stopped`. After a confirmed cancel the capture waits up to
+10 s for the firing to record the terminal it provoked, so the record carries
+that drained error and the firing's own cancel. The capture directory and
+every existing ancestor must be owned by the operator or root and closed to
+group and other writes unless sticky, checked before and again after the
+directory is created. The
+record names the model, the harness,
+the output origin, whether the transform call returned and the firing settled,
+the attempt count, and every
+attempt's complete system prompt, user prompt, generation settings, start
+error, and every drained output or error, followed by the published rows. The host's model
+execution protocol reports no token usage, so each record carries
+`usage: null` and `usage_reported: false`; its cost is unknown. The test
+reads no credential: the host owns them.
+`a_capture_records_the_model_attempts_usage_and_complete_input` runs the
+same capture over the scripted producer in the default suite.
+
+**Record-and-forward provider mode.** `new MockProvider({ forward })` in
+`packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends
+to one Messages endpoint and returns the provider's response to OpenCode.
+`RustTestHarness.create({ forward })` builds it and runs OpenCode on
+`forward.model` at `forward.contextLimit` with an output limit of
+`forward.limits.maxOutputTokens`, so the forwarded body already names the
+selected model and carries a `max_tokens` the forwarder admits. Construction
+requires:
+
+- an `https:` URL whose path ends in `/messages`, with no user info, query,
+  or fragment;
+- the model, as the provider echoes it in responses, which every request
+  must name, and its context limit;
+- the reviewed corpus digest;
+- input and output prices in USD per million tokens, with the input price
+  at least the model's highest input-side price;
+- four limits: `maxCalls`, `maxOutputTokens`, `timeoutMs`, and
+  `spendCapUsd`;
+- a credential callback.
+
+Scripted responses and forwarding are exclusive: passing both, or scripting
+a forwarding mock, throws. A forwarding mock accepts only requests carrying
+its per-mock `inboundKey`, which the harness writes into OpenCode's provider
+config, so no other local process can spend its budget through the mock; that
+`opencode.json` is written `0600` in an owner-only `0700` isolated tree. The
+harness also starts a forwarding run's OpenCode serve API behind HTTP Basic
+auth (`OPENCODE_SERVER_USERNAME` and a random `OPENCODE_SERVER_PASSWORD` in
+the child's environment only, matched by the SDK client's `authorization`
+header), so another local process cannot drive sessions that spend the
+budget through OpenCode; a scripted run keeps the unauthenticated loopback
+API. `forward.contextLimit`
+is the context limit OpenCode is configured with. Before each send the
+forwarder checks that the body is a JSON object, the model,
+the request's `max_tokens`, the call count, and the spend cap. The spend
+check reserves the body's byte length as input tokens plus `max_tokens` as
+output. A response with usage charges its stated tokens; a response without
+usage, or a send without a response, charges the reservation. A streamed
+response states usage only when it reaches `message_stop` with a
+`message_delta` carrying usage and no `error` event, because `message_start`
+carries provisional counts. A refused send, a non-2xx response, a streamed
+response cut before `message_stop` or carrying an `error` event, a timeout, a
+redirect, a failed credential callback, a response that is not a Messages
+message (no JSON `type: "message"` with a `content` array, or no SSE
+`message_start`), a response naming another model or none, a response above
+16 MiB, which is cut off and charged its reservation, or a response whose
+usage costs more than its reservation stops the run, and every later request
+is refused without a send. Each exchange records the model its response
+names. The input price
+must cover any pricing the client's `anthropic-beta` header enables. The forwarder sends the received
+bytes unchanged, adds the callback's headers to the outbound request only,
+and records each exchange with redacted headers and the bounded response
+bytes. `forwardingReport()` keeps attempted sends and acknowledged responses
+apart, counts every refused request in `refused` while retaining at most 32
+refusal reasons in `refusals`, refuses a request after a stop before reading
+its body so the mock retains nothing further, and marks the run incomplete on
+a stop, a send in flight, a truncated
+capture, an unknown cost, an acknowledged response without a stop reason,
+spend above the cap, or a tool call that no later request answers with its
+`tool_result`. The limits, spend, and stop span the mock's life, across
+`reset()`.
+`publishForwardingReport` writes it with mode `0600` in an owner-only `0700`
+directory outside the repository whose existing ancestors are owned by the
+operator or root and closed to group and other writes unless sticky, checked
+before and again after creation, refusing
+a shared existing directory, an untrusted ancestor, or a label that is not a
+plain file name. `tests/compression-fidelity-forwarding.test.ts`
+runs the whole loop through OpenCode against an in-process provider double.
+
 ## What is unsupported
 
 - **Consumer exact expansion.** No registered tool returns native source
@@ -267,9 +404,6 @@ memory, hint, and recovery rows:
   `unavailable` in every C6 scenario.
 - **Pi decay tiers.** The Pi delivery test covers C1 at P1 in m1 and m0. No
   Pi row covers P2 to P5, and Pi carries corpus tool parts as text.
-- **Record-and-forward provider mode.** The e2e Messages mock serves scripted
-  responses, and its cassette modes record or replay those scripted
-  exchanges. No mode forwards a captured request to a real provider.
 - **Truncated-away memory.** A rendered memory line is capped at 64 KiB, far
   above the injection budget, so no admitted row can render with its
   decisive qualifier truncated away. The budget-excluded variant drops the

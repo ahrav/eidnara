@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { resolveEidnaraUserConfigPath } from "@eidnara/opencode/config/config-paths";
 import { isSecretKey, keepsScalarValue } from "@eidnara/opencode/shared/redaction";
+import { FIXTURE_KEY } from "../mock-provider/server";
 import { waitForChildExit } from "../process-exit";
 import {
     buildDirectHostFixture,
@@ -33,6 +34,9 @@ export function pluginEntryPath(): string {
     }
     return PLUGIN_DIST_ENTRY;
 }
+
+/** The mock provider's default model id. */
+export const MOCK_MODEL_ID = "mock-sonnet";
 
 export interface IsolatedEnv {
     configDir: string;
@@ -71,6 +75,12 @@ export interface SpawnOptions {
     openCodeConfigExtra?: Record<string, unknown>;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
+    /** Override the mock model's output token limit, which OpenCode sends as `max_tokens`. Default 8192. */
+    modelOutputLimit?: number;
+    /** The mock provider's model id; a forwarding run names the real model here. */
+    modelId?: string;
+    /** The key OpenCode sends to the mock provider; the fixture key by default. */
+    mockApiKey?: string;
     /** Reuse an isolated env so direct host starts before OpenCode and survives serve restarts. */
     existingEnv?: IsolatedEnv;
     /** User-tier host connection file. When set, the user config carries `host.connection_file`. */
@@ -131,6 +141,8 @@ export function createIsolatedEnv(): IsolatedEnv {
     const dataDir = join(base, "data");
     const cacheDir = join(base, "cache");
     const workdir = join(base, "work");
+    // `opencode.json` carries the mock provider's inbound key, so the tree is owner-only.
+    mkdirSync(base, { mode: 0o700 });
     for (const d of [configDir, dataDir, cacheDir, workdir]) {
         mkdirSync(d, { recursive: true });
     }
@@ -172,7 +184,10 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
     const extraWithoutProvider = { ...extra };
     delete extraWithoutProvider.provider;
 
-    const limit = { context: opts.modelContextLimit ?? 200000, output: 8192 };
+    const limit = {
+        context: opts.modelContextLimit ?? 200000,
+        output: opts.modelOutputLimit ?? 8192,
+    };
     const harnessProviders: Record<string, unknown> = opts.bedrock
         ? {
               "amazon-bedrock": {
@@ -188,12 +203,12 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
                   npm: "@ai-sdk/anthropic",
                   env: [],
                   options: {
-                      apiKey: "test-key-not-real",
+                      apiKey: opts.mockApiKey ?? FIXTURE_KEY,
                       baseURL: mockProviderURL,
                   },
                   models: {
-                      "mock-sonnet": {
-                          id: "mock-sonnet",
+                      [opts.modelId ?? MOCK_MODEL_ID]: {
+                          id: opts.modelId ?? MOCK_MODEL_ID,
                           name: "Mock Sonnet",
                           cost: { input: 0, output: 0 },
                           limit,
@@ -245,7 +260,9 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         Object.assign(eidnara, { host: { connection_file: opts.userHostConnectionFile } });
     }
 
-    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
+    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2), {
+        mode: 0o600,
+    });
 
     //
     const userConfigPath = userEidnaraConfigPath(env);
@@ -618,7 +635,7 @@ async function spawnOpencodeWithProvision(
         childEnv.XDG_CONFIG_HOME = env.configDir;
         childEnv.XDG_DATA_HOME = env.dataDir;
         childEnv.XDG_CACHE_HOME = env.cacheDir;
-        if (!resolvedOpts.bedrock) childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
+        if (!resolvedOpts.bedrock) childEnv.ANTHROPIC_API_KEY = FIXTURE_KEY;
         for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
             childEnv[key] = value;
         }

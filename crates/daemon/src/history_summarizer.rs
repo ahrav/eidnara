@@ -1912,7 +1912,7 @@ fn cancellation_confirmed_stopped(result: &Result<(), HistorySummarizerProducerE
 /// (`NotSent`) or `err.is_host_terminal()` identifies a host rejection. A `Terminal` carrying
 /// a client-local code leaves the model's execution and billing status uncertain. The firing
 /// ends model selection when a start failure leaves execution or billing uncertain.
-fn start_effect_proven(err: &HistorySummarizerProducerError) -> bool {
+pub(crate) fn start_effect_proven(err: &HistorySummarizerProducerError) -> bool {
     use crate::history_summarizer_producer::HistorySummarizerSendOutcome::{NotSent, Terminal};
     match err.send_outcome() {
         Some(NotSent) => true,

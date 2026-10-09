@@ -7,12 +7,17 @@
  *
  * The server supports Anthropic Messages SSE streaming and single-shot JSON responses.
  *
+ * In forwarding mode (`new MockProvider({ forward })`) every request goes to the one selected
+ * HTTPS provider through `Forwarder`, and scripting is unavailable. Scripted mode never sends a
+ * request off the host.
+ *
  * In cassette mode every request goes to the Rust oracle. Replay serves recorded frames or a
  * typed `cassette_miss` and never enters the scripted-selection block; record serves the script
  * only after the oracle admits the exchange. Misses and refusals are HTTP 400 because the AI SDK
  * retries 408, 409, 429, and 5xx.
  */
 
+import { randomBytes } from "node:crypto";
 import {
     type CassetteMiss,
     type CassetteMode,
@@ -22,6 +27,7 @@ import {
     type OracleRequest,
     type RecordedResponse,
 } from "./cassette-oracle";
+import { type ForwardConfig, Forwarder, type ForwardingReport, redact } from "./forward";
 
 export interface MockUsage {
     input_tokens: number;
@@ -83,6 +89,12 @@ export interface MockServerOptions {
     port?: number;
 }
 
+/** Construction options: scripted responses or forwarding, never both. */
+export interface MockProviderOptions {
+    script?: MockResponse[];
+    forward?: ForwardConfig;
+}
+
 /** One cassette bound to one world variant for the mock's lifetime in that mode. */
 export interface CassetteSession {
     oracle: Pick<CassetteOracle, "lookup" | "record">;
@@ -103,6 +115,8 @@ export type RequestMatcher = (
 ) => MockResponse | null;
 
 const JSON_HEADERS = { "content-type": "application/json" };
+/** The key OpenCode sends to a scripted mock. */
+export const FIXTURE_KEY = "test-key-not-real";
 /** Well above any provider body OpenCode sends (a 200k-token context is about 1 MiB). */
 const MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024;
 
@@ -115,6 +129,35 @@ export class MockProvider {
     /** Every per-run mutable: script, captures, counters, cassette binding, logs. `reset()` replaces
      * the object, so a request that began under an earlier run keeps writing into that run. */
     private run: Run = freshRun();
+    private readonly forwarder: Forwarder | null;
+    /**
+     * The key a client must send as `x-api-key` in forwarding mode, fresh per mock, so only
+     * the OpenCode configured with it can spend the forwarding budget.
+     */
+    readonly inboundKey: string;
+
+    constructor(options: MockProviderOptions = {}) {
+        if (options.forward && options.script) {
+            throw new Error("forwarding and scripted responses are mutually exclusive");
+        }
+        this.forwarder = options.forward ? new Forwarder(options.forward) : null;
+        this.inboundKey = this.forwarder
+            ? `forward-${randomBytes(16).toString("hex")}`
+            : FIXTURE_KEY;
+        if (options.script) this.run.responses = [...options.script];
+    }
+
+    /** The forwarding run's limits, sends, responses, and completeness. */
+    forwardingReport(): ForwardingReport {
+        if (!this.forwarder) throw new Error("this mock is not forwarding");
+        return this.forwarder.report();
+    }
+
+    /** The current run, after asserting this mock serves scripted responses. */
+    private scriptedRun(): Run {
+        if (this.forwarder) throw new Error("a forwarding mock serves no scripted responses");
+        return this.run;
+    }
 
     async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
         const port = options.port ?? 0; // 0 = pick any available port
@@ -134,21 +177,22 @@ export class MockProvider {
     }
 
     async stop(): Promise<void> {
+        this.forwarder?.close();
         if (this.server) {
             this.server.stop(true);
             this.server = null;
         }
     }
     script(responses: MockResponse[]): void {
-        this.run.responses = [...responses];
+        this.scriptedRun().responses = [...responses];
     }
 
     /** Set a default response to return when the queue is empty. */
     setDefault(response: MockResponse): void {
-        this.run.defaultResponse = response;
+        this.scriptedRun().defaultResponse = response;
     }
     enqueue(response: MockResponse): void {
-        this.run.responses.push(response);
+        this.scriptedRun().responses.push(response);
     }
 
     /**
@@ -156,7 +200,7 @@ export class MockProvider {
      * If no matcher returns a response, the provider consults the main queue, then `defaultResponse`.
      */
     addMatcher(matcher: RequestMatcher): void {
-        this.run.matchers.push(matcher);
+        this.scriptedRun().matchers.push(matcher);
     }
     requests(): CapturedRequest[] {
         return [...this.run.captured];
@@ -165,7 +209,8 @@ export class MockProvider {
         return this.run.captured[this.run.captured.length - 1] ?? null;
     }
     /** Starts a new run: script, captures, counters, and the cassette binding with its logs are
-     * fresh, and a request still in flight keeps writing into the run it began in. */
+     * fresh, and a request still in flight keeps writing into the run it began in. A forwarding
+     * mock's limits, spend, and stop span its whole life, so its report survives a reset. */
     reset(): void {
         this.run = freshRun();
     }
@@ -179,6 +224,7 @@ export class MockProvider {
      * `reset()`, with a fresh script, captures, counters, and logs; a request still in flight keeps
      * the run it began in. */
     useCassette(session: CassetteSession): void {
+        this.scriptedRun();
         this.run = { ...freshRun(), cassette: session };
     }
 
@@ -225,15 +271,27 @@ export class MockProvider {
             const run = this.run;
             const session = run.cassette;
             const logs = run.logs;
-            const bodyText = await req.text();
-            // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
-            let body: Record<string, unknown> = {};
-            try {
-                const parsed: unknown = JSON.parse(bodyText);
-                if (isRecord(parsed)) body = parsed;
-            } catch {
-                body = {};
+            // The key is checked before the body is read, so an unauthenticated upload never
+            // occupies the forwarding mock.
+            if (this.forwarder && req.headers.get("x-api-key") !== this.inboundKey) {
+                return new Response(errorBody("authentication_error", {}), {
+                    status: 401,
+                    headers: JSON_HEADERS,
+                });
             }
+            const stopped = this.forwarder?.stoppedRefusal();
+            if (stopped) return stopped;
+            const bodyBytes = new Uint8Array(await req.arrayBuffer());
+            const bodyText = new TextDecoder().decode(bodyBytes);
+            // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.
+            // `JSON.parse` returns a defined value for valid JSON, so `undefined` marks a parse failure.
+            let parsed: unknown;
+            try {
+                parsed = JSON.parse(bodyText);
+            } catch {
+                parsed = undefined;
+            }
+            const body: Record<string, unknown> = isRecord(parsed) ? parsed : {};
 
             const headers: Record<string, string> = {};
             req.headers.forEach((value, key) => {
@@ -244,10 +302,20 @@ export class MockProvider {
                 receivedAt: Date.now(),
                 method,
                 path: url.pathname,
-                headers,
+                headers: this.forwarder ? redact(headers) : headers,
                 body,
             };
             run.captured.push(captured);
+            if (this.forwarder) {
+                const forwarded = await this.forwarder.forward(
+                    bodyBytes,
+                    bodyText,
+                    parsed,
+                    headers,
+                );
+                captured.responseCompletedAt = Date.now();
+                return forwarded;
+            }
 
             const oracleRequest: OracleRequest = {
                 path: url.pathname,
@@ -405,6 +473,14 @@ function isProducible(scripted: MockResponse): scripted is Producible {
 /** The status range `Response` accepts; anything else would throw in `serve` after admission. */
 function isServableStatus(status: number): boolean {
     return Number.isInteger(status) && status >= 200 && status <= 599;
+}
+
+/** The response scripted mode serves for `scripted` and the request `body`. */
+export function scriptedResponse(
+    scripted: MockResponse & { usage: MockUsage },
+    body: Record<string, unknown>,
+): Response {
+    return serve(produce(scripted, body));
 }
 
 /** Builds the exact response the script describes, as status, content type, and frames. */
