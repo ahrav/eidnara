@@ -62,6 +62,8 @@ export interface ForwardConfig {
 export const MAX_CAPTURED_RESPONSE_BYTES = 4 * 1024 * 1024;
 /** Response bytes read per send; a longer response is cut off and the send fails. */
 export const MAX_RESPONSE_BYTES = 4 * MAX_CAPTURED_RESPONSE_BYTES;
+/** Refusal reasons kept in a report; `refused` counts every refusal, retained or not. */
+export const MAX_RETAINED_REFUSALS = 32;
 
 const REDACTED_HEADERS = new Set([
     "authorization",
@@ -129,6 +131,8 @@ export interface ForwardingReport {
     acknowledged_responses: number;
     spent_usd: number;
     stopped: string | null;
+    /** Every refused request, including those past `MAX_RETAINED_REFUSALS`. */
+    refused: number;
     refusals: string[];
     complete: boolean;
     incomplete_reasons: string[];
@@ -151,8 +155,8 @@ export function validateForwardConfig(config: ForwardConfig): Readonly<ForwardCo
     if (!url.pathname.endsWith("/messages")) {
         throw new Error("forwarding accepts only a Messages endpoint");
     }
-    if (url.username || url.password || url.search) {
-        throw new Error("the upstream URL carries no credential or query");
+    if (url.username || url.password || url.search || url.hash) {
+        throw new Error("the upstream URL carries no credential, query, or fragment");
     }
     if (typeof config.model !== "string" || config.model === "") {
         throw new Error("forwarding needs an explicit model");
@@ -431,6 +435,7 @@ export class Forwarder {
     private readonly config: Readonly<ForwardConfig>;
     private readonly exchanges: ForwardedExchange[] = [];
     private readonly refusals: string[] = [];
+    private refused = 0;
     private readonly unhashed = new Map<ForwardedExchange, Uint8Array>();
     private spent = 0;
     private stopped: string | null = null;
@@ -440,7 +445,8 @@ export class Forwarder {
     }
 
     private refuse(reason: string): Response {
-        this.refusals.push(reason);
+        this.refused += 1;
+        if (this.refusals.length < MAX_RETAINED_REFUSALS) this.refusals.push(reason);
         this.stopped ??= reason;
         return errorResponse("forwarding_refused", reason);
     }
@@ -650,6 +656,7 @@ export class Forwarder {
             acknowledged_responses: acknowledged.length,
             spent_usd: this.spent,
             stopped: this.stopped,
+            refused: this.refused,
             refusals: [...this.refusals],
             complete: reasons.length === 0,
             incomplete_reasons: reasons,

@@ -10,6 +10,7 @@ import {
     type ForwardConfig,
     Forwarder,
     MAX_RESPONSE_BYTES,
+    MAX_RETAINED_REFUSALS,
     publishForwardingReport,
     readResponse,
     validateForwardConfig,
@@ -205,6 +206,7 @@ describe("construction", () => {
             [{ contextLimit: 0 }, "context limit"],
             [{ upstreamURL: "https://user:pass@provider.test/v1/messages" }, "no credential"],
             [{ upstreamURL: "https://provider.test/v1/messages?key=x" }, "no credential"],
+            [{ upstreamURL: "https://provider.test/v1/messages#token=x" }, "no credential"],
             [{ corpusSha256: "0".repeat(64) }, "reviewed synthetic corpus"],
             [{ pricing: { inputPerMTok: 0, outputPerMTok: 15 } }, "prices"],
             [{ credentials: undefined as unknown as ForwardConfig["credentials"] }, "credential"],
@@ -814,6 +816,28 @@ describe("forwarding", () => {
             expect(report.stopped).toContain(run.stopped);
             expect(report.complete).toBe(false);
         }
+    });
+
+    test("refusals after a stop are counted and the retained list is bounded", async () => {
+        const double = upstreamDouble([
+            () =>
+                new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                    headers: { "content-type": "text/event-stream" },
+                }),
+        ]);
+        const mock = new MockProvider({
+            forward: config({ fetch: double.send, limits: { ...config().limits, maxCalls: 1 } }),
+        });
+        const base = await start(mock);
+        await (await post(base, firstTurn)).text();
+        for (let i = 0; i < MAX_RETAINED_REFUSALS + 40; i++) {
+            expect((await post(base, firstTurn)).status).toBe(400);
+        }
+        const report = mock.forwardingReport();
+        expect(report.refused).toBe(MAX_RETAINED_REFUSALS + 40);
+        expect(report.refusals.length).toBe(MAX_RETAINED_REFUSALS);
+        expect(report.attempted_sends).toBe(1);
+        expect(double.received.length).toBe(1);
     });
 
     test("a timed-out send is charged its reservation", async () => {

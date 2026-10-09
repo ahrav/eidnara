@@ -334,7 +334,8 @@ to one Messages endpoint and returns the provider's response to OpenCode.
 selected model and carries a `max_tokens` the forwarder admits. Construction
 requires:
 
-- an `https:` URL whose path ends in `/messages`, with no user info or query;
+- an `https:` URL whose path ends in `/messages`, with no user info, query,
+  or fragment;
 - the model, as the provider echoes it in responses, which every request
   must name, and its context limit;
 - the reviewed corpus digest;
@@ -376,7 +377,8 @@ must cover any pricing the client's `anthropic-beta` header enables. The forward
 bytes unchanged, adds the callback's headers to the outbound request only,
 and records each exchange with redacted headers and the bounded response
 bytes. `forwardingReport()` keeps attempted sends and acknowledged responses
-apart, and marks the run incomplete on a stop, a send in flight, a truncated
+apart, counts every refused request in `refused` while retaining at most 32
+refusal reasons in `refusals`, and marks the run incomplete on a stop, a send in flight, a truncated
 capture, an unknown cost, an acknowledged response without a stop reason,
 spend above the cap, or a tool call that no later request answers with its
 `tool_result`. The limits, spend, and stop span the mock's life, across

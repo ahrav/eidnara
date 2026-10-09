@@ -354,8 +354,11 @@ Reachability: test-only
 Status: active
 Exercised: partial - the forwarding branch runs against an in-process
 provider double with a canary credential, through OpenCode's registered tool
-loop and through each limit and failure boundary; no authorized live provider
-run exists.
+loop and through each limit and the timeout, provider-error, malformed-body,
+model-mismatch, oversized-response, and unfinished-loop boundaries; the
+redirect boundary is asserted only as the `redirect: "error"` option on the
+outbound request, since the double returns its scripted response without
+following redirects, and no authorized live provider run exists.
 Guarantee: Optional live evaluation forwards only authorized synthetic requests
 to the selected HTTPS provider, returns matching responses through the real tool
 loop, excludes credentials from artifacts, and stays within frozen run limits.
