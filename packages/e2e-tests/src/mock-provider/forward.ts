@@ -271,7 +271,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
     const name = (value: unknown) => {
         if (typeof value === "string") model = value;
     };
-    if (contentType.includes("text/event-stream")) {
+    if (contentType.toLowerCase().includes("text/event-stream")) {
         let stopped = false;
         let errored = false;
         finalUsage = false;

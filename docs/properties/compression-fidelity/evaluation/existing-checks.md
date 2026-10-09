@@ -56,21 +56,23 @@ evidence; initial qualification does not grant permanent coverage credit.
 
 | Check and location | Condition or diagnostic | Status |
 | --- | --- | --- |
-| Mock dispatch, `packages/e2e-tests/src/mock-provider/server.ts:262-302` | Uses matcher, queue, then configured default; without any response returns HTTP 500, `No scripted response available`. | unaudited |
-| Mock usage guard, `packages/e2e-tests/src/mock-provider/server.ts:402-424` | Scripted errors bypass usage; missing both produces HTTP 500, ``MockResponse requires `usage` or `error` ``. | unaudited |
-| Scripted model assignment, `packages/e2e-tests/src/mock-provider/server.ts:428-429` | A script can set the response model string; otherwise it echoes the request model. This is not real-execution provenance. No script/forward exclusivity check exists. | none found |
+| Mock dispatch, `packages/e2e-tests/src/mock-provider/server.ts:327-348` | Uses matcher, queue, then configured default; without any response returns HTTP 500, `No scripted response available`. | unaudited |
+| Mock usage guard, `packages/e2e-tests/src/mock-provider/server.ts:350-365` | Scripted errors bypass usage; missing both produces HTTP 500, ``MockResponse requires `usage` or `error` ``. | unaudited |
+| Scripted model assignment, `packages/e2e-tests/src/mock-provider/server.ts:499-500` | A script can set the response model string; otherwise it echoes the request model. This is not real-execution provenance. Script/forward exclusivity is a construction error at `server.ts:140-142`. | unaudited |
 | Tool publication guard, `packages/e2e-tests/src/scripted-tool-call.ts:120-139` | Throws when the requested tool was never published in the provider request. | unaudited |
 | Tool-result guard, `packages/e2e-tests/src/scripted-tool-call.ts:62-77,140-145` | Finds a provider-visible `tool_result` by `tool_use_id`; missing result is an infrastructure error. Returned text is a projection, not raw result bytes. | unaudited |
 | Prompt error handling, `packages/e2e-tests/src/rust-harness.ts:375-406` | Timeout throws and SDK rejection is promoted to error. The `Promise.race` is not evidence that remote work stops or that cost is capped. | unaudited |
 
-No `src/mock-provider/server.test.ts`, scripted-tool helper unit test, forwarding
-mode, real-response capture, whole-loop limit check, or credential-exclusion
-check for live fidelity artifacts was found. The mock stores incoming headers
-and parsed JSON (`server.ts:221-249`). `reset` discards request history
-(`server.ts:169-171`), and the scripted tool helper calls it at line 101.
-The required default-mode zero-outbound assertion also has no dedicated fidelity
-check. Its requirement is unconditional for default runs, even while future
-enabled forwarding remains optional.
+No `src/mock-provider/server.test.ts` or scripted-tool helper unit test was
+found. The forwarding mode, its limits, its captures, and its credential
+exclusion are covered by `src/mock-provider/forward.test.ts` and
+`tests/compression-fidelity-forwarding.test.ts`, listed under
+[cf-bounded-record-and-forward](catalog.md#cf-bounded-record-and-forward);
+the default-mode zero-outbound assertion lives in `forward.test.ts`
+("sends nothing off the host"). The mock stores incoming headers and parsed
+JSON (`server.ts:273-296`). `reset` discards request history
+(`server.ts:213-215`), and the scripted tool helper calls it through
+`harness.resetMock()` at `scripted-tool-call.ts:102`.
 
 ## Evidence assembly and outcomes
 
@@ -109,7 +111,7 @@ No complete fidelity cost check was found. Relevant prior art is narrower:
 | Observation or check | Condition or limitation | Status |
 | --- | --- | --- |
 | `packages/e2e-tests/src/rust-harness.ts:444-453` | Measures normalized messages from the last main request; absent requests return zero/empty output. This is not all-attempt, complete-invocation cost evidence. | unaudited |
-| `packages/e2e-tests/src/mock-provider/server.ts:287-294` | Requires scripted usage unless returning an error. It does not measure actual provider charges or ambiguous attempts. | unaudited |
+| `packages/e2e-tests/src/mock-provider/server.ts:350-365` | Requires scripted usage unless returning an error. It does not measure actual provider charges or ambiguous attempts. | unaudited |
 | `packages/e2e-tests/src/opencode-runner/spawn.ts:174-187` | Mock model prices are zero. These configured values cannot substitute for real generation/recovery cost. | unaudited |
 
 The plan requires bytes/tokens with estimator/model identity, generation

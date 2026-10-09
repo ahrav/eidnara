@@ -304,7 +304,7 @@ Confidence: high - [evidence](evidence/cf-evaluation-cost-completeness.md).
 Plan lines 271,278-285 require these observations and fixed limits; mock counters
 and zero prices are not actual provider-cost evidence.
 Existing check: None found for complete fidelity cost accounting. Mock usage
-guards at `packages/e2e-tests/src/mock-provider/server.ts:287-294` are `unaudited`
+guards at `packages/e2e-tests/src/mock-provider/server.ts:350-365` are `unaudited`
 and enforce only scripted-response shape.
 Impact: A comparison can hide wasted attempts, overstate savings, or spend beyond
 the approved run limits while showing a complete cost result.

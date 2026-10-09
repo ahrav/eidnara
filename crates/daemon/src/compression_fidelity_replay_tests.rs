@@ -1408,11 +1408,13 @@ struct RecordedOutput {
 
 type AttemptLog = Arc<Mutex<Vec<RecordedAttempt>>>;
 
-/// The latest connect's arguments let a run be cancelled through a second connection.
+/// The latest connect's arguments let a run be cancelled through a second connection, and
+/// `starts_in_flight` counts starts whose handle or error the recorder has not yet appended.
 struct RecordingFactory {
     inner: Arc<dyn HistorySummarizerProducerFactory>,
     attempts: AttemptLog,
     connected: Mutex<Option<ConnectArgs>>,
+    starts_in_flight: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -1443,6 +1445,7 @@ impl HistorySummarizerProducerFactory for RecordingFactory {
         Ok(Box::new(RecordingDriver {
             inner,
             attempts: Arc::clone(&self.attempts),
+            starts_in_flight: Arc::clone(&self.starts_in_flight),
         }))
     }
 }
@@ -1450,6 +1453,7 @@ impl HistorySummarizerProducerFactory for RecordingFactory {
 struct RecordingDriver {
     inner: Box<dyn HistorySummarizerProducerDriver + Send>,
     attempts: AttemptLog,
+    starts_in_flight: Arc<AtomicUsize>,
 }
 
 impl RecordingDriver {
@@ -1531,6 +1535,7 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
         max_output_tokens: u32,
         temperature: f64,
     ) -> Result<RunHandle, HistorySummarizerProducerError> {
+        self.starts_in_flight.fetch_add(1, Ordering::SeqCst);
         let started = self
             .inner
             .start_with_generation(
@@ -1554,6 +1559,7 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
             },
             &started,
         );
+        self.starts_in_flight.fetch_sub(1, Ordering::SeqCst);
         started
     }
 
@@ -1636,6 +1642,7 @@ async fn capture_sources(
             inner: Arc::clone(&factory),
             attempts: Arc::clone(&attempts),
             connected: Mutex::new(None),
+            starts_in_flight: Arc::default(),
         });
         let config = DaemonConfig {
             model_chain: vec![model.to_owned()],
@@ -1662,6 +1669,13 @@ async fn capture_sources(
             first["history_summarizer"]["fired"].clone()
         });
         let settled = transform_returned && wait_settled(&store, &attempts, deadline).await;
+        // A start still in flight at the deadline appends its run id only when it returns, so
+        // the snapshot waits for the producer's own request timeout before cancelling.
+        let starts_in_flight = if settled {
+            0
+        } else {
+            wait_for_starts(&recording.starts_in_flight, START_QUIESCE).await
+        };
         let rows = store.load_history_segments("ses").unwrap();
         let attempts = attempts.lock().unwrap().clone();
         // Run lifetime is detached from the waiter the timeout dropped; `run.cancel` ends it.
@@ -1696,6 +1710,7 @@ async fn capture_sources(
                 "transform_returned": transform_returned,
                 "settled": settled,
                 "cancelled_runs": cancelled_runs,
+                "starts_in_flight_at_cancel": starts_in_flight,
                 "attempt_count": attempts.len(),
                 "attempts": attempts,
                 "usage": null,
@@ -1711,6 +1726,21 @@ async fn capture_sources(
         );
     }
     captured
+}
+
+/// The producer bounds one `start` by its 30 s request timeout; the margin covers reconnects.
+const START_QUIESCE: Duration = Duration::from_secs(45);
+
+/// Polls until no start is in flight or `budget` passes, and returns the count still in flight.
+async fn wait_for_starts(starts_in_flight: &AtomicUsize, budget: Duration) -> usize {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let in_flight = starts_in_flight.load(Ordering::SeqCst);
+        if in_flight == 0 || tokio::time::Instant::now() >= deadline {
+            return in_flight;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn cancel_undrained_runs(
@@ -1979,6 +2009,46 @@ async fn a_timed_out_capture_cancels_its_started_runs() {
     producer.notify.notify_waiters();
 }
 
+/// A start still in flight at the deadline is waited for, so its run is cancelled too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_in_flight_at_the_deadline_is_still_cancelled() {
+    let producer = Arc::new(ProducerState::default());
+    producer.block_output.store(true, Ordering::SeqCst);
+    producer.block_start.store(true, Ordering::SeqCst);
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let release = {
+        let producer = Arc::clone(&producer);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            producer.block_start.store(false, Ordering::SeqCst);
+            producer.notify.notify_waiters();
+        })
+    };
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_millis(300),
+    )
+    .await;
+    release.await.unwrap();
+    assert_eq!(records.len(), sources().count());
+    let cancels = producer.cancels.lock().unwrap().clone();
+    assert_eq!(
+        cancels.len(),
+        records.len(),
+        "the first source's start returned after its deadline and was still cancelled: {cancels:?}"
+    );
+    assert!(cancels[0].ends_with(":run-1"), "{cancels:?}");
+    let first = &records[0].detail;
+    assert_eq!(first["attempt_count"], 1);
+    assert_eq!(first["cancelled_runs"][0]["cancelled"], true);
+    producer.block_output.store(false, Ordering::SeqCst);
+    producer.notify.notify_waiters();
+}
+
 /// The recorder keeps a start error and every drained output or error of a run, in order.
 #[tokio::test(flavor = "current_thread")]
 async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
@@ -2012,6 +2082,7 @@ async fn the_recorder_keeps_start_errors_and_every_drained_outcome() {
         }),
         attempts: Arc::clone(&attempts),
         connected: Mutex::new(None),
+        starts_in_flight: Arc::default(),
     };
     let mut driver = factory
         .connect(Path::new("/"), "opencode", &Default::default())

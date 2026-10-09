@@ -22377,6 +22377,8 @@ mod tests {
         block_status: std::sync::atomic::AtomicBool,
         /// `connect` waits on `notify` while `block_connect` is set.
         block_connect: std::sync::atomic::AtomicBool,
+        /// `start` waits on `notify` while `block_start` is set, after counting the start.
+        block_start: std::sync::atomic::AtomicBool,
         close_attempts: AtomicUsize,
         block_close_attempt: std::sync::atomic::AtomicBool,
         cancels: Mutex<Vec<String>>,
@@ -22509,6 +22511,9 @@ mod tests {
                 .pop_front()
             {
                 return result;
+            }
+            while self.state.block_start.load(Ordering::SeqCst) {
+                self.state.notify.notified().await;
             }
             let output = match self.state.next_fact.lock().expect("next fact mutex").take() {
                 Some(fact) => {

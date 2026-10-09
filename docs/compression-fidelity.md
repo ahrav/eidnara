@@ -290,11 +290,14 @@ creates or requires, outside the repository. Its terminal is `published`,
 published no rows, or `unsettled` for a source whose transform call or firing
 did not finish within the wait, that never started a producer, or that drained
 no model output;
-the test fails after writing every record when any source is unsettled. An
-unsettled source's started runs that drained no output are cancelled through
-a second connection before the next source begins, because the host keeps a
-run alive after its waiter is dropped until `run.cancel` ends it; the record
-lists each cancel's run id and outcome under `cancelled_runs`. The
+the test fails after writing every record when any source is unsettled. For
+an unsettled source the capture waits up to 45 s for any `start` still in
+flight to return its run handle, then binds each started run's session and
+cancels every run that drained no output through a second connection before
+the next source begins, because the host keeps a run alive after its waiter is
+dropped until `run.cancel` ends it; the record lists each cancel's run id and
+outcome under `cancelled_runs` and any start still unreturned under
+`starts_in_flight_at_cancel`. The
 record names the model, the harness,
 the output origin, whether the transform call returned and the firing settled,
 the attempt count, and every

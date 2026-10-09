@@ -865,6 +865,23 @@ describe("forwarding", () => {
         expect(report.incomplete_reasons).toContain("cost unknown for a send");
     });
 
+    test("the response media type is matched without regard to case", async () => {
+        const upper = () =>
+            new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                headers: { "content-type": "Text/Event-Stream; charset=utf-8" },
+            });
+        const mock = new MockProvider({ forward: config({ fetch: upstreamDouble([upper]).send }) });
+        await (await post(await start(mock), firstTurn)).text();
+        const report = mock.forwardingReport();
+        expect(report.stopped).toBeNull();
+        expect(report.exchanges[0]?.response?.usage).toEqual({
+            ...USAGE,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        });
+        expect(report.complete).toBe(true);
+    });
+
     test("a response that is not a Messages message stops the run", async () => {
         const bare = () =>
             new Response(JSON.stringify({ model: MODEL, stop_reason: "end_turn", usage: USAGE }), {
