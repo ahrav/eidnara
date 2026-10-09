@@ -10,9 +10,10 @@
  * in the file.
  */
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+// Loaded through `getBuiltinModule` for the startup cost noted in `../atomic-publish`.
+const { readFileSync } = process.getBuiltinModule("node:fs");
 
 /** SHA-256 of the complete committed corpus file. It moves with the Rust pin, never alone. */
 export const COMPRESSION_FIDELITY_CORPUS_SHA256 =
@@ -196,7 +197,7 @@ export function readCompressionFidelityCorpus(
     } catch (error) {
         fail(`corpus at ${path} is unreadable: ${(error as Error).message}`);
     }
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
     if (sha256 !== COMPRESSION_FIDELITY_CORPUS_SHA256) {
         fail(
             `corpus at ${path} hashes to ${sha256}, expected ${COMPRESSION_FIDELITY_CORPUS_SHA256}`,

@@ -10,11 +10,12 @@
  * record-and-forward provider mode published, with the limits that mode enforced.
  */
 
-import { readdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BEHAVIORAL_VERDICTS } from "../incident-pool/report";
 import type { FidelityCorpus, FidelityScenario } from "./corpus";
+
+// Loaded through `getBuiltinModule` for the startup cost noted in `../atomic-publish`.
+const fs = process.getBuiltinModule("node:fs");
 
 export const ARM_SCHEMA = "eidnara.compression-fidelity-arm/v1";
 export const MANIFEST_SCHEMA = "eidnara.compression-fidelity-manifest/v1";
@@ -124,7 +125,7 @@ export async function readJson(
 ): Promise<{ bytes: Buffer; value: unknown } | { error: string }> {
     let bytes: Buffer;
     try {
-        bytes = await readFile(path);
+        bytes = await fs.promises.readFile(path);
     } catch (error) {
         return { error: `${path} is unreadable: ${(error as Error).message}` };
     }
@@ -277,7 +278,7 @@ export async function loadArm(
     };
     let names: string[];
     try {
-        names = readdirSync(dir).sort();
+        names = fs.readdirSync(dir).sort();
     } catch {
         arm.errors.push(`${dir} is unreadable`);
         return arm;
