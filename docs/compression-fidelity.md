@@ -287,7 +287,7 @@ summarizer prompt from a real model, such as
 once that the primary agent's `eidnara_search` searches project memory only,
 and its importance rubric and P4 guidance make no search-recovery promise:
 P4 detail survives only in the tier text the summarizer writes.
-`the_summarizer_prompt_promises_no_recovery_past_the_tool_contract` in
+`the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out` in
 `history_summarizer_prompt.rs` keeps the limit and rejects the removed phrases.
 
 **Record-and-forward provider mode.** `new MockProvider({ forward })` in

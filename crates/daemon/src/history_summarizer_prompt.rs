@@ -478,10 +478,10 @@ mod tests {
     }
 
     /// The primary agent's `eidnara_search` searches project memory only, and no registered tool
-    /// restores summarized history or the original transcript. The prompt states that limit and
-    /// makes no recovery promise past it.
+    /// restores summarized history or the original transcript. The prompt keeps that limit, and
+    /// the phrases #723 removed, which promised recovery through search, stay out.
     #[test]
-    fn the_summarizer_prompt_promises_no_recovery_past_the_tool_contract() {
+    fn the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out() {
         let prompt = HISTORY_SUMMARIZER_SYSTEM_PROMPT;
         assert!(prompt.contains(
             "Do not assume it can search summarized history or restore the original transcript."

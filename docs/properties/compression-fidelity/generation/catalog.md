@@ -393,7 +393,7 @@ guidance review or an observed consumer incident.
 Existing check: [Registry guidance test:272-319][registry-tests],
 [search-description test:428-439][search-tests], unaudited, and the
 [summarizer prompt guidance-capability test][prompt]
-`the_summarizer_prompt_promises_no_recovery_past_the_tool_contract`, which pins
+`the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out`, which pins
 the prompt's recovery limit and rejects the search-recovery phrases #723
 removed. The human review of generated outputs stays open.
 Impact: Generation discards necessary qualifiers or detail on a recovery

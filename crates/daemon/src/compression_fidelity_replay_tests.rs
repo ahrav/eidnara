@@ -1279,6 +1279,9 @@ const REAL_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
 const REAL_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
 const REAL_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
 const REAL_OWNER: &str = "daemon.compression_fidelity.real_capture";
+/// The harness a capture's session binds under. A real host's ModelExecution route admits only
+/// the harnesses it runs and rejects any other with `invalid_identity`.
+const CAPTURE_HARNESS: &str = "opencode";
 
 /// One producer start the recorder saw: the complete model input and every output or error
 /// the daemon drained for its run.
@@ -1522,12 +1525,11 @@ async fn capture_sources(
             model_chain: vec![model.to_owned()],
             ..default_test_config()
         };
-        // The host's ModelExecution route admits only the harnesses it serves.
         let (handler, store, _dir, _project) = handler_with_factory_for_harness(
             recording,
             config,
             Arc::new(MissingSessionResolver),
-            "opencode",
+            CAPTURE_HARNESS,
         );
         let follow_up = follow_up_for(case, source);
         let mut messages = source_ingress(case, source);
@@ -1668,6 +1670,11 @@ async fn real_producer_capture_of_every_corpus_source() {
 }
 
 /// The capture records a scripted producer's run with the fields a real capture carries.
+#[test]
+fn a_capture_binds_a_harness_the_host_admits() {
+    assert!(host_runtime::model_execution::backend::Harness::parse(CAPTURE_HARNESS).is_some());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     let producer = Arc::new(ProducerState::default());

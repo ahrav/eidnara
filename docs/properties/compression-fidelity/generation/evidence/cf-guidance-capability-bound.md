@@ -102,7 +102,7 @@ combined prompt/hint capability-review check at HEAD.
   when you encounter related work." P4 detail "survives only in the tier text
   you write." Line 132's code-reading clause stays: the primary agent reads
   the current code through its harness tools.
-  `history_summarizer_prompt::tests::the_summarizer_prompt_promises_no_recovery_past_the_tool_contract`
+  `history_summarizer_prompt::tests::the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out`
   pins the line 17 limit and rejects the removed recovery phrases; it fails on
   the base prompt (`297fc28e…`) and passes on the candidate (`4d975027…`).
 - Missing evidence: A non-author human review of the generated outputs, sealed
