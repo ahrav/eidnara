@@ -75,6 +75,8 @@ export interface SpawnOptions {
     openCodeConfigExtra?: Record<string, unknown>;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
+    /** Override the mock model's output token limit, which OpenCode sends as `max_tokens`. Default 8192. */
+    modelOutputLimit?: number;
     /** The mock provider's model id; a forwarding run names the real model here. */
     modelId?: string;
     /** The key OpenCode sends to the mock provider; the fixture key by default. */
@@ -182,7 +184,10 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
     const extraWithoutProvider = { ...extra };
     delete extraWithoutProvider.provider;
 
-    const limit = { context: opts.modelContextLimit ?? 200000, output: 8192 };
+    const limit = {
+        context: opts.modelContextLimit ?? 200000,
+        output: opts.modelOutputLimit ?? 8192,
+    };
     const harnessProviders: Record<string, unknown> = opts.bedrock
         ? {
               "amazon-bedrock": {

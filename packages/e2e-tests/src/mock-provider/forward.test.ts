@@ -8,6 +8,7 @@ import type { CassetteOracle } from "./cassette-oracle";
 import {
     type ForwardConfig,
     Forwarder,
+    MAX_RESPONSE_BYTES,
     publishForwardingReport,
     readResponse,
     validateForwardConfig,
@@ -242,6 +243,7 @@ describe("forwarding", () => {
             model: null,
             toolUses: ["toolu_esc"],
             unfinished: null,
+            malformed: null,
         });
         expect(
             readResponse("text/event-stream", stream.split("\n").slice(1, 3).join("\n")),
@@ -251,6 +253,7 @@ describe("forwarding", () => {
             model: null,
             toolUses: [],
             unfinished: "stream ended before message_stop",
+            malformed: "is not a Messages message",
         });
     });
 
@@ -266,6 +269,7 @@ describe("forwarding", () => {
             model: null,
             toolUses: [],
             unfinished: "stream ended before message_stop",
+            malformed: null,
         });
         const errored = [
             opening,
@@ -277,13 +281,14 @@ describe("forwarding", () => {
         expect(readResponse("text/event-stream", errored).unfinished).toBe(
             "stream carried an error event",
         );
-        const provisional = [start, delta, 'data: {"type":"message_stop"}'].join("\n");
+        const provisional = [opening, delta, 'data: {"type":"message_stop"}'].join("\n");
         expect(readResponse("text/event-stream", provisional)).toEqual({
             usage: null,
             stopReason: null,
             model: null,
             toolUses: [],
             unfinished: null,
+            malformed: null,
         });
     });
 
@@ -661,6 +666,7 @@ describe("forwarding", () => {
             () =>
                 new Response(
                     JSON.stringify({
+                        type: "message",
                         model: MODEL,
                         content: [{ input: {}, name: "read", id: "toolu_7", type: "tool_use" }],
                         stop_reason: "tool_use",
@@ -696,6 +702,7 @@ describe("forwarding", () => {
             () =>
                 new Response(
                     JSON.stringify({
+                        type: "message",
                         model: MODEL,
                         content: [{ input: {}, name: "read", id: "toolu_8", type: "tool_use" }],
                         stop_reason: "tool_use",
@@ -858,6 +865,54 @@ describe("forwarding", () => {
         expect(report.incomplete_reasons).toContain("cost unknown for a send");
     });
 
+    test("a response that is not a Messages message stops the run", async () => {
+        const bare = () =>
+            new Response(JSON.stringify({ model: MODEL, stop_reason: "end_turn", usage: USAGE }), {
+                headers: { "content-type": "application/json" },
+            });
+        const mock = new MockProvider({ forward: config({ fetch: upstreamDouble([bare]).send }) });
+        const base = await start(mock);
+        expect((await post(base, { ...firstTurn, stream: false })).status).toBe(200);
+        expect(mock.forwardingReport().stopped).toBe("send 0 is not a Messages message");
+        expect(mock.forwardingReport().complete).toBe(false);
+
+        const headless = [
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":${JSON.stringify(USAGE)}}`,
+            'data: {"type":"message_stop"}',
+        ].join("\n");
+        expect(readResponse("text/event-stream", headless).malformed).toBe(
+            "is not a Messages message",
+        );
+        expect(readResponse("text/event-stream", sse([], "end_turn")).malformed).toBeNull();
+    });
+
+    test("a response above MAX_RESPONSE_BYTES is cut off, charged its reservation, and stops the run", async () => {
+        const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+        let sent = 0;
+        const stream = new ReadableStream<Uint8Array>({
+            pull(controller) {
+                if (sent++ < 20) controller.enqueue(chunk);
+                else controller.close();
+            },
+        });
+        const double = upstreamDouble([
+            () => new Response(stream, { headers: { "content-type": "application/json" } }),
+        ]);
+        const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+        const reply = await post(await start(mock), { ...firstTurn, stream: false });
+        const text = await reply.text();
+        expect(reply.status).toBe(400);
+        expect(text).toContain("ResponseTooLarge");
+        const report = mock.forwardingReport();
+        expect(report.stopped).toBe("send 0 ended without a response (ResponseTooLarge)");
+        const exchange = report.exchanges[0];
+        expect(exchange?.response?.outcome).toBe("ambiguous");
+        expect(exchange?.response?.body_bytes).toBe(0);
+        expect(report.spent_usd).toBe(exchange?.request.reserved_usd ?? -1);
+        expect(MAX_RESPONSE_BYTES).toBeGreaterThan(4 * 1024 * 1024);
+    });
+
     test("an unfinished tool loop is incomplete", async () => {
         const toolUse = sse(
             [{ type: "tool_use", id: "toolu_1", name: "read", input: {} }],
@@ -924,12 +979,22 @@ describe("forwarding", () => {
                 mockProviderURL: "http://127.0.0.1:4321",
                 modelId: MODEL,
                 modelContextLimit: 200_000,
+                modelOutputLimit: 1024,
                 mockApiKey: mock.inboundKey,
             });
             const generated = readFileSync(join(env.configDir, "opencode.json"), "utf8");
             expect(generated).toContain(`"${MODEL}"`);
             expect(generated).toContain(mock.inboundKey);
             expect(generated).not.toContain(FAKE_KEY);
+            const limit = (
+                JSON.parse(generated) as {
+                    provider: Record<
+                        string,
+                        { models: Record<string, { limit: { context: number; output: number } }> }
+                    >;
+                }
+            ).provider["mock-anthropic"]?.models[MODEL]?.limit;
+            expect(limit).toEqual({ context: 200_000, output: 1024 });
             expect(statSync(resolve(env.configDir, "..")).mode & 0o777).toBe(0o700);
             expect(statSync(join(env.configDir, "opencode.json")).mode & 0o777).toBe(0o600);
         } finally {

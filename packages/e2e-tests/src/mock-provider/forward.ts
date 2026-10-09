@@ -60,6 +60,8 @@ export interface ForwardConfig {
 
 /** Response bytes kept per exchange; a longer response is served whole and captured truncated. */
 export const MAX_CAPTURED_RESPONSE_BYTES = 4 * 1024 * 1024;
+/** Response bytes read per send; a longer response is cut off and the send fails. */
+export const MAX_RESPONSE_BYTES = 4 * MAX_CAPTURED_RESPONSE_BYTES;
 
 const REDACTED_HEADERS = new Set([
     "authorization",
@@ -215,6 +217,11 @@ export interface ResponseFacts {
     toolUses: string[];
     /** Why an SSE stream is unfinished: an `error` event or no `message_stop`; `null` when finished. */
     unfinished: string | null;
+    /**
+     * Why the body is not a Messages message: no JSON `type: "message"` with a `content` array,
+     * or no SSE `message_start` carrying a `message`; `null` when it is one.
+     */
+    malformed: string | null;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -255,6 +262,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
     let stopReason: string | null = null;
     let model: string | null = null;
     let unfinished: string | null = null;
+    let message = false;
     let finalUsage = true;
     const blocks: Array<Record<string, unknown>> = [];
     const take = (usage: unknown) => {
@@ -279,6 +287,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
             if (isObject(event.message)) {
                 take(event.message.usage);
                 name(event.message.model);
+                if (event.type === "message_start") message = true;
             }
             take(event.usage);
             if (event.type === "message_delta" && isObject(event.usage)) finalUsage = true;
@@ -296,15 +305,17 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         try {
             body = JSON.parse(text);
         } catch {
-            return { usage: null, stopReason: null, model: null, toolUses: [], unfinished: null };
+            body = undefined;
         }
         if (isObject(body)) {
             take(body.usage);
             name(body.model);
             if (typeof body.stop_reason === "string") stopReason = body.stop_reason;
             blocks.push(...blocksOf(body.content));
+            message = body.type === "message" && Array.isArray(body.content);
         }
     }
+    const malformed = message ? null : "is not a Messages message";
     const toolUses = blocks
         .filter((block) => block.type === "tool_use" && typeof block.id === "string")
         .map((block) => block.id as string);
@@ -318,7 +329,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         !isCount(cacheWrite) ||
         !isCount(cacheRead)
     ) {
-        return { usage: null, stopReason, model, toolUses, unfinished };
+        return { usage: null, stopReason, model, toolUses, unfinished, malformed };
     }
     return {
         usage: {
@@ -331,7 +342,35 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         model,
         toolUses,
         unfinished,
+        malformed,
     };
+}
+
+/** The body's bytes, or a `ResponseTooLarge` error once more than `cap` bytes have arrived. */
+async function readBounded(response: Response, cap: number): Promise<Uint8Array<ArrayBuffer>> {
+    const reader = response.body?.getReader();
+    if (!reader) return new Uint8Array(0);
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > cap) {
+            await reader.cancel();
+            const error = new Error(`response above ${cap} bytes`);
+            error.name = "ResponseTooLarge";
+            throw error;
+        }
+        chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return bytes;
 }
 
 function errorResponse(type: string, message: string): Response {
@@ -438,7 +477,7 @@ export class Forwarder {
         return { reserved, toolResults: toolResultIds(parsed) };
     }
 
-    /** Sends `body` and reads the whole response before the deadline. */
+    /** Sends `body` and reads the response, up to `MAX_RESPONSE_BYTES`, before the deadline. */
     private async timedSend(
         body: Uint8Array<ArrayBuffer>,
         headers: Record<string, string>,
@@ -460,7 +499,7 @@ export class Forwarder {
                     // A redirect would move the send to an unselected target.
                     redirect: "error",
                 });
-                return [sent, new Uint8Array(await sent.arrayBuffer())] as const;
+                return [sent, await readBounded(sent, MAX_RESPONSE_BYTES)] as const;
             })(),
             expired,
         ]);
@@ -528,7 +567,7 @@ export class Forwarder {
         }
         const contentType = response.headers.get("content-type") ?? "";
         const responseText = new TextDecoder().decode(bytes);
-        const { usage, stopReason, model, toolUses, unfinished } = readResponse(
+        const { usage, stopReason, model, toolUses, unfinished, malformed } = readResponse(
             contentType,
             responseText,
         );
@@ -561,6 +600,7 @@ export class Forwarder {
         if (!response.ok)
             this.stopped ??= `send ${exchange.index} returned HTTP ${response.status}`;
         else if (unfinished) this.stopped ??= `send ${exchange.index} ${unfinished}`;
+        else if (malformed) this.stopped ??= `send ${exchange.index} ${malformed}`;
         else if (model === null) this.stopped ??= `send ${exchange.index} states no model`;
         else if (model !== this.config.model) {
             this.stopped ??= `send ${exchange.index} names model ${model}`;

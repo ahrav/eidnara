@@ -310,8 +310,10 @@ same capture over the scripted producer in the default suite.
 `packages/e2e-tests/src/mock-provider/` forwards each request OpenCode sends
 to one Messages endpoint and returns the provider's response to OpenCode.
 `RustTestHarness.create({ forward })` builds it and runs OpenCode on
-`forward.model` at `forward.contextLimit`, so the forwarded body already
-names the selected model. Construction requires:
+`forward.model` at `forward.contextLimit` with an output limit of
+`forward.limits.maxOutputTokens`, so the forwarded body already names the
+selected model and carries a `max_tokens` the forwarder admits. Construction
+requires:
 
 - an `https:` URL whose path ends in `/messages`, with no user info or query;
 - the model, as the provider echoes it in responses, which every request
@@ -338,10 +340,13 @@ response states usage only when it reaches `message_stop` with a
 `message_delta` carrying usage and no `error` event, because `message_start`
 carries provisional counts. A refused send, a non-2xx response, a streamed
 response cut before `message_stop` or carrying an `error` event, a timeout, a
-redirect, a failed credential callback, a response naming another model or
-none, or a response whose usage costs more than its reservation stops the
-run, and every later request is refused without a send. Each exchange records
-the model its response names. The input price
+redirect, a failed credential callback, a response that is not a Messages
+message (no JSON `type: "message"` with a `content` array, or no SSE
+`message_start`), a response naming another model or none, a response above
+16 MiB, which is cut off and charged its reservation, or a response whose
+usage costs more than its reservation stops the run, and every later request
+is refused without a send. Each exchange records the model its response
+names. The input price
 must cover any pricing the client's `anthropic-beta` header enables. The forwarder sends the received
 bytes unchanged, adds the callback's headers to the outbound request only,
 and records each exchange with redacted headers and the bounded response

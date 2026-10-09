@@ -380,8 +380,9 @@ or the cassette refuses; the construction errors for scripted plus forwarding
 and for a missing HTTPS Messages target, model, corpus digest, price, or
 limit; byte-equal forwarding, the returned response, and the captured
 tool-result turn; a stop at each limit, a timeout, a provider error, a
-response naming another model or none, and a request body that is not a JSON
-object; reservation-priced unknown cost,
+response naming another model or none, a response that is not a Messages
+message, a response above the 16 MiB read bound, and a request body that is
+not a JSON object; reservation-priced unknown cost,
 including an SSE stream cut before `message_stop` or carrying an `error` event,
 which also stops the run; an unfinished tool loop; and a canary credential
 absent from the report, captures, and generated configuration, whose
