@@ -404,6 +404,45 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(userPrompt)).toContain("records a malformed digest");
     });
 
+    test("a terminal is one its owner emits", async () => {
+        const first = allScenarios[0]?.s.id ?? "";
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${first}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.terminal = "published";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            `delivery.${first}.json has terminal published, which opencode-delivery does not emit`,
+        );
+        expect(rowOf(assembled, first)?.execution.status).toBe("missing");
+    });
+
+    test("a real capture attempt records its prompts as text", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: {
+                attempt: {
+                    system: undefined,
+                    prompt: undefined,
+                    system_sha256: sha256("summarizer system prompt"),
+                    prompt_sha256: sha256("p"),
+                },
+            },
+        });
+        expect(errorsOf(assembled)).toContain("records a prompt as a digest without its text");
+        const fractional = await assemble(scratch(), {
+            baseline: {
+                settings: { temperature: 0.1, max_output_tokens: 1024.5 },
+                attempt: { max_output_tokens: 1024.5 },
+            },
+        });
+        expect(errorsOf(fractional)).toContain(
+            "arm.json declares no whole-number max_output_tokens",
+        );
+    });
+
     test("an output origin is the exact literal its producer writes", async () => {
         const lookalike = await assemble(scratch(), {
             baseline: { origin: "real-looking fixture" },
@@ -892,7 +931,9 @@ describe("evidence deterministic column", () => {
                 writeFileSync(path, JSON.stringify(value));
             },
         });
-        expect(assembled.arms[0]?.identity_errors).toEqual([]);
+        expect(errorsOf(assembled)).toContain(
+            `delivery.${exact}.json has terminal read_exact, which opencode-delivery does not emit`,
+        );
         expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
     });
 
@@ -916,6 +957,7 @@ describe("evidence deterministic column", () => {
                 const path = join(dir, `delivery.${scenario?.s.id}.json`);
                 const value = JSON.parse(readFileSync(path, "utf8"));
                 value.owner = "daemon.harness_sources.c6_exact_read";
+                value.terminal = "read_exact";
                 value.detail = { tier: scenario?.s.serving.tier };
                 writeFileSync(path, JSON.stringify(value));
             },
@@ -1295,6 +1337,22 @@ describe("evidence live mode", () => {
                 "does not match the forwarding report schema",
             );
         }
+        // `1e400` parses to Infinity, which JSON.stringify cannot write back.
+        const infinite = scratch();
+        const unbounded = await assemble(infinite, {
+            mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
+            tamper: (dir) => {
+                const text = JSON.stringify(report).replace(
+                    '"spendCapUsd":1',
+                    '"spendCapUsd":1e400',
+                );
+                writeFileSync(join(dir, "forwarding-0.json"), text);
+                writeFileSync(join(infinite, "candidate", "forwarding-0.json"), text);
+            },
+        });
+        expect(errorsOf(unbounded)).toContain("does not match the forwarding report schema");
         const oneCall = { ...LIMITS, maxCalls: 1 };
         const second = { ...report.exchanges[0], index: 1 };
         const overCap = { ...report, limits: oneCall, exchanges: [...report.exchanges, second] };
