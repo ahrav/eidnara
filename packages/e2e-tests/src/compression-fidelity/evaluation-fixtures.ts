@@ -93,8 +93,32 @@ export function writeArm(
         markers: [],
     });
     const captures = new Map<string, string>();
+    const scripted = options.generationOrigin === "scripted";
     for (const c of corpus.cases) {
         for (const source of c.sources) {
+            if (scripted) {
+                write(dir, `generation.${source.id}.json`, {
+                    ...base(c.id, source.id),
+                    owner: "daemon.compression_fidelity.replay",
+                    scenario: null,
+                    stage: "generation",
+                    terminal: "published",
+                    detail: {
+                        attempts:
+                            options.attempt === null
+                                ? []
+                                : [
+                                      {
+                                          attempt: 1,
+                                          model,
+                                          system_sha256: sha256(system),
+                                          output_origin: "scripted approved example",
+                                      },
+                                  ],
+                    },
+                });
+                continue;
+            }
             const capture = write(dir, `real.${source.id}.json`, {
                 ...base(c.id, source.id),
                 owner: "daemon.compression_fidelity.real_capture",

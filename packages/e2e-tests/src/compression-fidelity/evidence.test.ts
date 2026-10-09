@@ -4,6 +4,7 @@ import {
     mkdirSync,
     readdirSync,
     readFileSync,
+    rmSync,
     statSync,
     symlinkSync,
     writeFileSync,
@@ -185,6 +186,43 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(assembled)).toContain(
             `delivery.${first}.json marks stage served as a judge control`,
         );
+    });
+
+    test("a scripted arm needs a published replay generation that records its prompt for every source", async () => {
+        const scripted = { generationOrigin: "scripted" as const };
+        const complete = await assemble(scratch(), { baseline: scripted, candidate: scripted });
+        expect(complete.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(complete.treatment).toBe(true);
+        const unrecorded = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: null },
+            candidate: scripted,
+        });
+        expect(errorsOf(unrecorded)).toContain("records no system prompt");
+        const first = corpus.cases[0]?.sources[0]?.id ?? "";
+        const absent = await assemble(scratch(), {
+            baseline: scripted,
+            candidate: scripted,
+            tamper: (dir) => rmSync(join(dir, `generation.${first}.json`)),
+        });
+        expect(errorsOf(absent)).toContain(`no published scripted generation for ${first}`);
+        expect(absent.refused).toContain("an arm has identity errors");
+    });
+
+    test("a generation record that names a scenario is an identity error", async () => {
+        const scenario = allScenarios[0];
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `real.${scenario?.s.source}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.scenario = scenario?.s.id;
+                writeFileSync(join(dir, "real.scenario.json"), JSON.stringify(value));
+                rmSync(join(dir, `delivery.${scenario?.s.id}.json`));
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            `real.scenario.json names scenario ${scenario?.s.id}; a capture stage is source-level`,
+        );
+        expect(rowOf(assembled, scenario?.s.id)?.execution.status).toBe("missing");
     });
 
     test("arms with different generation origins refuse the comparison", async () => {
@@ -618,6 +656,7 @@ describe("evidence live mode", () => {
             mode: "forward",
             corpus_sha256: SHA,
             model: "claude-live",
+            stopped: null as string | null,
             limits: { maxCalls: 40 },
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
@@ -626,6 +665,8 @@ describe("evidence live mode", () => {
                     index: 0,
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
+                        outcome: "acknowledged",
+                        stop_reason: "end_turn" as string | null,
                         truncated: false,
                         body_text: "ok",
                         body_sha256: sha256("ok") as string | null,
@@ -688,6 +729,19 @@ describe("evidence live mode", () => {
         );
         const incomplete = { ...unanswered, complete: false, incomplete_reasons: ["x"] };
         expect(errorsOf(await live([incomplete]))).not.toContain("in a complete report");
+        const errored = forwardingReport("{}", sha256("{}"), true);
+        const [sent] = errored.exchanges;
+        if (sent)
+            sent.response = { ...sent.response, outcome: "provider_error", stop_reason: null };
+        expect(errorsOf(await live([errored]))).toContain(
+            "exchange 0 response outcome is provider_error in a complete report",
+        );
+        expect(errorsOf(await live([errored]))).toContain(
+            "exchange 0 response states no stop reason in a complete report",
+        );
+        expect(
+            errorsOf(await live([{ ...complete, stopped: "send 0 returned HTTP 500" }])),
+        ).toContain("complete report records a stop: send 0 returned HTTP 500");
         const raised = await live([
             { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
         ]);
