@@ -16,9 +16,13 @@
 //! selection and records a binding only once its answer is delivered, so an admitted request
 //! that is cancelled or fails before answering consumes its entry without reporting a binding.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
+use std::ops::Range;
 use std::sync::LazyLock;
 
+use daemon::history_summarizer_chunk::{ALIAS_CLOSE, ALIAS_OPEN};
+use memchr::memmem::Finder;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -70,6 +74,281 @@ pub struct Record {
     pub start: u64,
     pub end: u64,
     pub text: String,
+}
+
+/// The ordinal range of the presented line that starts `text`, `[a-b] R: part / part`, and the
+/// offset of its parts. The search stays within the line.
+fn presented_header(text: &str) -> Option<(u64, u64, usize)> {
+    let rest = text.strip_prefix('[')?;
+    let (range, after_range) = split_once_pair(rest, b']')?;
+    let (start, end) = match memchr::memchr(b'-', range.as_bytes()) {
+        Some(dash) => (range[..dash].parse().ok()?, range[dash + 1..].parse().ok()?),
+        None => {
+            let ordinal = range.parse().ok()?;
+            (ordinal, ordinal)
+        }
+    };
+    let (_, parts_at) = split_once_pair(&rest[after_range..], b':')?;
+    Some((start, end, 1 + after_range + parts_at))
+}
+
+/// One presented line with alias markers stripped from its parts.
+#[cfg(test)]
+fn presented_line(line: &str) -> Option<(u64, u64, String)> {
+    let (start, end, parts_at) = presented_header(line)?;
+    let mut text = String::with_capacity(line.len() - parts_at);
+    push_stripped_tokens(line, parts_at, &mut text);
+    Some((start, end, text))
+}
+
+/// Splits `text` at its first `first` followed by a space, when that comes before any newline.
+/// Returns the text before the delimiter and the offset after it.
+fn split_once_pair(text: &str, first: u8) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    let at = bytes
+        .windows(2)
+        .position(|window| window[0] == b'\n' || (window[0] == first && window[1] == b' '))?;
+    (bytes[at] == first).then(|| (&text[..at], at + 2))
+}
+
+/// Whitespace follows `char::is_whitespace`, so a non-ASCII separator such as U+00A0 splits
+/// tokens exactly as `str::split_whitespace` does.
+#[inline(always)]
+fn whitespace_len(text: &str, at: usize) -> usize {
+    let byte = text.as_bytes()[at];
+    if byte < 0x80 {
+        usize::from(is_ascii_whitespace(byte))
+    } else {
+        multibyte_whitespace_len(text, at)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn multibyte_whitespace_len(text: &str, at: usize) -> usize {
+    match text[at..].chars().next() {
+        Some(character) if character.is_whitespace() => character.len_utf8(),
+        _ => 0,
+    }
+}
+
+/// `is_ascii_whitespace` matches `char::is_whitespace` for ASCII bytes, including U+000B.
+fn is_ascii_whitespace(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | 0x0B | 0x0C | b'\r' | b' ')
+}
+
+fn skip_whitespace(text: &str, mut at: usize) -> usize {
+    while at < text.len() {
+        let gap = whitespace_len(text, at);
+        if gap == 0 {
+            break;
+        }
+        at += gap;
+    }
+    at
+}
+
+/// Skips whitespace within the current line; a newline stays in place.
+fn skip_line_whitespace(text: &str, mut at: usize) -> usize {
+    while at < text.len() && text.as_bytes()[at] != b'\n' {
+        let gap = whitespace_len(text, at);
+        if gap == 0 {
+            break;
+        }
+        at += gap;
+    }
+    at
+}
+
+fn token_end(text: &str, mut at: usize) -> usize {
+    let bytes = text.as_bytes();
+    while at < bytes.len() {
+        if bytes[at] < 0x80 {
+            if is_ascii_whitespace(bytes[at]) {
+                break;
+            }
+            at += 1;
+        } else {
+            if whitespace_len(text, at) > 0 {
+                break;
+            }
+            at += text[at..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    at
+}
+
+const LOW_BITS: u64 = 0x0101_0101_0101_0101;
+const HIGH_BITS: u64 = LOW_BITS << 7;
+
+/// `next_special` returns the index of the first byte at or after `from` that is below U+0020, has
+/// its high bit set, or is a space right after another space. `next_special` scans past isolated
+/// spaces and classifies eight bytes per word-parallel step.
+fn next_special(bytes: &[u8], from: usize) -> usize {
+    let mut carry = u64::from(from > 0 && bytes[from - 1] == b' ') << 7;
+    let (words, tail) = bytes[from..].as_chunks::<8>();
+    let (pairs, odd) = words.as_chunks::<2>();
+    let mut at = from;
+    for [first, second] in pairs {
+        let (special, next) = classify(u64::from_le_bytes(*first), carry);
+        if special != 0 {
+            return at + (special.trailing_zeros() / 8) as usize;
+        }
+        let (special, next) = classify(u64::from_le_bytes(*second), next);
+        if special != 0 {
+            return at + 8 + (special.trailing_zeros() / 8) as usize;
+        }
+        carry = next;
+        at += 16;
+    }
+    for word in odd {
+        let (special, next) = classify(u64::from_le_bytes(*word), carry);
+        if special != 0 {
+            return at + (special.trailing_zeros() / 8) as usize;
+        }
+        carry = next;
+        at += 8;
+    }
+    for &byte in tail {
+        if !(0x20..0x80).contains(&byte) || (byte == b' ' && carry != 0) {
+            return at;
+        }
+        carry = u64::from(byte == b' ');
+        at += 1;
+    }
+    at
+}
+
+/// Flags the special bytes of one little-endian word in each byte's high bit. `carry` holds, in
+/// bit 7, whether the byte before the word is a space; the returned carry does the same for the
+/// word's last byte.
+#[inline(always)]
+fn classify(word: u64, carry: u64) -> (u64, u64) {
+    let seven_bits = LOW_BITS * 0x7F;
+    let below_space = !(((word & seven_bits) + LOW_BITS * 0x60) | word) & HIGH_BITS;
+    let not_space = word ^ (LOW_BITS * 0x20);
+    let space = !(((not_space & seven_bits) + seven_bits) | not_space) & HIGH_BITS;
+    let pair = space & ((space << 8) | carry);
+    ((word & HIGH_BITS) | below_space | pair, space >> 56)
+}
+
+/// The byte offset of the first `ALIAS_CLOSE` in `token`, a slice that starts on a character
+/// boundary.
+fn alias_close(token: &[u8]) -> Option<usize> {
+    let mut encoded = [0; 4];
+    let close = ALIAS_CLOSE.encode_utf8(&mut encoded).as_bytes();
+    token
+        .windows(close.len())
+        .position(|window| window == close)
+}
+
+/// Appends the stripped tokens of the line that starts at `from` in `text` to `out`, and returns
+/// the offset of the newline that ends the line, or `text.len()`.
+fn push_stripped_tokens(text: &str, from: usize, out: &mut String) -> usize {
+    let bytes = text.as_bytes();
+    let mut scan = skip_line_whitespace(text, from);
+    let mut run = scan;
+    let mut token_start = true;
+    while scan < bytes.len() {
+        let at = next_special(bytes, scan);
+        if at >= bytes.len() || bytes[at] == b'\n' {
+            scan = at;
+            break;
+        }
+        let opens_token = if at == run {
+            token_start
+        } else {
+            bytes[at - 1] == b' '
+        };
+        if opens_token && text[at..].starts_with(ALIAS_OPEN) {
+            let marker = at + ALIAS_OPEN.len_utf8();
+            let end = token_end(text, marker);
+            if let Some(close) = alias_close(&bytes[marker..end]) {
+                out.push_str(&text[run..at]);
+                scan = marker + close + ALIAS_CLOSE.len_utf8();
+                let after = skip_line_whitespace(text, scan);
+                token_start = after > scan;
+                if token_start && !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                scan = after;
+                run = scan;
+                continue;
+            }
+            scan = marker;
+            token_start = false;
+            continue;
+        }
+        let gap = whitespace_len(text, at);
+        if gap > 0 {
+            out.push_str(&text[run..at]);
+            scan = skip_line_whitespace(text, at + gap);
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            run = scan;
+            token_start = true;
+            continue;
+        }
+        scan = at + text[at..].chars().next().map_or(1, char::len_utf8);
+        token_start = false;
+    }
+    out.push_str(&text[run..scan]);
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    scan
+}
+
+/// The presented records of a summarizer prompt's first `<new_messages>` section. Returns `None`
+/// when the section is missing, unclosed, or holds no record line.
+pub fn presented_records(prompt: &str) -> Option<Vec<Record>> {
+    static OPEN: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(b"<new_messages>"));
+    static CLOSE: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(b"</new_messages>"));
+    let body = &prompt[OPEN.find(prompt.as_bytes())? + OPEN.needle().len()..];
+    let body = &body[..CLOSE.find(body.as_bytes())?];
+    // The first parsed header starts a record. A later header starts a record when its start
+    // equals the preceding record's `end + 1`. After the first record, a nonblank line that does
+    // not start a record extends the preceding record's text.
+    let bytes = body.as_bytes();
+    let mut lines: Vec<Record> = Vec::with_capacity(body.len() / 128 + 1);
+    let mut scratch = String::new();
+    let mut pending: Option<(u64, u64)> = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        let next = pending.map(|(_, end)| end + 1);
+        match presented_header(&body[at..]) {
+            Some((start, end, parts_at)) if next.is_none_or(|next| start == next) => {
+                if let Some((start, end)) = pending {
+                    lines.push(Record {
+                        start,
+                        end,
+                        text: scratch.clone(),
+                    });
+                }
+                scratch.clear();
+                at = push_stripped_tokens(body, at + parts_at, &mut scratch) + 1;
+                pending = Some((start, end));
+            }
+            _ => {
+                let line_end = memchr::memchr(b'\n', &bytes[at..]).map_or(bytes.len(), |n| at + n);
+                let continuation = body[at..line_end].trim();
+                if pending.is_some() && !continuation.is_empty() {
+                    scratch.push(' ');
+                    scratch.push_str(continuation);
+                }
+                at = line_end + 1;
+            }
+        }
+    }
+    if let Some((start, end)) = pending {
+        lines.push(Record {
+            start,
+            end,
+            text: scratch,
+        });
+    }
+    (!lines.is_empty()).then_some(lines)
 }
 
 static CORPUS: LazyLock<Result<(Corpus, Value), String>> = LazyLock::new(|| {
@@ -138,10 +417,19 @@ pub struct Binding {
     pub output_sha256: String,
 }
 
-/// An admitted scripted answer. [`CaseScript::delivered`] records it once it is emitted.
+/// An admitted scripted answer. [`CaseScript::delivered`] records its receipt once the answer is
+/// emitted.
 #[derive(Debug)]
 pub struct Answer {
     pub text: String,
+    pub receipt: Receipt,
+}
+
+/// What [`CaseScript::delivered`] records for one emitted answer.
+#[derive(Debug)]
+pub struct Receipt {
+    /// [`CaseScript`]'s generation when the answer was admitted.
+    generation: u64,
     /// `None` for a filler answer.
     binding: Option<Binding>,
 }
@@ -168,6 +456,7 @@ enum Queued {
     Scenario {
         scenario: String,
         source: &'static Source,
+        prepared: &'static Prepared,
         p1_only: bool,
     },
     /// `rows` bounds the segment count, or `None` for one segment per two records.
@@ -176,11 +465,141 @@ enum Queued {
     Echo { rows: Option<usize> },
 }
 
+/// Case ID and source ID.
+type SourceKey = (&'static str, &'static str);
+
+/// What `bind` needs for each source, prepared once per process. `None` marks a source whose
+/// approved example `bind` cannot rewrite or whose messages it cannot locate.
+static PREPARED: LazyLock<HashMap<SourceKey, Option<Prepared>>> = LazyLock::new(|| {
+    corpus()
+        .map(|(corpus, _)| {
+            corpus
+                .cases
+                .iter()
+                .flat_map(|case| {
+                    case.sources.iter().map(move |source| {
+                        ((case.id.as_str(), source.id.as_str()), prepared(source))
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+});
+
+struct Prepared {
+    probes: Vec<Probe>,
+    template: Template,
+}
+
+/// Where `bind` rewrites a source's approved example. The example holds, in order, one
+/// `<history_segments>` opening tag, one range pattern, and one `<meta>` element.
+struct Template {
+    /// The byte offset right after `<history_segments>`, where a lead-in segment goes.
+    segments: usize,
+    /// The bytes of `start="1" end="N"`.
+    range: Range<usize>,
+    /// The bytes of `<meta>...</meta>`.
+    meta: Range<usize>,
+}
+
+impl Template {
+    fn new(source: &Source) -> Option<Self> {
+        let example = source.approved_example.as_str();
+        let pattern = range_pattern(source);
+        let segments = example.find("<history_segments>")? + "<history_segments>".len();
+        let range_at = example.find(&pattern)?;
+        let range = range_at..range_at + pattern.len();
+        let meta_at = example.find("<meta>")?;
+        let meta = meta_at..meta_at + example[meta_at..].find("</meta>")? + "</meta>".len();
+        let single = example.matches(&pattern).count() == 1
+            && example.matches("<meta>").count() == 1
+            && ["<p2>", "</p2>", "<p3>", "</p3>"]
+                .iter()
+                .all(|tag| example.matches(tag).count() == 1);
+        let ordered = segments <= range.start && range.end <= meta.start;
+        (single && ordered).then_some(Self {
+            segments,
+            range,
+            meta,
+        })
+    }
+}
+
+/// Locates one source message in presented text with a ready-made finder.
+struct Probe {
+    /// The words of the collapsed probe, in order.
+    tokens: Vec<String>,
+    /// Finds candidate occurrences of the first word.
+    first: Finder<'static>,
+    /// The probe was cut right after a whole word, so a carrying text continues past that word.
+    trailing_space: bool,
+}
+
+impl Probe {
+    fn new(parts: &[Part]) -> Option<Self> {
+        message_probe(parts).map(|text| Self::from_text(&text))
+    }
+
+    fn from_text(text: &str) -> Self {
+        let tokens: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
+        Self {
+            first: Finder::new(&tokens[0]).into_owned(),
+            trailing_space: text.ends_with(' '),
+            tokens,
+        }
+    }
+
+    /// Whether `text` with its whitespace collapsed contains the probe.
+    ///
+    /// Collapsing joins the words of `text` with single spaces, so the probe occurs in the
+    /// collapsed text exactly where its words occur in `text` separated by whitespace runs, with
+    /// the first word possibly inside a longer word and the last word possibly cut short. A probe
+    /// that ends in a space needs whitespace and a further word after its last word, since
+    /// collapsing drops trailing whitespace.
+    #[cfg(test)]
+    fn carried_by(&self, text: &str) -> bool {
+        self.carried_from(text, 0).is_some()
+    }
+
+    /// `carried_from` returns the end offset of the first probe match starting at or after
+    /// `from`. `from` must be at most `text.len()`.
+    fn carried_from(&self, text: &str, from: usize) -> Option<usize> {
+        self.first
+            .find_iter(&text.as_bytes()[from..])
+            .find_map(|at| self.matches_at(text, from + at))
+    }
+
+    fn matches_at(&self, text: &str, at: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut pos = at;
+        for (index, token) in self.tokens.iter().enumerate() {
+            if index > 0 {
+                let after = skip_whitespace(text, pos);
+                if after == pos {
+                    return None;
+                }
+                pos = after;
+            }
+            if !bytes[pos..].starts_with(token.as_bytes()) {
+                return None;
+            }
+            pos += token.len();
+        }
+        if !self.trailing_space {
+            return Some(pos);
+        }
+        let after = skip_whitespace(text, pos);
+        (after > pos && after < text.len()).then_some(pos)
+    }
+}
+
 /// The selection and its consumption record. Every summarizer request after a selection consumes
 /// one entry or fails, so an unrelated request cannot leave a scenario for a later one.
 #[derive(Default)]
 pub struct CaseScript {
     armed: bool,
+    /// The number of accepted selections.
+    generation: u64,
     queue: VecDeque<Queued>,
     bound: u64,
     filled: u64,
@@ -213,12 +632,12 @@ fn resolve(scenario: &str) -> Result<(&'static str, &'static Source), ScriptErro
     Ok((case.id.as_str(), source))
 }
 
-fn collapse(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn probe_of(text: &str) -> String {
-    collapse(text).chars().take(PROBE_CHARS).collect()
+    text.split_whitespace()
+        .enumerate()
+        .flat_map(|(index, word)| (index > 0).then_some(' ').into_iter().chain(word.chars()))
+        .take(PROBE_CHARS)
+        .collect()
 }
 
 /// The probe that locates a message in the presented transcript: the leading characters of its
@@ -238,19 +657,16 @@ fn range_pattern(source: &Source) -> String {
     format!("start=\"1\" end=\"{}\"", source.messages.len())
 }
 
-/// Whether `bind` can rewrite this source's approved example and locate every message.
-fn scriptable(source: &Source) -> bool {
-    let example = &source.approved_example;
-    example.matches(&range_pattern(source)).count() == 1
-        && example.matches("<meta>").count() == 1
-        && example.contains("<history_segments>")
-        && ["<p2>", "</p2>", "<p3>", "</p3>"]
-            .iter()
-            .all(|tag| example.matches(tag).count() == 1)
-        && source
-            .messages
-            .iter()
-            .all(|message| message_probe(&message.parts).is_some())
+/// The template and the probes of every message, when `bind` can rewrite this source's approved
+/// example and locate every message.
+fn prepared(source: &Source) -> Option<Prepared> {
+    let template = Template::new(source)?;
+    let probes = source
+        .messages
+        .iter()
+        .map(|message| Probe::new(&message.parts))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Prepared { probes, template })
 }
 
 /// The native records of the source a scenario names, as the corpus file spells them, so a
@@ -324,18 +740,21 @@ impl CaseScript {
                     Some(scenario) => (scenario, true),
                     None => (entry.as_str(), false),
                 };
-                let (_, source) = resolve(scenario)?;
-                if !scriptable(source) {
-                    return Err(ScriptError::CorpusRejected);
-                }
+                let (case, source) = resolve(scenario)?;
+                let prepared = PREPARED
+                    .get(&(case, source.id.as_str()))
+                    .and_then(Option::as_ref)
+                    .ok_or(ScriptError::CorpusRejected)?;
                 Ok(Queued::Scenario {
                     scenario: entry.clone(),
                     source,
+                    prepared,
                     p1_only,
                 })
             })
             .collect::<Result<VecDeque<_>, _>>()?;
         self.armed = true;
+        self.generation += 1;
         self.queue = queue;
         self.bindings.clear();
         Ok(())
@@ -366,23 +785,34 @@ impl CaseScript {
             self.exhausted += 1;
             return Some(Err(AnswerFailure::Exhausted));
         };
+        let generation = self.generation;
         let answer = match queued {
             Queued::Filler { rows } => Ok(Answer {
                 text: filler(records, rows),
-                binding: None,
+                receipt: Receipt {
+                    generation,
+                    binding: None,
+                },
             }),
             Queued::Echo { rows } => Ok(Answer {
                 text: echo(records, rows),
-                binding: None,
+                receipt: Receipt {
+                    generation,
+                    binding: None,
+                },
             }),
             Queued::Scenario {
                 scenario,
                 source,
+                prepared,
                 p1_only,
-            } => bind(&scenario, source, p1_only, records)
+            } => bind(&scenario, source, prepared, p1_only, records)
                 .map(|(text, binding)| Answer {
                     text,
-                    binding: Some(binding),
+                    receipt: Receipt {
+                        generation,
+                        binding: Some(binding),
+                    },
                 })
                 .ok_or(AnswerFailure::Mismatch),
         };
@@ -392,12 +822,15 @@ impl CaseScript {
         Some(answer)
     }
 
-    /// Records an admitted answer once the fixture emits it.
-    pub fn delivered(&mut self, answer: &Answer) {
-        match &answer.binding {
+    /// Records an admitted answer once the fixture emits it. The lifetime counters count every
+    /// emitted answer.
+    pub fn delivered(&mut self, receipt: &Receipt) {
+        match &receipt.binding {
             Some(binding) => {
                 self.bound += 1;
-                self.bindings.push(binding.clone());
+                if receipt.generation == self.generation {
+                    self.bindings.push(binding.clone());
+                }
             }
             None => self.filled += 1,
         }
@@ -406,19 +839,23 @@ impl CaseScript {
 
 /// The first and last record of the source's run, when its messages appear in order in one
 /// contiguous run of presented records covering exactly the source's ordinals. Consecutive
-/// messages may share one merged record; a record inside the run that carries none of them is a
-/// mismatch.
-fn locate(source: &Source, records: &[Record]) -> Option<(usize, usize)> {
-    let mut hits = Vec::with_capacity(source.messages.len());
-    let mut cursor = 0;
-    for message in &source.messages {
-        let probe = message_probe(&message.parts)?;
-        let at = cursor
-            + records[cursor..]
-                .iter()
-                .position(|record| collapse(&record.text).contains(&probe))?;
+/// messages may share a merged record if each message starts at or after the preceding probe's
+/// end offset.
+fn locate(probes: &[Probe], records: &[Record]) -> Option<(usize, usize)> {
+    let mut hits = Vec::with_capacity(probes.len());
+    let (mut cursor, mut offset) = (0, 0);
+    for probe in probes {
+        let (at, end) = records[cursor..]
+            .iter()
+            .enumerate()
+            .find_map(|(index, record)| {
+                let from = if index == 0 { offset } else { 0 };
+                probe
+                    .carried_from(&record.text, from)
+                    .map(|end| (cursor + index, end))
+            })?;
         hits.push(at);
-        cursor = at;
+        (cursor, offset) = (at, end);
     }
     let (first, last) = (*hits.first()?, *hits.last()?);
     let contiguous = hits.windows(2).all(|pair| pair[1] - pair[0] <= 1);
@@ -429,8 +866,7 @@ fn locate(source: &Source, records: &[Record]) -> Option<(usize, usize)> {
         run.len() as u64 <= record.end - record.start + 1
     });
     let covered = records[last].end - records[first].start + 1;
-    (contiguous && within_ranges && covered == source.messages.len() as u64)
-        .then_some((first, last))
+    (contiguous && within_ranges && covered == probes.len() as u64).then_some((first, last))
 }
 
 /// The approved example of `source` with its range moved to the presented ordinals.
@@ -441,42 +877,48 @@ fn locate(source: &Source, records: &[Record]) -> Option<(usize, usize)> {
 fn bind(
     scenario: &str,
     source: &Source,
+    prepared: &Prepared,
     p1_only: bool,
     records: &[Record],
 ) -> Option<(String, Binding)> {
-    let (first, last) = locate(source, records)?;
+    let (first, last) = locate(&prepared.probes, records)?;
     let (start, end) = (records[first].start, records[last].end);
-    let mut text = source.approved_example.replacen(
-        &range_pattern(source),
-        &format!("start=\"{start}\" end=\"{end}\""),
-        1,
-    );
+    let unprocessed_from = records.get(last + 1).map(|record| record.start);
+    let example = source.approved_example.as_str();
+    let template = &prepared.template;
+    let mut text = String::with_capacity(example.len() + 512);
+    text.push_str(&example[..template.segments]);
+    if first > 0 {
+        let (lead_start, lead_end) = (records[0].start, records[first - 1].end);
+        write!(
+            text,
+            "<history_segment start=\"{lead_start}\" end=\"{lead_end}\" title=\"Fixture lead-in {lead_start} to {lead_end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored lead-in before the scripted case.</p1><p2>Fixture lead-in.</p2><p3>Lead-in.</p3><p4 /></history_segment>"
+        )
+        .expect("write to a String");
+    }
+    let case_at = text.len();
+    text.push_str(&example[template.segments..template.range.start]);
+    write!(text, "start=\"{start}\" end=\"{end}\"").expect("write to a String");
+    text.push_str(&example[template.range.end..template.meta.start]);
+    write!(
+        text,
+        "<meta><messages_processed>{start}-{end}</messages_processed>"
+    )
+    .expect("write to a String");
+    if let Some(next) = unprocessed_from {
+        write!(text, "<unprocessed_from>{next}</unprocessed_from>").expect("write to a String");
+    }
+    text.push_str("</meta>");
+    text.push_str(&example[template.meta.end..]);
     if p1_only {
+        // The case segment's `<p2>` and `<p3>` elements occur once in the example after the
+        // lead-in.
         for tag in ["p2", "p3"] {
             let close_tag = format!("</{tag}>");
-            let open = text.find(&format!("<{tag}>"))?;
+            let open = case_at + text[case_at..].find(&format!("<{tag}>"))?;
             let close = open + text[open..].find(&close_tag)? + close_tag.len();
             text.replace_range(open..close, "");
         }
-    }
-    let unprocessed_from = records.get(last + 1).map(|record| record.start);
-    let meta_at = text.find("<meta>")?;
-    let meta_end = meta_at + text[meta_at..].find("</meta>")? + "</meta>".len();
-    let processed = format!("<messages_processed>{start}-{end}</messages_processed>");
-    let meta = match unprocessed_from {
-        Some(next) => {
-            format!("<meta>{processed}<unprocessed_from>{next}</unprocessed_from></meta>")
-        }
-        None => format!("<meta>{processed}</meta>"),
-    };
-    text.replace_range(meta_at..meta_end, &meta);
-    if first > 0 {
-        let (lead_start, lead_end) = (records[0].start, records[first - 1].end);
-        let lead = format!(
-            "<history_segment start=\"{lead_start}\" end=\"{lead_end}\" title=\"Fixture lead-in {lead_start} to {lead_end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored lead-in before the scripted case.</p1><p2>Fixture lead-in.</p2><p3>Lead-in.</p3><p4 /></history_segment>"
-        );
-        let at = text.find("<history_segments>")? + "<history_segments>".len();
-        text.insert_str(at, &lead);
     }
     let binding = Binding {
         scenario: scenario.to_owned(),
@@ -484,7 +926,7 @@ fn bind(
         start,
         end,
         unprocessed_from,
-        output_sha256: format!("{:x}", Sha256::digest(text.as_bytes())),
+        output_sha256: lower_hex(&Sha256::digest(text.as_bytes())),
     };
     Some((text, binding))
 }
@@ -514,6 +956,20 @@ fn groups(records: &[Record], rows: Option<usize>, chunk: usize) -> Vec<&[Record
                 .collect()
         }
     }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                DIGITS[usize::from(byte >> 4)],
+                DIGITS[usize::from(byte & 0x0F)],
+            ]
+        })
+        .map(char::from)
+        .collect()
 }
 
 /// The summarizer answer the fixture stands in for a provider with: one `history_segment` per
@@ -557,14 +1013,50 @@ fn output_document(segments: &str, next: u64) -> String {
 /// records; `rows` splits the records into that many contiguous segments, as evenly as the
 /// record count allows, or one per record when fewer are presented.
 fn filler(records: &[Record], rows: Option<usize>) -> String {
-    let mut segments = String::new();
-    for group in groups(records, rows, FILLER_CHUNK) {
+    let groups = groups(records, rows, FILLER_CHUNK);
+    let mut segments = String::with_capacity(groups.len() * 256);
+    for group in groups {
         let (start, end) = (group[0].start, group[group.len() - 1].end);
-        segments.push_str(&format!(
-            "<history_segment start=\"{start}\" end=\"{end}\" title=\"Fixture filler {start} to {end}\" episode_type=\"infra\" importance=\"{FIXTURE_IMPORTANCE}\"><p1>Fixture-authored filler for messages {start} to {end}.</p1><p2>Filler {start} to {end}.</p2><p3>Filler.</p3><p4 /></history_segment>"
-        ));
+        push_filler_segment(&mut segments, start, end);
     }
     output_document(&segments, records.last().map_or(1, |record| record.end + 1))
+}
+
+fn push_filler_segment(out: &mut String, start: u64, end: u64) {
+    out.push_str("<history_segment start=\"");
+    push_decimal(out, start);
+    out.push_str("\" end=\"");
+    push_decimal(out, end);
+    out.push_str("\" title=\"Fixture filler ");
+    push_decimal(out, start);
+    out.push_str(" to ");
+    push_decimal(out, end);
+    out.push_str("\" episode_type=\"infra\" importance=\"");
+    push_decimal(out, u64::from(FIXTURE_IMPORTANCE));
+    out.push_str("\"><p1>Fixture-authored filler for messages ");
+    push_decimal(out, start);
+    out.push_str(" to ");
+    push_decimal(out, end);
+    out.push_str(".</p1><p2>Filler ");
+    push_decimal(out, start);
+    out.push_str(" to ");
+    push_decimal(out, end);
+    out.push_str(".</p2><p3>Filler.</p3><p4 /></history_segment>");
+}
+
+/// Appends `value` in decimal without the formatting machinery.
+fn push_decimal(out: &mut String, mut value: u64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    out.extend(digits[at..].iter().copied().map(char::from));
 }
 
 #[cfg(test)]
@@ -619,6 +1111,10 @@ mod tests {
             .flat_map(|case| &case.sources)
     }
 
+    fn ready(source: &Source) -> Prepared {
+        prepared(source).unwrap_or_else(|| panic!("{}", source.id))
+    }
+
     fn armed(entries: &[&str]) -> CaseScript {
         let mut script = CaseScript::default();
         let entries: Vec<String> = entries.iter().map(|entry| (*entry).to_owned()).collect();
@@ -629,12 +1125,12 @@ mod tests {
     #[test]
     fn every_source_binds_behind_a_lead_in_and_before_a_trailing_record() {
         for source in sources() {
-            assert!(scriptable(source), "{}", source.id);
+            let prepared = ready(source);
             let count = source.messages.len() as u64;
             let mut records = vec![record(1, 1, "lead-in turn")];
             records.extend(presented(source, 2));
             records.push(record(count + 2, count + 2, "trailing turn"));
-            let (text, binding) = bind("S", source, false, &records).unwrap();
+            let (text, binding) = bind("S", source, &prepared, false, &records).unwrap();
             assert_eq!(
                 (binding.start, binding.end, binding.unprocessed_from),
                 (2, count + 1, Some(count + 2)),
@@ -657,7 +1153,8 @@ mod tests {
     #[test]
     fn a_source_presented_at_its_own_ordinals_binds_without_a_lead_in() {
         for source in sources() {
-            let (text, binding) = bind("S", source, false, &presented(source, 1)).unwrap();
+            let (text, binding) =
+                bind("S", source, &ready(source), false, &presented(source, 1)).unwrap();
             assert_eq!((binding.start, binding.unprocessed_from), (1, None));
             assert!(!text.contains("Fixture lead-in"), "{}", source.id);
             assert!(!text.contains("<unprocessed_from>"), "{}", source.id);
@@ -671,8 +1168,133 @@ mod tests {
         // C4.V1 messages 4 and 5 are consecutive assistant messages.
         let merged = format!("{} / {}", records[3].text, records[4].text);
         records.splice(3..5, [record(4, 5, &merged)]);
-        let (_, binding) = bind("S", source, false, &records).unwrap();
+        let (_, binding) = bind("S", source, &ready(source), false, &records).unwrap();
         assert_eq!((binding.start, binding.end), (1, 7));
+    }
+
+    #[test]
+    fn consecutive_messages_merged_out_of_order_are_a_mismatch() {
+        let source = sources().find(|source| source.id == "C4.V1").unwrap();
+        let mut records = presented(source, 1);
+        let reversed = format!("{} / {}", records[4].text, records[3].text);
+        records.splice(3..5, [record(4, 5, &reversed)]);
+        assert!(bind("S", source, &ready(source), false, &records).is_none());
+    }
+
+    #[test]
+    fn an_answer_admitted_under_a_replaced_selection_binds_nothing_in_the_new_one() {
+        let source = sources().find(|source| source.id == "C1.V1").unwrap();
+        let scenario = scenario_for(source);
+        let mut script = armed(&[&scenario]);
+        let stale = script.answer(&presented(source, 1)).unwrap().unwrap();
+        script.select(&[FILLER.to_owned()]).unwrap();
+        script.delivered(&stale.receipt);
+        let status = script.status();
+        assert_eq!((status.bound, status.remaining), (1, 1));
+        assert!(status.bindings.is_empty());
+    }
+
+    #[test]
+    fn a_probe_is_carried_through_collapsed_whitespace_only() {
+        let carries = |text: &str, probe: &str| Probe::from_text(probe).carried_by(text);
+        assert!(carries("x a b c y", "a b c"));
+        assert!(carries("xa \n b\u{a0}cd", "a b cd"));
+        assert!(carries("a b c", "a b "));
+        assert!(carries("a b\t c", "a b "));
+        assert!(!carries("a b \n", "a b "));
+        assert!(!carries("a b", "a b "));
+        assert!(!carries("ab c", "a b c"));
+        assert!(!carries("a b c", "a b cd"));
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as usize
+        }
+
+        fn text(&mut self, pieces: &[&str], count: usize) -> String {
+            (0..count)
+                .map(|_| pieces[self.below(pieces.len())])
+                .collect()
+        }
+    }
+
+    const PIECES: &[&str] = &[
+        "a", "b", "c", "ab", "bc", " ", " ", " ", "  ", "\t", "\n", "\u{a0}", "\u{2028}",
+        "\u{3000}", "\u{200b}", "é", "/", "«s1»", "«", "»",
+    ];
+
+    #[test]
+    fn carried_by_agrees_with_collapsing_the_text() {
+        let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        for _ in 0..20_000 {
+            let text_pieces = 1 + rng.below(12);
+            let text = rng.text(PIECES, text_pieces);
+            let probe_pieces = 1 + rng.below(5);
+            let mut probe = collapse(&rng.text(PIECES, probe_pieces));
+            if rng.below(3) == 0 {
+                probe.push(' ');
+            }
+            if probe.trim().is_empty() {
+                continue;
+            }
+            assert_eq!(
+                Probe::from_text(&probe).carried_by(&text),
+                collapse(&text).contains(&probe),
+                "text {text:?} probe {probe:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn presented_line_agrees_with_splitting_on_whitespace() {
+        let reference = |parts: &str| -> String {
+            parts
+                .split_whitespace()
+                .map(|token| match token.strip_prefix(ALIAS_OPEN) {
+                    Some(marked) => marked
+                        .split_once(ALIAS_CLOSE)
+                        .map_or(token, |(_, rest)| rest),
+                    None => token,
+                })
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut rng = Rng(0xD1B5_4A32_D192_ED03);
+        for _ in 0..20_000 {
+            let pieces = rng.below(24);
+            let parts = rng.text(PIECES, pieces).replace('\n', "\t");
+            let line = format!("[1] U: {parts}");
+            assert_eq!(
+                presented_line(&line).map(|(_, _, text)| text),
+                Some(reference(&parts)),
+                "{parts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_presented_with_wider_whitespace_binds() {
+        for source in sources() {
+            let mut records = presented(source, 1);
+            for record in &mut records {
+                record.text = record.text.replace(' ', " \n\t ");
+            }
+            let (_, binding) = bind("S", source, &ready(source), false, &records).unwrap();
+            assert_eq!(
+                (binding.start, binding.end),
+                (1, source.messages.len() as u64),
+                "{}",
+                source.id
+            );
+        }
     }
 
     #[test]
@@ -685,20 +1307,21 @@ mod tests {
                 later.start += 1;
                 later.end += 1;
             }
+            let prepared = ready(source);
             assert!(
-                bind("S", source, false, &foreign).is_none(),
+                bind("S", source, &prepared, false, &foreign).is_none(),
                 "{}",
                 source.id
             );
             let mut reordered = records.clone();
             reordered.swap(0, 1);
             assert!(
-                bind("S", source, false, &reordered).is_none(),
+                bind("S", source, &prepared, false, &reordered).is_none(),
                 "{}",
                 source.id
             );
             assert!(
-                bind("S", source, false, &records[..records.len() - 1]).is_none(),
+                bind("S", source, &prepared, false, &records[..records.len() - 1]).is_none(),
                 "{}",
                 source.id
             );
@@ -736,7 +1359,7 @@ mod tests {
         assert!(lead.contains("<p2>Fixture lead-in.</p2>"));
         assert!(case.contains("<p1>") && case.contains("<p4 />"));
         assert!(!case.contains("<p2>") && !case.contains("<p3>"));
-        let binding = answer.binding.as_ref().unwrap();
+        let binding = answer.receipt.binding.as_ref().unwrap();
         assert_eq!(
             binding.output_sha256,
             format!("{:x}", Sha256::digest(answer.text.as_bytes()))
@@ -775,10 +1398,10 @@ mod tests {
         let mut script = armed(&[FILLER, &scenario, &scenario]);
         let filled = script.answer(&[record(1, 2, "x")]).unwrap().unwrap();
         assert!(filled.text.contains("title=\"Fixture filler 1 to 2\""));
-        script.delivered(&filled);
+        script.delivered(&filled.receipt);
         let bound = script.answer(&presented(source, 1)).unwrap().unwrap();
         assert!(script.status().bindings.is_empty());
-        script.delivered(&bound);
+        script.delivered(&bound.receipt);
         assert_eq!(
             script
                 .answer(&[record(1, 1, "unrelated")])

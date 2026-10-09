@@ -198,46 +198,85 @@ function isCount(value: unknown): value is number {
     return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
-/**
- * The usage and stop reason of a JSON or SSE Messages response. Usage is `null` unless the
- * response states input and output counts; absent cache counts are zero.
- */
-export function readUsage(
-    contentType: string,
-    text: string,
-): {
+export interface ResponseFacts {
     usage: Usage | null;
     stopReason: string | null;
-} {
+    /** The `tool_use` ids the response asks for. */
+    toolUses: string[];
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === "object";
+}
+
+/**
+ * The facts `readResponse` extracts live under the keys `usage`, `stop_reason`, and
+ * `content_block`. JSON spells such a key either as the literal quoted name or with a `\u`
+ * escape, so every `data:` line that can affect the result contains one of these four strings,
+ * and parsing only those lines preserves the result.
+ */
+const FACT_KEY = /"usage"|"stop_reason"|"content_block"|\\u/g;
+
+function factLines(text: string): string[] {
+    const starts: number[] = [];
+    FACT_KEY.lastIndex = 0;
+    for (let match = FACT_KEY.exec(text); match; match = FACT_KEY.exec(text)) {
+        starts.push(text.lastIndexOf("\n", match.index) + 1);
+        const end = text.indexOf("\n", match.index);
+        if (end < 0) break;
+        FACT_KEY.lastIndex = end + 1;
+    }
+    return starts.map((start) => {
+        const end = text.indexOf("\n", start);
+        return text.slice(start, end < 0 ? text.length : end);
+    });
+}
+
+/**
+ * The usage, stop reason, and `tool_use` ids of a JSON or SSE Messages response, read in one
+ * pass over its events. Usage is `null` unless the response states input and output counts;
+ * absent cache counts are zero. An SSE `data:` line that is not a JSON object is skipped.
+ */
+export function readResponse(contentType: string, text: string): ResponseFacts {
     const fields: Record<string, unknown> = {};
     let stopReason: string | null = null;
+    const blocks: Array<Record<string, unknown>> = [];
     const take = (usage: unknown) => {
-        if (usage && typeof usage === "object") Object.assign(fields, usage);
+        if (isObject(usage)) Object.assign(fields, usage);
     };
     if (contentType.includes("text/event-stream")) {
-        for (const line of text.split("\n")) {
+        for (const line of factLines(text)) {
             if (!line.startsWith("data:")) continue;
-            let event: Record<string, unknown>;
+            let event: unknown;
             try {
                 event = JSON.parse(line.slice(5));
             } catch {
                 continue;
             }
-            const message = event.message as Record<string, unknown> | undefined;
-            take(message?.usage);
+            if (!isObject(event)) continue;
+            if (isObject(event.message)) take(event.message.usage);
             take(event.usage);
-            const delta = event.delta as Record<string, unknown> | undefined;
-            if (typeof delta?.stop_reason === "string") stopReason = delta.stop_reason;
+            if (isObject(event.delta) && typeof event.delta.stop_reason === "string") {
+                stopReason = event.delta.stop_reason;
+            }
+            if (isObject(event.content_block)) blocks.push(event.content_block);
         }
     } else {
+        let body: unknown;
         try {
-            const body = JSON.parse(text) as Record<string, unknown>;
+            body = JSON.parse(text);
+        } catch {
+            return { usage: null, stopReason: null, toolUses: [] };
+        }
+        if (isObject(body)) {
             take(body.usage);
             if (typeof body.stop_reason === "string") stopReason = body.stop_reason;
-        } catch {
-            return { usage: null, stopReason: null };
+            blocks.push(...blocksOf(body.content));
         }
     }
+    const toolUses = blocks
+        .filter((block) => block.type === "tool_use" && typeof block.id === "string")
+        .map((block) => block.id as string);
     const cacheWrite = fields.cache_creation_input_tokens ?? 0;
     const cacheRead = fields.cache_read_input_tokens ?? 0;
     if (
@@ -246,7 +285,7 @@ export function readUsage(
         !isCount(cacheWrite) ||
         !isCount(cacheRead)
     ) {
-        return { usage: null, stopReason };
+        return { usage: null, stopReason, toolUses };
     }
     return {
         usage: {
@@ -256,6 +295,7 @@ export function readUsage(
             cache_read_input_tokens: cacheRead,
         },
         stopReason,
+        toolUses,
     };
 }
 
@@ -267,11 +307,7 @@ function errorResponse(type: string, message: string): Response {
 }
 
 function blocksOf(value: unknown): Array<Record<string, unknown>> {
-    return Array.isArray(value)
-        ? value.filter(
-              (block): block is Record<string, unknown> => !!block && typeof block === "object",
-          )
-        : [];
+    return Array.isArray(value) ? value.filter(isObject) : [];
 }
 
 /** The `tool_result` ids a parsed Messages request answers. */
@@ -283,27 +319,6 @@ function toolResultIds(request: Record<string, unknown>): string[] {
             )
             .map((block) => block.tool_use_id as string),
     );
-}
-
-/** The `tool_use` ids a JSON or SSE Messages response asks for. */
-function toolUseIds(contentType: string, text: string): string[] {
-    let blocks: Array<Record<string, unknown>> = [];
-    if (contentType.includes("text/event-stream")) {
-        for (const line of text.split("\n")) {
-            if (!line.startsWith("data:")) continue;
-            try {
-                const event = JSON.parse(line.slice(5)) as Record<string, unknown>;
-                blocks = blocks.concat(blocksOf([event.content_block]));
-            } catch {}
-        }
-    } else {
-        try {
-            blocks = blocksOf((JSON.parse(text) as Record<string, unknown>).content);
-        } catch {}
-    }
-    return blocks
-        .filter((block) => block.type === "tool_use" && typeof block.id === "string")
-        .map((block) => block.id as string);
 }
 
 function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]> {
@@ -322,10 +337,26 @@ function unanswered(reserved: number): NonNullable<ForwardedExchange["response"]
     };
 }
 
+function copyExchange(exchange: ForwardedExchange): ForwardedExchange {
+    const { request, response } = exchange;
+    return {
+        ...exchange,
+        tool_results: [...exchange.tool_results],
+        tool_uses: [...exchange.tool_uses],
+        request: { ...request, headers: { ...request.headers } },
+        response: response && {
+            ...response,
+            headers: { ...response.headers },
+            usage: response.usage && { ...response.usage },
+        },
+    };
+}
+
 export class Forwarder {
     private readonly config: Readonly<ForwardConfig>;
     private readonly exchanges: ForwardedExchange[] = [];
     private readonly refusals: string[] = [];
+    private readonly unhashed = new Map<ForwardedExchange, Uint8Array>();
     private spent = 0;
     private stopped: string | null = null;
 
@@ -346,17 +377,13 @@ export class Forwarder {
 
     /** The send's reservation, or the reason the limits refuse it. */
     private admit(
-        text: string,
+        json: unknown,
         bytes: number,
     ): { reserved: number; toolResults: string[] } | { refused: string } {
         if (this.stopped) return { refused: `stopped: ${this.stopped}` };
         const { limits, model } = this.config;
-        let parsed: Record<string, unknown>;
-        try {
-            parsed = JSON.parse(text);
-        } catch {
-            return { refused: "unreadable request body" };
-        }
+        if (json === undefined) return { refused: "unreadable request body" };
+        const parsed = json as Record<string, unknown>;
         if (parsed.model !== model)
             return { refused: `request names model ${String(parsed.model)}` };
         if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
@@ -402,14 +429,16 @@ export class Forwarder {
 
     /**
      * Forwards `body` and returns the provider's response, or a non-retryable refusal when a
-     * limit, the model, or an earlier stop forbids the send.
+     * limit, the model, or an earlier stop forbids the send. `text` is `body` decoded as UTF-8
+     * and `json` is `JSON.parse(text)`, or `undefined` when `text` is not JSON.
      */
     async forward(
         body: Uint8Array<ArrayBuffer>,
+        text: string,
+        json: unknown,
         headers: Record<string, string>,
     ): Promise<Response> {
-        const text = new TextDecoder().decode(body);
-        const admitted = this.admit(text, body.byteLength);
+        const admitted = this.admit(json, body.byteLength);
         if ("refused" in admitted) return this.refuse(admitted.refused);
         const { reserved, toolResults } = admitted;
         const outbound: Record<string, string> = {};
@@ -428,7 +457,7 @@ export class Forwarder {
             tool_uses: [],
             request: {
                 headers: redact(headers),
-                body_sha256: sha256(body),
+                body_sha256: "",
                 body_bytes: body.byteLength,
                 body_text: text,
                 reserved_usd: reserved,
@@ -436,6 +465,16 @@ export class Forwarder {
             response: null,
         };
         this.exchanges.push(exchange);
+        // The send proceeds while the digest is pending.
+        this.unhashed.set(exchange, body);
+        crypto.subtle.digest("SHA-256", body).then(
+            (digest) => {
+                if (this.unhashed.delete(exchange)) {
+                    exchange.request.body_sha256 = Buffer.from(digest).toString("hex");
+                }
+            },
+            () => {},
+        );
         // The reservation counts until the response settles the real cost.
         this.spent += reserved;
         let response: Response;
@@ -450,8 +489,8 @@ export class Forwarder {
         }
         const contentType = response.headers.get("content-type") ?? "";
         const responseText = new TextDecoder().decode(bytes);
-        const { usage, stopReason } = readUsage(contentType, responseText);
-        exchange.tool_uses = toolUseIds(contentType, responseText);
+        const { usage, stopReason, toolUses } = readResponse(contentType, responseText);
+        exchange.tool_uses = toolUses;
         const cost = usage
             ? this.price(
                   usage.input_tokens +
@@ -462,14 +501,15 @@ export class Forwarder {
             : reserved;
         this.spent += cost - reserved;
         const captured = bytes.subarray(0, MAX_CAPTURED_RESPONSE_BYTES);
+        const truncated = captured.byteLength < bytes.byteLength;
         exchange.response = {
             outcome: response.ok ? "acknowledged" : "provider_error",
             status: response.status,
             headers: redact(headerRecord(response.headers)),
             body_sha256: sha256(bytes),
             body_bytes: bytes.byteLength,
-            body_text: new TextDecoder().decode(captured),
-            truncated: captured.byteLength < bytes.byteLength,
+            body_text: truncated ? new TextDecoder().decode(captured) : responseText,
+            truncated,
             stop_reason: stopReason,
             usage,
             cost_usd: cost,
@@ -486,6 +526,10 @@ export class Forwarder {
 
     /** The run so far: the frozen limits, every send and response, and whether it is complete. */
     report(): ForwardingReport {
+        for (const [exchange, body] of this.unhashed) {
+            exchange.request.body_sha256 = sha256(body);
+        }
+        this.unhashed.clear();
         const settled = this.exchanges.flatMap((e) => (e.response ? [e.response] : []));
         const acknowledged = settled.filter((r) => r.outcome === "acknowledged");
         const reasons: string[] = [];
@@ -521,7 +565,7 @@ export class Forwarder {
             refusals: [...this.refusals],
             complete: reasons.length === 0,
             incomplete_reasons: reasons,
-            exchanges: structuredClone(this.exchanges),
+            exchanges: this.exchanges.map(copyExchange),
         };
     }
 }

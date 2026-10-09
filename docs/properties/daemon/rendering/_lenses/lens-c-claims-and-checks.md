@@ -222,9 +222,9 @@ Two smaller divergences on the same axis, both inside the 4e scope:
 - `transform.rs:9115`, `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)`.
   Compiled out of release, and trivially satisfied in debug: lens A's
   `render-a-user-hint-total-cap-cannot-bind` computes a maximum of 604 UTF-16
-  units against the cap of 800 at `:114`. Re-verified here: `:117`
-  `USER_HINT_RESULT_LIMIT = 3` applied at `:9090`, `:113`
-  `USER_HINT_FRAGMENT_CHAR_CAP = 80` applied at `:9096`, envelope built at
+  units against the cap of 800 at `:110`. Re-verified here: `:113`
+  `USER_HINT_RESULT_LIMIT = 3` applied at `:9097`, `:109`
+  `USER_HINT_FRAGMENT_CHAR_CAP = 80` applied at `:9098`, envelope built at
   `:9111`, truncation entered at `:9114` and gated at `:9120`.
 
 **Net effect on this part's records.** Any 4e property whose only enforcement is

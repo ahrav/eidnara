@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 434b6eb901e6de95e81aa5d610322e08a6a8130eeeadc0e82833c3c4e48ec7cb # shrinks to pieces = ["deadbeef1234567", "&", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "日本語", "quasar", "😀", "quasar", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "configuration", "quasar", "😀", "quasar", "quasar", "quasar", "quasar", "quasar", "quasar", "configuration", "quasar", "quasar", "`code`", "quasar", "quasar", " ", "&", " ", "quasar", "§12§", "&", "日本語", "&", "\u{a0}", "quasar", "quasar", "quasar", "quasar"]

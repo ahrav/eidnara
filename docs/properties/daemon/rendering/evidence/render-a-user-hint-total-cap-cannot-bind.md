@@ -59,17 +59,17 @@ All references read back at `HEAD` `e447c927`, in
 ### The footer after #926
 
 The references above stay at `e447c927`. This section and the arithmetic below
-use `main` at `6edbe8b05`, where `render_user_hint` sits at
-`transform.rs:8609-8635`. #926 replaces its footer line with:
+read back at this branch's HEAD, where `render_user_hint` sits at
+`transform.rs:9091-9117`. #926 replaces its footer line with:
 
 ```
-8627:    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
+9109:    let footer = "If these fragments seem relevant to the current request, you may run eidnara_search to search project memory for their topic. Otherwise ignore.";
 ```
 
 ### The arithmetic
 
 Measured in UTF-16 code units, which is what `utf16_len`
-(`transform.rs:8506-8508` at `6edbe8b05`) counts. Every row was re-measured
+(`transform.rs:8961-8963`) counts. Every row was re-measured
 against the #926 footer and the wrapper strings:
 
 | Component | Units |

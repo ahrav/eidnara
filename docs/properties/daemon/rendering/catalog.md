@@ -880,9 +880,9 @@ producer
 Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
 maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
 2 + 1 + 1 + 121 (cut note, #723) + 143 (footer, #926) + 23 = 604 UTF-16 units against a cap of 800.
-`USER_HINT_RESULT_LIMIT` is 3 (`:117`, applied `:9090`) and `one_line_fragment`
-caps each fragment at 80 UTF-16 units (`:113`, applied `:9096`, enforced
-`:9132-9139`).
+`USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment`
+caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced
+`:9148-9155`).
 Existing check: none. The only guard is the `debug_assert!` at `:9115`, which
 is trivially satisfied.
 Impact: A dead truncation path plus a `debug_assert` that can never fail. It is
@@ -1514,7 +1514,7 @@ none run in CI.
 Impact: The provider sees a user message that ends with three fragments of
 earlier conversation plus the instruction "If these fragments seem relevant to
 the current request, you may run eidnara_search to search project memory for
-their topic" (#926; `transform.rs:8627` at `6edbe8b05`). Attributed to the user, that reads
+their topic" (#926; `transform.rs:9109`). Attributed to the user, that reads
 as the user's own instruction.
 The module's own code shows it knows this is a text convention and not a
 boundary: `is_system_reminder_transport_message`'s comment says wire
