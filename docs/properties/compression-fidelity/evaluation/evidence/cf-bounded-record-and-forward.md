@@ -40,19 +40,19 @@ inspection.
   tokens plus `max_tokens` as output, at the configured prices) fits under
   `spendCapUsd`. The corpus digest is a construction-time attestation; the
   forwarder reads no message content (see the open question below).
-- [Send and response](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L532-L632)
+- [Send and response](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L540-L640)
   forwards the received bytes unchanged with only `content-type`, `accept`,
   `anthropic-version`, and `anthropic-beta` copied from the inbound request
   and the callback's headers added outbound; `redirect: "error"`; one
   deadline per send that also fires when the mock stops
-  (`close`, line 489); at most 16 MiB of response read
+  (`close`, line 497); at most 16 MiB of response read
   ([`readBounded`](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L354)).
   The response's usage, stop reason, model, `tool_use` ids, and Messages
   envelope are read; a non-2xx, an unfinished or errored stream, a body that
   is not a Messages message, a response naming another model or none, or
   usage costing more than the reservation stops the run. Captured headers are
   [redacted](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L195).
-- [Report](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L635-L678)
+- [Report](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L643-L686)
   records `mode: "forward"`, the upstream URL, the frozen limits and prices,
   every exchange, attempted sends apart from acknowledged responses, spend,
   the stop reason, refusal count and up to 32 reasons, and `complete` only
@@ -60,7 +60,7 @@ inspection.
   truncated, every cost is known, every acknowledged response states a stop
   reason, spend is within the cap, and every `tool_use` id is answered by a
   later request's `tool_result`.
-- [Publication](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L710-L740)
+- [Publication](../../../../../packages/e2e-tests/src/mock-provider/forward.ts#L718-L748)
   writes the report `0600` through the atomic publisher into a `0700`
   owner-only directory outside the repository, with every existing ancestor
   owned by this user or root and closed to group and other writes unless
@@ -72,7 +72,10 @@ inspection.
   starts a forwarding run's OpenCode serve API behind a random Basic
   credential held only in the child's environment and the SDK client's
   header. The mock checks the inbound key
-  [before reading a body](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L276).
+  [before reading a body](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L276),
+  and once the run has stopped it answers the refusal before reading a body
+  ([line 282](../../../../../packages/e2e-tests/src/mock-provider/server.ts#L282)),
+  so a stopped run retains no further request.
 - [Real producer capture](../../../../../crates/daemon/src/compression_fidelity_replay_tests.rs#L1684-L1805)
   (`capture_sources`, behind the ignored
   [`real_producer_capture_of_every_corpus_source`](../../../../../crates/daemon/src/compression_fidelity_replay_tests.rs#L1996))
@@ -159,7 +162,7 @@ boundary is asserted only as the outbound `redirect: "error"` option.
   multi-provider adapter was added and incident isolation is unchanged.
 
 ### Q: How will recorded mode prevent forged real-model evidence?
-- Sources examined: `server.ts:139-158`, `forward.ts:635-678`.
+- Sources examined: `server.ts:139-159`, `forward.ts:643-686`.
 - Findings: a forwarding mock cannot be scripted; the report records
   `mode: "forward"`, the upstream URL, and each response's own `model`, and
   a response naming another model stops the run.

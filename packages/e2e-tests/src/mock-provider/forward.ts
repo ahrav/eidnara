@@ -485,6 +485,14 @@ export class Forwarder {
         return { reserved, toolResults: toolResultIds(parsed) };
     }
 
+    /**
+     * The refusal every request after a stop receives, or `null` while the run is live. The mock
+     * answers with it before reading a body, so a stopped run retains nothing further.
+     */
+    stoppedRefusal(): Response | null {
+        return this.stopped ? this.refuse(`stopped: ${this.stopped}`) : null;
+    }
+
     /** Ends every send still in flight; the mock calls this when it stops. */
     close(): void {
         this.lifecycle.abort(new DOMException("the forwarding mock stopped", "AbortError"));

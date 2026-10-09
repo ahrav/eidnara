@@ -279,6 +279,8 @@ export class MockProvider {
                     headers: JSON_HEADERS,
                 });
             }
+            const stopped = this.forwarder?.stoppedRefusal();
+            if (stopped) return stopped;
             const bodyBytes = new Uint8Array(await req.arrayBuffer());
             const bodyText = new TextDecoder().decode(bodyBytes);
             // Unparseable and non-object bodies script as `{}`; the oracle judges `bodyText` itself.

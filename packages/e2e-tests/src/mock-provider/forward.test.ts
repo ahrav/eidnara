@@ -880,6 +880,9 @@ describe("forwarding", () => {
         expect(report.refusals.length).toBe(MAX_RETAINED_REFUSALS);
         expect(report.attempted_sends).toBe(1);
         expect(double.received.length).toBe(1);
+        // The request that reached the limit is read and kept; every one after the stop is
+        // refused before its body is read or kept.
+        expect(mock.requests().length).toBe(2);
     });
 
     test("a timed-out send is charged its reservation", async () => {
