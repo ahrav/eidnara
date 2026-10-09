@@ -273,20 +273,27 @@ environment variables, all required:
 | --- | --- |
 | `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model |
 | `EIDNARA_FIDELITY_REAL_MODEL` | The model id the history summarizer runs, as the only model in its chain |
-| `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source's firing may take to settle |
+| `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source may take, from its transform call, which awaits the emergency firing inline, through its settled firing |
 | `EIDNARA_FIDELITY_OBSERVATIONS_DIR` | A private directory outside the repository |
 
 Run it with
 `cargo +1.98 test -p daemon --lib --locked real_producer_capture -- --ignored`.
+The capture route binds harness `opencode`, the harness the host's model
+execution binds, and presents no credential source claims, so the host must be
+one that verifies none: a host started with no envelope credentials and no AWS
+profile source. A claim-verifying host refuses each start, and the record
+keeps the refusal as that attempt's start error.
 Each source yields one `daemon.compression_fidelity.real_capture` record,
 written with mode `0600` in an owner-only `0700` directory that the test
 creates or requires, outside the repository. Its terminal is `published`,
 `validation_rejected` for a settled firing that drained model output but
-published no rows, or `unsettled` for a firing that did not settle within
-the wait, never started a producer, or drained no model output;
+published no rows, or `unsettled` for a source whose transform call or firing
+did not finish within the wait, that never started a producer, or that drained
+no model output;
 the test fails after writing every record when any source is unsettled. The
-record names the model,
-the output origin, whether the firing settled, the attempt count, and every
+record names the model, the harness,
+the output origin, whether the transform call returned and the firing settled,
+the attempt count, and every
 attempt's complete system prompt, user prompt, generation settings, start
 error, and every drained output or error, followed by the published rows. The host's model
 execution protocol reports no token usage, so each record carries
@@ -314,16 +321,20 @@ names the selected model. Construction requires:
 Scripted responses and forwarding are exclusive: passing both, or scripting
 a forwarding mock, throws. A forwarding mock accepts only requests carrying
 its per-mock `inboundKey`, which the harness writes into OpenCode's provider
-config, so no other local process can spend its budget. `forward.contextLimit`
+config, so no other local process can spend its budget; that `opencode.json`
+is written `0600` in an owner-only `0700` isolated tree. `forward.contextLimit`
 is the context limit OpenCode is configured with. Before each send the
-forwarder checks the model,
+forwarder checks that the body is a JSON object, the model,
 the request's `max_tokens`, the call count, and the spend cap. The spend
 check reserves the body's byte length as input tokens plus `max_tokens` as
 output. A response with usage charges its stated tokens; a response without
-usage, or a send without a response, charges the reservation. A refused
-send, a non-2xx response, a timeout, a redirect, a failed credential
-callback, or a response whose usage costs more than its reservation stops
-the run, and every later request is refused without a send. The input price
+usage, or a send without a response, charges the reservation. A streamed
+response states usage only when it reaches `message_stop` with a
+`message_delta` carrying usage and no `error` event, because `message_start`
+carries provisional counts. A refused send, a non-2xx response, a streamed
+response cut before `message_stop` or carrying an `error` event, a timeout, a
+redirect, a failed credential callback, or a response whose usage costs more
+than its reservation stops the run, and every later request is refused without a send. The input price
 must cover any pricing the client's `anthropic-beta` header enables. The forwarder sends the received
 bytes unchanged, adds the callback's headers to the outbound request only,
 and records each exchange with redacted headers and the bounded response

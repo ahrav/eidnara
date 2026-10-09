@@ -24,8 +24,9 @@ function outboundSpy(): { calls: string[]; restore: () => void } {
     const calls: string[] = [];
     const spy = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : String(input));
-        if (url.hostname !== "127.0.0.1") calls.push(url.href);
-        return original(input, init);
+        if (url.hostname === "127.0.0.1") return original(input, init);
+        calls.push(url.href);
+        throw new TypeError(`outbound fetch to ${url.host} is blocked in tests`);
     }) as typeof fetch;
     globalThis.fetch = spy;
     return { calls, restore: () => (globalThis.fetch = original) };
@@ -168,12 +169,10 @@ describe("scripted mode", () => {
         const spy = outboundSpy();
         try {
             const mock = new MockProvider({
-                forward: config({
-                    upstreamURL: "https://provider.invalid/v1/messages",
-                    limits: { ...config().limits, timeoutMs: 5_000 },
-                }),
+                forward: config({ upstreamURL: "https://provider.invalid/v1/messages" }),
             });
             await (await post(await start(mock), firstTurn)).text();
+            expect(mock.forwardingReport().stopped).toContain("without a response");
         } finally {
             spy.restore();
         }
@@ -230,6 +229,7 @@ describe("forwarding", () => {
             'data: {"type":"message_delta","delta":{"stop_reaso\\u006e":"tool_use"},"\\u0075sage":{"output_tokens":6}}',
             "data: 7",
             "data: not json",
+            'data: {"type":"message_sto\\u0070"}',
         ].join("\n");
         expect(readResponse("text/event-stream", stream)).toEqual({
             usage: {
@@ -240,10 +240,93 @@ describe("forwarding", () => {
             },
             stopReason: "tool_use",
             toolUses: ["toolu_esc"],
+            unfinished: null,
         });
         expect(
             readResponse("text/event-stream", stream.split("\n").slice(1, 3).join("\n")),
-        ).toEqual({ usage: null, stopReason: null, toolUses: [] });
+        ).toEqual({
+            usage: null,
+            stopReason: null,
+            toolUses: [],
+            unfinished: "stream ended before message_stop",
+        });
+    });
+
+    test("a stream cut short or carrying an error event states no usage", () => {
+        const opening =
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":40,"output_tokens":1}}}';
+        const delta =
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}';
+        const cut = [opening, delta].join("\n");
+        expect(readResponse("text/event-stream", cut)).toEqual({
+            usage: null,
+            stopReason: null,
+            toolUses: [],
+            unfinished: "stream ended before message_stop",
+        });
+        const errored = [
+            opening,
+            delta,
+            'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+            'data: {"type":"message_stop"}',
+        ].join("\n");
+        expect(readResponse("text/event-stream", errored).usage).toBeNull();
+        expect(readResponse("text/event-stream", errored).unfinished).toBe(
+            "stream carried an error event",
+        );
+        const provisional = [start, delta, 'data: {"type":"message_stop"}'].join("\n");
+        expect(readResponse("text/event-stream", provisional)).toEqual({
+            usage: null,
+            stopReason: null,
+            toolUses: [],
+            unfinished: null,
+        });
+    });
+
+    test("an interrupted or errored stream keeps its reservation and stops the run", async () => {
+        const opening = {
+            type: "message_start",
+            message: { id: "msg_1", model: MODEL, usage: { ...USAGE, output_tokens: 1 } },
+        };
+        const frames = (events: unknown[]) =>
+            events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+        const delta = {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "partial" },
+        };
+        const streams: Array<[string, string]> = [
+            [frames([opening, delta]), "before message_stop"],
+            [
+                frames([
+                    opening,
+                    delta,
+                    { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+                ]),
+                "an error event",
+            ],
+        ];
+        for (const [stream, reason] of streams) {
+            const double = upstreamDouble([
+                () => new Response(stream, { headers: { "content-type": "text/event-stream" } }),
+                () =>
+                    new Response(sse([{ type: "text", text: "x" }], "end_turn"), {
+                        headers: { "content-type": "text/event-stream" },
+                    }),
+            ]);
+            const mock = new MockProvider({ forward: config({ fetch: double.send }) });
+            const base = await start(mock);
+            expect(await (await post(base, firstTurn)).text()).toBe(stream);
+            expect((await post(base, firstTurn)).status).toBe(400);
+            const report = mock.forwardingReport();
+            const exchange = report.exchanges[0];
+            expect(double.received.length).toBe(1);
+            expect(exchange?.response?.cost_known).toBe(false);
+            expect(exchange?.response?.cost_usd).toBe(exchange?.request.reserved_usd ?? -1);
+            expect(report.spent_usd).toBe(exchange?.request.reserved_usd ?? -1);
+            expect(report.stopped).toContain(reason);
+            expect(report.complete).toBe(false);
+        }
     });
 
     test("forwards the received bytes, returns the provider's response, and captures the tool-result turn", async () => {
@@ -625,6 +708,13 @@ describe("forwarding", () => {
                 sends: 0,
                 stopped: "unreadable request body",
             },
+            ...["null", "[]", "7"].map((body) => ({
+                forward: {},
+                body,
+                replies: [],
+                sends: 0,
+                stopped: "not a JSON object",
+            })),
             {
                 forward: { limits: { ...config().limits, spendCapUsd: 0.000001 } },
                 body: firstTurn,
@@ -778,6 +868,8 @@ describe("forwarding", () => {
             expect(generated).toContain(`"${MODEL}"`);
             expect(generated).toContain(mock.inboundKey);
             expect(generated).not.toContain(FAKE_KEY);
+            expect(statSync(resolve(env.configDir, "..")).mode & 0o777).toBe(0o700);
+            expect(statSync(join(env.configDir, "opencode.json")).mode & 0o777).toBe(0o600);
         } finally {
             rmSync(resolve(env.configDir, ".."), { recursive: true, force: true });
         }

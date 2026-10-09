@@ -205,6 +205,8 @@ export interface ResponseFacts {
     stopReason: string | null;
     /** The `tool_use` ids the response asks for. */
     toolUses: string[];
+    /** Why an SSE stream is unfinished: an `error` event or no `message_stop`; `null` when finished. */
+    unfinished: string | null;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -212,12 +214,11 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The facts `readResponse` extracts live under the keys `usage`, `stop_reason`, and
- * `content_block`. JSON spells such a key either as the literal quoted name or with a `\u`
- * escape, so every `data:` line that can affect the result contains one of these four strings,
- * and parsing only those lines preserves the result.
+ * `readResponse` reads the keys `usage`, `stop_reason`, and `content_block` and the event types
+ * `message_stop` and `error`. JSON spells each as the literal quoted string or with a `\u`
+ * escape, so a `data:` line that names any of them contains one of these six patterns.
  */
-const FACT_KEY = /"usage"|"stop_reason"|"content_block"|\\u/g;
+const FACT_KEY = /"(?:usage|stop_reason|content_block|message_stop|error)"|\\u/g;
 
 function factLines(text: string): string[] {
     const starts: number[] = [];
@@ -237,16 +238,23 @@ function factLines(text: string): string[] {
 /**
  * The usage, stop reason, and `tool_use` ids of a JSON or SSE Messages response, read in one
  * pass over its events. Usage is `null` unless the response states input and output counts;
- * absent cache counts are zero. An SSE `data:` line that is not a JSON object is skipped.
+ * absent cache counts are zero. SSE usage needs both a `message_delta` carrying usage and a
+ * `message_stop` event, because `message_start` carries provisional counts; any `error` event
+ * makes it `null`. An SSE `data:` line that is not a JSON object is skipped.
  */
 export function readResponse(contentType: string, text: string): ResponseFacts {
     const fields: Record<string, unknown> = {};
     let stopReason: string | null = null;
+    let unfinished: string | null = null;
+    let finalUsage = true;
     const blocks: Array<Record<string, unknown>> = [];
     const take = (usage: unknown) => {
         if (isObject(usage)) Object.assign(fields, usage);
     };
     if (contentType.includes("text/event-stream")) {
+        let stopped = false;
+        let errored = false;
+        finalUsage = false;
         for (const line of factLines(text)) {
             if (!line.startsWith("data:")) continue;
             let event: unknown;
@@ -258,17 +266,22 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
             if (!isObject(event)) continue;
             if (isObject(event.message)) take(event.message.usage);
             take(event.usage);
+            if (event.type === "message_delta" && isObject(event.usage)) finalUsage = true;
+            if (event.type === "message_stop") stopped = true;
+            if (event.type === "error") errored = true;
             if (isObject(event.delta) && typeof event.delta.stop_reason === "string") {
                 stopReason = event.delta.stop_reason;
             }
             if (isObject(event.content_block)) blocks.push(event.content_block);
         }
+        if (errored) unfinished = "stream carried an error event";
+        else if (!stopped) unfinished = "stream ended before message_stop";
     } else {
         let body: unknown;
         try {
             body = JSON.parse(text);
         } catch {
-            return { usage: null, stopReason: null, toolUses: [] };
+            return { usage: null, stopReason: null, toolUses: [], unfinished: null };
         }
         if (isObject(body)) {
             take(body.usage);
@@ -282,12 +295,14 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
     const cacheWrite = fields.cache_creation_input_tokens ?? 0;
     const cacheRead = fields.cache_read_input_tokens ?? 0;
     if (
+        unfinished !== null ||
+        !finalUsage ||
         !isCount(fields.input_tokens) ||
         !isCount(fields.output_tokens) ||
         !isCount(cacheWrite) ||
         !isCount(cacheRead)
     ) {
-        return { usage: null, stopReason, toolUses };
+        return { usage: null, stopReason, toolUses, unfinished };
     }
     return {
         usage: {
@@ -298,6 +313,7 @@ export function readResponse(contentType: string, text: string): ResponseFacts {
         },
         stopReason,
         toolUses,
+        unfinished,
     };
 }
 
@@ -385,7 +401,10 @@ export class Forwarder {
         if (this.stopped) return { refused: `stopped: ${this.stopped}` };
         const { limits, model } = this.config;
         if (json === undefined) return { refused: "unreadable request body" };
-        const parsed = json as Record<string, unknown>;
+        if (!isObject(json) || Array.isArray(json)) {
+            return { refused: "request body is not a JSON object" };
+        }
+        const parsed = json;
         if (parsed.model !== model)
             return { refused: `request names model ${String(parsed.model)}` };
         if (!isCount(parsed.max_tokens) || parsed.max_tokens > limits.maxOutputTokens) {
@@ -491,7 +510,7 @@ export class Forwarder {
         }
         const contentType = response.headers.get("content-type") ?? "";
         const responseText = new TextDecoder().decode(bytes);
-        const { usage, stopReason, toolUses } = readResponse(contentType, responseText);
+        const { usage, stopReason, toolUses, unfinished } = readResponse(contentType, responseText);
         exchange.tool_uses = toolUses;
         const cost = usage
             ? this.price(
@@ -519,6 +538,7 @@ export class Forwarder {
         };
         if (!response.ok)
             this.stopped ??= `send ${exchange.index} returned HTTP ${response.status}`;
+        else if (unfinished) this.stopped ??= `send ${exchange.index} ${unfinished}`;
         if (cost > reserved) this.stopped ??= `send ${exchange.index} cost above its reservation`;
         return new Response(bytes, {
             status: response.status,

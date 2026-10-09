@@ -139,6 +139,8 @@ export function createIsolatedEnv(): IsolatedEnv {
     const dataDir = join(base, "data");
     const cacheDir = join(base, "cache");
     const workdir = join(base, "work");
+    // `opencode.json` carries the mock provider's inbound key, so the tree is owner-only.
+    mkdirSync(base, { mode: 0o700 });
     for (const d of [configDir, dataDir, cacheDir, workdir]) {
         mkdirSync(d, { recursive: true });
     }
@@ -253,7 +255,9 @@ function writeConfigs(env: IsolatedEnv, mockProviderURL: string, opts: SpawnOpti
         Object.assign(eidnara, { host: { connection_file: opts.userHostConnectionFile } });
     }
 
-    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2));
+    writeFileSync(join(env.configDir, "opencode.json"), JSON.stringify(opencodeConfig, null, 2), {
+        mode: 0o600,
+    });
 
     //
     const userConfigPath = userEidnaraConfigPath(env);
