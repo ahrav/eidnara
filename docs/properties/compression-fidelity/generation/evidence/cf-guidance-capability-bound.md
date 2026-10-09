@@ -105,10 +105,20 @@ combined prompt/hint capability-review check at HEAD.
   `history_summarizer_prompt::tests::the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out`
   pins the line 17 limit and rejects the removed recovery phrases; it fails on
   the base prompt (`297fc28e…`) and passes on the candidate (`4d975027…`).
+  The P4 guidance at lines 214, 225, 241, 245, 369, and 387 keeps its
+  findability wording ("search hooks", "hard to find via search"). Those lines
+  describe the daemon's automatic hint search,
+  [`run_user_hint_lexical_search`][transform], which matches query tokens
+  against each history segment's title, content, and P1-P4 text. They promise
+  that a segment can be matched, which the daemon does, and no recovery of
+  detail.
 - Missing evidence: A non-author human review of the generated outputs, sealed
   control judgments, and serving scenarios bound to the real captures. The
   replay scenarios still serve scripted outputs, so no serving observation
-  names a real capture.
+  names a real capture. The author's keyword pre-read of eight captures per
+  arm found C1's "rejected" in P2-P4 in 6 of 8 baseline captures and 4 of 8
+  candidate captures; a human reviewer judges first whether that is a C1.O1
+  regression or noise.
 - Conclusion: The deterministic check passes. Semantic acceptance stays
   unverified until a human reviews the paired captures.
 

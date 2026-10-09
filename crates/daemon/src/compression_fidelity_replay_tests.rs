@@ -1669,12 +1669,13 @@ async fn real_producer_capture_of_every_corpus_source() {
     assert!(unsettled.is_empty(), "unsettled sources: {unsettled:?}");
 }
 
-/// The capture records a scripted producer's run with the fields a real capture carries.
+/// The real capture's harness is one the host's ModelExecution route admits.
 #[test]
 fn a_capture_binds_a_harness_the_host_admits() {
     assert!(host_runtime::model_execution::backend::Harness::parse(CAPTURE_HARNESS).is_some());
 }
 
+/// The capture records a scripted producer's run with the fields a real capture carries.
 #[tokio::test(flavor = "current_thread")]
 async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
     let producer = Arc::new(ProducerState::default());
