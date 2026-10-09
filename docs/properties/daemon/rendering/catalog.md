@@ -879,7 +879,7 @@ producer
 (`packages/plugin/src/hooks/eidnara/rust-mode-transform.ts:2010` (source-catalog path, not present at HEAD)).
 Confidence: high - [evidence](evidence/render-a-user-hint-total-cap-cannot-bind.md). Computed the
 maximum: 22 (`<eidnara-search-hint>\n`) + 44 (three-fragment header) + 1 + 3 × 82 +
-2 + 1 + 143 (footer, #926) + 23 = 482 UTF-16 units against a cap of 800.
+2 + 1 + 1 + 106 (cut note, #723) + 143 (footer, #926) + 23 = 589 UTF-16 units against a cap of 800.
 `USER_HINT_RESULT_LIMIT` is 3 (`:113`, applied `:9097`) and `one_line_fragment`
 caps each fragment at 80 UTF-16 units (`:109`, applied `:9098`, enforced
 `:9148-9155`).

@@ -587,7 +587,7 @@ Measured over production lines only: `transform.rs:7511-12623` excluding
 | `transform.rs:11246-11250` | `debug_assert!` "served output contains duplicate tool_use ids" — the loud half of the belt | **No** |
 | `transform.rs:12139-12144` | `debug_assert!` "claude-code-anthropic synthetic prefix must not contain system-role messages" | **No** |
 | `transform.rs:8396` | `debug_assert_eq!(strip_tag_prefix(&tagged, tag_number), value)` — the byte-exact-inverse claim | **No** |
-| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 482 against 800 | **No** |
+| `transform.rs:9115` | `debug_assert!(utf16_len(&wrapped) <= USER_HINT_TOTAL_CHAR_CAP)` — trivially satisfied, max 589 against 800 | **No** |
 
 **Zero unconditional runtime assertions in 9,304 production lines.** The two
 `assert!` sites in the transform range, `:11206` and `:11219`, are inside
