@@ -7,6 +7,8 @@ import {
     type Delivery,
     eidnaraConfig,
     M1_SERVING,
+    OPENCODE_ESTIMATOR,
+    servingCost,
 } from "../src/compression-fidelity/campaign";
 import { capabilityDrift, surfaceOfRequest } from "../src/compression-fidelity/capabilities";
 import {
@@ -79,11 +81,12 @@ function observation(
                 admission: delivery.pass.admission,
                 invocation_bytes: delivery.pass.invocationBytes,
                 invocation_charged_tokens: delivery.pass.invocationCharged,
-                estimator: "opencode-heuristic utf8-bytes-div-3.5-v1",
+                estimator: OPENCODE_ESTIMATOR,
             },
             request_body_utf8_bytes: Buffer.byteLength(
                 JSON.stringify(delivery.capture.request.body),
             ),
+            serving: servingCost(delivery),
         },
     });
 }

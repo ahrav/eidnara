@@ -111,6 +111,21 @@ export interface Delivery {
     capture: RetainedCapture;
 }
 
+/** The OpenCode admission estimator a pass line's charged tokens come from. */
+export const OPENCODE_ESTIMATOR = "opencode-heuristic utf8-bytes-div-3.5-v1";
+
+/** The cost of serving `delivery`, which its observation records under `detail.serving`. */
+export function servingCost(delivery: Delivery): Record<string, unknown> {
+    return {
+        request_body_utf8_bytes: Buffer.byteLength(JSON.stringify(delivery.capture.request.body)),
+        invocation_bytes: delivery.pass.invocationBytes,
+        invocation_charged_tokens: delivery.pass.invocationCharged,
+        estimator: OPENCODE_ESTIMATOR,
+        transform_elapsed_ms: delivery.pass.elapsedMs,
+        raw_source_leaks: delivery.verdict.leaks.length,
+    };
+}
+
 function segmentOf(texts: readonly string[], title: string): string {
     const text = texts.find((candidate) => candidate.includes(title)) ?? "";
     const at = text.indexOf(title);

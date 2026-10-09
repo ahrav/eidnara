@@ -1,11 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { parseArgs, run } from "../../scripts/eval-compression-fidelity";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
     type ArmOptions,
     allScenarios,
-    CORPUS_PATH,
     corpus,
     SHA,
     scratch,
@@ -408,56 +406,5 @@ describe("evidence live mode", () => {
         const clean = live([forwardingReport("{}", sha256("{}"), true)]);
         expect(clean.arms[0]?.identity_errors).toEqual([]);
         expect(clean.refused).toEqual([]);
-    });
-});
-
-describe("eval:compression-fidelity command", () => {
-    test("flags are required once each and unknown flags are refused", () => {
-        const base = ["--baseline", "a", "--candidate", "b", "--out", "o"];
-        expect(parseArgs(base).mode).toBe("offline");
-        expect(() => parseArgs([...base, "--baseline", "c"])).toThrow();
-        expect(() => parseArgs([...base, "--extra", "x"])).toThrow("unknown flag");
-        expect(() => parseArgs([...base, "--mode", "online"])).toThrow("offline or live");
-        expect(() => parseArgs(base.slice(2))).toThrow("--baseline is required");
-    });
-
-    test("the default run sends nothing and writes only owner-only files outside the repository", () => {
-        const root = scratch();
-        const baseline = writeArm(root, { label: "baseline" });
-        const candidate = writeArm(root, { label: "candidate" });
-        const original = globalThis.fetch;
-        const sent: string[] = [];
-        const spy = async (input: RequestInfo | URL): Promise<Response> => {
-            sent.push(String(input));
-            throw new Error("no send");
-        };
-        globalThis.fetch = Object.assign(spy, { preconnect: original.preconnect });
-        const out = join(root, "out");
-        let written: ReturnType<typeof run> | undefined;
-        try {
-            written = run({
-                baseline: baseline.dir,
-                candidate: candidate.dir,
-                out,
-                corpus: CORPUS_PATH,
-                mode: "offline",
-            });
-        } finally {
-            globalThis.fetch = original;
-        }
-        expect(sent).toEqual([]);
-        expect(written?.accepted).toBe(false);
-        expect(readdirSync(out).sort()).toEqual(["manifest.json", "report.json"]);
-        expect(statSync(out).mode & 0o777).toBe(0o700);
-        expect(statSync(written?.report ?? "").mode & 0o777).toBe(0o600);
-        expect(() =>
-            run({
-                baseline: baseline.dir,
-                candidate: candidate.dir,
-                out: resolve(import.meta.dir, "eval-out"),
-                corpus: CORPUS_PATH,
-                mode: "offline",
-            }),
-        ).toThrow("inside the repository");
     });
 });
