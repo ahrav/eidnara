@@ -21,6 +21,7 @@ import { curveTier, tierWindows } from "./decay-oracle";
 import {
     captureTexts,
     type DeliveryVerdict,
+    historyHeadings,
     judgeDelivery,
     publishedCount,
     reviewedTiers,
@@ -141,6 +142,8 @@ export interface Delivery {
     newer: number;
     curve: ServedTier;
     segment: string;
+    /** The row headings served inside the history wrappers. */
+    headings: string[];
     pass: RustPassLine;
     capture: RetainedCapture;
 }
@@ -439,6 +442,7 @@ export class CaseDriver {
             newer,
             curve: curveTier(this.importancesNewestFirst(newer), newer + 1, budget),
             segment: segmentOf(texts, this.title),
+            headings: historyHeadings(texts),
             pass,
             capture,
         };

@@ -50,6 +50,7 @@ function observation(
     scenario: string,
     delivery: Delivery,
     markers: string[],
+    extra: Record<string, unknown> = {},
 ): void {
     emitObservation({
         case: driver.fidelityCase.id,
@@ -61,6 +62,7 @@ function observation(
             : "served",
         markers,
         detail: {
+            ...extra,
             config: delivery.config,
             history_budget_tokens: delivery.budget,
             stage: delivery.stage,
@@ -169,6 +171,8 @@ async function observeDecayRows(
         expect(delivery.budget).toBe(budget);
         expect([delivery.verdict.tier, delivery.curve]).toEqual([tier, tier]);
         expect(delivery.stage).toBe(tier === "p5" ? "absent" : "m0");
+        // An archived case leaves the newer rows' headings in the history wrapper.
+        if (tier === "p5") expect(delivery.headings).not.toEqual([]);
         if (tier === "p4") expect(delivery.segment.trim().split("\n")).toHaveLength(1);
         observation(driver, scenario.id, delivery, [
             "cf-delivery-m0-tier-inputs",
@@ -187,14 +191,25 @@ async function pressureCampaign(h: RustTestHarness, scenarioId: string): Promise
     await driver.publish(scenario.id);
     const before = await driver.observeRebuilt("pressure-before");
     expect([before.stage, before.verdict.tier, before.pass.decision]).toEqual(["m0", "p1", "HARD"]);
+    const declared = scenario.serving.tier ?? "p1";
     const pressed = await driver.pressure();
     expectCredited(pressed, "p5");
     expect(pressed.budget).toBeGreaterThan(0);
     expect(pressed.curve).not.toBe("p5");
-    expect(TIER_RANK[pressed.verdict.tier ?? "p1"]).toBeGreaterThan(TIER_RANK[pressed.curve]);
-    observation(driver, scenario.id, pressed, [
-        ...(driver.importance >= 80 ? ["cf-delivery-high-importance-pressure-input"] : []),
-    ]);
+    // The smallest budget demotes the case at least to its declared tier. The daemon's replay
+    // witness pins the exact tier by searching budgets over fresh folds; the observation records
+    // the declared tier beside the served one.
+    expect(TIER_RANK[pressed.verdict.tier ?? "p1"]).toBeGreaterThanOrEqual(TIER_RANK[declared]);
+    expect(TIER_RANK[declared]).toBeGreaterThan(TIER_RANK[pressed.curve]);
+    // The guard demotes the oldest row first, so the newer rows' headings stay served.
+    expect(pressed.headings).not.toEqual([]);
+    observation(
+        driver,
+        scenario.id,
+        pressed,
+        [...(driver.importance >= 80 ? ["cf-delivery-high-importance-pressure-input"] : [])],
+        { declared_tier: declared },
+    );
 }
 
 /** Serves every row under the aging budget. */

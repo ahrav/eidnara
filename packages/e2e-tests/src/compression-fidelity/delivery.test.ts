@@ -8,6 +8,7 @@ import type { ScriptSource } from "../rust-runner/hermetic-host";
 import { COMPRESSION_FIDELITY_CORPUS_SHA256 } from "./corpus";
 import {
     emitObservation,
+    historyHeadings,
     judgeDelivery,
     planSeed,
     publishedOf,
@@ -145,6 +146,19 @@ describe("compression fidelity delivery judgment", () => {
         expect(servedTier([mentioned], TITLE, BODIES)).toBe("p5");
         const since = `<session-history-since>\n## 1-6 · ${TITLE}\n${BODIES[0]}\n</session-history-since>`;
         expect(servedTier([since, "follow-up"], TITLE, BODIES)).toBe("p1");
+    });
+
+    it("lists the headings inside the history wrappers only", () => {
+        const m1 = `<session-history-since>\n## 7-8 · Newer\nbody\n</session-history-since>`;
+        const m0 = `<session-history>\n## 1-6 · ${TITLE}\n## 9-9 · Other\n</session-history>`;
+        expect(historyHeadings([`${m1}\n${m0}\n## 10-10 · Unwrapped`, "follow-up"])).toEqual([
+            "## 7-8 · Newer",
+            `## 1-6 · ${TITLE}`,
+            "## 9-9 · Other",
+        ]);
+        expect(
+            historyHeadings(["## 1-1 · Unwrapped", "<session-history>\n</session-history>"]),
+        ).toEqual([]);
     });
 
     it("scans outside both history wrappers, the system text included", () => {

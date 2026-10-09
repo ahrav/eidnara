@@ -182,7 +182,7 @@ export interface PiRun {
             messages: unknown[];
             navigateTree(id: string): Promise<unknown>;
         };
-        requests: { messages: unknown[] }[];
+        requests: { messages: unknown[]; systemPrompt: string | undefined }[];
         dispose(): Promise<void>;
     };
     close(): Promise<void>;

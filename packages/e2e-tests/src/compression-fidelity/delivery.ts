@@ -279,6 +279,14 @@ export function servedTier(
     return segment.trim().split("\n").length === 1 ? "p4" : "unmatched";
 }
 
+/** The `## ` headings inside every history wrapper in `texts`, in served order. */
+export function historyHeadings(texts: readonly string[]): string[] {
+    return texts
+        .flatMap(historyWrappers)
+        .flatMap((wrapper) => wrapper.split("\n"))
+        .filter((line) => line.startsWith("## "));
+}
+
 /** Where served texts carry the case segment titled `title`. */
 export function stageOf(texts: readonly string[], title: string): "m1" | "m0" | "absent" {
     for (const text of texts) {
