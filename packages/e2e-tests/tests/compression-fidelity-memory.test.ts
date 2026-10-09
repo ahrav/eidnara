@@ -267,7 +267,7 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                     DISTRACTOR_PAIRS,
                     (_step, k) =>
                         `Distractor ${k}: the recaps said we can start wiring the right parser.`,
-                    { rows: DISTRACTOR_ROWS, restart: AGING_SERVING },
+                    { rows: DISTRACTOR_ROWS, restart: AGING_SERVING, cover: true },
                 );
                 expect(distractors).toBeGreaterThan(0);
 

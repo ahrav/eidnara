@@ -552,16 +552,22 @@ export class CaseDriver {
      * Publishes newer rows whose bodies repeat `pairs` synthetic message pairs, through the
      * fixture's echo answer, in at most `rows` rows when given. `text` receives the step and the
      * pair index. With `restart`, OpenCode restarts under that budget after the seed; otherwise
-     * the rows publish under the current budget. Returns the rows it added.
+     * the rows publish under the current budget. With `cover`, the turns an earlier observation
+     * left unpublished land in a filler row first, so the echo rows repeat the synthetic pairs
+     * alone. Returns the rows the echo added.
      */
     async publishEchoed(
         label: string,
         pairs: number,
         text: (step: number, k: number) => string,
-        options: { rows?: number; restart?: ServingConfig } = {},
+        options: { rows?: number; restart?: ServingConfig; cover?: boolean } = {},
     ): Promise<number> {
         this.step += 1;
         const step = this.step;
+        if (options.cover) {
+            seedSource(this.h, this.sessionId, ballastTurn(this.h, `${label} cover ${step}`));
+            await this.publishStep("filler", `${label} cover ${step}`, this.fillerImportance);
+        }
         seedSource(
             this.h,
             this.sessionId,
