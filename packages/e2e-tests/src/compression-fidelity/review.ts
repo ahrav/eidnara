@@ -418,6 +418,8 @@ function servingCosts(evidence: readonly Evidence[]): { serving: Json[]; missing
         ) {
             missing.push(`${e.file}: invocation_charged_tokens`);
         }
+        // An admitting branch measured an invocation; zero bytes is the producer's `none` shape.
+        if (row.invocation_bytes === 0) missing.push(`${e.file}: invocation_bytes`);
         serving.push(row);
     }
     return { serving, missing };

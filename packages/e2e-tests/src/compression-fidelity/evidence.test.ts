@@ -1035,7 +1035,29 @@ describe("evidence deterministic column", () => {
                 writeFileSync(path, JSON.stringify(value));
             },
         });
-        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("not_evaluated");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
+    });
+
+    test("a served replay record without a tier fails the deterministic column", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                write(dir, "replay.m1.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "daemon.compression_fidelity.replay",
+                    case: allScenarios.find((e) => e.s.id === scenario?.id)?.case,
+                    source: scenario?.source,
+                    scenario: scenario?.id,
+                    stage: "m1",
+                    terminal: "served",
+                    markers: [],
+                    detail: { path: "natural" },
+                });
+            },
+        });
+        expect(errorsOf(assembled)).toBe("");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
     });
 
     test("a wrong served tier fails the deterministic column", async () => {

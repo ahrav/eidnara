@@ -1029,8 +1029,8 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
     // must serve the corpus tier.
     const results = evidence.flatMap((e) => {
         const tier = servedTierOf(e);
-        if (tier === undefined) return [];
-        // A served tier that is present but no string names no tier at all.
+        // A served result names its tier; one that is absent or no string fails the column.
+        if (tier === undefined) return e.terminal === "served" ? [false] : [];
         if (tier === null) return [false];
         const curve = e.detail.curve_tier;
         if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {
