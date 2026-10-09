@@ -8,8 +8,8 @@ use memory_store::{
 };
 
 use crate::decay_render::{
-    MarkerForm, PRECEDENCE_SENTENCE, correction_marker, corrections_line, escape_xml_content,
-    guard_history_segment_body, live_claims, render_rows,
+    MarkerForm, PRECEDENCE_SENTENCE, correction_marker, corrections_line, guarded_body,
+    live_claims, render_rows,
 };
 use crate::m0_compose::trim_user_profile_to_budget;
 use crate::memory_render::{
@@ -177,7 +177,7 @@ fn render_memory_updates(segments: &[StoredHistorySegment]) -> String {
     }
     format!(
         "<memory-updates>\n{PRECEDENCE_SENTENCE}\n{}\n</memory-updates>",
-        guard_history_segment_body(&escape_xml_content(&corrections_line(&entries)))
+        guarded_body(&corrections_line(&entries))
     )
 }
 
