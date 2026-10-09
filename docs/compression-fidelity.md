@@ -262,8 +262,9 @@ Run it with
 Each source yields one `daemon.compression_fidelity.real_capture` record,
 written with mode `0600` in an owner-only `0700` directory that the test
 creates or requires, outside the repository. Its terminal is `published`,
-`validation_rejected` for a settled firing without rows, or `unsettled` for
-a firing that did not settle within the wait or never started a producer;
+`validation_rejected` for a settled firing that drained model output but
+published no rows, or `unsettled` for a firing that did not settle within
+the wait, never started a producer, or drained no model output;
 the test fails after writing every record when any source is unsettled. The
 record names the model,
 the output origin, whether the firing settled, the attempt count, and every

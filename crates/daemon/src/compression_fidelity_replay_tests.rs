@@ -1288,8 +1288,8 @@ struct RecordedAttempt {
     model: String,
     system: String,
     prompt: String,
-    max_output_tokens: Option<u32>,
-    temperature: Option<f64>,
+    max_output_tokens: u32,
+    temperature: f64,
     run_id: Option<String>,
     start_error: Option<String>,
     outputs: Vec<RecordedOutput>,
@@ -1431,8 +1431,8 @@ impl HistorySummarizerProducerDriver for RecordingDriver {
                 model: model.into(),
                 system: system.into(),
                 prompt: prompt.into(),
-                max_output_tokens: Some(max_output_tokens),
-                temperature: Some(temperature),
+                max_output_tokens,
+                temperature,
                 ..RecordedAttempt::default()
             },
             &started,
@@ -1533,7 +1533,10 @@ async fn capture_sources(
         let settled = wait_settled(&store, &attempts, wait).await;
         let rows = store.load_history_segments("ses").unwrap();
         let attempts = attempts.lock().unwrap().clone();
-        let terminal = match (settled, rows.is_empty()) {
+        let answered = attempts
+            .iter()
+            .any(|attempt| attempt.outputs.iter().any(|output| output.text.is_some()));
+        let terminal = match (settled && answered, rows.is_empty()) {
             (false, _) => Terminal::Unsettled,
             (true, true) => Terminal::ValidationRejected,
             (true, false) => Terminal::Published,
@@ -1586,9 +1589,16 @@ async fn wait_settled(store: &MemoryStore, attempts: &AttemptLog, wait: Duration
 }
 
 /// `dir` as an owner-only directory outside the repository: created with mode `0700` when
-/// absent, refused when it lies inside the repository or exists with any other mode or owner.
+/// absent, refused when it names a parent directory, lies inside the repository, or exists
+/// with any other mode or owner.
 fn private_capture_dir(dir: &Path) -> PathBuf {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    assert!(
+        !dir.components()
+            .any(|part| part == std::path::Component::ParentDir),
+        "{} names a parent directory",
+        dir.display()
+    );
     let absolute = std::path::absolute(dir).unwrap();
     let existing = absolute.ancestors().find(|a| a.exists()).unwrap();
     let real = existing
@@ -1698,6 +1708,13 @@ async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
         assert_eq!(attempt["model"], start.model.as_str());
         assert_eq!(attempt["system"], start.system.as_str());
         assert_eq!(attempt["prompt"], start.prompt.as_str(), "{}", source.id);
+        assert_eq!(attempt["model"], "probe/model");
+        assert_eq!(
+            prompt_ordinal_range(attempt["prompt"].as_str().unwrap()),
+            Some((1, source.messages.len() as u64)),
+            "{}: the complete chunk input",
+            source.id
+        );
         assert_eq!(
             attempt["max_output_tokens"],
             crate::history_summarizer_producer::HISTORY_SUMMARIZER_MAX_OUTPUT_TOKENS
@@ -1823,6 +1840,8 @@ fn the_capture_directory_is_owner_only_and_outside_the_repository() {
     assert!(refused.is_err());
     assert!(!inside.exists());
     let dir = tempfile::tempdir().unwrap();
+    let climbing = dir.path().join("missing/../captures");
+    assert!(std::panic::catch_unwind(|| private_capture_dir(&climbing)).is_err());
     let fresh = private_capture_dir(&dir.path().join("captures"));
     assert_eq!(
         std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
