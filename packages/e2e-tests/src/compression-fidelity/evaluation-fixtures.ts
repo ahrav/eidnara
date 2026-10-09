@@ -113,6 +113,7 @@ export function writeArm(
                                           attempt: 1,
                                           model,
                                           system_sha256: sha256(system),
+                                          prompt_sha256: sha256("p"),
                                           output_origin: "scripted approved example",
                                       },
                                   ],

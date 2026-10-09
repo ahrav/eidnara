@@ -123,6 +123,38 @@ describe("evidence identity and completeness", () => {
         expect(assembled.refused).toContain("an arm has identity errors");
     });
 
+    test("every capture attempt names the arm's model", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { attempt: { model: "anthropic/other" } },
+        });
+        expect(errorsOf(assembled)).toContain(
+            "attempt ran model anthropic/other, not the arm's model",
+        );
+        const unnamed = await assemble(scratch(), { baseline: { attempt: { model: undefined } } });
+        expect(errorsOf(unnamed)).toContain("attempt ran model undefined, not the arm's model");
+    });
+
+    test("a system prompt recorded as text and as a digest must agree", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { attempt: { system_sha256: sha256("another prompt") } },
+        });
+        expect(errorsOf(assembled)).toContain("records a system prompt whose digest differs");
+        expect(assembled.refused).toContain("an arm has identity errors");
+    });
+
+    test("the user prompt each source was generated from is held equal across the arms", async () => {
+        const first = corpus.cases[0]?.sources[0]?.id ?? "";
+        const assembled = await assemble(scratch(), {
+            candidate: { attempt: { prompt: "another user prompt" } },
+        });
+        expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
+        expect(assembled.refused).toContain(`the arms generated ${first} from different prompts`);
+        const unrecorded = await assemble(scratch(), {
+            baseline: { attempt: { prompt: undefined } },
+        });
+        expect(errorsOf(unrecorded)).toContain("records no user prompt");
+    });
+
     test("a published real capture must record the system prompt it ran", async () => {
         const assembled = await assemble(scratch(), { baseline: { attempt: null } });
         expect(errorsOf(assembled)).toContain("records no system prompt");
@@ -585,7 +617,7 @@ describe("evidence generation origin", () => {
                 (detail) => {
                     (detail.attempts as Array<Record<string, unknown>>)[0]!.model = "other/model";
                 },
-                `real.${source}.json ran an attempt on model other/model, not the arm's`,
+                `real.${source}.json attempt ran model other/model, not the arm's model`,
             ],
             [
                 (detail) => {
@@ -679,6 +711,23 @@ describe("evidence deterministic column", () => {
         expect(rowOf(assembled, exact)?.deterministic).toBe("not_evaluated");
     });
 
+    test("the exact-read witness judges only exact-read scenarios", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "natural");
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.s.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.owner = "daemon.harness_sources.c6_exact_read";
+                value.detail = { tier: scenario?.s.serving.tier };
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(assembled)).toContain(
+            `delivery.${scenario?.s.id}.json names scenario ${scenario?.s.id}, which is not an exact read`,
+        );
+        expect(rowOf(assembled, scenario?.s.id)?.execution.status).toBe("missing");
+    });
+
     test("a pressure delivery without a curve tier fails the pressure oracle", async () => {
         const scenario = allScenarios.find(({ s }) => s.serving.path === "pressure")?.s;
         const assembled = await assemble(scratch(), {
@@ -762,6 +811,7 @@ describe("evidence comparison refusals", () => {
 });
 
 describe("evidence live mode", () => {
+    const LIMITS = { maxCalls: 40, maxOutputTokens: 1024, timeoutMs: 1000, spendCapUsd: 1 };
     function forwardingReport(body: string, bodySha: string, complete: boolean) {
         return {
             mode: "forward",
@@ -770,7 +820,7 @@ describe("evidence live mode", () => {
             context_limit: 200_000,
             stopped: null as string | null,
             spent_usd: 0.5,
-            limits: { maxCalls: 40 } as Record<string, number>,
+            limits: LIMITS as Record<string, number>,
             complete,
             incomplete_reasons: complete ? [] : ["a send is in flight"],
             exchanges: [
@@ -781,6 +831,7 @@ describe("evidence live mode", () => {
                     request: { body_text: body, body_sha256: bodySha },
                     response: {
                         outcome: "acknowledged",
+                        model: "claude-live" as string | null,
                         stop_reason: "end_turn" as string | null,
                         truncated: false,
                         body_text: "ok",
@@ -792,7 +843,10 @@ describe("evidence live mode", () => {
         };
     }
 
-    function live(reports: Array<Record<string, unknown>>, limits?: Record<string, number>) {
+    function live(
+        reports: Array<Record<string, unknown>>,
+        limits: Record<string, number> = LIMITS,
+    ) {
         const root = scratch();
         return assemble(root, {
             mode: "live",
@@ -877,12 +931,32 @@ describe("evidence live mode", () => {
         };
         const answered = { ...looped, exchanges: [...looped.exchanges, answer] };
         expect(errorsOf(await live([answered]))).not.toContain("asks for tool");
-        const capped = { maxCalls: 40, spendCapUsd: 1 };
-        expect(
-            errorsOf(await live([{ ...complete, spent_usd: 1.5, limits: capped }], capped)),
-        ).toContain("complete report spent 1.5 USD above its 1 USD cap");
+        expect(errorsOf(await live([{ ...complete, spent_usd: 1.5 }]))).toContain(
+            "complete report spent 1.5 USD above its 1 USD cap",
+        );
+        const renamed = forwardingReport("{}", sha256("{}"), true);
+        const [named] = renamed.exchanges;
+        if (named) named.response = { ...named.response, model: "claude-other" };
+        expect(errorsOf(await live([renamed]))).toContain(
+            "exchange 0 response names model claude-other in a complete report",
+        );
+        if (named) named.response = { ...named.response, model: null };
+        expect(errorsOf(await live([renamed]))).toContain(
+            "exchange 0 response names no model in a complete report",
+        );
+        const { timeoutMs: _, ...threeLimits } = LIMITS;
+        expect(errorsOf(await live([{ ...complete, limits: threeLimits }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const untyped = {
+            ...complete,
+            exchanges: [{ ...complete.exchanges[0], tool_uses: "toolu_1" }],
+        };
+        expect(errorsOf(await live([untyped]))).toContain(
+            "does not match the forwarding report schema",
+        );
         const raised = await live([
-            { ...forwardingReport("{}", sha256("{}"), true), limits: { maxCalls: 41 } },
+            { ...forwardingReport("{}", sha256("{}"), true), limits: { ...LIMITS, maxCalls: 41 } },
         ]);
 
         expect(errorsOf(raised)).toContain("ran limits other than the arm's");
@@ -890,10 +964,15 @@ describe("evidence live mode", () => {
             [
                 {
                     ...forwardingReport("{}", sha256("{}"), true),
-                    limits: { maxOutputTokens: 1024, maxCalls: 40 },
+                    limits: {
+                        spendCapUsd: 1,
+                        timeoutMs: 1000,
+                        maxOutputTokens: 1024,
+                        maxCalls: 40,
+                    },
                 },
             ],
-            { maxCalls: 40, maxOutputTokens: 1024 },
+            LIMITS,
         );
         expect(reordered.arms[0]?.identity_errors).toEqual([]);
         const clean = await live([forwardingReport("{}", sha256("{}"), true)]);
@@ -911,14 +990,18 @@ describe("evidence live mode", () => {
     test("live arms whose forwarding reports ran different models are refused", async () => {
         const root = scratch();
         const report = forwardingReport("{}", sha256("{}"), true);
+        const forwardedTo = (model: string) => ({
+            ...report,
+            model,
+            exchanges: report.exchanges.map((e) => ({ ...e, response: { ...e.response, model } })),
+        });
         const assembled = await assemble(root, {
             mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
             tamper: (dir) => {
                 write(dir, "forwarding-0.json", report);
-                write(join(root, "candidate"), "forwarding-0.json", {
-                    ...report,
-                    model: "claude-other",
-                });
+                write(join(root, "candidate"), "forwarding-0.json", forwardedTo("claude-other"));
             },
         });
         expect(assembled.arms.map((a) => a.identity_errors)).toEqual([[], []]);
@@ -926,6 +1009,8 @@ describe("evidence live mode", () => {
         expect(assembled.manifest.arms[1]?.forwarding_reports[0]?.model).toBe("claude-other");
         const limited = await assemble(scratch(), {
             mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
             tamper: (dir) => {
                 write(dir, "forwarding-0.json", report);
                 write(join(dir, "..", "candidate"), "forwarding-0.json", {
@@ -935,7 +1020,7 @@ describe("evidence live mode", () => {
             },
         });
         expect(limited.refused).toContain("the arms forwarded at different context limits");
-        const mixed = await live([report, { ...report, model: "claude-other" }]);
+        const mixed = await live([report, forwardedTo("claude-other")]);
         expect(errorsOf(mixed)).toContain(
             "forwarding-1.json forwarded to claude-other, where forwarding-0.json forwarded to claude-live",
         );

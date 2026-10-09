@@ -512,7 +512,12 @@ describe("eval:compression-fidelity gates", () => {
                         model: "claude-live",
                         context_limit: 200_000,
                         spent_usd: 0,
-                        limits: { maxCalls: 40 },
+                        limits: {
+                            maxCalls: 40,
+                            maxOutputTokens: 1024,
+                            timeoutMs: 1000,
+                            spendCapUsd: 1,
+                        },
                         stopped: null,
                         complete: false,
                         incomplete_reasons: ["cost unknown for a send"],
@@ -524,6 +529,7 @@ describe("eval:compression-fidelity gates", () => {
                                 request: { body_text: "{}", body_sha256: sha256("{}") },
                                 response: {
                                     outcome: "acknowledged",
+                                    model: "claude-live",
                                     stop_reason: "end_turn",
                                     truncated: false,
                                     body_text: "",

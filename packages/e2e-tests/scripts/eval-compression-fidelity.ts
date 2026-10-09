@@ -92,8 +92,8 @@ export async function run(
         reviews,
     });
     return {
-        manifest: publishPrivateJson(manifest, args.out, "manifest.json"),
-        report: publishPrivateJson(report, args.out, "report.json"),
+        manifest: publishPrivateJson(manifest, out, "manifest.json"),
+        report: publishPrivateJson(report, out, "report.json"),
         accepted: report.accepted === true,
     };
 }
