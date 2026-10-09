@@ -437,9 +437,9 @@ eval:compression-fidelity --baseline <dir> --candidate <dir>
   `daemon.compression_fidelity.real_capture`, and `opencode-delivery`. It
   also holds any `forwarding-*.json` reports and an `arm.json`
   (`eidnara.compression-fidelity-arm/v1`). `arm.json` names the arm's label,
-  the SHA-256 of its history summarizer system prompt, its model, provider,
-  version, settings, and limits, and whether its generation origin is
-  `scripted` or `real`.
+  the SHA-256 of its history summarizer system prompt as 64 lowercase hex
+  digits, its model, provider, version, settings, and limits, and whether
+  its generation origin is `scripted` or `real`.
 
 **Outputs.** `manifest.json` and `report.json`, written with mode `0600` in
 an owner-only `0700` directory outside the repository whose existing ancestors
@@ -493,7 +493,8 @@ either arm; an arm directory is refused before any write, and a component of
 - a system prompt the arm did not declare, or an attempt whose prompt text
   and recorded digest disagree, for the system prompt or the user prompt;
 - a published generation record with an attempt that records no system
-  prompt, no user prompt, or a model other than the arm's;
+  prompt, no user prompt, a model other than the arm's, or a digest field
+  that is not 64 lowercase hex digits;
 - a published generation record that records no system prompt, or a source
   with no published generation record: a real capture in an arm labeled
   `real`, the U2 replay's `generation` stage with scripted output in an arm
@@ -504,8 +505,8 @@ either arm; an arm directory is refused before any write, and a component of
   source's approved example;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
-- a forwarding report without the four limits the forwarder enforces, or
-  whose exchange tool ids are not string arrays;
+- a forwarding report without the four limits the forwarder enforces or
+  positive prices, or whose exchange tool ids are not string arrays;
 - a forwarding report marked complete that records a stop, no send, or spend
   above its `spendCapUsd`, or whose exchange asks for a tool no later request
   answers, has no response, a response whose outcome is other than
@@ -523,8 +524,9 @@ In an arm labeled `real`:
   arm's model; a capture recorded under another model is an identity error;
 - a published real capture records `settled: true`, an attempt output with
   text, and nonempty `published_rows`, the state the capture writer publishes;
-- each attempt of a published real capture names the arm's model and records
-  the `temperature` and `max_output_tokens` the arm's `settings` declare;
+- `arm.json` `settings` declare numeric `temperature` and
+  `max_output_tokens`, and each attempt of a published real capture records
+  those values;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.

@@ -155,6 +155,11 @@ export function text(value: unknown): value is string {
     return typeof value === "string" && value !== "";
 }
 
+/** A lowercase hex SHA-256 digest. */
+export function digest(value: unknown): value is string {
+    return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
 export function strings(value: unknown): string[] {
     return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
@@ -194,7 +199,13 @@ function armConfig(value: unknown): ArmConfig | null {
     if (!record(value) || value.schema !== ARM_SCHEMA) return null;
     const { label, prompt_sha256, model, provider, version, settings, limits, generation_origin } =
         value;
-    if (!text(label) || !text(prompt_sha256) || !text(model) || !text(provider) || !text(version)) {
+    if (
+        !text(label) ||
+        !digest(prompt_sha256) ||
+        !text(model) ||
+        !text(provider) ||
+        !text(version)
+    ) {
         return null;
     }
     if (!record(settings) || !(limits === null || record(limits))) return null;
@@ -223,7 +234,9 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (
         !record(pricing) ||
         typeof pricing.inputPerMTok !== "number" ||
-        typeof pricing.outputPerMTok !== "number"
+        typeof pricing.outputPerMTok !== "number" ||
+        pricing.inputPerMTok <= 0 ||
+        pricing.outputPerMTok <= 0
     ) {
         return null;
     }
@@ -307,17 +320,19 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
 function promptHashes(
     evidence: Evidence,
     field: "system" | "prompt",
-): { hashes: string[]; conflict: boolean } {
+): { hashes: string[]; conflict: boolean; malformed: boolean } {
     const hashes: string[] = [];
     let conflict = false;
+    let malformed = false;
     for (const attempt of attemptsOf(evidence)) {
-        const digest = attempt[`${field}_sha256`];
+        const claimed = attempt[`${field}_sha256`];
         const recorded = typeof attempt[field] === "string" ? sha256(attempt[field]) : null;
-        if (recorded !== null && typeof digest === "string" && digest !== recorded) conflict = true;
+        if (claimed !== undefined && !digest(claimed)) malformed = true;
+        if (recorded !== null && digest(claimed) && claimed !== recorded) conflict = true;
         if (recorded !== null) hashes.push(recorded);
-        else if (typeof digest === "string") hashes.push(digest);
+        else if (digest(claimed)) hashes.push(claimed);
     }
-    return { hashes, conflict };
+    return { hashes, conflict, malformed };
 }
 
 /** The system prompt hashes an observation claims its producer ran. */
@@ -605,6 +620,9 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     if (!config) return errors;
     for (const evidence of arm.evidence) {
         const system = promptHashes(evidence, "system");
+        if (system.malformed || promptHashes(evidence, "prompt").malformed) {
+            errors.push(`${evidence.file} records a malformed digest`);
+        }
         if (system.conflict) {
             errors.push(
                 `${evidence.file} records a system prompt whose digest differs from its text`,
@@ -669,6 +687,11 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             }
         }
         return errors;
+    }
+    for (const setting of ATTEMPT_SETTINGS) {
+        if (typeof config.settings[setting] !== "number") {
+            errors.push(`arm.json declares no numeric ${setting}`);
+        }
     }
     const published = generations.filter((g) => g.owner === REAL_CAPTURE);
     for (const capture of published) {
