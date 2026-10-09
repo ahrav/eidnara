@@ -56,6 +56,17 @@
             ]
         },
         {
+            "path": "tests/compression-fidelity-memory.test.ts",
+            "tier": "rust-only",
+            "rationale": "compression fidelity memory, hint, and recovery delivery: C3.M1 earns memory credit only when a verified copy is admitted into the invocation's project-memory block, and its wrong-project, candidate-only, budget-excluded, withheld, and rejected variants earn none; eidnara_search recovers it with arguments taken from the visible request; C4's omitted row reaches the provider as a truncated hint ahead of distractor rows only while auto-search is on",
+            "contract_refs": [
+                "cf-memory-credit-requires-admitted-visible-content",
+                "cf-hints-do-not-strengthen-source-claims",
+                "cf-visible-memory-recovery",
+                "cf-delivery-scenarios-reach-qualified-invocations"
+            ]
+        },
+        {
             "path": "tests/compression-fidelity-pi.test.ts",
             "tier": "pi-rust",
             "rationale": "compression fidelity delivery through the Pi context handler: a scripted C1 publication against the direct-host fixture serves its reviewed P1 body in the m1 window and then in a rematerialized m0, with the covered source text only inside the history wrappers",

@@ -408,6 +408,17 @@ describe("direct host fixture contract", () => {
                 expect(await rejection(stack.scriptCases(["C9.S1"]))).toContain("unknown_scenario");
                 expect(await rejection(stack.scriptSource("C1.V1"))).toContain("unknown_scenario");
                 expect(await rejection(stack.scriptCases([]))).toContain("empty_queue");
+                expect(await stack.userHintOutcome()).toBeNull();
+                // The kernel opens with the first project session, so a fresh stack reports
+                // kernel_unavailable for both admission controls.
+                expect(
+                    await rejection(stack.memoryAdmission("mem_missing", "quarantine")),
+                ).toContain("kernel_unavailable");
+                expect(
+                    await rejection(
+                        stack.memorySeed("mem_missing", "mem_new", "ARCHITECTURE", "x"),
+                    ),
+                ).toContain("kernel_unavailable");
                 expect(await rejection(stack.scriptCases(Array(9).fill("C1.S1")))).toContain(
                     "queue_too_long",
                 );

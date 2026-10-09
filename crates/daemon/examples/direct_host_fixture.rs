@@ -131,6 +131,12 @@ mod unix {
     /// The queued sender delivers the acknowledgment channel the run uses to confirm it resumed.
     type BlockedQueue = Arc<Mutex<VecDeque<(u64, oneshot::Sender<oneshot::Sender<()>>)>>>;
 
+    fn fresh_incarnation() -> String {
+        let mut nonce = [0u8; 16];
+        getrandom::getrandom(&mut nonce).expect("OS entropy for the fixture incarnation");
+        nonce.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
     struct ControlledBackend {
         next: Mutex<NextBehavior>,
         /// While set, every call fails as a source outage would.
@@ -142,6 +148,12 @@ mod unix {
         counters: Arc<BackendCounters>,
         /// Corpus case scripts; while armed, every admitted summarizer request consumes one entry.
         script: Arc<Mutex<CaseScript>>,
+        /// Memory admission controls issued, which key their kernel intents.
+        admissions: AtomicU64,
+        /// Random per-process prefix of every admission token. Committed intents outlive the
+        /// process in the state root, so a restarted fixture whose `admissions` count starts
+        /// over at zero still issues keys no earlier incarnation committed.
+        incarnation: String,
     }
 
     impl ControlledBackend {
@@ -158,7 +170,14 @@ mod unix {
                 shutdown,
                 counters: Arc::new(BackendCounters::default()),
                 script: Arc::new(Mutex::new(CaseScript::default())),
+                admissions: AtomicU64::new(0),
+                incarnation: fresh_incarnation(),
             })
+        }
+
+        fn admission_token(&self) -> String {
+            let issued = self.admissions.fetch_add(1, Ordering::SeqCst);
+            format!("{}-{issued}", self.incarnation)
         }
 
         fn set_next(&self, behavior: NextBehavior) {
@@ -647,11 +666,120 @@ mod unix {
         },
         /// The case script's queue and consumption record.
         ScriptStatus,
+        /// Records one admission event on an existing memory decision through the kernel's own
+        /// admission engine: `code_observed` verifies it, `explicit_reject` and `quarantine`
+        /// withdraw it from automatic surfaces.
+        MemoryAdmission {
+            object_id: String,
+            event: MemoryEvent,
+        },
+        /// Commits a verified project memory, as repository code would establish it, into the
+        /// project scope of the existing decision `anchor`.
+        MemorySeed {
+            anchor: String,
+            object_id: String,
+            category: String,
+            text: String,
+        },
         /// The native records of the source a scenario names.
         ScriptSource {
             scenario: String,
         },
         GracefulShutdown,
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum MemoryEvent {
+        CodeObserved,
+        ExplicitReject,
+        Quarantine,
+    }
+
+    fn admit(
+        kernel: &kernel::KernelStore,
+        token: &str,
+        step: impl FnOnce(
+            &mut kernel::Envelope<'_>,
+        ) -> Result<kernel::AdmissionDecision, kernel::KernelError>,
+    ) -> Result<ControlResult, &'static str> {
+        let mut decided = None;
+        kernel
+            .commit(
+                daemon::kernel_route_fixtures::intent(&format!("fixture-memory-admission-{token}")),
+                |envelope| {
+                    decided = Some(step(envelope)?);
+                    Ok(String::new())
+                },
+            )
+            .map_err(|error| {
+                eprintln!("direct host fixture: memory admission refused: {error:?}");
+                "admission_refused"
+            })?;
+        decided
+            .map(|decision| ControlResult::Admission {
+                effective_maturity: decision.effective_maturity.as_str(),
+                disposition: decision.disposition.as_str(),
+                visibility: decision.visibility.as_str(),
+            })
+            .ok_or("admission_refused")
+    }
+
+    /// Records `event` on `object_id` through the kernel's admission engine, under the classes
+    /// the decision already carries.
+    fn memory_admission(
+        kernel: &kernel::KernelStore,
+        object_id: &str,
+        event: MemoryEvent,
+        token: &str,
+    ) -> Result<ControlResult, &'static str> {
+        use daemon::kernel_route_fixtures::{admission, observe_code};
+        use kernel::{EventKind, KernelError};
+        admit(kernel, token, |envelope| {
+            let (prior, _) = envelope
+                .subject_admission(object_id)?
+                .ok_or(KernelError::AdmissionPolicy)?;
+            let classes = (prior.source_class, prior.taint_class);
+            let kind = match event {
+                MemoryEvent::CodeObserved => {
+                    let observation = format!("{object_id}-observed-{token}");
+                    return observe_code(envelope, object_id, &observation, classes);
+                }
+                MemoryEvent::ExplicitReject => EventKind::ExplicitReject,
+                MemoryEvent::Quarantine => EventKind::Quarantine,
+            };
+            envelope.record_admission(admission(object_id, kind, None, classes))
+        })
+    }
+
+    /// Commits a repository-sourced memory decision into `anchor`'s project scope and admits it
+    /// on a code observation.
+    fn memory_seed(
+        kernel: &kernel::KernelStore,
+        anchor: &str,
+        object_id: &str,
+        category: &str,
+        text: &str,
+        token: &str,
+    ) -> Result<ControlResult, &'static str> {
+        use daemon::kernel_route_fixtures::{
+            MEMORY_DOMAIN, ensure_domain, memory_decision_spec, observe_code,
+        };
+        use kernel::{KernelError, SourceClass, TaintClass};
+        admit(kernel, token, |envelope| {
+            let scope = envelope
+                .object_state(anchor)?
+                .and_then(|state| state.scope_id)
+                .ok_or(KernelError::NotFound)?;
+            ensure_domain(envelope, MEMORY_DOMAIN)?;
+            envelope.insert_decision(memory_decision_spec(object_id, &scope, category, text))?;
+            observe_code(
+                envelope,
+                object_id,
+                &format!("{object_id}-observed"),
+                (SourceClass::TrustedLocalCode, TaintClass::CurrentCode),
+            )
+        })
     }
 
     #[derive(Serialize)]
@@ -684,6 +812,11 @@ mod unix {
             outcome: Option<daemon::transform::UserHintPass>,
         },
         Script(crate::case_script::ScriptStatus),
+        Admission {
+            effective_maturity: &'static str,
+            disposition: &'static str,
+            visibility: &'static str,
+        },
         Source(serde_json::Value),
     }
 
@@ -773,70 +906,96 @@ mod unix {
                 BoundedLine::Oversized => rejected(None, "request_too_large"),
                 BoundedLine::Line(line) => match serde_json::from_slice::<ControlRequest>(&line) {
                     Ok(request) => {
-                        let outcome: Result<(ControlResult, bool), &'static str> =
-                            match request.command {
-                                ControlCommand::BackendSuccess => {
-                                    backend.set_next(NextBehavior::Success);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::BlockNextCall => {
-                                    backend.set_next(NextBehavior::Block);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::ReleaseBlockedCall => Ok((
-                                    ControlResult::Ack {
-                                        accepted: backend.release_blocked().await,
-                                    },
-                                    false,
-                                )),
-                                ControlCommand::TypedFailure => {
-                                    backend.set_next(NextBehavior::Failure);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::OutageBegin => {
-                                    backend.outage.store(true, Ordering::SeqCst);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::OutageEnd => {
-                                    backend.outage.store(false, Ordering::SeqCst);
-                                    Ok((ControlResult::Ack { accepted: true }, false))
-                                }
-                                ControlCommand::Counters => {
-                                    let mut counters = backend.counters.snapshot();
-                                    counters.cassette_refused = recorder
-                                        .as_ref()
-                                        .map_or(0, |recorder| recorder.redaction_refusals() as u64);
-                                    Ok((ControlResult::Counters(counters), false))
-                                }
-                                ControlCommand::UserHintOutcome => Ok((
-                                    ControlResult::UserHint {
-                                        outcome: core.user_hint_outcome_for_test(),
-                                    },
-                                    false,
-                                )),
-                                ControlCommand::HistorySummarizerLive => Ok((
-                                    ControlResult::HistorySummarizer {
-                                        live: core.history_summarizer_live_for_test(),
-                                    },
-                                    false,
-                                )),
-                                ControlCommand::ScriptCases { entries } => backend
-                                    .script()
-                                    .select(&entries)
-                                    .map(|()| (ControlResult::Ack { accepted: true }, false))
-                                    .map_err(|error| error.code()),
-                                ControlCommand::ScriptStatus => {
-                                    Ok((ControlResult::Script(backend.script().status()), false))
-                                }
-                                ControlCommand::ScriptSource { scenario } => {
-                                    crate::case_script::source_records(&scenario)
-                                        .map(|records| (ControlResult::Source(records), false))
-                                        .map_err(|error| error.code())
-                                }
-                                ControlCommand::GracefulShutdown => {
-                                    Ok((ControlResult::Ack { accepted: true }, true))
-                                }
-                            };
+                        let outcome: Result<(ControlResult, bool), &'static str> = match request
+                            .command
+                        {
+                            ControlCommand::BackendSuccess => {
+                                backend.set_next(NextBehavior::Success);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::BlockNextCall => {
+                                backend.set_next(NextBehavior::Block);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::ReleaseBlockedCall => Ok((
+                                ControlResult::Ack {
+                                    accepted: backend.release_blocked().await,
+                                },
+                                false,
+                            )),
+                            ControlCommand::TypedFailure => {
+                                backend.set_next(NextBehavior::Failure);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::OutageBegin => {
+                                backend.outage.store(true, Ordering::SeqCst);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::OutageEnd => {
+                                backend.outage.store(false, Ordering::SeqCst);
+                                Ok((ControlResult::Ack { accepted: true }, false))
+                            }
+                            ControlCommand::Counters => {
+                                let mut counters = backend.counters.snapshot();
+                                counters.cassette_refused = recorder
+                                    .as_ref()
+                                    .map_or(0, |recorder| recorder.redaction_refusals() as u64);
+                                Ok((ControlResult::Counters(counters), false))
+                            }
+                            ControlCommand::UserHintOutcome => Ok((
+                                ControlResult::UserHint {
+                                    outcome: core.user_hint_outcome_for_test(),
+                                },
+                                false,
+                            )),
+                            ControlCommand::HistorySummarizerLive => Ok((
+                                ControlResult::HistorySummarizer {
+                                    live: core.history_summarizer_live_for_test(),
+                                },
+                                false,
+                            )),
+                            ControlCommand::ScriptCases { entries } => backend
+                                .script()
+                                .select(&entries)
+                                .map(|()| (ControlResult::Ack { accepted: true }, false))
+                                .map_err(|error| error.code()),
+                            ControlCommand::ScriptStatus => {
+                                Ok((ControlResult::Script(backend.script().status()), false))
+                            }
+                            ControlCommand::MemoryAdmission { object_id, event } => {
+                                let token = backend.admission_token();
+                                core.kernel_store_for_test()
+                                    .ok_or("kernel_unavailable")
+                                    .and_then(|kernel| {
+                                        memory_admission(&kernel, &object_id, event, &token)
+                                    })
+                                    .map(|result| (result, false))
+                            }
+                            ControlCommand::MemorySeed {
+                                anchor,
+                                object_id,
+                                category,
+                                text,
+                            } => {
+                                let token = backend.admission_token();
+                                core.kernel_store_for_test()
+                                    .ok_or("kernel_unavailable")
+                                    .and_then(|kernel| {
+                                        memory_seed(
+                                            &kernel, &anchor, &object_id, &category, &text, &token,
+                                        )
+                                    })
+                                    .map(|result| (result, false))
+                            }
+                            ControlCommand::ScriptSource { scenario } => {
+                                crate::case_script::source_records(&scenario)
+                                    .map(|records| (ControlResult::Source(records), false))
+                                    .map_err(|error| error.code())
+                            }
+                            ControlCommand::GracefulShutdown => {
+                                Ok((ControlResult::Ack { accepted: true }, true))
+                            }
+                        };
                         let (result, stop) = match outcome {
                             Ok(outcome) => outcome,
                             Err(code) => {
@@ -1359,8 +1518,20 @@ mod unix {
 
     #[cfg(test)]
     mod tests {
+        use daemon::kernel_route_fixtures::{
+            commit_verified_memory, intent, project_scope_spec, seed_domain,
+        };
+
         use super::*;
         use crate::case_script::Record;
+
+        fn visibility(result: Result<ControlResult, &'static str>) -> Result<&'static str, String> {
+            match result {
+                Ok(ControlResult::Admission { visibility, .. }) => Ok(visibility),
+                Ok(_) => Err("not an admission result".to_string()),
+                Err(code) => Err(code.to_string()),
+            }
+        }
 
         fn sink(status: SinkStatus) -> EventSink {
             EventSink::new(Arc::new(move |_| status))
@@ -1375,6 +1546,47 @@ mod unix {
                 text: "x".to_owned(),
             }];
             Some(Summary::Scripted(script.answer(&records).unwrap().unwrap()))
+        }
+
+        #[test]
+        fn admission_controls_after_a_fixture_restart_apply_to_the_persisted_kernel() {
+            let root = tempfile::tempdir().unwrap();
+            let store = kernel::KernelStore::open(root.path()).unwrap();
+            seed_domain(&store);
+            store
+                .commit(intent("project-scope"), |envelope| {
+                    envelope.insert_scope(project_scope_spec("scope-project", "project-digest"))?;
+                    Ok(String::new())
+                })
+                .unwrap();
+            commit_verified_memory(
+                &store,
+                "anchor",
+                "mem_anchor",
+                "scope-project",
+                "ARCHITECTURE",
+                "anchor",
+            );
+
+            let first = ControlledBackend::new(CancellationToken::new());
+            let seeded = memory_seed(
+                &store,
+                "mem_anchor",
+                "mem_seeded",
+                "ARCHITECTURE",
+                "seeded",
+                &first.admission_token(),
+            );
+            assert_eq!(visibility(seeded), Ok("automatic"));
+
+            let restarted = ControlledBackend::new(CancellationToken::new());
+            let withheld = memory_admission(
+                &store,
+                "mem_seeded",
+                MemoryEvent::Quarantine,
+                &restarted.admission_token(),
+            );
+            assert_eq!(visibility(withheld), Ok("audit_only"));
         }
 
         #[test]

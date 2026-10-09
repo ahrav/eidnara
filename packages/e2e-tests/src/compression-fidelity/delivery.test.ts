@@ -214,6 +214,7 @@ describe("compression fidelity delivery judgment", () => {
             scenario: "C1.S1",
             source: "C1.V1",
             leakProbes: [],
+            memoryExamples: [],
             messages: [
                 { info: { role: "user" }, parts: [{ id: "a", type: "text", text: "question" }] },
                 {
