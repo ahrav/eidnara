@@ -273,7 +273,7 @@ environment variables, all required:
 
 | Variable | Meaning |
 | --- | --- |
-| `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model |
+| `EIDNARA_FIDELITY_REAL_CONNECTION_FILE` | The connection file of a running host whose model execution can reach the model and verifies no credential claims |
 | `EIDNARA_FIDELITY_REAL_MODEL` | The model id the history summarizer runs, as the only model in its chain |
 | `EIDNARA_FIDELITY_REAL_WAIT_SECONDS` | How long each source's firing may take to settle |
 | `EIDNARA_FIDELITY_OBSERVATIONS_DIR` | A private directory outside the repository |
@@ -297,7 +297,14 @@ reads no credential: the host owns them.
 `a_capture_records_the_model_attempts_usage_and_complete_input` runs the
 same capture over the scripted producer in the default suite.
 The capture binds its session under the `opencode` harness, which the host's
-ModelExecution route admits. `direct_host_fixture` serves the capture when
+ModelExecution route admits, with an empty `credential_fingerprints` map. The
+capture therefore runs against a host whose ModelExecution route verifies no
+credential claims: `direct_host_fixture` without `--harness-runtime`, or an
+`eidnara_host` started with an envelope that carries no credentials and no
+AWS source. A credential-verifying host checks the route's fingerprints at
+`CredentialVerifier::verify` before each send and answers
+`harness_unavailable` / `credential_snapshot_mismatch` for the empty map.
+`direct_host_fixture` serves the capture when
 `EIDNARA_FIXTURE_SUMMARIZER_COMMAND` names a command that answers each
 summarizer prompt from a real model, such as
 `packages/e2e-tests/scripts/bedrock-summarizer.ts`.

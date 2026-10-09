@@ -1742,9 +1742,10 @@ fn private_capture_dir(dir: &Path) -> PathBuf {
 /// Opt-in real capture of every corpus source through the host's existing producer
 /// execution, written as private capture records. Never part of a default run.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "opt-in real producer capture; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE, \
-            EIDNARA_FIDELITY_REAL_MODEL, EIDNARA_FIDELITY_REAL_WAIT_SECONDS and \
-            EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
+#[ignore = "opt-in real producer capture; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE naming a \
+            host that admits sends without a credential claim (direct_host_fixture without \
+            --harness-runtime), EIDNARA_FIDELITY_REAL_MODEL, EIDNARA_FIDELITY_REAL_WAIT_SECONDS \
+            and EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
 async fn real_producer_capture_of_every_corpus_source() {
     let required = |name: &str| {
         std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for real capture"))

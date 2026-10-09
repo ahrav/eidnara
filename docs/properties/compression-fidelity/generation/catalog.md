@@ -83,9 +83,12 @@ focus, not independent corroboration by another reviewer.
 | Version compatibility | Keep KTD1's Rust-owned corpus and KTD2's private test ancestry without changing wire contracts. |
 | Wildcard, last | Require a material source-to-publication situation, not a placeholder-prompt success or evidence found only in references. |
 
-Focused portfolio refinements retain two further consequences. Prompt lines
-130/212 promised recovery beyond the registered memory-only search contract,
-and so did the hint footer until #926 rewrote it as a memory search, despite prompt lines 17/362 disclaiming transcript recovery.
+Focused portfolio refinements retain two further consequences. At the
+inspected HEAD `99f68bd3`, prompt lines 130/212 promised recovery beyond the
+registered memory-only search contract, and so did the hint footer until #926
+rewrote it as a memory search, despite prompt lines 17/362 disclaiming
+transcript recovery. #723 rewrote lines 130/212 so the prompt at HEAD makes
+no search-recovery promise; the historical witness stays in the evidence file.
 The owning guidance needs manual capability review, not automated semantic
 classification. U5 also needs a named failing witness, fresh reviewed same-case
 outputs for meaning changes, and explicit importance/serving-shift observations
@@ -382,14 +385,17 @@ capability artifacts, not classify the prose automatically. The condition
 applies to every guidance revision accepted as capability-correct.
 Fault/timing angle: Prompt or hint wording can preserve an obsolete recovery
 premise after tools or source contracts change, or contradict another section.
-Required faults and enabling state: Review prompt lines 130/212 against 17/362
-and a history-derived hint with the memory-only registry; include a supported
-memory-search statement and a disabled-registry control. Link the actual text
-and applicable configuration without requiring an external provider call.
+Required faults and enabling state: Review each accepted guidance revision of
+the prompt and a history-derived hint against prompt lines 17/362 and the
+memory-only registry; include a supported memory-search statement and a
+disabled-registry control. Link the actual text and applicable configuration
+without requiring an external provider call. The historical witness is the
+line 130/212 conflict at HEAD `99f68bd3`, recorded in the evidence file.
 Confidence: high - [Evidence](evidence/cf-guidance-capability-bound.md).
-The prompt conflict, history-derived hint footer, and registered memory-only
-search path are inspected; this is evidence of a false premise, not a passing
-guidance review or an observed consumer incident.
+The historical prompt conflict, history-derived hint footer, and registered
+memory-only search path are inspected. #723 corrected the prompt conflict at
+HEAD; the hint footer and generated outputs still await the human guidance
+review, and no consumer incident is observed.
 Existing check: [Registry guidance test:272-319][registry-tests],
 [search-description test:428-439][search-tests], unaudited, and the
 [summarizer prompt guidance-capability test][prompt]
