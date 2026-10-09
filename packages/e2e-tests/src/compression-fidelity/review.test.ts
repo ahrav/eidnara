@@ -509,8 +509,9 @@ describe("eval:compression-fidelity gates", () => {
                     write(dir, "forwarding-0.json", {
                         mode: "forward",
                         corpus_sha256: SHA,
-                        model: "anthropic/claude-test",
+                        model: "claude-live",
                         limits: { maxCalls: 40 },
+                        stopped: null,
                         complete: false,
                         incomplete_reasons: ["cost unknown for a send"],
                         exchanges: [
@@ -518,6 +519,8 @@ describe("eval:compression-fidelity gates", () => {
                                 index: 0,
                                 request: { body_text: "{}", body_sha256: sha256("{}") },
                                 response: {
+                                    outcome: "acknowledged",
+                                    stop_reason: "end_turn",
                                     truncated: false,
                                     body_text: "",
                                     body_sha256: null,

@@ -30,6 +30,7 @@ export const OWNERS = [
     "opencode-delivery",
 ] as const;
 export const REAL_CAPTURE = "daemon.compression_fidelity.real_capture";
+const REPLAY = "daemon.compression_fidelity.replay";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 const EXECUTED = new Set(["published", "served", "read_exact", "discoverable", "excluded"]);
 const EXACT_READ_OWNER = "daemon.harness_sources.c6_exact_read";
@@ -85,12 +86,16 @@ export interface ForwardingEvidence {
     /** The model OpenCode ran, as the provider echoes it. */
     model: string;
     limits: Json;
+    /** The reason the forwarder stopped, when it did. */
+    stopped: string | null;
     complete: boolean;
     incomplete_reasons: string[];
     exchanges: Array<{
         index: number;
         request: { body_text: string; body_sha256: string };
         response: {
+            outcome: string;
+            stop_reason: string | null;
             truncated: boolean;
             body_text: string;
             body_sha256: string | null;
@@ -206,6 +211,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (!text(value.model) || !record(value.limits) || typeof value.complete !== "boolean") {
         return null;
     }
+    if (value.stopped !== null && !text(value.stopped)) return null;
     if (!Array.isArray(value.incomplete_reasons) || !Array.isArray(value.exchanges)) return null;
     const exchanges: ForwardingEvidence["exchanges"] = [];
     for (const exchange of value.exchanges) {
@@ -229,12 +235,17 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
             }
             if (response.body_sha256 !== null && typeof response.body_sha256 !== "string")
                 return null;
+            if (!text(response.outcome)) return null;
+            if (response.stop_reason !== null && typeof response.stop_reason !== "string")
+                return null;
         }
         exchanges.push({
             index: exchange.index,
             request: { body_text: request.body_text, body_sha256: request.body_sha256 },
             response: response
                 ? {
+                      outcome: response.outcome as string,
+                      stop_reason: response.stop_reason as string | null,
                       truncated: response.truncated as boolean,
                       body_text: response.body_text as string,
                       body_sha256: response.body_sha256 as string | null,
@@ -248,6 +259,7 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         corpus_sha256: value.corpus_sha256,
         model: value.model,
         limits: value.limits,
+        stopped: value.stopped as string | null,
         complete: value.complete,
         incomplete_reasons: strings(value.incomplete_reasons),
         exchanges,
@@ -289,6 +301,14 @@ function completeRealAttempt(attempt: Json, model: string): boolean {
     );
 }
 
+/** A source-level generation record: a real capture, or the U2 replay's generation stage. */
+function isGeneration(evidence: { owner: string; stage: string }): boolean {
+    return (
+        evidence.owner === REAL_CAPTURE ||
+        (evidence.owner === REPLAY && evidence.stage === "generation")
+    );
+}
+
 /**
  * The hash and completeness errors of one forwarding report. A report marked complete carries
  * the writer's completeness invariants the assembler can observe: at least one send, and for
@@ -303,6 +323,9 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
     if (report.complete && report.exchanges.length === 0) {
         errors.push(`${file} complete report records no send`);
     }
+    if (report.complete && report.stopped !== null) {
+        errors.push(`${file} complete report records a stop: ${report.stopped}`);
+    }
     for (const exchange of report.exchanges) {
         // The hashed representation is the request body as UTF-8 bytes, the bytes sent.
         if (sha256(exchange.request.body_text) !== exchange.request.body_sha256) {
@@ -314,6 +337,11 @@ function checkForwarding(file: string, report: ForwardingEvidence): string[] {
             continue;
         }
         if (!response.cost_known) complete(exchange.index, "cost is unknown");
+        if (response.outcome !== "acknowledged") {
+            complete(exchange.index, `response outcome is ${response.outcome}`);
+        }
+        if (response.stop_reason === null)
+            complete(exchange.index, "response states no stop reason");
         if (response.truncated) {
             complete(exchange.index, "response is truncated");
             continue;
@@ -440,6 +468,12 @@ export async function loadArm(
             arm.errors.push(`${name} marks stage ${value.stage} as a judge control`);
             continue;
         }
+        if (label !== null && !sourceLabel && isGeneration({ owner, stage: value.stage })) {
+            arm.errors.push(
+                `${name} names scenario ${label}; a ${value.stage} stage is source-level`,
+            );
+            continue;
+        }
         const evidence: Evidence = {
             file: name,
             sha256: sha256(read.bytes),
@@ -501,21 +535,26 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             }
         }
     }
-    if (config.generation_origin !== "real") return errors;
-    const published = arm.evidence.filter(
-        (e) =>
-            e.owner === REAL_CAPTURE &&
-            e.terminal === "published" &&
-            String(e.detail.output_origin ?? "").startsWith("real"),
-    );
+    const generations = arm.evidence.filter((e) => isGeneration(e) && e.terminal === "published");
+    for (const generation of generations) {
+        if (systemHashes(generation).length === 0) {
+            errors.push(`${generation.file} records no system prompt`);
+        }
+    }
+    if (config.generation_origin !== "real") {
+        for (const { source } of sources(corpus)) {
+            if (!generations.some((g) => g.source === source)) {
+                errors.push(`no published scripted generation for ${source}`);
+            }
+        }
+        return errors;
+    }
+    const published = generations.filter((g) => g.owner === REAL_CAPTURE);
     for (const capture of published) {
         if (capture.detail.model !== config.model) {
             errors.push(
                 `${capture.file} captured with model ${String(capture.detail.model)}, not the arm's model`,
             );
-        }
-        if (systemHashes(capture).length === 0) {
-            errors.push(`${capture.file} records no system prompt`);
         }
         for (const attempt of attemptsOf(capture)) {
             for (const setting of ATTEMPT_SETTINGS) {
@@ -527,7 +566,11 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
             }
         }
     }
-    const captures = published.filter((c) => c.detail.model === config.model);
+    const captures = published.filter(
+        (c) =>
+            c.detail.model === config.model &&
+            String(c.detail.output_origin ?? "").startsWith("real"),
+    );
     for (const evidence of arm.evidence) {
         if (outputOrigins(evidence).some((origin) => origin.includes("scripted"))) {
             errors.push(`${evidence.file} carries scripted output in an arm labeled real`);

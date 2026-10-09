@@ -503,11 +503,17 @@ either arm; an arm directory is refused before any write.
   other than `missing-capture`, the delivery witness's judge self-test;
 - a leftover temporary file, whether `.<name>.tmp` or `<name>.tmp-<hex>`;
 - a system prompt the arm did not declare;
+- a published generation record that records no system prompt, or a source
+  with no published generation record: a real capture in an arm labeled
+  `real`, the U2 replay's `generation` stage in an arm labeled `scripted`;
 - forwarding exchange text that does not match its recorded hash. The
   hashed representation is the request body as UTF-8 bytes;
-- a forwarding report marked complete that records no send, or whose
-  exchange has no response, a truncated response, an unknown cost, or a
-  response without a hash.
+- a forwarding report marked complete that records a stop or no send, or
+  whose exchange has no response, a response whose outcome is other than
+  `acknowledged`, a response with no stop reason, a truncated response, an
+  unknown cost, or a response without a hash;
+- a generation record, a real capture or the U2 replay's `generation` stage,
+  that names a scenario; generation is source-level.
 
 In an arm labeled `real`:
 - scripted output is an identity error, whether `detail.output_origin` or an
@@ -517,9 +523,8 @@ In an arm labeled `real`:
   The capture records at least one complete attempt: the arm's model, a
   system prompt or its hash, a prompt, and a text output; an attempt on
   another model is an identity error;
-- every published real capture records the system prompt it ran, and each of
-  its attempts records the `temperature` and `max_output_tokens` the arm's
-  `settings` declare;
+- each attempt of a published real capture records the `temperature` and
+  `max_output_tokens` the arm's `settings` declare;
 - every serving observation, one that records `detail.served_tier` or
   `detail.tier`, must name, in `detail.generation_capture_sha256`, the file
   hash of the published real capture of its source whose output it served.
