@@ -303,7 +303,8 @@ tier, `natural-archive-input`, `high-importance-pressure-input` (C3.S5),
 `missing-capture-input`, and
 `packages/e2e-tests/tests/compression-fidelity-memory.test.ts` witnesses
 `memory-positive-input`, `memory-negative-inputs` for each negative subcase,
-`hint-fragment-input`, and `hints-disabled-input`. `legacy-input` and
+`hint-fragment-input`'s truncation subcase, and `hints-disabled-input`.
+`hint-fragment-input`'s whole-fragment drop subcase, `legacy-input`, and
 `raw-fallback-input` remain missing.
 Guarantee: The declared delivery campaign constructs every required
 independent serving situation before claiming its coverage.

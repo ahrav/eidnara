@@ -153,8 +153,16 @@ describe.skipIf(!rustPrereqs.ok)("compression fidelity memory, hint, and recover
                 excludedIds.push(otherAnchor, memoryId("wrong-project"));
                 await observeExcluded("memory-wrong-project");
 
-                // An agent-authored memory in this project, which stays a labeled candidate.
+                // An agent-authored memory in this project stays a labeled candidate. Explicit
+                // reads label active rows below verified maturity.
                 const anchor = await createMemory(h, await h.createSession(), example);
+                const candidate = await runScriptedToolCall(h, await h.createSession(), {
+                    tool: "eidnara_memory",
+                    input: { action: "get", objectIds: [anchor] },
+                    prompt: "Read that memory back.",
+                });
+                expect(candidate.resultText).toContain(`"objectId":"${anchor}"`);
+                expect(candidate.resultText).toContain('"labeled":true');
                 excludedIds.push(anchor);
                 await observeExcluded("memory-candidate-only");
 
