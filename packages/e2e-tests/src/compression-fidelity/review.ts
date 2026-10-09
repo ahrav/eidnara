@@ -16,6 +16,7 @@ import {
     type Evidence,
     type EvidenceRow,
     executed,
+    isHintTruncation,
     type Json,
     named,
     REAL_CAPTURE,
@@ -337,7 +338,7 @@ const measurement = (v: unknown) => typeof v === "number" && Number.isFinite(v) 
  * U2 replay serves through the daemon, never through OpenCode, so its tier observations do too.
  */
 function uncosted(e: Evidence): boolean {
-    if (e.owner === "daemon.compression_fidelity.replay") return true;
+    if (e.owner === "daemon.compression_fidelity.replay" || isHintTruncation(e)) return true;
     return (
         e.owner === "opencode-delivery" &&
         e.scenario === "C1.S1" &&
@@ -717,6 +718,13 @@ export function evaluate(input: {
         const failedDeliveries = sourceLevel
             .filter((e) => !executed(e))
             .map((e) => `source-level delivery ${e.file} ended ${e.terminal}`);
+        // The witness serves p1 at every source-level stage and asserts it before recording.
+        const sparseDeliveries = sourceLevel
+            .filter((e) => executed(e) && servedTierOf(e) !== "p1")
+            .map(
+                (e) =>
+                    `source-level delivery ${e.file} served ${String(servedTierOf(e))}, where the witness serves p1`,
+            );
         // The witness writes all three stages for each source with no m1 scenario.
         const absentDeliveries = sourceLevelSources(input.corpus).flatMap((source) => {
             const lacking = SOURCE_LEVEL_STAGES.filter(
@@ -736,6 +744,7 @@ export function evaluate(input: {
             ...stray,
             ...absentDeliveries,
             ...failedDeliveries,
+            ...sparseDeliveries,
             ...(sourceServing.missing.length > 0
                 ? [`source-level serving cost incomplete: ${sourceServing.missing.join(", ")}`]
                 : []),

@@ -70,6 +70,15 @@ const FORWARD_LIMITS = ["maxCalls", "maxOutputTokens", "timeoutMs", "spendCapUsd
 const SOURCE_LABEL_STAGES = ["m1", "warm", "cold-m0"];
 /** The delivery witness's judge self-test; a judge control elsewhere is refused. */
 const JUDGE_CONTROL = { stage: "missing-capture", scenario: "C1.S2" } as const;
+/**
+ * The memory witness's record of the truncated hint fragment on the hint-truncated scenario: an
+ * auxiliary artifact of the preceding `hint-on` delivery, serving no tier and charging no cost.
+ */
+export function isHintTruncation(e: { owner: string; stage: string; scenario: string | null }) {
+    return (
+        e.owner === "opencode-delivery" && e.stage === "hint-truncation" && e.scenario === "C4.S6"
+    );
+}
 /** The scenario variants a witness emits, by owner and scenario; any other label is refused. */
 const VARIANTS: Record<string, ReadonlyArray<{ scenario: string; variant: string }>> = {
     "opencode-delivery": [{ scenario: "C1.S2", variant: "p1-only" }],
@@ -1030,7 +1039,8 @@ function deterministicOf(scenario: FidelityScenario, evidence: Evidence[]): Dete
     const results = evidence.flatMap((e) => {
         const tier = servedTierOf(e);
         // A served result names its tier; one that is absent or no string fails the column.
-        if (tier === undefined) return e.terminal === "served" ? [false] : [];
+        if (tier === undefined)
+            return e.terminal === "served" && !isHintTruncation(e) ? [false] : [];
         if (tier === null) return [false];
         const curve = e.detail.curve_tier;
         if (scenario.serving.path === "pressure" && e.owner === "opencode-delivery") {

@@ -736,6 +736,19 @@ describe("eval:compression-fidelity gates", () => {
         expect(partial.report.arms[0]?.withheld).toContain(
             "source-level delivery of C2.V2 lacks its warm stage",
         );
+        const sparse = await evaluate(scratch(), {
+            baseline: { skipSourceLevel: true },
+            tamper: (dir) => {
+                sourceLevel(dir, SERVING);
+                const path = join(dir, "source.cold-m0.json");
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = "p5";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(sparse.report.arms[0]?.withheld).toContain(
+            "source-level delivery source.cold-m0.json served p5, where the witness serves p1",
+        );
         const failed = await evaluate(scratch(), {
             baseline: { skipSourceLevel: true },
             tamper: (dir) => {
@@ -1044,6 +1057,35 @@ describe("eval:compression-fidelity gates", () => {
         const row = report.arms[0]?.rows.find((r) => r.scenario === scenario);
         expect(report.arms[0]?.identity_errors).toEqual([]);
         expect(row?.cost.missing).toContain("spoof.json: serving");
+    });
+
+    test("the hint-truncation artifact of C4.S6 is neither served nor costed", async () => {
+        const scenario = allScenarios.find(({ s }) => s.serving.path === "hint_truncated");
+        const { report } = await evaluate(scratch(), {
+            tamper: (dir) => {
+                write(dir, "hint-truncation.json", {
+                    schema_version: 1,
+                    corpus_sha256: SHA,
+                    owner: "opencode-delivery",
+                    case: scenario?.case,
+                    source: scenario?.s.source,
+                    scenario: scenario?.s.id,
+                    stage: "hint-truncation",
+                    terminal: "served",
+                    markers: ["cf-delivery-hint-fragment-input"],
+                    detail: {
+                        case_fragment: "- …x…",
+                        fragment_utf16_units: 5,
+                        qualifier_kept: true,
+                    },
+                });
+            },
+        });
+        const row = report.arms[0]?.rows.find((r) => r.scenario === scenario?.s.id);
+        expect(report.arms[0]?.identity_errors).toEqual([]);
+        expect(row?.deterministic).toBe("pass");
+        expect(row?.cost.status).toBe("complete");
+        expect(row?.cost.serving.length).toBe(1);
     });
 
     test("a served delivery observation without a tier is costed as missing its tier", async () => {
