@@ -294,6 +294,43 @@ describe("evidence identity and completeness", () => {
         expect(errorsOf(unhashed)).toContain("returned output other than the reviewed output");
     });
 
+    test("a real arm declares numeric generation settings and its attempts record them", async () => {
+        const unset = await assemble(scratch(), {
+            baseline: {
+                settings: {},
+                attempt: { temperature: undefined, max_output_tokens: undefined },
+            },
+        });
+        expect(errorsOf(unset)).toContain("arm.json does not match its schema");
+        const stringy = await assemble(scratch(), {
+            baseline: {
+                settings: { temperature: "0.1", max_output_tokens: 1024 },
+                attempt: { temperature: "0.1" },
+            },
+        });
+        expect(errorsOf(stringy)).toContain("arm.json does not match its schema");
+    });
+
+    test("a prompt digest must be a SHA-256 hex digest", async () => {
+        const scripted = { generationOrigin: "scripted" as const };
+        const labeled = await assemble(scratch(), {
+            baseline: { ...scripted, promptSha256: "baseline" },
+            candidate: { ...scripted, promptSha256: "candidate" },
+        });
+        expect(errorsOf(labeled)).toContain("arm.json does not match its schema");
+        const systemPrompt = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { system_sha256: "baseline" } },
+            candidate: scripted,
+        });
+        expect(errorsOf(systemPrompt)).toContain("records a malformed digest");
+        expect(errorsOf(systemPrompt)).toContain("records no system prompt");
+        const userPrompt = await assemble(scratch(), {
+            baseline: { ...scripted, attempt: { prompt_sha256: "p" } },
+            candidate: scripted,
+        });
+        expect(errorsOf(userPrompt)).toContain("records a malformed digest");
+    });
+
     test("every generation attempt records its system prompt", async () => {
         const assembled = await assemble(scratch(), {
             baseline: {
@@ -1165,6 +1202,9 @@ describe("evidence live mode", () => {
         expect(errorsOf(await live([{ ...report, pricing: { inputPerMTok: 3 } }]))).toContain(
             "does not match the forwarding report schema",
         );
+        expect(
+            errorsOf(await live([{ ...report, pricing: { inputPerMTok: 0, outputPerMTok: 15 } }])),
+        ).toContain("does not match the forwarding report schema");
         expect(elsewhere.manifest.arms[1]?.forwarding_reports[0]?.upstream_url).toBe(
             "https://other.example.test/v1/messages",
         );

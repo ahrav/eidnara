@@ -161,8 +161,8 @@ export function named(value: unknown): value is string {
     return typeof value === "string" && value.trim() !== "";
 }
 
-/** A lowercase hex SHA-256 digest, the form `sha256()` produces. */
-function digest(value: unknown): value is string {
+/** A lowercase hex SHA-256 digest. */
+export function digest(value: unknown): value is string {
     return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
@@ -245,7 +245,9 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
     if (
         !record(pricing) ||
         typeof pricing.inputPerMTok !== "number" ||
-        typeof pricing.outputPerMTok !== "number"
+        typeof pricing.outputPerMTok !== "number" ||
+        pricing.inputPerMTok <= 0 ||
+        pricing.outputPerMTok <= 0
     ) {
         return null;
     }
@@ -333,17 +335,19 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
 function promptHashes(
     evidence: Evidence,
     field: "system" | "prompt",
-): { hashes: string[]; conflict: boolean } {
+): { hashes: string[]; conflict: boolean; malformed: boolean } {
     const hashes: string[] = [];
     let conflict = false;
+    let malformed = false;
     for (const attempt of attemptsOf(evidence)) {
-        const digest = attempt[`${field}_sha256`];
+        const claimed = attempt[`${field}_sha256`];
         const recorded = typeof attempt[field] === "string" ? sha256(attempt[field]) : null;
-        if (recorded !== null && typeof digest === "string" && digest !== recorded) conflict = true;
+        if (claimed !== undefined && !digest(claimed)) malformed = true;
+        if (recorded !== null && digest(claimed) && claimed !== recorded) conflict = true;
         if (recorded !== null) hashes.push(recorded);
-        else if (typeof digest === "string") hashes.push(digest);
+        else if (digest(claimed)) hashes.push(claimed);
     }
-    return { hashes, conflict };
+    return { hashes, conflict, malformed };
 }
 
 /** The system prompt hashes an observation claims its producer ran. */
@@ -648,6 +652,9 @@ function checkGeneration(arm: Arm, corpus: FidelityCorpus): string[] {
     if (!config) return errors;
     for (const evidence of arm.evidence) {
         const system = promptHashes(evidence, "system");
+        if (system.malformed || promptHashes(evidence, "prompt").malformed) {
+            errors.push(`${evidence.file} records a malformed digest`);
+        }
         if (system.conflict) {
             errors.push(
                 `${evidence.file} records a system prompt whose digest differs from its text`,

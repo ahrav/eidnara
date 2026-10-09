@@ -65,6 +65,8 @@ export interface ArmOptions {
     /** Replaces the single default attempt with the attempts this returns. */
     attempts?: (attempt: Record<string, unknown>) => Record<string, unknown>[];
     capture?: Record<string, unknown>;
+    settings?: Record<string, unknown>;
+    promptSha256?: string;
     generationOrigin?: "scripted" | "real";
     limits?: Record<string, number>;
 }
@@ -80,11 +82,11 @@ export function writeArm(
     write(dir, "arm.json", {
         schema: ARM_SCHEMA,
         label: options.label,
-        prompt_sha256: sha256(system),
+        prompt_sha256: options.promptSha256 ?? sha256(system),
         model,
         provider: "anthropic",
         version: "2026-01-01",
-        settings: SETTINGS,
+        settings: options.settings ?? SETTINGS,
         limits: options.limits ?? { maxCalls: 40 },
         generation_origin: options.generationOrigin ?? "real",
     });
