@@ -473,7 +473,7 @@ either arm; an arm directory is refused before any write, and a component of
 | Column | Values and source |
 | --- | --- |
 | `execution` | `executed`, `failed`, or `missing`, with every observation's owner, stage, and terminal |
-| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier, a pressure delivery's served tier sparser than its recorded `curve_tier`, or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` |
+| `deterministic` | `pass`, `assertion_fail`, or `not_evaluated`: the served tier against the scenario's tier; a pressure delivery's served tier sparser than its recorded `curve_tier` and at least the scenario's tier; or a `read_exact` terminal from `daemon.harness_sources.c6_exact_read` recording the `sha256` and positive `byte_length` of the bytes it read |
 
 **Identity.** The assembler recomputes every file's SHA-256. It refuses:
 
@@ -511,9 +511,9 @@ either arm; an arm directory is refused before any write, and a component of
   hashed representation is the request body as UTF-8 bytes;
 - a forwarding report without the four limits the forwarder enforces (whole
   call and token counts), positive prices, a nonnegative spend, string
-  incomplete reasons and refusals, a per-send cost, or an HTTPS Messages
-  endpoint free of credential and query, or whose exchange tool ids are not
-  string arrays;
+  incomplete reasons and refusals, a nonnegative per-send cost, or an HTTPS
+  Messages endpoint free of credential and query, or whose exchange tool ids
+  are not string arrays or whose exchange indices are not their positions;
 - a forwarding report with more exchanges than its `maxCalls`, or whose
   `spent_usd` differs from the sum of its exchanges' `cost_usd`;
 - a forwarding report marked complete that lists an incomplete reason or a
@@ -532,7 +532,8 @@ In an arm labeled `real`:
 - every source needs a published real capture whose `detail.model` is the
   arm's model; a capture recorded under another model is an identity error;
 - a published real capture records `settled: true`, an attempt output with
-  text, and nonempty `published_rows`, the state the capture writer publishes;
+  text, nonempty `published_rows`, and an `attempt_count` equal to its
+  retained attempts, the state the capture writer publishes;
 - `arm.json` `settings` declare numeric `temperature` and
   `max_output_tokens`, and each attempt of a published real capture records
   those values;
@@ -542,8 +543,9 @@ In an arm labeled `real`:
 
 A scenario label `<scenario>@<variant>` belongs to its scenario's case. A
 label that is a corpus source ID, which the delivery witness writes for the
-m1, warm, and cold stages of a source with no m1 scenario, must equal the
-observation's `source` and makes the observation source-level evidence.
+`m1`, `warm`, and `cold-m0` stages of a source with no m1 scenario, must equal
+the observation's `source` and makes the observation source-level evidence;
+a source label from another owner, stage, or source is an identity error.
 Observations of a variant and observations marked `detail.judge_control`,
 which test the delivery judge itself, appear in the row's outcomes and judge
 nothing.

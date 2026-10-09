@@ -234,6 +234,27 @@ describe("evidence identity and completeness", () => {
         );
     });
 
+    test("an exact-read pass needs the witness's byte identity fields", async () => {
+        const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read")?.s.id ?? "";
+        const withDetail = (detail: Record<string, unknown>) =>
+            assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${exact}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.detail = detail;
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+        expect(rowOf(await withDetail({}), exact)?.deterministic).toBe("not_evaluated");
+        expect(
+            rowOf(await withDetail({ sha256: "abc", byte_length: 144 }), exact)?.deterministic,
+        ).toBe("not_evaluated");
+        expect(
+            rowOf(await withDetail({ sha256: "0".repeat(64), byte_length: 0 }), exact)
+                ?.deterministic,
+        ).toBe("not_evaluated");
+    });
+
     test("an observation whose detail is not an object is an identity error", async () => {
         const exact = allScenarios.find(({ s }) => s.serving.path === "exact_read")?.s.id ?? "";
         const assembled = await assemble(scratch(), {
@@ -381,6 +402,19 @@ describe("evidence identity and completeness", () => {
             candidate: scripted,
         });
         expect(errorsOf(userPrompt)).toContain("records a malformed digest");
+    });
+
+    test("a real capture's attempt count equals its retained attempts", async () => {
+        const assembled = await assemble(scratch(), {
+            baseline: { capture: { attempt_count: 2 } },
+        });
+        expect(errorsOf(assembled)).toContain("records attempt_count 2 for 1 retained attempt");
+        const unnumbered = await assemble(scratch(), {
+            baseline: { capture: { attempt_count: undefined } },
+        });
+        expect(errorsOf(unnumbered)).toContain(
+            "records attempt_count undefined for 1 retained attempt",
+        );
     });
 
     test("every entry of a generation's attempts is a record", async () => {
@@ -654,6 +688,18 @@ describe("evidence identity and completeness", () => {
                 (o) => o.file === "opencode-delivery.C2.C2.V2.m1.json",
             ),
         ).toMatchObject({ case: "C2", source: "C2.V2", scenario: null, stage: "m1" });
+        const relabeled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, "delivery.C1.S1.json");
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.scenario = "C1.V1";
+                value.terminal = "unqualified";
+                writeFileSync(join(dir, "relabeled.json"), JSON.stringify(value));
+            },
+        });
+        expect(errorsOf(relabeled)).toContain(
+            "relabeled.json labels source C1.V1, which the delivery witness labels only for a source without an m1 scenario at its m1, warm, or cold-m0 stage",
+        );
         const crossed = await assemble(scratch(), { tamper: stage("C2.V2", "C2.V1") });
         expect(errorsOf(crossed)).toContain(
             "opencode-delivery.C2.C2.V2.m1.json labels source C2.V2 but names source C2.V1",
@@ -825,6 +871,21 @@ describe("evidence deterministic column", () => {
             `delivery.${scenario?.s.id}.json names scenario ${scenario?.s.id}, which is not an exact read`,
         );
         expect(rowOf(assembled, scenario?.s.id)?.execution.status).toBe("missing");
+    });
+
+    test("a pressure delivery must reach the scenario's tier as well as pass its curve", async () => {
+        const scenario = allScenarios.find(({ s }) => s.id === "C1.S5")?.s;
+        const assembled = await assemble(scratch(), {
+            tamper: (dir) => {
+                const path = join(dir, `delivery.${scenario?.id}.json`);
+                const value = JSON.parse(readFileSync(path, "utf8"));
+                value.detail.served_tier = "p2";
+                value.detail.curve_tier = "p1";
+                writeFileSync(path, JSON.stringify(value));
+            },
+        });
+        expect(scenario?.serving.tier).toBe("p4");
+        expect(rowOf(assembled, scenario?.id)?.deterministic).toBe("assertion_fail");
     });
 
     test("a pressure delivery without a curve tier fails the pressure oracle", async () => {
@@ -1192,6 +1253,22 @@ describe("evidence live mode", () => {
             errorsOf(await live([{ ...report, refusals: ["limits.maxCalls reached"] }])),
         ).toContain("complete report records a refusal: limits.maxCalls reached");
         expect(errorsOf(await live([{ ...report, refusals: [1] }]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const refund = { ...report.exchanges[0], index: 1 };
+        refund.response = { ...refund.response, cost_usd: -0.25 };
+        const offset = { ...report, exchanges: [...report.exchanges, refund], spent_usd: 0.25 };
+        expect(errorsOf(await live([offset]))).toContain(
+            "does not match the forwarding report schema",
+        );
+        const reordered = {
+            ...report,
+            exchanges: [
+                { ...report.exchanges[0], index: 1, tool_results: ["toolu_1"] },
+                { ...report.exchanges[0], index: 0, tool_uses: ["toolu_1"] },
+            ],
+        };
+        expect(errorsOf(await live([reordered]))).toContain(
             "does not match the forwarding report schema",
         );
         for (const spent of [-0.01, Number.NaN, Number.POSITIVE_INFINITY]) {
