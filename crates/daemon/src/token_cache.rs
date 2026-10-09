@@ -197,24 +197,35 @@ pub(crate) fn count_under(
     count_keyed(revision.cache_key(content_digest), content, count)
 }
 
+fn lookup(generations: &mut Generations, key: &[u8; 32]) -> Option<u32> {
+    if let Some(&count) = generations.current.get(key) {
+        return Some(count);
+    }
+    let count = *generations.previous.get(key)?;
+    insert_current(generations, *key, count);
+    Some(count)
+}
+
+fn lookup_locked(key: &[u8; 32]) -> Option<u32> {
+    // ponytail: one global lock; shard per digest byte if concurrent sessions
+    // ever contend here.
+    let mut guard = lock_cache();
+    lookup(guard.get_or_insert_with(Generations::default), key)
+}
+
 /// Count for `content` cached under the final cache key `digest`.
 fn count_keyed(digest: [u8; 32], content: &str, count: impl FnOnce(&str) -> usize) -> usize {
     bump_local(|stats| stats.calls += 1);
-    // ponytail: one global lock; shard per digest byte if concurrent sessions
-    // ever contend here.
-    {
-        let mut guard = lock_cache();
-        let generations = guard.get_or_insert_with(Generations::default);
-        if let Some(&count) = generations.current.get(&digest) {
-            bump_local(|stats| stats.hits += 1);
-            return count as usize;
-        }
-        if let Some(&count) = generations.previous.get(&digest) {
-            bump_local(|stats| stats.hits += 1);
-            insert_current(generations, digest, count);
-            return count as usize;
-        }
+    if let Some(count) = lookup_locked(&digest) {
+        bump_local(|stats| stats.hits += 1);
+        return count as usize;
     }
+    count_missed(digest, content, count)
+}
+
+/// Records a miss and caches `count(content)` under `digest`. The caller has
+/// already recorded the call.
+fn count_missed(digest: [u8; 32], content: &str, count: impl FnOnce(&str) -> usize) -> usize {
     // Tokenize outside the lock: a 2 KiB payload costs ~80 us and would
     // serialize every concurrent session behind one merge loop.
     bump_local(|stats| {
@@ -276,17 +287,12 @@ impl crate::decay_render::TokenCount for ExactTokens {
 /// Drop-in replacement for `tokenizer::estimate_tokens` that hashes and
 /// caches contents long enough to be worth it.
 ///
-/// For content of at least [`PARAGRAPH_CACHED_LEN`] bytes with multiple
-/// `tokenizer::paragraph_spans`, the total is each span's count plus
-/// `tokenizer::estimate_tokens("\n")` per separator, and each span of at least
-/// [`MIN_CACHED_LEN`] bytes is cached under its own key. A body that joins rows
-/// counted earlier then costs one lookup per row.
+/// Content of at least `PARAGRAPH_CACHED_LEN` bytes with 2 through
+/// `PARAGRAPH_MAX_SPANS` paragraph spans reuses cached span counts, so a body
+/// that joins rows counted earlier reuses the counts of its matching spans.
 pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
     if content.len() >= PARAGRAPH_CACHED_LEN {
-        let spans: Vec<&str> = tokenizer::paragraph_spans(content).collect();
-        if spans.len() > 1 {
-            return cached_paragraph_count(&spans);
-        }
+        return cached_paragraph_count(content);
     }
     cached_count_under(
         AccountingRevision::exact_tokenizer(),
@@ -299,30 +305,36 @@ pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
 /// their own do.
 const PARAGRAPH_CACHED_LEN: usize = 4096;
 
-/// Records one call, a hit when every cached span hits. Missed spans tokenize
-/// outside the lock.
-fn cached_paragraph_count(spans: &[&str]) -> usize {
+/// Limits one call's span lookups and span entries to an eighth of a
+/// generation. Span discovery collects one extra span to detect overflow, and
+/// admission adds at most one whole-content entry beyond the span entries.
+const PARAGRAPH_MAX_SPANS: usize = GENERATION_CAP / 8;
+
+fn cached_paragraph_count(content: &str) -> usize {
     let revision = AccountingRevision::exact_tokenizer();
+    let whole = revision.raw_key(content);
+    bump_local(|stats| stats.calls += 1);
+    if let Some(count) = lookup_locked(&whole) {
+        bump_local(|stats| stats.hits += 1);
+        return count as usize;
+    }
+    let spans: Vec<&str> = tokenizer::paragraph_spans(content)
+        .take(PARAGRAPH_MAX_SPANS + 1)
+        .collect();
+    if !(2..=PARAGRAPH_MAX_SPANS).contains(&spans.len()) {
+        return count_missed(whole, content, tokenizer::estimate_tokens);
+    }
     let keys: Vec<Option<[u8; 32]>> = spans
         .iter()
         .map(|span| (span.len() >= MIN_CACHED_LEN).then(|| revision.raw_key(span)))
         .collect();
-    let mut counts: Vec<Option<u32>> = vec![None; spans.len()];
-    {
+    let counts: Vec<Option<u32>> = {
         let mut guard = lock_cache();
         let generations = guard.get_or_insert_with(Generations::default);
-        for (key, count) in keys.iter().zip(&mut counts) {
-            let Some(key) = key else {
-                continue;
-            };
-            if let Some(&cached) = generations.current.get(key) {
-                *count = Some(cached);
-            } else if let Some(&cached) = generations.previous.get(key) {
-                insert_current(generations, *key, cached);
-                *count = Some(cached);
-            }
-        }
-    }
+        keys.iter()
+            .map(|key| key.as_ref().and_then(|key| lookup(generations, key)))
+            .collect()
+    };
     let mut total = (spans.len() - 1) * tokenizer::estimate_tokens("\n");
     let mut tokenized_bytes = 0u64;
     let mut missed = Vec::new();
@@ -338,25 +350,21 @@ fn cached_paragraph_count(spans: &[&str]) -> usize {
             missed.push((*key, count));
         }
     }
-    let hit = keys
-        .iter()
-        .zip(&counts)
-        .all(|(key, count)| key.is_none() || count.is_some());
     bump_local(|stats| {
-        stats.calls += 1;
-        if hit {
+        if tokenized_bytes == 0 {
             stats.hits += 1;
         } else {
             stats.misses += 1;
         }
         stats.tokenized_bytes += tokenized_bytes;
     });
-    if !missed.is_empty() {
-        let mut guard = lock_cache();
-        let generations = guard.get_or_insert_with(Generations::default);
-        for (key, count) in missed {
-            insert_current(generations, key, count);
-        }
+    if let Ok(count) = u32::try_from(total) {
+        missed.push((whole, count));
+    }
+    let mut guard = lock_cache();
+    let generations = guard.get_or_insert_with(Generations::default);
+    for (key, count) in missed {
+        insert_current(generations, key, count);
     }
     total
 }
@@ -449,6 +457,92 @@ mod tests {
                 tokenizer::estimate_tokens(&blank_runs)
             );
         }
+    }
+
+    #[test]
+    fn a_repeated_short_paragraph_content_hits_without_tokenizing() {
+        let _guard = test_cache_guard();
+        clear();
+        let short: Vec<String> = (0..700).map(|i| format!("note {i}")).collect();
+        let mixed: Vec<String> = (0..300)
+            .map(|i| {
+                if i % 2 == 0 {
+                    format!("## {i} · a paragraph long enough to be cached under its own key")
+                } else {
+                    format!("aside {i}")
+                }
+            })
+            .collect();
+        for parts in [short, mixed] {
+            let content = parts.join("\n\n");
+            assert!(content.len() >= PARAGRAPH_CACHED_LEN);
+            assert!(tokenizer::paragraph_spans(&content).count() > 1);
+            assert_eq!(
+                cached_estimate_tokens(&content),
+                tokenizer::estimate_tokens(&content)
+            );
+            let before = local_stats();
+            assert_eq!(
+                cached_estimate_tokens(&content),
+                tokenizer::estimate_tokens(&content)
+            );
+            let after = local_stats();
+            assert_eq!(
+                (after.calls - before.calls, after.hits - before.hits),
+                (1, 1)
+            );
+            assert_eq!(after.tokenized_bytes, before.tokenized_bytes);
+        }
+    }
+
+    #[test]
+    fn a_paragraph_count_that_tokenizes_records_a_miss() {
+        let _guard = test_cache_guard();
+        clear();
+        let content = "x\n\n".repeat(1_400);
+        assert!(content.len() >= PARAGRAPH_CACHED_LEN);
+        let before = local_stats();
+        assert_eq!(
+            cached_estimate_tokens(&content),
+            tokenizer::estimate_tokens(&content)
+        );
+        let after = local_stats();
+        assert_eq!(after.calls - before.calls, 1);
+        assert_eq!(after.hits - before.hits, 0);
+        assert_eq!(after.misses - before.misses, 1);
+        assert!(after.tokenized_bytes > before.tokenized_bytes);
+    }
+
+    #[test]
+    fn a_paragraph_count_admits_a_bounded_number_of_span_entries() {
+        let _guard = test_cache_guard();
+        clear();
+        let spans: Vec<String> = (0..PARAGRAPH_MAX_SPANS + 1_000)
+            .map(|i| format!("## {i:06} · a distinct paragraph long enough for its own entry"))
+            .collect();
+        let content = spans.join("\n\n");
+        assert_eq!(tokenizer::paragraph_spans(&content).count(), spans.len());
+        assert_eq!(
+            cached_estimate_tokens(&content),
+            tokenizer::estimate_tokens(&content)
+        );
+        let revision = AccountingRevision::exact_tokenizer();
+        let admitted = {
+            let guard = lock_cache();
+            let generations = guard.as_ref().expect("the count initialized the cache");
+            tokenizer::paragraph_spans(&content)
+                .map(|span| revision.raw_key(span))
+                .filter(|key| {
+                    generations.current.contains_key(key) || generations.previous.contains_key(key)
+                })
+                .count()
+        };
+        assert!(admitted <= PARAGRAPH_MAX_SPANS, "{admitted} span entries");
+        let tiny = "x\n\n".repeat(PARAGRAPH_MAX_SPANS * 4);
+        assert_eq!(
+            cached_estimate_tokens(&tiny),
+            tokenizer::estimate_tokens(&tiny)
+        );
     }
 
     #[test]
