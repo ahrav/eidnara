@@ -262,6 +262,11 @@ pub fn pieces(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     })
 }
 
+/// Whether `c` is in the pre-tokenizer's whitespace class.
+pub fn is_whitespace(c: char) -> bool {
+    class_of_scalar(c as u32) == Class::Space
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

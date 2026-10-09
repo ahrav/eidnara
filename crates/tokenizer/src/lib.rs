@@ -109,6 +109,19 @@ pub fn suffix_anchor(text: &str, lookback: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// Whether `text` starts outside the pre-tokenizer's whitespace class.
+///
+/// For texts `t1, ..., tk` whose `t2, ..., tk` each start outside that class, the
+/// `"\n\n"` join tokenizes as each `ti + "\n"` for `i < k`, then one `"\n"` per separator,
+/// then `tk`: a separator's whitespace run, together with any trailing whitespace of the text
+/// before it, ends at a non-whitespace character, so the scanner gives its last `"\n"` back
+/// as a piece of its own, and no other piece crosses a class change. [`estimate_tokens`] of
+/// the join is therefore `estimate_tokens(ti + "\n")` summed over `i < k`, plus
+/// `(k - 1) * estimate_tokens("\n")`, plus `estimate_tokens(tk)`.
+pub fn starts_outside_whitespace(text: &str) -> bool {
+    text.chars().next().is_some_and(|c| !scan::is_whitespace(c))
+}
+
 fn vocab() -> &'static bpe::Vocab {
     static VOCAB: OnceLock<bpe::Vocab> = OnceLock::new();
     VOCAB.get_or_init(|| bpe::Vocab::from_blob(VOCAB_BLOB))
