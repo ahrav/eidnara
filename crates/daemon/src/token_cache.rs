@@ -67,6 +67,18 @@ impl AccountingRevision {
         hasher.update(content_digest);
         hasher.finalize().into()
     }
+
+    /// The key of raw `content` in one pass: `revision ‖ NUL ‖ content`. Raw contents are
+    /// cached from [`MIN_CACHED_LEN`] bytes, so this preimage is longer than the 64-byte
+    /// `revision ‖ digest` preimage of [`Self::cache_key`], and content that itself starts
+    /// with tail hygiene's `"text\0"` cannot alias a digest-keyed entry.
+    fn raw_key(&self, content: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.key);
+        hasher.update([0u8]);
+        hasher.update(content.as_bytes());
+        hasher.finalize().into()
+    }
 }
 
 /// Maximum entries in each current or previous generation.
@@ -161,7 +173,8 @@ fn insert_current(generations: &mut Generations, digest: [u8; 32], count: u32) {
 ///
 /// Callers must hash a domain-separated, injective encoding of `content`.
 /// Tail hygiene hashes `kind_name ‖ NUL ‖ content`; this module's raw path
-/// hashes `NUL ‖ content`, which no kind name can prefix.
+/// keys by `revision ‖ NUL ‖ content` instead, a longer preimage than the
+/// `revision ‖ digest` key this digest gets.
 pub(crate) fn count_with_digest(digest: [u8; 32], content: &str) -> usize {
     count_under(
         AccountingRevision::exact_tokenizer(),
@@ -181,7 +194,11 @@ pub(crate) fn count_under(
     content: &str,
     count: impl FnOnce(&str) -> usize,
 ) -> usize {
-    let digest = revision.cache_key(content_digest);
+    count_keyed(revision.cache_key(content_digest), content, count)
+}
+
+/// Count for `content` cached under the final cache key `digest`.
+fn count_keyed(digest: [u8; 32], content: &str, count: impl FnOnce(&str) -> usize) -> usize {
     bump_local(|stats| stats.calls += 1);
     // ponytail: one global lock; shard per digest byte if concurrent sessions
     // ever contend here.
@@ -244,12 +261,90 @@ pub(crate) fn test_cache_guard() -> std::sync::MutexGuard<'static, ()> {
 
 /// Drop-in replacement for `tokenizer::estimate_tokens` that hashes and
 /// caches contents long enough to be worth it.
+///
+/// For content of at least [`PARAGRAPH_CACHED_LEN`] bytes with multiple
+/// `tokenizer::paragraph_spans`, the total is each span's count plus
+/// `tokenizer::estimate_tokens("\n")` per separator, and each span of at least
+/// [`MIN_CACHED_LEN`] bytes is cached under its own key. A body that joins rows
+/// counted earlier then costs one lookup per row.
 pub(crate) fn cached_estimate_tokens(content: &str) -> usize {
+    if content.len() >= PARAGRAPH_CACHED_LEN {
+        let spans: Vec<&str> = tokenizer::paragraph_spans(content).collect();
+        if spans.len() > 1 {
+            return cached_paragraph_count(&spans);
+        }
+    }
     cached_count_under(
         AccountingRevision::exact_tokenizer(),
         content,
         tokenizer::estimate_tokens,
     )
+}
+
+/// Contents shorter than this keep one entry, as rows and blocks counted on
+/// their own do.
+const PARAGRAPH_CACHED_LEN: usize = 4096;
+
+/// Records one call, a hit when every cached span hits. Missed spans tokenize
+/// outside the lock.
+fn cached_paragraph_count(spans: &[&str]) -> usize {
+    let revision = AccountingRevision::exact_tokenizer();
+    let keys: Vec<Option<[u8; 32]>> = spans
+        .iter()
+        .map(|span| (span.len() >= MIN_CACHED_LEN).then(|| revision.raw_key(span)))
+        .collect();
+    let mut counts: Vec<Option<u32>> = vec![None; spans.len()];
+    {
+        let mut guard = lock_cache();
+        let generations = guard.get_or_insert_with(Generations::default);
+        for (key, count) in keys.iter().zip(&mut counts) {
+            let Some(key) = key else {
+                continue;
+            };
+            if let Some(&cached) = generations.current.get(key) {
+                *count = Some(cached);
+            } else if let Some(&cached) = generations.previous.get(key) {
+                insert_current(generations, *key, cached);
+                *count = Some(cached);
+            }
+        }
+    }
+    let mut total = (spans.len() - 1) * tokenizer::estimate_tokens("\n");
+    let mut tokenized_bytes = 0u64;
+    let mut missed = Vec::new();
+    for ((span, key), count) in spans.iter().zip(&keys).zip(&counts) {
+        if let Some(count) = count {
+            total += *count as usize;
+            continue;
+        }
+        let count = tokenizer::estimate_tokens(span);
+        tokenized_bytes += span.len() as u64;
+        total += count;
+        if let (Some(key), Ok(count)) = (key, u32::try_from(count)) {
+            missed.push((*key, count));
+        }
+    }
+    let hit = keys
+        .iter()
+        .zip(&counts)
+        .all(|(key, count)| key.is_none() || count.is_some());
+    bump_local(|stats| {
+        stats.calls += 1;
+        if hit {
+            stats.hits += 1;
+        } else {
+            stats.misses += 1;
+        }
+        stats.tokenized_bytes += tokenized_bytes;
+    });
+    if !missed.is_empty() {
+        let mut guard = lock_cache();
+        let generations = guard.get_or_insert_with(Generations::default);
+        for (key, count) in missed {
+            insert_current(generations, key, count);
+        }
+    }
+    total
 }
 
 /// `count` under `revision` for contents long enough to be worth caching.
@@ -266,13 +361,7 @@ pub(crate) fn cached_count_under(
         });
         return count(content);
     }
-    // The leading NUL keeps this key domain disjoint from tail hygiene's
-    // `kind_name ‖ NUL ‖ content` keys, so content that itself starts with
-    // `"text\0"` cannot alias another entry's count.
-    let mut hasher = Sha256::new();
-    hasher.update([0u8]);
-    hasher.update(content.as_bytes());
-    count_under(revision, hasher.finalize().into(), content, count)
+    count_keyed(revision.raw_key(content), content, count)
 }
 
 #[cfg(test)]
@@ -296,6 +385,54 @@ mod tests {
             assert_eq!(
                 cached_estimate_tokens(content),
                 tokenizer::estimate_tokens(content)
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_joins_count_exactly_from_their_rows() {
+        let _guard = test_cache_guard();
+        let rows: Vec<String> = (0..120)
+            .map(|i| {
+                let tail = ["", " ", "\u{3000}", "\t"][i % 4];
+                format!(
+                    "## {i}-{i} · paragraph join fixture {i}{tail}\n{}",
+                    "fold cache tier ".repeat(i % 7 + 3)
+                )
+            })
+            .collect();
+        let body = rows.join("\n\n");
+        let wrapped = format!("<session-history>\n{body}\n</session-history>");
+        assert!(body.len() >= PARAGRAPH_CACHED_LEN);
+        assert_eq!(
+            tokenizer::paragraph_spans(&body).count(),
+            rows.len(),
+            "every join cuts"
+        );
+        for row in &rows[..rows.len() - 1] {
+            cached_estimate_tokens(&format!("{row}\n"));
+        }
+        cached_estimate_tokens(&rows[rows.len() - 1]);
+        let before = local_stats();
+        assert_eq!(
+            cached_estimate_tokens(&body),
+            tokenizer::estimate_tokens(&body)
+        );
+        let after = local_stats();
+        assert_eq!(
+            (after.calls - before.calls, after.hits - before.hits),
+            (1, 1)
+        );
+        assert_eq!(after.tokenized_bytes, before.tokenized_bytes);
+        assert_eq!(
+            cached_estimate_tokens(&wrapped),
+            tokenizer::estimate_tokens(&wrapped)
+        );
+        let blank_runs = format!("{body}\n\n\n\n{body}\n\n \n\n{body}");
+        for _ in 0..2 {
+            assert_eq!(
+                cached_estimate_tokens(&blank_runs),
+                tokenizer::estimate_tokens(&blank_runs)
             );
         }
     }
