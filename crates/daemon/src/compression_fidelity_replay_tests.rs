@@ -4,7 +4,7 @@
 //! tiers are the corpus's approved bodies; the renderer is only observed.
 
 use super::compression_fidelity_corpus::*;
-use super::compression_fidelity_observation::{Observation, Terminal};
+use super::compression_fidelity_observation::{OBSERVATIONS_DIR, Observation, Terminal};
 use super::*;
 
 use memory_store::{ExtractionFailure, MemoryReviewerNonadmissionCode};
@@ -1270,6 +1270,419 @@ async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
     assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     assert!(producer.attempts.lock().unwrap().is_empty());
     assert!(store.load_history_segments("ses").unwrap().is_empty());
+}
+
+/// Opt-in real capture: the host connection file of a running host whose model execution can
+/// reach the operator's model, the model id the history summarizer runs, and the per-source
+/// wait for its firing to settle.
+const REAL_CONNECTION_FILE: &str = "EIDNARA_FIDELITY_REAL_CONNECTION_FILE";
+const REAL_MODEL: &str = "EIDNARA_FIDELITY_REAL_MODEL";
+const REAL_WAIT_SECONDS: &str = "EIDNARA_FIDELITY_REAL_WAIT_SECONDS";
+const REAL_OWNER: &str = "daemon.compression_fidelity.real_capture";
+
+/// One producer start the recorder saw: the complete model input and every output or error
+/// the daemon drained for its run.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+struct RecordedAttempt {
+    session_id: String,
+    model: String,
+    system: String,
+    prompt: String,
+    max_output_tokens: Option<u32>,
+    temperature: Option<f64>,
+    run_id: Option<String>,
+    start_error: Option<String>,
+    outputs: Vec<RecordedOutput>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RecordedOutput {
+    text: Option<String>,
+    length_capped: Option<bool>,
+    error: Option<String>,
+}
+
+type AttemptLog = Arc<Mutex<Vec<RecordedAttempt>>>;
+
+/// Connects every producer through `inner` and records each start and output.
+struct RecordingFactory {
+    inner: Arc<dyn HistorySummarizerProducerFactory>,
+    attempts: AttemptLog,
+}
+
+#[async_trait]
+impl HistorySummarizerProducerFactory for RecordingFactory {
+    async fn connect(
+        &self,
+        project_root: &Path,
+        harness: &str,
+        credential_fingerprints: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Box<dyn HistorySummarizerProducerDriver + Send>, HistorySummarizerProducerError>
+    {
+        let inner = self
+            .inner
+            .connect(project_root, harness, credential_fingerprints)
+            .await?;
+        Ok(Box::new(RecordingDriver {
+            inner,
+            attempts: Arc::clone(&self.attempts),
+        }))
+    }
+}
+
+struct RecordingDriver {
+    inner: Box<dyn HistorySummarizerProducerDriver + Send>,
+    attempts: AttemptLog,
+}
+
+impl RecordingDriver {
+    fn started(
+        &self,
+        mut attempt: RecordedAttempt,
+        started: &Result<RunHandle, HistorySummarizerProducerError>,
+    ) {
+        match started {
+            Ok(handle) => attempt.run_id = Some(handle.run_id.clone()),
+            Err(error) => attempt.start_error = Some(format!("{error:?}")),
+        }
+        self.attempts.lock().unwrap().push(attempt);
+    }
+
+    fn drained(
+        &self,
+        run_id: &str,
+        output: Result<ProducerOutput, HistorySummarizerProducerError>,
+    ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+        let recorded = match &output {
+            Ok(out) => RecordedOutput {
+                text: Some(out.text.clone()),
+                length_capped: Some(out.length_capped),
+                error: None,
+            },
+            Err(error) => RecordedOutput {
+                text: None,
+                length_capped: None,
+                error: Some(format!("{error:?}")),
+            },
+        };
+        let mut attempts = self.attempts.lock().unwrap();
+        if let Some(attempt) = attempts
+            .iter_mut()
+            .rev()
+            .find(|a| a.run_id.as_deref() == Some(run_id))
+        {
+            attempt.outputs.push(recorded);
+        }
+        output
+    }
+}
+
+#[async_trait]
+impl HistorySummarizerProducerDriver for RecordingDriver {
+    async fn bind_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), HistorySummarizerProducerError> {
+        self.inner.bind_session(session_id).await
+    }
+
+    async fn start(
+        &mut self,
+        session_id: &str,
+        system: &str,
+        prompt: &str,
+        model: &str,
+    ) -> Result<RunHandle, HistorySummarizerProducerError> {
+        let started = self.inner.start(session_id, system, prompt, model).await;
+        self.started(
+            RecordedAttempt {
+                session_id: session_id.into(),
+                model: model.into(),
+                system: system.into(),
+                prompt: prompt.into(),
+                ..RecordedAttempt::default()
+            },
+            &started,
+        );
+        started
+    }
+
+    async fn start_with_generation(
+        &mut self,
+        session_id: &str,
+        system: &str,
+        prompt: &str,
+        model: &str,
+        max_output_tokens: u32,
+        temperature: f64,
+    ) -> Result<RunHandle, HistorySummarizerProducerError> {
+        let started = self
+            .inner
+            .start_with_generation(
+                session_id,
+                system,
+                prompt,
+                model,
+                max_output_tokens,
+                temperature,
+            )
+            .await;
+        self.started(
+            RecordedAttempt {
+                session_id: session_id.into(),
+                model: model.into(),
+                system: system.into(),
+                prompt: prompt.into(),
+                max_output_tokens: Some(max_output_tokens),
+                temperature: Some(temperature),
+                ..RecordedAttempt::default()
+            },
+            &started,
+        );
+        started
+    }
+
+    async fn await_output(
+        &mut self,
+        run_id: &str,
+    ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+        let output = self.inner.await_output(run_id).await;
+        self.drained(run_id, output)
+    }
+
+    async fn await_output_with_timeout(
+        &mut self,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+        let output = self.inner.await_output_with_timeout(run_id, timeout).await;
+        self.drained(run_id, output)
+    }
+
+    async fn redrain_output(
+        &mut self,
+        run_id: &str,
+    ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+        let output = self.inner.redrain_output(run_id).await;
+        self.drained(run_id, output)
+    }
+
+    async fn redrain_output_with_timeout(
+        &mut self,
+        run_id: &str,
+        timeout: Duration,
+    ) -> Result<ProducerOutput, HistorySummarizerProducerError> {
+        let output = self
+            .inner
+            .redrain_output_with_timeout(run_id, timeout)
+            .await;
+        self.drained(run_id, output)
+    }
+
+    async fn status(&mut self, run_id: &str) -> Result<RunState, HistorySummarizerProducerError> {
+        self.inner.status(run_id).await
+    }
+
+    async fn cancel(&mut self, run_id: &str) -> Result<(), HistorySummarizerProducerError> {
+        self.inner.cancel(run_id).await
+    }
+
+    async fn close_attempt(&mut self) -> Result<(), HistorySummarizerProducerError> {
+        self.inner.close_attempt().await
+    }
+
+    async fn close(&mut self) -> Result<(), HistorySummarizerProducerError> {
+        self.inner.close().await
+    }
+
+    async fn purge_session(
+        &mut self,
+        session_id: &str,
+    ) -> Result<(), HistorySummarizerProducerError> {
+        self.inner.purge_session(session_id).await
+    }
+}
+
+/// Folds every corpus source once through `factory` with `model` as the only summarizer model,
+/// waits up to `wait` for each firing to settle, and returns one capture observation per
+/// source: every attempt's complete input and drained outputs, the published rows, and
+/// `usage: null`, because the host's model-execution protocol reports no token usage.
+async fn capture_sources(
+    factory: Arc<dyn HistorySummarizerProducerFactory>,
+    model: &str,
+    output_origin: &str,
+    wait: Duration,
+) -> Vec<Observation> {
+    let mut captured = Vec::new();
+    for (case, source) in sources() {
+        let attempts: AttemptLog = Arc::default();
+        let recording = Arc::new(RecordingFactory {
+            inner: Arc::clone(&factory),
+            attempts: Arc::clone(&attempts),
+        });
+        let config = DaemonConfig {
+            model_chain: vec![model.to_owned()],
+            ..default_test_config()
+        };
+        let (handler, store, _dir, _project) =
+            handler_with_factory(recording, config, Arc::new(MissingSessionResolver));
+        let follow_up = follow_up_for(case, source);
+        let mut messages = source_ingress(case, source);
+        let next = messages.len() as u64 + 1;
+        messages.extend(live_tail(follow_up, next));
+        let request = request_with_usage(messages, HIGH_PRESSURE_USAGE, CONTEXT_LIMIT);
+        let first = call_transform_request(&handler, request).await;
+        let deadline = std::time::Instant::now() + wait;
+        let settled = loop {
+            let idle = store.load("ses").unwrap().meta.history_summarizer.state
+                == HistorySummarizerPhase::Idle;
+            if idle && !attempts.lock().unwrap().is_empty() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let rows = store.load_history_segments("ses").unwrap();
+        let attempts = attempts.lock().unwrap().clone();
+        let terminal = if rows.is_empty() {
+            Terminal::ValidationRejected
+        } else {
+            Terminal::Published
+        };
+        captured.push(
+            Observation::new(
+                REAL_OWNER,
+                CORPUS_SHA256,
+                &case.id,
+                &source.id,
+                "capture",
+                terminal,
+            )
+            .with(json!({
+                "model": model,
+                "output_origin": output_origin,
+                "fired": first["history_summarizer"]["fired"],
+                "settled": settled,
+                "attempt_count": attempts.len(),
+                "attempts": attempts,
+                "usage": null,
+                "usage_reported": false,
+                "published_rows": rows.iter().map(|row| json!({
+                    "start": row.start_message,
+                    "end": row.end_message,
+                    "title": row.title,
+                    "p1": row.p1, "p2": row.p2, "p3": row.p3, "p4": row.p4,
+                    "importance": row.importance,
+                })).collect::<Vec<_>>(),
+            })),
+        );
+    }
+    captured
+}
+
+/// The directory capture records go to: required, and outside the repository.
+fn private_capture_dir() -> PathBuf {
+    let dir = PathBuf::from(
+        std::env::var_os(OBSERVATIONS_DIR)
+            .unwrap_or_else(|| panic!("{OBSERVATIONS_DIR} must name a private directory")),
+    );
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    assert!(
+        !dir.starts_with(&repository),
+        "{} is inside the repository",
+        dir.display()
+    );
+    dir
+}
+
+/// Opt-in real capture of every corpus source through the host's existing producer
+/// execution, written as private capture records. Never part of a default run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "opt-in real producer capture; needs EIDNARA_FIDELITY_REAL_CONNECTION_FILE, \
+            EIDNARA_FIDELITY_REAL_MODEL, EIDNARA_FIDELITY_REAL_WAIT_SECONDS and \
+            EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
+async fn real_producer_capture_of_every_corpus_source() {
+    let required = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for real capture"))
+    };
+    let connection_file = PathBuf::from(required(REAL_CONNECTION_FILE));
+    let model = required(REAL_MODEL);
+    let wait = Duration::from_secs(required(REAL_WAIT_SECONDS).parse().unwrap());
+    let dir = private_capture_dir();
+    let factory = Arc::new(RealHistorySummarizerProducerFactory {
+        connection_file,
+        cancellation: CancellationToken::new(),
+    });
+    for record in capture_sources(factory, &model, "real producer through the host", wait).await {
+        record.emit_to(&dir);
+    }
+}
+
+/// The capture records a scripted producer's run with the fields a real capture carries.
+#[tokio::test(flavor = "current_thread")]
+async fn a_capture_records_the_model_attempts_usage_and_complete_input() {
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .await_results
+        .lock()
+        .unwrap()
+        .extend(sources().map(|(_, source)| {
+            Ok(ProducerOutput {
+                text: source.approved_example.clone(),
+                length_capped: false,
+            })
+        }));
+    let factory = Arc::new(TestProducerFactory {
+        state: Arc::clone(&producer),
+    });
+    let records = capture_sources(
+        factory,
+        "probe/model",
+        "scripted approved example",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(records.len(), sources().count());
+    let dir = tempfile::tempdir().unwrap();
+    for (record, (case, source)) in records.iter().zip(sources()) {
+        let read: Value =
+            serde_json::from_slice(&std::fs::read(record.emit_to(dir.path())).unwrap()).unwrap();
+        assert_eq!(read["owner"], REAL_OWNER);
+        assert_eq!(read["case"], case.id.as_str());
+        assert_eq!(read["terminal"], "published", "{}", source.id);
+        let detail = &read["detail"];
+        assert_eq!(detail["model"], "probe/model");
+        assert_eq!(detail["output_origin"], "scripted approved example");
+        assert_eq!(detail["settled"], true);
+        assert_eq!(detail["attempt_count"], 1);
+        assert_eq!(detail["usage"], Value::Null);
+        assert_eq!(detail["usage_reported"], false);
+        let attempt = &detail["attempts"][0];
+        assert_eq!(attempt["model"], "probe/model");
+        assert_eq!(
+            attempt["system"],
+            crate::history_summarizer_prompt::HISTORY_SUMMARIZER_SYSTEM_PROMPT
+        );
+        let prompt = attempt["prompt"].as_str().unwrap();
+        assert_eq!(
+            prompt_ordinal_range(prompt),
+            Some((1, source.messages.len() as u64)),
+            "{}: the complete chunk input",
+            source.id
+        );
+        assert_eq!(
+            attempt["outputs"][0]["text"],
+            source.approved_example.as_str()
+        );
+        assert_eq!(detail["published_rows"].as_array().unwrap().len(), 1);
+    }
 }
 
 #[test]

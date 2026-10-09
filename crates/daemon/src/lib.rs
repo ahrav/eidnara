@@ -22677,16 +22677,20 @@ mod tests {
         config: DaemonConfig,
         resolver: Arc<dyn SessionResolver>,
     ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
+        handler_with_factory(Arc::new(TestProducerFactory { state }), config, resolver)
+    }
+
+    fn handler_with_factory(
+        factory: Arc<dyn HistorySummarizerProducerFactory>,
+        config: DaemonConfig,
+        resolver: Arc<dyn SessionResolver>,
+    ) -> (Handler, Arc<MemoryStore>, tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let data_home = dir.path().join("data");
         std::fs::create_dir_all(&data_home).unwrap();
         let store =
             Arc::new(MemoryStore::open(&dev_descriptor_at(data_home.to_str().unwrap())).unwrap());
-        let handler = Handler::with_producer_factory_config_resolver(
-            Arc::new(TestProducerFactory { state }),
-            config,
-            resolver,
-        );
+        let handler = Handler::with_producer_factory_config_resolver(factory, config, resolver);
         handler.install_store_for_test(Arc::clone(&store));
         let project = dir.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
