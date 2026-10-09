@@ -37,7 +37,12 @@ const SCRIPTED_ORIGIN = "scripted approved example";
 const TIERS = ["p1", "p2", "p3", "p4", "p5"];
 /** The terminals each witness emits, and which of them mean the scenario executed. */
 const TERMINALS: Record<string, { executed: readonly string[]; failed: readonly string[] }> = {
-    "opencode-delivery": { executed: ["served"], failed: ["unqualified"] },
+    // The memory campaign records a credited negative case as `excluded` and a recovered
+    // memory as `discoverable`.
+    "opencode-delivery": {
+        executed: ["served", "excluded", "discoverable"],
+        failed: ["unqualified"],
+    },
     "daemon.compression_fidelity.replay": {
         executed: ["published", "served"],
         failed: [
@@ -283,6 +288,8 @@ function forwardingOf(value: unknown): ForwardingEvidence | null {
         !record(pricing) ||
         typeof pricing.inputPerMTok !== "number" ||
         typeof pricing.outputPerMTok !== "number" ||
+        !Number.isFinite(pricing.inputPerMTok) ||
+        !Number.isFinite(pricing.outputPerMTok) ||
         pricing.inputPerMTok <= 0 ||
         pricing.outputPerMTok <= 0
     ) {

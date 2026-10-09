@@ -406,6 +406,18 @@ describe("evidence identity and completeness", () => {
 
     test("a terminal is one its owner emits", async () => {
         const first = allScenarios[0]?.s.id ?? "";
+        for (const terminal of ["excluded", "discoverable"]) {
+            const memory = await assemble(scratch(), {
+                tamper: (dir) => {
+                    const path = join(dir, `delivery.${first}.json`);
+                    const value = JSON.parse(readFileSync(path, "utf8"));
+                    value.terminal = terminal;
+                    writeFileSync(path, JSON.stringify(value));
+                },
+            });
+            expect(memory.arms[0]?.identity_errors).toEqual([]);
+            expect(rowOf(memory, first)?.execution.status).toBe("executed");
+        }
         const assembled = await assemble(scratch(), {
             tamper: (dir) => {
                 const path = join(dir, `delivery.${first}.json`);
@@ -1353,6 +1365,21 @@ describe("evidence live mode", () => {
             },
         });
         expect(errorsOf(unbounded)).toContain("does not match the forwarding report schema");
+        const priceless = scratch();
+        const unpriced = await assemble(priceless, {
+            mode: "live",
+            baseline: { limits: LIMITS },
+            candidate: { limits: LIMITS },
+            tamper: (dir) => {
+                const text = JSON.stringify(report).replace(
+                    '"inputPerMTok":3',
+                    '"inputPerMTok":1e400',
+                );
+                writeFileSync(join(dir, "forwarding-0.json"), text);
+                writeFileSync(join(priceless, "candidate", "forwarding-0.json"), text);
+            },
+        });
+        expect(errorsOf(unpriced)).toContain("does not match the forwarding report schema");
         const oneCall = { ...LIMITS, maxCalls: 1 };
         const second = { ...report.exchanges[0], index: 1 };
         const overCap = { ...report, limits: oneCall, exchanges: [...report.exchanges, second] };
