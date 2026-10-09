@@ -291,15 +291,19 @@ published no rows, or `unsettled` for a source whose transform call or firing
 did not finish within the wait, that never started a producer, or that drained
 no model output;
 the test fails after writing every record when any source is unsettled. For
-an unsettled source the capture waits up to 45 s for any `start` still in
-flight to return its run handle, then binds each started run's session and
-cancels every run that drained no output through a second connection before
-the next source begins, because the host keeps a run alive after its waiter is
-dropped until `run.cancel` ends it; the record lists each cancel's run id and
-outcome under `cancelled_runs` and any start still unreturned under
-`starts_in_flight_at_cancel`. A cancel the host does not confirm, or a start
-still unreturned, sets `capture_stopped` on that record and ends the capture
-before another source can start a run. The capture directory and every
+an unsettled source the capture waits up to 75 s (one `connect` and one
+`start` at the producer's 30 s request timeout each, with margin) for any
+firing that has connected to return its first run handle, holding 2 s for a
+firing spawned just before the deadline to call `connect`. It then binds each
+started run's session and cancels, through a second connection, every run
+that drained no model output and whose own cancel the host did not confirm,
+before the next source begins, because the host keeps a run alive after its
+waiter is dropped until `run.cancel` ends it. Each attempt records the
+firing's own cancel under `cancel`, the record lists each cancel's run id and
+outcome under `cancelled_runs` and any firing still before its first start
+under `firings_before_first_start_at_cancel`. A cancel the host does not
+confirm, or a firing still before its first start, sets `capture_stopped` on
+that record and ends the capture before another source can start a run. The capture directory and every
 existing ancestor must be owned by the operator or root and closed to group
 and other writes unless sticky. The
 record names the model, the harness,
