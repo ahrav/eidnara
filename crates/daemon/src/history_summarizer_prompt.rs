@@ -639,9 +639,9 @@ mod tests {
         }
     }
 
-    /// The primary agent's `eidnara_search` searches project memory only, and no registered tool
-    /// restores summarized history or the original transcript. The prompt keeps that limit, and
-    /// the phrases #723 removed, which promised recovery through search, stay out.
+    /// The prompt tells the summarizer that `eidnara_search` covers the sources the primary
+    /// agent's current tool contract exposes; the current OpenCode registry separately scopes
+    /// `eidnara_search` to project memory.
     #[test]
     fn the_summarizer_prompt_keeps_its_recovery_limit_and_the_removed_search_promises_out() {
         let prompt = HISTORY_SUMMARIZER_SYSTEM_PROMPT;
