@@ -284,6 +284,47 @@ describe("Pi eviction", () => {
         }
     });
 
+    it("hands an overflow over an Eidnara compaction back to Pi after a declined pass", async () => {
+        const { call } = foldingDaemon(true);
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+                settings: SETTINGS,
+            });
+            await harness.session.prompt(`one ${"x".repeat(400)}`);
+            await harness.session.prompt(`two ${"x".repeat(400)}`);
+            await eventually(() => compactions(harness as TestAgentSession).length > 0);
+            const evicted = compactions(harness).length;
+            call.mockImplementation(async (input) => {
+                if (input.method === "transform") throw new Error("daemon down");
+                return input.method === "transform.boundary"
+                    ? { anchors: [] }
+                    : { state: "accepted" };
+            });
+            await harness.session.prompt(`three ${"x".repeat(400)}`);
+            const ends = compactionEnds(harness);
+            harness.respond([
+                fauxAssistantMessage("", {
+                    stopReason: "error",
+                    errorMessage: "prompt is too long: 213462 tokens > 200000 maximum",
+                }),
+                fauxAssistantMessage("pi summary"),
+                fauxAssistantMessage("pi summary"),
+                fauxAssistantMessage("after the recovery"),
+            ]);
+            await harness.session.prompt("overflowing");
+            await eventually(() => ends.some((end) => end.reason === "overflow"));
+            expect(ends.find((end) => end.reason === "overflow")?.aborted).toBe(false);
+            const latest = compactions(harness).at(-1);
+            expect(compactions(harness).length).toBeGreaterThan(evicted);
+            expect(latest?.fromHook).not.toBe(true);
+            expect(latest?.summary).not.toBe(M0);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
     it("cancels an overflow with no acknowledged boundary", async () => {
         const call = unfoldedDaemon();
         try {
