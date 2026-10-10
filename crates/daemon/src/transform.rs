@@ -2445,13 +2445,9 @@ fn newest_live_segment_sequence(
     session_id: &str,
     live: &[&FlatBlock],
 ) -> Result<i64, TransformError> {
-    let live_ids: BTreeSet<&str> = live.iter().map(|block| block.id()).collect();
+    let live_ids: HashSet<&str> = live.iter().map(|block| block.id()).collect();
     Ok(store
-        .load_history_segments(session_id)?
-        .iter()
-        .filter(|segment| live_ids.contains(segment.end_message_id.as_str()))
-        .map(|segment| segment.sequence)
-        .max()
+        .newest_history_segment_ending_on(session_id, |end| live_ids.contains(end))?
         .unwrap_or(-1))
 }
 
