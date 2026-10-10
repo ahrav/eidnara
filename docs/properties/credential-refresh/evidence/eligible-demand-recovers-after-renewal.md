@@ -20,16 +20,17 @@ through `fail_next_run_on_the_source`:
   `fire_and_settle` publishes a model fold with exactly two producer starts.
 - `:93` emergency: after the failed firing, `expire_history_summarizer_backoff`
   moves the backoff into the past and the next usage-driven transform fires;
-  the witness waits for the second start and for the summarizer to reach idle
-  at `firing_seq >= 2`.
-- `:120` wrapup: the first `session.wrapup` returns `ok: false` with
+  the request and the wait for the second start share one
+  `tokio::time::timeout(TEST_WAIT_BUDGET, ..)`, then the witness waits for the
+  summarizer to reach idle at `firing_seq >= 2`.
+- `:124` wrapup: the first `session.wrapup` returns `ok: false` with
   `disposition: "retryable"`; after the backoff expires the next wrapup,
   awaited under `tokio::time::timeout(TEST_WAIT_BUDGET, ..)`, returns
   `ok: true` and a model fold is published. The handler's own wrapup budget is
   `MAX_WRAPUP_REQUEST_BUDGET` less a margin (`crates/daemon/src/lib.rs:6160`,
   3,800 seconds at `crates/daemon/src/history_summarizer.rs:1580`), so the
   test's timeout is the bound that applies.
-- `source_recovery_tests.rs:153` reattach: a seeded awaiting state answers
+- `source_recovery_tests.rs:157` reattach: a seeded awaiting state answers
   `no_fire: "reattaching"`, the failure starts no model, then
   `fire_and_settle` publishes.
 
@@ -69,9 +70,10 @@ continue.
 The window is the cooldown boundary: the backoff recorded at the source
 failure must have expired at the next eligible operation. The recovery bound
 is one firing after expiry inside two consecutive 10-second windows: the
-emergency path waits for the second start, then for idle; the normal and
-reattach paths retry `busy` under one deadline, then wait for idle under
-another; the wrapup path has one window around its request. Each window is
+emergency path awaits its request and the second start under one timeout,
+then waits for idle; the normal and reattach paths await each request and
+retry `busy` under one deadline, then wait for idle under another; the wrapup
+path has one window around its request. Each window is
 `TEST_WAIT_BUDGET`, so the end-to-end bound is 20 seconds. The rotation
 witness depends on the shifted clock seam and a scripted dispatch; the path
 witnesses depend on the scripted producer.

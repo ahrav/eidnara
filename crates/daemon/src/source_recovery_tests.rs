@@ -106,9 +106,13 @@ async fn the_emergency_path_folds_again_after_a_source_failure_and_cooldown() {
     assert_the_source_failure_advanced_nothing(&store, &before);
 
     expire_history_summarizer_backoff(&store);
-    let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
-    assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
-    wait_for_count(&producer.starts, 2).await;
+    tokio::time::timeout(TEST_WAIT_BUDGET, async {
+        let response = call_transform_with_usage(&handler, messages, 48_000, 50_000).await;
+        assert_eq!(response["history_summarizer"]["fired"], true, "{response}");
+        wait_for_count(&producer.starts, 2).await;
+    })
+    .await
+    .expect("the recovered emergency firing started within the wait budget");
     wait_for_history_summarizer_state(&store, |state| {
         state.state == HistorySummarizerPhase::Idle && state.firing_seq >= 2
     })

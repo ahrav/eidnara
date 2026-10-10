@@ -32,8 +32,8 @@ Production guard: `recheck_before_spawn` at `aws_refresh.rs:612` re-applies
 | --- | --- | --- | --- |
 | `the_normal_path_folds_again_after_a_source_failure_and_cooldown` | `crates/daemon/src/source_recovery_tests.rs:68` | normal path; `backoff` refusal; two starts | unaudited |
 | `the_emergency_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:93` | emergency path; second start; idle at `firing_seq >= 2` | unaudited |
-| `the_wrapup_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:120` | wrapup `retryable` then `ok` | unaudited |
-| `the_reattach_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:153` | reattach starts no model on the failure, folds after | unaudited |
+| `the_wrapup_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:124` | wrapup `retryable` then `ok` | unaudited |
+| `the_reattach_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:157` | reattach starts no model on the failure, folds after | unaudited |
 | `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner` | `model_execution_subprocess.rs:4266` | 49 runs, 26 refreshes, one external login, exact row sequence | unaudited |
 
 Test seams: `TEST_WAIT_BUDGET` and `TEST_WAIT_POLL` at

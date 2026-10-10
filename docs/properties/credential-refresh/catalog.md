@@ -171,8 +171,8 @@ rotations with one external login.
 Confidence: high - [evidence](evidence/eligible-demand-recovers-after-renewal.md).
 The five tests and the bound their wait helpers enforce were read at the #872
 branch.
-Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:120`,
-`:153` (normal, emergency, wrapup, reattach);
+Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:124`,
+`:157` (normal, emergency, wrapup, reattach);
 `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner`.
 Impact: folding stalls after a credential outage until the daemon restarts.
