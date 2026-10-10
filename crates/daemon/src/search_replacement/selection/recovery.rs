@@ -1,6 +1,8 @@
 use super::super::{BuildEvent, BuildFailure, ReplacementBuilder, ReplacementSpec, wall_ms};
 use super::*;
-use crate::projection_lifecycle::{ControlState, IntentRefusal, LifecycleRequest, Transition};
+use crate::projection_lifecycle::{
+    ControlState, IntentRefusal, LifecycleRequest, RecoveryTarget, Transition,
+};
 use kernel::SourceHoldBinding;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +11,10 @@ pub enum RecoveryEvent {
     Selection(SelectionEvent),
     Retirement(retirement::RetirementEvent),
     BeforeEpisode,
+    /// The recorded target moved forward to `target`, the tip a still-registered predecessor trailed.
+    Recertified {
+        target: i64,
+    },
     BeforeFinalAcknowledgement,
     FinalAcknowledged,
     BeforeCurrent,
@@ -276,14 +282,31 @@ impl SearchSelection {
             .replacement_capture
             .as_deref()
             .and_then(|c| c.stage.as_deref())
-            && (intent
+        {
+            // A selected seed's target may have been recertified past its checkpoint, never past the kernel tip it was certified at.
+            let recertified = |target: RecoveryTarget| -> Result<bool, BuildError> {
+                if !is_selected || target.commit_seq <= stage.checkpoint_commit_seq {
+                    return Ok(false);
+                }
+                let tip = kernel.capture_commit_read_target_within_budget(budget)?;
+                Ok(self
+                    .recovery_incarnation
+                    .is_some_and(|incarnation| incarnation == tip.incarnation)
+                    && target.commit_seq <= tip.through_commit)
+            };
+            let target_bound = match intent.recovery_target {
+                Some(target) if target.commit_seq == stage.checkpoint_commit_seq => true,
+                Some(target) => recertified(target)?,
+                None => false,
+            };
+            if intent
                 .staged_seed_digest
                 .as_deref()
                 .is_some_and(|d| d != stage.stage_manifest().digest())
-                || intent.recovery_target.map(|t| t.commit_seq)
-                    != Some(stage.checkpoint_commit_seq))
-        {
-            return Err(BuildError::Invalid("construction operation differs").into());
+                || !target_bound
+            {
+                return Err(BuildError::Invalid("construction operation differs").into());
+            }
         }
         if !is_selected {
             if let Some(target) = intent.recovery_target {
@@ -337,24 +360,35 @@ impl SearchSelection {
         if !family.names_operation(&intent) {
             return Err(BuildError::Invalid("selected operation differs").into());
         }
-        if let Some(old) = &family.certificate.retiring
-            && kernel
-                .outbox_consumer_checkpoint_within_budget(budget, &old.consumer.consumer_id)
-                .map_err(BuildError::from)?
-                .is_some()
-            && kernel
-                .capture_commit_read_target_within_budget(budget)
-                .map_err(BuildError::from)?
-                .through_commit
-                > family.certificate.seed.checkpoint_commit_seq
-        {
-            return Err(BuildError::Kernel(kernel::KernelError::ConsumerPending).into());
-        }
         observer(RecoveryEvent::BeforeEpisode);
         let mut intent = intent;
         intent.episodes = lifecycle
             .consume_expected_episode(gate, &intent, wall_ms()?)
             .map_err(BuildError::from)?;
+        // The kernel deregisters only a consumer at its tip, so a predecessor still registered behind a tip past the target cannot retire there. The target moves forward to that tip under this attempt's episode, and the selected family catches up to it before the retirement.
+        if let Some(old) = &family.certificate.retiring
+            && let Some(fixed) = intent.recovery_target
+            && kernel
+                .outbox_consumer_checkpoint_within_budget(budget, &old.consumer.consumer_id)
+                .map_err(BuildError::from)?
+                .is_some()
+        {
+            let tip = kernel
+                .capture_commit_read_target_within_budget(budget)
+                .map_err(BuildError::from)?
+                .through_commit;
+            if tip > fixed.commit_seq {
+                observer(RecoveryEvent::Recertified { target: tip });
+                intent = lifecycle
+                    .recertify_target(
+                        gate,
+                        &intent,
+                        RecoveryTarget { commit_seq: tip },
+                        wall_ms()?,
+                    )
+                    .map_err(BuildError::from)?;
+            }
+        }
         let check = || {
             if lifecycle.read() != ControlState::Intent(intent.clone()) {
                 return Err(BuildError::Invalid("recovery operation changed"));
@@ -368,13 +402,21 @@ impl SearchSelection {
             .recovery_target
             .ok_or(BuildError::Invalid("missing fixed target"))?
             .commit_seq;
-        let now = wall_ms()?;
-        let report = family
-            .projection
-            .read_within(deadline(budget)?, |conn| {
-                verify_active(conn, &self.identity, &family.generation(), self.bounds, now)
-            })
-            .map_err(BuildError::from)?;
+        let active = |budget: &EvalBudget| {
+            let now = wall_ms()?;
+            family
+                .projection
+                .read_within(deadline(budget)?, |conn| {
+                    verify_active(conn, &self.identity, &family.generation(), self.bounds, now)
+                })
+                .map_err(BuildError::from)
+        };
+        let mut report = active(budget)?;
+        if report.checkpoint.checkpoint_commit_seq < target {
+            self.catch_up_selected(&family, kernel, gate, spec, budget, &intent)?;
+            check()?;
+            report = active(budget)?;
+        }
         if report.checkpoint.checkpoint_commit_seq != target {
             return Err(BuildError::Invalid("local prefix differs from target").into());
         }
@@ -383,6 +425,7 @@ impl SearchSelection {
                 &family,
                 retirement::RetirementRun {
                     kernel,
+                    through: target,
                     spec,
                     budget,
                     transaction: &transaction,
@@ -451,6 +494,72 @@ impl SearchSelection {
         }
         self.recovery_incarnation = Some(fresh);
         Ok(())
+    }
+
+    /// Applies the commits after the selected family's checkpoint through the record's target in one bounded episode under the family's own hold, acknowledging them for the record's consumer. The episode charges the catch-up hooks a Current family's catch-up charges.
+    fn catch_up_selected(
+        &self,
+        family: &SelectedFamily,
+        kernel: &KernelStore,
+        gate: &HookGate,
+        spec: &ReplacementSpec,
+        budget: &EvalBudget,
+        intent: &LifecycleIntent,
+    ) -> Result<(), BuildError> {
+        let target = intent
+            .recovery_target
+            .ok_or(BuildError::Invalid("missing fixed target"))?
+            .commit_seq;
+        let checkpoint = family
+            .projection
+            .read_within(deadline(budget)?, |conn| {
+                read_checkpoint(conn, &self.identity.kernel_incarnation_id)
+            })?
+            .ok_or(BuildError::Invalid("selected family has no checkpoint"))?;
+        let grants = gate.admit_all(
+            &[
+                ProjectionHook::EmbeddingBootstrap,
+                ProjectionHook::GitDurableRows,
+            ],
+            EntryPoint::Dispatch,
+        )?;
+        let expected = InvalidationIdentity::from(&self.identity);
+        for grant in &grants {
+            gate.check_limits(grant, &expected, &spec.catchup_page_charges())?;
+        }
+        let consumer = crate::search_catchup::CatchUpConsumer {
+            binding: SourceHoldBinding {
+                consumer_id: intent.consumer.consumer_id.clone(),
+                lease_epoch: kernel.lease_epoch(),
+                source_policy_version: self.identity.projection_policy_version.clone(),
+            },
+            hold_id: checkpoint.hold_id,
+            kernel_incarnation_id: self.identity.kernel_incarnation_id.clone(),
+            generation_id: Some(intent.consumer.generation_id.clone()),
+        };
+        let episode = budget.linked();
+        let report = crate::search_catchup::SearchCatchUp::new(kernel, &family.projection)
+            .with_budget(episode.clone())
+            .run_episode_toward(
+                &consumer,
+                &spec.episode,
+                kernel::CommitReadTarget {
+                    through_commit: target,
+                    incarnation: family.incarnation,
+                },
+                wall_ms()?,
+                &mut |_| {
+                    if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
+                        episode.cancel();
+                    }
+                },
+            )?;
+        match report.end {
+            crate::search_catchup::EpisodeEnd::ReachedTarget => Ok(()),
+            crate::search_catchup::EpisodeEnd::Blocked(blocked) => {
+                Err(BuildError::Blocked(blocked))
+            }
+        }
     }
 
     fn check_recovery_admission(

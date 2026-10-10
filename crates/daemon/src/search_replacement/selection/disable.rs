@@ -335,7 +335,19 @@ impl SearchSelection {
                 }
             };
             family.unavailable.store(true, Ordering::Release);
-            if !family.names_operation(intent) {
+            // A recertified target never passes the kernel tip it was certified at.
+            let past_tip = match intent.recovery_target {
+                Some(target)
+                    if target.commit_seq > family.certificate.seed.checkpoint_commit_seq =>
+                {
+                    target.commit_seq
+                        > kernel
+                            .capture_commit_read_target_within_budget(budget)?
+                            .through_commit
+                }
+                _ => false,
+            };
+            if !family.names_operation(intent) || past_tip {
                 return Err(BuildError::Invalid(
                     "disabled handoff differs from selected certificate",
                 ));
@@ -350,10 +362,21 @@ impl SearchSelection {
             let incarnation = family.incarnation;
             history = incarnation;
             if family.certificate.retiring.is_some() {
+                let applied = family.projection.read_within(deadline(budget)?, |conn| {
+                    retrieval::batch::read_checkpoint(conn, &self.identity.kernel_incarnation_id)?
+                        .map(|c| c.checkpoint_commit_seq)
+                        .ok_or(ProjectionError::CorruptRow)
+                })?;
                 self.retire_bound(
                     &family,
                     retirement::RetirementRun {
                         kernel,
+                        // The handoff's target is the seed's checkpoint or a later recertified commit, and a catch-up toward a recertified one may have stopped short of it; retirement certifies only what the selected family applied.
+                        through: intent
+                            .recovery_target
+                            .map_or(family.certificate.seed.checkpoint_commit_seq, |target| {
+                                target.commit_seq.min(applied)
+                            }),
                         spec,
                         budget,
                         transaction: &transaction,

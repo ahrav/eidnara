@@ -5365,7 +5365,7 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         assert!(started.elapsed() < Duration::from_secs(10));
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    // A replacement retires the old consumer only at the target it certified, so a commit landing between that target and the retirement leaves the rebuild blocked. Pausing the claim-source runner keeps the kernel quiet while each rebuild here completes.
+    // A commit landing after a replacement's retirement acknowledged the old consumer leaves the deregistration for a later slice to recertify, at one more episode. Pausing the claim-source runner keeps the kernel quiet so each rebuild here completes in the slice that starts it.
     restarted.handler().pause_claim_sources_for_test();
     let reader = loop {
         let pinned = tokio::task::spawn_blocking({

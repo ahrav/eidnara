@@ -18,6 +18,8 @@ pub enum RetirementEvent {
 
 pub(super) struct RetirementRun<'a> {
     pub kernel: &'a KernelStore,
+    /// The certified commit the old consumer retires through: the selected seed's checkpoint, or a later recertified commit the selected family has applied. Retirement refuses a commit past the family's checkpoint.
+    pub through: i64,
     pub spec: &'a super::super::ReplacementSpec,
     pub budget: &'a EvalBudget,
     pub transaction: &'a LifecycleTransactionLock,
@@ -65,7 +67,7 @@ impl SearchSelection {
         Ok(Some(old))
     }
 
-    /// The fixed selection certificate bounds retirement; retries cannot acknowledge a later tip.
+    /// Retires the predecessor through the selected seed's checkpoint, the target of a record that was never recertified; retries cannot acknowledge a later tip. A record whose target moved retires through recovery, which certifies the moved target.
     pub fn retire(
         &self,
         kernel: &KernelStore,
@@ -96,6 +98,7 @@ impl SearchSelection {
             &family,
             RetirementRun {
                 kernel,
+                through: certificate.seed.checkpoint_commit_seq,
                 spec,
                 budget,
                 transaction: &transaction,
@@ -151,6 +154,7 @@ impl SearchSelection {
     ) -> Result<(), BuildError> {
         let RetirementRun {
             kernel,
+            through,
             spec,
             budget,
             transaction,
@@ -163,12 +167,22 @@ impl SearchSelection {
             .ok_or(BuildError::Invalid("no durable old consumer binding"))?;
         spec.identity.require_compatible(&self.identity)?;
         let target = CommitReadTarget {
-            through_commit: certificate.seed.checkpoint_commit_seq,
+            through_commit: through,
             incarnation: family.incarnation,
         };
         let old_digest = old.seed.stage_manifest().digest();
         if !certificate.retiring_is_bound(old) {
             return Err(BuildError::Invalid("retirement binding mismatch"));
+        }
+        let applied = family.projection.read_within(deadline(budget)?, |conn| {
+            retrieval::batch::read_checkpoint(conn, &certificate.seed.kernel_incarnation_id)?
+                .map(|checkpoint| checkpoint.checkpoint_commit_seq)
+                .ok_or(ProjectionError::CorruptRow)
+        })?;
+        if applied < through {
+            return Err(BuildError::Invalid(
+                "retirement target exceeds the selected family's checkpoint",
+            ));
         }
         let obligations = kernel
             .consumer_obligations_within_budget(

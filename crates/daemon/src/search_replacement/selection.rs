@@ -970,19 +970,22 @@ fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
 }
 
 impl SelectedFamily {
-    /// The record moves only its consumed episodes and its cleared construction history after selection.
+    /// Whether `intent` is the operation this family's certificate bound at selection. Consumed episodes, the capture record, and the prior disable move after selection, and a recertified recovery target moves only forward from the bound one.
     fn names_operation(&self, intent: &LifecycleIntent) -> bool {
         let bound = &self.certificate.intent;
-        *bound
-            == LifecycleIntent {
-                episodes: crate::projection_lifecycle::EpisodeAccounting {
-                    consumed: bound.episodes.consumed,
-                    ..intent.episodes
-                },
-                replacement_capture: bound.replacement_capture.clone(),
-                prior_disabled: bound.prior_disabled.clone(),
-                ..intent.clone()
-            }
+        bound.recovery_target.is_some()
+            && intent.recovery_target >= bound.recovery_target
+            && *bound
+                == LifecycleIntent {
+                    episodes: crate::projection_lifecycle::EpisodeAccounting {
+                        consumed: bound.episodes.consumed,
+                        ..intent.episodes
+                    },
+                    replacement_capture: bound.replacement_capture.clone(),
+                    prior_disabled: bound.prior_disabled.clone(),
+                    recovery_target: bound.recovery_target,
+                    ..intent.clone()
+                }
     }
 
     fn generation(&self) -> VectorGeneration {

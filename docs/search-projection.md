@@ -61,10 +61,23 @@ commit rebuilds the projection under a fresh capture.
 
 Retirement acknowledges the old consumer through the replacement's certified
 target and then deregisters it, and the kernel deregisters only a consumer at
-its tip. A commit that lands between the certified target and the
-deregistration leaves the rebuild in its intent record, and the slice reports
-`outbox consumer has not reached the commit-log tip` while the old family keeps
-serving. A rebuild therefore completes in a quiet window after its target.
+its tip. When the completion slice finds the old consumer still registered and
+the tip past the recorded target, it recertifies:
+
+1. `ProjectionLifecycle::recertify_target` moves the recorded target forward to
+   that tip under the episode the slice consumed. The attempt, allowance, and
+   deadline stay as recorded, and the target never passes the kernel tip.
+2. The selected family catches up to the new target under its own hold, and the
+   new consumer acknowledges each window.
+3. Retirement certifies the old consumer's obligations through the new target
+   and acknowledges it there. A receipt for the same retirement through an
+   earlier commit is replaced by the later one.
+
+A commit that lands after that acknowledgement leaves the deregistration
+pending (`outbox consumer has not reached the commit-log tip`) while the old
+family keeps serving, and the next slice recertifies again. Each retry spends
+one episode, so a tip that outruns every attempt leaves the record blocked once
+its allowance is spent.
 
 ## Readers and exact-lookup certificates
 

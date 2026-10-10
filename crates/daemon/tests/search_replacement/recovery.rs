@@ -1048,8 +1048,9 @@ fn interrupted_export_and_same_lineage_restore_complete_from_fresh_authority() {
     }
 }
 
+/// The kernel deregisters only a consumer at its tip, so a predecessor still registered behind a tip past the fixed target cannot retire there. The completion slice moves the target forward to that tip under its own episode, catches the selected family up, and retires the predecessor at the recertified target: the row published after selection is served, both consumers stand at the tip, and the record keeps its attempt, allowance, and deadline.
 #[test]
-fn advancing_tip_blocks_retirement_before_consuming_a_completion_slice() {
+fn an_advancing_tip_recertifies_the_target_and_retires_the_predecessor_at_it() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
     corpus.seed();
@@ -1060,23 +1061,288 @@ fn advancing_tip_blocks_retirement_before_consuming_a_completion_slice() {
     let mut selection = selector(root.path());
     finish(&mut selection, &corpus, &gate, &config);
     let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
-    corpus.publish("moving-tip", "must not be silently acknowledged");
-    let result = selection.recover_slice(
+    let moved = corpus.publish("moving-tip", "reaches the selected family");
+    let tip = corpus.tip();
+    assert!(tip > fixed.recovery_target.unwrap().commit_seq);
+    let mut events = Vec::new();
+    let progress = selection
+        .recover_slice(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+    assert_eq!(progress, RecoveryProgress::Current);
+    assert!(events.contains(&RecoveryEvent::Recertified { target: tip }));
+    let done = current(root.path());
+    assert_eq!(
+        done.recovery_target,
+        Some(RecoveryTarget { commit_seq: tip })
+    );
+    assert_eq!(done.episodes.consumed, fixed.episodes.consumed + 1);
+    assert_eq!(
+        (
+            done.attempt_id.as_str(),
+            done.episodes.allowance,
+            done.episodes.deadline
+        ),
+        (
+            fixed.attempt_id.as_str(),
+            fixed.episodes.allowance,
+            fixed.episodes.deadline
+        )
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+    assert_eq!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint("next-consumer")
+            .unwrap(),
+        Some(tip)
+    );
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    let observed = observe(&reader);
+    assert!(observed.rows.contains_key(&moved), "{observed:?}");
+    assert_eq!(observed.checkpoint, tip);
+}
+
+/// A commit that lands after the predecessor's acknowledgement leaves its deregistration pending, with the receipt recorded at the first recertified target. The next slice recertifies the later tip under one more episode, replaces that receipt with one through the new target, and completes; a slice with no episode left refuses before recording anything.
+#[test]
+fn a_tip_that_moves_during_retirement_is_recertified_by_the_next_slice() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
+    corpus.publish("first-move", "recertified once");
+    let first = corpus.tip();
+    let mut moved_during_retirement = None;
+    let pending = selection.recover_slice(
         &corpus.kernel,
         &gate,
         &config,
         &budget(Duration::from_secs(20)),
-        &mut |_| {},
+        &mut |event| {
+            if event
+                == RecoveryEvent::Retirement(
+                    daemon::search_replacement::selection::retirement::RetirementEvent::Acknowledged,
+                )
+                && moved_during_retirement.is_none()
+            {
+                moved_during_retirement = Some(corpus.publish("second-move", "recertified twice"));
+            }
+        },
     );
-    assert!(matches!(
-        result,
-        Err(
-            daemon::search_replacement::selection::recovery::RecoveryFailure::Blocked(
-                BuildError::Kernel(kernel::KernelError::ConsumerPending)
-            )
+    assert!(
+        matches!(
+            pending,
+            Err(RecoveryFailure::Blocked(BuildError::Kernel(
+                kernel::KernelError::ConsumerPending
+            )))
+        ),
+        "{pending:?}"
+    );
+    let second_object =
+        moved_during_retirement.expect("the retirement acknowledged the predecessor");
+    let interrupted = control(root.path());
+    assert_eq!(
+        interrupted.recovery_target,
+        Some(RecoveryTarget { commit_seq: first })
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        Some(first)
+    );
+    let second = corpus.tip();
+
+    let mut events = Vec::new();
+    let progress = selection
+        .recover_slice(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |event| events.push(event),
         )
-    ));
-    assert_eq!(control(root.path()), fixed);
+        .unwrap();
+    assert_eq!(progress, RecoveryProgress::Current);
+    assert!(events.contains(&RecoveryEvent::Recertified { target: second }));
+    let done = current(root.path());
+    assert_eq!(
+        done.recovery_target,
+        Some(RecoveryTarget { commit_seq: second })
+    );
+    assert_eq!(done.episodes.consumed, fixed.episodes.consumed + 2);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None
+    );
+    let reader = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap();
+    assert!(observe(&reader).rows.contains_key(&second_object));
+    let receipts: Vec<i64> = reader
+        .read(&budget(Duration::from_secs(10)), |conn| {
+            conn.prepare("SELECT through_commit_seq FROM retirement_receipts")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(retrieval::ProjectionError::from)
+        })
+        .unwrap();
+    assert_eq!(
+        receipts,
+        vec![second],
+        "the later certification replaced the first receipt"
+    );
+}
+
+/// A slice cancelled after it recorded a recertified target leaves the selected family behind that target. The next completion slice resumes the catch-up under the recorded target without moving it again. A disable at that point retires the predecessor only through the commit the selected family applied, so the predecessor is never acknowledged past it and its deregistration waits for the tip.
+#[tokio::test]
+async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_applied() {
+    for next in ["resume", "disable"] {
+        let root = tempfile::tempdir().unwrap();
+        let corpus = Corpus::open(root.path());
+        corpus.seed();
+        corpus.publish("base", "bytes");
+        let mut config = spec(root.path());
+        let gate = home_gate(root.path(), &config);
+        record(root.path(), &gate, None, &config.identity);
+        let mut selection = selector(root.path());
+        finish(&mut selection, &corpus, &gate, &config);
+        let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
+        let seed_target = fixed.recovery_target.unwrap().commit_seq;
+        let moved = corpus.publish("moving-tip", "behind the recertified target");
+        let tip = corpus.tip();
+        let slice = budget(Duration::from_secs(20));
+        let interrupted =
+            selection.recover_slice(&corpus.kernel, &gate, &config, &slice, &mut |event| {
+                if matches!(event, RecoveryEvent::Recertified { .. }) {
+                    slice.cancel();
+                }
+            });
+        assert!(interrupted.is_err(), "{next}: {interrupted:?}");
+        let recorded = control(root.path());
+        assert_eq!(
+            recorded.recovery_target,
+            Some(RecoveryTarget { commit_seq: tip })
+        );
+        if next == "resume" {
+            let mut events = Vec::new();
+            let progress = selection
+                .recover_slice(
+                    &corpus.kernel,
+                    &gate,
+                    &config,
+                    &budget(Duration::from_secs(20)),
+                    &mut |event| events.push(event),
+                )
+                .unwrap();
+            assert_eq!(progress, RecoveryProgress::Current);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, RecoveryEvent::Recertified { .. })),
+                "the recorded target already names the tip: {events:?}"
+            );
+            assert_eq!(
+                current(root.path()).recovery_target,
+                recorded.recovery_target
+            );
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                None
+            );
+            let reader = selection
+                .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+                .unwrap();
+            assert!(observe(&reader).rows.contains_key(&moved));
+        } else {
+            gate.install(disable::cleanup_evaluator(root.path()));
+            selection.begin_disable(&gate, &mut |_| {}).unwrap();
+            let pending = selection
+                .reconcile_disabled(
+                    &corpus.kernel,
+                    &gate,
+                    &config,
+                    &budget(Duration::from_secs(20)),
+                    &mut |_| {},
+                )
+                .await;
+            assert!(
+                matches!(
+                    pending,
+                    Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+                ),
+                "{pending:?}"
+            );
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                Some(seed_target),
+                "the predecessor is acknowledged through the applied commit, not the recertified one"
+            );
+        }
+    }
+}
+
+/// Recertification spends the attempt's episode, so a predecessor the tip keeps outrunning leaves the record blocked once its allowance is spent rather than retrying without bound.
+#[test]
+fn recertification_stops_when_the_allowance_is_spent() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = Corpus::open(root.path());
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let mut config = spec(root.path());
+    let gate = home_gate(root.path(), &config);
+    record(root.path(), &gate, None, &config.identity);
+    let mut selection = selector(root.path());
+    finish(&mut selection, &corpus, &gate, &config);
+    let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
+    let mut slices = 0;
+    let refused = loop {
+        let key = format!("outrun-{slices}");
+        let result = selection.recover_slice(
+            &corpus.kernel,
+            &gate,
+            &config,
+            &budget(Duration::from_secs(20)),
+            &mut |event| {
+                if event
+                    == RecoveryEvent::Retirement(
+                        daemon::search_replacement::selection::retirement::RetirementEvent::Acknowledged,
+                    )
+                {
+                    corpus.publish(&key, "outruns the retirement");
+                }
+            },
+        );
+        slices += 1;
+        match result {
+            Err(RecoveryFailure::Blocked(BuildError::Intent(
+                daemon::projection_lifecycle::IntentRefusal::AllowanceExhausted,
+            ))) => break slices,
+            Err(RecoveryFailure::Blocked(BuildError::Kernel(
+                kernel::KernelError::ConsumerPending,
+            ))) => {}
+            other => panic!("slice {slices}: {other:?}"),
+        }
+        assert!(slices <= 4, "the allowance did not bound recertification");
+    };
+    let left = fixed.episodes.allowance - fixed.episodes.consumed;
+    assert_eq!(refused, usize::try_from(left).unwrap() + 1);
+    let blocked = control(root.path());
+    assert_eq!(blocked.episodes.consumed, blocked.episodes.allowance);
     assert!(
         corpus
             .kernel
