@@ -270,6 +270,7 @@ struct FlatProjectionBuilder {
     blocks: Vec<FlatBlock>,
     identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
     state: ProjectionState,
+    scratch: crate::served_json::CanonicalScratch,
 }
 
 fn project_messages_from_state(
@@ -344,7 +345,7 @@ fn project_messages_from_state(
                 Err(WireError::UnpairedToolResult { .. }) if covered_head => None,
                 arc => arc?,
             };
-            let flat = flatten_block(&msg, index, arc_id)?;
+            let flat = flatten_block(&mut builder.scratch, &msg, index, arc_id)?;
             if !flat.synthetic {
                 identities.push(BlockIdentity {
                     kind_tag: flat.kind_tag.clone(),
@@ -464,12 +465,13 @@ pub fn text_from_message(msg: &WireMessage) -> Option<&str> {
 }
 
 fn flatten_block(
+    scratch: &mut crate::served_json::CanonicalScratch,
     msg: &Arc<IngressMessage>,
     index: usize,
     arc_id: Option<String>,
 ) -> Result<FlatBlock, WireError> {
     let block = &msg.ck.content()[index];
-    let bytes = crate::served_json::canonical_block_bytes(block).map_err(|_| {
+    let bytes = crate::served_json::canonical_block_text(scratch, block).map_err(|_| {
         WireError::UnsupportedBlock {
             mid: msg.mid.clone(),
             block_index: index,
@@ -518,7 +520,7 @@ fn flatten_block(
         file_path,
         provider_executed,
         arc_id,
-        bytes: Arc::from(bytes),
+        bytes,
         content_hash,
         synthetic: msg.ck.meta.synthetic,
         tool_call_id,

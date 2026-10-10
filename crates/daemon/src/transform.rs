@@ -14355,8 +14355,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The three fresh-byte consumers must read `canonical_block_bytes`; a consumer
-    /// that serializes a block any other way changes identity silently.
     #[test]
     fn fresh_block_byte_consumers_call_the_canonical_producer() {
         let flatten = include_str!("wire.rs")
@@ -14368,7 +14366,7 @@ pub(crate) mod tests {
             .0;
         assert_eq!(
             flatten
-                .matches("served_json::canonical_block_bytes(")
+                .matches("served_json::canonical_block_text(")
                 .count(),
             1
         );
