@@ -7049,14 +7049,18 @@ impl RowMemo {
     }
 
     /// Memoizes `core` for `session_id` at `row_version` when the memo's other fields plus
-    /// the core fit the retention bound, dropping a memoized `meta` first when only that makes
-    /// room; the measurement precedes the clone. A core outranks the meta because it is the
-    /// larger read to repeat.
+    /// the core fit the retention bound. A memoized `meta` is dropped first when that alone
+    /// makes room, and kept when the core exceeds the bound without it. The retention
+    /// measurement precedes cloning `core`.
     fn record_core(&mut self, session_id: &str, row_version: u64, core: &CoreState) {
         self.record(session_id, row_version, |memo| {
             memo.core = None;
             let needed = Self::core_bytes(core);
-            if memo.retained_bytes() + needed > ROW_MEMO_RETAINED_BYTES_BOUND {
+            let with_meta = memo.retained_bytes();
+            let without_meta = with_meta - memo.meta.as_ref().map_or(0, String::capacity);
+            if with_meta + needed > ROW_MEMO_RETAINED_BYTES_BOUND
+                && without_meta + needed <= ROW_MEMO_RETAINED_BYTES_BOUND
+            {
                 memo.meta = None;
             }
             if memo.retained_bytes() + needed <= ROW_MEMO_RETAINED_BYTES_BOUND {
@@ -20100,6 +20104,22 @@ mod tests {
         assert_eq!(fresh.core.as_ref(), Some(&core_needs_the_meta_room));
         assert!(fresh.meta.is_none(), "the core outranks the meta");
         assert!(fresh.retained_bytes() <= ROW_MEMO_RETAINED_BYTES_BOUND);
+
+        // A core that breaks the bound even without the meta leaves the meta in place.
+        let mut oversized = RowMemo::default();
+        oversized.record("ses", 3, |_| {});
+        oversized.record_meta("ses", 3, &meta);
+        oversized.record_core(
+            "ses",
+            3,
+            &memo_core("m2#0", &"x".repeat(ROW_MEMO_RETAINED_BYTES_BOUND)),
+        );
+        assert!(oversized.core.is_none(), "an over-bound core is dropped");
+        assert_eq!(
+            oversized.meta.as_deref(),
+            Some(meta.as_str()),
+            "a core that cannot fit displaces nothing"
+        );
         memo.record_core("ses", 3, &kept);
         memo.record_meta("ses", 3, "{}");
         memo.record("ses", 3, |memo| {

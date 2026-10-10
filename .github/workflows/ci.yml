@@ -26,16 +26,38 @@ on:
           tier of one arm for pi-pass, whose measured arm needs about 9000
         type: string
         default: "1200"
+      qualification:
+        description: >-
+          Run the retained-history and outage qualification campaign, with its
+          six witness runs, on the reference host and upload its report
+        type: boolean
+        default: false
+      qualification_cases:
+        description: Campaign cases, `all` or a comma-separated subset
+        type: string
+        default: all
+      qualification_operations:
+        description: Interactive operations per repetition
+        type: string
+        default: "10000"
+      lexical_scale:
+        description: >-
+          Run the D26b lexical scan p99 gate at one million occurrences on the
+          reference host and upload its samples
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
 # `main` preserves in-progress runs; newer pending runs replace older pending
-# runs. Scale-driver dispatches run independently of other runs on their ref.
+# runs. Scale-driver, qualification, and lexical-scale dispatches run
+# independently of other runs on their ref.
 concurrency:
   group: >-
-    ${{ github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    ${{ github.event_name == 'workflow_dispatch'
+    && (inputs.scale_driver != '' || inputs.qualification || inputs.lexical_scale)
     && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -1140,6 +1162,144 @@ jobs:
         with:
           name: scale-report-${{ inputs.scale_driver }}
           path: ${{ runner.temp }}/scale
+          if-no-files-found: warn
+
+  # The retained-history and outage qualification (#864, #872) runs only when
+  # dispatched: each witness test runs first at the checked-out commit and is
+  # recorded with its exit code, then the release campaign runs with those
+  # records. A witness whose run reports no single passed test is recorded as
+  # failed.
+  qualification:
+    name: qualification campaign (dispatched)
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification
+    env:
+      QUALIFICATION_CASES: ${{ inputs.qualification_cases }}
+      QUALIFICATION_OPERATIONS: ${{ inputs.qualification_operations }}
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Witness runs
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/qualification"
+          mkdir -p "$out"
+          commit="$(git rev-parse HEAD)"
+          {
+            echo "commit $commit"
+            echo "nproc $(nproc)"
+            free -b
+            lsblk -d -o NAME,ROTA,SIZE
+            df -h / /mnt
+          } | tee "$out/runner.txt"
+          printf '{' > "$out/witnesses.json"
+          separator=''
+          witness() {
+            local name="$1"
+            shift
+            local code=0
+            "$@" > "$out/$name.log" 2>&1 || code=$?
+            # libtest prints the first summary; a `harness = false` target prints the second.
+            if [ "$code" -eq 0 ] && ! grep -qE '^test result: ok. 1 passed|: 1 run, 0 failed$' "$out/$name.log"; then
+              code=97
+            fi
+            echo "$name exit $code"
+            printf '%s"%s":{"test":"%s","source_commit":"%s","exit_code":%d}' \
+              "$separator" "$name" "$*" "$commit" "$code" >> "$out/witnesses.json"
+            separator=','
+          }
+          daemon_lib=(cargo +1.98 test --release --locked -p daemon --all-features --lib)
+          witness normal_fold "${daemon_lib[@]}" \
+            the_normal_path_folds_again_after_a_source_failure_and_cooldown
+          witness emergency_fold "${daemon_lib[@]}" \
+            the_emergency_path_folds_again_after_a_source_failure_and_cooldown
+          witness wrapup_fold "${daemon_lib[@]}" \
+            the_wrapup_path_folds_again_after_a_source_failure_and_cooldown
+          witness reattach_fold "${daemon_lib[@]}" \
+            the_reattach_path_folds_again_after_a_source_failure_and_cooldown
+          witness rotation_soak cargo +1.98 test --release --locked \
+            -p host-runtime --test model_execution_subprocess \
+            a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner
+          # The runner refuses a witness its catalog does not name, so the
+          # warm-acquisition run is recorded only where `WITNESSES` lists it.
+          if grep -q '"warm_acquisition",' crates/eval-core/src/qualification.rs; then
+            witness warm_acquisition cargo +1.98 test --release --locked \
+              -p host-runtime --test model_execution_supervisor \
+              warm_acquisition_p99_stays_within_one_millisecond -- --ignored --exact
+          fi
+          printf '}\n' >> "$out/witnesses.json"
+          cat "$out/witnesses.json"
+
+      - name: Campaign
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/qualification"
+          # The campaign's stores go on the runner's larger local disk.
+          sudo mkdir -p /mnt/qualification-state
+          sudo chown "$(id -u):$(id -g)" /mnt/qualification-state
+          cargo +1.98 build --release --locked -p daemon --example eval_runner \
+            --features eval-runner
+          target/release/examples/eval_runner qualification \
+            --out "$out/report.json" \
+            --cases "$QUALIFICATION_CASES" \
+            --operations "$QUALIFICATION_OPERATIONS" \
+            --repetitions 5 \
+            --outage-scale 1 \
+            --state-dir /mnt/qualification-state \
+            --witness-runs "$out/witnesses.json" 2>&1 | tee "$out/campaign.log"
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: qualification
+          path: ${{ runner.temp }}/qualification
+          if-no-files-found: warn
+
+  # The D26b lexical gate (#391) builds a one-million-occurrence projection
+  # and runs only when dispatched, in release on the reference host.
+  lexical-scale:
+    name: lexical scan p99 (dispatched)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event_name == 'workflow_dispatch' && inputs.lexical_scale
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Lexical scan p99
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/lexical-scale"
+          mkdir -p "$out"
+          {
+            echo "commit $(git rev-parse HEAD)"
+            echo "nproc $(nproc)"
+            free -b
+          } | tee "$out/lexical-scale.log"
+          EIDNARA_LEXICAL_SCALE_SAMPLES="$out/samples.json" \
+            cargo +1.98 test --release --locked -p retrieval \
+            --test lexical_retrieval lexical_scan_p99_at_one_million_occurrences \
+            -- --ignored --exact --nocapture 2>&1 | tee -a "$out/lexical-scale.log"
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: lexical-scale
+          path: ${{ runner.temp }}/lexical-scale
           if-no-files-found: warn
 
   unlocked-deps:
