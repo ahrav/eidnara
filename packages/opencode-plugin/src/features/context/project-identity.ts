@@ -580,14 +580,13 @@ export function resolveProjectIdentityForSession(
     allowHomeProject = false,
 ): string | undefined {
     const canonicalHome = canonicalUserHomeDirectory();
-    const canonicalDirectory = (() => {
-        try {
-            return realpathSync.native(path.resolve(directory));
-        } catch {
-            return path.resolve(directory);
-        }
-    })();
-    const inheritsHomeRepository = gitRootDirectory(canonicalDirectory) === canonicalHome;
+    const physicalDirectory = physicalIdentityPath(directory);
+    const canonicalDirectory = physicalDirectory ?? path.resolve(directory);
+    const gitRoot =
+        physicalDirectory === undefined
+            ? gitRootDirectory(canonicalDirectory)
+            : nearestGitAncestor(physicalDirectory);
+    const inheritsHomeRepository = gitRoot === canonicalHome;
     if (canonicalDirectory === canonicalHome || inheritsHomeRepository) {
         if (!allowHomeProject) return undefined;
         // Sessions whose effective Git root is `$HOME` use the home identity.
