@@ -23,8 +23,12 @@ through `fail_next_run_on_the_source`:
   the witness waits for the second start and for the summarizer to reach idle
   at `firing_seq >= 2`.
 - `:120` wrapup: the first `session.wrapup` returns `ok: false` with
-  `disposition: "retryable"`; after the backoff expires the next wrapup returns
-  `ok: true` and a model fold is published.
+  `disposition: "retryable"`; after the backoff expires the next wrapup,
+  awaited under `tokio::time::timeout(TEST_WAIT_BUDGET, ..)`, returns
+  `ok: true` and a model fold is published. The handler's own wrapup budget is
+  `MAX_WRAPUP_REQUEST_BUDGET` less a margin (`crates/daemon/src/lib.rs:6160`,
+  3,800 seconds at `crates/daemon/src/history_summarizer.rs:1580`), so the
+  test's timeout is the bound that applies.
 - `:151` reattach: a seeded awaiting state answers `no_fire: "reattaching"`,
   the failure starts no model, then `fire_and_settle` publishes.
 
@@ -85,7 +89,9 @@ archive or placeholder; a producer start count that proves exactly one retry.
   wait. An earlier revision of `fire_and_settle` retried `busy` without a cap,
   so a summarizer that stayed busy would have run the normal and reattach
   witnesses to the runner's timeout instead of failing them; the helper now
-  asserts a `TEST_WAIT_BUDGET` deadline across those retries.
+  asserts a `TEST_WAIT_BUDGET` deadline across those retries. The wrapup
+  witness awaited its recovered request under the handler's 3,800-second
+  budget alone; it now awaits under `TEST_WAIT_BUDGET`.
 - Missing evidence: none for the five checks read.
 - Conclusion: resolved with answer - one firing, and 10 seconds per wait
   including the `busy` retries.

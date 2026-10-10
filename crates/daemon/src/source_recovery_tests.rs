@@ -142,7 +142,9 @@ async fn the_wrapup_path_folds_again_after_a_source_failure_and_cooldown() {
 
     producer.outputs.lock().unwrap().clear();
     expire_history_summarizer_backoff(&store);
-    let folded = wrapup().await;
+    let folded = tokio::time::timeout(TEST_WAIT_BUDGET, wrapup())
+        .await
+        .expect("the recovered wrapup folds within the wait budget");
     assert_eq!(folded["ok"], json!(true), "{folded}");
     assert_a_model_fold_published(&store);
 }

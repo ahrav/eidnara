@@ -152,9 +152,13 @@ backoff has expired, the first operation the summarizer accepts fires one
 model run, and that single firing publishes the fold and returns the
 summarizer to idle within the 10-second `TEST_WAIT_BUDGET`, polled every 2 ms;
 an operation refused as `busy` is retried only inside a second
-`TEST_WAIT_BUDGET` that starts with the first attempt, and any other refusal
-or a second backoff fails the witness. The four paths are witnessed separately
-because one path's recovery says nothing about another's.
+`TEST_WAIT_BUDGET` that starts with the first attempt; the recovered wrapup
+request returns `ok` inside the same budget; and any other refusal or a second
+backoff fails the witness. The four paths are witnessed separately because one
+path's recovery says nothing about another's. The rotation soak must also
+complete once per campaign: 49 Bedrock runs on one owner and one adapter, with
+exactly the run that observes the external login failing as `Transient`, the
+exact `ASIAROW<n>` row sequence, and 26 physical refreshes.
 Fault/timing angle: the cooldown boundary, and an external login between
 rotations.
 Required faults and enabling state: a typed source failure on each path; the
@@ -216,8 +220,11 @@ publication unique and its raw history, passes the RSS, latency, read, and
 allocation gates, and returns the backlog to its pre-outage band within 360
 seconds after a 120-second outage.
 Check: `sometimes` - a complete five-repetition campaign on the required
-runner must pass every gate at least once; per-operation lineage is asserted
-with `always` inside each repetition by `audit_lineage`.
+runner must pass every gate at least once; `audit_lineage` is evaluated with
+`always` once per repetition and once per outage run, against the store as
+observed after the last operation and the segments published since the seed,
+and fails the run on any duplicate, overlap, raw loss outside oldest-first
+eviction, or coverage gap that persists to that observation.
 Fault/timing angle: the 120-second source outage, its cooldown, and restored
 demand at the frozen 50% arrival rate.
 Required faults and enabling state: the outage schedule, the retained-history
@@ -235,6 +242,13 @@ Impact: a million-message or outage claim without evidence that it holds.
 Open questions:
 - Supply the dedicated Linux x64 GNU runner with 4 logical CPUs, 16 GiB, and
   local SSD. (needs human input)
+- `audit_lineage` reads the store once at the end of a repetition
+  (`crates/daemon/examples/eval_runner/qualification.rs:504`) and once at the
+  end of the outage run (`:647`). A publication that is duplicated and then
+  superseded, or raw history lost and re-ingested, before that observation
+  leaves no trace. Should the runner audit after every operation, at a cost
+  inside the latency gates, or keep an append-only publication trail?
+  (needs human input)
 - `WitnessRun` (`qualification.rs:64`) records a test name, a clean source
   commit, and an exit code; `QualificationReport::build` checks only the
   commit and the exit code. A `warm_acquisition` run recorded on another host

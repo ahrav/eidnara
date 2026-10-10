@@ -71,6 +71,23 @@ commit; a host that meets the required runner with no cgroup constraint.
 
 ## Investigation log
 
+### Q: Is lineage audited per operation?
+
+- Sources examined: `repetition` in
+  `crates/daemon/examples/eval_runner/qualification.rs:502` through `:505`,
+  the outage run at `:647` through `:653`, `observe` at `:283`.
+- Findings: `observe` reads `chunk_transcripts` and the `history_segments`
+  published after the seed from the store once, after the interactive
+  operations or the outage schedule finish; `audit_lineage` runs on that one
+  observation. Each publication is one row of `history_segments`, so the audit
+  catches every duplicate, overlap, loss, or gap that persists to the end of
+  the run. A violation repaired before the final observation leaves no row to
+  audit.
+- Missing evidence: an append-only publication trail, or an audit after every
+  operation.
+- Conclusion: needs human input - audit per operation at a latency cost, or
+  record a trail; the record's wording now states the end-of-run observation.
+
 ### Q: Does a recorded witness run prove its execution context?
 
 - Sources examined: `WitnessRun` (`qualification.rs:64`),

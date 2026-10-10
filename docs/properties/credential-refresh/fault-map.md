@@ -39,6 +39,10 @@ need the fault-free interval after it.
   ran under, so a `warm_acquisition` run from the wrong host or a debug build
   cannot clear `pending_witnesses`. Awaits the open question in the N13
   record.
+- An append-only publication trail or a per-operation `audit_lineage` call in
+  the campaign runner, so a transient duplicate or raw loss repaired before the
+  end-of-run observation still fails the run. Awaits the open question in the
+  N13 record.
 - A recorded campaign run on the dedicated runner, which is the only coverage
   N13 accepts.
 
