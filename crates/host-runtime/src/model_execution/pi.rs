@@ -199,9 +199,12 @@ struct PiRun {
 
 /// Pi tries the aliased provider first and retries the canonical provider once after a credential failure.
 /// Direct `openai` and `google` API-key users lack credentials under subscription-extension aliases.
-/// Pi tries each provider at most once.
-/// Both attempts share one wall-clock budget; the retry receives only the remainder.
-/// A first-attempt cleanup failure or retained crash-ownership record blocks the retry so retry success cannot mask disk or registry residue.
+/// A provider that rejects the requested temperature gets the request once more with no temperature, so
+/// models that accept only their native decoding still run; the retry keeps the attempt's provider.
+/// Each retry happens at most once, and every attempt shares one wall-clock budget: a retry receives only the remainder.
+/// A first-attempt cleanup failure or retained crash-ownership record blocks a retry so retry success cannot mask disk or registry residue.
+/// The request is cloned before an attempt only while a retry can still follow it, so a request with no alias and no
+/// temperature holds one prompt copy rather than two.
 async fn run_pi_with_provider_fallback(
     run: PiRun,
     request: BackendRequest,
@@ -210,45 +213,59 @@ async fn run_pi_with_provider_fallback(
 ) -> BackendTerminal {
     let aliased = pi_model_ref(&request.provider, &request.model);
     let canonical = format!("{}/{}", request.provider, request.model);
-    // Requests without an alias do not retry.
-    // The no-alias path creates no clone, so it holds one prompt copy rather than two.
-    if aliased == canonical {
-        return run_pi(run, request, events, cancel, aliased).await;
-    }
     let started = tokio::time::Instant::now();
-    let first = run_pi(
-        run.clone(),
-        request.clone(),
-        events.clone(),
-        cancel.clone(),
-        aliased,
-    )
-    .await;
-    // An attempt that left private prompt material on disk must surface its cleanup failure.
-    // A retained crash-ownership record blocks retry: success would replace the terminal before
-    // the supervisor latches the record.
-    let credential_failure = matches!(
-        &first,
-        BackendTerminal::Failed(error) if error.class == ErrorClass::AuthRequired
-            && !error.message.contains(subprocess::CLEANUP_FAILURE_MARKER)
-            && !error.message.contains(subprocess::RECORD_RETAINED_MARKER)
-    );
-    if !credential_failure || cancel.is_cancelled() {
-        return first;
-    }
-    let Some(remaining) = run.limits.run_timeout.checked_sub(started.elapsed()) else {
-        return first;
-    };
-    if remaining.is_zero() {
-        return first;
-    }
-    // The retry drops `first` before retrying to keep concurrent capture buffers within the declared headroom.
-    drop(first);
     let budget_end = started + run.limits.run_timeout;
-    let mut retry = run;
-    retry.limits.run_timeout = remaining;
-    retry.deadline = Some(budget_end);
-    run_pi(retry, request, events, cancel, canonical).await
+    let mut provider_retry = aliased != canonical;
+    let mut model_ref = aliased;
+    let mut request = request;
+    let mut attempt = run.clone();
+    loop {
+        let temperature_retry = request.temperature.is_some();
+        let next = (provider_retry || temperature_retry).then(|| request.clone());
+        let terminal = run_pi(
+            attempt,
+            request,
+            events.clone(),
+            cancel.clone(),
+            model_ref.clone(),
+        )
+        .await;
+        let Some(mut next) = next else {
+            return terminal;
+        };
+        let BackendTerminal::Failed(error) = &terminal else {
+            return terminal;
+        };
+        // An attempt that left private prompt material on disk must surface its cleanup failure.
+        // A retained crash-ownership record blocks retry: success would replace the terminal before
+        // the supervisor latches the record.
+        if error.message.contains(subprocess::CLEANUP_FAILURE_MARKER)
+            || error.message.contains(subprocess::RECORD_RETAINED_MARKER)
+            || cancel.is_cancelled()
+        {
+            return terminal;
+        }
+        if provider_retry && error.class == ErrorClass::AuthRequired {
+            provider_retry = false;
+            model_ref.clone_from(&canonical);
+        } else if temperature_retry && error.message == PI_TEMPERATURE_REJECTED_MESSAGE {
+            next.temperature = None;
+        } else {
+            return terminal;
+        }
+        let Some(remaining) = run.limits.run_timeout.checked_sub(started.elapsed()) else {
+            return terminal;
+        };
+        if remaining.is_zero() {
+            return terminal;
+        }
+        // The retry drops the failed terminal first to keep concurrent capture buffers within the declared headroom.
+        drop(terminal);
+        attempt = run.clone();
+        attempt.limits.run_timeout = remaining;
+        attempt.deadline = Some(budget_end);
+        request = next;
+    }
 }
 
 /// Bounds cleanup so a stalled filesystem cannot wedge the setup-abort path; an elapsed bound reports the cleanup as unproven.
@@ -689,6 +706,20 @@ fn parse_pi_transcript(stdout: &[u8]) -> Result<(Vec<BackendEvent>, BackendTermi
     Ok((text.into_iter().collect(), terminal))
 }
 
+/// `BackendError::message` of a Pi run whose provider refused the requested temperature for the model.
+const PI_TEMPERATURE_REJECTED_MESSAGE: &str = "pi provider rejected the requested temperature";
+
+/// Whether provider error text refuses the `temperature` parameter itself, as Bedrock does for a
+/// model that accepts only its native decoding (`temperature` is deprecated for this model) and
+/// OpenAI does for a reasoning model (Unsupported parameter: 'temperature').
+fn rejects_temperature(provider_text: &str) -> bool {
+    let lower = provider_text.to_ascii_lowercase();
+    lower.contains("temperature")
+        && ["deprecated", "not supported", "unsupported", "does not support"]
+            .iter()
+            .any(|phrase| lower.contains(phrase))
+}
+
 /// `message_end` and `agent_end` share this classification: `stop` and `length` succeed unless content requests tools; `error` and `aborted` fail; other spellings return `None`.
 ///
 /// The executor publishes only the winning decision's assistant text.
@@ -729,6 +760,17 @@ fn assistant_message_terminal(
                 .get("errorMessage")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
+            if reason == "error" && rejects_temperature(provider_text) {
+                return Ok(Some((
+                    None,
+                    BackendTerminal::Failed(BackendError {
+                        class: ErrorClass::Permanent,
+                        retry_after_secs: None,
+                        message: PI_TEMPERATURE_REJECTED_MESSAGE.to_owned(),
+                        provider_code: None,
+                    }),
+                )));
+            }
             Some((
                 None,
                 // The emitted message uses the stop reason rather than provider text.
@@ -788,6 +830,36 @@ fn message_requests_tools(message: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_temperature_is_its_own_pi_failure() {
+        for text in [
+            "The model returned the following errors: `temperature` is deprecated for this model.",
+            "Unsupported parameter: 'temperature' is not supported with this model.",
+            "This model does not support temperature",
+        ] {
+            assert!(rejects_temperature(text), "{text}");
+            let message = serde_json::json!({
+                "role": "assistant",
+                "stopReason": "error",
+                "errorMessage": text,
+                "content": [],
+            });
+            let Some((_, BackendTerminal::Failed(error))) =
+                assistant_message_terminal(&message, 1).expect("a known stop reason")
+            else {
+                panic!("expected a failed terminal for {text}");
+            };
+            assert_eq!(error.message, PI_TEMPERATURE_REJECTED_MESSAGE);
+        }
+        for text in [
+            "temperature must be at most 1",
+            "model not found: prov/typo",
+            "Unsupported parameter: 'top_k'",
+        ] {
+            assert!(!rejects_temperature(text), "{text}");
+        }
+    }
 
     /// The emitted message drops `errorMessage`, so a content refusal and a model the provider does not know arrive as the same string; neither can count against the chunk.
     #[test]

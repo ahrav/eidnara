@@ -154,6 +154,10 @@ fn main() {
             pi_alias_credential_failure_retries_canonical_provider,
         ),
         (
+            "pi_rejected_temperature_retries_without_temperature",
+            pi_rejected_temperature_retries_without_temperature,
+        ),
+        (
             "pi_project_pi_resources_ignored",
             pi_project_pi_resources_ignored,
         ),
@@ -627,6 +631,19 @@ mod fixture {
         std::process::exit(0);
     }
 
+    /// The provider refuses any request that carries a temperature and answers one without it.
+    fn temperature_rejected(out: PathBuf) -> ! {
+        let session = serde_json::json!({"type": "session", "id": "s", "version": "1", "timestamp": 1, "cwd": "/"});
+        let end = if std::env::var_os("EIDNARA_MODEL_EXECUTION_TEMPERATURE").is_some() {
+            fs::write(out.join("temperature-attempted"), b"1").expect("write temperature marker");
+            serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "The model returned the following errors: `temperature` is deprecated for this model.", "content": []}})
+        } else {
+            serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "native decoding answer"}]}})
+        };
+        emit_lines(&[session, serde_json::json!({"type": "agent_start"}), end]);
+        std::process::exit(0);
+    }
+
     /// Pi must drain the lingering failed invocation after its error terminal.
     /// The failed alias invocation exhausts the run budget.
     fn alias_auth_retry_lingering(out: PathBuf) -> ! {
@@ -801,6 +818,9 @@ mod fixture {
             }
             Ok("alias_auth_retry_lingering") => {
                 alias_auth_retry_lingering(out.expect("alias fixture needs an out dir"));
+            }
+            Ok("temperature_rejected") => {
+                temperature_rejected(out.expect("temperature fixture needs an out dir"));
             }
             Ok("error_then_retry_after_grace") => error_then_retry_after_grace(),
             Ok("hang_ignore_term") => hang_ignore_term(out),
@@ -2547,6 +2567,29 @@ fn pi_alias_credential_failure_retries_canonical_provider() {
     assert!(args.iter().any(|arg| arg == "openai/m"), "{args:?}");
     assert!(!args.iter().any(|arg| arg == "openai-codex/m"), "{args:?}");
     assert!(setup.out.path().join("alias-attempted").exists());
+}
+
+/// A provider that refuses the temperature for the model gets the request once more without it.
+fn pi_rejected_temperature_retries_without_temperature() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "temperature_rejected")],
+        Vec::new(),
+        None,
+    );
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "anthropic/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "native decoding answer")
+    ));
+    assert!(setup.out.path().join("temperature-attempted").exists());
 }
 
 /// `AuthRequired` received during Pi's shutdown gap must trigger the canonical retry.
