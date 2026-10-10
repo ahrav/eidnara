@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions, Permissions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
@@ -313,6 +313,69 @@ enum StoredIntent {
     Current(CurrentIntent),
 }
 
+impl StoredIntent {
+    fn decode(bytes: &[u8]) -> serde_json::Result<Self> {
+        if let Ok(current) = serde_json::from_slice(bytes) {
+            return Ok(Self::Current(current));
+        }
+        match serde_json::from_slice::<StoredKeys>(bytes) {
+            Ok(StoredKeys { current: true, .. }) => {
+                serde_json::from_slice(bytes).map(Self::Current)
+            }
+            Ok(StoredKeys {
+                deregistered: true, ..
+            }) => serde_json::from_slice(bytes).map(Self::Disabled),
+            Ok(_) => serde_json::from_slice(bytes).map(Self::Active),
+            Err(_) => serde_json::from_slice(bytes),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StoredKeys {
+    current: bool,
+    deregistered: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum StoredKey {
+    Current,
+    Deregistered,
+    #[serde(other)]
+    Other,
+}
+
+impl<'de> Deserialize<'de> for StoredKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Keys;
+        impl<'de> serde::de::Visitor<'de> for Keys {
+            type Value = StoredKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a control record object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<StoredKeys, A::Error> {
+                let mut keys = StoredKeys::default();
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        StoredKey::Current => keys.current = true,
+                        StoredKey::Deregistered => keys.deregistered = true,
+                        StoredKey::Other => {}
+                    }
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+                Ok(keys)
+            }
+        }
+        deserializer.deserialize_map(Keys)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CurrentIntent {
@@ -515,12 +578,57 @@ impl ProjectionLifecycle {
 
     /// Reads the record, keeping a record that could not be read apart from one that was read and rejected. `Err` is an I/O failure or a directory whose mode or owner is not the daemon's own; `open` or the next write repairs those, so a caller must not decide a durable stop from one. `Ok(Unavailable)` is a record whose bytes or own metadata were refused.
     pub(crate) fn probe_at(data_home: &Path) -> Result<ControlState, Unreadable> {
-        let bytes = match read_owner_only_record(&data_home.join(CONTROL_DIR), CONTROL_RECORD)? {
-            RecordRead::Absent => return Ok(ControlState::Absent),
-            RecordRead::Refused(reason) => return Ok(ControlState::Unavailable(reason.to_owned())),
+        Ok(
+            match read_owner_only_record(&data_home.join(CONTROL_DIR), CONTROL_RECORD)? {
+                RecordRead::Absent => ControlState::Absent,
+                RecordRead::Refused(reason) => ControlState::Unavailable(reason.to_owned()),
+                RecordRead::Bytes(bytes) => Self::decode_record(&bytes),
+            },
+        )
+    }
+
+    /// Whether the record at `record` under `dir` is a durable stop: a `Disabled` record, or one [`Self::probe_at`] reads and refuses. `cache` keeps the record open while its path still names it unchanged, and the last bytes this decoded with their verdict; [`Self::decode_record`] reads nothing but the bytes, so a record with the same bytes reuses that verdict.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::probe_at`].
+    pub(crate) fn probe_stop(
+        dir: &Path,
+        record: &Path,
+        cache: Option<&mut ControlCache>,
+    ) -> Result<bool, Unreadable> {
+        let Some(cache) = cache else {
+            return Ok(match read_owner_only_file(dir, record, None)? {
+                RecordRead::Absent => false,
+                RecordRead::Refused(_) => true,
+                RecordRead::Bytes(bytes) => Self::decodes_stop(&bytes),
+            });
+        };
+        let bytes = match read_owner_only_file(dir, record, Some(&mut cache.held))? {
+            RecordRead::Absent => return Ok(false),
+            RecordRead::Refused(_) => return Ok(true),
             RecordRead::Bytes(bytes) => bytes,
         };
-        Ok(match serde_json::from_slice::<StoredIntent>(&bytes) {
+        if let Some((decoded, stop)) = &cache.decoded
+            && *decoded == bytes
+        {
+            return Ok(*stop);
+        }
+        let stop = Self::decodes_stop(&bytes);
+        cache.decoded = Some((bytes, stop));
+        Ok(stop)
+    }
+
+    fn decodes_stop(bytes: &[u8]) -> bool {
+        matches!(
+            Self::decode_record(bytes),
+            ControlState::Disabled(_) | ControlState::Unavailable(_)
+        )
+    }
+
+    /// The state a record's bytes hold; anything short of a complete record of this schema is [`ControlState::Unavailable`].
+    fn decode_record(bytes: &[u8]) -> ControlState {
+        match StoredIntent::decode(bytes) {
             Ok(StoredIntent::Current(record)) => {
                 let intent = record.current;
                 if record.schema != CURRENT_SCHEMA
@@ -554,7 +662,7 @@ impl ProjectionLifecycle {
                 Err(reason) => ControlState::Unavailable(reason),
             },
             Err(_) => ControlState::Unavailable("malformed record".to_owned()),
-        })
+        }
     }
 
     /// Reads projection generation pins for a reclaimer holding the lifecycle transaction lock.
@@ -1297,6 +1405,13 @@ pub(crate) fn open_directory(dir: &Path) -> io::Result<File> {
         .open(dir)
 }
 
+/// What a gate keeps between admissions to read the control record: the record held open while its path still names it unchanged, and the last bytes it decoded with whether they hold a durable stop.
+#[derive(Default)]
+pub(crate) struct ControlCache {
+    held: Option<HeldRecord>,
+    decoded: Option<(Vec<u8>, bool)>,
+}
+
 /// Why a record could not be read: an I/O failure or a failed owner-only check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unreadable(pub(crate) String);
@@ -1314,16 +1429,52 @@ pub(crate) enum RecordRead {
 ///
 /// An I/O failure, or a directory whose mode or owner is not the caller's own, is [`Unreadable`]: the directory's opener or next write repairs those, so a caller must not decide a durable stop from one.
 pub(crate) fn read_owner_only_record(dir: &Path, record: &str) -> Result<RecordRead, Unreadable> {
-    let metadata = match open_directory(dir).and_then(|fd| fd.metadata()) {
-        Ok(metadata) => metadata,
+    read_owner_only_file(dir, &dir.join(record), None)
+}
+
+/// [`read_owner_only_record`] for the record path `record` under `dir`.
+fn read_owner_only_file(
+    dir: &Path,
+    record: &Path,
+    held: Option<&mut Option<HeldRecord>>,
+) -> Result<RecordRead, Unreadable> {
+    let euid = rustix::process::geteuid().as_raw();
+    let metadata = match fs::symlink_metadata(dir) {
+        Ok(metadata)
+            if owner_only_directory_of(&metadata, euid).is_ok()
+                && metadata.mode() & 0o500 == 0o500 =>
+        {
+            metadata
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RecordRead::Absent),
-        Err(error) => return Err(Unreadable(error.kind().to_string())),
+        _ => {
+            let metadata = match open_directory(dir).and_then(|fd| fd.metadata()) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(RecordRead::Absent);
+                }
+                Err(error) => return Err(Unreadable(error.kind().to_string())),
+            };
+            owner_only_directory_of(&metadata, euid)
+                .map_err(|reason| Unreadable(reason.to_owned()))?;
+            metadata
+        }
     };
-    owner_only_directory(&metadata).map_err(|reason| Unreadable(reason.to_owned()))?;
+    let mut held = held;
+    if let Some(slot) = held.as_deref_mut()
+        && let Some(open) = slot.as_ref()
+    {
+        match fs::symlink_metadata(record) {
+            Ok(current) if HeldKey::of(&current) == open.key => {
+                return read_open_record(&open.file, &current, euid);
+            }
+            _ => *slot = None,
+        }
+    }
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK).bits() as i32)
-        .open(dir.join(record))
+        .open(record)
     {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RecordRead::Absent),
@@ -1340,8 +1491,27 @@ pub(crate) fn read_owner_only_record(dir: &Path, record: &str) -> Result<RecordR
         Ok(metadata) => metadata,
         Err(error) => return Err(Unreadable(error.kind().to_string())),
     };
+    let read = read_open_record(&file, &metadata, euid)?;
+    if let (Some(slot), RecordRead::Bytes(_)) = (held, &read)
+        && page_cache_coherent(&file)
+    {
+        *slot = Some(HeldRecord {
+            key: HeldKey::of(&metadata),
+            file,
+        });
+    }
+    Ok(read)
+}
+
+/// The owner-only checks and the read of an open record whose metadata is `metadata`, from its first byte.
+fn read_open_record(
+    file: &File,
+    metadata: &fs::Metadata,
+    euid: u32,
+) -> Result<RecordRead, Unreadable> {
+    use std::os::unix::fs::FileExt;
     // Nothing repairs the record's own mode or owner, unlike the directory's, so this is a refused record rather than a transient failure.
-    if !metadata.is_file() || metadata.mode() & 0o077 != 0 || !owned_by_caller(&metadata) {
+    if !metadata.is_file() || metadata.mode() & 0o077 != 0 || metadata.uid() != euid {
         return Ok(RecordRead::Refused(
             "not the caller's own owner-only regular file",
         ));
@@ -1349,19 +1519,90 @@ pub(crate) fn read_owner_only_record(dir: &Path, record: &str) -> Result<RecordR
     if metadata.len() > MAX_RECORD_BYTES {
         return Ok(RecordRead::Refused("over the size cap"));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    if let Err(error) = (&file).take(MAX_RECORD_BYTES).read_to_end(&mut bytes) {
-        return Err(Unreadable(error.kind().to_string()));
+    let len = metadata.len() as usize;
+    let cap = MAX_RECORD_BYTES as usize;
+    // The extra byte lets the first read detect growth beyond the metadata length, subject to `MAX_RECORD_BYTES`.
+    let mut bytes = vec![0; (len + 1).min(cap)];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        match file.read_at(&mut bytes[filled..], filled as u64) {
+            Ok(0) => break,
+            Ok(read) => {
+                filled += read;
+                if filled == len {
+                    break;
+                }
+                if filled == bytes.len() && filled < cap {
+                    bytes.resize((filled * 2).min(cap), 0);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(Unreadable(error.kind().to_string())),
+        }
     }
+    bytes.truncate(filled);
     Ok(RecordRead::Bytes(bytes))
+}
+
+/// A control record a gate keeps open between admissions, and the metadata it was opened under.
+pub(crate) struct HeldRecord {
+    file: File,
+    key: HeldKey,
+}
+
+/// The metadata a held record must still show at its path before it is read again: the same inode, file type and mode, owner, and change time. A chmod, chown, ACL or label change, or a link or rename of the inode updates the change time.
+#[derive(PartialEq, Eq)]
+struct HeldKey {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    uid: u32,
+    ctime: i64,
+    ctime_nsec: i64,
+}
+
+impl HeldKey {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+}
+
+/// Whether every read of `file` returns the bytes a fresh open of its inode would: a local filesystem whose page cache all readers share. Network, FUSE, and stacked filesystems revalidate on open or keep a reader on another inode, so their records are opened again for each read.
+#[cfg(target_os = "linux")]
+fn page_cache_coherent(file: &File) -> bool {
+    const LOCAL: [u64; 4] = [
+        0x0000_ef53, // ext2, ext3, ext4
+        0x5846_5342, // XFS
+        0x9123_683e, // Btrfs
+        0x0102_1994, // tmpfs
+    ];
+    // `FsWord` is `c_long`; masking to 32 bits keeps magic values above `i32::MAX` intact on 32-bit targets.
+    rustix::fs::fstatfs(file).is_ok_and(|fs| LOCAL.contains(&(fs.f_type as u64 & 0xffff_ffff)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn page_cache_coherent(_file: &File) -> bool {
+    false
 }
 
 /// Requires the caller's own directory with no group or other permission bits; every reader and the opener judge the directory by this one predicate.
 pub(crate) fn owner_only_directory(metadata: &fs::Metadata) -> Result<(), &'static str> {
+    owner_only_directory_of(metadata, rustix::process::geteuid().as_raw())
+}
+
+/// [`owner_only_directory`] for a caller whose effective uid is `euid`.
+fn owner_only_directory_of(metadata: &fs::Metadata, euid: u32) -> Result<(), &'static str> {
     if !metadata.is_dir() {
         return Err("the lifecycle path is not a directory");
     }
-    if !owned_by_caller(metadata) {
+    if metadata.uid() != euid {
         return Err("the lifecycle directory is not the caller's own");
     }
     if metadata.mode() & 0o077 != 0 {
@@ -1389,5 +1630,261 @@ fn store_refusal(error: StoreError) -> IntentRefusal {
             IntentRefusal::DurabilityUnknown(error.kind().to_string())
         }
         other => IntentRefusal::Io(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{
+        ACTIVE_SCHEMA, CURRENT_SCHEMA, Cause, ConsumerBinding, CurrentIntent, DISABLED_SCHEMA,
+        DisabledIntent, EpisodeAccounting, LifecycleIntent, RecoveryTarget, StoredIntent,
+        Transition,
+    };
+
+    fn active() -> LifecycleIntent {
+        LifecycleIntent {
+            schema: ACTIVE_SCHEMA,
+            transition: Transition::Rebuilding,
+            selected_generation: "generation".to_owned(),
+            kernel_incarnation_id: "kernel".to_owned(),
+            consumer: ConsumerBinding {
+                consumer_id: "consumer".to_owned(),
+                generation_id: "generation".to_owned(),
+            },
+            cause: Cause::Registration,
+            attempt_id: "attempt".to_owned(),
+            recovery_target: Some(RecoveryTarget { commit_seq: 3 }),
+            episodes: EpisodeAccounting {
+                allowance: 2,
+                consumed: 1,
+                deadline: 9,
+            },
+            authorization_ref: None,
+            staged_seed_digest: None,
+            replacement_capture: None,
+            recorded_at: 1,
+            prior_disabled: None,
+        }
+    }
+
+    /// The variant and content a decode yields; every decode error reads the same, as `probe_at` reports each as one malformed record.
+    fn decoded(result: serde_json::Result<StoredIntent>) -> Option<(&'static str, Value)> {
+        Some(match result.ok()? {
+            StoredIntent::Active(intent) => ("active", serde_json::to_value(intent).unwrap()),
+            StoredIntent::Disabled(intent) => ("disabled", serde_json::to_value(intent).unwrap()),
+            StoredIntent::Current(intent) => ("current", serde_json::to_value(intent).unwrap()),
+        })
+    }
+
+    /// Each stored record, each with a key removed, retyped, or added, records naming another variant's distinguishing key, and inputs that are not one JSON object.
+    fn corpus() -> Vec<Vec<u8>> {
+        let disabled = DisabledIntent {
+            schema: DISABLED_SCHEMA,
+            handoff: Some(Box::new(active())),
+            recorded_at: 2,
+            episodes: None,
+            through: Some(4),
+            deregistered: true,
+        };
+        let current = CurrentIntent {
+            schema: CURRENT_SCHEMA,
+            current: active(),
+        };
+        let bases = [
+            serde_json::to_value(active()).unwrap(),
+            serde_json::to_value(disabled).unwrap(),
+            serde_json::to_value(current).unwrap(),
+        ];
+        let mut values = Vec::new();
+        for base in &bases {
+            values.push(base.clone());
+            let fields = base.as_object().unwrap();
+            values.push(Value::Array(fields.values().cloned().collect()));
+            for key in fields.keys() {
+                let mut removed = base.clone();
+                removed.as_object_mut().unwrap().remove(key);
+                values.push(removed);
+                for replacement in [json!(null), json!("x"), json!(4.0), json!(-1), json!([])] {
+                    let mut retyped = base.clone();
+                    retyped[key] = replacement;
+                    values.push(retyped);
+                }
+            }
+            for (key, value) in [
+                ("current", serde_json::to_value(active()).unwrap()),
+                ("deregistered", json!(false)),
+                ("unknown", json!(1)),
+            ] {
+                let mut added = base.clone();
+                added[key] = value;
+                values.push(added);
+            }
+        }
+        let mut corpus: Vec<Vec<u8>> = values
+            .iter()
+            .flat_map(|value| {
+                [
+                    serde_json::to_vec(value).unwrap(),
+                    serde_json::to_vec_pretty(value).unwrap(),
+                ]
+            })
+            .collect();
+        let current = serde_json::to_string(&bases[2]).unwrap();
+        let disabled = serde_json::to_string(&bases[1]).unwrap();
+        corpus.extend(
+            [
+                current.replacen("\"current\"", "\"curr\\u0065nt\"", 1),
+                disabled.replacen("\"deregistered\"", "\"d\\u0065registered\"", 1),
+                current.replacen('{', "{\"schema\":4,", 1),
+                disabled.replacen('{', "{\"deregistered\":true,", 1),
+                format!("{current} "),
+                format!("{current}{{}}"),
+                format!("[{current}]"),
+                current[..current.len() - 1].to_owned(),
+                "{}".to_owned(),
+                "null".to_owned(),
+                "4".to_owned(),
+                String::new(),
+            ]
+            .map(String::into_bytes),
+        );
+        corpus
+    }
+
+    #[test]
+    fn decode_selects_the_variant_the_untagged_enum_selects() {
+        let mut variants = std::collections::BTreeSet::new();
+        for bytes in corpus() {
+            let expected = decoded(serde_json::from_slice::<StoredIntent>(&bytes));
+            assert_eq!(
+                decoded(StoredIntent::decode(&bytes)),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            variants.extend(expected.map(|(variant, _)| variant));
+        }
+        assert_eq!(
+            variants.into_iter().collect::<Vec<_>>(),
+            ["active", "current", "disabled"]
+        );
+    }
+
+    /// `probe_stop` with a gate's cache agrees with `probe_at` on every record state a gate can meet: absent, current, rewritten in place or by rename, disabled, refused by mode or owner-only checks, malformed, unlinked, and replaced by a symlink.
+    #[test]
+    fn a_cached_stop_verdict_follows_the_record() {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+        use super::{
+            CONTROL_DIR, CONTROL_RECORD, ControlCache, ControlState, ProjectionLifecycle,
+            page_cache_coherent,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let dir = home.join(CONTROL_DIR);
+        let record = dir.join(CONTROL_RECORD);
+        let mut completed = active();
+        completed.staged_seed_digest = Some("a".repeat(64));
+        let current = serde_json::to_vec(&CurrentIntent {
+            schema: CURRENT_SCHEMA,
+            current: completed.clone(),
+        })
+        .unwrap();
+        completed.attempt_id = "another-attempt".to_owned();
+        let rewritten = serde_json::to_vec(&CurrentIntent {
+            schema: CURRENT_SCHEMA,
+            current: completed,
+        })
+        .unwrap();
+        let disabled = serde_json::to_vec(&DisabledIntent {
+            schema: DISABLED_SCHEMA,
+            handoff: Some(Box::new(active())),
+            recorded_at: 2,
+            episodes: None,
+            through: None,
+            deregistered: false,
+        })
+        .unwrap();
+        let renamed = |bytes: &[u8]| {
+            let staged = dir.join("staged");
+            std::fs::write(&staged, bytes).unwrap();
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::rename(&staged, &record).unwrap();
+        };
+        let in_place = |bytes: &[u8]| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&record)
+                .unwrap();
+            file.write_all(bytes).unwrap();
+        };
+        let mode = |mode: u32| {
+            std::fs::set_permissions(&record, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let mut cache = ControlCache::default();
+        let mut check = |expected: Option<bool>| {
+            let stop = ProjectionLifecycle::probe_stop(&dir, &record, Some(&mut cache)).ok();
+            let state = ProjectionLifecycle::probe_at(home);
+            let reference = state.as_ref().ok().map(|state| {
+                matches!(
+                    state,
+                    ControlState::Disabled(_) | ControlState::Unavailable(_)
+                )
+            });
+            assert_eq!(stop, reference, "{state:?}");
+            assert_eq!(stop, expected, "{state:?}");
+            cache.held.is_some()
+        };
+
+        check(Some(false));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        check(Some(false));
+        renamed(&current);
+        check(Some(false));
+        let held = check(Some(false));
+        let coherent = page_cache_coherent(&std::fs::File::open(&record).unwrap());
+        assert_eq!(held, coherent);
+        in_place(&disabled);
+        check(Some(true));
+        in_place(&current);
+        check(Some(false));
+        renamed(&rewritten);
+        check(Some(false));
+        renamed(&disabled);
+        check(Some(true));
+        renamed(&current);
+        check(Some(false));
+        mode(0o644);
+        check(Some(true));
+        // The owner cannot read a write-only record unless the daemon runs with the capability to override that, so the verdict here is `probe_at`'s alone.
+        mode(0o200);
+        let unreadable = ProjectionLifecycle::probe_at(home).map(|state| {
+            matches!(
+                state,
+                ControlState::Disabled(_) | ControlState::Unavailable(_)
+            )
+        });
+        check(unreadable.ok());
+        mode(0o600);
+        check(Some(false));
+        in_place(&current[..current.len() - 1]);
+        check(Some(true));
+        in_place(&current);
+        check(Some(false));
+        std::fs::remove_file(&record).unwrap();
+        check(Some(false));
+        let target = dir.join("target");
+        std::fs::write(&target, &current).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&target, &record).unwrap();
+        check(None);
+        std::fs::remove_file(&record).unwrap();
+        renamed(&current);
+        check(Some(false));
     }
 }

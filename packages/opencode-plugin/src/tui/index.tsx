@@ -741,6 +741,14 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <b>Model Execution</b>
                 </text>
                 <R t={t()} l="AWS credentials" v={s().awsCredentials} fg={t().textMuted} />
+                {s().searchAdmission && (
+                    <R
+                        t={t()}
+                        l="Search admission"
+                        v={s().searchAdmission ?? ""}
+                        fg={t().textMuted}
+                    />
+                )}
             </box>
 
             <box marginTop={1} width="100%">

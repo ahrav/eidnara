@@ -134,7 +134,8 @@ async fn scope_harness_and_disable_are_decided_before_any_candidate_read() {
     claimed["harness"] = json!("test");
     let passed = body(daemon.outcome(claimed).await);
     assert_eq!(terminal(&passed), "lane_unavailable");
-    assert_eq!(passed["reason"], "no_family");
+    // No admission records are installed, so the refusal names the missing manifest.
+    assert_eq!(passed["reason"], "no_manifest");
 
     let mut missing = request(&project, "id:rule");
     missing.as_object_mut().unwrap().remove("remaining_ms");
@@ -593,5 +594,210 @@ async fn committed_memories_are_served_with_canonical_references_under_productio
         assert_eq!(entry["canonical"]["source_revision"], 1, "{served}");
     }
     assert!(serde_json::to_vec(&served).unwrap().len() <= 65_536);
+    daemon.shutdown().await;
+}
+
+/// The `search_admission` block `session.status` reports.
+async fn search_admission(daemon: &KernelDaemon) -> Value {
+    let status = daemon
+        .call(json!({"method": "session.status", "v": 1, "session_id": SESSION}))
+        .await;
+    status["search_admission"].clone()
+}
+
+/// Polls `session.status` until its `search_admission` block equals `expected`.
+async fn await_admission(daemon: &KernelDaemon, expected: Value) {
+    let started = Instant::now();
+    loop {
+        let admission = search_admission(daemon).await;
+        if admission == expected {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "search admission stayed {admission}, expected {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// AC2: installed records that are absent, malformed, readable by others, bound to another identity, or carry failed harness evidence enable no hook, and both `session.status` and the route's refusal name the admission failure by its code. Neither carries the records' content.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn refused_records_name_the_admission_failure_in_status_and_route() {
+    for (label, expected) in [
+        ("absent", "no_manifest"),
+        ("malformed", "records_malformed"),
+        ("wrongly owned", "records_refused"),
+        ("stale identity", ""),
+        ("failed harness", "evidence_failed"),
+    ] {
+        let data = tempfile::tempdir().unwrap();
+        let home = data.path().to_owned();
+        let kernel_root = home.join("eidnara").join("context");
+        drop(KernelStore::open(kernel_root.join("kernel")).unwrap());
+        let current = identity(&kernel_incarnation_id(&kernel_root));
+        let mut written = None;
+        match label {
+            "failed harness" => {
+                let mut campaign = campaign_json(&current);
+                let harness = campaign["harness_runs"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                    .next()
+                    .unwrap();
+                *harness = json!({"outcome": "failed"});
+                let manifest = manifest_json_with(&current, &ProjectionHook::ALL, &[]);
+                write_records(&home, &manifest, &campaign);
+                written = Some(campaign);
+            }
+            "malformed" => {
+                support::projection_gate::write_record(
+                    &home,
+                    daemon::projection_admission::MANIFEST_RECORD,
+                    b"{\"protocol_version\": sentinel-record-content",
+                );
+                write_records(
+                    &home,
+                    &json!({"sentinel-record-content": true}),
+                    &campaign_json(&current),
+                );
+            }
+            "wrongly owned" => {
+                write_records(
+                    &home,
+                    &manifest_json_with(&current, &ProjectionHook::ALL, &[]),
+                    &campaign_json(&current),
+                );
+                let manifest = home
+                    .join(daemon::projection_admission::ADMISSION_DIR)
+                    .join(daemon::projection_admission::MANIFEST_RECORD);
+                std::fs::set_permissions(
+                    &manifest,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o644),
+                )
+                .unwrap();
+            }
+            "stale identity" => {
+                // Records gathered under another vector generation epoch than the lane's.
+                let mut stale = current.clone();
+                stale.generation_epoch += 1;
+                let campaign = campaign_json(&stale);
+                write_records(
+                    &home,
+                    &manifest_json_with(&stale, &ProjectionHook::ALL, &[]),
+                    &campaign,
+                );
+                written = Some(campaign);
+            }
+            _ => {}
+        }
+        let daemon = KernelDaemon::start_in(data, None).await;
+        daemon
+            .handler()
+            .set_query_route_limits(Some(limits()))
+            .unwrap();
+        // The stale case is refused on the manifest's or the evidence's identity, whichever the gate reaches first.
+        let accepts = |reason: &str| match expected {
+            "" => ["manifest_identity", "evidence_identity"].contains(&reason),
+            expected => reason == expected,
+        };
+        let started = Instant::now();
+        let reason = loop {
+            let admission = search_admission(&daemon).await;
+            if admission["state"] == "refused" && admission["reason"].as_str().is_some_and(accepts)
+            {
+                break admission["reason"].as_str().unwrap().to_owned();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "{label}: admission stayed {admission}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let project = daemon.project().to_owned();
+        let refused = body(daemon.outcome(request(&project, "anything")).await);
+        assert_eq!(terminal(&refused), "lane_unavailable", "{label}: {refused}");
+        assert_eq!(refused["reason"], reason.as_str(), "{label}: {refused}");
+        let shown = refused.to_string() + &search_admission(&daemon).await.to_string();
+        assert!(
+            !shown.contains("sentinel-record-content"),
+            "{label}: {shown}"
+        );
+        if written.is_some() {
+            for content in [
+                current.tokenizer_fingerprint.as_str(),
+                current.embedding_model.as_str(),
+                "passed",
+            ] {
+                assert!(
+                    !shown.contains(content),
+                    "{label}: the refusal exposes record content {content:?}: {shown}"
+                );
+            }
+        }
+        daemon.shutdown().await;
+    }
+}
+
+/// AC1, AC5: installed records alone, with no recorded request and no test registration helper, register the projection through the daemon's own slice loop; `session.status` moves from refused to admitted and the route serves a fused answer from the registered family. An always-disabled registration would leave the route refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn installed_records_alone_register_a_family_the_route_serves() {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let kernel_root = home.join("eidnara").join("context");
+    drop(KernelStore::open(kernel_root.join("kernel")).unwrap());
+    let current = identity(&kernel_incarnation_id(&kernel_root));
+    write_records(
+        &home,
+        &manifest_json_with(&current, &ProjectionHook::ALL, &[]),
+        &campaign_json(&current),
+    );
+    let daemon = KernelDaemon::start_in(data, None).await;
+    daemon
+        .handler()
+        .set_query_route_limits(Some(limits()))
+        .unwrap();
+    await_admission(&daemon, json!({"state": "admitted"})).await;
+    let lifecycle = support::flock::open_lifecycle(&home);
+    let started = Instant::now();
+    let project = daemon.project().to_owned();
+    let fused = loop {
+        let answer = body(
+            daemon
+                .outcome(request(&project, "id:rule explicit contract"))
+                .await,
+        );
+        if answer["kind"] == "fused" {
+            break answer;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the registered family never served: {answer}, {:?}",
+            lifecycle.read()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(fused["lanes"]["exact"]["status"], "complete", "{fused}");
+    let current = loop {
+        if let ControlState::Current(current) = lifecycle.read() {
+            break current;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the registration never reached Current: {:?}",
+            lifecycle.read()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(current.cause, Cause::Registration);
+    assert_eq!(
+        body(
+            daemon
+                .outcome(request(&project, "id:rule explicit contract"))
+                .await
+        )["kind"],
+        "fused"
+    );
     daemon.shutdown().await;
 }

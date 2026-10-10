@@ -318,11 +318,29 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
+        self.admit_reader(gate)
+    }
+
+    pub(crate) fn admit_selected_hooks(&self, gate: &HookGate) -> Result<(), BuildError> {
+        self.admit_reader(gate)?;
+        let family = self
+            .selected
+            .load_full()
+            .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        admit_transition_hook(gate, &family.certificate)
+    }
+
+    /// The admission every reader of this manager's family takes: the gate's hook admission for this data home, then the family's limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the gate's denial.
+    pub(crate) fn admit_reader(&self, gate: &HookGate) -> Result<Admission, BuildError> {
         gate.require_selection_home(&self.data_home)?;
-        let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
-        gate.check_limits(
-            &grant,
-            &InvalidationIdentity::from(&self.identity),
+        Ok(gate.admit_within_limits(
+            ProjectionHook::EmbeddingBootstrap,
+            EntryPoint::Reload,
+            &self.identity,
             &[
                 ("local_transaction_rows", self.bounds.max_rows() as u64),
                 (
@@ -330,8 +348,7 @@ impl SearchSelection {
                     self.bounds.max_live_per_class.get() as u64,
                 ),
             ],
-        )?;
-        Ok(grant)
+        )?)
     }
 
     /// Publishes the durable pointer before swapping the in-process family; errors require reconciliation through `reopen`.

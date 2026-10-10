@@ -654,6 +654,30 @@ pub enum Denial {
     },
 }
 
+impl Denial {
+    /// The stable code a status surface or a route refusal reports for this denial. It names the gate or condition, never a record's content.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RecoveryRequired => "recovery_required",
+            Self::ControlUnreadable(_) => "control_unreadable",
+            Self::Invalidated => "invalidated",
+            Self::NoManifest => "no_manifest",
+            Self::Disabled(_) => "hook_disabled",
+            Self::ManifestIdentity => "manifest_identity",
+            Self::EvidenceIdentity => "evidence_identity",
+            Self::Missing(_) => "evidence_missing",
+            Self::Failed(..) => "evidence_failed",
+            Self::Stale { .. } => "coverage_stale",
+            Self::UnapprovedObserver(_) => "unapproved_observer",
+            Self::Unsupported { .. } => "capability_unsupported",
+            Self::LimitExceeded { .. } => "limit_exceeded",
+            Self::CompressionDisabled => "compression_disabled",
+            Self::Revoked => "compression_revoked",
+            Self::LimitChanged { .. } => "limit_changed",
+        }
+    }
+}
+
 /// A grant. `invalidated` fires when the gate's manifest or identity changes after the grant; the holder cancels its budget and lets admitted work join.
 #[derive(Debug, Clone)]
 pub struct Admission {
@@ -834,7 +858,7 @@ impl EvidenceEvaluator {
     ) -> Result<(), Denial> {
         // The report carries the projection identity it was read under and the registered generation its counts were taken for; a report for an older generation still names the current identity, so both are bound.
         let generation = &coverage.report.generation;
-        if InvalidationIdentity::from(&coverage.report.identity) != self.current
+        if self.current != coverage.report.identity
             || generation.embedding_model != self.current.embedding_model
             || generation.tokenizer_fingerprint != self.current.tokenizer_fingerprint
             || generation.vector_dimension != self.current.vector_dimension
@@ -896,13 +920,18 @@ impl EvidenceEvaluator {
     }
 
     fn capability(&self) -> Result<(), Denial> {
-        for capability in CAPABILITIES {
-            for harness in HARNESSES {
-                let proved = self
-                    .evidence
-                    .capabilities
-                    .get(&(harness.to_owned(), capability.name.to_owned()))
-                    .copied();
+        let mut proved = [[None; HARNESSES.len()]; CAPABILITIES.len()];
+        for ((harness, capability), evidence) in &self.evidence.capabilities {
+            let harness = HARNESSES.iter().position(|known| known == harness);
+            let capability = CAPABILITIES
+                .iter()
+                .position(|known| known.name == capability);
+            if let (Some(harness), Some(capability)) = (harness, capability) {
+                proved[capability][harness] = Some(*evidence);
+            }
+        }
+        for (capability, proved) in CAPABILITIES.iter().zip(proved) {
+            for (harness, proved) in HARNESSES.into_iter().zip(proved) {
                 let ok = match capability.disposition {
                     CapabilityDisposition::Required => {
                         proved == Some(CapabilityEvidence::Supported)
@@ -938,6 +967,40 @@ impl EvidenceEvaluator {
     }
 }
 
+impl PartialEq<ProjectionIdentity> for InvalidationIdentity {
+    // `PartialEq` and `From` use exhaustive patterns, so a field added to `ProjectionIdentity` requires review in both implementations.
+    fn eq(&self, identity: &ProjectionIdentity) -> bool {
+        let ProjectionIdentity {
+            schema_version,
+            kernel_incarnation_id: _,
+            projection_policy_version,
+            identity_contract_version,
+            limit_manifest_protocol_version,
+            embedding_model,
+            tokenizer_fingerprint,
+            analysis_identity,
+            vector_dimension,
+            generation_epoch,
+        } = identity;
+        self.schema_version == *schema_version
+            && self.tokenizer_fingerprint == *tokenizer_fingerprint
+            && self.analysis_identity == *analysis_identity
+            && self.embedding_model == *embedding_model
+            && self.projection_policy_version == *projection_policy_version
+            && self.identity_contract_version == *identity_contract_version
+            && self.limit_manifest_protocol_version == *limit_manifest_protocol_version
+            && self.vector_dimension == *vector_dimension
+            && self.generation_epoch == *generation_epoch
+    }
+}
+
+fn judge_all(evaluator: &EvidenceEvaluator) -> Vec<Result<(), Denial>> {
+    ProjectionHook::ALL
+        .iter()
+        .map(|hook| evaluator.judge(*hook))
+        .collect()
+}
+
 /// One admission request the gate judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
@@ -948,12 +1011,31 @@ pub struct LedgerEntry {
 
 struct GateState {
     evaluator: Option<EvidenceEvaluator>,
+    /// `evaluator`'s [`EvidenceEvaluator::judge`] verdict for each hook, in [`ProjectionHook::ALL`] order, judged when `evaluator` is set. A verdict depends on the evaluator alone, so it holds until the evaluator is replaced.
+    verdicts: Vec<Result<(), Denial>>,
+    /// What admissions keep between them to read the control record.
+    control_cache: crate::projection_lifecycle::ControlCache,
     disabled: bool,
     /// The token every grant under `evaluator` carries; replaced with the evaluator.
     invalidated: CancellationToken,
 }
 
 impl GateState {
+    fn set_evaluator(&mut self, evaluator: Option<EvidenceEvaluator>) {
+        self.verdicts = evaluator.as_ref().map_or_else(Vec::new, judge_all);
+        self.evaluator = evaluator;
+    }
+
+    /// The installed evaluator's verdict for `hook`; [`Denial::NoManifest`] without one.
+    fn verdict(&self, hook: ProjectionHook) -> Result<(), Denial> {
+        ProjectionHook::ALL
+            .iter()
+            .position(|known| *known == hook)
+            .and_then(|index| self.verdicts.get(index))
+            .cloned()
+            .unwrap_or(Err(Denial::NoManifest))
+    }
+
     /// Cancels every outstanding grant and starts a token for the next ones. A disable cancels without starting one, which is what keeps the gate latched.
     fn invalidate_grants(&mut self) {
         self.invalidated.cancel();
@@ -965,6 +1047,8 @@ impl GateState {
 pub struct HookGate {
     state: Mutex<GateState>,
     data_home: Option<PathBuf>,
+    /// The lifecycle control directory under `data_home` and its record's path, which every admission reads.
+    control: Option<(PathBuf, PathBuf)>,
     #[cfg(feature = "test-support")]
     ledger: Mutex<Vec<LedgerEntry>>,
 }
@@ -972,8 +1056,12 @@ pub struct HookGate {
 impl HookGate {
     /// Stores the data home so admission checks consult durable lifecycle state.
     pub fn for_home(data_home: &Path) -> Self {
+        use crate::projection_lifecycle::{CONTROL_DIR, CONTROL_RECORD};
+        let dir = data_home.join(CONTROL_DIR);
+        let record = dir.join(CONTROL_RECORD);
         Self {
             data_home: Some(data_home.to_owned()),
+            control: Some((dir, record)),
             ..Self::empty()
         }
     }
@@ -987,8 +1075,11 @@ impl HookGate {
     fn empty() -> Self {
         Self {
             data_home: None,
+            control: None,
             state: Mutex::new(GateState {
                 evaluator: None,
+                verdicts: Vec::new(),
+                control_cache: Default::default(),
                 disabled: false,
                 invalidated: CancellationToken::new(),
             }),
@@ -1009,14 +1100,17 @@ impl HookGate {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let verdicts = judge_all(&evaluator);
         let renewal = if state.disabled {
             Renewal::Disabled
         } else if state.evaluator.as_ref().is_none_or(|old| {
             old.manifest == evaluator.manifest
                 && old.current == evaluator.current
-                && ProjectionHook::ALL
+                && state
+                    .verdicts
                     .iter()
-                    .all(|hook| old.judge(*hook).is_err() || evaluator.judge(*hook).is_ok())
+                    .zip(&verdicts)
+                    .all(|(old, new)| old.is_err() || new.is_ok())
                 && (old.judge_compressed_activation().is_err()
                     || (evaluator.judge_compressed_activation().is_ok()
                         && old.binding == evaluator.binding))
@@ -1027,6 +1121,7 @@ impl HookGate {
             Renewal::Invalidated
         };
         state.evaluator = Some(evaluator);
+        state.verdicts = verdicts;
         renewal
     }
 
@@ -1050,22 +1145,19 @@ impl HookGate {
 
     /// Consults the durable record before an admission. A `Disabled` record, or one that was read and refused, latches the gate closed; a record that could not be read denies only this call, since the next lifecycle open or write repairs it and no durable stop exists.
     /// The caller holds `state` across the probe and the latch, so `authorized_recovery`, which persists the recovered record under the same lock, cannot interleave with a stale observation.
-    fn observe_stop(&self, state: Option<&mut GateState>) -> Result<(), Denial> {
-        use crate::projection_lifecycle::{ControlState, ProjectionLifecycle, Unreadable};
-        let Some(home) = &self.data_home else {
+    fn observe_stop(&self, mut state: Option<&mut GateState>) -> Result<(), Denial> {
+        use crate::projection_lifecycle::{ProjectionLifecycle, Unreadable};
+        let Some((dir, record)) = &self.control else {
             return Ok(());
         };
-        match ProjectionLifecycle::probe_at(home) {
-            Ok(ControlState::Absent | ControlState::Intent(_) | ControlState::Current(_)) => Ok(()),
-            Ok(ControlState::Disabled(_) | ControlState::Unavailable(_)) => {
-                if let Some(state) = state {
-                    state.disabled = true;
-                    state.invalidated.cancel();
-                }
-                Ok(())
-            }
-            Err(Unreadable(reason)) => Err(Denial::ControlUnreadable(reason)),
+        let cache = state.as_deref_mut().map(|state| &mut state.control_cache);
+        let stop = ProjectionLifecycle::probe_stop(dir, record, cache)
+            .map_err(|Unreadable(reason)| Denial::ControlUnreadable(reason))?;
+        if stop && let Some(state) = state {
+            state.disabled = true;
+            state.invalidated.cancel();
         }
+        Ok(())
     }
 
     pub(crate) fn authorized_recovery(
@@ -1090,7 +1182,7 @@ impl HookGate {
             ProjectionHook::EmbeddingBootstrap,
             ProjectionHook::EmbeddingBackfill,
         ] {
-            evaluator.judge(hook).map_err(IntentRefusal::Denied)?;
+            state.verdict(hook).map_err(IntentRefusal::Denied)?;
         }
         persist()?;
         state.invalidate_grants();
@@ -1106,17 +1198,7 @@ impl HookGate {
     ) -> Result<(), Denial> {
         let state = self.cleanup_state(expected)?;
         let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
-        for &(name, observed) in requested {
-            let max = evaluator.limit(name)?;
-            if observed > max {
-                return Err(Denial::LimitExceeded {
-                    limit: name.to_owned(),
-                    observed,
-                    max,
-                });
-            }
-        }
-        Ok(())
+        requested_within(evaluator, requested)
     }
 
     pub(crate) fn cleanup_envelope(
@@ -1163,7 +1245,7 @@ impl HookGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.invalidate_grants();
-        state.evaluator = evaluator;
+        state.set_evaluator(evaluator);
     }
 
     /// Every request judged so far, oldest first.
@@ -1198,8 +1280,8 @@ impl HookGate {
                 if state.disabled {
                     return Err(Denial::RecoveryRequired);
                 }
-                let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
-                evaluator.judge(*hook)?;
+                state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+                state.verdict(*hook)?;
                 Ok(Admission {
                     hook: *hook,
                     entry,
@@ -1231,6 +1313,59 @@ impl HookGate {
     pub fn admit(&self, hook: ProjectionHook, entry: EntryPoint) -> Result<Admission, Denial> {
         self.admit_all(&[hook], entry)
             .map(|mut admissions| admissions.remove(0))
+    }
+
+    /// Admits `hook` at `entry` and checks `expected` and `requested` as [`Self::check_limits`] does, under one gate-state lock. With `test-support`, the ledger records the admission verdict.
+    ///
+    /// # Errors
+    ///
+    /// Returns the admission's [`Denial`] when admission fails; otherwise the first denial of the invalidation, identity, or limit checks.
+    pub(crate) fn admit_within_limits(
+        &self,
+        hook: ProjectionHook,
+        entry: EntryPoint,
+        expected: &ProjectionIdentity,
+        requested: &[(&str, u64)],
+    ) -> Result<Admission, Denial> {
+        let mut state: Option<MutexGuard<'_, GateState>> = self.state.lock().ok();
+        let observed = self.observe_stop(state.as_deref_mut());
+        let judged = observed.and_then(|()| {
+            let state = state.as_deref().ok_or(Denial::NoManifest)?;
+            if state.disabled {
+                return Err(Denial::RecoveryRequired);
+            }
+            let evaluator = state.evaluator.as_ref().ok_or(Denial::NoManifest)?;
+            state.verdict(hook)?;
+            Ok((state, evaluator))
+        });
+        #[cfg(feature = "test-support")]
+        let admitted = judged.as_ref().map(|_| ()).map_err(Clone::clone);
+        let verdict = judged.and_then(|(state, evaluator)| {
+            let grant = Admission {
+                hook,
+                entry,
+                invalidated: state.invalidated.clone(),
+            };
+            if grant.invalidated.is_cancelled() {
+                return Err(Denial::Invalidated);
+            }
+            if evaluator.current != *expected {
+                return Err(Denial::EvidenceIdentity);
+            }
+            requested_within(evaluator, requested)?;
+            Ok(grant)
+        });
+        drop(state);
+        #[cfg(feature = "test-support")]
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(LedgerEntry {
+                hook,
+                entry,
+                verdict: admitted,
+            });
+        verdict
     }
 
     /// Admits production use or full-corpus publication of compressed vector layers under the gate's current state, judged by [`EvidenceEvaluator::judge_compressed_activation`]. The grant carries the same invalidation token as every hook grant, so a changed manifest or identity withdraws it too.
@@ -1298,17 +1433,25 @@ impl HookGate {
         if *expected != evaluator.current {
             return Err(Denial::EvidenceIdentity);
         }
-        evaluator.judge(grant.hook)?;
-        for &(name, observed) in requested {
-            let max = evaluator.limit(name)?;
-            if observed > max {
-                return Err(Denial::LimitExceeded {
-                    limit: name.to_owned(),
-                    observed,
-                    max,
-                });
-            }
-        }
-        Ok(())
+        state.verdict(grant.hook)?;
+        requested_within(evaluator, requested)
     }
+}
+
+/// Requires each requested charge to fit its manifest limit.
+fn requested_within(
+    evaluator: &EvidenceEvaluator,
+    requested: &[(&str, u64)],
+) -> Result<(), Denial> {
+    for &(name, observed) in requested {
+        let max = evaluator.limit(name)?;
+        if observed > max {
+            return Err(Denial::LimitExceeded {
+                limit: name.to_owned(),
+                observed,
+                max,
+            });
+        }
+    }
+    Ok(())
 }

@@ -340,6 +340,7 @@ describe("createEidnaraCommandHandler", () => {
                 "- HistorySummarizer publish health: ok (0 consecutive publish failures)",
             );
             expect(text).toContain("- AWS credentials: unknown");
+            expect(text).not.toContain("- Search admission:");
             expect(text).toContain("- Passes: 12 received, 0 rejected");
             expect(text).toContain(`- Daemon: ${STATUS_RESPONSE.summary}`);
             expect(text).not.toContain("### Tail Hygiene");
@@ -364,6 +365,7 @@ describe("createEidnaraCommandHandler", () => {
                     next_retry_in_seconds: 30,
                     consecutive_failures: 2,
                 },
+                search_admission: { state: "refused", reason: "evidence_identity" },
                 pass_trace: {
                     receive_count: 20,
                     reject_count: 2,
@@ -382,11 +384,34 @@ describe("createEidnaraCommandHandler", () => {
             expect(text).toContain(
                 "- AWS credentials: profile login_required, retry in 30s, 2 consecutive failures",
             );
+            expect(text).toContain("- Search admission: refused (evidence_identity)");
             expect(text).toContain(
                 "- Passes: 20 received, 2 rejected; last reject: snapshot stale ",
             );
             const passesLine = text.split("\n").find((line) => line.startsWith("- Passes:"));
             expect(passesLine?.length).toBeLessThan(220);
+        });
+
+        it("renders an admitted search projection and refuses to echo a malformed reason", async () => {
+            for (const [admission, line] of [
+                [{ state: "admitted" }, "- Search admission: admitted"],
+                [
+                    { state: "refused", reason: "/home/u/.aws/credentials token=abc" },
+                    "- Search admission: refused (unknown)",
+                ],
+            ] as const) {
+                const { run, texts } = setup(() => ({
+                    ...STATUS_RESPONSE,
+                    search_admission: admission,
+                }));
+                await expectSentinel(
+                    run("eidnara-status", "ses-search-admission"),
+                    "eidnara-status",
+                );
+                const [text] = texts();
+                expect(text).toContain(line);
+                expect(text).not.toContain("token=abc");
+            }
         });
 
         it("renders the compaction timing block from the summarizer timeline", async () => {

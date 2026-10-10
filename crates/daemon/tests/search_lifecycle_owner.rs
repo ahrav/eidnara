@@ -1207,6 +1207,205 @@ async fn a_refused_manifest_closes_admission_before_maintenance_drains() {
     owner.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_pin_refused_while_maintenance_drains_names_the_records_refusal() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+
+    support::projection_gate::write_record(
+        home,
+        daemon::projection_admission::MANIFEST_RECORD,
+        b"{\"protocol_version\": malformed",
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(owner.admission_state(), Err("records_malformed"));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the gate is closed");
+    assert_eq!(owner.pin_refusal(&refused), "records_malformed");
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
+}
+
+#[test]
+fn a_slice_refused_on_the_lane_names_the_lane_in_status_and_pin_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        LocalEmbeddingsComponent::unsupported("no lane"),
+    );
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Closed(SpecRefusal::LaneNotReady("disabled"))
+    ));
+    assert_eq!(owner.admission_state(), Err("lane_not_ready"));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("no family is selected");
+    assert_eq!(owner.pin_refusal(&refused), "lane_not_ready");
+
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    assert!(matches!(
+        owner.request(&rebuild(home), now(), &slice_budget()),
+        Err(BuildError::Intent(
+            daemon::projection_lifecycle::IntentRefusal::Denied(Denial::NoManifest)
+        ))
+    ));
+    assert_eq!(owner.admission_state(), Err("no_manifest"));
+}
+
+#[test]
+fn a_kernel_tip_unread_after_preparation_is_named_in_status() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    assert_eq!(owner.admission_state(), Err("no_family"));
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::clone(&cancel),
+    );
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let outcome = owner.run_slice(&budget);
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    assert_eq!(owner.admission_state(), Err("kernel_unreadable"));
+}
+
+#[test]
+fn status_reports_no_family_until_a_family_is_selected() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("no family is selected");
+    assert_eq!(owner.pin_refusal(&refused), "no_family");
+    assert_eq!(owner.admission_state(), Err("no_family"));
+}
+
+#[test]
+fn a_selected_family_that_refuses_its_pin_is_named_apart_from_no_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let staged = match control(home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.pin(&slice_budget()).unwrap();
+
+    std::fs::remove_file(
+        home.join("search-families")
+            .join(&staged)
+            .join("bootstrap.json"),
+    )
+    .unwrap();
+    assert_eq!(owner.admission_state(), Ok(()));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the certificate is gone");
+    assert_eq!(owner.pin_refusal(&refused), "family_refused");
+}
+
+#[test]
+fn a_refused_request_over_an_unbounded_record_names_the_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(control(home), ControlState::Current(_)));
+
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    assert!(matches!(
+        owner.request(&foreign, now(), &slice_budget()),
+        Err(BuildError::Invalid(_))
+    ));
+    assert_eq!(owner.admission_state(), Err("limits_unbounded"));
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {
@@ -4994,6 +5193,70 @@ fn admission_recovers_in_process_after_the_gate_denies_the_selected_family() {
     owner.pin(&slice_budget()).unwrap();
 }
 
+/// A family recovered under `AuthorizedRecovery` reads through `EmbeddingBackfill`; the status surface judges that hook as a reader's pin does, so disabling it in the manifest refuses both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_judges_the_recovered_family_on_its_transition_hook() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().to_owned();
+    let corpus = Corpus::open(&home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(&home);
+    let owner = owner(&home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(&home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    let staged = match control(&home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
+    let mut recovery = rebuild(&home);
+    recovery.transition = Transition::AuthorizedRecovery;
+    recovery.cause = Cause::DisabledRecovery;
+    recovery.selected_generation = staged;
+    recovery.attempt_id = "recovery-attempt".to_owned();
+    recovery.consumer.consumer_id = "search-recovered".to_owned();
+    recovery.consumer.generation_id = "gen-2".to_owned();
+    recovery.authorization_ref = Some("operator:recovery-ticket".to_owned());
+    owner.request(&recovery, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    assert!(matches!(control(&home), ControlState::Current(_)));
+    assert_eq!(owner.admission_state(), Ok(()));
+    owner.pin(&slice_budget()).unwrap();
+
+    let identity = identity(&kernel_incarnation_id(&home));
+    let without_backfill: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBackfill)
+        .collect();
+    write_records(
+        &home,
+        &manifest_json(&identity, &without_backfill),
+        &campaign_json(&identity),
+    );
+    let _ = owner.run_slice(&slice_budget());
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the disabled transition hook refuses the pin");
+    assert_eq!(owner.pin_refusal(&refused), "hook_disabled");
+    assert_eq!(owner.admission_state(), Err("hook_disabled"));
+}
+
 /// An active record past its deadline starts nothing. The slice still judges admission on the current observation, so it denies a selected family that trails the kernel instead of serving it on pre-deadline evidence.
 #[test]
 fn an_expired_active_record_is_still_judged_on_the_current_observation() {
@@ -5233,7 +5496,12 @@ fn limits_too_small_to_bound_a_slice_refuse_the_specification() {
             "{overrides:?}: {outcome:?}"
         );
         assert!(matches!(control(home), ControlState::Intent(_)));
-        assert!(owner.pin(&slice_budget()).is_err());
+        assert_eq!(owner.admission_state(), Err("limits_unbounded"));
+        let refused = owner
+            .pin(&slice_budget())
+            .err()
+            .expect("the gate is closed");
+        assert_eq!(owner.pin_refusal(&refused), "limits_unbounded");
     }
 }
 

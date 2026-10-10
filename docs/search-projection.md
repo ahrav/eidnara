@@ -111,6 +111,33 @@ before it. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
 current epoch, checkpoint, or tip.
 
+## Admission status
+
+`session.status` carries a `search_admission` block whenever the daemon runs a
+lifecycle owner: `{"state": "admitted"}` when the gate admits the selected
+family's reads, or `{"state": "refused", "reason": <code>}` with the
+`Denial::code` of the gate's refusal, for example `no_manifest`,
+`manifest_identity`, `evidence_identity`, `evidence_failed`, or
+`coverage_stale`. Records the last slice refused to read report
+`records_unreadable`, `records_refused` (for example a record readable by
+other users), or `records_malformed` in place of `no_manifest`; a slice whose
+preparation of valid records failed reports `lane_not_ready`,
+`limits_unbounded`, or `kernel_unreadable` the same way. A `retrieval.query` whose pin the gate refuses answers
+`lane_unavailable` with the same code as its `reason`, `no_family` once
+the gate admits but no family is selected, and `family_refused` when the gate
+admits a selected family whose own checks refused the pin. Codes name the gate or condition,
+never record content. OpenCode's `/eidnara-status` renders the block as
+`Search admission`.
+
+Every admission, including the one behind the status block, reads the
+lifecycle record fresh. The gate checks the control directory's owner and mode
+from its path metadata, opening the directory only when that metadata does not
+show the caller's own owner-only directory. On ext4, XFS, Btrfs, and tmpfs the
+gate keeps the record open and rereads its bytes while the record path still
+names the same inode with the same mode, owner, and change time; any other
+metadata, and every other filesystem, opens the record again. A record whose
+bytes equal the last bytes the gate decoded reuses that decode's verdict.
+
 ## Disable and recovery
 
 `SearchLifecycleOwner::disable` closes admission before any write, persists the

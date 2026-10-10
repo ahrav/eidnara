@@ -1059,3 +1059,50 @@ async fn revocation_before_the_pass_is_seen_before_its_first_write() {
         .unwrap()
         .unwrap();
 }
+
+/// Every denial reports a distinct code that status surfaces and route refusals carry as a bare code, never the content its variant names.
+#[test]
+fn each_denial_reports_a_distinct_content_free_code() {
+    use daemon::projection_gates::{Denial, Gate, ProjectionHook};
+    let denials = [
+        Denial::RecoveryRequired,
+        Denial::ControlUnreadable("secret-path".into()),
+        Denial::Invalidated,
+        Denial::NoManifest,
+        Denial::Disabled(ProjectionHook::EmbeddingBootstrap),
+        Denial::ManifestIdentity,
+        Denial::EvidenceIdentity,
+        Denial::Missing(Gate::Resource),
+        Denial::Failed(Gate::Resource, "secret-detail".into()),
+        Denial::Stale { lag: 3, max: 1 },
+        Denial::UnapprovedObserver("secret-observer".into()),
+        Denial::Unsupported {
+            harness: "secret-harness".into(),
+            capability: "secret-capability".into(),
+        },
+        Denial::LimitExceeded {
+            limit: "secret-limit".into(),
+            observed: 2,
+            max: 1,
+        },
+        Denial::CompressionDisabled,
+        Denial::Revoked,
+        Denial::LimitChanged {
+            limit: "secret-limit".into(),
+            evidence: 1,
+            manifest: 2,
+        },
+    ];
+    let codes: std::collections::BTreeSet<&str> = denials.iter().map(Denial::code).collect();
+    assert_eq!(codes.len(), denials.len(), "{codes:?}");
+    for code in codes {
+        assert!(
+            (1..=32).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                && !code.contains("secret"),
+            "{code}"
+        );
+    }
+}

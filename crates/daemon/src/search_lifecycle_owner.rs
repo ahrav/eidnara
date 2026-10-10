@@ -92,6 +92,8 @@ fn next_claim_batch(batch: NonZeroUsize, report: &MaterializationReport) -> NonZ
 /// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
 const MAINTENANCE_DESTINATION: ArtifactDestination = ArtifactDestination::Local;
 
+const KERNEL_UNREADABLE: &str = "kernel_unreadable";
+
 /// The bound projects maintenance rotates across, each under the project digest that orders the rotation, read at each slice so bindings take effect at the next one.
 pub type ProjectRoster = Arc<dyn Fn() -> Vec<(String, ProjectScope)> + Send + Sync>;
 
@@ -108,6 +110,18 @@ pub enum SpecRefusal {
     LimitRange(&'static str),
     #[error("the kernel incarnation could not be read: {0}")]
     Kernel(String),
+}
+
+impl SpecRefusal {
+    /// Status surfaces use these stable codes to identify refusal categories. Absent records yield `None`, which the gate reports as `no_manifest`.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::LaneNotReady(_) => Some("lane_not_ready"),
+            Self::Inputs(refusal) => refusal.code(),
+            Self::TooSmall(_) | Self::LimitRange(_) => Some("limits_unbounded"),
+            Self::Kernel(_) => Some(KERNEL_UNREADABLE),
+        }
+    }
 }
 
 /// Why `prepare` produced no identity: the records refused, or a manager with a running supervisor must be joined before it can be replaced.
@@ -181,6 +195,8 @@ pub struct SearchLifecycleOwner {
     claims_paused: Arc<std::sync::atomic::AtomicBool>,
     /// The batch size of the next claim-source slice, at most `CLAIM_SLICE_BOUNDS.batch`.
     claim_batch: std::sync::atomic::AtomicUsize,
+    /// `preparation_refused` preserves the last slice's [`SpecRefusal::code`] so status can report the refusal while the gate reports `no_manifest`.
+    preparation_refused: Mutex<Option<&'static str>>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
@@ -263,6 +279,7 @@ impl SearchLifecycleOwner {
             claims: Mutex::new(ClaimProgress::default()),
             claims_paused: Arc::default(),
             claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
+            preparation_refused: Mutex::new(None),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -480,6 +497,11 @@ impl SearchLifecycleOwner {
             Managed::Selection(current) => current.maintenance(),
             _ => None,
         };
+        *self
+            .preparation_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            prepared.as_ref().err().and_then(SpecRefusal::code);
         let (inputs, identity, bounds, budget) = match prepared {
             Ok(prepared) => {
                 self.remember_grace(&prepared.0, &prepared.1);
@@ -504,6 +526,19 @@ impl SearchLifecycleOwner {
             *managed = Managed::Selection(Box::new(self.new_selection(identity.clone(), bounds)));
         }
         Ok((inputs, identity, budget))
+    }
+
+    fn close_refused(&self, refusal: SpecRefusal) -> SliceOutcome {
+        self.close_gate(refusal.code());
+        SliceOutcome::Closed(refusal)
+    }
+
+    fn close_gate(&self, code: Option<&'static str>) {
+        *self
+            .preparation_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = code;
+        let _ = self.admission.refresh(None);
     }
 
     /// Runs one bounded claim-source slice, or nothing while paused, so memories present before startup and every later decision change reach the search projection's source descriptors. The slice ends within `SLICE_IDLE` and within `budget`; publication runs with local-only egress and grants no search admission.
@@ -692,10 +727,7 @@ impl SearchLifecycleOwner {
                 let _ = self.admission.refresh(None);
                 return SliceOutcome::RotateMaintenance(handle);
             }
-            Err(Unprepared::Refused(refusal)) => {
-                let _ = self.admission.refresh(None);
-                return SliceOutcome::Closed(refusal);
-            }
+            Err(Unprepared::Refused(refusal)) => return self.close_refused(refusal),
         };
         #[cfg(feature = "test-support")]
         self.tap(SliceEvent::Prepared {
@@ -755,10 +787,7 @@ impl SearchLifecycleOwner {
             &intent.consumer.generation_id,
         ) {
             Ok(spec) => spec,
-            Err(refusal) => {
-                let _ = self.admission.refresh(None);
-                return SliceOutcome::Closed(refusal);
-            }
+            Err(refusal) => return self.close_refused(refusal),
         };
         // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so the records are installed with no coverage, as for an expired record: ordinary hooks are denied while a cleanup keeps its evidence.
         if !completed && let Err(denial) = duration_within_bound(inputs.manifest(), &intent) {
@@ -1074,6 +1103,10 @@ impl SearchLifecycleOwner {
         let tip = match self.kernel.tip_within_budget(budget) {
             Ok(tip) => tip,
             Err(_) => {
+                *self
+                    .preparation_refused
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(KERNEL_UNREADABLE);
                 self.admission.gate().close();
                 return Refresh::Closed(Closed::NoProjection);
             }
@@ -1121,23 +1154,23 @@ impl SearchLifecycleOwner {
         // The records and lane are read now rather than trusted from the evidence an earlier slice installed; unavailable ones close the gate and refuse the request.
         let inputs = match AdmissionInputs::read(&self.home) {
             Ok(inputs) => inputs,
-            Err(_) => {
-                let _ = self.admission.refresh(None);
+            Err(refusal) => {
+                self.close_gate(SpecRefusal::from(refusal).code());
                 return Err(IntentRefusal::Denied(Denial::NoManifest).into());
             }
         };
         let identity = match self.identity(inputs.manifest(), budget) {
             Ok(identity) => identity,
-            Err(_) => {
-                let _ = self.admission.refresh(None);
+            Err(refusal) => {
+                self.close_gate(refusal.code());
                 return Err(IntentRefusal::Denied(Denial::EvidenceIdentity).into());
             }
         };
         // What a slice prepares under is checked first: a manifest with no slice bound or no coverage bounds would leave the recorded request to slices that all refuse it. That refusal is the manifest's, and closes the gate as a slice's would, since the earlier grants belong to a manifest that is gone.
         let slice_bound = limit(inputs.manifest(), "supervisor_slice_ms")
             .and_then(|slice_ms| nonzero_u64("supervisor_slice_ms", slice_ms));
-        if slice_bound.is_err() || coverage_bounds(inputs.manifest()).is_err() {
-            let _ = self.admission.refresh(None);
+        if let Err(refusal) = slice_bound.and_then(|_| coverage_bounds(inputs.manifest())) {
+            self.close_gate(refusal.code());
             return Err(BuildError::Invalid(
                 "manifest limits cannot bound the request",
             ));
@@ -1148,7 +1181,7 @@ impl SearchLifecycleOwner {
             && (*selection.identity() != identity
                 || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
         {
-            let _ = self.admission.refresh(None);
+            self.close_gate(None);
             self.requested.notify_one();
             return Err(BuildError::Invalid(
                 "maintenance runs under records a reload replaced; retry after the next slice rotates it",
@@ -1167,7 +1200,7 @@ impl SearchLifecycleOwner {
         }
         // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate as that slice would: closed over an operation the manifest cannot bound, and on the records with no coverage over an active record past its duration bound, so a cleanup keeps its envelope.
         let recorded = ProjectionLifecycle::read_at(&self.home);
-        let spec_fits = |current: &LifecycleIntent| {
+        let spec_refusal = |current: &LifecycleIntent| {
             replacement_spec(
                 inputs.manifest(),
                 identity.clone(),
@@ -1175,19 +1208,23 @@ impl SearchLifecycleOwner {
                 current.episodes.allowance,
                 &current.consumer.generation_id,
             )
-            .is_ok()
+            .err()
         };
         let current_fit = match &recorded {
-            ControlState::Intent(current) if !spec_fits(current) => RecordFit::Unbounded,
+            ControlState::Intent(current) if let Some(refusal) = spec_refusal(current) => {
+                RecordFit::Unbounded(refusal.code())
+            }
             // An active record's duration is charged as its slices charge it; a completed record's construction is history.
             ControlState::Intent(current)
                 if duration_within_bound(inputs.manifest(), current).is_err() =>
             {
                 RecordFit::OverDuration
             }
-            ControlState::Current(current) if !spec_fits(current) => RecordFit::Unbounded,
+            ControlState::Current(current) if let Some(refusal) = spec_refusal(current) => {
+                RecordFit::Unbounded(refusal.code())
+            }
             // An unreadable record is what the next slice closes admission on.
-            ControlState::Unavailable(_) => RecordFit::Unbounded,
+            ControlState::Unavailable(_) => RecordFit::Unbounded(None),
             _ => RecordFit::Fits,
         };
         let leave_gate_as_a_slice_would = || match current_fit {
@@ -1201,8 +1238,8 @@ impl SearchLifecycleOwner {
                     },
                 );
             }
-            RecordFit::Unbounded => {
-                let _ = self.admission.refresh(None);
+            RecordFit::Unbounded(code) => {
+                self.close_gate(code);
             }
         };
         // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced; over a recorded operation those records cannot bound, the gate the last slice closed stays closed.
@@ -1279,6 +1316,46 @@ impl SearchLifecycleOwner {
         // The slice loop's idle wait ends now, so the record is not first seen after an idle period has spent its time.
         self.requested.notify_one();
         Ok(recorded)
+    }
+
+    /// The search admission a status surface reports, judged as a reader's pin judges it: the gate's hook admission and, while no slice holds the manager, the selected family's limits. The gate reads its durable stop record as every admission does. Records the last slice refused to read report their [`InputRefusal::code`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial::code`] of the refusal.
+    pub fn admission_state(&self) -> Result<(), &'static str> {
+        let gate = self.admission.gate();
+        let selected = self.try_lock_free().and_then(|managed| match &*managed {
+            Managed::Selection(selection) => Some(selection.admit_selected_hooks(gate)),
+            _ => None,
+        });
+        let verdict = match selected {
+            Some(admitted) => admitted.map_err(|error| refusal_code(&error).unwrap_or("no_family")),
+            None => gate
+                .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+                .map(|_| ())
+                .map_err(|denial| denial.code()),
+        };
+        verdict.map_err(|code| self.named_refusal(code))
+    }
+
+    pub fn pin_refusal(&self, error: &BuildError) -> &'static str {
+        refusal_code(error)
+            .map(|code| self.named_refusal(code))
+            .or_else(|| self.admission_state().err())
+            .unwrap_or("family_refused")
+    }
+
+    /// A recorded refusal code preserves the specific cause behind `no_manifest`.
+    fn named_refusal(&self, code: &'static str) -> &'static str {
+        match code {
+            "no_manifest" => self
+                .preparation_refused
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(code),
+            code => code,
+        }
     }
 
     /// Pins the selected family for one reader. Freshness is judged on the coverage the last slice observed, so a reader can trail the kernel by the commits that arrived since that slice on top of `catchup_lag_commits`; the next slice observes the family again.
@@ -1421,6 +1498,16 @@ fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
             SourceHoldError::BindingMismatch | SourceHoldError::Invalid(_)
         ))
     )
+}
+
+/// The admission code a selection refusal carries when the gate refused it: the records, the evidence, the observation, or the limits the last slice installed.
+fn refusal_code(error: &BuildError) -> Option<&'static str> {
+    match error {
+        BuildError::Denied(denial) | BuildError::Intent(IntentRefusal::Denied(denial)) => {
+            Some(denial.code())
+        }
+        _ => None,
+    }
 }
 
 /// The outcome of a Current family's refusal: the rebuild its cause earns, or the refusal itself.
@@ -1573,8 +1660,8 @@ enum RecordFit {
     Fits,
     /// An active record's duration exceeds its transition's bound; the records still bound a cleanup.
     OverDuration,
-    /// The manifest cannot bound the recorded operation, or the record is unreadable.
-    Unbounded,
+    /// The manifest cannot bound the recorded operation, with the refusal's code, or the record is unreadable.
+    Unbounded(Option<&'static str>),
 }
 
 /// Charges an active record's own duration, its deadline less the clock it was recorded at, against its transition's bound in `manifest`, as recovery charges it at every admission.
