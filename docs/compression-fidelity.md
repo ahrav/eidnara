@@ -364,6 +364,46 @@ serves the capture when
 summarizer prompt from a real model, such as
 `packages/e2e-tests/scripts/bedrock-summarizer.ts`.
 
+**Real-serving replay.** The ignored daemon test
+`real_captures_serve_their_natural_tiers` serves each corpus source from its
+published real capture. `EIDNARA_FIDELITY_REAL_CAPTURE_DIR` names the
+directory the real producer capture wrote, `EIDNARA_FIDELITY_REAL_MODEL` names
+the arm's model, and `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names where the replay
+writes. The evaluation reads one arm directory, so both directories are that
+arm directory. For each source the test reads the published
+`daemon.compression_fidelity.real_capture` record of that model whose
+`output_origin` is `real producer through the host`, takes the attempt output
+whose P1, as the validator's parser reads it, is the published row's, and
+folds it under that model through the real validation and publication path.
+It then records P1 at m0 on the first fold, P1 in the m1 window after a
+test-authored baseline, and each decayed tier at m0 under test-authored newer
+rows. The m1 fold moves every ordinal the output carries past the baseline:
+segment `start` and `end`, `<messages_processed>`, and `<unprocessed_from>`.
+The natural curve sets a row's tier from its importance and position, so a
+probe row with four distinct bodies finds each tier's first age, and the
+captured row must serve its own rendered body for that tier at that age. The
+row is found by its `## start-end` heading, so escaped titles, equal tiers, a
+one-sentence P4, and heading lines in a body all serve. Every record carries
+`output_origin` `real producer through the host` and
+`generation_capture_sha256`, the SHA-256 of the capture file it served. A
+source with no published real capture fails the run. The replay serves
+one-row captures: a scenario's tier is the tier its source's row serves, so a
+capture whose published rows number other than one, or whose row covers less
+than the source's whole message range, fails the run as the captures are
+read, before any source folds. Both folds of a source run under the capture's
+model. The replay writes its records only after every source has served, so
+a failing source leaves the arm directory as it found it. The
+replay serves the natural and omission paths; the pressure scenarios (C1.S5
+and C3.S5) have no bound serving record in a real arm, so the report names
+them missing until a pressure witness serves the capture. Run it with
+`cargo +1.98 test -p daemon --lib --locked real_captures_serve -- --ignored`.
+`a_real_capture_binds_every_tier_the_replay_serves_from_it` runs the same
+serving in the default suite over scripted-producer captures shaped like real
+output: every output carries `<unprocessed_from>`, and the sources add
+whitespace and an escaped entity around P1, a `<p1 >` opener closed by
+`</p2>`, a one-sentence P4, the P1-only fallback, an escaped title, a heading
+line in P1, and a P2 that ends with P3.
+
 **Summarizer recovery guidance.** Two separate facts bound recovery. The
 history summarizer system prompt states once that the primary agent's
 `eidnara_search` covers the sources its current tool contract exposes and
