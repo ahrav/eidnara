@@ -12,10 +12,12 @@ use host_runtime::generation::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
-use retrieval::batch::VectorGeneration;
+use retrieval::batch::{VectorGeneration, read_checkpoint};
 use retrieval::coverage::{CoverageBounds, CoverageReport, observe, verify_active, verify_pages};
+use retrieval::exact::{CompletenessCertificate, EXTRACTION_VERSION};
 use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use storage::GuardedConn;
 
 use super::{BuildError, VerifiedReplacement, wall_ms};
@@ -130,6 +132,8 @@ struct SelectedFamily {
     bounds: CoverageBounds,
     _seed_pin: ValidatedGeneration,
     unavailable: std::sync::atomic::AtomicBool,
+    /// The inventory epoch under the first kernel lease epoch a reader presented.
+    inventory_epoch: std::sync::OnceLock<(u64, String)>,
 }
 
 pub struct SearchSelection {
@@ -234,6 +238,27 @@ impl SearchSelection {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
         admit_transition_hook(gate, &family.certificate)
+    }
+
+    /// The identity the selected seed was built under, read from the selected family's durable bootstrap certificate. `None` when nothing is selected or the selector or certificate cannot be read.
+    pub fn selected_seed_identity(&self) -> Option<ProjectionIdentity> {
+        let CurrentProfile::Current(digest) = GenerationStore::open(Some(&self.data_home))
+            .ok()?
+            .read_search_current()
+            .ok()?
+        else {
+            return None;
+        };
+        let bytes = certificate_bytes(&self.family_home(&digest).ok()?).ok()?;
+        let certificate: Bootstrap = serde_json::from_slice(&bytes).ok()?;
+        Some(certificate.seed.identity())
+    }
+
+    pub fn selected_quarantined(&self) -> bool {
+        self.selected
+            .load()
+            .as_ref()
+            .is_some_and(|family| family.projection.quarantine().is_some())
     }
 
     pub fn pin(
@@ -462,8 +487,6 @@ impl SearchSelection {
         budget: &EvalBudget,
         transaction: &LifecycleTransactionLock,
     ) -> Result<(), BuildError> {
-        // Refusing an infinite budget here keeps `family_damage`'s `Invalid` arm exact: past this
-        // point the only `Invalid` `validate_family` can raise is one of its own prefix checks.
         self.admit(gate, budget)?;
         let store = GenerationStore::open(Some(&self.data_home))?;
         match store.reconcile_search(transaction)? {
@@ -602,6 +625,7 @@ impl SearchSelection {
                 .incarnation,
             bounds: self.bounds,
             _seed_pin: seed_pin,
+            inventory_epoch: std::sync::OnceLock::new(),
         };
         // Run the page scan before readers share the family's connection.
         family
@@ -639,7 +663,7 @@ impl SearchSelection {
                     .capture_commit_read_target_within_budget(budget)?
                     .through_commit
         {
-            return Err(BuildError::Invalid(
+            return Err(BuildError::FamilyPrefix(
                 "active checkpoint differs from certified prefix",
             ));
         }
@@ -650,7 +674,9 @@ impl SearchSelection {
         if ack.is_none_or(|ack| {
             ack < seed.checkpoint_commit_seq || ack > report.checkpoint.checkpoint_commit_seq
         }) {
-            return Err(BuildError::Invalid("selected consumer checkpoint mismatch"));
+            return Err(BuildError::FamilyPrefix(
+                "selected consumer checkpoint mismatch",
+            ));
         }
         for class in kernel::source_identity::OccurrenceClass::ALL {
             let inventory = kernel.live_source_descriptors(
@@ -661,7 +687,9 @@ impl SearchSelection {
                 budget,
             )?;
             if inventory.next.is_some() || inventory.rows.len() != report.class(class).lexical {
-                return Err(BuildError::Invalid("canonical prefix inventory mismatch"));
+                return Err(BuildError::FamilyPrefix(
+                    "canonical prefix inventory mismatch",
+                ));
             }
             family.projection.read_within(deadline(budget)?, |conn| {
                 if retrieval::batch::read_checkpoint(conn, &self.identity.kernel_incarnation_id)?
@@ -1012,6 +1040,82 @@ impl SearchReader {
             .read_within(deadline(budget)?, read)?)
     }
 
+    /// The inventory epoch binds completeness certificates to the family's kernel incarnation, the kernel lease epoch, the seed digest, and the consumer ID.
+    pub fn inventory_epoch(&self, kernel: &KernelStore) -> String {
+        let lease_epoch = kernel.lease_epoch();
+        let (computed_for, epoch) = self
+            .family
+            .inventory_epoch
+            .get_or_init(|| (lease_epoch, self.digest_inventory_epoch(lease_epoch)));
+        if *computed_for == lease_epoch {
+            epoch.clone()
+        } else {
+            self.digest_inventory_epoch(lease_epoch)
+        }
+    }
+
+    fn digest_inventory_epoch(&self, lease_epoch: u64) -> String {
+        let seed = &self.family.certificate.seed;
+        let mut digest = Sha256::new();
+        for part in [
+            seed.kernel_incarnation_id.as_bytes(),
+            &lease_epoch.to_be_bytes(),
+            self.digest().as_bytes(),
+            self.consumer().consumer_id.as_bytes(),
+        ] {
+            digest.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(part);
+        }
+        format!("inventory-{:x}", digest.finalize())
+    }
+
+    /// Certifies that this reader's family covers the kernel's exact-lookup inventory: the family's checkpoint equals the kernel tip, and the family's consumer has acknowledged that checkpoint. One kernel snapshot supplies the tip, the kernel identity, and the acknowledgement. The certificate names [`Self::inventory_epoch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `BuildError::Invalid` if the family's checkpoint is absent, differs from the kernel tip, or exceeds its consumer's acknowledgement, or if that acknowledgement is absent. Propagates errors from family validation, checkpoint reads, and kernel queries.
+    pub fn completeness_certificate(
+        &self,
+        kernel: &KernelStore,
+        budget: &EvalBudget,
+    ) -> Result<CompletenessCertificate, BuildError> {
+        deadline(budget)?;
+        let observed =
+            kernel.capture_consumer_tip_within_budget(budget, &self.consumer().consumer_id)?;
+        let seed = &self.family.certificate.seed;
+        if observed.target.incarnation != self.family.incarnation
+            || observed.database_incarnation_id != seed.kernel_incarnation_id
+        {
+            return Err(ProjectionError::IdentityMismatch.into());
+        }
+        let checkpoint = self
+            .read(budget, |conn| {
+                read_checkpoint(conn, &seed.kernel_incarnation_id)
+            })?
+            .ok_or(BuildError::Invalid("the family has no applied prefix"))?;
+        let complete_through = checkpoint.checkpoint_commit_seq;
+        if observed.target.through_commit != complete_through {
+            return Err(BuildError::Invalid("the family trails the kernel tip"));
+        }
+        if observed
+            .consumer_checkpoint
+            .is_none_or(|acknowledged| acknowledged < complete_through)
+        {
+            return Err(BuildError::Invalid(
+                "the family's consumer has not acknowledged its checkpoint",
+            ));
+        }
+        Ok(CompletenessCertificate {
+            canonical_incarnation_id: observed.database_incarnation_id,
+            kernel_incarnation: observed.target.incarnation,
+            inventory_epoch: self.inventory_epoch(kernel),
+            identity_contract_version: seed.identity_contract_version.clone(),
+            extraction_version: EXTRACTION_VERSION,
+            complete_through_commit_seq: complete_through,
+            projection: checkpoint,
+        })
+    }
+
     pub fn coverage(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         self.read(budget, |conn| {
             observe(
@@ -1080,8 +1184,22 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
         BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow) => {
             Some(QuarantineKind::Integrity)
         }
-        BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
+        BuildError::FamilyPrefix(_) => Some(QuarantineKind::Integrity),
         _ => None,
+    }
+}
+
+/// `damages_family` identifies errors that report integrity damage to a family's own database or rows: a store integrity failure, a lost connection, a stored row that contradicts itself, or a stored prefix that contradicts the kernel's census of it.
+pub(crate) fn damages_family(error: &BuildError) -> bool {
+    match error {
+        BuildError::Projection(SearchProjectionError::Store(store)) => {
+            matches!(classify_store_failure(store), StoreFailure::Integrity)
+        }
+        BuildError::Projection(SearchProjectionError::Connection(_))
+        | BuildError::FamilyPrefix(_) => true,
+        BuildError::Projection(SearchProjectionError::Projection(error))
+        | BuildError::Mutation(error) => matches!(classify(error), Refusal::Integrity),
+        _ => false,
     }
 }
 
@@ -1148,4 +1266,36 @@ fn open_directory(path: &Path) -> std::io::Result<File> {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     Ok(directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_integrity_damage_to_the_family_counts_as_damage() {
+        for damaged in [
+            BuildError::Mutation(ProjectionError::CorruptRow),
+            BuildError::Projection(SearchProjectionError::Projection(
+                ProjectionError::CorruptRow,
+            )),
+            BuildError::Projection(SearchProjectionError::Connection("lost".to_owned())),
+            BuildError::FamilyPrefix("canonical prefix inventory mismatch"),
+        ] {
+            assert!(damages_family(&damaged), "{damaged:?}");
+            assert!(
+                matches!(family_damage(&damaged), Some(QuarantineKind::Integrity)),
+                "the reopen quarantine agrees: {damaged:?}"
+            );
+        }
+        for refused in [
+            BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow),
+            BuildError::Mutation(ProjectionError::IdentityMismatch),
+            BuildError::Mutation(ProjectionError::Interrupted),
+            BuildError::Invalid("bootstrap binding mismatch"),
+            BuildError::Expired,
+        ] {
+            assert!(!damages_family(&refused), "{refused:?}");
+        }
+    }
 }

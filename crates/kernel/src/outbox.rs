@@ -5,11 +5,22 @@
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
+use super::commit_read::CommitReadTarget;
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
+use super::open::checked_database_incarnation_id;
 use super::redaction::{RedactedField, identity, redact};
 use super::retention::begin_fenced_write;
 use super::source_hold::release_consumer_holds_in_tx;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
+
+/// The committed tip, the database identity, and one consumer's checkpoint, as one reader snapshot saw them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerTipSnapshot {
+    pub target: CommitReadTarget,
+    pub database_incarnation_id: String,
+    /// `None` when the consumer is unregistered.
+    pub consumer_checkpoint: Option<i64>,
+}
 
 /// Result of pruning rows through the minimum consumer checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,13 +137,16 @@ impl Envelope<'_> {
         consumer_id: &str,
         recorded_at: i64,
     ) -> Result<(), KernelError> {
-        self.guarded(|envelope| envelope.deregister_outbox_consumer_inner(consumer_id, recorded_at))
+        self.guarded(|envelope| {
+            envelope.deregister_outbox_consumer_inner(consumer_id, recorded_at, None)
+        })
     }
 
     fn deregister_outbox_consumer_inner(
         &mut self,
         consumer_id: &str,
         recorded_at: i64,
+        certified_through: Option<i64>,
     ) -> Result<(), KernelError> {
         let (consumer_id, checkpoint) = self.consumer_checkpoint(consumer_id, recorded_at)?;
         if checkpoint < self.pre_operation_tip()? {
@@ -149,11 +163,14 @@ impl Envelope<'_> {
                 [consumer_id.as_str()],
             )
             .map_err(map_sqlite)?;
-        let audit = serde_json::json!({
+        let mut audit = serde_json::json!({
             "consumer_id": consumer_id.clone(),
             "checkpoint_commit_seq": checkpoint,
             "recorded_at": recorded_at,
         });
+        if let Some(certified_through) = certified_through {
+            audit["certified_through"] = certified_through.into();
+        }
         self.push_control_change(
             consumer_id.clone(),
             "outbox_consumer",
@@ -162,6 +179,44 @@ impl Envelope<'_> {
             Vec::new(),
         );
         Ok(())
+    }
+
+    /// The owner certifies disposal of everything the consumer read through `certified_through`. Retirement acknowledges the consumer through the pre-operation tip, covering commits that arrive after certification, and deregisters it in the same operation.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`KernelError::InvalidInput`] when `recorded_at` is negative or `consumer_id` is empty.
+    /// - Returns [`KernelError::NotFound`] when the consumer is not registered.
+    /// - Returns [`KernelError::ConsumerPending`] when the consumer checkpoint is below `certified_through`.
+    pub fn retire_outbox_consumer(
+        &mut self,
+        consumer_id: &str,
+        certified_through: i64,
+        recorded_at: i64,
+    ) -> Result<(), KernelError> {
+        self.guarded(|envelope| {
+            envelope.retire_outbox_consumer_inner(consumer_id, certified_through, recorded_at)
+        })
+    }
+
+    fn retire_outbox_consumer_inner(
+        &mut self,
+        consumer_id: &str,
+        certified_through: i64,
+        recorded_at: i64,
+    ) -> Result<(), KernelError> {
+        if certified_through < 0 {
+            return Err(KernelError::InvalidInput);
+        }
+        let (consumer_id, checkpoint) = self.consumer_checkpoint(consumer_id, recorded_at)?;
+        if checkpoint < certified_through {
+            return Err(KernelError::ConsumerPending);
+        }
+        let tip = self.pre_operation_tip()?;
+        if checkpoint < tip {
+            acknowledge_outbox_in_tx(self.tx, &consumer_id, tip, recorded_at)?;
+        }
+        self.deregister_outbox_consumer_inner(&consumer_id, recorded_at, Some(certified_through))
     }
 
     /// # Errors
@@ -551,6 +606,43 @@ impl KernelStore {
             .map_err(map_sqlite)?;
         limit.check()?;
         Ok(checkpoint)
+    }
+
+    /// Reads the committed tip with its incarnation, the durable database identity, and `consumer_id`'s checkpoint from one reader snapshot, so a caller comparing the three takes one reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `consumer_id` is empty, [`KernelError::CorruptCanonicalRow`] when the database identity is missing or malformed, and [`KernelError::Deadline`] when the budget is exhausted.
+    pub fn capture_consumer_tip_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        consumer_id: &str,
+    ) -> Result<ConsumerTipSnapshot, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let consumer_id = consumer_identity(consumer_id)?;
+            let reader = self.reader_with_limit(&limit)?;
+            // One statement is its own snapshot, so its three subqueries read one committed state without a transaction.
+            let (through_commit, database_incarnation_id, consumer_checkpoint) = reader
+                .query_row_cached(
+                    "SELECT (SELECT COALESCE(MAX(commit_seq),0) FROM commit_log),
+                            (SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1),
+                            (SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1)",
+                    [&consumer_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(map_sqlite)?;
+            let snapshot = ConsumerTipSnapshot {
+                target: CommitReadTarget {
+                    through_commit,
+                    incarnation: self.incarnation(),
+                },
+                database_incarnation_id: checked_database_incarnation_id(database_incarnation_id)?,
+                consumer_checkpoint,
+            };
+            limit.check()?;
+            Ok(snapshot)
+        })
     }
 
     /// Advances a registered consumer checkpoint monotonically.

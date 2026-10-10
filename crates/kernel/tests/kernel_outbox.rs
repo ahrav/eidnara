@@ -4,6 +4,11 @@
 
 #![cfg(feature = "test-support")]
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
+
+use kernel::applicability::EvalBudget;
 use kernel::{CommitIntent, DomainSpec, KernelError, KernelStore, Sensitivity};
 use rusqlite::{Connection, OpenFlags};
 
@@ -507,6 +512,175 @@ fn a_consumer_id_that_redaction_rewrites_is_rejected() {
             })
             .unwrap_err(),
         KernelError::InvalidInput
+    );
+}
+
+#[test]
+fn one_snapshot_reports_the_tip_identity_and_checkpoint_that_separate_reads_report() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    commit_domain(&store, 1);
+    store
+        .commit(intent("register"), |envelope| {
+            envelope.register_outbox_consumer("search", 10)?;
+            Ok("registered".to_string())
+        })
+        .unwrap();
+    let inspected = inspect(directory.path());
+    let marker: String = inspected
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let snapshot = |consumer: &str| {
+        let snapshot = store
+            .capture_consumer_tip_within_budget(&budget, consumer)
+            .unwrap();
+        assert_eq!(snapshot.target, store.capture_commit_read_target().unwrap());
+        assert_eq!(snapshot.database_incarnation_id, marker);
+        assert_eq!(
+            snapshot.consumer_checkpoint,
+            store.outbox_consumer_checkpoint(consumer).unwrap()
+        );
+        snapshot
+    };
+    let registered = snapshot("search");
+    assert!(registered.consumer_checkpoint.is_some());
+    assert_eq!(snapshot("absent").consumer_checkpoint, None);
+
+    let tip = commit_domain(&store, 2);
+    assert!(snapshot("search").consumer_checkpoint < Some(tip));
+    store.acknowledge_outbox("search", tip, 11).unwrap();
+    let acknowledged = snapshot("search");
+    assert_eq!(acknowledged.target.through_commit, tip);
+    assert_eq!(acknowledged.consumer_checkpoint, Some(tip));
+
+    for consumer in ["", "  ", &format!("search-{SECRET}")] {
+        assert_eq!(
+            store
+                .capture_consumer_tip_within_budget(&budget, consumer)
+                .unwrap_err(),
+            KernelError::InvalidInput
+        );
+    }
+    let spent = EvalBudget::new(Some(Instant::now()), Arc::new(AtomicBool::new(false)));
+    assert_eq!(
+        store
+            .capture_consumer_tip_within_budget(&spent, "search")
+            .unwrap_err(),
+        KernelError::Deadline
+    );
+}
+
+#[test]
+fn a_retired_consumer_leaves_past_commits_after_its_certified_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    commit_domain(&store, 1);
+    let registered = store
+        .commit(intent("register"), |envelope| {
+            envelope.register_outbox_consumer("retiring", 10)?;
+            envelope.register_outbox_consumer("successor", 10)?;
+            Ok("registered".to_string())
+        })
+        .unwrap()
+        .commit_seq;
+    store
+        .acknowledge_outbox("retiring", registered, 11)
+        .unwrap();
+    let later = commit_domain(&store, 2);
+    assert_eq!(
+        store
+            .commit(intent("retire-uncertified"), |envelope| {
+                envelope.retire_outbox_consumer("retiring", later, 12)?;
+                Ok("retired".to_string())
+            })
+            .unwrap_err(),
+        KernelError::ConsumerPending,
+        "a consumer below its certified checkpoint stays registered"
+    );
+    assert_eq!(
+        store
+            .commit(intent("deregister-behind"), |envelope| {
+                envelope.deregister_outbox_consumer("retiring", 12)?;
+                Ok("removed".to_string())
+            })
+            .unwrap_err(),
+        KernelError::ConsumerPending
+    );
+    store
+        .commit(intent("retire"), |envelope| {
+            envelope.retire_outbox_consumer("retiring", registered, 13)?;
+            Ok("retired".to_string())
+        })
+        .unwrap();
+    assert_eq!(store.outbox_consumer_checkpoint("retiring").unwrap(), None);
+    let payload: String = inspect(directory.path())
+        .query_row(
+            "SELECT CAST(payload AS TEXT) FROM change_event
+             WHERE change_kind='consumer_deregister' AND object_id='retiring'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        payload.contains(&format!("\"certified_through\":{registered}")),
+        "the retirement audit records the certified checkpoint: {payload}"
+    );
+    assert!(
+        payload.contains(&format!("\"checkpoint_commit_seq\":{later}")),
+        "the retirement audit records the acknowledged tip: {payload}"
+    );
+    assert!(
+        store.outbox_consumer_checkpoint("successor").unwrap() < Some(later),
+        "the successor keeps the commits the retired consumer skipped"
+    );
+    assert_eq!(
+        store
+            .commit(intent("retire-absent"), |envelope| {
+                envelope.retire_outbox_consumer("retiring", registered, 14)?;
+                Ok("retired".to_string())
+            })
+            .unwrap_err(),
+        KernelError::NotFound
+    );
+}
+
+#[test]
+fn a_negative_retirement_certificate_is_rejected_before_the_checkpoint_comparison() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    commit_domain(&store, 1);
+    let registered = store
+        .commit(intent("register"), |envelope| {
+            envelope.register_outbox_consumer("retiring", 10)?;
+            Ok("registered".to_string())
+        })
+        .unwrap()
+        .commit_seq;
+    store
+        .acknowledge_outbox("retiring", registered, 11)
+        .unwrap();
+    assert_eq!(
+        store
+            .commit(intent("retire-negative"), |envelope| {
+                envelope.retire_outbox_consumer("retiring", -1, 12)?;
+                Ok("retired".to_string())
+            })
+            .unwrap_err(),
+        KernelError::InvalidInput,
+        "a negative certificate is an argument error, not a satisfied checkpoint"
+    );
+    assert_eq!(
+        store.outbox_consumer_checkpoint("retiring").unwrap(),
+        Some(registered),
+        "the consumer stays registered at its checkpoint"
     );
 }
 

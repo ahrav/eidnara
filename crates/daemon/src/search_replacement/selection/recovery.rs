@@ -337,19 +337,6 @@ impl SearchSelection {
         if !family.names_operation(&intent) {
             return Err(BuildError::Invalid("selected operation differs").into());
         }
-        if let Some(old) = &family.certificate.retiring
-            && kernel
-                .outbox_consumer_checkpoint_within_budget(budget, &old.consumer.consumer_id)
-                .map_err(BuildError::from)?
-                .is_some()
-            && kernel
-                .capture_commit_read_target_within_budget(budget)
-                .map_err(BuildError::from)?
-                .through_commit
-                > family.certificate.seed.checkpoint_commit_seq
-        {
-            return Err(BuildError::Kernel(kernel::KernelError::ConsumerPending).into());
-        }
         observer(RecoveryEvent::BeforeEpisode);
         let mut intent = intent;
         intent.episodes = lifecycle

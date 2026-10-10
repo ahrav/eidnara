@@ -301,8 +301,9 @@ impl SearchSelection {
             },
             |envelope| {
                 kernel.require_incarnation(target.incarnation)?;
-                envelope.deregister_outbox_consumer(
+                envelope.retire_outbox_consumer(
                     receipt.old_consumer,
+                    receipt.through,
                     super::super::wall_ms().map_err(|_| kernel::KernelError::InvalidInput)?,
                 )?;
                 Ok(String::new())
