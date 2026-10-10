@@ -760,7 +760,7 @@ const PI_TEMPERATURE_REJECTED_MESSAGE: &str = "pi provider rejected the requeste
 /// OpenAI does for a reasoning model (Unsupported parameter: 'temperature').
 ///
 /// A provider can report several validation errors in one message, so the refusal phrase must sit in the
-/// same sentence or clause as `temperature`; clauses end at `.`, `;`, or a line break.
+/// same sentence or clause as `temperature`; clauses end at `.`, `,`, `;`, or a line break.
 fn rejects_temperature(provider_text: &str) -> bool {
     const PHRASES: [&str; 4] = [
         "deprecated",
@@ -769,7 +769,7 @@ fn rejects_temperature(provider_text: &str) -> bool {
         "does not support",
     ];
     let lower = provider_text.to_ascii_lowercase();
-    lower.split(['.', ';', '\n']).any(|clause| {
+    lower.split(['.', ',', ';', '\n']).any(|clause| {
         clause.contains("temperature") && PHRASES.iter().any(|phrase| clause.contains(phrase))
     })
 }
@@ -926,6 +926,8 @@ mod tests {
             "Unsupported parameter: 'top_k'",
             "`temperature` must be at most 1; `top_k` is unsupported",
             "`top_k` is deprecated for this model.\n`temperature` must be at most 1.",
+            "`temperature` must be at most 1, `top_k` is unsupported",
+            "temperature: Input should be less than or equal to 1, top_k: Extra inputs are not permitted, unsupported",
         ] {
             assert!(!rejects_temperature(text), "{text}");
         }
