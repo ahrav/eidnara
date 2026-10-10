@@ -715,9 +715,14 @@ const PI_TEMPERATURE_REJECTED_MESSAGE: &str = "pi provider rejected the requeste
 fn rejects_temperature(provider_text: &str) -> bool {
     let lower = provider_text.to_ascii_lowercase();
     lower.contains("temperature")
-        && ["deprecated", "not supported", "unsupported", "does not support"]
-            .iter()
-            .any(|phrase| lower.contains(phrase))
+        && [
+            "deprecated",
+            "not supported",
+            "unsupported",
+            "does not support",
+        ]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
 }
 
 /// `message_end` and `agent_end` share this classification: `stop` and `length` succeed unless content requests tools; `error` and `aborted` fail; other spellings return `None`.
