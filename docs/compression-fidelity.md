@@ -380,7 +380,13 @@ row is found by its `## start-end` heading, so escaped titles, equal tiers, a
 one-sentence P4, and heading lines in a body all serve. Every record carries
 `output_origin` `real producer through the host` and
 `generation_capture_sha256`, the SHA-256 of the capture file it served. A
-source with no published real capture fails the run. Run it with
+source with no published real capture fails the run. The replay serves
+one-row captures: a scenario's tier is the tier its source's row serves, so a
+capture whose published rows number other than one fails the run as the
+captures are read, before any source folds or any record is written. The
+replay serves the natural and omission paths; the pressure scenarios (C1.S5
+and C3.S5) have no bound serving record in a real arm, so the report names
+them missing until a pressure witness serves the capture. Run it with
 `cargo +1.98 test -p daemon --lib --locked real_captures_serve -- --ignored`.
 `a_real_capture_binds_every_tier_the_replay_serves_from_it` runs the same
 serving in the default suite over scripted-producer captures shaped like real

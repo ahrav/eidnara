@@ -3043,8 +3043,48 @@ fn published_p1_reads_p1_as_the_validator_does() {
     }
 }
 
+#[test]
+#[should_panic(
+    expected = "C1.V1.capture.json: publishes 2 rows; the replay serves one-row captures"
+)]
+fn a_capture_publishing_several_rows_fails_the_replay_before_it_folds() {
+    const MODEL: &str = "probe/model";
+    let (case, source) = case_source("C1", "C1.V1");
+    let output = "<output><history_segments>\
+        <history_segment start=\"1\" end=\"3\" title=\"first\" importance=\"50\">\
+        <p1>first arc</p1><p2>first</p2><p3>f</p3><p4/></history_segment>\
+        <history_segment start=\"4\" end=\"6\" title=\"second\" importance=\"50\">\
+        <p1>second arc</p1><p2>second</p2><p3>s</p3><p4/></history_segment>\
+        </history_segments><meta><unprocessed_from>7</unprocessed_from></meta></output>";
+    assert_eq!(published_p1(output).as_deref(), Some("first arc"));
+    let row = |start: u64, end: u64, title: &str, p1: &str| {
+        json!({
+            "start": start, "end": end, "title": title,
+            "p1": p1, "p2": "", "p3": "", "p4": "", "importance": 50,
+        })
+    };
+    let dir = tempfile::tempdir().unwrap();
+    Observation::new(
+        REAL_OWNER,
+        CORPUS_SHA256,
+        &case.id,
+        &source.id,
+        "capture",
+        Terminal::Published,
+    )
+    .with(json!({
+        "model": MODEL,
+        "output_origin": REAL_ORIGIN,
+        "attempts": [{"model": MODEL, "outputs": [{"text": output}]}],
+        "published_rows": [row(1, 3, "first", "first arc"), row(4, 6, "second", "second arc")],
+    }))
+    .emit_to(dir.path());
+    real_captures(dir.path(), MODEL);
+}
+
 /// Reads every published real capture of `model` in `dir`, keyed by source. A capture names its
 /// output by the attempt output whose P1, as the validator publishes it, is its published row's.
+/// A capture that publishes several rows fails the read; the replay serves one-row captures.
 fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
     let mut captures = BTreeMap::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
@@ -3065,6 +3105,11 @@ fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
         {
             continue;
         }
+        let rows = detail["published_rows"].as_array().map_or(0, Vec::len);
+        assert_eq!(
+            rows, 1,
+            "{name}: publishes {rows} rows; the replay serves one-row captures"
+        );
         let p1 = detail["published_rows"][0]["p1"]
             .as_str()
             .filter(|p1| !p1.is_empty())
