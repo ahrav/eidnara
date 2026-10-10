@@ -56,6 +56,8 @@ export interface ArmContext {
     workdir: string;
     /** Directory holding the sandbox script; empty when arms run unsandboxed. */
     sandboxDir: string;
+    /** Refuse main-harness requests past `CONTEXT_LIMIT`, as a model with that window does. */
+    enforceWindow: boolean;
     onCall: (record: CallRecord) => void;
     fixtureBin: string;
 }
@@ -219,6 +221,7 @@ export abstract class Arm {
             workdir: ctx.workdir,
             dumpDir: ctx.resultsDir,
             onCall: ctx.onCall,
+            ...(ctx.enforceWindow ? { windowTokens: CONTEXT_LIMIT } : {}),
         };
         this.main = new BedrockGateway({ ...common, role: "main", stripTemperature: false });
         this.closure = new BedrockGateway({

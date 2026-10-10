@@ -152,6 +152,8 @@ export interface GatewayOptions {
     workdir: string;
     dumpDir: string;
     stripTemperature: boolean;
+    /** Refuses a request whose estimated input exceeds this many tokens, as a model with that window does. */
+    windowTokens?: number;
     onCall: (record: CallRecord) => void;
 }
 
@@ -286,6 +288,30 @@ export class BedrockGateway {
             estimatedInputTokens: estimateTokens(received.body.length),
             requestBytes: received.body.length,
         };
+        // The byte estimate reads about 15 percent under Bedrock's count, so the gate scales it up.
+        const window = this.options.windowTokens;
+        const projected = Math.round(base.estimatedInputTokens * 1.15);
+        if (window !== undefined && projected > window) {
+            const message = `prompt is too long: ${projected} tokens > ${window} maximum`;
+            sink.status(400, {
+                "content-type": "application/json",
+                "x-amzn-errortype": "ValidationException",
+            });
+            sink.write(Buffer.from(JSON.stringify({ message })));
+            sink.end();
+            this.record({
+                ...base,
+                status: 400,
+                ms: performance.now() - started,
+                firstByteMs: null,
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+                error: `ValidationException: ${message}`,
+            });
+            return;
+        }
         if (
             this.options.role === "main" &&
             caller === "main" &&

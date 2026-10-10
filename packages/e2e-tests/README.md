@@ -262,6 +262,9 @@ turn latency, model calls and tokens per caller, and memory.
   another arm or the answer key. `--sandbox off` runs without it.
 - `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
   those prompts, to exercise a pass that misses its deadline.
+- The gateway answers a request whose estimated input exceeds the arms'
+  200k window with `prompt is too long`, as a model with that window does;
+  `--enforce-window off` forwards it to Bedrock.
 
 ```sh
 PATH=<dir with opencode 1.18.22>:$PATH bun run eval:ab --tier m --seed 21 \

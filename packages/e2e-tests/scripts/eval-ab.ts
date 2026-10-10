@@ -25,6 +25,7 @@ interface Options {
     sessionGapMs: number;
     fixtureBin: string;
     sandbox: boolean;
+    enforceWindow: boolean;
     /** `session:turn` keys before whose prompt the arm's daemon stops for `stallMs`. */
     stallAt: Set<string>;
     stallMs: number;
@@ -56,6 +57,7 @@ function parseArgs(argv: string[]): Options {
                 .filter((key) => key.length > 0),
         ),
         stallMs: Number(get("stall-ms", "6000")),
+        enforceWindow: get("enforce-window", "on") === "on",
     };
 }
 
@@ -216,6 +218,7 @@ async function main(): Promise<void> {
                 root,
                 resultsDir: outDir,
                 sandboxDir: opts.sandbox ? opts.out : "",
+                enforceWindow: opts.enforceWindow,
                 workdir,
                 fixtureBin: opts.fixtureBin,
                 onCall: (record: CallRecord) =>
