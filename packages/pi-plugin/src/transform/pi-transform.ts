@@ -61,6 +61,13 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
     }
 }
 
+function isToolResultEntry(entry: SessionEntry | undefined): boolean {
+    return (
+        entry?.type === "message" &&
+        ((entry as unknown as Json).message as Json | undefined)?.role === "toolResult"
+    );
+}
+
 function failedAssistant(entry: SessionEntry): boolean {
     const message = (entry as unknown as Json).message as Json | undefined;
     return (
@@ -309,11 +316,17 @@ export function createPiTransform(options: PiTransformOptions) {
         // so eviction requires a boundary on a message, custom message, or branch summary row.
         const row = rowEntry(ack.boundary.mid);
         if (!row || row.role === "compactionSummary") return undefined;
-        const kept = row.entryId;
         const branch = options.branchOf(sessionId);
         branch.sync(reader);
-        const keptAt = branch.indexOf(kept);
+        let keptAt = branch.indexOf(row.entryId);
         if (keptAt === undefined) return undefined;
+        // A `toolResult` stays with the assistant message that carries its call, so Pi's own
+        // array never opens on a result whose call it evicted.
+        while (keptAt > 0 && isToolResultEntry(reader.getEntry(branch.idAt(keptAt) ?? ""))) {
+            keptAt -= 1;
+        }
+        const kept = branch.idAt(keptAt);
+        if (kept === undefined) return undefined;
         const committed = latestCompaction(branch, reader);
         // A compaction that already evicted through this boundary, or one that keeps less, leaves nothing to evict.
         if (

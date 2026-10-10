@@ -225,6 +225,7 @@ pub fn project_messages(messages: &[Arc<IngressMessage>]) -> Result<FlatProjecti
 pub(crate) struct MessageProjection<'a> {
     messages: &'a [Arc<IngressMessage>],
     synthetic_mids: BTreeSet<&'a str>,
+    covered_head: bool,
 }
 
 impl<'a> MessageProjection<'a> {
@@ -232,7 +233,16 @@ impl<'a> MessageProjection<'a> {
         Self {
             messages,
             synthetic_mids: BTreeSet::new(),
+            covered_head: false,
         }
+    }
+
+    /// The first message is a history segment's end message, so a tool result in it answers a
+    /// call the segment covers before the window. Its results project with no arc instead of
+    /// failing as unpaired; every later message still pairs its results.
+    pub(crate) fn with_covered_head(mut self) -> Self {
+        self.covered_head = true;
+        self
     }
 
     pub(crate) fn mark_synthetic(&mut self, message: &'a IngressMessage) {
@@ -321,15 +331,19 @@ fn project_messages_from_state(
             }
         }
 
+        let covered_head = ingress.covered_head && seen_mids.len() == 1;
         let mut identities = Vec::new();
         for index in 0..msg.ck.content().len() {
-            let arc_id = arc_for_block(
+            let arc_id = match arc_for_block(
                 &msg.mid,
                 index,
                 &msg.ck,
                 &mut builder.state.pending_calls,
                 &builder.state.call_arcs,
-            )?;
+            ) {
+                Err(WireError::UnpairedToolResult { .. }) if covered_head => None,
+                arc => arc?,
+            };
             let flat = flatten_block(&msg, index, arc_id)?;
             if !flat.synthetic {
                 identities.push(BlockIdentity {
@@ -907,6 +921,63 @@ mod tests {
         ];
         let err = project_messages(&messages).expect_err("orphan result must reject");
         assert!(matches!(err, WireError::UnpairedToolResult { .. }));
+    }
+
+    fn tool_result_msg(mid: &str, ordinal: u64, call_id: &str) -> Arc<IngressMessage> {
+        Arc::new(IngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck: WireMessage::from_parts(
+                "tool",
+                vec![WireBlock::bare(BlockKind::ToolResult {
+                    id: call_id.to_string(),
+                    tool_name: "read".to_string(),
+                    output: ToolOutput::bare(OutputKind::Text { text: "x".into() }),
+                    provider_executed: false,
+                })],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        })
+    }
+
+    #[test]
+    fn a_covered_head_projects_a_result_whose_call_precedes_the_window() {
+        let messages = vec![
+            tool_result_msg("m40", 40, "toolu_covered"),
+            text_msg("m41", 41, "assistant", "after"),
+            text_msg("m42", 42, "user", "next"),
+        ];
+        let err = project_messages(&messages).expect_err("an uncovered head result is unpaired");
+        assert!(matches!(err, WireError::UnpairedToolResult { .. }));
+        let projection = MessageProjection::new(&messages)
+            .with_covered_head()
+            .project()
+            .expect("a covered head result projects");
+        let head = projection
+            .blocks
+            .iter()
+            .find(|block| block.id == "m40#0")
+            .expect("head block present");
+        assert_eq!(head.arc_id, None);
+    }
+
+    #[test]
+    fn a_covered_head_still_pairs_every_later_result() {
+        let messages = vec![
+            tool_result_msg("m40", 40, "toolu_covered"),
+            text_msg("m41", 41, "user", "next"),
+            tool_result_msg("m42", 42, "toolu_orphan"),
+        ];
+        let err = MessageProjection::new(&messages)
+            .with_covered_head()
+            .project()
+            .expect_err("a result after the head still needs its call");
+        assert!(matches!(
+            err,
+            WireError::UnpairedToolResult { ref mid, .. } if mid == "m42"
+        ));
     }
 
     #[test]

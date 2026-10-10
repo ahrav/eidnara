@@ -51,7 +51,11 @@ const M0 = "<session-history>\n## 1-2 · folded\n</session-history>";
  * A daemon that folds every pass through the second-newest row. A `fixed` daemon renders the
  * boundary of its first pass on every later pass, so the acknowledged boundary never moves.
  */
-function foldingDaemon(fixed = false, otherCallMs = 0) {
+function foldingDaemon(
+    fixed = false,
+    otherCallMs = 0,
+    headOf: (rows: { id: string; message?: Json }[]) => number = (rows) => rows.length - 2,
+) {
     const transforms: Json[] = [];
     let sequence = 0;
     let pinned: string | undefined;
@@ -63,8 +67,8 @@ function foldingDaemon(fixed = false, otherCallMs = 0) {
             return { state: "accepted" };
         }
         transforms.push(body);
-        const rows = body.native_messages as { id: string }[];
-        let head = Math.max(0, rows.length - 2);
+        const rows = body.native_messages as { id: string; message?: Json }[];
+        let head = Math.max(0, headOf(rows));
         if (fixed && pinned !== undefined)
             head = Math.max(
                 0,
@@ -547,6 +551,52 @@ describe("Pi eviction", () => {
             expect(textOf(harness.session.messages.at(-1))).toBe("loop done");
             expect(transforms.length).toBeGreaterThanOrEqual(5);
             await eventually(() => compactions(harness as TestAgentSession).length > 0);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("keeps the call of a tool result the boundary lands on", async () => {
+        const { call } = foldingDaemon(false, 0, (rows) =>
+            rows.findLastIndex((row) => row.message?.role === "toolResult"),
+        );
+        const probe = (pi: { registerTool: (tool: unknown) => void }) =>
+            pi.registerTool({
+                name: "probe",
+                label: "probe",
+                description: "probe",
+                parameters: Type.Object({ n: Type.Number() }),
+                execute: async () => ({ content: [{ type: "text", text: "probed" }], details: {} }),
+            });
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension, probe as never],
+                tools: ["probe"],
+                settings: SETTINGS,
+            });
+            harness.respond([
+                fauxAssistantMessage(fauxToolCall("probe", { n: 1 })),
+                fauxAssistantMessage("probe done"),
+            ]);
+            await harness.session.prompt(`one ${"x".repeat(400)}`);
+            await harness.session.prompt(`two ${"x".repeat(400)}`);
+            await eventually(() => compactions(harness as TestAgentSession).length > 0);
+            const entries = harness.sessionManager.getEntries();
+            const kept = entries.find(
+                (entry) =>
+                    entry.id === compactions(harness as TestAgentSession)[0]?.firstKeptEntryId,
+            ) as { message?: Json } | undefined;
+            expect(kept?.message?.role).toBe("assistant");
+            const content = kept?.message?.content as Json[];
+            expect(content.some((part) => part.type === "toolCall")).toBe(true);
+
+            // Pi's own array, which it sends whenever a pass declines, keeps the call.
+            const roles = harness.session.messages.map((message) => (message as Json).role);
+            expect(roles[0]).toBe("compactionSummary");
+            const result = roles.indexOf("toolResult");
+            expect(result).toBeGreaterThan(0);
+            expect(roles[result - 1]).toBe("assistant");
         } finally {
             call.mockRestore();
         }

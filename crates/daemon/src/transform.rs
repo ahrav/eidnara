@@ -2438,6 +2438,23 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     fingerprints
 }
 
+/// The projection of a resolved window. An anchored window starts at its anchor's end message,
+/// which the anchor covers, so that message's tool results may answer calls before the window.
+fn window_projection(request: &TransformRequest) -> wire::MessageProjection<'_> {
+    let projection = wire::MessageProjection::new(&request.messages);
+    let head_covered = request
+        .coverage
+        .as_ref()
+        .and_then(|coverage| coverage.resolved.anchor.as_ref())
+        .and_then(|anchor| wire::split_block_id(&anchor.end_message_id))
+        .is_some_and(|(mid, _)| request.messages.first().is_some_and(|head| head.mid == mid));
+    if head_covered {
+        projection.with_covered_head()
+    } else {
+        projection
+    }
+}
+
 /// Normalized decisions use `projection`, not raw message flags exposed through `Deref`.
 struct TransformIngress<'a> {
     request: &'a TransformRequest,
@@ -2448,7 +2465,7 @@ impl<'a> TransformIngress<'a> {
     fn original(request: &'a TransformRequest) -> Self {
         Self {
             request,
-            projection: wire::MessageProjection::new(&request.messages),
+            projection: window_projection(request),
         }
     }
 
@@ -2727,7 +2744,7 @@ fn apply_additive_only(
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
     let projection_started_at = Instant::now();
-    let projection = project_messages(&req.messages)?;
+    let projection = window_projection(req).project()?;
     let live = projection
         .blocks
         .iter()
