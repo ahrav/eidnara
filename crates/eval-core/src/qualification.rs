@@ -43,7 +43,7 @@ pub const REQUIRED_CPUS: u32 = 4;
 pub const REQUIRED_MEMORY_BYTES: u64 = 16 << 30;
 pub const MEMORY_TOLERANCE_BYTES: u64 = 1 << 30;
 pub const REQUIRED_MODEL_WORKERS: u32 = 8;
-/// A report qualifies only after every witness in `WITNESSES` has a recorded run at the report's source commit that exited zero.
+/// A report qualifies only after every witness in `WITNESSES` has a recorded run at the report's clean source commit that exited zero.
 pub const WITNESSES: [&str; 5] = [
     "normal_fold",
     "emergency_fold",
@@ -52,22 +52,28 @@ pub const WITNESSES: [&str; 5] = [
     "rotation_soak",
 ];
 
+/// Suffix the runner appends to `HEAD` when the working tree differs from it.
+/// One dirty label covers every working tree on that commit, so only a clean commit binds evidence to a tree.
+pub const DIRTY_SOURCE_SUFFIX: &str = "-dirty";
+
 /// One run of the test that witnesses a named behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WitnessRun {
     /// The test as the operator invoked it, for example its cargo target and name.
     pub test: String,
-    /// The source commit the test ran at; a run counts only toward a report measured at the same commit.
+    /// The clean source commit the test ran at.
     pub source_commit: String,
     pub exit_code: i32,
 }
 
-/// Checks that every recorded run names a witness in `WITNESSES` and a test.
-///
+fn is_clean_commit(commit: &str) -> bool {
+    !commit.is_empty() && !commit.ends_with(DIRTY_SOURCE_SUFFIX)
+}
+
 /// # Errors
 ///
-/// Returns a message naming the first unknown witness or empty test.
+/// Returns a message naming the first unknown witness, empty test, or empty or dirty source commit.
 pub fn check_witness_runs(runs: &BTreeMap<String, WitnessRun>) -> Result<(), String> {
     for (name, run) in runs {
         if !WITNESSES.contains(&name.as_str()) {
@@ -75,6 +81,12 @@ pub fn check_witness_runs(runs: &BTreeMap<String, WitnessRun>) -> Result<(), Str
         }
         if run.test.trim().is_empty() {
             return Err(format!("witness {name:?} names no test"));
+        }
+        if !is_clean_commit(&run.source_commit) {
+            return Err(format!(
+                "witness {name:?} needs a clean source commit, got {:?}",
+                run.source_commit
+            ));
         }
     }
     Ok(())
@@ -970,7 +982,7 @@ pub struct QualificationReport {
     pub planned_rotations: Vec<u64>,
     /// The witness runs the operator recorded, keyed by witness.
     pub witness_runs: BTreeMap<String, WitnessRun>,
-    /// Witnesses with no recorded run that exited zero at the report's source commit; the report cannot qualify until none remain.
+    /// Witnesses requiring a recorded exit-zero run at the report's clean source commit. Qualification requires this set to be empty.
     pub pending_witnesses: Vec<String>,
     /// A report from a host with shortfalls is baseline evidence, never qualification.
     pub qualified: bool,
@@ -998,12 +1010,13 @@ impl QualificationReport {
         let outage = outage.ok();
         let host_shortfalls = environment.shortfalls();
         let complete = catalog().iter().all(|c| cases.iter().any(|r| r.case == *c));
+        let clean_source = is_clean_commit(&source_commit);
         let pending_witnesses: Vec<String> = WITNESSES
             .iter()
             .filter(|w| {
-                witness_runs
-                    .get(**w)
-                    .is_none_or(|run| run.exit_code != 0 || run.source_commit != source_commit)
+                witness_runs.get(**w).is_none_or(|run| {
+                    !clean_source || run.exit_code != 0 || run.source_commit != source_commit
+                })
             })
             .map(|w| (*w).to_owned())
             .collect();
@@ -1592,7 +1605,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let run = |exit_code| WitnessRun {
-            test: "daemon::source_recovery_tests".into(),
+            test: "source_recovery_tests".into(),
             source_commit: "c".into(),
             exit_code,
         };
@@ -1641,6 +1654,32 @@ mod tests {
                 "a {missing} run at another commit keeps the report pending"
             );
         }
+        let dirty_commit = format!("c{DIRTY_SOURCE_SUFFIX}");
+        let dirty_runs: BTreeMap<String, WitnessRun> = passed
+            .iter()
+            .map(|(name, run)| {
+                let mut run = run.clone();
+                run.source_commit.clone_from(&dirty_commit);
+                (name.clone(), run)
+            })
+            .collect();
+        let dirty = QualificationReport::build(
+            dirty_commit.clone(),
+            "t".into(),
+            environment(4, false),
+            all(),
+            Ok(passing_outage()),
+            dirty_runs.clone(),
+        );
+        assert_eq!(
+            dirty.pending_witnesses, WITNESSES,
+            "a dirty label names no single tree, so no run counts toward a dirty report"
+        );
+        assert!(!dirty.qualified);
+        assert!(check_witness_runs(&dirty_runs).is_err());
+        let mut uncommitted = passed.clone();
+        uncommitted.get_mut(WITNESSES[0]).unwrap().source_commit = String::new();
+        assert!(check_witness_runs(&uncommitted).is_err());
         let mut unknown = passed.clone();
         unknown.insert("warm_soak".into(), run(0));
         assert!(check_witness_runs(&unknown).is_err());
