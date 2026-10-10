@@ -16,6 +16,7 @@
 //! probe qualifies, the common probes are read in descending rowid order under the scan bound instead. A skipped probe
 //! of either kind leaves the result incomplete.
 
+use rusqlite::StatementStatus;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
@@ -114,6 +115,8 @@ pub struct Consumed {
     pub ranked_matches: usize,
     pub judged: usize,
     pub batches: usize,
+    /// SQLite virtual-machine operations (`SQLITE_STMTSTATUS_VM_STEP`) the count and scan statements executed for the probes that finished; the count grows with the rows those statements visit. A ranked probe's FTS5 rank sort runs in a nested statement SQLite keeps internal, so its scoring is observed through `ranked_matches`.
+    pub sql_steps: u64,
     /// Candidates the kernel judged ineligible before or at final revalidation, by verdict in judgment order.
     pub excluded: Vec<(EligibilityVerdict, usize)>,
 }
@@ -309,8 +312,9 @@ pub fn scan(
         }
         if !counted.contains(probe) {
             match count_probe(conn, probe, bounds.qualifying_matches, budget) {
-                Ok(count) => {
+                Ok((count, steps)) => {
                     retrieval.consumed.counted_rows += count;
+                    retrieval.consumed.sql_steps += steps;
                     counted.insert(probe);
                     distinct.push((ordinal, probe, count));
                 }
@@ -359,8 +363,9 @@ pub fn scan(
             budget,
             &mut best,
         ) {
-            Ok((rows, truncated)) => {
+            Ok((rows, truncated, steps)) => {
                 retrieval.consumed.scanned_rows += rows;
+                retrieval.consumed.sql_steps += steps;
                 if truncated {
                     incomplete(&mut retrieval, IncompleteReason::ScanBound);
                 }
@@ -481,13 +486,26 @@ fn count_probe(
     probe: &Probe,
     qualifying: NonZeroUsize,
     budget: &EvalBudget,
-) -> Result<usize, ScanStop> {
+) -> Result<(usize, u64), ScanStop> {
     budget.check().map_err(|_| ScanStop::Budget)?;
     let limit = i64::try_from(qualifying.get().saturating_add(1)).unwrap_or(i64::MAX);
-    let count: i64 = conn
-        .prepare_cached(COUNT_SQL)?
-        .query_row(rusqlite::params![probe, limit], |row| row.get(0))?;
-    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+    let mut statement = conn.prepare_cached(COUNT_SQL)?;
+    statement.reset_status(StatementStatus::VmStep);
+    let count: i64 = statement.query_row(rusqlite::params![probe, limit], |row| row.get(0))?;
+    Ok((
+        usize::try_from(count).unwrap_or(usize::MAX),
+        vm_steps(&statement),
+    ))
+}
+
+/// The VM steps `statement` ran since its counter was last reset.
+fn vm_steps(statement: &rusqlite::Statement<'_>) -> u64 {
+    // SQLite keeps the counter unsigned and hands it back as an `int`.
+    u64::from(
+        statement
+            .get_status(StatementStatus::VmStep)
+            .cast_unsigned(),
+    )
 }
 
 /// Takes the probe's best `scan_rows` live rows in comparator order and merges each into `best`; `true` when live rows past the bound existed.
@@ -501,21 +519,30 @@ fn scan_probe(
     scan_rows: NonZeroUsize,
     budget: &EvalBudget,
     best: &mut BTreeMap<String, Hit>,
-) -> Result<(usize, bool), ScanStop> {
+) -> Result<(usize, bool, u64), ScanStop> {
     let bound = scan_rows.get();
     let mut taken: Vec<(String, Hit)> = Vec::new();
     let mut detail = conn.prepare_cached(ROW_SQL)?;
+    detail.reset_status(StatementStatus::VmStep);
+    let mut steps = 0;
     let truncated = match run {
-        Run::Common => scan_common(conn, &mut detail, probe, ordinal, bound, budget, &mut taken)?,
+        Run::Common => {
+            let (truncated, common) =
+                scan_common(conn, &mut detail, probe, ordinal, bound, budget, &mut taken)?;
+            steps += common;
+            truncated
+        }
         Run::Ranked(count) => {
             let mut statement = conn.prepare_cached(RANKED_SQL)?;
             let mut ids = conn.prepare_cached(ID_SQL)?;
+            statement.reset_status(StatementStatus::VmStep);
+            ids.reset_status(StatementStatus::VmStep);
             // The engine's rank sorter scores and orders every counted match once; rows are stepped out only until the bound settles.
             let ranked = statement.query_map(
                 rusqlite::params![probe, i64::try_from(count).unwrap_or(i64::MAX)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            settle_ranked(
+            let truncated = settle_ranked(
                 ranked,
                 &mut detail,
                 &mut ids,
@@ -523,9 +550,12 @@ fn scan_probe(
                 ordinal,
                 bound,
                 &mut taken,
-            )?
+            )?;
+            steps += vm_steps(&statement) + vm_steps(&ids);
+            truncated
         }
     };
+    steps += vm_steps(&detail);
     let seen = taken.len();
     for (occurrence_id, hit) in taken {
         if best
@@ -535,10 +565,10 @@ fn scan_probe(
             best.insert(occurrence_id, hit);
         }
     }
-    Ok((seen, truncated))
+    Ok((seen, truncated, steps))
 }
 
-/// `scan_common` takes a common probe's first `bound` live rows in descending rowid order and returns `true` when another live row exists.
+/// `scan_common` takes a common probe's first `bound` live rows in descending rowid order and returns `true` when another live row exists, with the VM steps its page statement ran.
 /// Each page reads `bound + 1` rows below the last rowid seen, so a dead row costs one read and no kept slot, and a short page ends the match set.
 fn scan_common(
     conn: &GuardedConn<'_>,
@@ -548,11 +578,12 @@ fn scan_common(
     bound: usize,
     budget: &EvalBudget,
     taken: &mut Vec<(String, Hit)>,
-) -> Result<bool, ScanStop> {
+) -> Result<(bool, u64), ScanStop> {
     let mut statement = conn.prepare_cached(COMMON_SQL)?;
+    statement.reset_status(StatementStatus::VmStep);
     let page = i64::try_from(bound.saturating_add(1)).unwrap_or(i64::MAX);
     let mut ceiling = i64::MAX;
-    loop {
+    let truncated = 'pages: loop {
         let mut rows = statement.query(rusqlite::params![probe, ceiling, page])?;
         let mut fetched: i64 = 0;
         while let Some(row) = rows.next()? {
@@ -562,15 +593,16 @@ fn scan_common(
             ceiling = rowid.saturating_sub(1);
             if let Some(found) = live_row(detail, rowid, UNRANKED, ordinal)? {
                 if taken.len() == bound {
-                    return Ok(true);
+                    break 'pages true;
                 }
                 taken.push(found);
             }
         }
         if fetched < page {
-            return Ok(false);
+            break false;
         }
-    }
+    };
+    Ok((truncated, vm_steps(&statement)))
 }
 
 /// Keeps the best `bound` live rows of `ranked`, which is in the engine's rank order; `true` when a live row lies past the bound.

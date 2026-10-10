@@ -2216,3 +2216,145 @@ fn dead_rows_leading_a_common_probe_neither_take_its_scan_bound_nor_hide_truncat
         vec![IncompleteReason::CommonTerms, IncompleteReason::ScanBound]
     );
 }
+
+/// Equal-byte occurrences of distinct objects stay distinct contributions: they tie on raw rank, the occurrence comparator orders them, and with one-row batches the eligible siblings fill every accepted slot past an ineligible leader. Duplicate and permuted probes leave the result unchanged.
+#[test]
+fn equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader() {
+    let fixture = Fixture::all_admitted();
+    let objects = ["twin-a", "twin-b", "twin-c"];
+    let mut siblings: Vec<Row> = objects
+        .iter()
+        .map(|object| Row::claim(object, "sibling twin text"))
+        .collect();
+    siblings.sort_by_key(Row::occurrence_id);
+    // The comparator's first sibling stays an unadmitted decision, so the kernel hides it.
+    let leader = siblings[0].object.clone();
+    fixture
+        .kernel
+        .commit(intent("twin-leader"), |envelope| {
+            envelope.insert_decision(decision(&leader))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let admitted: Vec<&str> = siblings[1..]
+        .iter()
+        .map(|row| row.object.as_str())
+        .collect();
+    fixture.admit(&admitted);
+    fixture.project(&siblings);
+
+    let two_one_row_batches = RetrievalBounds {
+        max_accepted: NonZeroUsize::new(2).unwrap(),
+        batch_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let expected: Vec<String> = siblings[1..].iter().map(Row::occurrence_id).collect();
+    for request in ["sibling", "sibling sibling", "twin sibling", "sibling twin"] {
+        let retrieval = fixture
+            .retrieve(
+                &probes(request),
+                two_one_row_batches,
+                &EvalBudget::unbounded(),
+            )
+            .unwrap();
+        assert_eq!(ids_of(&retrieval), expected, "{request}");
+        assert_eq!(retrieval.completion, Completion::Complete, "{request}");
+        assert_eq!(
+            retrieval.consumed.excluded,
+            vec![(EligibilityVerdict::Hidden, 1)],
+            "{request}"
+        );
+        let ranks: Vec<f64> = keyed(&retrieval)
+            .into_iter()
+            .map(|(_, rank)| rank)
+            .collect();
+        assert_eq!(
+            ranks[0].to_bits(),
+            ranks[1].to_bits(),
+            "{request}: equal bytes tie"
+        );
+    }
+}
+
+/// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. A smaller scan bound runs fewer steps on the same counted rows, a result cap leaves the scan work unchanged, and one more matching row adds SQL steps on a ranked run and on a common run.
+#[test]
+fn work_counters_report_exact_and_over_bound_work() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse parse");
+    let run = |bounds: RetrievalBounds| {
+        fixture
+            .retrieve(&request, bounds, &EvalBudget::unbounded())
+            .unwrap()
+    };
+    let exact = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(exact.completion, Completion::Complete);
+    let consumed = &exact.consumed;
+    assert_eq!(consumed.probes, 2, "a repeated probe is counted");
+    assert_eq!(consumed.counted_rows, 4, "a repeated probe is counted once");
+    assert_eq!(consumed.scanned_rows, 4);
+    assert_eq!(consumed.ranked_matches, 4);
+    // Four hits judged in batches of two, then the four accepted re-judged in one final batch.
+    assert_eq!((consumed.judged, consumed.batches), (8, 3));
+    assert!(consumed.sql_steps > 0);
+
+    let over = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(3).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(
+        over.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+    assert_eq!(over.consumed.scanned_rows, 3);
+    assert_eq!(over.consumed.counted_rows, 4);
+    assert!(
+        over.consumed.sql_steps < consumed.sql_steps,
+        "the scan side stops at its bound: {} against {}",
+        over.consumed.sql_steps,
+        consumed.sql_steps
+    );
+
+    let capped = run(RetrievalBounds {
+        max_accepted: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(capped.contributions.len(), 1);
+    assert_eq!(
+        capped.consumed.scanned_rows, consumed.scanned_rows,
+        "the result cap leaves the scan bound to bound scan work"
+    );
+    assert_eq!(capped.consumed.sql_steps, consumed.sql_steps);
+
+    // `parse` is common past two qualifying matches, so this run takes the common scan.
+    let common_before = run(small_thresholds());
+    assert_eq!(
+        common_before.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    fixture.admit(&["parse-more"]);
+    fixture.project(&[Row::claim("parse-more", "parse once more")]);
+    let common_after = run(small_thresholds());
+    assert_eq!(
+        common_after.consumed.scanned_rows,
+        common_before.consumed.scanned_rows + 1
+    );
+    assert!(
+        common_after.consumed.sql_steps > common_before.consumed.sql_steps,
+        "the common scan's steps grow with its rows"
+    );
+    let grown = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(grown.consumed.counted_rows, 5);
+    assert_eq!(grown.consumed.scanned_rows, 5);
+    assert!(
+        grown.consumed.sql_steps > consumed.sql_steps,
+        "{} steps for five rows against {} for four",
+        grown.consumed.sql_steps,
+        consumed.sql_steps
+    );
+}
