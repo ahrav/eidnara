@@ -1252,6 +1252,15 @@ fn a_slice_refused_on_the_lane_names_the_lane_in_status_and_pin_refusals() {
         .err()
         .expect("no family is selected");
     assert_eq!(owner.pin_refusal(&refused), "lane_not_ready");
+
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    assert!(matches!(
+        owner.request(&rebuild(home), now(), &slice_budget()),
+        Err(BuildError::Intent(
+            daemon::projection_lifecycle::IntentRefusal::Denied(Denial::NoManifest)
+        ))
+    ));
+    assert_eq!(owner.admission_state(), Err("no_manifest"));
 }
 
 #[test]

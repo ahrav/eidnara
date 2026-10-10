@@ -529,12 +529,16 @@ impl SearchLifecycleOwner {
     }
 
     fn close_refused(&self, refusal: SpecRefusal) -> SliceOutcome {
+        self.close_gate(refusal.code());
+        SliceOutcome::Closed(refusal)
+    }
+
+    fn close_gate(&self, code: Option<&'static str>) {
         *self
             .preparation_refused
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = refusal.code();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = code;
         let _ = self.admission.refresh(None);
-        SliceOutcome::Closed(refusal)
     }
 
     /// Runs one bounded claim-source slice, or nothing while paused, so memories present before startup and every later decision change reach the search projection's source descriptors. The slice ends within `SLICE_IDLE` and within `budget`; publication runs with local-only egress and grants no search admission.
@@ -1145,23 +1149,23 @@ impl SearchLifecycleOwner {
         // The records and lane are read now rather than trusted from the evidence an earlier slice installed; unavailable ones close the gate and refuse the request.
         let inputs = match AdmissionInputs::read(&self.home) {
             Ok(inputs) => inputs,
-            Err(_) => {
-                let _ = self.admission.refresh(None);
+            Err(refusal) => {
+                self.close_gate(SpecRefusal::from(refusal).code());
                 return Err(IntentRefusal::Denied(Denial::NoManifest).into());
             }
         };
         let identity = match self.identity(inputs.manifest(), budget) {
             Ok(identity) => identity,
-            Err(_) => {
-                let _ = self.admission.refresh(None);
+            Err(refusal) => {
+                self.close_gate(refusal.code());
                 return Err(IntentRefusal::Denied(Denial::EvidenceIdentity).into());
             }
         };
         // What a slice prepares under is checked first: a manifest with no slice bound or no coverage bounds would leave the recorded request to slices that all refuse it. That refusal is the manifest's, and closes the gate as a slice's would, since the earlier grants belong to a manifest that is gone.
         let slice_bound = limit(inputs.manifest(), "supervisor_slice_ms")
             .and_then(|slice_ms| nonzero_u64("supervisor_slice_ms", slice_ms));
-        if slice_bound.is_err() || coverage_bounds(inputs.manifest()).is_err() {
-            let _ = self.admission.refresh(None);
+        if let Err(refusal) = slice_bound.and_then(|_| coverage_bounds(inputs.manifest())) {
+            self.close_gate(refusal.code());
             return Err(BuildError::Invalid(
                 "manifest limits cannot bound the request",
             ));
@@ -1172,7 +1176,7 @@ impl SearchLifecycleOwner {
             && (*selection.identity() != identity
                 || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
         {
-            let _ = self.admission.refresh(None);
+            self.close_gate(None);
             self.requested.notify_one();
             return Err(BuildError::Invalid(
                 "maintenance runs under records a reload replaced; retry after the next slice rotates it",
@@ -1226,7 +1230,7 @@ impl SearchLifecycleOwner {
                 );
             }
             RecordFit::Unbounded => {
-                let _ = self.admission.refresh(None);
+                self.close_gate(None);
             }
         };
         // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced; over a recorded operation those records cannot bound, the gate the last slice closed stays closed.
