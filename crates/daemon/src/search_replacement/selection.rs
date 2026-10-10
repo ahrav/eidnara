@@ -994,17 +994,24 @@ impl SelectedFamily {
     }
 
     fn check_kernel(&self, kernel: &KernelStore, budget: &EvalBudget) -> Result<(), BuildError> {
+        self.checked_kernel_tip(kernel, budget).map(drop)
+    }
+
+    /// `checked_kernel_tip` returns the tip captured during kernel identity verification so checkpoint comparison uses the same observation.
+    fn checked_kernel_tip(
+        &self,
+        kernel: &KernelStore,
+        budget: &EvalBudget,
+    ) -> Result<i64, BuildError> {
         deadline(budget)?;
-        if kernel
-            .capture_commit_read_target_within_budget(budget)?
-            .incarnation
-            != self.incarnation
+        let target = kernel.capture_commit_read_target_within_budget(budget)?;
+        if target.incarnation != self.incarnation
             || kernel.database_incarnation_id_within_budget(budget)?
                 != self.certificate.seed.kernel_incarnation_id
         {
             return Err(ProjectionError::IdentityMismatch.into());
         }
-        Ok(())
+        Ok(target.through_commit)
     }
 }
 
@@ -1070,13 +1077,13 @@ impl SearchReader {
         kernel: &KernelStore,
         budget: &EvalBudget,
     ) -> Result<CompletenessCertificate, BuildError> {
-        self.family.check_kernel(kernel, budget)?;
+        let tip = self.family.checked_kernel_tip(kernel, budget)?;
         let incarnation = self.family.certificate.seed.kernel_incarnation_id.clone();
         let checkpoint = self
             .read(budget, |conn| read_checkpoint(conn, &incarnation))?
             .ok_or(BuildError::Invalid("the family has no applied prefix"))?;
         let complete_through = checkpoint.checkpoint_commit_seq;
-        if kernel.tip_within_budget(budget)? != complete_through {
+        if tip != complete_through {
             return Err(BuildError::Invalid("the family trails the kernel tip"));
         }
         if kernel
