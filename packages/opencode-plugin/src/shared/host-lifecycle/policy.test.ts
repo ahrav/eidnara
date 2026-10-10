@@ -1964,6 +1964,37 @@ describe("demand-start coalescing and detachment (U3 scenarios 15-16)", () => {
         }
     }, 20_000);
 
+    test("coalesced demands report one attempt for a shared refused start", async () => {
+        const root = tempDir("eidnara-policy-coalesce-attempt-");
+        const binary = path.join(root, "refusing-eidnara-host.sh");
+        writeFileSync(binary, `#!/bin/sh\nsleep 1\necho '${missingPayloadResultJson()}'\nexit 1\n`);
+        chmodSync(binary, 0o700);
+        try {
+            const policy = policyFor({
+                env: { XDG_DATA_HOME: root },
+                launchTarget: { kind: "test-binary", path: binary },
+            });
+            const shared = await Promise.all([
+                policy.demandStart({ origin: "managed-default", capability: "context" }),
+                policy.demandStart({ origin: "managed-default", capability: "context" }),
+                policy.demandStart({ origin: "managed-default", capability: "local_embeddings" }),
+            ]);
+            for (const outcome of shared) {
+                expect(outcome.result.reason).toBe("native_payload_missing");
+                expect(outcome.attempt).toBeDefined();
+            }
+            expect(new Set(shared.map((outcome) => outcome.attempt)).size).toBe(1);
+            const later = await policy.demandStart({
+                origin: "managed-default",
+                capability: "context",
+            });
+            expect(later.attempt).toBeDefined();
+            expect(later.attempt).not.toBe(shared[0]?.attempt);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 20_000);
+
     test("demands coalesce only when their startup envelopes are the same request", async () => {
         const root = tempDir("eidnara-policy-coalesce-envelope-");
         const { binary, invocationLog } = fakeBinary(root, { sleepSeconds: 1 });
