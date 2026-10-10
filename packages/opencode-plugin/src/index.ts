@@ -47,15 +47,18 @@ import {
 } from "./shared/conflict-detector";
 import { getEidnaraStorageDir } from "./shared/data-path";
 import { pluginFoldAuthority, publishOnChange } from "./shared/fold-authority-status";
+import { createStartRefusalAnnouncer } from "./shared/host-lifecycle/start-notice";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { createPromptSurfaceRuntime } from "./shared/prompt-surface-runtime";
 import { EidnaraRpcServer } from "./shared/rpc-server";
 
+const startRefusals = createStartRefusalAnnouncer(() => process.env);
 const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
     parentPackageName: "@eidnara/opencode",
+    onRefusal: (reason, remediation) => startRefusals.refused(reason, remediation),
 });
 
 function desktopServerUrl(ctx: Parameters<Plugin>[0]): string | undefined {
@@ -74,6 +77,16 @@ const server: Plugin = async (ctx) => {
         return {};
     }
     configureManagedDemandStart(managedDemandStart);
+    startRefusals.listen((notice) => {
+        log(`[eidnara] ${notice}`);
+        void Promise.resolve()
+            .then(() =>
+                ctx.client.tui.showToast({
+                    body: { title: "Eidnara is off", message: notice, variant: "warning" },
+                }),
+            )
+            .catch(() => undefined);
+    });
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
     const foldAuthority = pluginFoldAuthority(

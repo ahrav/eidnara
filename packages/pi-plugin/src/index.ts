@@ -30,6 +30,7 @@ import {
 import { normalizeTodoStateJson } from "@eidnara/opencode/hooks/context/todo-view";
 import { setHarness } from "@eidnara/opencode/shared/harness";
 import { piModelRefToCanonical } from "@eidnara/opencode/shared/harness-provider-map";
+import { createStartRefusalAnnouncer } from "@eidnara/opencode/shared/host-lifecycle/start-notice";
 import { log } from "@eidnara/opencode/shared/logger";
 import {
     CAPTURE_MAX_AGE_MS,
@@ -87,10 +88,22 @@ const PREFIX = "[eidnara][pi]";
  * `§N§` tags, so the compaction setting decides whether Eidnara owns compaction on Pi.
  */
 export const PI_TRANSFORM_AVAILABLE: boolean = true;
+const startRefusals = createStartRefusalAnnouncer(() => process.env);
+const pendingStartNotices: string[] = [];
+startRefusals.listen((notice) => {
+    log(`[eidnara] ${notice}`);
+    pendingStartNotices.push(notice);
+});
 const managedDemandStart = createLazyManagedDemandStart({
     declaringModuleUrl: import.meta.url,
     parentPackageName: "@eidnara/pi",
+    onRefusal: (reason, remediation) => startRefusals.refused(reason, remediation),
 });
+
+/** Shows the daemon start refusals queued since the last hook that had a UI. */
+export function showPendingStartNotices(ctx: Pick<ExtensionContext, "ui">): void {
+    for (const notice of pendingStartNotices.splice(0)) ctx.ui.notify(notice, "warning");
+}
 
 // ---------------------------------------------------------------------------
 //
@@ -521,6 +534,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     });
     info("registered /eidnara-status");
     registerStatusLine(pi, { projectIdentity });
+    pi.on("session_start", async (_event, ctx) => showPendingStartNotices(ctx));
+    pi.on("agent_end", async (_event, ctx) => showPendingStartNotices(ctx));
     info("registered eidnara status line");
 
     registerCtxFlushCommand(pi, daemonSessionDeps);
