@@ -202,6 +202,8 @@ pub(crate) struct Rule {
     pub unnamed_captures: Vec<usize>,
     /// A byte every match of `regex` contains; input without it skips the rule.
     pub required_byte: Option<u8>,
+    /// The unnamed capture whose pattern starts and ends with the same literal quote byte. Findings report the enclosed bytes; value gates read the whole capture.
+    pub quoted_capture: Option<usize>,
     /// Added to each candidate's confidence before the minimum is applied.
     pub confidence_bonus: i8,
     /// Which source-code value shapes the evaluator rejects for this rule.
@@ -630,6 +632,7 @@ pub(crate) fn compile_rule(
         .collect();
     // The value group `("[a-z0-9=_\-]{8,20}")` makes a double quote a necessary byte of every match.
     let required_byte = (declaration.name == "hashicorp-tf-password").then_some(b'"');
+    let quoted_capture = (declaration.name == "hashicorp-tf-password").then_some(1);
     let confidence_bonus = if declaration.name == "generic-api-key" {
         2
     } else {
@@ -650,6 +653,7 @@ pub(crate) fn compile_rule(
         suppressor_matcher,
         unnamed_captures,
         required_byte,
+        quoted_capture,
         confidence_bonus,
         code_reference_gate,
         encoded_declaration,
@@ -1032,11 +1036,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "d4ccd4e42d05cfd7d784e2b53fef8224b6bd472872eb9dcc9162d5344987b9fd",
+                "69235bd55d45ad0e6e80caf378cce8a3ee27087a13190c26776864264503bf22",
             ),
             (
                 ScanProfile::Comprehensive,
-                "46c1a5a4dc853c456ee1cd323393a6e07e7b2726b86a0b246c666a6272e2f3f2",
+                "c19adcf9d5dc7aa972f008fdb12a0cf8ceeb520b1ed4a73b5211d0c0a629dadb",
             ),
         ] {
             let digest = rules
@@ -1191,5 +1195,70 @@ mod tests {
             .find(|rule| rule.declaration.name == "generic-api-key")
             .expect("generic-api-key is missing from the corpus");
         assert_eq!(rule.declaration.min_confidence, Some(5));
+    }
+
+    fn opens_and_closes_with_one_quote(hir: &regex_syntax::hir::Hir) -> bool {
+        use regex_syntax::hir::HirKind;
+        let edge = |part: Option<&regex_syntax::hir::Hir>, last: bool| match part?.kind() {
+            HirKind::Literal(literal) if last => literal.0.last().copied(),
+            HirKind::Literal(literal) => literal.0.first().copied(),
+            _ => None,
+        };
+        let ends = match hir.kind() {
+            HirKind::Literal(literal) if literal.0.len() >= 2 => {
+                (literal.0.first().copied(), literal.0.last().copied())
+            }
+            HirKind::Concat(parts) => (edge(parts.first(), false), edge(parts.last(), true)),
+            _ => (None, None),
+        };
+        matches!(ends, (Some(first), Some(last)) if first == last && matches!(first, b'"' | b'\'' | b'`'))
+    }
+
+    fn quote_enclosed_captures(hir: &regex_syntax::hir::Hir, found: &mut Vec<usize>) {
+        use regex_syntax::hir::HirKind;
+        match hir.kind() {
+            HirKind::Capture(capture) => {
+                if capture.name.is_none() && opens_and_closes_with_one_quote(&capture.sub) {
+                    found.push(capture.index as usize);
+                }
+                quote_enclosed_captures(&capture.sub, found);
+            }
+            HirKind::Concat(parts) | HirKind::Alternation(parts) => {
+                for part in parts {
+                    quote_enclosed_captures(part, found);
+                }
+            }
+            HirKind::Repetition(repetition) => quote_enclosed_captures(&repetition.sub, found),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn quoted_capture_matches_pattern_syntax() {
+        let rules = RuleSet::from_embedded().unwrap();
+        let mut assigned = 0;
+        for rule in rules.active(ScanProfile::Comprehensive) {
+            let name = rule.declaration.name.as_str();
+            let hir = regex_syntax::ParserBuilder::new()
+                .unicode(rule.declaration.unicode)
+                .utf8(false)
+                .build()
+                .parse(&rule.declaration.regex)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let mut found = Vec::new();
+            if rule.declaration.value_group.is_none() && rule.declaration.secret_group.is_none() {
+                quote_enclosed_captures(&hir, &mut found);
+            }
+            assert!(
+                found.len() <= 1,
+                "{name}: quote-enclosed captures {found:?}"
+            );
+            assert_eq!(rule.quoted_capture, found.first().copied(), "{name}");
+            assigned += usize::from(rule.quoted_capture.is_some());
+        }
+        assert_eq!(
+            assigned, 1,
+            "the corpus rule set carrying a `quoted_capture` changed; update this oracle"
+        );
     }
 }
