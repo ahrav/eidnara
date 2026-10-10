@@ -719,20 +719,28 @@ fn filler_row(sequence: i64, ordinal: i64) -> StoredHistorySegment {
     }
 }
 
+fn render_natural(rows: &[StoredHistorySegment]) -> String {
+    crate::decay_render::render_stored_history_segments(rows, 0.0, |text: &str| {
+        crate::token_cache::cached_estimate_tokens(text)
+    })
+}
+
 /// `row` followed by `newer` test-authored rows, rendered at the natural curve (budget 0).
 fn render_aged(row: &StoredHistorySegment, newer: i64) -> String {
     let mut rows = vec![row.clone()];
     rows.extend((1..=newer).map(|k| filler_row(row.sequence + k, row.end_message + k)));
-    crate::decay_render::render_stored_history_segments(&rows, 0.0, |text: &str| {
-        crate::token_cache::cached_estimate_tokens(text)
-    })
+    render_natural(&rows)
 }
 
 /// The first number of newer rows at which `row` serves each tier.
 fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [i64; 5] {
     let mut first: [Option<i64>; 5] = [None; 5];
+    let mut rows = vec![row.clone()];
     for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
-        let tier = served_tier(&render_aged(row, newer), &row.title, approved);
+        if newer > 0 {
+            rows.push(filler_row(row.sequence + newer, row.end_message + newer));
+        }
+        let tier = served_tier(&render_natural(&rows), &row.title, approved);
         first[rank(tier)].get_or_insert(newer);
         if first.iter().all(Option::is_some) {
             break;

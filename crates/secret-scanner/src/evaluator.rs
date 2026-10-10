@@ -24,6 +24,7 @@ enum Abort {
 struct CandidateSpans {
     full: TextSpan,
     value: TextSpan,
+    reported: TextSpan,
     key: Option<TextSpan>,
 }
 
@@ -187,26 +188,32 @@ fn candidate_spans(
 ) -> Result<Option<CandidateSpans>, Abort> {
     let full_match = captures.get(0).ok_or(ScanError::InvalidSpan)?;
     // A nonparticipating declared value, secret, or key group skips the candidate, rather than aborting the whole scan, reporting the whole match, or silently skipping the gate keyed on that group.
-    let value_match = if let Some(name) = rule.declaration.value_group.as_deref() {
+    let (selected, value_match) = if let Some(name) = rule.declaration.value_group.as_deref() {
         match captures.name(name) {
-            Some(value) => value,
+            Some(value) => (None, value),
             None => return Ok(None),
         }
     } else if let Some(group) = rule.declaration.secret_group {
         match captures.get(usize::from(group)) {
-            Some(value) => value,
+            Some(value) => (None, value),
             None => return Ok(None),
         }
-    } else if let Some(alternative) = first_unnamed_capture(rule, captures) {
-        alternative
+    } else if let Some((index, alternative)) = first_unnamed_capture(rule, captures) {
+        (Some(index), alternative)
     } else {
-        full_match
+        (None, full_match)
     };
     if value_match.is_empty() {
         return Ok(None);
     }
-    let (value_start, value_end) = unquoted(rule, captures, value_match);
-    if value_start == value_end {
+    let gated = unquoted(rule, captures, value_match);
+    let quoted = matches!(selected, Some(index) if rule.quoted_capture == Some(index));
+    let reported = if quoted {
+        (value_match.start() + 1, value_match.end() - 1)
+    } else {
+        (gated.start(), gated.end())
+    };
+    if reported.0 >= reported.1 {
         return Ok(None);
     }
     let key_match = match rule.declaration.key_group.as_deref() {
@@ -218,16 +225,25 @@ fn candidate_spans(
     };
 
     let full_span = TextSpan::snapped(input, full_match.start(), full_match.end())?;
-    let value_span = TextSpan::snapped(input, value_start, value_end)?;
+    let value_span = TextSpan::snapped(input, gated.start(), gated.end())?;
+    let reported_span = if quoted {
+        TextSpan::snapped(input, reported.0, reported.1)?
+    } else {
+        value_span
+    };
     let key_span = key_match
         .map(|value| TextSpan::snapped(input, value.start(), value.end()))
         .transpose()?;
-    if !full_span.contains(value_span) || key_span.is_some_and(|span| !full_span.contains(span)) {
+    if !full_span.contains(value_span)
+        || !value_span.contains(reported_span)
+        || key_span.is_some_and(|span| !full_span.contains(span))
+    {
         return Err(ScanError::InvalidSpan.into());
     }
     Ok(Some(CandidateSpans {
         full: full_span,
         value: value_span,
+        reported: reported_span,
         key: key_span,
     }))
 }
@@ -243,6 +259,7 @@ fn evaluate_candidate_spans(
     let CandidateSpans {
         full: full_span,
         value: value_span,
+        reported,
         key: key_span,
     } = spans;
     if full_span.len() > MAX_MATCH_BYTES {
@@ -390,7 +407,7 @@ fn evaluate_candidate_spans(
         rule_id: rule.declaration.name.clone(),
         rule_source: rule.source,
         full_span,
-        value_span,
+        value_span: reported,
         key_span,
     }))
 }
@@ -569,9 +586,11 @@ fn candidate(
     (value_start, value_end): (usize, usize),
     (key_start, key_end): (usize, usize),
 ) -> Result<Probe, ScanError> {
+    let value = TextSpan::snapped(input, value_start, value_end)?;
     Ok(Probe::Candidate(CandidateSpans {
         full: TextSpan::snapped(input, full_start, full_end)?,
-        value: TextSpan::snapped(input, value_start, value_end)?,
+        value,
+        reported: value,
         key: Some(TextSpan::snapped(input, key_start, key_end)?),
     }))
 }
@@ -715,44 +734,37 @@ fn keyed_keyword_at(key: &[u8], index: usize) -> bool {
 }
 
 // Unnamed captures hold secrets; named captures mark header fields. Ignore named captures so header-only rules return their whole match.
-// Fallback rules report the inside of matching shell quotes around the selected capture: an unnamed capture nested exactly inside them, or else the quoted section itself when no copy of the opening quote sits inside it. A capture such as `"user":"pass"` joins two quoted sections and stays whole. Declared groups take precedence.
-fn unquoted(
+// Fallback rules treat an unnamed capture spanning the quoted interior as the secret; declared value and secret groups take precedence.
+fn unquoted<'a>(
     rule: &Rule,
-    captures: &Captures<'_>,
-    selected: regex::bytes::Match<'_>,
-) -> (usize, usize) {
-    let whole = (selected.start(), selected.end());
+    captures: &Captures<'a>,
+    selected: regex::bytes::Match<'a>,
+) -> regex::bytes::Match<'a> {
     if rule.declaration.value_group.is_some() || rule.declaration.secret_group.is_some() {
-        return whole;
+        return selected;
     }
     let bytes = selected.as_bytes();
     let quoted = bytes.len() >= 2
         && matches!(bytes[0], b'\'' | b'"' | b'`')
         && bytes[bytes.len() - 1] == bytes[0];
     if !quoted {
-        return whole;
+        return selected;
     }
-    let inside = (selected.start() + 1, selected.end() - 1);
-    let nested = rule
-        .unnamed_captures
+    rule.unnamed_captures
         .iter()
         .filter_map(|&index| captures.get(index))
-        .any(|inner| (inner.start(), inner.end()) == inside);
-    if nested || !bytes[1..bytes.len() - 1].contains(&bytes[0]) {
-        inside
-    } else {
-        whole
-    }
+        .find(|inner| inner.start() == selected.start() + 1 && inner.end() == selected.end() - 1)
+        .unwrap_or(selected)
 }
 
 fn first_unnamed_capture<'a>(
     rule: &Rule,
     captures: &Captures<'a>,
-) -> Option<regex::bytes::Match<'a>> {
+) -> Option<(usize, regex::bytes::Match<'a>)> {
     rule.unnamed_captures
         .iter()
-        .filter_map(|&index| captures.get(index))
-        .find(|value| !value.is_empty())
+        .filter_map(|&index| Some((index, captures.get(index)?)))
+        .find(|(_, value)| !value.is_empty())
 }
 
 fn add_work(total: &mut usize, amount: usize, limit: usize) -> Result<(), Abort> {
@@ -1654,27 +1666,34 @@ fn validate_slack(value: &[u8]) -> OfflineVerdict {
         segments
             .next()
             .is_some_and(|segment| segment.first().is_some_and(u8::is_ascii_digit))
+    } else if config_access || prefix == b"xoxb" {
+        after_digit_segments(body, 1).is_some()
+    } else if matches!(prefix, b"xoxp" | b"xoxo" | b"xoxs") {
+        after_digit_segments(body, 3).is_some()
+    } else if prefix.eq_ignore_ascii_case(b"xoxe") {
+        // The two-segment refresh shape holds exactly one `-` in its body.
+        after_digit_segments(body, 1).is_some_and(|rest| {
+            after_digit_segments(rest, 2).is_some() || memchr::memchr(b'-', rest).is_none()
+        })
     } else {
-        let segment_count = segments.clone().count();
-        let fixed = if config_access || prefix == b"xoxb" {
-            1
-        } else if matches!(prefix, b"xoxp" | b"xoxo" | b"xoxs") {
-            3
-        } else if prefix.eq_ignore_ascii_case(b"xoxe") {
-            if segment_count == 2 { 1 } else { 3 }
-        } else {
-            return OfflineVerdict::Indeterminate;
-        };
-        segment_count > fixed
-            && segments
-                .take(fixed)
-                .all(|segment| !segment.is_empty() && segment.iter().all(u8::is_ascii_digit))
+        return OfflineVerdict::Indeterminate;
     };
     if shaped {
         OfflineVerdict::Valid
     } else {
         OfflineVerdict::Invalid
     }
+}
+
+fn after_digit_segments(mut body: &[u8], count: usize) -> Option<&[u8]> {
+    for _ in 0..count {
+        let digits = body.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        if digits == 0 || body.get(digits) != Some(&b'-') {
+            return None;
+        }
+        body = &body[digits + 1..];
+    }
+    Some(body)
 }
 
 fn base64_prefix(input: &[u8], prefix: &[u8]) -> bool {
@@ -1911,9 +1930,11 @@ mod tests {
                     TextSpan::snapped(input, found.start(), found.end()).unwrap()
                 };
                 let full = captures.get(0).unwrap();
+                let value = group("value");
                 let spans = CandidateSpans {
                     full: TextSpan::snapped(input, full.start(), full.end()).unwrap(),
-                    value: group("value"),
+                    value,
+                    reported: value,
                     key: Some(group("key")),
                 };
                 let evaluated = candidate_spans(rule, &captures, input).unwrap();
@@ -2510,6 +2531,90 @@ mod tests {
                 },
             );
             assert!(matches!(outcome, Err(Abort::Work)), "{key}: {outcome:?}");
+        }
+    }
+
+    const SLACK_DIGIT_PREFIXES: [&str; 8] = [
+        "xoxb-",
+        "xoxp-",
+        "xoxo-",
+        "xoxs-",
+        "xoxe-",
+        "XOXE-",
+        "xoxe.xoxb-",
+        "XOXE.XOXP-",
+    ];
+
+    const SLACK_BODY_PIECES: [&str; 10] =
+        ["0", "1", "12", "9876543210", "-", "-", "a", "Z", "x", "AbC"];
+
+    /// `validate_slack` must agree with this split-and-count reading for the prefixes whose shape fixes leading all-digit segments.
+    fn slack_digit_shape_oracle(prefix: &str, body: &[u8]) -> Option<bool> {
+        if prefix.len() + body.len() < 10 {
+            return None;
+        }
+        let segments: Vec<&[u8]> = body.split(|byte| *byte == b'-').collect();
+        let fixed = match prefix {
+            "xoxb-" | "xoxe.xoxb-" | "XOXE.XOXP-" => 1,
+            "xoxe-" | "XOXE-" if segments.len() == 2 => 1,
+            _ => 3,
+        };
+        Some(
+            segments.len() > fixed
+                && segments[..fixed]
+                    .iter()
+                    .all(|segment| !segment.is_empty() && segment.iter().all(u8::is_ascii_digit)),
+        )
+    }
+
+    fn assert_slack_digit_shape_matches_oracle(prefix: &str, body: &str) {
+        let value = format!("{prefix}{body}");
+        let observed = match validate_slack(value.as_bytes()) {
+            OfflineVerdict::Valid => Some(true),
+            OfflineVerdict::Invalid => Some(false),
+            OfflineVerdict::Indeterminate => None,
+        };
+        assert_eq!(
+            observed,
+            slack_digit_shape_oracle(prefix, body.as_bytes()),
+            "{value}"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2_000))]
+        #[test]
+        fn slack_digit_shapes_match_the_segment_count_reading(
+            prefix in 0..SLACK_DIGIT_PREFIXES.len(),
+            pieces in proptest::collection::vec(0..SLACK_BODY_PIECES.len(), 0..16)
+        ) {
+            let body: String = pieces.iter().map(|&piece| SLACK_BODY_PIECES[piece]).collect();
+            assert_slack_digit_shape_matches_oracle(SLACK_DIGIT_PREFIXES[prefix], &body);
+        }
+    }
+
+    #[test]
+    fn slack_digit_shapes_match_the_segment_count_reading_on_rule_shapes() {
+        let refresh: String = "ABCDEF0123456789".repeat(10).chars().take(146).collect();
+        for prefix in SLACK_DIGIT_PREFIXES {
+            for body in [
+                "1234567890-1234567890-1234567890-AbCdEfGhIjKlMn-OpQrStUvWxYz1234",
+                "1234567890-1234567890-Ab-Cd-efgh",
+                "1234567890-1234567890-1234567890-",
+                "1-22-333-abcdef123456",
+                "1-22-333",
+                "1-22-333-",
+                "1-",
+                "1",
+                "-1-2-3-4",
+                "1--2-3-4",
+                "12a-34-56-tail",
+                &format!("1-{refresh}"),
+                &format!("1-{refresh}-tail"),
+                "",
+            ] {
+                assert_slack_digit_shape_matches_oracle(prefix, body);
+            }
         }
     }
 }
