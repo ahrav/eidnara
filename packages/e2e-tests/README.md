@@ -235,3 +235,39 @@ The `gates` job installs OpenCode 1.18.22 and Pi 0.80.2 on Node 24.18.0,
 builds both daemon examples, exports their paths through the variables above,
 and runs `validate-mode-manifest` and `test:rust` with
 `EIDNARA_E2E_REQUIRE_PI=1`.
+
+## Eidnara on/off evaluation
+
+`bun run eval:ab` runs one seeded project world through Pi and OpenCode with
+and without Eidnara and records every turn and model call. `bun run
+eval:ab:report <out>` prints accuracy by fact kind, a paired on/off test,
+turn latency, model calls and tokens per caller, and memory.
+
+- The world (`src/ab-eval/world.ts`) is a synthetic service repository plus
+  coding sessions. Fact turns plant decisions, corrections, constraints,
+  incident IDs, cross-session facts, and error codes that exist only in test
+  output; probe turns ask about each fact once. Grading is a whole-word token
+  match, so no judge runs.
+- The Bedrock gateway (`src/ab-eval/gateway.ts`) answers filler and fact turns
+  with scripted assistant steps whose tool calls run in the harness, and
+  forwards probes, native compaction, and every Eidnara model call to Bedrock
+  with the caller's AWS credentials. A scripted turn spends no model time, so
+  its wall time is harness and plugin overhead.
+- Arms (`src/ab-eval/arms.ts`): `pi-off`, `pi-on`, `pi-onraw`, `oc-off`,
+  `oc-on`. `pi-on` strips the summarizer's temperature at the gateway;
+  `pi-onraw` sends requests as the plugin builds them. Eidnara arms run the
+  release `direct_host_fixture` with the pinned harness closures.
+- With passwordless `sudo`, each harness runs in a mount namespace that hides
+  `/tmp` and the home directory except its own arm, so an agent cannot read
+  another arm or the answer key. `--sandbox off` runs without it.
+- `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
+  those prompts, to exercise a pass that misses its deadline.
+
+```sh
+PATH=<dir with opencode 1.18.22>:$PATH bun run eval:ab --tier m --seed 21 \
+  --arms pi-off,pi-on,oc-off,oc-on --out /tmp/ab-eval/runs/m1 --pace-ms 2000
+bun run eval:ab:report /tmp/ab-eval/runs/m1
+```
+
+Tiers: `xs` (2 x 24 turns), `c` (1 x 170), `s` (3 x 110), `m` (12 x 260),
+`l` (40 x 600). Run reports stay outside the repository.
