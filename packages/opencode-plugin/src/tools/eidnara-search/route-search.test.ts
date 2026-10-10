@@ -204,6 +204,54 @@ describe("eidnara_search through the fused route", () => {
         expect(transport.calls).toHaveLength(0);
     });
 
+    it("ranks a memory-only source subset through the route exactly as the default sources do", async () => {
+        const rendered = async (sources?: string[]) => {
+            const { kernel, transport, run } = harness();
+            kernel.seedDecision({ object_id: id(1), decision_kind: "NAMING", summary: "First." });
+            kernel.seedDecision({ object_id: id(2), decision_kind: "NAMING", summary: "Second." });
+            let request: Record<string, unknown> = {};
+            kernel.routeReply = (body) => {
+                const { remaining_ms: _remaining, ...rest } = body;
+                request = rest;
+                return fused([{ object: id(2) }, { object: id(1) }]);
+            };
+            const execution = await run(
+                sources === undefined ? { query: "order" } : { query: "order", sources },
+            );
+            if (execution.status !== "complete") throw new Error(execution.text);
+            return {
+                order: execution.prePack.map((result) => result.objectId),
+                methods: methods(transport),
+                request,
+                text: execution.text,
+            };
+        };
+        const memoryOnly = await rendered(["memory"]);
+        expect(memoryOnly.order).toEqual([id(2), id(1)]);
+        expect(memoryOnly.methods).toEqual(["retrieval.query", "kernel.read"]);
+        expect(memoryOnly.request).toMatchObject({ query: "order", destination: "local" });
+        expect(await rendered()).toEqual(memoryOnly);
+    });
+
+    it("renders no memory text when the hydration read answers a project mismatch", async () => {
+        const { kernel, transport, run } = harness();
+        kernel.seedDecision({
+            object_id: id(1),
+            decision_kind: "NAMING",
+            summary: "Text bound to the ranked project.",
+        });
+        kernel.routeReply = () => fused([{ object: id(1) }]);
+        kernel.surfaceStates.set("explicit_search", {
+            kind: "invalid",
+            reason: "project_mismatch",
+        });
+        const execution = await run({ query: "bound project" });
+        expect(execution.status).toBe("invalid");
+        expect(execution.text).toContain("The request named a project other than the bound one.");
+        expect(execution.text).not.toContain("Text bound to the ranked project.");
+        expect(methods(transport)).toEqual(["retrieval.query", "kernel.read"]);
+    });
+
     it("answers a healthy empty ranking without the snapshot scan", async () => {
         const { kernel, transport, run } = harness();
         kernel.seedDecision({ object_id: id(1), decision_kind: "NAMING", summary: "memory text" });

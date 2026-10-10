@@ -22,7 +22,18 @@ export const EVAL_RUNNER: DaemonExample = {
     prebuiltEnv: "EIDNARA_E2E_EVAL_RUNNER_BIN",
 };
 
-export const DAEMON_EXAMPLES: readonly DaemonExample[] = [DIRECT_HOST_FIXTURE, EVAL_RUNNER];
+/** Writes the fixture search admission pair for a built payload's embedding bundle. */
+export const SEARCH_ADMISSION_RECORDS: DaemonExample = {
+    example: "search_admission_records",
+    feature: "direct-host-fixture",
+    prebuiltEnv: "EIDNARA_E2E_SEARCH_ADMISSION_RECORDS_BIN",
+};
+
+export const DAEMON_EXAMPLES: readonly DaemonExample[] = [
+    DIRECT_HOST_FIXTURE,
+    EVAL_RUNNER,
+    SEARCH_ADMISSION_RECORDS,
+];
 
 export function workspaceExampleBinary(repoRoot: string, example: DaemonExample): string {
     return join(repoRoot, "target/debug/examples", example.example);
