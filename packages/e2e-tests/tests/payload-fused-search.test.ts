@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { disposeAll } from "../src/harness-primitives";
 import { PiTestHarness } from "../src/pi-harness";
 import { detectPiPrereqs } from "../src/pi-runner/spawn";
 import { RustTestHarness } from "../src/rust-harness";
@@ -112,8 +113,7 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
     }, SUITE_TIMEOUT_MS);
 
     afterAll(async () => {
-        await pi?.dispose();
-        await oc?.dispose();
+        await disposeAll([pi, oc]);
     }, 120_000);
 
     it(

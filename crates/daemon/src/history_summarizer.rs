@@ -4903,9 +4903,16 @@ mod tests {
     }
 
     fn source_run_failure(class: ErrorClass) -> HistorySummarizerProducerError {
+        source_run_failure_with_detail(class, "opencode AWS credential source is unavailable")
+    }
+
+    fn source_run_failure_with_detail(
+        class: ErrorClass,
+        detail: &str,
+    ) -> HistorySummarizerProducerError {
         HistorySummarizerProducerError::RunFailed {
             run_id: "run-1".to_owned(),
-            detail: "opencode AWS credential source is unavailable".to_owned(),
+            detail: detail.to_owned(),
             classification: Some(ErrorClassification {
                 class,
                 retry_after_secs: Some(120),
@@ -4917,36 +4924,44 @@ mod tests {
 
     #[tokio::test]
     async fn a_source_failure_skips_same_provider_models_and_falls_back_to_another_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        seed_prior_history_segment(&store);
-        let chunk = history_summarizer_chunk();
-        let prior = prior_ranges();
-        let models = vec![
-            "amazon-bedrock/model-a".to_owned(),
-            "amazon-bedrock/model-b".to_owned(),
-            "anthropic/model-c".to_owned(),
-        ];
-        let mut producer = ScriptedProducer::default()
-            .with_start(Ok(run_handle("run-1")))
-            .with_output(Err(source_run_failure(ErrorClass::Transient)))
-            .with_start(Ok(run_handle("run-2")))
-            .with_output(Ok(producer_output(history_summarizer_xml("other source"))));
-        let outcome = run_history_summarizer_firing(
-            &mut producer,
-            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
-        )
-        .await
-        .unwrap();
-        let HistorySummarizerDriveOutcome::Completed(success) = outcome else {
-            panic!("expected the other source's model to publish");
-        };
-        assert_eq!(success.model, "anthropic/model-c");
-        assert_eq!(
-            producer.observed_starts.len(),
-            2,
-            "model-b shares the failed source"
-        );
+        for detail in [
+            "opencode AWS credential source is unavailable",
+            "opencode provider reported an error (status 400)",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_history_segment(&store);
+            let chunk = history_summarizer_chunk();
+            let prior = prior_ranges();
+            let models = vec![
+                "amazon-bedrock/model-a".to_owned(),
+                "amazon-bedrock/model-b".to_owned(),
+                "anthropic/model-c".to_owned(),
+            ];
+            let mut producer = ScriptedProducer::default()
+                .with_start(Ok(run_handle("run-1")))
+                .with_output(Err(source_run_failure_with_detail(
+                    ErrorClass::Transient,
+                    detail,
+                )))
+                .with_start(Ok(run_handle("run-2")))
+                .with_output(Ok(producer_output(history_summarizer_xml("other source"))));
+            let outcome = run_history_summarizer_firing(
+                &mut producer,
+                fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
+            )
+            .await
+            .unwrap();
+            let HistorySummarizerDriveOutcome::Completed(success) = outcome else {
+                panic!("{detail:?}: expected the other source's model to publish");
+            };
+            assert_eq!(success.model, "anthropic/model-c", "{detail:?}");
+            assert_eq!(
+                producer.observed_starts.len(),
+                2,
+                "{detail:?}: model-b shares the failed source, by its typed scope"
+            );
+        }
     }
 
     #[tokio::test]
