@@ -454,22 +454,45 @@ async fn retrieval_adapter_agrees_with_daemon_and_kernel_on_one_snapshot() {
 /// AC3 architecture check: in every workspace crate's sources outside the kernel, `KernelStore::judge_eligibility` and `judge_eligibility_within_budget` are called or named only from the daemon's wire and cache adapter, the retrieval batch adapter, and the embedding dispatcher. Retrieval's product dependencies include the kernel and exclude the daemon, and the kernel keeps its verdict function private. A new caller must join this list, where review sees it.
 #[test]
 fn canonical_eligibility_has_one_kernel_policy_entry_outside_the_kernel() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     // A call, a method path, or a function passed by name all contain one of these.
     let entries = [".judge_eligibility", "::judge_eligibility"];
     let allowed = [
-        "daemon/src/kernel_routes/eligibility.rs",
-        "daemon/src/embedding_dispatch.rs",
-        "retrieval/src/eligibility.rs",
+        "crates/daemon/src/kernel_routes/eligibility.rs",
+        "crates/daemon/src/embedding_dispatch.rs",
+        "crates/retrieval/src/eligibility.rs",
     ];
-    let mut callers = BTreeMap::new();
-    let mut pending: Vec<std::path::PathBuf> = std::fs::read_dir(&root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|crate_dir| crate_dir.file_name().is_some_and(|name| name != "kernel"))
-        .map(|crate_dir| crate_dir.join("src"))
-        .filter(|src| src.is_dir())
+    // The workspace manifest's `members` list includes crates outside `crates/`.
+    let workspace = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let members = workspace
+        .split("members = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .unwrap();
+    let member_dirs: Vec<&str> = members
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .filter(|member| *member != "crates/kernel")
         .collect();
+    assert!(
+        member_dirs
+            .iter()
+            .any(|member| !member.starts_with("crates/")),
+        "the scan reaches the workspace members outside crates/: {member_dirs:?}"
+    );
+    let mut callers = BTreeMap::new();
+    let mut pending: Vec<std::path::PathBuf> = member_dirs
+        .iter()
+        .map(|member| root.join(member).join("src"))
+        .collect();
+    for src in &pending {
+        assert!(
+            src.is_dir(),
+            "{} is a workspace member with sources",
+            src.display()
+        );
+    }
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
@@ -505,8 +528,8 @@ fn canonical_eligibility_has_one_kernel_policy_entry_outside_the_kernel() {
         "eligibility is judged outside the shared adapters: {unexpected:?}"
     );
     for adapter in [
-        "daemon/src/kernel_routes/eligibility.rs",
-        "retrieval/src/eligibility.rs",
+        "crates/daemon/src/kernel_routes/eligibility.rs",
+        "crates/retrieval/src/eligibility.rs",
     ] {
         assert!(
             callers.contains_key(adapter),
@@ -514,7 +537,7 @@ fn canonical_eligibility_has_one_kernel_policy_entry_outside_the_kernel() {
         );
     }
 
-    let manifest = std::fs::read_to_string(root.join("retrieval/Cargo.toml")).unwrap();
+    let manifest = std::fs::read_to_string(root.join("crates/retrieval/Cargo.toml")).unwrap();
     let product = manifest
         .split("[dependencies]")
         .nth(1)
@@ -528,7 +551,8 @@ fn canonical_eligibility_has_one_kernel_policy_entry_outside_the_kernel() {
         names.contains(&"kernel") && !names.contains(&"daemon"),
         "retrieval's product dependencies include the kernel and exclude the daemon: {names:?}"
     );
-    let kernel_policy = std::fs::read_to_string(root.join("kernel/src/eligibility.rs")).unwrap();
+    let kernel_policy =
+        std::fs::read_to_string(root.join("crates/kernel/src/eligibility.rs")).unwrap();
     assert!(
         kernel_policy.contains("\nfn judge(") && !kernel_policy.contains("pub fn judge("),
         "the kernel's verdict function stays private to the kernel"
