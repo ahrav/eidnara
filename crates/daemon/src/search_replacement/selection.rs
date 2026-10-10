@@ -299,10 +299,10 @@ impl SearchSelection {
     /// Returns the gate's denial.
     pub(crate) fn admit_reader(&self, gate: &HookGate) -> Result<Admission, BuildError> {
         gate.require_selection_home(&self.data_home)?;
-        let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
-        gate.check_limits(
-            &grant,
-            &InvalidationIdentity::from(&self.identity),
+        Ok(gate.admit_within_limits(
+            ProjectionHook::EmbeddingBootstrap,
+            EntryPoint::Reload,
+            &self.identity,
             &[
                 ("local_transaction_rows", self.bounds.max_rows() as u64),
                 (
@@ -310,8 +310,7 @@ impl SearchSelection {
                     self.bounds.max_live_per_class.get() as u64,
                 ),
             ],
-        )?;
-        Ok(grant)
+        )?)
     }
 
     /// Publishes the durable pointer before swapping the in-process family; errors require reconciliation through `reopen`.

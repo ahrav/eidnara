@@ -98,6 +98,15 @@ the gate admits but no family is selected. Codes name the gate or condition,
 never record content. OpenCode's `/eidnara-status` renders the block as
 `Search admission`.
 
+Every admission, including the one behind the status block, reads the
+lifecycle record fresh. The gate checks the control directory's owner and mode
+from its path metadata, opening the directory only when that metadata does not
+show the caller's own owner-only directory. On ext4, XFS, Btrfs, and tmpfs the
+gate keeps the record open and rereads its bytes while the record path still
+names the same inode with the same mode, owner, and change time; any other
+metadata, and every other filesystem, opens the record again. A record whose
+bytes equal the last bytes the gate decoded reuses that decode's verdict.
+
 ## Disable and recovery
 
 `SearchLifecycleOwner::disable` closes admission before any write, persists the
