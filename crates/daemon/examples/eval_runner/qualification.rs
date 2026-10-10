@@ -27,7 +27,7 @@ use super::support::eval_surface::block_on;
 pub const USAGE: &str = "qualification --out <report.json> --cases <all|name,...> \
      --operations <per repetition> --repetitions <n> --outage-scale <divisor> \
      --state-dir <dir on the measured filesystem> \
-     [--witness-runs <json object of witness name to {test, exit_code}>]";
+     [--witness-runs <witnesses.json: witness name to {test, source_commit, exit_code}>]";
 
 const RAW_CAP_BYTES: u64 = memory_store::MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES as u64;
 
