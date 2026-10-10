@@ -388,8 +388,11 @@ one-sentence P4, and heading lines in a body all serve. Every record carries
 `generation_capture_sha256`, the SHA-256 of the capture file it served. A
 source with no published real capture fails the run. The replay serves
 one-row captures: a scenario's tier is the tier its source's row serves, so a
-capture whose published rows number other than one fails the run as the
-captures are read, before any source folds or any record is written. The
+capture whose published rows number other than one, or whose row covers less
+than the source's whole message range, fails the run as the captures are
+read, before any source folds. Both folds of a source run under the capture's
+model. The replay writes its records only after every source has served, so
+a failing source leaves the arm directory as it found it. The
 replay serves the natural and omission paths; the pressure scenarios (C1.S5
 and C3.S5) have no bound serving record in a real arm, so the report names
 them missing until a pressure witness serves the capture. Run it with
