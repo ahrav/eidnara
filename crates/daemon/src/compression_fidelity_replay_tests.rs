@@ -540,24 +540,41 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
     }
 }
 
-/// The approved example with its segment range moved `offset` ordinals later. Tier bodies,
-/// title, and importance are untouched; only the coordinate frame changes.
-fn translated(approved_example: &str, count: u64, offset: u64) -> String {
-    approved_example
-        .replacen(
-            &format!("start=\"1\" end=\"{count}\""),
-            &format!("start=\"{}\" end=\"{}\"", 1 + offset, count + offset),
-            1,
+fn translated(output: &str, offset: u64) -> String {
+    use regex::{Captures, Regex};
+    let shift = |digits: &str| digits.parse::<u64>().unwrap() + offset;
+    let attribute = Regex::new(r#"\b(start|end)="(\d+)""#).unwrap();
+    let opener = Regex::new(r"<history_segment\s[^>]*>").unwrap();
+    let processed = Regex::new(r"<messages_processed>(\d+)-(\d+)</messages_processed>").unwrap();
+    let unprocessed = Regex::new(r"<unprocessed_from>(\d+)</unprocessed_from>").unwrap();
+    let output = opener.replace_all(output, |tag: &Captures| {
+        attribute
+            .replace_all(&tag[0], |pair: &Captures| {
+                format!("{}=\"{}\"", &pair[1], shift(&pair[2]))
+            })
+            .into_owned()
+    });
+    let output = processed.replace_all(&output, |range: &Captures| {
+        format!(
+            "<messages_processed>{}-{}</messages_processed>",
+            shift(&range[1]),
+            shift(&range[2])
         )
-        .replacen(
-            &format!("<messages_processed>1-{count}</messages_processed>"),
-            &format!(
-                "<messages_processed>{}-{}</messages_processed>",
-                1 + offset,
-                count + offset
-            ),
-            1,
-        )
+    });
+    unprocessed
+        .replace_all(&output, |from: &Captures| {
+            format!("<unprocessed_from>{}</unprocessed_from>", shift(&from[1]))
+        })
+        .into_owned()
+}
+
+#[test]
+fn translated_shifts_every_ordinal_the_validator_reads() {
+    let output = "<output><history_segments><history_segment start=\"1\" end=\"4\" title=\"T\" importance=\"50\"><p1>x</p1><p2>x</p2><p3>x</p3><p4 /></history_segment></history_segments><meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta></output>";
+    assert_eq!(
+        translated(output, 3),
+        "<output><history_segments><history_segment start=\"4\" end=\"7\" title=\"T\" importance=\"50\"><p1>x</p1><p2>x</p2><p3>x</p3><p4 /></history_segment></history_segments><meta><messages_processed>4-7</messages_processed><unprocessed_from>8</unprocessed_from></meta></output>"
+    );
 }
 
 const SCAFFOLD_MESSAGES: u64 = 3;
@@ -624,7 +641,6 @@ async fn two_folds(
 async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
     for (case, source) in sources() {
         let follow_up = follow_up_for(case, source);
-        let count = source.messages.len() as u64;
         let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
         let shifted = source_ingress(case, source)
             .into_iter()
@@ -639,7 +655,7 @@ async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
             follow_up,
             [
                 baseline_output,
-                translated(&source.approved_example, count, SCAFFOLD_MESSAGES),
+                translated(&source.approved_example, SCAFFOLD_MESSAGES),
             ],
         )
         .await;
@@ -670,29 +686,37 @@ async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
     }
 }
 
-/// The served segment of the row titled `title`: from its heading to the next heading.
-fn segment_of<'r>(rendered: &'r str, title: &str) -> Option<&'r str> {
-    let at = rendered.find(title)?;
+/// Heading lookup requires body lines beginning with `## ` to be indented.
+fn segment_of<'r>(rendered: &'r str, row: &StoredHistorySegment) -> Option<&'r str> {
+    let heading = format!("## {}-{} · ", row.start_message, row.end_message);
+    let at = if rendered.starts_with(&heading) {
+        0
+    } else {
+        rendered.find(&format!("\n{heading}"))? + 1
+    };
     let segment = &rendered[at..];
     Some(segment[..segment.find("\n\n## ").unwrap_or(segment.len())].trim_end())
 }
 
-/// The tier at which `rendered` serves the case row titled `title`, judged only against the
-/// approved bodies: the body it carries, title only for P4, or absent for P5.
-fn served_tier(rendered: &str, title: &str, approved: &[String; 4]) -> Tier {
-    let Some(segment) = segment_of(rendered, title) else {
+fn served_body<'r>(rendered: &'r str, row: &StoredHistorySegment) -> Option<&'r str> {
+    let segment = segment_of(rendered, row)?;
+    Some(segment.split_once('\n').map_or("", |(_, body)| body))
+}
+
+/// `bodies` must contain each tier's expected body in renderer output format.
+fn served_tier(rendered: &str, row: &StoredHistorySegment, bodies: &[String; 4]) -> Tier {
+    let Some(body) = served_body(rendered, row) else {
         return Tier::P5;
     };
-    let carried: Vec<Tier> = [Tier::P1, Tier::P2, Tier::P3]
+    let carried: Vec<Tier> = TIERS
         .into_iter()
-        .zip(approved)
-        .filter(|(_, body)| segment.ends_with(body.as_str()))
+        .zip(bodies)
+        .filter(|(_, expected)| expected.as_str() == body)
         .map(|(tier, _)| tier)
         .collect();
     match carried.as_slice() {
         [tier] => *tier,
-        [] if segment.lines().count() == 1 => Tier::P4,
-        other => panic!("{title}: ambiguous serving {other:?}: {segment}"),
+        other => panic!("{}: ambiguous serving {other:?}: {body}", row.title),
     }
 }
 
@@ -733,10 +757,22 @@ fn render_aged(row: &StoredHistorySegment, newer: i64) -> String {
 }
 
 /// Each tier's first age: the least number of newer rows under which the natural curve serves
-/// `row` at that tier. The search requires `rank_at(newer)` to be nondecreasing in `newer`.
-fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [i64; 5] {
+/// `row` at that tier. The probe uses distinct tier bodies so `served_tier` can distinguish
+/// tiers even when `bodies`, the row's own tiers as rendered, coincide. The search requires the
+/// probe's rank to be nondecreasing in the number of newer rows.
+fn first_ages(row: &StoredHistorySegment, bodies: &[String; 4], id: &str) -> [i64; 5] {
     const MAX_NEWER: i64 = crate::decay_render::PRESSURE_WINDOW as i64 + 2;
-    let mut rows = vec![row.clone()];
+    let probe_bodies = ["P1", "P2", "P3", "P4"].map(|tier| format!("Probe {tier} body."));
+    let [p1, p2, p3, p4] = probe_bodies.clone();
+    let probe = StoredHistorySegment {
+        content: p1.clone(),
+        p1: Some(p1),
+        p2: Some(p2),
+        p3: Some(p3),
+        p4: Some(p4),
+        ..row.clone()
+    };
+    let mut rows = vec![probe];
     let mut ranks: Vec<Option<usize>> = Vec::new();
     let mut rank_at = |newer: i64| -> usize {
         let at = usize::try_from(newer).unwrap();
@@ -750,8 +786,8 @@ fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [
         *ranks[at].get_or_insert_with(|| {
             rank(served_tier(
                 &render_natural(&rows[..=at]),
-                &row.title,
-                approved,
+                row,
+                &probe_bodies,
             ))
         })
     };
@@ -788,6 +824,22 @@ fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [
         below = at_or_past;
     }
     assert_eq!(rank_at(0), 0, "{id}: the fresh row serves P1");
+    rows[0] = row.clone();
+    let serves = |newer: i64, tier: Tier| {
+        let rendered = render_natural(&rows[..=newer as usize]);
+        let expected = (tier != Tier::P5).then(|| bodies[rank(tier)].as_str());
+        assert_eq!(
+            served_body(&rendered, row),
+            expected,
+            "{id}: {tier:?} at {newer} newer rows"
+        );
+    };
+    for (index, (tier, age)) in TIERS.into_iter().zip(first).enumerate() {
+        serves(age, tier);
+        if index > 0 {
+            serves(age - 1, TIERS[index - 1]);
+        }
+    }
     first
 }
 
@@ -820,7 +872,7 @@ fn first_ages_match_an_exhaustive_scan_at_every_decay_rate() {
             if newer > 0 {
                 rows.push(filler_row(row.sequence + newer, row.end_message + newer));
             }
-            let tier = served_tier(&render_natural(&rows), &row.title, &approved);
+            let tier = served_tier(&render_natural(&rows), &row, &approved);
             scanned[rank(tier)].get_or_insert(newer);
         }
         let scanned = scanned.map(|age| age.unwrap_or_else(|| panic!("importance {importance}")));
@@ -828,6 +880,76 @@ fn first_ages_match_an_exhaustive_scan_at_every_decay_rate() {
             first_ages(&row, &approved, "alpha"),
             scanned,
             "importance {importance}"
+        );
+    }
+}
+
+#[test]
+fn first_ages_hold_for_every_published_tier_shape() {
+    let base = StoredHistorySegment {
+        sequence: 1,
+        start_message: 1,
+        end_message: 4,
+        end_message_id: "cf-alpha-4#0".to_owned(),
+        title: "Alpha".to_owned(),
+        content: "Alpha ships the first body in full.".to_owned(),
+        p1: Some("Alpha ships the first body in full.".to_owned()),
+        p2: Some("Alpha ships the body.".to_owned()),
+        p3: Some("Alpha ships.".to_owned()),
+        p4: Some(String::new()),
+        importance: 60,
+        ..Default::default()
+    };
+    let rendered = |row: &StoredHistorySegment| {
+        [&row.p1, &row.p2, &row.p3, &row.p4]
+            .map(|body| crate::decay_render::guarded_body(body.as_deref().unwrap_or_default()))
+    };
+    let expected = first_ages(&base, &rendered(&base), "base");
+    let heading = "Alpha ships the first body in full.\n## Details\nAll of it.".to_owned();
+    let shapes = [
+        (
+            "one-sentence P4",
+            StoredHistorySegment {
+                p4: Some("Alpha shipped.".to_owned()),
+                ..base.clone()
+            },
+        ),
+        (
+            "P1-only fallback",
+            StoredHistorySegment {
+                p2: base.p1.clone(),
+                p3: base.p1.clone(),
+                ..base.clone()
+            },
+        ),
+        (
+            "P3 ends P2",
+            StoredHistorySegment {
+                p2: Some("Alpha ships the body. Alpha ships.".to_owned()),
+                ..base.clone()
+            },
+        ),
+        (
+            "escaped title",
+            StoredHistorySegment {
+                title: "Alpha & <beta>".to_owned(),
+                ..base.clone()
+            },
+        ),
+        (
+            "heading line in P1",
+            StoredHistorySegment {
+                p1: Some(heading.clone()),
+                content: heading,
+                ..base.clone()
+            },
+        ),
+    ];
+    for (shape, row) in shapes {
+        assert_eq!(
+            first_ages(&row, &rendered(&row), shape),
+            expected,
+            "{shape}"
         );
     }
 }
@@ -909,14 +1031,16 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
             [source.approved_example.clone(), newer_output.clone()],
         )
         .await;
-        let row = fold.rows().remove(0);
+        let mut rows = fold.rows();
+        let newer_row = rows.remove(1);
+        let row = rows.remove(0);
         let approved = approved_tiers(&source.approved_example);
         let newer_approved = approved_tiers(&newer_output);
 
         let generous = fold.pass(Some(60_000.0), "cfg-generous").await;
         let retained = session_history(&m0_text(&generous));
         assert_eq!(
-            served_tier(history_body(&retained), &row.title, &approved),
+            served_tier(history_body(&retained), &row, &approved),
             Tier::P1,
             "{}",
             scenario.id
@@ -928,10 +1052,7 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
                 .pass(Some(budget as f64), &format!("cfg-{probe}"))
                 .await;
             let slice = session_history(&m0_text(&served));
-            (
-                served_tier(history_body(&slice), &row.title, &approved),
-                slice,
-            )
+            (served_tier(history_body(&slice), &row, &approved), slice)
         };
         let (mut budget, mut high) = (1, estimate(&retained));
         let (mut tier, mut slice) = served_at(budget, 0).await;
@@ -952,7 +1073,7 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
             scenario.id
         );
         let body = history_body(&slice).to_owned();
-        let newer_tier = served_tier(&body, newer_title, &newer_approved);
+        let newer_tier = served_tier(&body, &newer_row, &newer_approved);
         assert!(
             rank(newer_tier) < rank(target),
             "{}: the guard demotes the oldest row first; the newer row serves {newer_tier:?}",
@@ -1399,7 +1520,7 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
     sparse.p3 = None;
     for newer in p2_age..p4_age {
         let out = render_aged(&sparse, newer);
-        let segment = segment_of(&out, &row.title).unwrap();
+        let segment = segment_of(&out, &row).unwrap();
         assert!(
             segment.ends_with(p1.as_str()),
             "at {newer} newer rows a missing P2 or P3 falls back to P1: {segment}"
@@ -1407,7 +1528,7 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
     }
     let at_p4 = render_aged(&sparse, p4_age);
     assert_eq!(
-        segment_of(&at_p4, &row.title).unwrap().lines().count(),
+        segment_of(&at_p4, &row).unwrap().lines().count(),
         1,
         "the empty P4 still renders title only"
     );
@@ -1436,7 +1557,7 @@ async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
         assert_eq!(
             served_tier(
                 history_body(&session_history(&m0_text(&served))),
-                &row.title,
+                &row,
                 &approved
             ),
             Tier::P1,
@@ -2891,13 +3012,35 @@ struct RealCapture {
     capture_sha256: String,
 }
 
-/// The first `<p1>` body of `output`, trimmed and unescaped as the validator publishes it.
 fn published_p1(output: &str) -> Option<String> {
-    let start = output.find("<p1>")? + "<p1>".len();
-    let end = start + output[start..].find("</p1>")?;
-    Some(crate::history_summarizer_validate::unescape_xml(
-        output[start..end].trim(),
-    ))
+    crate::history_summarizer_validate::parse_history_segment_output(output)
+        .ok()?
+        .history_segments
+        .into_iter()
+        .next()?
+        .p1
+}
+
+#[test]
+fn published_p1_reads_p1_as_the_validator_does() {
+    for (output, p1) in [
+        (
+            "<output><history_segments><history_segment start=\"1\" end=\"2\" title=\"t\"><p1 >\nfull &amp; narrative\n</p2><p2>condensed</p2><p3>outcome</p3><p4/></history_segment></history_segments><meta><unprocessed_from>3</unprocessed_from></meta></output>",
+            "full & narrative",
+        ),
+        (
+            "The tiers use <p1>prose</p1> first.\n<output><history_segments><history_segment start=\"1\" end=\"2\" title=\"t\"><p1>body</p1><p2>b</p2><p3>b</p3><p4/></history_segment></history_segments><meta><unprocessed_from>3</unprocessed_from></meta></output>",
+            "body",
+        ),
+    ] {
+        let parsed = crate::history_summarizer_validate::parse_history_segment_output(output)
+            .unwrap()
+            .history_segments
+            .remove(0)
+            .p1;
+        assert_eq!(parsed.as_deref(), Some(p1), "the validator's P1: {output}");
+        assert_eq!(published_p1(output).as_deref(), Some(p1), "{output}");
+    }
 }
 
 /// Reads every published real capture of `model` in `dir`, keyed by source. A capture names its
@@ -2960,7 +3103,6 @@ fn bound(detail: Value, capture: &RealCapture) -> Value {
 /// Folds a test-authored baseline, then `source` with `output` translated past it, through one
 /// handler, and serves the result: the m1-window scenario of [`serve_capture`].
 async fn windowed_fold(case: &'static Case, source: &'static Source, output: &str) -> Value {
-    let count = source.messages.len() as u64;
     let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
     let shifted = source_ingress(case, source)
         .into_iter()
@@ -2969,10 +3111,7 @@ async fn windowed_fold(case: &'static Case, source: &'static Source, output: &st
             message
         })
         .collect();
-    let outputs = [
-        baseline_output,
-        translated(output, count, SCAFFOLD_MESSAGES),
-    ];
+    let outputs = [baseline_output, translated(output, SCAFFOLD_MESSAGES)];
     let windowed = two_folds(baseline, shifted, follow_up_for(case, source), outputs).await;
     windowed.pass(None, "cfg0").await
 }
@@ -3015,9 +3154,9 @@ async fn serve_capture(
         "{}: the captured P1 publishes",
         source.id
     );
-    // History renders escape `&`, `<`, and `>`, so served text is matched in its rendered form.
+    // Matching uses the rendered form of served text.
     let tiers = [&row.p1, &row.p2, &row.p3, &row.p4]
-        .map(|body| crate::decay_render::escape_xml_content(&tier(body)));
+        .map(|body| crate::decay_render::guarded_body(&tier(body)));
     let p1 = tiers[0].clone();
     observations.push(
         observation(&case.id, &source.id, "generation", Terminal::Published).with(bound(
@@ -3177,18 +3316,47 @@ async fn serve_captures(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
     const MODEL: &str = "probe/model";
-    // One source answers with whitespace-wrapped, escaped tier bodies, as a real model may.
-    let (_, wrapped) = case_source("C1", "C1.V1");
-    let wrapped_output = |source: &Source| {
-        if source.id != wrapped.id {
-            return source.approved_example.clone();
-        }
-        let [p1, ..] = approved_tiers(&source.approved_example);
-        source.approved_example.replacen(
-            &format!("<p1>{p1}</p1>"),
-            &format!("<p1>\n{} &amp; more\n</p1>", p1.replace('&', "&amp;")),
-            1,
-        )
+    let real_output = |source: &Source| {
+        let example = &source.approved_example;
+        let count = source.messages.len();
+        let [p1, p2, p3, _] = approved_tiers(example);
+        let title = approved_title(example);
+        let varied = match source.id.as_str() {
+            "C1.V1" => example.replacen(
+                &format!("<p1>{p1}</p1>"),
+                &format!("<p1>\n{} &amp; more\n</p1>", p1.replace('&', "&amp;")),
+                1,
+            ),
+            "C2.V1" => example.replacen(&format!("<p1>{p1}</p1>"), &format!("<p1 >{p1}</p2>"), 1),
+            "C2.V2" => example.replacen("<p4 />", "<p4>Deploy d-7781 succeeded.</p4>", 1),
+            "C3.V1" => example.replacen(&format!("<p2>{p2}</p2>"), "", 1).replacen(
+                &format!("<p3>{p3}</p3>"),
+                "",
+                1,
+            ),
+            "C4.V1" => example.replacen(
+                &format!("title=\"{title}\""),
+                &format!("title=\"{title} &amp; more\""),
+                1,
+            ),
+            "C5.V1" => example.replacen(
+                &format!("<p1>{p1}</p1>"),
+                &format!("<p1>{p1}\n## Waves\nPayments moved first.</p1>"),
+                1,
+            ),
+            "C6.V1" => {
+                example.replacen(&format!("<p2>{p2}</p2>"), &format!("<p2>{p2} {p3}</p2>"), 1)
+            }
+            other => panic!("{other} has no real shape"),
+        };
+        assert_ne!(&varied, example, "{}: the variation applies", source.id);
+        let processed = format!("<messages_processed>1-{count}</messages_processed>");
+        let unprocessed = format!(
+            "{processed}<unprocessed_from>{}</unprocessed_from>",
+            count + 1
+        );
+        assert!(varied.contains(&processed), "{}", source.id);
+        varied.replacen(&processed, &unprocessed, 1)
     };
     let producer = Arc::new(ProducerState::default());
     producer
@@ -3197,7 +3365,7 @@ async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
         .unwrap()
         .extend(sources().map(|(_, source)| {
             Ok(ProducerOutput {
-                text: wrapped_output(source),
+                text: real_output(source),
                 length_capped: false,
             })
         }));
@@ -3226,7 +3394,7 @@ async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
         assert_eq!(
             captures[&source.id],
             RealCapture {
-                output: wrapped_output(source),
+                output: real_output(source),
                 model: MODEL.to_owned(),
                 capture_sha256: digests[&source.id].clone(),
             },
