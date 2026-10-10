@@ -1049,7 +1049,7 @@ fn interrupted_export_and_same_lineage_restore_complete_from_fresh_authority() {
 }
 
 #[test]
-fn advancing_tip_blocks_retirement_before_consuming_a_completion_slice() {
+fn an_advancing_tip_after_selection_retires_the_old_consumer_and_completes() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
     corpus.seed();
@@ -1059,30 +1059,36 @@ fn advancing_tip_blocks_retirement_before_consuming_a_completion_slice() {
     record(root.path(), &gate, None, &config.identity);
     let mut selection = selector(root.path());
     finish(&mut selection, &corpus, &gate, &config);
-    let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
-    corpus.publish("moving-tip", "must not be silently acknowledged");
-    let result = selection.recover_slice(
-        &corpus.kernel,
-        &gate,
-        &config,
-        &budget(Duration::from_secs(20)),
-        &mut |_| {},
-    );
-    assert!(matches!(
-        result,
-        Err(
-            daemon::search_replacement::selection::recovery::RecoveryFailure::Blocked(
-                BuildError::Kernel(kernel::KernelError::ConsumerPending)
+    let selected = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
+    let target = selected.recovery_target.unwrap().commit_seq;
+    corpus.publish("moving-tip", "read by the replacement's consumer");
+    let tip = corpus.tip();
+    assert!(tip > target);
+    assert_eq!(
+        selection
+            .recover_slice(
+                &corpus.kernel,
+                &gate,
+                &config,
+                &budget(Duration::from_secs(20)),
+                &mut |_| {},
             )
-        )
-    ));
-    assert_eq!(control(root.path()), fixed);
-    assert!(
+            .unwrap(),
+        RecoveryProgress::Current
+    );
+    assert_eq!(current(root.path()).attempt_id, "next-operation");
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None,
+        "the old consumer is retired past the commit it never read"
+    );
+    assert_eq!(
         corpus
             .kernel
-            .outbox_consumer_checkpoint(CONSUMER)
-            .unwrap()
-            .is_some()
+            .outbox_consumer_checkpoint("next-consumer")
+            .unwrap(),
+        Some(target),
+        "the replacement's consumer still owes the commit after its target"
     );
 }
 

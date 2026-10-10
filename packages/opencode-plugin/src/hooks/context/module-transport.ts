@@ -91,6 +91,8 @@ export interface HostModuleTransportOptions {
 export interface LazyManagedDemandStartOptions {
     declaringModuleUrl: string;
     parentPackageName: string;
+    /** Receives the reason, remediation, and shared attempt of every refused start. */
+    onRefusal?: (reason: string, remediation: string | null, attempt?: object) => void;
 }
 
 let configuredManagedDemandStart: ManagedDemandStart | undefined;
@@ -280,8 +282,15 @@ export function createLazyManagedDemandStart(
             parentPackageName: options.parentPackageName,
         });
         // Envelope construction is synchronous preparation, so it is measured before the residual is taken.
-        const startupEnvelope =
-            request.startupEnvelope ?? buildManagedStartupEnvelope(options.parentPackageName);
+        let startupEnvelope: NativeStartupEnvelope;
+        try {
+            startupEnvelope =
+                request.startupEnvelope ?? buildManagedStartupEnvelope(options.parentPackageName);
+        } catch (error) {
+            const code = (error as { code?: unknown } | null)?.code;
+            if (typeof code === "string") options.onRefusal?.(code, null);
+            throw error;
+        }
         const preparationMs = performance.now() - startedAt;
         const deadlineMs =
             request.deadlineMs === undefined ? undefined : request.deadlineMs - preparationMs;
@@ -290,6 +299,13 @@ export function createLazyManagedDemandStart(
             ...(deadlineMs === undefined ? {} : { deadlineMs }),
             startupEnvelope,
         });
+        if (!outcome.result.ok) {
+            options.onRefusal?.(
+                outcome.result.reason,
+                outcome.result.remediation ?? null,
+                outcome.attempt,
+            );
+        }
         return {
             ok: outcome.result.ok,
             reason: outcome.result.reason,
@@ -1007,10 +1023,10 @@ export class HostModuleTransport {
         const projectRoot = this.canonicalRoot(rawProjectRoot);
         // One identity may legitimately have multiple filesystem routes, such as worktrees. Reusing a route across roots would bind a session to the wrong tree.
         const routeKey = `${sessionId}\0${projectRoot}`;
-        // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
-        const credentialSourceVersion = managedCredentialSourceVersion(process.env);
         // The cache reads a route only after connection settlement, and its generation must match the current connection.
         const { client, expectedDaemonId } = await this.ensureConnected(deadline, signal);
+        // The cache key includes credentials so credential rotation invalidates routes, including routes to explicit credential-bearing daemons.
+        const credentialSourceVersion = managedCredentialSourceVersion(process.env);
         // `closeSession` fences a registered opening through `state.closed`; a close that landed before registration is observed here, so no replacement route is opened for a closed session.
         if (sessionClosed()) {
             throw this.sessionClosedError(sessionId);

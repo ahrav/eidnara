@@ -200,23 +200,26 @@ impl SearchSelection {
         } else {
             // The proof is the immediate prior disable, or the one an aborted follow-up retained.
             let prior = certificate.intent.prior_disabled.as_deref();
-            let retired = prior
-                .into_iter()
-                .chain(
-                    prior
-                        .and_then(|disabled| disabled.handoff.as_deref())
-                        .and_then(|handoff| handoff.prior_disabled.as_deref()),
-                )
-                .any(|disabled| {
-                    disabled.deregistered
-                        && disabled
-                            .through
-                            .is_some_and(|t| t >= old.seed.checkpoint_commit_seq)
-                        && disabled.handoff.as_deref().is_some_and(|handoff| {
-                            handoff.consumer == old.consumer
-                                && handoff.staged_seed_digest.as_deref() == Some(&old_digest)
-                        })
-                });
+            // The restore itself supplies the retirement proof for `Cause::KernelRestored`.
+            let retired = certificate.intent.cause
+                == crate::projection_lifecycle::Cause::KernelRestored
+                || prior
+                    .into_iter()
+                    .chain(
+                        prior
+                            .and_then(|disabled| disabled.handoff.as_deref())
+                            .and_then(|handoff| handoff.prior_disabled.as_deref()),
+                    )
+                    .any(|disabled| {
+                        disabled.deregistered
+                            && disabled
+                                .through
+                                .is_some_and(|t| t >= old.seed.checkpoint_commit_seq)
+                            && disabled.handoff.as_deref().is_some_and(|handoff| {
+                                handoff.consumer == old.consumer
+                                    && handoff.staged_seed_digest.as_deref() == Some(&old_digest)
+                            })
+                    });
             let mut after = match checkpoint {
                 Some(after) => after,
                 None if retired => target.through_commit,
@@ -301,8 +304,9 @@ impl SearchSelection {
             },
             |envelope| {
                 kernel.require_incarnation(target.incarnation)?;
-                envelope.deregister_outbox_consumer(
+                envelope.retire_outbox_consumer(
                     receipt.old_consumer,
+                    receipt.through,
                     super::super::wall_ms().map_err(|_| kernel::KernelError::InvalidInput)?,
                 )?;
                 Ok(String::new())

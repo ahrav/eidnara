@@ -69,12 +69,18 @@ pub enum Cause {
     EmbeddingModelMismatch,
     ProjectionPolicyMismatch,
     IdentityContractMismatch,
+    /// A limit manifest protocol change requires a rebuild.
+    LimitProtocolMismatch,
+    /// A kernel restore within the same database lineage requires a rebuild.
+    KernelRestored,
     /// The projection was deleted after pruning and is rebuilt from the kernel.
     DeletedAfterPruning,
     /// A Disabled projection resumes under operator authorization.
     DisabledRecovery,
     /// No projection exists yet; the installed records admit its first build from the kernel.
     Registration,
+    /// Catch-up hold extension for the Current family returned `SourceHoldError::BindingMismatch` or `SourceHoldError::Invalid(_)`.
+    CatchUpHoldLost,
 }
 
 /// The kernel consumer the projection reads through and the vector generation it produces.

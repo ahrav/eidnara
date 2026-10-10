@@ -540,24 +540,41 @@ async fn approved_examples_publish_through_real_validation_and_replace_covered_i
     }
 }
 
-/// The approved example with its segment range moved `offset` ordinals later. Tier bodies,
-/// title, and importance are untouched; only the coordinate frame changes.
-fn translated(approved_example: &str, count: u64, offset: u64) -> String {
-    approved_example
-        .replacen(
-            &format!("start=\"1\" end=\"{count}\""),
-            &format!("start=\"{}\" end=\"{}\"", 1 + offset, count + offset),
-            1,
+fn translated(output: &str, offset: u64) -> String {
+    use regex::{Captures, Regex};
+    let shift = |digits: &str| digits.parse::<u64>().unwrap() + offset;
+    let attribute = Regex::new(r#"\b(start|end)="(\d+)""#).unwrap();
+    let opener = Regex::new(r"<history_segment\s[^>]*>").unwrap();
+    let processed = Regex::new(r"<messages_processed>(\d+)-(\d+)</messages_processed>").unwrap();
+    let unprocessed = Regex::new(r"<unprocessed_from>(\d+)</unprocessed_from>").unwrap();
+    let output = opener.replace_all(output, |tag: &Captures| {
+        attribute
+            .replace_all(&tag[0], |pair: &Captures| {
+                format!("{}=\"{}\"", &pair[1], shift(&pair[2]))
+            })
+            .into_owned()
+    });
+    let output = processed.replace_all(&output, |range: &Captures| {
+        format!(
+            "<messages_processed>{}-{}</messages_processed>",
+            shift(&range[1]),
+            shift(&range[2])
         )
-        .replacen(
-            &format!("<messages_processed>1-{count}</messages_processed>"),
-            &format!(
-                "<messages_processed>{}-{}</messages_processed>",
-                1 + offset,
-                count + offset
-            ),
-            1,
-        )
+    });
+    unprocessed
+        .replace_all(&output, |from: &Captures| {
+            format!("<unprocessed_from>{}</unprocessed_from>", shift(&from[1]))
+        })
+        .into_owned()
+}
+
+#[test]
+fn translated_shifts_every_ordinal_the_validator_reads() {
+    let output = "<output><history_segments><history_segment start=\"1\" end=\"4\" title=\"T\" importance=\"50\"><p1>x</p1><p2>x</p2><p3>x</p3><p4 /></history_segment></history_segments><meta><messages_processed>1-4</messages_processed><unprocessed_from>5</unprocessed_from></meta></output>";
+    assert_eq!(
+        translated(output, 3),
+        "<output><history_segments><history_segment start=\"4\" end=\"7\" title=\"T\" importance=\"50\"><p1>x</p1><p2>x</p2><p3>x</p3><p4 /></history_segment></history_segments><meta><messages_processed>4-7</messages_processed><unprocessed_from>8</unprocessed_from></meta></output>"
+    );
 }
 
 const SCAFFOLD_MESSAGES: u64 = 3;
@@ -586,14 +603,14 @@ fn scaffold(first: u64, title: &str) -> (Vec<IngressMessage>, String) {
 
 /// Folds `before`, then `before ++ added` as a second firing, through one handler.
 async fn two_folds(
+    config: DaemonConfig,
     before: Vec<IngressMessage>,
     added: Vec<IngressMessage>,
     follow_up: &FollowUp,
     outputs: [String; 2],
 ) -> Fold {
     let producer = scripted(outputs.into());
-    let (handler, store, dir, _project) =
-        handler_with_store(Arc::clone(&producer), default_test_config());
+    let (handler, store, dir, _project) = handler_with_store(Arc::clone(&producer), config);
     let mut first = before.clone();
     first.extend(live_tail(follow_up, before.len() as u64 + 1));
     let mut fold = Fold {
@@ -624,7 +641,6 @@ async fn two_folds(
 async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
     for (case, source) in sources() {
         let follow_up = follow_up_for(case, source);
-        let count = source.messages.len() as u64;
         let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
         let shifted = source_ingress(case, source)
             .into_iter()
@@ -634,12 +650,13 @@ async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
             })
             .collect();
         let fold = two_folds(
+            default_test_config(),
             baseline,
             shifted,
             follow_up,
             [
                 baseline_output,
-                translated(&source.approved_example, count, SCAFFOLD_MESSAGES),
+                translated(&source.approved_example, SCAFFOLD_MESSAGES),
             ],
         )
         .await;
@@ -670,29 +687,37 @@ async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
     }
 }
 
-/// The served segment of the row titled `title`: from its heading to the next heading.
-fn segment_of<'r>(rendered: &'r str, title: &str) -> Option<&'r str> {
-    let at = rendered.find(title)?;
+/// Heading lookup requires body lines beginning with `## ` to be indented.
+fn segment_of<'r>(rendered: &'r str, row: &StoredHistorySegment) -> Option<&'r str> {
+    let heading = format!("## {}-{} · ", row.start_message, row.end_message);
+    let at = if rendered.starts_with(&heading) {
+        0
+    } else {
+        rendered.find(&format!("\n{heading}"))? + 1
+    };
     let segment = &rendered[at..];
     Some(segment[..segment.find("\n\n## ").unwrap_or(segment.len())].trim_end())
 }
 
-/// The tier at which `rendered` serves the case row titled `title`, judged only against the
-/// approved bodies: the body it carries, title only for P4, or absent for P5.
-fn served_tier(rendered: &str, title: &str, approved: &[String; 4]) -> Tier {
-    let Some(segment) = segment_of(rendered, title) else {
+fn served_body<'r>(rendered: &'r str, row: &StoredHistorySegment) -> Option<&'r str> {
+    let segment = segment_of(rendered, row)?;
+    Some(segment.split_once('\n').map_or("", |(_, body)| body))
+}
+
+/// `bodies` must contain each tier's expected body in renderer output format.
+fn served_tier(rendered: &str, row: &StoredHistorySegment, bodies: &[String; 4]) -> Tier {
+    let Some(body) = served_body(rendered, row) else {
         return Tier::P5;
     };
-    let carried: Vec<Tier> = [Tier::P1, Tier::P2, Tier::P3]
+    let carried: Vec<Tier> = TIERS
         .into_iter()
-        .zip(approved)
-        .filter(|(_, body)| segment.ends_with(body.as_str()))
+        .zip(bodies)
+        .filter(|(_, expected)| expected.as_str() == body)
         .map(|(tier, _)| tier)
         .collect();
     match carried.as_slice() {
         [tier] => *tier,
-        [] if segment.lines().count() == 1 => Tier::P4,
-        other => panic!("{title}: ambiguous serving {other:?}: {segment}"),
+        other => panic!("{}: ambiguous serving {other:?}: {body}", row.title),
     }
 }
 
@@ -719,28 +744,215 @@ fn filler_row(sequence: i64, ordinal: i64) -> StoredHistorySegment {
     }
 }
 
-/// `row` followed by `newer` test-authored rows, rendered at the natural curve (budget 0).
-fn render_aged(row: &StoredHistorySegment, newer: i64) -> String {
-    let mut rows = vec![row.clone()];
-    rows.extend((1..=newer).map(|k| filler_row(row.sequence + k, row.end_message + k)));
-    crate::decay_render::render_stored_history_segments(&rows, 0.0, |text: &str| {
+fn render_natural(rows: &[StoredHistorySegment]) -> String {
+    crate::decay_render::render_stored_history_segments(rows, 0.0, |text: &str| {
         crate::token_cache::cached_estimate_tokens(text)
     })
 }
 
-/// The first number of newer rows at which `row` serves each tier.
-fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [i64; 5] {
-    let mut first: [Option<i64>; 5] = [None; 5];
-    for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
-        let tier = served_tier(&render_aged(row, newer), &row.title, approved);
-        first[rank(tier)].get_or_insert(newer);
-        if first.iter().all(Option::is_some) {
-            break;
+/// `row` followed by `newer` test-authored rows, rendered at the natural curve (budget 0).
+fn render_aged(row: &StoredHistorySegment, newer: i64) -> String {
+    let mut rows = vec![row.clone()];
+    rows.extend((1..=newer).map(|k| filler_row(row.sequence + k, row.end_message + k)));
+    render_natural(&rows)
+}
+
+/// Each tier's first age: the least number of newer rows under which the natural curve serves
+/// `row` at that tier. The probe uses distinct tier bodies so `served_tier` can distinguish
+/// tiers even when `bodies`, the row's own tiers as rendered, coincide. The search requires the
+/// probe's rank to be nondecreasing in the number of newer rows.
+fn first_ages(row: &StoredHistorySegment, bodies: &[String; 4], id: &str) -> [i64; 5] {
+    const MAX_NEWER: i64 = crate::decay_render::PRESSURE_WINDOW as i64 + 2;
+    let probe_bodies = ["P1", "P2", "P3", "P4"].map(|tier| format!("Probe {tier} body."));
+    let [p1, p2, p3, p4] = probe_bodies.clone();
+    let probe = StoredHistorySegment {
+        content: p1.clone(),
+        p1: Some(p1),
+        p2: Some(p2),
+        p3: Some(p3),
+        p4: Some(p4),
+        ..row.clone()
+    };
+    let mut rows = vec![probe];
+    let mut ranks: Vec<Option<usize>> = Vec::new();
+    let mut rank_at = |newer: i64| -> usize {
+        let at = usize::try_from(newer).unwrap();
+        while rows.len() <= at {
+            let k = rows.len() as i64;
+            rows.push(filler_row(row.sequence + k, row.end_message + k));
+        }
+        if ranks.len() <= at {
+            ranks.resize(at + 1, None);
+        }
+        *ranks[at].get_or_insert_with(|| {
+            rank(served_tier(
+                &render_natural(&rows[..=at]),
+                row,
+                &probe_bodies,
+            ))
+        })
+    };
+    let mut first = [0i64; 5];
+    let mut below = 0i64;
+    for wanted in 1..TIERS.len() {
+        let mut step = 1;
+        let mut at_or_past = loop {
+            let probe = (below + step).min(MAX_NEWER);
+            if rank_at(probe) >= wanted {
+                break probe;
+            }
+            if probe == MAX_NEWER {
+                panic!("{id}: natural decay never served {:?}", TIERS[wanted]);
+            }
+            below = probe;
+            step *= 2;
+        };
+        while at_or_past - below > 1 {
+            let middle = below + (at_or_past - below) / 2;
+            if rank_at(middle) >= wanted {
+                at_or_past = middle;
+            } else {
+                below = middle;
+            }
+        }
+        assert_eq!(
+            rank_at(at_or_past),
+            wanted,
+            "{id}: natural decay never served {:?}",
+            TIERS[wanted]
+        );
+        first[wanted] = at_or_past;
+        below = at_or_past;
+    }
+    assert_eq!(rank_at(0), 0, "{id}: the fresh row serves P1");
+    rows[0] = row.clone();
+    let serves = |newer: i64, tier: Tier| {
+        let rendered = render_natural(&rows[..=newer as usize]);
+        let expected = (tier != Tier::P5).then(|| bodies[rank(tier)].as_str());
+        assert_eq!(
+            served_body(&rendered, row),
+            expected,
+            "{id}: {tier:?} at {newer} newer rows"
+        );
+    };
+    for (index, (tier, age)) in TIERS.into_iter().zip(first).enumerate() {
+        serves(age, tier);
+        if index > 0 {
+            serves(age - 1, TIERS[index - 1]);
         }
     }
-    TIERS.map(|tier| {
-        first[rank(tier)].unwrap_or_else(|| panic!("{id}: natural decay never served {tier:?}"))
-    })
+    first
+}
+
+#[test]
+fn first_ages_match_an_exhaustive_scan_at_every_decay_rate() {
+    let approved = [
+        "Alpha ships the first body in full.".to_owned(),
+        "Alpha ships the body.".to_owned(),
+        "Alpha ships.".to_owned(),
+        String::new(),
+    ];
+    for importance in [1, 25, 50, 75, 100] {
+        let row = StoredHistorySegment {
+            sequence: 1,
+            start_message: 1,
+            end_message: 4,
+            end_message_id: "cf-alpha-4#0".to_owned(),
+            title: "Alpha".to_owned(),
+            content: approved[0].clone(),
+            p1: Some(approved[0].clone()),
+            p2: Some(approved[1].clone()),
+            p3: Some(approved[2].clone()),
+            p4: Some(String::new()),
+            importance,
+            ..Default::default()
+        };
+        let mut scanned: [Option<i64>; 5] = [None; 5];
+        let mut rows = vec![row.clone()];
+        for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
+            if newer > 0 {
+                rows.push(filler_row(row.sequence + newer, row.end_message + newer));
+            }
+            let tier = served_tier(&render_natural(&rows), &row, &approved);
+            scanned[rank(tier)].get_or_insert(newer);
+        }
+        let scanned = scanned.map(|age| age.unwrap_or_else(|| panic!("importance {importance}")));
+        assert_eq!(
+            first_ages(&row, &approved, "alpha"),
+            scanned,
+            "importance {importance}"
+        );
+    }
+}
+
+#[test]
+fn first_ages_hold_for_every_published_tier_shape() {
+    let base = StoredHistorySegment {
+        sequence: 1,
+        start_message: 1,
+        end_message: 4,
+        end_message_id: "cf-alpha-4#0".to_owned(),
+        title: "Alpha".to_owned(),
+        content: "Alpha ships the first body in full.".to_owned(),
+        p1: Some("Alpha ships the first body in full.".to_owned()),
+        p2: Some("Alpha ships the body.".to_owned()),
+        p3: Some("Alpha ships.".to_owned()),
+        p4: Some(String::new()),
+        importance: 60,
+        ..Default::default()
+    };
+    let rendered = |row: &StoredHistorySegment| {
+        [&row.p1, &row.p2, &row.p3, &row.p4]
+            .map(|body| crate::decay_render::guarded_body(body.as_deref().unwrap_or_default()))
+    };
+    let expected = first_ages(&base, &rendered(&base), "base");
+    let heading = "Alpha ships the first body in full.\n## Details\nAll of it.".to_owned();
+    let shapes = [
+        (
+            "one-sentence P4",
+            StoredHistorySegment {
+                p4: Some("Alpha shipped.".to_owned()),
+                ..base.clone()
+            },
+        ),
+        (
+            "P1-only fallback",
+            StoredHistorySegment {
+                p2: base.p1.clone(),
+                p3: base.p1.clone(),
+                ..base.clone()
+            },
+        ),
+        (
+            "P3 ends P2",
+            StoredHistorySegment {
+                p2: Some("Alpha ships the body. Alpha ships.".to_owned()),
+                ..base.clone()
+            },
+        ),
+        (
+            "escaped title",
+            StoredHistorySegment {
+                title: "Alpha & <beta>".to_owned(),
+                ..base.clone()
+            },
+        ),
+        (
+            "heading line in P1",
+            StoredHistorySegment {
+                p1: Some(heading.clone()),
+                content: heading,
+                ..base.clone()
+            },
+        ),
+    ];
+    for (shape, row) in shapes {
+        assert_eq!(
+            first_ages(&row, &rendered(&row), shape),
+            expected,
+            "{shape}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -814,20 +1026,23 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
         let newer_title = "Newer scaffold work";
         let (newer, newer_output) = scaffold(count + 1, newer_title);
         let fold = two_folds(
+            default_test_config(),
             source_ingress(case, source),
             newer,
             follow_up_for(case, source),
             [source.approved_example.clone(), newer_output.clone()],
         )
         .await;
-        let row = fold.rows().remove(0);
+        let mut rows = fold.rows();
+        let newer_row = rows.remove(1);
+        let row = rows.remove(0);
         let approved = approved_tiers(&source.approved_example);
         let newer_approved = approved_tiers(&newer_output);
 
         let generous = fold.pass(Some(60_000.0), "cfg-generous").await;
         let retained = session_history(&m0_text(&generous));
         assert_eq!(
-            served_tier(history_body(&retained), &row.title, &approved),
+            served_tier(history_body(&retained), &row, &approved),
             Tier::P1,
             "{}",
             scenario.id
@@ -839,10 +1054,7 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
                 .pass(Some(budget as f64), &format!("cfg-{probe}"))
                 .await;
             let slice = session_history(&m0_text(&served));
-            (
-                served_tier(history_body(&slice), &row.title, &approved),
-                slice,
-            )
+            (served_tier(history_body(&slice), &row, &approved), slice)
         };
         let (mut budget, mut high) = (1, estimate(&retained));
         let (mut tier, mut slice) = served_at(budget, 0).await;
@@ -863,7 +1075,7 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
             scenario.id
         );
         let body = history_body(&slice).to_owned();
-        let newer_tier = served_tier(&body, newer_title, &newer_approved);
+        let newer_tier = served_tier(&body, &newer_row, &newer_approved);
         assert!(
             rank(newer_tier) < rank(target),
             "{}: the guard demotes the oldest row first; the newer row serves {newer_tier:?}",
@@ -1310,7 +1522,7 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
     sparse.p3 = None;
     for newer in p2_age..p4_age {
         let out = render_aged(&sparse, newer);
-        let segment = segment_of(&out, &row.title).unwrap();
+        let segment = segment_of(&out, &row).unwrap();
         assert!(
             segment.ends_with(p1.as_str()),
             "at {newer} newer rows a missing P2 or P3 falls back to P1: {segment}"
@@ -1318,7 +1530,7 @@ async fn legacy_and_tier_sparse_rows_render_from_their_own_fallbacks() {
     }
     let at_p4 = render_aged(&sparse, p4_age);
     assert_eq!(
-        segment_of(&at_p4, &row.title).unwrap().lines().count(),
+        segment_of(&at_p4, &row).unwrap().lines().count(),
         1,
         "the empty P4 still renders title only"
     );
@@ -1347,7 +1559,7 @@ async fn zero_budgets_and_disabled_models_satisfy_no_situation() {
         assert_eq!(
             served_tier(
                 history_body(&session_history(&m0_text(&served))),
-                &row.title,
+                &row,
                 &approved
             ),
             Tier::P1,
@@ -2784,5 +2996,581 @@ fn publication_refuses_to_replace_a_completed_record() {
     assert!(
         !temporary.exists(),
         "the refused writer's temporary file is removed"
+    );
+}
+
+/// Names a directory of published real captures; the opt-in real-serving replay serves each
+/// source's captured output in place of its approved example.
+const REAL_CAPTURE_DIR: &str = "EIDNARA_FIDELITY_REAL_CAPTURE_DIR";
+/// The `output_origin` a capture of a real producer through the host records.
+const REAL_ORIGIN: &str = "real producer through the host";
+
+/// A source's captured output, the model that produced it, and the SHA-256 of the capture file
+/// that published it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RealCapture {
+    output: String,
+    model: String,
+    capture_sha256: String,
+}
+
+fn published_p1(output: &str) -> Option<String> {
+    crate::history_summarizer_validate::parse_history_segment_output(output)
+        .ok()?
+        .history_segments
+        .into_iter()
+        .next()?
+        .p1
+}
+
+#[test]
+fn published_p1_reads_p1_as_the_validator_does() {
+    for (output, p1) in [
+        (
+            "<output><history_segments><history_segment start=\"1\" end=\"2\" title=\"t\"><p1 >\nfull &amp; narrative\n</p2><p2>condensed</p2><p3>outcome</p3><p4/></history_segment></history_segments><meta><unprocessed_from>3</unprocessed_from></meta></output>",
+            "full & narrative",
+        ),
+        (
+            "The tiers use <p1>prose</p1> first.\n<output><history_segments><history_segment start=\"1\" end=\"2\" title=\"t\"><p1>body</p1><p2>b</p2><p3>b</p3><p4/></history_segment></history_segments><meta><unprocessed_from>3</unprocessed_from></meta></output>",
+            "body",
+        ),
+    ] {
+        let parsed = crate::history_summarizer_validate::parse_history_segment_output(output)
+            .unwrap()
+            .history_segments
+            .remove(0)
+            .p1;
+        assert_eq!(parsed.as_deref(), Some(p1), "the validator's P1: {output}");
+        assert_eq!(published_p1(output).as_deref(), Some(p1), "{output}");
+    }
+}
+
+#[test]
+#[should_panic(
+    expected = "C1.V1.capture.json: publishes 2 rows; the replay serves one-row captures"
+)]
+fn a_capture_publishing_several_rows_fails_the_replay_before_it_folds() {
+    const MODEL: &str = "probe/model";
+    let (case, source) = case_source("C1", "C1.V1");
+    let output = "<output><history_segments>\
+        <history_segment start=\"1\" end=\"3\" title=\"first\" importance=\"50\">\
+        <p1>first arc</p1><p2>first</p2><p3>f</p3><p4/></history_segment>\
+        <history_segment start=\"4\" end=\"6\" title=\"second\" importance=\"50\">\
+        <p1>second arc</p1><p2>second</p2><p3>s</p3><p4/></history_segment>\
+        </history_segments><meta><unprocessed_from>7</unprocessed_from></meta></output>";
+    assert_eq!(published_p1(output).as_deref(), Some("first arc"));
+    let row = |start: u64, end: u64, title: &str, p1: &str| {
+        json!({
+            "start": start, "end": end, "title": title,
+            "p1": p1, "p2": "", "p3": "", "p4": "", "importance": 50,
+        })
+    };
+    let dir = tempfile::tempdir().unwrap();
+    Observation::new(
+        REAL_OWNER,
+        CORPUS_SHA256,
+        &case.id,
+        &source.id,
+        "capture",
+        Terminal::Published,
+    )
+    .with(json!({
+        "model": MODEL,
+        "output_origin": REAL_ORIGIN,
+        "attempts": [{"model": MODEL, "outputs": [{"text": output}]}],
+        "published_rows": [row(1, 3, "first", "first arc"), row(4, 6, "second", "second arc")],
+    }))
+    .emit_to(dir.path());
+    real_captures(dir.path(), MODEL);
+}
+
+#[test]
+#[should_panic(
+    expected = "C1.V1.capture.json: the published row covers messages 1-3 of 6; the replay serves a row covering its whole source"
+)]
+fn a_capture_whose_row_covers_a_prefix_of_its_source_fails_the_replay_before_it_folds() {
+    const MODEL: &str = "probe/model";
+    let (case, source) = case_source("C1", "C1.V1");
+    assert_eq!(source.messages.len(), 6);
+    let output = "<output><history_segments>\
+        <history_segment start=\"1\" end=\"3\" title=\"prefix\" importance=\"50\">\
+        <p1>prefix arc</p1><p2>prefix</p2><p3>p</p3><p4/></history_segment>\
+        </history_segments><meta><unprocessed_from>4</unprocessed_from></meta></output>";
+    assert_eq!(published_p1(output).as_deref(), Some("prefix arc"));
+    let dir = tempfile::tempdir().unwrap();
+    Observation::new(
+        REAL_OWNER,
+        CORPUS_SHA256,
+        &case.id,
+        &source.id,
+        "capture",
+        Terminal::Published,
+    )
+    .with(json!({
+        "model": MODEL,
+        "output_origin": REAL_ORIGIN,
+        "attempts": [{"model": MODEL, "outputs": [{"text": output}]}],
+        "published_rows": [{
+            "start": 1, "end": 3, "title": "prefix",
+            "p1": "prefix arc", "p2": "", "p3": "", "p4": "", "importance": 50,
+        }],
+    }))
+    .emit_to(dir.path());
+    real_captures(dir.path(), MODEL);
+}
+
+/// Reads every published real capture of `model` in `dir`, keyed by source. A capture names its
+/// output by the attempt output whose P1, as the validator publishes it, is its published row's.
+/// A capture that publishes several rows, or a row covering less than its whole source, fails
+/// the read; the replay serves one row that covers its source.
+fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
+    let mut captures = BTreeMap::new();
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+    {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !(name.starts_with(&format!("{REAL_OWNER}.")) && name.ends_with(".capture.json")) {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        let detail = &record["detail"];
+        if record["owner"] != REAL_OWNER
+            || record["corpus_sha256"] != CORPUS_SHA256
+            || record["terminal"] != "published"
+            || detail["output_origin"] != REAL_ORIGIN
+            || detail["model"] != model
+        {
+            continue;
+        }
+        let rows = detail["published_rows"].as_array().map_or(0, Vec::len);
+        assert_eq!(
+            rows, 1,
+            "{name}: publishes {rows} rows; the replay serves one-row captures"
+        );
+        let source = record["source"].as_str().unwrap().to_owned();
+        let messages = sources()
+            .find(|(_, s)| s.id == source)
+            .unwrap_or_else(|| panic!("{name}: {source} is no corpus source"))
+            .1
+            .messages
+            .len() as u64;
+        let row = &detail["published_rows"][0];
+        let (start, end) = (row["start"].as_u64(), row["end"].as_u64());
+        assert_eq!(
+            (start, end),
+            (Some(1), Some(messages)),
+            "{name}: the published row covers messages {}-{} of {messages}; the replay serves a \
+             row covering its whole source",
+            start.map_or_else(|| "?".to_owned(), |n| n.to_string()),
+            end.map_or_else(|| "?".to_owned(), |n| n.to_string()),
+        );
+        let p1 = row["p1"]
+            .as_str()
+            .filter(|p1| !p1.is_empty())
+            .unwrap_or_else(|| panic!("{name}: the published row has no P1"));
+        let output = detail["attempts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .flat_map(|attempt| attempt["outputs"].as_array().into_iter().flatten().rev())
+            .filter_map(|output| output["text"].as_str())
+            .find(|text| published_p1(text).as_deref() == Some(p1))
+            .unwrap_or_else(|| panic!("{name}: no attempt output carries the published P1"));
+        let previous = captures.insert(
+            source,
+            RealCapture {
+                output: output.to_owned(),
+                model: model.to_owned(),
+                capture_sha256: format!("{:x}", sha2::Sha256::digest(&bytes)),
+            },
+        );
+        assert!(previous.is_none(), "{name}: a second capture of one source");
+    }
+    captures
+}
+
+/// `detail` with the origin of the output it was served from and the capture that published it.
+fn bound(detail: Value, capture: &RealCapture) -> Value {
+    let mut detail = detail;
+    detail["output_origin"] = json!(REAL_ORIGIN);
+    detail["generation_capture_sha256"] = json!(capture.capture_sha256);
+    detail
+}
+
+/// The daemon configuration of a replay fold: `model` as the only summarizer model.
+fn capture_config(model: &str) -> DaemonConfig {
+    DaemonConfig {
+        model_chain: vec![model.to_owned()],
+        ..default_test_config()
+    }
+}
+
+/// Folds a test-authored baseline, then `source` with `output` translated past it, through one
+/// handler, and serves the result: the m1-window scenario of [`serve_capture`].
+async fn windowed_fold(
+    case: &'static Case,
+    source: &'static Source,
+    output: &str,
+    model: &str,
+) -> Value {
+    let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
+    let shifted = source_ingress(case, source)
+        .into_iter()
+        .map(|mut message| {
+            message.ordinal += SCAFFOLD_MESSAGES;
+            message
+        })
+        .collect();
+    let outputs = [baseline_output, translated(output, SCAFFOLD_MESSAGES)];
+    let windowed = two_folds(
+        capture_config(model),
+        baseline,
+        shifted,
+        follow_up_for(case, source),
+        outputs,
+    )
+    .await;
+    for attempt in windowed.attempts() {
+        assert_eq!(
+            attempt.model, model,
+            "{}: the m1 window folds under the capture's model",
+            source.id
+        );
+    }
+    windowed.pass(None, "cfg0").await
+}
+
+/// Folds `source` once with its captured output under the capture's model, then serves it
+/// naturally: P1 at m0 on the first fold, P1 in the m1 window after a test-authored baseline,
+/// and each decayed tier at m0 under test-authored newer rows. Every observation names the
+/// capture it serves. `windowed` is the source's [`windowed_fold`], which the caller runs
+/// alongside the first fold.
+async fn serve_capture(
+    case: &'static Case,
+    source: &'static Source,
+    capture: &RealCapture,
+    windowed: tokio::task::JoinHandle<Value>,
+) -> Vec<Observation> {
+    let output = &capture.output;
+    let mut observations = Vec::new();
+    let fold = fold_with(
+        capture_config(&capture.model),
+        source_ingress(case, source),
+        follow_up_for(case, source),
+        vec![output.clone()],
+    )
+    .await;
+    let attempt = fold.attempts().remove(0);
+    let rows = fold.rows();
+    let [row] = rows.as_slice() else {
+        panic!("{}: the captured output publishes one row", source.id);
+    };
+    // The validator trims and unescapes tier bodies, so the published row, not the raw output,
+    // names what each tier serves.
+    let tier = |body: &Option<String>| body.clone().unwrap_or_default();
+    assert_eq!(
+        published_p1(output),
+        row.p1.clone(),
+        "{}: the captured P1 publishes",
+        source.id
+    );
+    // Matching uses the rendered form of served text.
+    let tiers = [&row.p1, &row.p2, &row.p3, &row.p4]
+        .map(|body| crate::decay_render::guarded_body(&tier(body)));
+    let p1 = tiers[0].clone();
+    observations.push(
+        observation(&case.id, &source.id, "generation", Terminal::Published).with(bound(
+            json!({
+                "attempts": [{
+                    "attempt": 1,
+                    "model": attempt.model,
+                    "system_sha256": sha256_hex(&attempt.system),
+                    "prompt_sha256": sha256_hex(&attempt.prompt),
+                    "output_sha256": sha256_hex(output),
+                    "output_origin": REAL_ORIGIN,
+                }],
+                "chunk": [1, source.messages.len()],
+            }),
+            capture,
+        )),
+    );
+    let served = fold.pass(None, "cfg0").await;
+    assert!(m0_text(&served).contains(&p1), "{}: P1 at m0", source.id);
+    observations.push(
+        observation(&case.id, &source.id, "m0", Terminal::Served).with(bound(
+            json!({"tier": "p1", "path": "natural", "first_fold_direct_to_m0": true}),
+            capture,
+        )),
+    );
+
+    let served = windowed
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()));
+    assert!(
+        synthetic_text(&served, 1).contains(&p1),
+        "{}: P1 rides m1",
+        source.id
+    );
+    let m0 = m0_text(&served);
+    assert!(
+        m0.contains("Baseline workspace setup") && !m0.contains(&p1),
+        "{}: m0 stays frozen at the baseline",
+        source.id
+    );
+    for scenario in scenarios_serving(case, source, ServingPath::Natural, Tier::P1, Stage::M1) {
+        observations.push(
+            observation(&case.id, &source.id, "m1", Terminal::Served)
+                .scenario(&scenario.id)
+                .with(bound(json!({"tier": "p1", "path": "natural"}), capture)),
+        );
+    }
+
+    let ages = first_ages(row, &tiers, &source.id);
+    assert!(
+        ages.windows(2).all(|pair| pair[0] < pair[1]),
+        "{}: tiers decay in order: {ages:?}",
+        source.id
+    );
+    for (tier, age) in TIERS.into_iter().zip(ages) {
+        let path = if tier == Tier::P5 {
+            ServingPath::Omission
+        } else {
+            ServingPath::Natural
+        };
+        let tier_name = format!("{tier:?}").to_lowercase();
+        for scenario in scenarios_serving(case, source, path, tier, Stage::M0) {
+            observations.push(
+                observation(
+                    &case.id,
+                    &source.id,
+                    format!("m0_decay_{tier_name}"),
+                    Terminal::Served,
+                )
+                .scenario(&scenario.id)
+                .with(bound(
+                    json!({
+                        "tier": tier_name,
+                        "path": if tier == Tier::P5 { "omission" } else { "natural" },
+                        "newer_rows": age,
+                        "newer_rows_are": "test-authored filler",
+                        "history_budget_tokens": 0,
+                    }),
+                    capture,
+                )),
+            );
+        }
+    }
+    observations
+}
+
+/// Serves every corpus source from its published real capture of `EIDNARA_FIDELITY_REAL_MODEL`
+/// in `EIDNARA_FIDELITY_REAL_CAPTURE_DIR`, and writes the bound observations under
+/// `EIDNARA_FIDELITY_OBSERVATIONS_DIR`. A source with no published real capture fails the run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "opt-in real-serving replay; needs EIDNARA_FIDELITY_REAL_CAPTURE_DIR naming published \
+            real captures, EIDNARA_FIDELITY_REAL_MODEL naming the arm's model, and \
+            EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
+async fn real_captures_serve_their_natural_tiers() {
+    let dir = std::env::var_os(REAL_CAPTURE_DIR)
+        .unwrap_or_else(|| panic!("{REAL_CAPTURE_DIR} names no capture directory"));
+    let model = std::env::var(REAL_MODEL)
+        .unwrap_or_else(|_| panic!("{REAL_MODEL} names no model; the arm binds one model"));
+    assert!(
+        std::env::var_os(OBSERVATIONS_DIR).is_some(),
+        "{OBSERVATIONS_DIR} names no observation directory"
+    );
+    let captures = real_captures(Path::new(&dir), &model);
+    for observation in serve_captures(&captures).await.into_iter().flatten() {
+        observation.emit();
+    }
+}
+
+/// Serves every corpus source from its capture concurrently and returns the observations in
+/// corpus order, writing none. A missing capture or a failing serving assertion panics the
+/// caller.
+async fn serve_captures(captures: &BTreeMap<String, RealCapture>) -> Vec<Vec<Observation>> {
+    let captured: Vec<(&'static Case, &'static Source, RealCapture)> = sources()
+        .map(|(case, source)| {
+            let capture = captures
+                .get(&source.id)
+                .unwrap_or_else(|| panic!("{}: no published real capture", source.id))
+                .clone();
+            (case, source, capture)
+        })
+        .collect();
+    // The windowed folds carry the most work, so they start first and the first folds fill in.
+    let windowed: Vec<_> = captured
+        .iter()
+        .map(|&(case, source, ref capture)| {
+            let output = capture.output.clone();
+            let model = capture.model.clone();
+            tokio::spawn(async move { windowed_fold(case, source, &output, &model).await })
+        })
+        .collect();
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, ((case, source, capture), windowed)) in
+        captured.into_iter().zip(windowed).enumerate()
+    {
+        tasks.spawn(async move { (index, serve_capture(case, source, &capture, windowed).await) });
+    }
+    let mut served: Vec<Option<Vec<Observation>>> = (0..tasks.len()).map(|_| None).collect();
+    while let Some(joined) = tasks.join_next().await {
+        let (index, observations) = joined.unwrap_or_else(|error| {
+            std::panic::resume_unwind(error.into_panic());
+        });
+        served[index] = Some(observations);
+    }
+    served.into_iter().map(Option::unwrap).collect()
+}
+
+/// A capture file published with the real origin binds what the real-serving replay serves: the
+/// reader takes the attempt output that published, as the validator trims and unescapes it,
+/// keyed by the capture file's SHA-256; every observation the replay records names that digest,
+/// the real origin, and the capture's model. A capture of another model, another corpus, a
+/// scripted origin, or an unpublished terminal binds nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
+    const MODEL: &str = "probe/model";
+    let real_output = |source: &Source| {
+        let example = &source.approved_example;
+        let count = source.messages.len();
+        let [p1, p2, p3, _] = approved_tiers(example);
+        let title = approved_title(example);
+        let varied = match source.id.as_str() {
+            "C1.V1" => example.replacen(
+                &format!("<p1>{p1}</p1>"),
+                &format!("<p1>\n{} &amp; more\n</p1>", p1.replace('&', "&amp;")),
+                1,
+            ),
+            "C2.V1" => example.replacen(&format!("<p1>{p1}</p1>"), &format!("<p1 >{p1}</p2>"), 1),
+            "C2.V2" => example.replacen("<p4 />", "<p4>Deploy d-7781 succeeded.</p4>", 1),
+            "C3.V1" => example.replacen(&format!("<p2>{p2}</p2>"), "", 1).replacen(
+                &format!("<p3>{p3}</p3>"),
+                "",
+                1,
+            ),
+            "C4.V1" => example.replacen(
+                &format!("title=\"{title}\""),
+                &format!("title=\"{title} &amp; more\""),
+                1,
+            ),
+            "C5.V1" => example.replacen(
+                &format!("<p1>{p1}</p1>"),
+                &format!("<p1>{p1}\n## Waves\nPayments moved first.</p1>"),
+                1,
+            ),
+            "C6.V1" => {
+                example.replacen(&format!("<p2>{p2}</p2>"), &format!("<p2>{p2} {p3}</p2>"), 1)
+            }
+            other => panic!("{other} has no real shape"),
+        };
+        assert_ne!(&varied, example, "{}: the variation applies", source.id);
+        let processed = format!("<messages_processed>1-{count}</messages_processed>");
+        let unprocessed = format!(
+            "{processed}<unprocessed_from>{}</unprocessed_from>",
+            count + 1
+        );
+        assert!(varied.contains(&processed), "{}", source.id);
+        varied.replacen(&processed, &unprocessed, 1)
+    };
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .await_results
+        .lock()
+        .unwrap()
+        .extend(sources().map(|(_, source)| {
+            Ok(ProducerOutput {
+                text: real_output(source),
+                length_capped: false,
+            })
+        }));
+    let records = capture_sources(
+        Arc::new(TestProducerFactory {
+            state: Arc::clone(&producer),
+        }),
+        MODEL,
+        REAL_ORIGIN,
+        Duration::from_secs(10),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut digests = BTreeMap::new();
+    for record in &records {
+        let path = record.emit_to(dir.path());
+        digests.insert(
+            record.source.clone(),
+            format!("{:x}", sha2::Sha256::digest(std::fs::read(path).unwrap())),
+        );
+    }
+    let captures = real_captures(dir.path(), MODEL);
+    assert_eq!(captures.len(), sources().count());
+    assert!(real_captures(dir.path(), "other/model").is_empty());
+    for (_, source) in sources() {
+        assert_eq!(
+            captures[&source.id],
+            RealCapture {
+                output: real_output(source),
+                model: MODEL.to_owned(),
+                capture_sha256: digests[&source.id].clone(),
+            },
+            "{}",
+            source.id
+        );
+    }
+
+    let mut witnessed = 0;
+    for ((_, source), observations) in sources().zip(serve_captures(&captures).await) {
+        let capture = &captures[&source.id];
+        witnessed += observations
+            .iter()
+            .filter(|observation| observation.scenario.is_some())
+            .count();
+        for observation in &observations {
+            assert_eq!(observation.detail["output_origin"], REAL_ORIGIN);
+            assert_eq!(
+                observation.detail["generation_capture_sha256"],
+                capture.capture_sha256.as_str(),
+                "{}: {}",
+                source.id,
+                observation.stage
+            );
+        }
+        let attempt = &observations[0].detail["attempts"][0];
+        assert_eq!(attempt["output_sha256"], sha256_hex(&capture.output));
+        assert_eq!(
+            attempt["model"], MODEL,
+            "the replay runs the capture's model"
+        );
+    }
+    assert!(witnessed > 0, "the replay witnesses corpus scenarios");
+
+    let twins = tempfile::tempdir().unwrap();
+    for (index, change) in [
+        |record: &mut Observation| {
+            record.detail["output_origin"] = json!("scripted approved example")
+        },
+        |record: &mut Observation| record.terminal = Terminal::Unsettled,
+        |record: &mut Observation| record.corpus_sha256 = "0".repeat(64).leak(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut twin = Observation::new(
+            REAL_OWNER,
+            CORPUS_SHA256,
+            &records[index].case,
+            &records[index].source,
+            "capture",
+            Terminal::Published,
+        )
+        .with(records[index].detail.clone());
+        change(&mut twin);
+        twin.emit_to(twins.path());
+    }
+    assert!(
+        real_captures(twins.path(), MODEL).is_empty(),
+        "a scripted, unpublished, or foreign-corpus capture binds nothing"
     );
 }

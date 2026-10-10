@@ -2133,7 +2133,9 @@ fn within_tip_checkpoint_without_source_application_is_not_a_complete_prefix() {
     for _ in 0..2 {
         assert!(matches!(
             selection.reopen(&corpus.kernel, &gate, &budget(Duration::from_secs(10))),
-            Err(BuildError::Invalid("canonical prefix inventory mismatch"))
+            Err(BuildError::FamilyPrefix(
+                "canonical prefix inventory mismatch"
+            ))
         ));
         assert!(
             selection

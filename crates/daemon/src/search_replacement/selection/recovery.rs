@@ -228,7 +228,6 @@ impl SearchSelection {
         budget: &EvalBudget,
         observer: &mut dyn FnMut(RecoveryEvent),
     ) -> Result<RecoveryProgress, RecoveryFailure<'a>> {
-        self.check_recovery_kernel(kernel, budget)?;
         let lifecycle = ProjectionLifecycle::open(&self.data_home).map_err(BuildError::from)?;
         #[cfg(feature = "test-support")]
         let lifecycle = self.recovery_lifecycle(lifecycle);
@@ -237,6 +236,7 @@ impl SearchSelection {
             ControlState::Current(intent) => (intent, true),
             _ => return Err(BuildError::Intent(IntentRefusal::Disabled).into()),
         };
+        self.check_recovery_kernel(kernel, budget, &intent.attempt_id)?;
         let selected = GenerationStore::open(Some(&self.data_home))
             .map_err(BuildError::from)?
             .read_search_current()
@@ -337,19 +337,6 @@ impl SearchSelection {
         if !family.names_operation(&intent) {
             return Err(BuildError::Invalid("selected operation differs").into());
         }
-        if let Some(old) = &family.certificate.retiring
-            && kernel
-                .outbox_consumer_checkpoint_within_budget(budget, &old.consumer.consumer_id)
-                .map_err(BuildError::from)?
-                .is_some()
-            && kernel
-                .capture_commit_read_target_within_budget(budget)
-                .map_err(BuildError::from)?
-                .through_commit
-                > family.certificate.seed.checkpoint_commit_seq
-        {
-            return Err(BuildError::Kernel(kernel::KernelError::ConsumerPending).into());
-        }
         observer(RecoveryEvent::BeforeEpisode);
         let mut intent = intent;
         intent.episodes = lifecycle
@@ -437,19 +424,21 @@ impl SearchSelection {
         &mut self,
         kernel: &KernelStore,
         budget: &EvalBudget,
+        attempt_id: &str,
     ) -> Result<(), BuildError> {
         let fresh = kernel
             .capture_commit_read_target_within_budget(budget)?
             .incarnation;
         if self
             .recovery_incarnation
-            .is_some_and(|prior| prior != fresh)
+            .as_ref()
+            .is_some_and(|(attempt, prior)| attempt == attempt_id && *prior != fresh)
             || kernel.database_incarnation_id_within_budget(budget)?
                 != self.identity.kernel_incarnation_id
         {
             return Err(ProjectionError::IdentityMismatch.into());
         }
-        self.recovery_incarnation = Some(fresh);
+        self.recovery_incarnation = Some((attempt_id.to_owned(), fresh));
         Ok(())
     }
 
