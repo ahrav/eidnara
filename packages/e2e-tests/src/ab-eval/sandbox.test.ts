@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { stopOwnedTree } from "./procs";
 import {
@@ -27,6 +27,27 @@ describe("sandbox masking plan", () => {
             /inside \/repo/,
         );
         expect(() => assertRunRootMaskable("/dev/shm/run", ["/repo", "/node"])).not.toThrow();
+    });
+});
+
+describe("sandbox availability", () => {
+    it("is unavailable when sudo works but namespace creation is refused", () => {
+        const bin = mkdtempSync(join(tmpdir(), "ab-fake-sudo-"));
+        writeFileSync(
+            join(bin, "sudo"),
+            '#!/bin/sh\ncase "$*" in *unshare*) echo "unshare: Operation not permitted" >&2; exit 1;; esac\nexit 0\n',
+            { mode: 0o755 },
+        );
+        // Bun resolves executables through the PATH it started with, so the probe runs in a child.
+        const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+        const probe = `import { sandboxAvailable } from ${JSON.stringify(join(import.meta.dir, "sandbox.ts"))}; console.log(sandboxAvailable());`;
+        try {
+            expect(spawnSync("sudo", ["-n", "true"], { env }).status).toBe(0);
+            const result = spawnSync(process.execPath, ["-e", probe], { env, encoding: "utf8" });
+            expect(result.stdout.trim()).toBe("false");
+        } finally {
+            rmSync(bin, { recursive: true, force: true });
+        }
     });
 });
 

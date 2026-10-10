@@ -545,6 +545,8 @@ export class BedrockGateway {
         const extra = body.additionalModelRequestFields as
             | { thinking?: { type?: string } }
             | undefined;
+        // Every arm forwards without the harness's thinking field, so the `on` and `onraw` arms
+        // differ by the temperature alone.
         if (extra?.thinking?.type === "enabled") delete extra.thinking;
         const inference = body.inferenceConfig as { temperature?: number } | undefined;
         if (this.options.stripTemperature && inference?.temperature !== undefined) {

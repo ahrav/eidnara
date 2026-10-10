@@ -122,14 +122,15 @@ function ownerOf(pid: number): number | undefined {
     }
 }
 
-export function ownedSubtreeRoots(rootPid: number): number[] {
+/** Every process in the tree under `rootPid`, including the root, that the invoking user owns. */
+export function ownedProcesses(rootPid: number): number[] {
     const uid = process.getuid?.();
     const parents = lazyParents();
     const out: number[] = [];
     const queue = [rootPid];
     for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
         if (ownerOf(next) === uid) out.push(next);
-        else queue.push(...childrenOf(next, parents));
+        queue.push(...childrenOf(next, parents));
     }
     return out;
 }
@@ -155,7 +156,7 @@ async function waitStopped(pids: number[], timeoutMs: number): Promise<boolean> 
 }
 
 export async function stopOwnedTree(rootPid: number, graceMs: number): Promise<void> {
-    const targets = ownedSubtreeRoots(rootPid);
+    const targets = ownedProcesses(rootPid);
     for (const pid of targets) signal(pid, "SIGTERM");
     if (await waitStopped(targets, graceMs)) return;
     for (const pid of targets) signal(pid, "SIGKILL");

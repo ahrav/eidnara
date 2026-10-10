@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
-import { descendants, treeStats } from "./procs";
+import { descendants, stopOwnedTree, treeStats } from "./procs";
 
 const spawned: ChildProcess[] = [];
 
@@ -47,5 +47,19 @@ describe("process sampling", () => {
     it("reports no stats for a missing process", () => {
         expect(treeStats(undefined)).toBeNull();
         expect(treeStats(2 ** 22 + 1)).toBeNull();
+    });
+});
+
+describe("stopping an owned tree", () => {
+    it("stops the children of an owned root, not only the root", async () => {
+        const child = spawn("/bin/sh", ["-c", "sleep 30 & wait"], { stdio: "ignore" });
+        spawned.push(child);
+        const pid = child.pid as number;
+        const [grandchild] = await waitFor(() => {
+            const found = descendants(pid);
+            return found.length >= 1 ? found : undefined;
+        });
+        await stopOwnedTree(pid, 2_000);
+        expect(treeStats(grandchild)).toBeNull();
     });
 });

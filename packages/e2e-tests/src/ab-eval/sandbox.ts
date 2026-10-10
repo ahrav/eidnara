@@ -6,6 +6,9 @@ import { ensurePiInstall } from "../bedrock-peer/harness-runtime";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 
+/** The namespace options every arm runs under; the availability probe creates the same namespaces. */
+const UNSHARE_ARGS = ["--mount", "--pid", "--fork", "--mount-proc", "--propagation", "private"];
+
 /** Paths reach the generated shell script unquoted, so each must be one plain word. */
 const PLAIN_PATH = /^\/[A-Za-z0-9._@+/-]*$/;
 
@@ -58,7 +61,7 @@ function sandboxScript(hidden: readonly string[]): string {
         .map((dir) => `mount -t tmpfs -o mode=1777 tmpfs ${plainPath(dir)}`)
         .join("\n");
     return `#!/bin/sh
-AB_PATH="$PATH" exec sudo -n --preserve-env unshare --mount --pid --fork --mount-proc --propagation private /bin/sh -c '
+AB_PATH="$PATH" exec sudo -n --preserve-env unshare ${UNSHARE_ARGS.join(" ")} /bin/sh -c '
 set -e
 keep=""
 while [ "$1" != "--" ]; do keep="$keep $1"; shift; done
@@ -104,6 +107,7 @@ export function ensureSandboxScript(runRoot: string): string {
     return path;
 }
 
+/** Passwordless `sudo` can create the arm's mount and PID namespaces on this host. */
 export function sandboxAvailable(): boolean {
-    return spawnSync("sudo", ["-n", "true"]).status === 0 && Bun.which("unshare") !== null;
+    return spawnSync("sudo", ["-n", "unshare", ...UNSHARE_ARGS, "true"]).status === 0;
 }

@@ -50,6 +50,28 @@ export interface ArmSpec {
     stripClosureTemperature: boolean;
 }
 
+/**
+ * The `on` arms strip the temperature from every Eidnara model call at the gateway; `pi-onraw`
+ * forwards those calls as the plugin builds them.
+ */
+const ARM_SPECS: Record<string, Omit<ArmSpec, "name">> = {
+    "pi-off": { harness: "pi", eidnara: false, stripClosureTemperature: false },
+    "pi-on": { harness: "pi", eidnara: true, stripClosureTemperature: true },
+    "pi-onraw": { harness: "pi", eidnara: true, stripClosureTemperature: false },
+    "oc-off": { harness: "opencode", eidnara: false, stripClosureTemperature: false },
+    "oc-on": { harness: "opencode", eidnara: true, stripClosureTemperature: true },
+};
+
+export function armSpec(name: string): ArmSpec {
+    const spec = ARM_SPECS[name];
+    if (!spec) {
+        throw new Error(
+            `unknown arm ${JSON.stringify(name)}; arms are ${Object.keys(ARM_SPECS).join(", ")}`,
+        );
+    }
+    return { name, ...spec };
+}
+
 export interface PromptResult {
     answer: string;
     ms: number;

@@ -265,11 +265,14 @@ turn latency, model calls and tokens per caller, and memory.
   with the caller's AWS credentials. A scripted turn spends no model time, so
   its wall time is harness and plugin overhead.
 - Arms (`src/ab-eval/arms.ts`): `pi-off`, `pi-on`, `pi-onraw`, `oc-off`,
-  `oc-on`. `pi-on` strips the summarizer's temperature at the gateway;
-  `pi-onraw` sends requests as the plugin builds them. Eidnara arms run the
-  release `direct_host_fixture` with the pinned harness closures.
-- With passwordless `sudo`, each harness runs in its own mount and PID
-  namespace. Empty mounts cover `/tmp`, the home directory, and the run
+  `oc-on`. The `on` arms strip the temperature from every Eidnara model call
+  at the gateway, since Opus 5.5 on Bedrock refuses the parameter; `pi-onraw`
+  forwards those calls with the temperature the plugin set. On every arm the
+  gateway removes the harness's `thinking` request field from each forwarded
+  call. Eidnara arms run the release `direct_host_fixture` with the pinned
+  harness closures. An unknown arm name fails the run before any arm starts.
+- When passwordless `sudo` can create mount and PID namespaces, each harness
+  runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the home directory, and the run
   directory, and the arm's own directory is mounted back; the arm's `/proc`
   lists only its own processes. The harness runs as the invoking user with
   `no_new_privs` set, so `sudo` inside the arm stays unprivileged. The run
@@ -277,7 +280,8 @@ turn latency, model calls and tokens per caller, and memory.
   directories. `--sandbox off` runs without isolation.
 - Each run writes to a fresh directory: `--out` must be missing or empty, and
   the default is a timestamped directory under `<tmp>/ab-eval/runs/` that
-  `runs/latest` links to.
+  `runs/latest` links to. The command exits nonzero when any arm fails, and
+  the other arms' results stay in the directory.
 - A turn that reaches its timeout is aborted, and the next turn starts once
   the harness has stopped it. The gateway retries throttled Bedrock calls
   until the turn's deadline.

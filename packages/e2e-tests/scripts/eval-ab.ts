@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { type Arm, type ArmSpec, armRoot, makeArm } from "../src/ab-eval/arms";
+import { type Arm, armRoot, armSpec, makeArm } from "../src/ab-eval/arms";
 import type { CallRecord } from "../src/ab-eval/gateway";
 import { procStats, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
@@ -57,16 +57,6 @@ function parseArgs(argv: string[]): Options {
         ),
         stallMs: Number(get("stall-ms", "6000")),
         enforceWindow: get("enforce-window", "on") === "on",
-    };
-}
-
-function specOf(name: string): ArmSpec {
-    const [harness, mode] = name.split("-") as [string, string];
-    return {
-        name,
-        harness: harness === "pi" ? "pi" : "opencode",
-        eidnara: mode === "on" || mode === "onraw",
-        stripClosureTemperature: mode === "on",
     };
 }
 
@@ -194,6 +184,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
 
 async function main(): Promise<void> {
     const opts = parseArgs(process.argv.slice(2));
+    const specs = opts.arms.map(armSpec);
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
     if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep());
@@ -208,8 +199,8 @@ async function main(): Promise<void> {
         JSON.stringify({ ...opts, stallAt: [...opts.stallAt] }, null, 2),
     );
     const results = await Promise.allSettled(
-        opts.arms.map(async (name) => {
-            const spec = specOf(name);
+        specs.map(async (spec) => {
+            const name = spec.name;
             const root = armRoot(join(opts.out, "arms"), name);
             const workdir = join(root, "work");
             prepareWorkdir(world, workdir);
@@ -240,6 +231,7 @@ async function main(): Promise<void> {
             `${opts.arms[i]}: ${r.status}${r.status === "rejected" ? ` ${String(r.reason).slice(0, 500)}` : ""}`,
         );
     }
+    if (results.some((r) => r.status === "rejected")) process.exitCode = 1;
     const summary = readFileSync(join(opts.out, "options.json"), "utf8");
     console.log(`out: ${opts.out}\n${summary}`);
 }
