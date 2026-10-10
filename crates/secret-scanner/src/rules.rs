@@ -1032,11 +1032,11 @@ mod tests {
         for (profile, expected) in [
             (
                 ScanProfile::Conservative,
-                "d4ccd4e42d05cfd7d784e2b53fef8224b6bd472872eb9dcc9162d5344987b9fd",
+                "69235bd55d45ad0e6e80caf378cce8a3ee27087a13190c26776864264503bf22",
             ),
             (
                 ScanProfile::Comprehensive,
-                "46c1a5a4dc853c456ee1cd323393a6e07e7b2726b86a0b246c666a6272e2f3f2",
+                "c19adcf9d5dc7aa972f008fdb12a0cf8ceeb520b1ed4a73b5211d0c0a629dadb",
             ),
         ] {
             let digest = rules

@@ -205,7 +205,10 @@ fn candidate_spans(
     if value_match.is_empty() {
         return Ok(None);
     }
-    let value_match = unquoted(rule, captures, value_match);
+    let (value_start, value_end) = unquoted(rule, captures, value_match);
+    if value_start == value_end {
+        return Ok(None);
+    }
     let key_match = match rule.declaration.key_group.as_deref() {
         Some(name) => match captures.name(name) {
             Some(key) => Some(key),
@@ -215,7 +218,7 @@ fn candidate_spans(
     };
 
     let full_span = TextSpan::snapped(input, full_match.start(), full_match.end())?;
-    let value_span = TextSpan::snapped(input, value_match.start(), value_match.end())?;
+    let value_span = TextSpan::snapped(input, value_start, value_end)?;
     let key_span = key_match
         .map(|value| TextSpan::snapped(input, value.start(), value.end()))
         .transpose()?;
@@ -712,27 +715,34 @@ fn keyed_keyword_at(key: &[u8], index: usize) -> bool {
 }
 
 // Unnamed captures hold secrets; named captures mark header fields. Ignore named captures so header-only rules return their whole match.
-// Fallback rules report an unnamed capture nested inside matching shell quotes; declared groups take precedence.
-fn unquoted<'a>(
+// Fallback rules report the inside of matching shell quotes around the selected capture: an unnamed capture nested exactly inside them, or else the quoted section itself when no copy of the opening quote sits inside it. A capture such as `"user":"pass"` joins two quoted sections and stays whole. Declared groups take precedence.
+fn unquoted(
     rule: &Rule,
-    captures: &Captures<'a>,
-    selected: regex::bytes::Match<'a>,
-) -> regex::bytes::Match<'a> {
+    captures: &Captures<'_>,
+    selected: regex::bytes::Match<'_>,
+) -> (usize, usize) {
+    let whole = (selected.start(), selected.end());
     if rule.declaration.value_group.is_some() || rule.declaration.secret_group.is_some() {
-        return selected;
+        return whole;
     }
     let bytes = selected.as_bytes();
     let quoted = bytes.len() >= 2
         && matches!(bytes[0], b'\'' | b'"' | b'`')
         && bytes[bytes.len() - 1] == bytes[0];
     if !quoted {
-        return selected;
+        return whole;
     }
-    rule.unnamed_captures
+    let inside = (selected.start() + 1, selected.end() - 1);
+    let nested = rule
+        .unnamed_captures
         .iter()
         .filter_map(|&index| captures.get(index))
-        .find(|inner| inner.start() == selected.start() + 1 && inner.end() == selected.end() - 1)
-        .unwrap_or(selected)
+        .any(|inner| (inner.start(), inner.end()) == inside);
+    if nested || !bytes[1..bytes.len() - 1].contains(&bytes[0]) {
+        inside
+    } else {
+        whole
+    }
 }
 
 fn first_unnamed_capture<'a>(
@@ -1617,14 +1627,16 @@ fn validate_pypi(value: &[u8]) -> OfflineVerdict {
 }
 
 // Unsupported prefixes and unparsable `xoxe` values return Indeterminate; malformed shapes for supported prefixes return Invalid. `xapp` requires only its first segment to start with a digit, while `xoxa` and `xoxr` allow one alphanumeric segment.
+// The other prefixes check only the all-digit segments every Slack rule regex fixes before the opaque tail: one for `xoxb` and the `xoxe.xox` config token, three for `xoxp`, `xoxo`, and `xoxs`, and for `xoxe` one in its two-segment refresh shape and three otherwise. The tail may hold `-`, so the verdict never depends on where a hyphen falls in it.
 fn validate_slack(value: &[u8]) -> OfflineVerdict {
     if value.len() < 10 {
         return OfflineVerdict::Indeterminate;
     }
     let prefix = &value[..4];
+    let config_access = starts_with_ignore_ascii_case(value, b"xoxe.xox");
     let body_start = if value.get(4) == Some(&b'-') {
         5
-    } else if starts_with_ignore_ascii_case(value, b"xoxe.xox") {
+    } else if config_access {
         match value.iter().position(|byte| *byte == b'-') {
             Some(dash) => dash + 1,
             None => return OfflineVerdict::Indeterminate,
@@ -1632,26 +1644,31 @@ fn validate_slack(value: &[u8]) -> OfflineVerdict {
     } else {
         return OfflineVerdict::Indeterminate;
     };
-    let segments: Vec<&[u8]> = value[body_start..].split(|byte| *byte == b'-').collect();
-    let leading = match segments.split_last() {
-        Some((_, leading)) if !leading.is_empty() => leading,
-        _ => &segments[..],
-    };
-    let starts_with_digit = |segment: &[u8]| segment.first().is_some_and(u8::is_ascii_digit);
+    let body = &value[body_start..];
+    let mut segments = body.split(|byte| *byte == b'-');
     let shaped = if matches!(prefix, b"xoxa" | b"xoxr") {
-        segments.first().is_some_and(|segment| {
+        segments.next().is_some_and(|segment| {
             !segment.is_empty() && segment.iter().all(u8::is_ascii_alphanumeric)
         })
     } else if prefix.eq_ignore_ascii_case(b"xapp") {
         segments
-            .first()
-            .is_some_and(|segment| starts_with_digit(segment))
-    } else if matches!(prefix, b"xoxb" | b"xoxp" | b"xoxo" | b"xoxs")
-        || prefix.eq_ignore_ascii_case(b"xoxe")
-    {
-        leading.iter().all(|segment| starts_with_digit(segment))
+            .next()
+            .is_some_and(|segment| segment.first().is_some_and(u8::is_ascii_digit))
     } else {
-        return OfflineVerdict::Indeterminate;
+        let segment_count = segments.clone().count();
+        let fixed = if config_access || prefix == b"xoxb" {
+            1
+        } else if matches!(prefix, b"xoxp" | b"xoxo" | b"xoxs") {
+            3
+        } else if prefix.eq_ignore_ascii_case(b"xoxe") {
+            if segment_count == 2 { 1 } else { 3 }
+        } else {
+            return OfflineVerdict::Indeterminate;
+        };
+        segment_count > fixed
+            && segments
+                .take(fixed)
+                .all(|segment| !segment.is_empty() && segment.iter().all(u8::is_ascii_digit))
     };
     if shaped {
         OfflineVerdict::Valid

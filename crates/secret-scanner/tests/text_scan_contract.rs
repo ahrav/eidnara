@@ -509,6 +509,63 @@ fn value_span_covers_the_secret_for_multi_group_rules() {
     }
 }
 
+/// A capture that includes its own wrapping quotes reports the quoted text
+/// without them, so redacting `value_span` removes the same bytes for every
+/// rule that matches one assignment.
+#[test]
+fn value_span_excludes_quotes_the_secret_capture_includes() {
+    let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
+    let secret = "xq9vlm2prt7wzk4b";
+    for (input, rule_id) in [
+        (format!("password = \"{secret}\""), "hashicorp-tf-password"),
+        (
+            format!("curl -u \"admin:{secret}\" https://api.corp-internal.net/v1/x"),
+            "curl-auth-user",
+        ),
+    ] {
+        let findings = scanner.scan(&input).unwrap().findings;
+        let finding = findings
+            .iter()
+            .find(|finding| finding.rule_id == rule_id)
+            .unwrap_or_else(|| panic!("{rule_id} produced no finding for {input:?}"));
+        let value = &input[finding.value_span.start()..finding.value_span.end()];
+        assert!(
+            !value.starts_with('"') && !value.ends_with('"'),
+            "{rule_id} kept the wrapping quotes in {value:?}"
+        );
+        assert!(value.ends_with(secret), "{rule_id} reported {value:?}");
+        assert!(
+            finding.full_span.start() <= finding.value_span.start()
+                && finding.value_span.end() <= finding.full_span.end()
+        );
+        if rule_id == "hashicorp-tf-password" {
+            // Every rule matching the assignment reports the same unquoted bytes.
+            for other in &findings {
+                assert_eq!(
+                    &input[other.value_span.start()..other.value_span.end()],
+                    secret,
+                    "{} disagrees with {rule_id}",
+                    other.rule_id
+                );
+            }
+        }
+    }
+    // A capture joining two quoted sections stays whole: stripping its outer
+    // quotes would leave `user":"pass`.
+    let joined = "curl -u \"deploy\":\"Zr8wq3Lm\" https://api.corp-internal.net/v1/x";
+    let finding = scanner
+        .scan(joined)
+        .unwrap()
+        .findings
+        .into_iter()
+        .find(|finding| finding.rule_id == "curl-auth-user")
+        .expect("curl-auth-user did not match the joined quoted pair");
+    assert_eq!(
+        &joined[finding.value_span.start()..finding.value_span.end()],
+        "\"deploy\":\"Zr8wq3Lm\""
+    );
+}
+
 /// A caller redacting `value_span` must delete the credential and nothing else.
 #[test]
 fn value_span_excludes_surrounding_command_text_for_alternation_rules() {
@@ -802,6 +859,44 @@ fn slack_validation_rejects_malformed_bodies() {
         !scanner.scan(&refresh).unwrap().findings.is_empty(),
         "the config-refresh shape stopped reporting"
     );
+}
+
+/// The user and bot rule regexes admit `-` in the opaque tail, so a hyphen
+/// anywhere in that tail must not decide whether the token is reported.
+#[test]
+fn slack_validation_accepts_hyphenated_tails_the_rules_admit() {
+    let scanner = Scanner::new(ScanProfile::Comprehensive).unwrap();
+    // Bodies are joined to their prefix at run time, as in
+    // `slack_validation_rejects_malformed_bodies`.
+    let prefix = "xox";
+    for (body, rule_ids) in [
+        (
+            "p-1234567890-1234567890-1234567890-AbCdEfGhIjKlMn-OpQrStUvWxYz1234",
+            &["slack-user-token", "magic-slack-token"][..],
+        ),
+        (
+            "b-1234567890-1234567890-Ab-Cd-efgh",
+            &["slack-bot-token", "magic-slack-token"][..],
+        ),
+        (
+            "b-1234567890-1234567890Ab-Cd",
+            &["slack-bot-token", "magic-slack-token"][..],
+        ),
+    ] {
+        let input = format!("{prefix}{body}");
+        let findings = scanner.scan(&input).unwrap().findings;
+        for rule_id in rule_ids {
+            let finding = findings
+                .iter()
+                .find(|finding| finding.rule_id == *rule_id)
+                .unwrap_or_else(|| panic!("{rule_id} did not report {input}"));
+            assert_eq!(
+                &input[finding.value_span.start()..finding.value_span.end()],
+                input,
+                "{rule_id} reported a fragment of {input}"
+            );
+        }
+    }
 }
 
 /// The keyed rules have no entropy floor and stay outside the engine safelists,
