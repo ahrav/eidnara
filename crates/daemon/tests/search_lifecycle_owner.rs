@@ -131,6 +131,7 @@ fn every_recorded_cause_keeps_the_name_a_lifecycle_record_stores() {
         (Cause::EmbeddingModelMismatch, "EmbeddingModelMismatch"),
         (Cause::ProjectionPolicyMismatch, "ProjectionPolicyMismatch"),
         (Cause::IdentityContractMismatch, "IdentityContractMismatch"),
+        (Cause::LimitProtocolMismatch, "LimitProtocolMismatch"),
         (Cause::DeletedAfterPruning, "DeletedAfterPruning"),
         (Cause::DisabledRecovery, "DisabledRecovery"),
         (Cause::Registration, "Registration"),

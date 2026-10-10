@@ -69,6 +69,8 @@ pub enum Cause {
     EmbeddingModelMismatch,
     ProjectionPolicyMismatch,
     IdentityContractMismatch,
+    /// A limit manifest protocol change requires a rebuild.
+    LimitProtocolMismatch,
     /// The projection was deleted after pruning and is rebuilt from the kernel.
     DeletedAfterPruning,
     /// A Disabled projection resumes under operator authorization.

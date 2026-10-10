@@ -1489,6 +1489,10 @@ fn identity_mismatch_cause(
             stored.identity_contract_version != running.identity_contract_version,
             Cause::IdentityContractMismatch,
         ),
+        (
+            stored.limit_manifest_protocol_version != running.limit_manifest_protocol_version,
+            Cause::LimitProtocolMismatch,
+        ),
     ]
     .into_iter()
     .find_map(|(differs, cause)| differs.then_some(cause))
@@ -2295,6 +2299,10 @@ mod tests {
         assert_eq!(
             changed(|stored| stored.identity_contract_version.push('x')),
             Some(Cause::IdentityContractMismatch)
+        );
+        assert_eq!(
+            changed(|stored| stored.limit_manifest_protocol_version.push('x')),
+            Some(Cause::LimitProtocolMismatch)
         );
         assert_eq!(
             changed(|stored| {
