@@ -51,27 +51,59 @@ pub struct ModelExecutionComponent {
     state_root: StateRoot,
 }
 
+const HARNESSES: [Harness; 2] = [Harness::OpenCode, Harness::Pi];
+
+/// The expected claim, or the subreason that refuses it, for each harness in [`HARNESSES`]
+/// order and each provider in [`EnvSnapshot::SUPPORTED_PROVIDERS`] order.
+type ClaimTable =
+    [[Result<String, &'static str>; EnvSnapshot::SUPPORTED_PROVIDERS.len()]; HARNESSES.len()];
+
 struct CredentialVerifier {
     env: EnvSnapshot,
     aws_source: Option<AwsProfileSource>,
-    key: OnceLock<ClaimKey>,
+    /// The verifier caches claims under the first installed connection key; `env` and
+    /// `aws_source` stay fixed for its lifetime.
+    claims: OnceLock<ClaimTable>,
 }
 
 impl CredentialVerifier {
+    fn install(&self, connection_key: &[u8; 32]) {
+        self.claims.get_or_init(|| {
+            let key = ClaimKey::new(connection_key);
+            HARNESSES.map(|harness| {
+                EnvSnapshot::SUPPORTED_PROVIDERS.map(|provider| {
+                    self.env
+                        .source_claim_under(
+                            &key,
+                            harness.as_str(),
+                            provider,
+                            self.aws_source.as_ref(),
+                        )
+                        .map_err(|error| error.subreason())
+                })
+            })
+        });
+    }
+
     fn verify(
         &self,
         harness: Harness,
         provider: &str,
         presented: &BTreeMap<String, String>,
     ) -> Result<(), &'static str> {
-        let key = self.key.get().ok_or("credential_snapshot_mismatch")?;
+        let claims = self.claims.get().ok_or("credential_snapshot_mismatch")?;
         let canonical = subprocess::canonical_provider(harness.as_str(), provider)
             .map_err(|error| error.subreason())?;
-        let expected = self
-            .env
-            .source_claim_under(key, harness.as_str(), provider, self.aws_source.as_ref())
-            .map_err(|error| error.subreason())?;
-        if source_claim::presented_claim_matches(&expected, presented, canonical) {
+        let slot = EnvSnapshot::SUPPORTED_PROVIDERS
+            .iter()
+            .position(|supported| *supported == canonical)
+            .ok_or("provider_unsupported")?;
+        let row = HARNESSES
+            .iter()
+            .position(|known| *known == harness)
+            .ok_or("credential_snapshot_mismatch")?;
+        let expected = claims[row][slot].as_deref().map_err(|reason| *reason)?;
+        if source_claim::presented_claim_matches(expected, presented, canonical) {
             Ok(())
         } else {
             Err("credential_snapshot_mismatch")
@@ -108,7 +140,7 @@ impl ModelExecutionComponent {
             credential_verifier: Some(Arc::new(CredentialVerifier {
                 env,
                 aws_source,
-                key: OnceLock::new(),
+                claims: OnceLock::new(),
             })),
             aws_owner: None,
             state_root,
@@ -186,7 +218,7 @@ async fn respond(ctx: &RequestCtx, body: Vec<u8>) -> RequestOutcome {
 impl CompositeComponent for ModelExecutionComponent {
     fn install_connection_key(&self, key: [u8; 32]) {
         if let Some(verifier) = &self.credential_verifier {
-            let _ = verifier.key.set(ClaimKey::new(&key));
+            verifier.install(&key);
         }
     }
 
@@ -528,6 +560,96 @@ impl SecondaryComponent for ModelExecutionComponent {
             Err(join) => Err(InitError(format!(
                 "model_execution crash-orphan sweep did not complete: {join}"
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROVIDERS: [&str; 7] = [
+        "amazon-bedrock",
+        "anthropic",
+        "google",
+        "openai",
+        "openai-codex",
+        "google-antigravity",
+        "mistral",
+    ];
+
+    fn selector() -> AwsProfileSource {
+        serde_json::from_value(serde_json::json!({
+            "kind": "profile", "profile": "corp", "region": "us-east-1",
+            "config_file": "/home/u/.aws/config", "credentials_file": "/home/u/.aws/credentials",
+            "sso_cache_root": "/home/u/.aws/sso/cache",
+        }))
+        .expect("selector")
+    }
+
+    #[test]
+    fn the_claim_table_answers_every_harness_and_provider_like_a_fresh_derivation() {
+        let env = EnvSnapshot::capture_from([
+            ("ANTHROPIC_API_KEY".into(), "sk-ant".into()),
+            ("OPENAI_API_KEY".into(), "sk-openai".into()),
+            ("GEMINI_API_KEY".into(), "".into()),
+            ("AWS_ACCESS_KEY_ID".into(), "AKIA".into()),
+            ("AWS_SECRET_ACCESS_KEY".into(), "s".repeat(17 * 1024).into()),
+            ("AWS_REGION".into(), "us-west-2".into()),
+        ])
+        .expect("snapshot");
+        let key = [0x42; 32];
+        let other_key = [0x43; 32];
+        for aws_source in [None, Some(selector())] {
+            let verifier = CredentialVerifier {
+                env: env.clone(),
+                aws_source: aws_source.clone(),
+                claims: OnceLock::new(),
+            };
+            assert_eq!(
+                verifier.verify(Harness::Pi, "anthropic", &BTreeMap::new()),
+                Err("credential_snapshot_mismatch"),
+                "no key, no claim"
+            );
+            verifier.install(&key);
+            verifier.install(&other_key);
+            for harness in HARNESSES {
+                for provider in PROVIDERS {
+                    let fresh =
+                        env.source_claim(&key, harness.as_str(), provider, aws_source.as_ref());
+                    let Ok(canonical) = subprocess::canonical_provider(harness.as_str(), provider)
+                    else {
+                        assert_eq!(
+                            verifier.verify(harness, provider, &BTreeMap::new()),
+                            Err("provider_unsupported")
+                        );
+                        continue;
+                    };
+                    let claim_under = |key: &[u8; 32]| {
+                        let claim = env
+                            .source_claim(key, harness.as_str(), provider, aws_source.as_ref())
+                            .unwrap_or_default();
+                        BTreeMap::from([(canonical.to_owned(), claim)])
+                    };
+                    match fresh {
+                        Ok(_) => {
+                            assert_eq!(
+                                verifier.verify(harness, provider, &claim_under(&key)),
+                                Ok(())
+                            );
+                            assert_eq!(
+                                verifier.verify(harness, provider, &claim_under(&other_key)),
+                                Err("credential_snapshot_mismatch"),
+                                "the first installed key stays the only key"
+                            );
+                        }
+                        Err(error) => assert_eq!(
+                            verifier.verify(harness, provider, &claim_under(&key)),
+                            Err(error.subreason())
+                        ),
+                    }
+                }
+            }
         }
     }
 }
