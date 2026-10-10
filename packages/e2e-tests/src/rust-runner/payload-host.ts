@@ -4,7 +4,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HostClient } from "@eidnara/opencode/shared/host-client";
-import { connectionFilePath } from "@eidnara/opencode/shared/host-lifecycle/paths";
+import {
+    connectionFilePath,
+    coordinationDirPath,
+} from "@eidnara/opencode/shared/host-lifecycle/paths";
 import type { HarnessHost } from "../rust-harness";
 import { SEARCH_ADMISSION_RECORDS } from "./daemon-examples";
 import { buildDaemonExample } from "./hermetic-host";
@@ -14,7 +17,6 @@ export const PAYLOAD_DIR_ENV = "EIDNARA_E2E_PAYLOAD_DIR";
 const LAUNCHER = "payload/bin/eidnara-host";
 const BUNDLE_MANIFEST = "payload/model/gte-modernbert-base-f32/manifest.json";
 const PAYLOAD_MANIFEST = "payload-manifest.json";
-const DAEMON_LOG = ".eidnara-coordination/eidnara.log";
 const MAX_LOG_BYTES = 16 * 1024;
 
 export function missingPayloadFiles(payloadDir: string): string[] {
@@ -64,7 +66,10 @@ export class PayloadHost implements HarnessHost {
             payloadManifestDigest(host.payloadDir),
         ]);
         if (started.status !== 0 || !started.stdout.includes('"ok":true')) {
-            throw new Error(`payload host did not start: ${describe(started)}\n${host.hostLog()}`);
+            const log = host.hostLog();
+            // A daemon the launcher spawned before reporting failure is stopped here, since the harness receives no host to tear down.
+            host.lifecycle(["stop"]);
+            throw new Error(`payload host did not start: ${describe(started)}\n${log}`);
         }
         return host;
     }
@@ -145,7 +150,10 @@ export class PayloadHost implements HarnessHost {
 
     hostLog(): string {
         try {
-            return readFileSync(join(this.dataDir, DAEMON_LOG), "utf8").slice(-MAX_LOG_BYTES);
+            return readFileSync(
+                join(coordinationDirPath(this.dataDir), "eidnara.log"),
+                "utf8",
+            ).slice(-MAX_LOG_BYTES);
         } catch {
             return "";
         }

@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use daemon::projection_gates::ProjectionHook;
 use retrieval::ProjectionIdentity;
 
-/// Each tool turn commits its transcript to the kernel, so the fixture's four-commit lag leaves a reader stale between slices.
+/// Replaces the fixture's four-commit `LAG_LIMIT` with `LIMIT`. Each tool turn commits its transcript to the kernel, so a four-commit lag marks a reader stale between slices, and `LIMIT` lets a search read the family while it catches up.
 const LAG_COMMITS: u64 = projection_gate::LIMIT;
 
 fn main() -> Result<(), Box<dyn Error>> {

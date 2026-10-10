@@ -136,6 +136,10 @@ jobs:
               # select this job even when no package file moves.
               - 'crates/host-runtime/**'
               - 'crates/daemon/**'
+              # The payload fused-search E2E exercises the route's ranking and
+              # its eligibility judgments, which these crates own.
+              - 'crates/retrieval/**'
+              - 'crates/kernel/**'
               - 'packages/**'
               - 'scripts/**'
               - 'release/**'

@@ -17,7 +17,7 @@ const ADMISSION_TIMEOUT_MS = 300_000;
 const CATCH_UP_TIMEOUT_MS = 120_000;
 const FALLBACK = "results come from the legacy snapshot scan";
 
-/** Each query and its memory use disjoint word sets, so a ranked row comes from the dense lane. */
+/** Each query and its memory use disjoint word sets, so a ranked row comes from the dense lane. Each harness writes both memories into its own project, so a row ranks only against its own harness's memories. */
 const BEFORE = {
     content: "Container images ship to production only on weekday mornings.",
     query: "release cadence restrictions for deploying builds",
@@ -114,7 +114,7 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
     afterAll(async () => {
         await pi?.dispose();
         await oc?.dispose();
-    });
+    }, 120_000);
 
     it(
         "ranks memories from before and after activation through each plugin's dense lane",
@@ -126,16 +126,17 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
                 expect(shared).toEqual([]);
             }
             const ocSession = await oc.createSession();
-            const ocSearch = async (query: string) =>
+            // The memory subset before admission keeps the fallback check to one source; afterwards each search uses the default sources.
+            const ocSearch = async (query: string, sources?: string[]) =>
                 (
                     await runScriptedToolCall(oc, ocSession, {
                         tool: "eidnara_search",
-                        input: { query, sources: ["memory"] },
+                        input: sources ? { query, sources } : { query },
                         prompt: "Search project memory.",
                     })
                 ).resultText;
-            const piSearch = (query: string) =>
-                piToolCall(pi, "eidnara_search", { query, sources: ["memory"] });
+            const piSearch = (query: string, sources?: string[]) =>
+                piToolCall(pi, "eidnara_search", sources ? { query, sources } : { query });
             const create = (content: string) => ({
                 action: "create",
                 content,
@@ -155,8 +156,8 @@ describe.skipIf(!PAYLOAD_DIR)("fused search through a built payload", () => {
                 await piToolCall(pi, "eidnara_memory", create(BEFORE.content)),
             );
 
-            expect(await ocSearch(BEFORE.query)).toContain(FALLBACK);
-            expect(await piSearch(BEFORE.query)).toContain(FALLBACK);
+            expect(await ocSearch(BEFORE.query, ["memory"])).toContain(FALLBACK);
+            expect(await piSearch(BEFORE.query, ["memory"])).toContain(FALLBACK);
 
             await oc.host.installSearchAdmission();
             await oc.host.waitForAdmitted(oc.env.workdir, ocSession, ADMISSION_TIMEOUT_MS);
