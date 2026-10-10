@@ -65,3 +65,19 @@ export async function waitFor<T>(
     }
     throw new Error(`${what} did not happen within ${timeoutMs}ms\n${diagnostics()}`);
 }
+
+export interface Disposable {
+    dispose(): Promise<void>;
+}
+
+export async function disposeAll(resources: readonly (Disposable | undefined)[]): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    for (const resource of resources) {
+        try {
+            await resource?.dispose();
+        } catch (error) {
+            failure ??= { error };
+        }
+    }
+    if (failure) throw failure.error;
+}
