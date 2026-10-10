@@ -162,6 +162,10 @@ fn main() {
             pi_rejected_temperature_retries_without_temperature,
         ),
         (
+            "pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider",
+            pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider,
+        ),
+        (
             "pi_model_execution_hook_omits_temperature_for_registry_refusing_models",
             pi_model_execution_hook_omits_temperature_for_registry_refusing_models,
         ),
@@ -652,6 +656,35 @@ mod fixture {
         std::process::exit(0);
     }
 
+    fn alias_refuses_temperature(out: PathBuf) -> ! {
+        let args = argv();
+        let model = args
+            .iter()
+            .position(|arg| arg == "--model")
+            .and_then(|index| args.get(index + 1))
+            .expect("model argument");
+        let temperature = std::env::var("EIDNARA_MODEL_EXECUTION_TEMPERATURE").ok();
+        let session = serde_json::json!({"type": "session", "id": "s", "version": "1", "timestamp": 1, "cwd": "/"});
+        let end = if model.starts_with("openai-codex/") {
+            if out.join("alias-credentials-expired").exists() {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "No API key found for provider", "content": []}})
+            } else if temperature.is_some() {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "Unsupported parameter: 'temperature' is not supported with this model.", "content": []}})
+            } else {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "alias answer"}]}})
+            }
+        } else {
+            fs::write(
+                out.join("canonical-temperature"),
+                temperature.as_deref().unwrap_or("absent"),
+            )
+            .expect("write canonical temperature");
+            serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "canonical answer"}]}})
+        };
+        emit_lines(&[session, serde_json::json!({"type": "agent_start"}), end]);
+        std::process::exit(0);
+    }
+
     /// Pi must drain the lingering failed invocation after its error terminal.
     /// The failed alias invocation exhausts the run budget.
     fn alias_auth_retry_lingering(out: PathBuf) -> ! {
@@ -829,6 +862,9 @@ mod fixture {
             }
             Ok("temperature_rejected") => {
                 temperature_rejected(out.expect("temperature fixture needs an out dir"));
+            }
+            Ok("alias_refuses_temperature") => {
+                alias_refuses_temperature(out.expect("alias temperature fixture needs an out dir"));
             }
             Ok("error_then_retry_after_grace") => error_then_retry_after_grace(),
             Ok("hang_ignore_term") => hang_ignore_term(out),
@@ -2694,6 +2730,45 @@ fn pi_remembered_temperature_refusal_skips_the_refused_attempt() {
         ));
         assert_eq!(marker.exists(), refused_attempt, "{model}");
     }
+}
+
+fn pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "alias_refuses_temperature")],
+        Vec::new(),
+        None,
+    );
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "openai/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "alias answer")
+    ));
+    fs::write(setup.out.path().join("alias-credentials-expired"), b"1")
+        .expect("expire alias credentials");
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "openai/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "canonical answer")
+    ));
+    assert_eq!(
+        fs::read_to_string(setup.out.path().join("canonical-temperature"))
+            .expect("canonical attempt ran"),
+        "0.25"
+    );
 }
 
 /// `AuthRequired` received during Pi's shutdown gap must trigger the canonical retry.

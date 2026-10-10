@@ -254,11 +254,13 @@ async fn run_pi_with_provider_fallback(
     let mut provider_retry = aliased != canonical;
     let mut model_ref = aliased;
     let mut request = request;
+    // Remembered refusals apply per model ref, so each attempt derives its temperature from the admitted value.
+    let admitted_temperature = request.temperature;
+    let mut temperature_refused = false;
     let mut attempt = run.clone();
     loop {
-        if request.temperature.is_some() && run.temperature_refusals.contains(&model_ref) {
-            request.temperature = None;
-        }
+        request.temperature = admitted_temperature
+            .filter(|_| !temperature_refused && !run.temperature_refusals.contains(&model_ref));
         let temperature_retry = request.temperature.is_some();
         let next = (provider_retry || temperature_retry).then(|| request.clone());
         let terminal = run_pi(
@@ -269,7 +271,7 @@ async fn run_pi_with_provider_fallback(
             model_ref.clone(),
         )
         .await;
-        let Some(mut next) = next else {
+        let Some(next) = next else {
             return terminal;
         };
         let BackendTerminal::Failed(error) = &terminal else {
@@ -289,7 +291,7 @@ async fn run_pi_with_provider_fallback(
             model_ref.clone_from(&canonical);
         } else if temperature_retry && error.message == PI_TEMPERATURE_REJECTED_MESSAGE {
             run.temperature_refusals.record(&model_ref);
-            next.temperature = None;
+            temperature_refused = true;
         } else {
             return terminal;
         }
