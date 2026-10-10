@@ -100,11 +100,11 @@ corpus identity and holds:
 
 A corpus edit moves both pins, so a record naming another digest covers
 nothing. Until a record names the current digest, the corpus stays
-unapproved and every arm built on it stays unaccepted. This gate is
-procedural: `eval:compression-fidelity` derives `accepted` from the review
-batch's two approvers in `controls.json`, and the operator checks the
-tracker record against the report's `corpus_sha256` before accepting a
-result.
+unapproved, and the operator rejects every result built on it, whatever
+its report's `accepted` field says. This gate is procedural:
+`eval:compression-fidelity` derives `accepted` from the review batch's two
+approvers in `controls.json`, and the operator checks the tracker record
+against the report's `corpus_sha256` before accepting a result.
 
 The Rust corpus module owns source, span, and revision validation, and
 `compression_fidelity_tests.rs` holds its negative controls. It rejects
