@@ -102,6 +102,7 @@ const managedDemandStart = createLazyManagedDemandStart({
 
 /** Shows the daemon start refusals queued since the last hook that had a UI. */
 export function showPendingStartNotices(ctx: Pick<ExtensionContext, "ui">): void {
+    if (pendingStartNotices.length === 0) return;
     for (const notice of pendingStartNotices.splice(0)) ctx.ui.notify(notice, "warning");
 }
 
@@ -534,8 +535,8 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     });
     info("registered /eidnara-status");
     registerStatusLine(pi, { projectIdentity });
-    pi.on("session_start", async (_event, ctx) => showPendingStartNotices(ctx));
-    pi.on("agent_end", async (_event, ctx) => showPendingStartNotices(ctx));
+    pi.on("session_start", (_event, ctx) => showPendingStartNotices(ctx));
+    pi.on("agent_end", (_event, ctx) => showPendingStartNotices(ctx));
     info("registered eidnara status line");
 
     registerCtxFlushCommand(pi, daemonSessionDeps);
