@@ -603,14 +603,14 @@ fn scaffold(first: u64, title: &str) -> (Vec<IngressMessage>, String) {
 
 /// Folds `before`, then `before ++ added` as a second firing, through one handler.
 async fn two_folds(
+    config: DaemonConfig,
     before: Vec<IngressMessage>,
     added: Vec<IngressMessage>,
     follow_up: &FollowUp,
     outputs: [String; 2],
 ) -> Fold {
     let producer = scripted(outputs.into());
-    let (handler, store, dir, _project) =
-        handler_with_store(Arc::clone(&producer), default_test_config());
+    let (handler, store, dir, _project) = handler_with_store(Arc::clone(&producer), config);
     let mut first = before.clone();
     first.extend(live_tail(follow_up, before.len() as u64 + 1));
     let mut fold = Fold {
@@ -650,6 +650,7 @@ async fn a_publication_after_a_prior_baseline_serves_p1_in_the_m1_window() {
             })
             .collect();
         let fold = two_folds(
+            default_test_config(),
             baseline,
             shifted,
             follow_up,
@@ -1025,6 +1026,7 @@ async fn positive_budget_pressure_demotes_the_oldest_row_and_a_generous_budget_r
         let newer_title = "Newer scaffold work";
         let (newer, newer_output) = scaffold(count + 1, newer_title);
         let fold = two_folds(
+            default_test_config(),
             source_ingress(case, source),
             newer,
             follow_up_for(case, source),
@@ -3082,9 +3084,45 @@ fn a_capture_publishing_several_rows_fails_the_replay_before_it_folds() {
     real_captures(dir.path(), MODEL);
 }
 
+#[test]
+#[should_panic(
+    expected = "C1.V1.capture.json: the published row covers messages 1-3 of 6; the replay serves a row covering its whole source"
+)]
+fn a_capture_whose_row_covers_a_prefix_of_its_source_fails_the_replay_before_it_folds() {
+    const MODEL: &str = "probe/model";
+    let (case, source) = case_source("C1", "C1.V1");
+    assert_eq!(source.messages.len(), 6);
+    let output = "<output><history_segments>\
+        <history_segment start=\"1\" end=\"3\" title=\"prefix\" importance=\"50\">\
+        <p1>prefix arc</p1><p2>prefix</p2><p3>p</p3><p4/></history_segment>\
+        </history_segments><meta><unprocessed_from>4</unprocessed_from></meta></output>";
+    assert_eq!(published_p1(output).as_deref(), Some("prefix arc"));
+    let dir = tempfile::tempdir().unwrap();
+    Observation::new(
+        REAL_OWNER,
+        CORPUS_SHA256,
+        &case.id,
+        &source.id,
+        "capture",
+        Terminal::Published,
+    )
+    .with(json!({
+        "model": MODEL,
+        "output_origin": REAL_ORIGIN,
+        "attempts": [{"model": MODEL, "outputs": [{"text": output}]}],
+        "published_rows": [{
+            "start": 1, "end": 3, "title": "prefix",
+            "p1": "prefix arc", "p2": "", "p3": "", "p4": "", "importance": 50,
+        }],
+    }))
+    .emit_to(dir.path());
+    real_captures(dir.path(), MODEL);
+}
+
 /// Reads every published real capture of `model` in `dir`, keyed by source. A capture names its
 /// output by the attempt output whose P1, as the validator publishes it, is its published row's.
-/// A capture that publishes several rows fails the read; the replay serves one-row captures.
+/// A capture that publishes several rows, or a row covering less than its whole source, fails
+/// the read; the replay serves one row that covers its source.
 fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
     let mut captures = BTreeMap::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
@@ -3110,7 +3148,24 @@ fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
             rows, 1,
             "{name}: publishes {rows} rows; the replay serves one-row captures"
         );
-        let p1 = detail["published_rows"][0]["p1"]
+        let source = record["source"].as_str().unwrap().to_owned();
+        let messages = sources()
+            .find(|(_, s)| s.id == source)
+            .unwrap_or_else(|| panic!("{name}: {source} is no corpus source"))
+            .1
+            .messages
+            .len() as u64;
+        let row = &detail["published_rows"][0];
+        let (start, end) = (row["start"].as_u64(), row["end"].as_u64());
+        assert_eq!(
+            (start, end),
+            (Some(1), Some(messages)),
+            "{name}: the published row covers messages {}-{} of {messages}; the replay serves a \
+             row covering its whole source",
+            start.map_or_else(|| "?".to_owned(), |n| n.to_string()),
+            end.map_or_else(|| "?".to_owned(), |n| n.to_string()),
+        );
+        let p1 = row["p1"]
             .as_str()
             .filter(|p1| !p1.is_empty())
             .unwrap_or_else(|| panic!("{name}: the published row has no P1"));
@@ -3123,7 +3178,6 @@ fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
             .filter_map(|output| output["text"].as_str())
             .find(|text| published_p1(text).as_deref() == Some(p1))
             .unwrap_or_else(|| panic!("{name}: no attempt output carries the published P1"));
-        let source = record["source"].as_str().unwrap().to_owned();
         let previous = captures.insert(
             source,
             RealCapture {
@@ -3145,9 +3199,22 @@ fn bound(detail: Value, capture: &RealCapture) -> Value {
     detail
 }
 
+/// The daemon configuration of a replay fold: `model` as the only summarizer model.
+fn capture_config(model: &str) -> DaemonConfig {
+    DaemonConfig {
+        model_chain: vec![model.to_owned()],
+        ..default_test_config()
+    }
+}
+
 /// Folds a test-authored baseline, then `source` with `output` translated past it, through one
 /// handler, and serves the result: the m1-window scenario of [`serve_capture`].
-async fn windowed_fold(case: &'static Case, source: &'static Source, output: &str) -> Value {
+async fn windowed_fold(
+    case: &'static Case,
+    source: &'static Source,
+    output: &str,
+    model: &str,
+) -> Value {
     let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
     let shifted = source_ingress(case, source)
         .into_iter()
@@ -3157,7 +3224,21 @@ async fn windowed_fold(case: &'static Case, source: &'static Source, output: &st
         })
         .collect();
     let outputs = [baseline_output, translated(output, SCAFFOLD_MESSAGES)];
-    let windowed = two_folds(baseline, shifted, follow_up_for(case, source), outputs).await;
+    let windowed = two_folds(
+        capture_config(model),
+        baseline,
+        shifted,
+        follow_up_for(case, source),
+        outputs,
+    )
+    .await;
+    for attempt in windowed.attempts() {
+        assert_eq!(
+            attempt.model, model,
+            "{}: the m1 window folds under the capture's model",
+            source.id
+        );
+    }
     windowed.pass(None, "cfg0").await
 }
 
@@ -3173,13 +3254,9 @@ async fn serve_capture(
     windowed: tokio::task::JoinHandle<Value>,
 ) -> Vec<Observation> {
     let output = &capture.output;
-    let config = || DaemonConfig {
-        model_chain: vec![capture.model.clone()],
-        ..default_test_config()
-    };
     let mut observations = Vec::new();
     let fold = fold_with(
-        config(),
+        capture_config(&capture.model),
         source_ingress(case, source),
         follow_up_for(case, source),
         vec![output.clone()],
@@ -3305,15 +3382,15 @@ async fn real_captures_serve_their_natural_tiers() {
         "{OBSERVATIONS_DIR} names no observation directory"
     );
     let captures = real_captures(Path::new(&dir), &model);
-    serve_captures(&captures, true).await;
+    for observation in serve_captures(&captures).await.into_iter().flatten() {
+        observation.emit();
+    }
 }
 
 /// Serves every corpus source from its capture concurrently and returns the observations in
-/// corpus order. A missing capture or a failing serving assertion panics the caller.
-async fn serve_captures(
-    captures: &BTreeMap<String, RealCapture>,
-    emit: bool,
-) -> Vec<Vec<Observation>> {
+/// corpus order, writing none. A missing capture or a failing serving assertion panics the
+/// caller.
+async fn serve_captures(captures: &BTreeMap<String, RealCapture>) -> Vec<Vec<Observation>> {
     let captured: Vec<(&'static Case, &'static Source, RealCapture)> = sources()
         .map(|(case, source)| {
             let capture = captures
@@ -3328,20 +3405,15 @@ async fn serve_captures(
         .iter()
         .map(|&(case, source, ref capture)| {
             let output = capture.output.clone();
-            tokio::spawn(async move { windowed_fold(case, source, &output).await })
+            let model = capture.model.clone();
+            tokio::spawn(async move { windowed_fold(case, source, &output, &model).await })
         })
         .collect();
     let mut tasks = tokio::task::JoinSet::new();
     for (index, ((case, source, capture), windowed)) in
         captured.into_iter().zip(windowed).enumerate()
     {
-        tasks.spawn(async move {
-            let mut observations = serve_capture(case, source, &capture, windowed).await;
-            if emit {
-                observations = observations.into_iter().map(Observation::emit).collect();
-            }
-            (index, observations)
-        });
+        tasks.spawn(async move { (index, serve_capture(case, source, &capture, windowed).await) });
     }
     let mut served: Vec<Option<Vec<Observation>>> = (0..tasks.len()).map(|_| None).collect();
     while let Some(joined) = tasks.join_next().await {
@@ -3449,7 +3521,7 @@ async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
     }
 
     let mut witnessed = 0;
-    for ((_, source), observations) in sources().zip(serve_captures(&captures, false).await) {
+    for ((_, source), observations) in sources().zip(serve_captures(&captures).await) {
         let capture = &captures[&source.id];
         witnessed += observations
             .iter()
