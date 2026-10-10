@@ -3722,9 +3722,11 @@ fn evict_history_receipts_beyond(
             "SELECT copies.owner_copy_id, copies.scan_id, scans.scan_batch_id
                FROM scan_owner_copies copies
                JOIN field_scans scans USING(scan_id)
-              WHERE copies.domain_owner_id IN (SELECT value FROM json_each(?1))
-                AND copies.field_id IN (SELECT value FROM json_each(?2))
-              ORDER BY copies.rowid DESC LIMIT -1 OFFSET ?3",
+              WHERE copies.rowid IN (
+                    SELECT rowid FROM scan_owner_copies
+                     WHERE domain_owner_id IN (SELECT value FROM json_each(?1))
+                       AND field_id IN (SELECT value FROM json_each(?2))
+                     ORDER BY rowid DESC LIMIT -1 OFFSET ?3)",
         )?
         .query_map(
             params![
@@ -3787,7 +3789,8 @@ const CACHE_STATE_RETAINED_OWNER_KEY: &str = "cache_state_retained";
 /// session's accumulated overlays; the owner index covers `domain_owner_id` only.
 const CACHE_STATE_HISTORY_OWNER_KEY: &str = "cache_state_history";
 
-/// Mirrors the `256` and `255` literals in the `commit_transform` UPSERT.
+/// `PASS_TRACE_HISTORY_RING_LEN` matches the ring length encoded by the `256` and `255`
+/// literals in the `trace_pass_stable` and `commit_transform` upserts.
 const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 
 /// The receipt field ids of the two writers that append to `scheduler_history`.
@@ -9577,6 +9580,11 @@ impl MemoryStore {
                      scheduler_history = CASE
                          WHEN json_array_length(pass_trace.scheduler_history) < 256 THEN
                              json_insert(pass_trace.scheduler_history, '$[#]', json(?3))
+                         WHEN json_array_length(pass_trace.scheduler_history) = 256 THEN
+                             json_insert(
+                                 json_remove(pass_trace.scheduler_history, '$[0]'),
+                                 '$[#]', json(?3)
+                             )
                          ELSE
                              json_insert(
                                  (SELECT json_group_array(json(value))
@@ -9590,6 +9598,11 @@ impl MemoryStore {
                          WHEN json_array_length(pass_trace.scheduler_interesting_history) < 256 THEN
                              json_insert(
                                  pass_trace.scheduler_interesting_history,
+                                 '$[#]', json(?4)
+                             )
+                         WHEN json_array_length(pass_trace.scheduler_interesting_history) = 256 THEN
+                             json_insert(
+                                 json_remove(pass_trace.scheduler_interesting_history, '$[0]'),
                                  '$[#]', json(?4)
                              )
                          ELSE
@@ -11578,6 +11591,11 @@ impl MemoryStore {
                          WHEN ?5 IS NULL THEN pass_trace.scheduler_history
                          WHEN json_array_length(pass_trace.scheduler_history) < 256 THEN
                              json_insert(pass_trace.scheduler_history, '$[#]', json(?5))
+                         WHEN json_array_length(pass_trace.scheduler_history) = 256 THEN
+                             json_insert(
+                                 json_remove(pass_trace.scheduler_history, '$[0]'),
+                                 '$[#]', json(?5)
+                             )
                          ELSE
                              json_insert(
                                  (SELECT json_group_array(json(value))
@@ -11591,6 +11609,11 @@ impl MemoryStore {
                           WHEN json_array_length(pass_trace.scheduler_interesting_history) < 256 THEN
                               json_insert(
                                   pass_trace.scheduler_interesting_history,
+                                  '$[#]', json(?6)
+                              )
+                          WHEN json_array_length(pass_trace.scheduler_interesting_history) = 256 THEN
+                              json_insert(
+                                  json_remove(pass_trace.scheduler_interesting_history, '$[0]'),
                                   '$[#]', json(?6)
                               )
                           ELSE
@@ -21433,6 +21456,98 @@ mod tests {
         assert!(
             receipts.is_disjoint(&commit_receipt),
             "the commit's receipt left with its evicted entry"
+        );
+    }
+
+    /// A full ring drops its first entry with `json_remove`, and the result is the same text
+    /// the trimming subquery builds for rings above the bound, escapes and nesting included.
+    #[test]
+    fn a_full_ring_drops_its_oldest_entry_as_the_trimming_subquery_does() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut entries: Vec<serde_json::Value> = (0..PASS_TRACE_HISTORY_RING_LEN)
+            .map(|n| {
+                serde_json::json!({
+                    "timestamp_ms": n,
+                    "scheduler_decision": format!("Defer \"{n}\" \\ caf\u{e9} \u{1f600}\n"),
+                    "usage": {"percent": n as f64 / 3.0, "limits": [n, null, true]},
+                })
+            })
+            .collect();
+        let mut texts: Vec<String> = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect();
+        texts[5] = r#"{ "timestamp_ms" : 5, "scheduler_decision" : "Defer \u0022\u00e9\\",
+            "usage" : { "percent" : 1.6666666666666667, "limits" : [ 5, null, true ] } }"#
+            .to_string();
+        let ring = format!("[{}]", texts.join(","));
+        entries[5] = serde_json::from_str(&texts[5]).unwrap();
+        let next = r#"{"timestamp_ms":256,"scheduler_decision":"Execute \u00e9\\"}"#;
+        let (removed, trimmed): (String, String) = conn
+            .query_row(
+                "SELECT json_insert(json_remove(?1, '$[0]'), '$[#]', json(?2)),
+                        json_insert(
+                            (SELECT json_group_array(json(value)) FROM json_each(?1)
+                              WHERE key >= json_array_length(?1) - 255),
+                            '$[#]', json(?2))",
+                params![ring, next],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(removed, trimmed);
+        let kept: Vec<serde_json::Value> = serde_json::from_str(&removed).unwrap();
+        assert_eq!(kept.len(), PASS_TRACE_HISTORY_RING_LEN);
+        assert_eq!(kept[..PASS_TRACE_HISTORY_RING_LEN - 1], entries[1..]);
+        assert_eq!(kept[PASS_TRACE_HISTORY_RING_LEN - 1]["timestamp_ms"], 256);
+    }
+
+    /// Once `scheduler_history` holds 256 entries, a stable pass replaces its oldest entry,
+    /// and its `pass_trace` upsert runs at most twice the VM steps of the upsert that
+    /// appended the second entry.
+    #[test]
+    fn a_stable_pass_on_a_full_ring_edits_it_without_walking_the_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let observation = |timestamp_ms| PassSchedulerObservation {
+            timestamp_ms,
+            scheduler_decision: "Defer".into(),
+            ..Default::default()
+        };
+        let upsert_steps = |timestamp_ms| {
+            store.start_statement_work_ledger();
+            store
+                .trace_pass_stable("ses", &observation(timestamp_ms), None)
+                .unwrap();
+            store
+                .take_statement_work()
+                .iter()
+                .filter(|run| run.sql.starts_with("INSERT INTO pass_trace"))
+                .map(|run| run.vm_steps)
+                .sum::<u64>()
+        };
+        upsert_steps(1);
+        let short_ring = upsert_steps(2);
+        for timestamp_ms in 3..300 {
+            store
+                .trace_pass_stable("ses", &observation(timestamp_ms), None)
+                .unwrap();
+        }
+        let full_ring = upsert_steps(300);
+        let history: Vec<i64> = store
+            .load_pass_trace("ses")
+            .unwrap()
+            .unwrap()
+            .scheduler_history
+            .iter()
+            .map(|entry| entry.timestamp_ms)
+            .collect();
+        assert_eq!(history, (45..=300).collect::<Vec<i64>>());
+        assert!(
+            full_ring <= 2 * short_ring,
+            "the full-ring upsert ran {full_ring} VM steps against {short_ring} on a short ring"
         );
     }
 
