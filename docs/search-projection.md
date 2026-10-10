@@ -68,7 +68,9 @@ revalidate canonical authorization at use.
 `SearchReader::completeness_certificate` issues the `CompletenessCertificate`
 that `retrieval::exact::resolve` requires for an exact proof. It issues one only
 when the family's checkpoint equals the kernel tip and the family's consumer has
-acknowledged that checkpoint. The certificate names
+acknowledged that checkpoint. One kernel statement
+(`KernelStore::capture_consumer_tip_within_budget`) reads the tip, the kernel
+database identity, and the acknowledgement from one snapshot. The certificate names
 `SearchReader::inventory_epoch`, a digest of the kernel incarnation, the kernel
 lease epoch, the selected seed digest, and the consumer. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the

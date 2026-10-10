@@ -770,7 +770,7 @@ fn current_owner(home: &Path, corpus: &Corpus) -> SearchLifecycleOwner {
     owner
 }
 
-/// An at-tip family whose kernel acknowledgement trails its local prefix is acknowledged by the next slice even with no new commits.
+/// An at-tip family whose kernel acknowledgement trails its local prefix certifies nothing for exact lookup, and the next slice acknowledges it even with no new commits, after which it certifies the tip.
 #[test]
 fn an_at_tip_family_still_reconciles_a_lost_acknowledgement() {
     let root = tempfile::tempdir().unwrap();
@@ -815,6 +815,17 @@ fn an_at_tip_family_still_reconciles_a_lost_acknowledgement() {
     assert_eq!(local, corpus.tip());
     let acknowledged = corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap();
     assert!(acknowledged < Some(local), "{acknowledged:?} >= {local}");
+    let reader = owner.pin(&slice_budget()).unwrap();
+    assert!(
+        matches!(
+            reader.completeness_certificate(&corpus.kernel, &slice_budget()),
+            Err(BuildError::Invalid(
+                "the family's consumer has not acknowledged its checkpoint"
+            ))
+        ),
+        "a checkpoint at the tip that its consumer has not acknowledged certifies nothing"
+    );
+    drop(reader);
 
     let outcome = owner.run_slice(&slice_budget());
     assert!(
@@ -825,6 +836,13 @@ fn an_at_tip_family_still_reconciles_a_lost_acknowledgement() {
         corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
         Some(local)
     );
+    let certificate = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .completeness_certificate(&corpus.kernel, &slice_budget())
+        .unwrap();
+    assert_eq!(certificate.complete_through_commit_seq, local);
+    assert_eq!(certificate.projection.checkpoint_commit_seq, local);
 }
 
 /// A rebuild recorded over a Current family whose supervisor runs hands that supervisor back before the replacement is built, and then completes.

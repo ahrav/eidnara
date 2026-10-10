@@ -906,19 +906,24 @@ fn read_valid_marker(conn: &Connection) -> Result<FormatMarker, KernelError> {
 }
 
 pub(super) fn database_incarnation_id_via(conn: &Connection) -> Result<String, KernelError> {
-    let incarnation = conn
-        .query_row_cached(
+    checked_database_incarnation_id(
+        conn.query_row_cached(
             "SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1",
             [],
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(map_sqlite)?
-        .ok_or(KernelError::CorruptCanonicalRow)?;
-    if !is_lower_hex(&incarnation, 32) {
-        return Err(KernelError::CorruptCanonicalRow);
-    }
-    Ok(incarnation)
+        .map_err(map_sqlite)?,
+    )
+}
+
+/// The stored database identity, refused as `CorruptCanonicalRow` when the marker row is absent or the identity is not 32 lowercase hex digits.
+pub(super) fn checked_database_incarnation_id(
+    stored: Option<String>,
+) -> Result<String, KernelError> {
+    stored
+        .filter(|incarnation| is_lower_hex(incarnation, 32))
+        .ok_or(KernelError::CorruptCanonicalRow)
 }
 
 pub(super) fn open_writer(path: &Path) -> rusqlite::Result<Connection> {
@@ -1754,7 +1759,12 @@ impl Drop for LimitedConnection<'_> {
     fn drop(&mut self) {
         if let Some(timeout) = self.busy_timeout_ms {
             let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
-            let _ = self.connection.pragma_update(None, "busy_timeout", timeout);
+            // `PRAGMA busy_timeout = N` sets the timeout through `sqlite3_busy_timeout`; calling it directly prepares no statement. SQLite stores the timeout as an `int`, so the clamp keeps every stored value.
+            let _ = self
+                .connection
+                .busy_timeout(std::time::Duration::from_millis(
+                    timeout.clamp(0, i64::from(i32::MAX)).unsigned_abs(),
+                ));
         }
     }
 }
