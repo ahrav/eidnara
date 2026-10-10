@@ -59,6 +59,13 @@ replacement is selected, and retirement releases the old consumer.
 Kernel source holds belong to one lease, so a daemon restart followed by any
 commit rebuilds the projection under a fresh capture.
 
+Retirement acknowledges the old consumer through the replacement's certified
+target and then deregisters it, and the kernel deregisters only a consumer at
+its tip. A commit that lands between the certified target and the
+deregistration leaves the rebuild in its intent record, and the slice reports
+`outbox consumer has not reached the commit-log tip` while the old family keeps
+serving. A rebuild therefore completes in a quiet window after its target.
+
 ## Readers and exact-lookup certificates
 
 `SearchLifecycleOwner::pin` returns a `SearchReader` for the selected family

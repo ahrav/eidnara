@@ -5365,6 +5365,8 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         assert!(started.elapsed() < Duration::from_secs(10));
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    // A replacement retires the old consumer only at the target it certified, so a commit landing between that target and the retirement leaves the rebuild blocked. Pausing the claim-source runner keeps the kernel quiet while each rebuild here completes.
+    restarted.handler().pause_claim_sources_for_test();
     let reader = loop {
         let pinned = tokio::task::spawn_blocking({
             let owner = Arc::clone(&owner);
@@ -5381,9 +5383,12 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    assert_eq!(
-        reader.consumer().consumer_id,
-        daemon::search_lifecycle_owner::REGISTERED_CONSUMER
+    // The first daemon's catch-up hold died with its lease, so the restarted daemon's slice loop may already have selected the replacement it records through the next consumer; the record match below names which family this is.
+    let consumer = reader.consumer().consumer_id.clone();
+    assert!(
+        consumer == daemon::search_lifecycle_owner::REGISTERED_CONSUMER
+            || consumer == "search-projection-1",
+        "the restarted daemon pinned {consumer}"
     );
     // The resumed projection still serves the memories the first daemon caught up to.
     loop {
@@ -5404,15 +5409,26 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
     }
     drop(reader);
     // The restart renews nothing: the record is the registered one, or the claim-source runner's commits since the restart already left that family behind and the loop recorded its replacement.
-    // The running daemon holds the lifecycle directory's flock while it writes, so each read retries a held lock.
-    match control(&home) {
+    // The running daemon holds the lifecycle directory's flock while it writes, so each read retries a held lock. A replacement the restart already recorded completes in the quiet kernel before the next commit.
+    let settled = loop {
+        match control(&home) {
+            ControlState::Intent(_) => {}
+            state => break state,
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the restart's replacement did not complete"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    match settled {
         ControlState::Current(resumed) if resumed.attempt_id == current.attempt_id => {
             assert_eq!(
                 resumed, current,
                 "the restart resumed the registered record unchanged"
             );
         }
-        ControlState::Current(replacing) | ControlState::Intent(replacing) => {
+        ControlState::Current(replacing) => {
             assert_eq!(replacing.cause, Cause::CatchUpHoldLost);
             assert_eq!(replacing.attempt_id, "rebuild-search-projection-1");
             assert_eq!(replacing.consumer.consumer_id, "search-projection-1");
@@ -5458,6 +5474,8 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         rebuilt.selected_generation,
         current.staged_seed_digest.unwrap()
     );
+    // The rebuilt family holds a live hold, so the claims the runner publishes now reach it by catch-up.
+    restarted.handler().resume_claim_sources_for_test();
     loop {
         let pinned = tokio::task::spawn_blocking({
             let owner = Arc::clone(&owner);
@@ -5466,28 +5484,18 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         .await
         .unwrap();
         if let Ok(reader) = pinned {
-            let live = reader
-                .projection()
-                .read(|conn| {
-                    retrieval::eligibility::live_candidates(
-                        conn,
-                        None,
-                        NonZeroUsize::new(64).unwrap(),
-                    )
-                })
-                .unwrap();
-            if live.len() >= 3 {
+            let bounds = RetrievalBounds {
+                max_probes: NonZeroUsize::new(4).unwrap(),
+                scan_rows: NonZeroUsize::new(8).unwrap(),
+                max_accepted: NonZeroUsize::new(8).unwrap(),
+                batch_rows: NonZeroUsize::new(8).unwrap(),
+                qualifying_matches: NonZeroUsize::new(8).unwrap(),
+                rank_budget: NonZeroUsize::new(16).unwrap(),
+            };
+            // Only `after-restart-1`'s summary holds `restart`; its canonical claim and promoted memory are two descriptors, none shared with the registered memories. The replacement may be selected before the commit and reach it by catch-up, so the wait is for those descriptors.
+            let restarted = lexical_objects(&reader, "restart", bounds);
+            if restarted.len() >= 2 {
                 assert_eq!(reader.consumer().consumer_id, rebuilt.consumer.consumer_id);
-                let bounds = RetrievalBounds {
-                    max_probes: NonZeroUsize::new(4).unwrap(),
-                    scan_rows: NonZeroUsize::new(8).unwrap(),
-                    max_accepted: NonZeroUsize::new(8).unwrap(),
-                    batch_rows: NonZeroUsize::new(8).unwrap(),
-                    qualifying_matches: NonZeroUsize::new(8).unwrap(),
-                    rank_budget: NonZeroUsize::new(16).unwrap(),
-                };
-                // Only `after-restart-1`'s summary holds `restart`; its canonical claim and promoted memory are two descriptors, none shared with the registered memories.
-                let restarted = lexical_objects(&reader, "restart", bounds);
                 let registered = lexical_objects(&reader, "registered", bounds);
                 assert_eq!(restarted.len(), 2, "{restarted:?}");
                 assert_eq!(registered.len(), 4, "{registered:?}");
