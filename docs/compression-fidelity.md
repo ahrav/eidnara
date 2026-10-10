@@ -81,6 +81,25 @@ Missing, unreadable, or mismatched bytes reject the run in both languages.
 No normalization applies, so whitespace-only, same-length, and
 scenario-only edits are rejected like any other edit.
 
+### Corpus approval record
+
+A corpus approval is a tracker record on the corpus ticket
+([#718](https://github.com/ahrav/eidnara/issues/718)). It covers exactly one
+corpus identity and holds:
+
+- the corpus SHA-256, equal to both pins and to
+  `sha256sum crates/daemon/testdata/compression-fidelity.json` at the
+  reviewed commit;
+- the reviewed commit;
+- two distinct reviewers, each approving the native spans, the source
+  revisions, the materiality marks, the permissible omission and abstention
+  cases, and the C3 memory example;
+- the time of approval, which precedes inspection of any candidate output.
+
+A corpus edit moves both pins, so a record naming another digest covers
+nothing. Until a record names the current digest, the corpus stays
+unapproved and every arm built on it stays unaccepted.
+
 The Rust corpus module owns source, span, and revision validation, and
 `compression_fidelity_tests.rs` holds its negative controls. It rejects
 duplicate or malformed IDs, spans that do not resolve to the exact bytes of
