@@ -87,7 +87,7 @@ pub struct ConsumerBinding {
     pub generation_id: String,
 }
 
-/// The kernel commit the transition must reach; fixed when first established, never moved by a retry, and moved forward only by [`ProjectionLifecycle::recertify_target`] after selection.
+/// The kernel commit the transition must reach; fixed when first established, never moved by a retry, and moved forward only by `ProjectionLifecycle::recertify_target` after selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryTarget {
@@ -804,7 +804,7 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a fixed target moves only forward through [`Self::recertify_target`].
+    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a fixed target moves only forward through `Self::recertify_target`.
     ///
     /// # Errors
     ///
