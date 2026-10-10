@@ -154,6 +154,10 @@ fn main() {
             pi_alias_credential_failure_retries_canonical_provider,
         ),
         (
+            "pi_remembered_temperature_refusal_skips_the_refused_attempt",
+            pi_remembered_temperature_refusal_skips_the_refused_attempt,
+        ),
+        (
             "pi_rejected_temperature_retries_without_temperature",
             pi_rejected_temperature_retries_without_temperature,
         ),
@@ -2590,6 +2594,38 @@ fn pi_rejected_temperature_retries_without_temperature() {
         |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "native decoding answer")
     ));
     assert!(setup.out.path().join("temperature-attempted").exists());
+}
+
+/// After a temperature refusal, later requests to that model ref run with native decoding; each distinct model ref first receives the requested temperature.
+fn pi_remembered_temperature_refusal_skips_the_refused_attempt() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "temperature_rejected")],
+        Vec::new(),
+        None,
+    );
+    let marker = setup.out.path().join("temperature-attempted");
+    for (model, refused_attempt) in [
+        ("anthropic/m", true),
+        ("anthropic/m", false),
+        ("anthropic/other", true),
+        ("anthropic/other", false),
+    ] {
+        let _ = fs::remove_file(&marker);
+        let (terminal, events) = execute(
+            &backend,
+            request(setup.project.path(), Harness::Pi, model, None),
+        );
+        assert!(
+            matches!(terminal, BackendTerminal::Completed { .. }),
+            "{model}: {terminal:?}"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "native decoding answer")
+        ));
+        assert_eq!(marker.exists(), refused_attempt, "{model}");
+    }
 }
 
 /// `AuthRequired` received during Pi's shutdown gap must trigger the canonical retry.

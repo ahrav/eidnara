@@ -7,8 +7,9 @@
 //! Pi loads the bundled ModelExecution payload hook last so it owns the final generation contract.
 //! The Eidnara Pi recursion guard suppresses full plugin startup in the child.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -62,6 +63,31 @@ pub struct PiBackend {
     env: EnvSnapshot,
     aws: Option<AwsDispatch>,
     state_root: StateRoot,
+    temperature_refusals: Arc<TemperatureRefusals>,
+}
+
+const MAX_TEMPERATURE_REFUSALS: usize = 64;
+
+/// Model refs whose provider refused a requested temperature, shared by every run of one backend.
+/// A later run for a remembered ref sends no temperature, so it skips the attempt the provider refuses.
+/// The set keeps at most [`MAX_TEMPERATURE_REFUSALS`] refs; a refusal past that bound still retries once without the temperature.
+#[derive(Default)]
+struct TemperatureRefusals(Mutex<HashSet<String>>);
+
+impl TemperatureRefusals {
+    fn contains(&self, model_ref: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(model_ref)
+    }
+
+    fn record(&self, model_ref: &str) {
+        let mut refused = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if refused.len() < MAX_TEMPERATURE_REFUSALS {
+            refused.insert(model_ref.to_owned());
+        }
+    }
 }
 
 impl PiBackend {
@@ -89,6 +115,7 @@ impl PiBackend {
             env,
             aws: None,
             state_root,
+            temperature_refusals: Arc::default(),
         }
     }
 
@@ -133,6 +160,7 @@ impl LlmExecutionBackend for PiBackend {
                 env,
                 aws: self.aws.clone(),
                 state_root,
+                temperature_refusals: Arc::clone(&self.temperature_refusals),
                 deadline: None,
             },
             request,
@@ -193,6 +221,7 @@ struct PiRun {
     env: EnvSnapshot,
     aws: Option<AwsDispatch>,
     state_root: StateRoot,
+    temperature_refusals: Arc<TemperatureRefusals>,
     /// The retry shares the first attempt's wall-clock budget, so it carries an absolute end instant rather than a duration that setup time would escape.
     deadline: Option<tokio::time::Instant>,
 }
@@ -201,6 +230,8 @@ struct PiRun {
 /// Direct `openai` and `google` API-key users lack credentials under subscription-extension aliases.
 /// A provider that rejects the requested temperature gets the request once more with no temperature, so
 /// models that accept only their native decoding still run; the retry keeps the attempt's provider.
+/// The backend remembers up to [`MAX_TEMPERATURE_REFUSALS`] model refs whose providers refused the temperature;
+/// later attempts for remembered refs omit the temperature.
 /// Each retry happens at most once, and every attempt shares one wall-clock budget: a retry receives only the remainder.
 /// A first-attempt cleanup failure or retained crash-ownership record blocks a retry so retry success cannot mask disk or registry residue.
 /// The request is cloned before an attempt only while a retry can still follow it, so a request with no alias and no
@@ -220,6 +251,9 @@ async fn run_pi_with_provider_fallback(
     let mut request = request;
     let mut attempt = run.clone();
     loop {
+        if request.temperature.is_some() && run.temperature_refusals.contains(&model_ref) {
+            request.temperature = None;
+        }
         let temperature_retry = request.temperature.is_some();
         let next = (provider_retry || temperature_retry).then(|| request.clone());
         let terminal = run_pi(
@@ -249,6 +283,7 @@ async fn run_pi_with_provider_fallback(
             provider_retry = false;
             model_ref.clone_from(&canonical);
         } else if temperature_retry && error.message == PI_TEMPERATURE_REJECTED_MESSAGE {
+            run.temperature_refusals.record(&model_ref);
             next.temperature = None;
         } else {
             return terminal;
@@ -295,6 +330,7 @@ async fn run_pi(
         env,
         aws,
         state_root,
+        temperature_refusals: _,
         deadline,
     } = run;
     // One deadline, anchored after the backend permit, covers credential acquisition,
@@ -835,6 +871,19 @@ fn message_requests_tools(message: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temperature_refusals_stay_within_their_bound() {
+        let refusals = TemperatureRefusals::default();
+        for index in 0..MAX_TEMPERATURE_REFUSALS {
+            refusals.record(&format!("prov/model-{index}"));
+        }
+        refusals.record("prov/model-0");
+        refusals.record("prov/past-the-bound");
+        assert!(refusals.contains("prov/model-0"));
+        assert!(refusals.contains(&format!("prov/model-{}", MAX_TEMPERATURE_REFUSALS - 1)));
+        assert!(!refusals.contains("prov/past-the-bound"));
+    }
 
     #[test]
     fn a_refused_temperature_is_its_own_pi_failure() {
