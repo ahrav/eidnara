@@ -46,9 +46,14 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-5: transport han
         expect(resumedRequest).toBeDefined();
         expect(wireCarriesTagOverlay(resumedRequest!.body)).toBe(true);
 
-        // Outage passes serve the input unchanged, which the failure path labels `raw`.
+        // An outage pass fails open from the last applied output or serves the input unchanged.
         const lines = assertLoudModuleFailure(h, sessionId);
-        expect(lines.some((line) => line.includes("served_from=raw"))).toBe(true);
+        expect(
+            lines.some(
+                (line) =>
+                    line.includes("served_from=last_applied") || line.includes("served_from=raw"),
+            ),
+        ).toBe(true);
         assertMessagesHaveNoPlaceholders(h.lastMainMessages(), sessionId);
     }, 300_000);
 });
