@@ -51,12 +51,23 @@ pub struct ModelExecutionComponent {
     state_root: StateRoot,
 }
 
-const HARNESSES: [Harness; 2] = [Harness::OpenCode, Harness::Pi];
+/// The expected claim, or the subreason that refuses it, for each provider in
+/// [`EnvSnapshot::SUPPORTED_PROVIDERS`] order.
+type ProviderClaims = [Result<String, &'static str>; EnvSnapshot::SUPPORTED_PROVIDERS.len()];
 
-/// The expected claim, or the subreason that refuses it, for each harness in [`HARNESSES`]
-/// order and each provider in [`EnvSnapshot::SUPPORTED_PROVIDERS`] order.
-type ClaimTable =
-    [[Result<String, &'static str>; EnvSnapshot::SUPPORTED_PROVIDERS.len()]; HARNESSES.len()];
+struct ClaimTable {
+    opencode: ProviderClaims,
+    pi: ProviderClaims,
+}
+
+impl ClaimTable {
+    fn row(&self, harness: Harness) -> &ProviderClaims {
+        match harness {
+            Harness::OpenCode => &self.opencode,
+            Harness::Pi => &self.pi,
+        }
+    }
+}
 
 struct CredentialVerifier {
     env: EnvSnapshot,
@@ -70,7 +81,7 @@ impl CredentialVerifier {
     fn install(&self, connection_key: &[u8; 32]) {
         self.claims.get_or_init(|| {
             let key = ClaimKey::new(connection_key);
-            HARNESSES.map(|harness| {
+            let derive = |harness: Harness| {
                 EnvSnapshot::SUPPORTED_PROVIDERS.map(|provider| {
                     self.env
                         .source_claim_under(
@@ -81,7 +92,11 @@ impl CredentialVerifier {
                         )
                         .map_err(|error| error.subreason())
                 })
-            })
+            };
+            ClaimTable {
+                opencode: derive(Harness::OpenCode),
+                pi: derive(Harness::Pi),
+            }
         });
     }
 
@@ -98,11 +113,9 @@ impl CredentialVerifier {
             .iter()
             .position(|supported| *supported == canonical)
             .ok_or("provider_unsupported")?;
-        let row = HARNESSES
-            .iter()
-            .position(|known| *known == harness)
-            .ok_or("credential_snapshot_mismatch")?;
-        let expected = claims[row][slot].as_deref().map_err(|reason| *reason)?;
+        let expected = claims.row(harness)[slot]
+            .as_deref()
+            .map_err(|reason| *reason)?;
         if source_claim::presented_claim_matches(expected, presented, canonical) {
             Ok(())
         } else {
@@ -613,7 +626,7 @@ mod tests {
             );
             verifier.install(&key);
             verifier.install(&other_key);
-            for harness in HARNESSES {
+            for harness in [Harness::OpenCode, Harness::Pi] {
                 for provider in PROVIDERS {
                     let fresh =
                         env.source_claim(&key, harness.as_str(), provider, aws_source.as_ref());
