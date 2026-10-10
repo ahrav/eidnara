@@ -12,6 +12,60 @@ Each record names its runnable check and the fault or enabling state that
 check constructs. A record is exercised only where that construction runs; a
 check that runs fault-free is not coverage.
 
+## Scope
+
+The five obligations the M4 qualification depends on, from the specification's
+"New source and scale obligations" table: the lifetime predicate every spawn
+applies to a refreshable row (N2), the model-effect certainty a typed source
+failure preserves (N8), folding progress after a source failure and its
+cooldown on each folding path (N9), the advisory and secret-free source health
+projection (N10), and the retained-history and outage-recovery campaign that
+gates the million-message claim (N13). The other eight N records and the
+specification's existing-behavior records stay in the specification's own
+catalog; this part does not restate them.
+
+## Reachability classes
+
+Each record carries its own class with the evidence in its `Reachability`
+field.
+
+- `default-production`: N8 runs in every daemon's history summarizer, and N10
+  in every host's health report, with no enabling state. N2 and the rotation
+  half of N9 run whenever the host envelope carries an `aws_source` selection:
+  `crates/daemon/src/bin/eidnara_host/serve.rs:1313` builds the source owner
+  from that selection and `:1336` installs it. The selection is the user's
+  choice of credential source in the shipped build, with no build feature or
+  deployment flag behind it, so the class is default-production rather than
+  explicit-config-only.
+- `test-only`: N13 is a campaign. The gates, the outage judge, and the lineage
+  oracle live in `crates/eval-core/src/qualification.rs`; the runner is
+  `crates/daemon/examples/eval_runner/qualification.rs`. Production code
+  reaches none of them.
+
+## Part artifacts
+
+This part carries `catalog.md`, `existing-checks.md`, `fault-map.md`, and
+`evidence/`. `portfolio-evaluation.md` is not written: no fresh-context
+evaluation has run over this part. The specification's own independent
+portfolio evaluation covered the N records at specification time and is
+recorded in #860 under "Independent portfolio evaluation and disposition".
+Evidence files follow the METHOD section schema and hold the verified trail;
+none was padded to reach a length.
+
+## Index
+
+| Slug | Spec | Type | Check | Exercised |
+| --- | --- | --- | --- | --- |
+| [`credential-lifetime-covers-dispatch`](#credential-lifetime-covers-dispatch) | N2 | safety | `always` | yes |
+| [`typed-source-failure-preserves-model-certainty`](#typed-source-failure-preserves-model-certainty) | N8 | safety | `always` | yes |
+| [`eligible-demand-recovers-after-renewal`](#eligible-demand-recovers-after-renewal) | N9 | liveness | `sometimes` | yes |
+| [`source-health-is-advisory-and-secret-free`](#source-health-is-advisory-and-secret-free) | N10 | safety | `always` | partial |
+| [`bounded-history-outage-recovery`](#bounded-history-outage-recovery) | N13 | liveness | `sometimes` | partial |
+
+Semantics distribution: three `always`, two `sometimes`.
+
+## Records
+
 ### credential-lifetime-covers-dispatch
 
 Type: safety
@@ -82,30 +136,40 @@ Guarantee: after a source failure, once the cooldown expires, the source
 answers, and an eligible operation arrives, the same daemon and routes publish
 a valid fold on each of the normal, emergency, wrapup, and reattach paths.
 Check: `sometimes` - each path must reach a valid fold after source failure
-and recovery at least once per campaign; the four paths are witnessed
-separately because one path's recovery says nothing about another's.
+and recovery at least once per campaign, inside a fixed bound: once the
+backoff has expired, the first operation the summarizer accepts fires one
+model run, and that single firing publishes the fold and returns the
+summarizer to idle within the 10-second `TEST_WAIT_BUDGET`, polled every 2 ms;
+an operation refused as `busy` while the prior firing settles is retried, and
+any other refusal or a second backoff fails the witness. The four paths are
+witnessed separately because one path's recovery says nothing about another's.
 Fault/timing angle: the cooldown boundary, and an external login between
 rotations.
 Required faults and enabling state: a typed source failure on each path; the
 cooldown elapsing; a usable source response; an eligible operation; 24
 rotations with one external login.
 Confidence: high - [evidence](evidence/eligible-demand-recovers-after-renewal.md).
-The five tests were read at the #872 branch.
+The five tests and the bound their wait helpers enforce were read at the #872
+branch.
 Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:120`,
 `:151` (normal, emergency, wrapup, reattach);
 `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner`.
 Impact: folding stalls after a credential outage until the daemon restarts.
-Open questions: None.
+Open questions:
+- `fire_and_settle` bounds each settle wait at 10 seconds but places no cap on
+  `busy` retries; should the normal and reattach witnesses cap that retry
+  count? (needs human input)
 
 ### source-health-is-advisory-and-secret-free
 
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: yes - the shared vectors cover every state, the bounds, malformed
-blocks, and selector and token canaries in Rust and TypeScript; the host
-reports the cached observation for each source mode
+Exercised: partial - the shared vectors cover every state, the bounds,
+malformed blocks, and selector and token canaries in Rust and TypeScript, and
+the host reports the cached observation for each source mode; the
+no-credential-I/O half rests on code reading, with no runtime witness
 Guarantee: source health performs no credential I/O, carries no secret or
 selector canary, and an absent or malformed block never reads as ready.
 Check: `always` - every serialized `aws_credentials` block matches the closed
@@ -151,8 +215,8 @@ witness above recorded as passed at the report's source commit.
 Confidence: medium - [evidence](evidence/bounded-history-outage-recovery.md).
 The gates and oracles were read and run; the qualifying run needs external
 hardware.
-Existing check: `crates/eval-core/src/qualification.rs:910` `audit_lineage`;
-`:1296` `the_outage_judge_fires_on_each_failure`;
+Existing check: `crates/eval-core/src/qualification.rs:922` `audit_lineage`;
+`:1309` `the_outage_judge_fires_on_each_failure`;
 `crates/daemon/examples/eval_runner/qualification.rs` (the campaign runner);
 `crates/host-runtime/tests/model_execution_supervisor.rs:1813`
 `warm_acquisition_p99_stays_within_one_millisecond` (ignored, release only).
@@ -160,3 +224,21 @@ Impact: a million-message or outage claim without evidence that it holds.
 Open questions:
 - Supply the dedicated Linux x64 GNU runner with 4 logical CPUs, 16 GiB, and
   local SSD. (needs human input)
+
+## Relationship map
+
+- `credential-lifetime-covers-dispatch` gates every spawn that
+  `eligible-demand-recovers-after-renewal` and
+  `bounded-history-outage-recovery` rely on: a recovered fold or a campaign
+  pass starts a child only through a row that satisfies `covers`.
+- `source-health-is-advisory-and-secret-free` is advisory to
+  `credential-lifetime-covers-dispatch`: a cached `ready` observation never
+  substitutes for the predicate at spawn, so a stale sample cannot authorize a
+  dispatch.
+- `typed-source-failure-preserves-model-certainty` produces the typed failure
+  and cooldown that `eligible-demand-recovers-after-renewal` recovers from; the
+  safety record holds while the fault is active, the liveness record needs the
+  fault-free interval after it.
+- `bounded-history-outage-recovery` runs the N9 outage at campaign scale and
+  asserts the N8 consequence per operation: `audit_lineage` fires on a lineage
+  published twice, the same defect N8 prevents at the dispatch.
