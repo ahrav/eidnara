@@ -1,4 +1,4 @@
-//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. An absent record with installed admission records is registered by the slice loop as a first build; every other rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. Holds die with the kernel's lease, so after a restart the family serves what it has until it trails the kernel past the freshness limit, at which point every hook is denied until a rebuild is requested. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
+//! The daemon's owner of the search projection lifecycle. One owner per data home holds the admission owner, the selection manager, and the running identity, and advances the durable lifecycle record one bounded slice at a time: a recorded rebuild or authorized recovery is built, selected, and completed across scheduled slices; a completed record is reopened and revalidated once and judged on its coverage after that; a disabled record admits nothing. Every slice first refreshes admission with what the daemon has actually opened: the selected family's own coverage once one is open, the unregistered observation before then, and no coverage at all for a selected family that refuses to be read. Readers pin the selected family through the owner and revalidate canonical authorization at use. An absent record with installed admission records is registered by the slice loop as a first build; every other rebuild or recovery starts from an explicit request, and a restart resumes the record it finds without renewing its allowance. A Current family catches up in the same slices: the construction hold outlives completion, so each slice applies the commits since the family's checkpoint under that hold and acknowledges them. A slice whose catch-up hold no longer extends, whose selected family is damaged, or whose running identity differs from the selected seed's in a rebuilt dimension reports the rebuild cause, and the slice loop records the replacement through the next registered consumer; the family serves within the freshness limit until the replacement is selected. Embedding maintenance runs one supervisor at a time, rotated round-robin across the bound projects the daemon reports through a roster, each for a fixed tenure of slices; a slice that finds the tenure over or the roster changed hands the supervisor back to the loop, which joins it before the next slice starts the next one.
 
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -11,12 +11,12 @@ use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
     ArtifactDestination, CommitPageBounds, KernelStore, ProjectScope, SourceHoldAdmission,
-    SourceHoldBinding, SourceHoldBounds, SourcePageBounds,
+    SourceHoldBinding, SourceHoldBounds, SourceHoldError, SourcePageBounds,
 };
 use retrieval::batch::{BatchBounds, VectorGeneration};
 use retrieval::coverage::CoverageBounds;
 use retrieval::dispatch::EpisodeGrant;
-use retrieval::{PersistBounds, ProjectionIdentity};
+use retrieval::{PersistBounds, ProjectionError, ProjectionIdentity};
 use tokio_util::sync::CancellationToken;
 
 use crate::claim_sources::{
@@ -38,12 +38,12 @@ use crate::projection_lifecycle::{
 #[cfg(feature = "test-support")]
 use crate::search_catchup::EpisodeEvent;
 use crate::search_catchup::{
-    CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeReport, SearchCatchUp,
+    Blocked, CatchUpConsumer, EpisodeBounds, EpisodeEnd, EpisodeReport, SearchCatchUp,
 };
 use crate::search_replacement::selection::disable::{DisableEvent, MaintenanceHandle};
 use crate::search_replacement::selection::recovery::{RecoveryFailure, RecoveryProgress};
 use crate::search_replacement::selection::retirement::DISPOSITION_ROW_BYTES;
-use crate::search_replacement::selection::{SearchReader, SearchSelection};
+use crate::search_replacement::selection::{SearchReader, SearchSelection, damages_family};
 use crate::search_replacement::{BuildError, ReplacementSpec, RetirementBounds};
 use crate::search_seed::SeedBounds;
 
@@ -92,6 +92,8 @@ fn next_claim_batch(batch: NonZeroUsize, report: &MaterializationReport) -> NonZ
 /// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
 const MAINTENANCE_DESTINATION: ArtifactDestination = ArtifactDestination::Local;
 
+const KERNEL_UNREADABLE: &str = "kernel_unreadable";
+
 /// The bound projects maintenance rotates across, each under the project digest that orders the rotation, read at each slice so bindings take effect at the next one.
 pub type ProjectRoster = Arc<dyn Fn() -> Vec<(String, ProjectScope)> + Send + Sync>;
 
@@ -108,6 +110,18 @@ pub enum SpecRefusal {
     LimitRange(&'static str),
     #[error("the kernel incarnation could not be read: {0}")]
     Kernel(String),
+}
+
+impl SpecRefusal {
+    /// Status surfaces use these stable codes to identify refusal categories. Absent records yield `None`, which the gate reports as `no_manifest`.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::LaneNotReady(_) => Some("lane_not_ready"),
+            Self::Inputs(refusal) => refusal.code(),
+            Self::TooSmall(_) | Self::LimitRange(_) => Some("limits_unbounded"),
+            Self::Kernel(_) => Some(KERNEL_UNREADABLE),
+        }
+    }
 }
 
 /// Why `prepare` produced no identity: the records refused, or a manager with a running supervisor must be joined before it can be replaced.
@@ -137,6 +151,8 @@ pub enum SliceOutcome {
     Unavailable(String),
     /// The recorded operation did not advance in this slice; the record stays as it was.
     Blocked(String),
+    /// The selected Current family needs a replacement for `Cause`: its catch-up hold cannot extend, its database is damaged, or the running identity differs from the one it was built under. The loop records the rebuild after the slice releases the manager.
+    Rebuild(Cause),
 }
 
 /// The selection manager and what holds it.
@@ -179,6 +195,8 @@ pub struct SearchLifecycleOwner {
     claims_paused: Arc<std::sync::atomic::AtomicBool>,
     /// The batch size of the next claim-source slice, at most `CLAIM_SLICE_BOUNDS.batch`.
     claim_batch: std::sync::atomic::AtomicUsize,
+    /// `preparation_refused` preserves the last slice's [`SpecRefusal::code`] so status can report the refusal while the gate reports `no_manifest`.
+    preparation_refused: Mutex<Option<&'static str>>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
@@ -261,6 +279,7 @@ impl SearchLifecycleOwner {
             claims: Mutex::new(ClaimProgress::default()),
             claims_paused: Arc::default(),
             claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
+            preparation_refused: Mutex::new(None),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -478,6 +497,11 @@ impl SearchLifecycleOwner {
             Managed::Selection(current) => current.maintenance(),
             _ => None,
         };
+        *self
+            .preparation_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            prepared.as_ref().err().and_then(SpecRefusal::code);
         let (inputs, identity, bounds, budget) = match prepared {
             Ok(prepared) => {
                 self.remember_grace(&prepared.0, &prepared.1);
@@ -502,6 +526,19 @@ impl SearchLifecycleOwner {
             *managed = Managed::Selection(Box::new(self.new_selection(identity.clone(), bounds)));
         }
         Ok((inputs, identity, budget))
+    }
+
+    fn close_refused(&self, refusal: SpecRefusal) -> SliceOutcome {
+        self.close_gate(refusal.code());
+        SliceOutcome::Closed(refusal)
+    }
+
+    fn close_gate(&self, code: Option<&'static str>) {
+        *self
+            .preparation_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = code;
+        let _ = self.admission.refresh(None);
     }
 
     /// Runs one bounded claim-source slice, or nothing while paused, so memories present before startup and every later decision change reach the search projection's source descriptors. The slice ends within `SLICE_IDLE` and within `budget`; publication runs with local-only egress and grants no search admission.
@@ -609,37 +646,56 @@ impl SearchLifecycleOwner {
         let identity = self
             .identity(inputs.manifest(), budget)
             .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
-        let bound = limit(inputs.manifest(), Transition::Rebuilding.duration_limit())
-            .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
-        let generation_id = format!("gen-{}", identity.generation_epoch);
-        let allowance = (1..=REGISTRATION_ALLOWANCE)
-            .rev()
-            .find(|allowance| {
-                replacement_spec(
-                    inputs.manifest(),
-                    identity.clone(),
-                    Transition::Rebuilding,
-                    *allowance,
-                    &generation_id,
-                )
-                .is_ok()
-            })
-            .unwrap_or(1);
-        let request = LifecycleRequest {
-            transition: Transition::Rebuilding,
-            selected_generation: "unregistered".to_owned(),
-            kernel_incarnation_id: identity.kernel_incarnation_id.clone(),
-            consumer: ConsumerBinding {
+        let attempt_id = format!("registration-{}", identity.kernel_incarnation_id);
+        let request = bounded_rebuild(
+            &inputs,
+            identity,
+            RebuildTarget {
+                selected_generation: "unregistered".to_owned(),
                 consumer_id: REGISTERED_CONSUMER.to_owned(),
-                generation_id,
+                attempt_id,
+                cause: Cause::Registration,
             },
-            cause: Cause::Registration,
-            attempt_id: format!("registration-{}", identity.kernel_incarnation_id),
-            recovery_target: None,
-            allowance,
-            deadline: now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
-            authorization_ref: None,
+            now,
+        )?;
+        self.request(&request, now, budget)
+    }
+
+    /// Records the replacement of the selected Current family for `cause`, sized as a registration is: the rebuild reads through the next registered consumer, names the Current seed as the generation it replaces, and takes its attempt identity from that consumer. A record that is no longer Current, including the Intent an earlier call recorded, records nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`BuildError`] [`Self::request`] returns.
+    pub fn request_rebuild(
+        &self,
+        cause: Cause,
+        now: i64,
+        budget: &EvalBudget,
+    ) -> Result<Option<Recorded>, BuildError> {
+        let ControlState::Current(current) = ProjectionLifecycle::read_at(&self.home) else {
+            return Ok(None);
         };
+        let selected_generation = current
+            .staged_seed_digest
+            .clone()
+            .ok_or(BuildError::Invalid("the Current record names no seed"))?;
+        let inputs = AdmissionInputs::read(&self.home)
+            .map_err(|_| IntentRefusal::Denied(Denial::NoManifest))?;
+        let identity = self
+            .identity(inputs.manifest(), budget)
+            .map_err(|_| IntentRefusal::Denied(Denial::EvidenceIdentity))?;
+        let consumer_id = next_consumer_id(&current.consumer.consumer_id);
+        let request = bounded_rebuild(
+            &inputs,
+            identity,
+            RebuildTarget {
+                selected_generation,
+                attempt_id: format!("rebuild-{consumer_id}"),
+                consumer_id,
+                cause,
+            },
+            now,
+        )?;
         self.request(&request, now, budget)
     }
 
@@ -671,10 +727,7 @@ impl SearchLifecycleOwner {
                 let _ = self.admission.refresh(None);
                 return SliceOutcome::RotateMaintenance(handle);
             }
-            Err(Unprepared::Refused(refusal)) => {
-                let _ = self.admission.refresh(None);
-                return SliceOutcome::Closed(refusal);
-            }
+            Err(Unprepared::Refused(refusal)) => return self.close_refused(refusal),
         };
         #[cfg(feature = "test-support")]
         self.tap(SliceEvent::Prepared {
@@ -734,10 +787,7 @@ impl SearchLifecycleOwner {
             &intent.consumer.generation_id,
         ) {
             Ok(spec) => spec,
-            Err(refusal) => {
-                let _ = self.admission.refresh(None);
-                return SliceOutcome::Closed(refusal);
-            }
+            Err(refusal) => return self.close_refused(refusal),
         };
         // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so the records are installed with no coverage, as for an expired record: ordinary hooks are denied while a cleanup keeps its evidence.
         if !completed && let Err(denial) = duration_within_bound(inputs.manifest(), &intent) {
@@ -769,7 +819,7 @@ impl SearchLifecycleOwner {
                 Ok(()) => {
                     self.settle_current(selection, &inputs, &spec, &intent, &identity, &budget)
                 }
-                Err(error) => SliceOutcome::Blocked(error.to_string()),
+                Err(error) => refused(selection, &error, &identity),
             };
         }
         // Measured again here: the refresh above may have waited, and the margin is from the deadline, not from the read.
@@ -809,6 +859,9 @@ impl SearchLifecycleOwner {
                 "reconcile",
                 failure.reconcile(selection, &budget).err(),
             )),
+            Err(RecoveryFailure::Blocked(error)) if completed => {
+                refused(selection, &error, &identity)
+            }
             Err(RecoveryFailure::Blocked(error)) => SliceOutcome::Blocked(error.to_string()),
         }
     }
@@ -836,8 +889,13 @@ impl SearchLifecycleOwner {
         if report.is_some() {
             let _ = self.refresh(inputs, Some(selection), identity, budget);
         }
+        let hold_lost = report
+            .as_ref()
+            .is_some_and(|report| catch_up_hold_lost(&report.end));
         match self.maintain(selection, inputs.manifest(), spec, budget) {
             Ok(Some(handle)) => SliceOutcome::RotateMaintenance(handle),
+            // Maintenance is attempted again next slice; the replacement it would maintain is recorded now.
+            Ok(None) | Err(_) if hold_lost => SliceOutcome::Rebuild(Cause::CatchUpHoldLost),
             Ok(None) => report.map_or(SliceOutcome::Current, SliceOutcome::CaughtUp),
             // The episode's progress decides the loop's next step; maintenance is attempted again next slice.
             Err(error) => report.map_or_else(
@@ -1045,13 +1103,22 @@ impl SearchLifecycleOwner {
         let tip = match self.kernel.tip_within_budget(budget) {
             Ok(tip) => tip,
             Err(_) => {
+                *self
+                    .preparation_refused
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(KERNEL_UNREADABLE);
                 self.admission.gate().close();
                 return Refresh::Closed(Closed::NoProjection);
             }
         };
-        // A selection kept under another identity, as after a reload the slice loop has not yet rotated on, is foreign evidence: the new identity has no registered family, so it is judged as unregistered rather than denied on the old family's report. No manager at all, before the first slice, is judged the same way.
+        // Admission treats an absent selection, an identity mismatch, or a quarantined selected family as unregistered, allowing bootstrap rebuilds for the requested identity.
         let coverage = match selection {
-            Some(selection) if selection.has_selected() && *selection.identity() == *identity => {
+            Some(selection)
+                if selection.has_selected()
+                    && !selection.selected_quarantined()
+                    && *selection.identity() == *identity
+                    && !selection.selected_over_another_kernel(&self.kernel, budget) =>
+            {
                 selection
                     .observe_selected(budget)
                     .ok()
@@ -1087,23 +1154,23 @@ impl SearchLifecycleOwner {
         // The records and lane are read now rather than trusted from the evidence an earlier slice installed; unavailable ones close the gate and refuse the request.
         let inputs = match AdmissionInputs::read(&self.home) {
             Ok(inputs) => inputs,
-            Err(_) => {
-                let _ = self.admission.refresh(None);
+            Err(refusal) => {
+                self.close_gate(SpecRefusal::from(refusal).code());
                 return Err(IntentRefusal::Denied(Denial::NoManifest).into());
             }
         };
         let identity = match self.identity(inputs.manifest(), budget) {
             Ok(identity) => identity,
-            Err(_) => {
-                let _ = self.admission.refresh(None);
+            Err(refusal) => {
+                self.close_gate(refusal.code());
                 return Err(IntentRefusal::Denied(Denial::EvidenceIdentity).into());
             }
         };
         // What a slice prepares under is checked first: a manifest with no slice bound or no coverage bounds would leave the recorded request to slices that all refuse it. That refusal is the manifest's, and closes the gate as a slice's would, since the earlier grants belong to a manifest that is gone.
         let slice_bound = limit(inputs.manifest(), "supervisor_slice_ms")
             .and_then(|slice_ms| nonzero_u64("supervisor_slice_ms", slice_ms));
-        if slice_bound.is_err() || coverage_bounds(inputs.manifest()).is_err() {
-            let _ = self.admission.refresh(None);
+        if let Err(refusal) = slice_bound.and_then(|_| coverage_bounds(inputs.manifest())) {
+            self.close_gate(refusal.code());
             return Err(BuildError::Invalid(
                 "manifest limits cannot bound the request",
             ));
@@ -1114,7 +1181,7 @@ impl SearchLifecycleOwner {
             && (*selection.identity() != identity
                 || coverage_bounds(inputs.manifest()).ok() != Some(selection.bounds()))
         {
-            let _ = self.admission.refresh(None);
+            self.close_gate(None);
             self.requested.notify_one();
             return Err(BuildError::Invalid(
                 "maintenance runs under records a reload replaced; retry after the next slice rotates it",
@@ -1133,7 +1200,7 @@ impl SearchLifecycleOwner {
         }
         // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate as that slice would: closed over an operation the manifest cannot bound, and on the records with no coverage over an active record past its duration bound, so a cleanup keeps its envelope.
         let recorded = ProjectionLifecycle::read_at(&self.home);
-        let spec_fits = |current: &LifecycleIntent| {
+        let spec_refusal = |current: &LifecycleIntent| {
             replacement_spec(
                 inputs.manifest(),
                 identity.clone(),
@@ -1141,19 +1208,23 @@ impl SearchLifecycleOwner {
                 current.episodes.allowance,
                 &current.consumer.generation_id,
             )
-            .is_ok()
+            .err()
         };
         let current_fit = match &recorded {
-            ControlState::Intent(current) if !spec_fits(current) => RecordFit::Unbounded,
+            ControlState::Intent(current) if let Some(refusal) = spec_refusal(current) => {
+                RecordFit::Unbounded(refusal.code())
+            }
             // An active record's duration is charged as its slices charge it; a completed record's construction is history.
             ControlState::Intent(current)
                 if duration_within_bound(inputs.manifest(), current).is_err() =>
             {
                 RecordFit::OverDuration
             }
-            ControlState::Current(current) if !spec_fits(current) => RecordFit::Unbounded,
+            ControlState::Current(current) if let Some(refusal) = spec_refusal(current) => {
+                RecordFit::Unbounded(refusal.code())
+            }
             // An unreadable record is what the next slice closes admission on.
-            ControlState::Unavailable(_) => RecordFit::Unbounded,
+            ControlState::Unavailable(_) => RecordFit::Unbounded(None),
             _ => RecordFit::Fits,
         };
         let leave_gate_as_a_slice_would = || match current_fit {
@@ -1167,8 +1238,8 @@ impl SearchLifecycleOwner {
                     },
                 );
             }
-            RecordFit::Unbounded => {
-                let _ = self.admission.refresh(None);
+            RecordFit::Unbounded(code) => {
+                self.close_gate(code);
             }
         };
         // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced; over a recorded operation those records cannot bound, the gate the last slice closed stays closed.
@@ -1245,6 +1316,46 @@ impl SearchLifecycleOwner {
         // The slice loop's idle wait ends now, so the record is not first seen after an idle period has spent its time.
         self.requested.notify_one();
         Ok(recorded)
+    }
+
+    /// The search admission a status surface reports, judged as a reader's pin judges it: the gate's hook admission and, while no slice holds the manager, the selected family's limits. The gate reads its durable stop record as every admission does. Records the last slice refused to read report their [`InputRefusal::code`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial::code`] of the refusal.
+    pub fn admission_state(&self) -> Result<(), &'static str> {
+        let gate = self.admission.gate();
+        let selected = self.try_lock_free().and_then(|managed| match &*managed {
+            Managed::Selection(selection) => Some(selection.admit_selected_hooks(gate)),
+            _ => None,
+        });
+        let verdict = match selected {
+            Some(admitted) => admitted.map_err(|error| refusal_code(&error).unwrap_or("no_family")),
+            None => gate
+                .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+                .map(|_| ())
+                .map_err(|denial| denial.code()),
+        };
+        verdict.map_err(|code| self.named_refusal(code))
+    }
+
+    pub fn pin_refusal(&self, error: &BuildError) -> &'static str {
+        refusal_code(error)
+            .map(|code| self.named_refusal(code))
+            .or_else(|| self.admission_state().err())
+            .unwrap_or("family_refused")
+    }
+
+    /// A recorded refusal code preserves the specific cause behind `no_manifest`.
+    fn named_refusal(&self, code: &'static str) -> &'static str {
+        match code {
+            "no_manifest" => self
+                .preparation_refused
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(code),
+            code => code,
+        }
     }
 
     /// Pins the selected family for one reader. Freshness is judged on the coverage the last slice observed, so a reader can trail the kernel by the commits that arrived since that slice on top of `catchup_lag_commits`; the next slice observes the family again.
@@ -1379,17 +1490,181 @@ fn with_followup(error: &BuildError, step: &str, followup: Option<BuildError>) -
     }
 }
 
-/// Charges an active record's own duration, its deadline less the clock it was recorded at, against its transition's bound in `manifest`, as recovery charges it at every admission.
+/// Whether a catch-up episode ended because the family's source hold cannot cover the next window under the running lease: the hold is bound to another lease, or it is missing, released, expired, or degraded. A hold error that a retry may clear ends the episode without a rebuild.
+fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
+    matches!(
+        end,
+        EpisodeEnd::Blocked(Blocked::HoldExtension(
+            SourceHoldError::BindingMismatch | SourceHoldError::Invalid(_)
+        ))
+    )
+}
+
+/// The admission code a selection refusal carries when the gate refused it: the records, the evidence, the observation, or the limits the last slice installed.
+fn refusal_code(error: &BuildError) -> Option<&'static str> {
+    match error {
+        BuildError::Denied(denial) | BuildError::Intent(IntentRefusal::Denied(denial)) => {
+            Some(denial.code())
+        }
+        _ => None,
+    }
+}
+
+/// The outcome of a Current family's refusal: the rebuild its cause earns, or the refusal itself.
+fn refused(
+    selection: &SearchSelection,
+    error: &BuildError,
+    running: &ProjectionIdentity,
+) -> SliceOutcome {
+    let quarantined = selection.selected_quarantined();
+    rebuild_cause(selection, quarantined, error, running).map_or_else(
+        || SliceOutcome::Blocked(error.to_string()),
+        SliceOutcome::Rebuild,
+    )
+}
+
+/// The cause a Current family's refusal earns a rebuild for: `Corruption` when the family's own database or rows are damaged, the first differing identity dimension when the running identity differs from the one the selected seed was built under, and `None` for every other refusal, including a family built over another kernel.
+fn rebuild_cause(
+    selection: &SearchSelection,
+    quarantined: bool,
+    error: &BuildError,
+    running: &ProjectionIdentity,
+) -> Option<Cause> {
+    if quarantined || damages_family(error) {
+        return Some(Cause::Corruption);
+    }
+    if !matches!(
+        error,
+        BuildError::Mutation(ProjectionError::IdentityMismatch)
+    ) {
+        return None;
+    }
+    let stored = selection.selected_seed_identity()?;
+    if stored == *running {
+        return Some(Cause::KernelRestored);
+    }
+    identity_mismatch_cause(&stored, running)
+}
+
+/// The cause naming the first dimension in which `stored` differs from `running`; `None` when both name another kernel or agree on every dimension a rebuild changes.
+fn identity_mismatch_cause(
+    stored: &ProjectionIdentity,
+    running: &ProjectionIdentity,
+) -> Option<Cause> {
+    if stored.kernel_incarnation_id != running.kernel_incarnation_id {
+        return None;
+    }
+    [
+        (
+            stored.schema_version != running.schema_version,
+            Cause::SchemaMismatch,
+        ),
+        (
+            stored.analysis_identity != running.analysis_identity,
+            Cause::AnalysisMismatch,
+        ),
+        (
+            stored.tokenizer_fingerprint != running.tokenizer_fingerprint,
+            Cause::TokenizerMismatch,
+        ),
+        (
+            stored.embedding_model != running.embedding_model
+                || stored.vector_dimension != running.vector_dimension
+                || stored.generation_epoch != running.generation_epoch,
+            Cause::EmbeddingModelMismatch,
+        ),
+        (
+            stored.projection_policy_version != running.projection_policy_version,
+            Cause::ProjectionPolicyMismatch,
+        ),
+        (
+            stored.identity_contract_version != running.identity_contract_version,
+            Cause::IdentityContractMismatch,
+        ),
+        (
+            stored.limit_manifest_protocol_version != running.limit_manifest_protocol_version,
+            Cause::LimitProtocolMismatch,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(differs, cause)| differs.then_some(cause))
+}
+
+/// The consumer a replacement of the family read through `existing` registers: the registered consumer with the next numeric suffix, so consecutive replacements never share a consumer and a replayed request derives the same one.
+fn next_consumer_id(existing: &str) -> String {
+    let next = existing
+        .strip_prefix(REGISTERED_CONSUMER)
+        .and_then(|suffix| suffix.strip_prefix('-'))
+        .and_then(|ordinal| ordinal.parse::<u64>().ok())
+        .map_or(1, |ordinal| ordinal.saturating_add(1));
+    format!("{REGISTERED_CONSUMER}-{next}")
+}
+
+/// What a rebuild replaces, which consumer it reads through, and why.
+struct RebuildTarget {
+    selected_generation: String,
+    consumer_id: String,
+    attempt_id: String,
+    cause: Cause,
+}
+
+/// A rebuild request for `target` under the largest allowance up to `REGISTRATION_ALLOWANCE` the manifest bounds, with the transition's whole duration bound from `now`.
+fn bounded_rebuild(
+    inputs: &AdmissionInputs,
+    identity: ProjectionIdentity,
+    target: RebuildTarget,
+    now: i64,
+) -> Result<LifecycleRequest, BuildError> {
+    let RebuildTarget {
+        selected_generation,
+        consumer_id,
+        attempt_id,
+        cause,
+    } = target;
+    let bound = limit(inputs.manifest(), Transition::Rebuilding.duration_limit())
+        .map_err(|_| BuildError::Invalid("manifest limits cannot bound the request"))?;
+    let generation_id = format!("gen-{}", identity.generation_epoch);
+    let allowance = (1..=REGISTRATION_ALLOWANCE)
+        .rev()
+        .find(|allowance| {
+            replacement_spec(
+                inputs.manifest(),
+                identity.clone(),
+                Transition::Rebuilding,
+                *allowance,
+                &generation_id,
+            )
+            .is_ok()
+        })
+        .unwrap_or(1);
+    Ok(LifecycleRequest {
+        transition: Transition::Rebuilding,
+        selected_generation,
+        kernel_incarnation_id: identity.kernel_incarnation_id,
+        consumer: ConsumerBinding {
+            consumer_id,
+            generation_id,
+        },
+        cause,
+        attempt_id,
+        recovery_target: None,
+        allowance,
+        deadline: now.saturating_add(i64::try_from(bound).unwrap_or(i64::MAX)),
+        authorization_ref: None,
+    })
+}
+
 /// How the manifest bounds the operation already recorded, as judged at a request.
 #[derive(Clone, Copy)]
 enum RecordFit {
     Fits,
     /// An active record's duration exceeds its transition's bound; the records still bound a cleanup.
     OverDuration,
-    /// The manifest cannot bound the recorded operation, or the record is unreadable.
-    Unbounded,
+    /// The manifest cannot bound the recorded operation, with the refusal's code, or the record is unreadable.
+    Unbounded(Option<&'static str>),
 }
 
+/// Charges an active record's own duration, its deadline less the clock it was recorded at, against its transition's bound in `manifest`, as recovery charges it at every admission.
 fn duration_within_bound(
     manifest: &RuntimeManifest,
     intent: &LifecycleIntent,
@@ -1765,9 +2040,16 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
         if cancel.is_cancelled() {
             return;
         }
-        // An unregistered home with installed records records its first build; the next slice starts it.
-        let registered = matches!(outcome, SliceOutcome::Unregistered)
-            && register_if_admitted(&owner, &cancel, &mut registration_reporter).await;
+        // An unregistered home with installed records records its first build, and a Current family that needs a replacement records its rebuild; the next slice starts either.
+        let registered = match outcome {
+            SliceOutcome::Unregistered => {
+                record_if_admitted(&owner, &cancel, &mut registration_reporter, None).await
+            }
+            SliceOutcome::Rebuild(cause) => {
+                record_if_admitted(&owner, &cancel, &mut registration_reporter, Some(cause)).await
+            }
+            _ => false,
+        };
         let advanced = claims_continue
             || registered
             || match &outcome {
@@ -1788,17 +2070,19 @@ async fn run_slice_loop(owner: Arc<SearchLifecycleOwner>, cancel: CancellationTo
     }
 }
 
-/// Records the first build of an unregistered home on the blocking pool; `true` when a record was written. A refusal repeats every idle period while the records stand, so `reporter` prints it once per repeat interval.
-async fn register_if_admitted(
+/// Records the first build of an unregistered home, or with `rebuild` the replacement of its Current family, on the blocking pool; `true` when a record was written. A refusal repeats every idle period while the records stand, so `reporter` prints it once per repeat interval.
+async fn record_if_admitted(
     owner: &Arc<SearchLifecycleOwner>,
     cancel: &CancellationToken,
     reporter: &mut SliceReporter,
+    rebuild: Option<Cause>,
 ) -> bool {
     let register_owner = Arc::clone(owner);
     let budget = EvalBudget::new(None, Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let register_budget = budget.bounded_by(Instant::now() + SLICE_IDLE);
-    let mut registration = tokio::task::spawn_blocking(move || {
-        register_owner.register_projection(crate::now_ms(), &register_budget)
+    let mut registration = tokio::task::spawn_blocking(move || match rebuild {
+        None => register_owner.register_projection(crate::now_ms(), &register_budget),
+        Some(cause) => register_owner.request_rebuild(cause, crate::now_ms(), &register_budget),
     });
     let registration = tokio::select! {
         biased;
@@ -1812,7 +2096,10 @@ async fn register_if_admitted(
         Ok(Ok(recorded)) => recorded.is_some(),
         Ok(Err(error)) => {
             if let Some(report) = reporter.report(
-                &SliceOutcome::Blocked(format!("registration refused: {error}")),
+                &SliceOutcome::Blocked(match rebuild {
+                    None => format!("registration refused: {error}"),
+                    Some(cause) => format!("{cause:?} rebuild refused: {error}"),
+                }),
                 Instant::now(),
             ) {
                 eprintln!("daemon: search lifecycle {report}");
@@ -1833,6 +2120,7 @@ enum ReportKind {
     Unavailable,
     Closed,
     CatchUpBlocked,
+    Rebuild,
 }
 
 /// Decides which slice outcomes reach the log: the first report after an outcome that is not one, a change of kind, and a repeat of the same kind with different detail once per `REPORT_REPEAT_INTERVAL`. A reason that embeds a moving value, such as the kernel tip, would otherwise print on every slice.
@@ -1861,6 +2149,9 @@ impl SliceReporter {
                 ReportKind::CatchUpBlocked,
                 format!("catch-up blocked: {blocked:?}"),
             ),
+            SliceOutcome::Rebuild(cause) => {
+                (ReportKind::Rebuild, format!("rebuild required: {cause:?}"))
+            }
             SliceOutcome::Unregistered
             | SliceOutcome::Advanced(_)
             | SliceOutcome::Current
@@ -2062,6 +2353,110 @@ mod tests {
             .map(|(_, bytes)| bytes)
             .sum();
         assert!(charged <= LIMIT, "{charged} > {LIMIT}");
+    }
+
+    #[test]
+    fn each_rebuilt_identity_dimension_names_its_own_cause_and_another_kernel_names_none() {
+        let running = test_identity();
+        let changed = |change: fn(&mut ProjectionIdentity)| {
+            let mut stored = running.clone();
+            change(&mut stored);
+            identity_mismatch_cause(&stored, &running)
+        };
+        assert_eq!(identity_mismatch_cause(&running, &running), None);
+        assert_eq!(
+            changed(|stored| stored.schema_version += 1),
+            Some(Cause::SchemaMismatch)
+        );
+        assert_eq!(
+            changed(|stored| stored.analysis_identity.push('x')),
+            Some(Cause::AnalysisMismatch)
+        );
+        assert_eq!(
+            changed(|stored| stored.tokenizer_fingerprint.push('x')),
+            Some(Cause::TokenizerMismatch)
+        );
+        for change in [
+            (|stored: &mut ProjectionIdentity| stored.embedding_model.push('x'))
+                as fn(&mut ProjectionIdentity),
+            |stored| stored.vector_dimension += 1,
+            |stored| stored.generation_epoch += 1,
+        ] {
+            assert_eq!(changed(change), Some(Cause::EmbeddingModelMismatch));
+        }
+        assert_eq!(
+            changed(|stored| stored.projection_policy_version.push('x')),
+            Some(Cause::ProjectionPolicyMismatch)
+        );
+        assert_eq!(
+            changed(|stored| stored.identity_contract_version.push('x')),
+            Some(Cause::IdentityContractMismatch)
+        );
+        assert_eq!(
+            changed(|stored| stored.limit_manifest_protocol_version.push('x')),
+            Some(Cause::LimitProtocolMismatch)
+        );
+        assert_eq!(
+            changed(|stored| {
+                stored.kernel_incarnation_id.push('x');
+                stored.tokenizer_fingerprint.push('x');
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn the_first_differing_dimension_names_the_cause() {
+        let running = test_identity();
+        let mut stored = running.clone();
+        stored.schema_version += 1;
+        stored.tokenizer_fingerprint.push('x');
+        stored.identity_contract_version.push('x');
+        assert_eq!(
+            identity_mismatch_cause(&stored, &running),
+            Some(Cause::SchemaMismatch)
+        );
+    }
+
+    #[test]
+    fn only_a_hold_that_cannot_cover_the_window_is_lost() {
+        use kernel::SourceHoldInvalidity;
+        let ended = |error| EpisodeEnd::Blocked(Blocked::HoldExtension(error));
+        for lost in [
+            SourceHoldError::BindingMismatch,
+            SourceHoldError::Invalid(SourceHoldInvalidity::Missing),
+            SourceHoldError::Invalid(SourceHoldInvalidity::Released),
+            SourceHoldError::Invalid(SourceHoldInvalidity::Expired),
+            SourceHoldError::Invalid(SourceHoldInvalidity::PurgeDegraded),
+            SourceHoldError::Invalid(SourceHoldInvalidity::MissingBytes),
+        ] {
+            assert!(catch_up_hold_lost(&ended(lost)), "{lost:?}");
+        }
+        for retried in [
+            SourceHoldError::VerificationChanged,
+            SourceHoldError::HoldLimitReached,
+            SourceHoldError::Kernel(kernel::KernelError::Deadline),
+        ] {
+            assert!(!catch_up_hold_lost(&ended(retried)), "{retried:?}");
+        }
+        assert!(!catch_up_hold_lost(&EpisodeEnd::ReachedTarget));
+        assert!(!catch_up_hold_lost(&EpisodeEnd::Blocked(
+            Blocked::Cancelled
+        )));
+    }
+
+    #[test]
+    fn each_replacement_reads_through_the_next_registered_consumer() {
+        assert_eq!(next_consumer_id(REGISTERED_CONSUMER), "search-projection-1");
+        assert_eq!(
+            next_consumer_id("search-projection-1"),
+            "search-projection-2"
+        );
+        assert_eq!(
+            next_consumer_id("search-projection-41"),
+            "search-projection-42"
+        );
+        assert_eq!(next_consumer_id("search-lifecycle"), "search-projection-1");
     }
 
     #[test]

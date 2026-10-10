@@ -4,6 +4,7 @@ import type { ContextResearcherConfig } from "../../config/schema/eidnara";
 import { runContextResearcher } from "../../features/context/context-researcher/agent";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
+import { formatSearchAdmission } from "../../shared/admission-status";
 import {
     formatCompactionTimingLines,
     summarizeCompactionTiming,
@@ -274,6 +275,10 @@ function formatRustStatusText(value: Record<string, unknown>): string {
         `- HistorySummarizer publish health: ${publishHealth}`,
         `- AWS credentials: ${formatAwsCredentialsHealth(awsCredentialsHealth(value.aws_credentials))}`,
     ];
+    const searchAdmission = formatSearchAdmission(value.search_admission);
+    if (searchAdmission !== null) {
+        lines.push(`- Search admission: ${searchAdmission}`);
+    }
     if (value.pass_trace && typeof value.pass_trace === "object") {
         lines.push(
             `- Passes: ${statusCount(passTrace, "receive_count")} received, ${statusCount(passTrace, "reject_count")} rejected${rejectError}`,

@@ -47,6 +47,21 @@ pub enum InputRefusal {
     UnknownCapability(String),
 }
 
+impl InputRefusal {
+    /// The stable code a status surface reports for records the daemon refused to read, never their content; `None` for absent records, which the gate reports as `no_manifest`.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::Missing(_) => None,
+            Self::Unreadable { .. } => Some("records_unreadable"),
+            Self::Refused { .. } => Some("records_refused"),
+            Self::Malformed(_)
+            | Self::Manifest(_)
+            | Self::UnknownHarness(_)
+            | Self::UnknownCapability(_) => Some("records_malformed"),
+        }
+    }
+}
+
 /// A passed run records its `invalidation_identity` because each harness runs independently; a pass under an earlier identity cannot satisfy a record after its identity changes.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]

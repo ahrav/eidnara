@@ -1,5 +1,5 @@
-import type { MockUsage } from "./mock-provider/server";
-import type { RustTestHarness } from "./rust-harness";
+import type { MockProvider, MockUsage } from "./mock-provider/server";
+import type { HarnessHost, RustTestHarness } from "./rust-harness";
 
 /** Cache-read-heavy usage keeps a scripted tool turn below every execute threshold the scenarios configure. */
 export const DEFAULT_SCRIPTED_TOOL_USAGE: MockUsage = {
@@ -60,7 +60,7 @@ function toolResultTextOf(block: WireContentBlock): string {
 }
 
 /** Scans every captured request for the `tool_result` block answering `callId`. */
-export function findToolResultText(harness: RustTestHarness, callId: string): string | null {
+export function findToolResultText(harness: { mock: MockProvider }, callId: string): string | null {
     for (const request of harness.mock.requests()) {
         const messages = request.body.messages;
         if (!Array.isArray(messages)) continue;
@@ -92,7 +92,7 @@ let scriptedCallCounter = 0;
  * Callers must observe each turn before scripting the next turn.
  */
 export async function runScriptedToolCall(
-    harness: RustTestHarness,
+    harness: RustTestHarness<HarnessHost>,
     sessionId: string,
     options: ScriptedToolCallOptions,
 ): Promise<ScriptedToolCall> {

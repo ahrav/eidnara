@@ -191,6 +191,31 @@ describe("registerRpcHandlers", () => {
         }
     });
 
+    test("status-detail carries the daemon's search admission only when the status reports it", async () => {
+        const cases = [
+            ["absent", undefined, undefined],
+            ["admitted", { state: "admitted" }, "admitted"],
+            [
+                "refused",
+                { state: "refused", reason: "evidence_failed" },
+                "refused (evidence_failed)",
+            ],
+            ["malformed reason", { state: "refused", reason: "token=abc" }, "refused (unknown)"],
+            ["unknown state", { state: "open" }, undefined],
+        ] as const;
+        for (const [name, search_admission, line] of cases) {
+            const { handlers } = register({}, { ...DAEMON_STATUS, search_admission });
+            const detail = (await handlers.get("status-detail")?.({
+                sessionId: `ses-handler-search-${name.replace(" ", "-")}`,
+            })) as unknown as StatusDetail;
+            expect({ name, searchAdmission: detail.searchAdmission }).toEqual({
+                name,
+                searchAdmission: line,
+            });
+            expect(JSON.stringify(detail)).not.toContain("token=abc");
+        }
+    });
+
     const USER_CONFIG = "/home/u/.config/eidnara/eidnara.jsonc";
     const statusWith = (summary: string): RustSessionStatus => ({ ...DAEMON_STATUS, summary });
     const foldAuthority = (

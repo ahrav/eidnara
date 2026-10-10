@@ -293,6 +293,55 @@ fn barrier_uses_recorded_consumers_and_requires_explicit_empty_set_abandonment()
 }
 
 #[test]
+fn retirement_leaves_a_barrier_past_the_certificate_to_the_successor() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    seed_domain(&store);
+    let handle = ingest(&store, "barrier", b"barrier");
+    let registered = store
+        .commit(intent("register-both"), |envelope| {
+            envelope.register_outbox_consumer("retiring", 1)?;
+            envelope.register_outbox_consumer("successor", 1)?;
+            Ok("registered".to_string())
+        })
+        .unwrap()
+        .commit_seq;
+    store.acknowledge_outbox("retiring", registered, 2).unwrap();
+    store
+        .acknowledge_outbox("successor", registered, 2)
+        .unwrap();
+    let deletion = store
+        .delete_artifact(delete_request(
+            "after-certificate",
+            &handle.digest,
+            ArtifactDeletionKind::Delete,
+        ))
+        .unwrap();
+    assert!(deletion.commit_seq > registered);
+    store
+        .commit(intent("retire"), |envelope| {
+            envelope.retire_outbox_consumer("retiring", registered, 3)?;
+            Ok("retired".to_string())
+        })
+        .unwrap();
+    let status = store.deletion_barrier(&deletion.barrier_id).unwrap();
+    assert!(
+        !status.cleared,
+        "the successor registered before the deletion still owes the barrier: {status:?}"
+    );
+    assert_eq!(status.consumers.len(), 2);
+    store
+        .acknowledge_outbox("successor", deletion.commit_seq, 4)
+        .unwrap();
+    assert!(
+        store
+            .deletion_barrier(&deletion.barrier_id)
+            .unwrap()
+            .cleared
+    );
+}
+
+#[test]
 fn barrier_specific_consumer_abandonment_records_operator_barrier_and_time() {
     let root = tempfile::tempdir().unwrap();
     let store = KernelStore::open(root.path()).unwrap();

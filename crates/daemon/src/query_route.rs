@@ -2002,8 +2002,10 @@ impl HandlerCore {
                 Err(_) if shared.is_exhausted() => {
                     return UnitOutcome::Terminal(terminal_response(exhaustion(&shared)));
                 }
-                Err(_) => {
-                    return UnitOutcome::Terminal(unavailable_response("no_family"));
+                Err(error) => {
+                    return UnitOutcome::Terminal(unavailable_response(
+                        lifecycle.pin_refusal(&error),
+                    ));
                 }
             };
             let producer: Option<Box<dyn DenseProducer>> =

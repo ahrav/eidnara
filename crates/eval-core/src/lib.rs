@@ -162,10 +162,11 @@ pub use pairs::{
     compile_pair_set, recency_bound,
 };
 pub use qualification::{
-    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, Environment, FAKE_MODEL_LATENCY_MS,
-    GateFailure, HostShortfall, LineageViolation, MESSAGE_TOKENS, OutageRun, OutageSchedule, Phase,
-    Publication, QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape,
-    StoreObservation, audit_lineage, catalog, frozen_arrival,
+    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, DIRTY_SOURCE_SUFFIX, Environment,
+    FAKE_MODEL_LATENCY_MS, GateFailure, HostShortfall, LineageViolation, MESSAGE_TOKENS, OutageRun,
+    OutageSchedule, Phase, Publication, QUALIFICATION_SEED, QualificationReport, RawRange,
+    Repetition, Shape, StoreObservation, WITNESSES, WitnessRun, audit_lineage, catalog,
+    check_witness_runs, frozen_arrival,
 };
 pub use reducer::*;
 pub use render::*;

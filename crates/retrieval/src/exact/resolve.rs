@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use kernel::applicability::EvalBudget;
 use kernel::{
-    ArtifactDestination, CommitReadTarget, EgressSnapshot, EligibilityVerdict, KernelError,
-    KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
+    ArtifactDestination, CommitReadIncarnation, CommitReadTarget, EgressSnapshot,
+    EligibilityVerdict, KernelError, KernelStore, MAX_ELIGIBILITY_CANDIDATES, ProjectScope,
 };
 use storage::GuardedConn;
 
@@ -20,6 +20,8 @@ use crate::{ProjectionError, TombstoneReason, read_identity};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletenessCertificate {
     pub canonical_incarnation_id: String,
+    /// Resolution requires the kernel incarnation recorded at certificate issuance; a mismatch yields `CertificateRefusal::IncarnationMismatch`.
+    pub kernel_incarnation: CommitReadIncarnation,
     pub inventory_epoch: String,
     pub identity_contract_version: String,
     pub extraction_version: u32,
@@ -278,6 +280,9 @@ pub fn resolve(
     let initial = kernel
         .capture_commit_read_target_within_budget(budget)
         .map_err(budget_refusal)?;
+    if initial.incarnation != certificate.kernel_incarnation {
+        return Err(CertificateRefusal::IncarnationMismatch.into());
+    }
     let mut attempt = Attempt {
         request,
         kernel,

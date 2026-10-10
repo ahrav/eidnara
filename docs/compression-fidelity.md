@@ -81,6 +81,31 @@ Missing, unreadable, or mismatched bytes reject the run in both languages.
 No normalization applies, so whitespace-only, same-length, and
 scenario-only edits are rejected like any other edit.
 
+### Corpus approval record
+
+A corpus approval is a tracker record on the corpus ticket
+([#718](https://github.com/ahrav/eidnara/issues/718)). It covers exactly one
+corpus identity and holds:
+
+- the corpus SHA-256, equal to both pins and to
+  `sha256sum crates/daemon/testdata/compression-fidelity.json` at the
+  reviewed commit;
+- the reviewed commit;
+- two distinct reviewers, each approving the whole corpus at that digest:
+  every case's native spans, source revisions, obligation and allowed-loss
+  statements, materiality marks, forbidden conclusions, follow-up prompts,
+  accepted dispositions and abstention, and approved example, plus the C3
+  memory example;
+- the time of approval, which precedes inspection of any candidate output.
+
+A corpus edit moves both pins, so a record naming another digest covers
+nothing. Until a record names the current digest, the corpus stays
+unapproved, and the operator rejects every result built on it, whatever
+its report's `accepted` field says. This gate is procedural:
+`eval:compression-fidelity` derives `accepted` from the review batch's two
+approvers in `controls.json`, and the operator checks the tracker record
+against the report's `corpus_sha256` before accepting a result.
+
 The Rust corpus module owns source, span, and revision validation, and
 `compression_fidelity_tests.rs` holds its negative controls. It rejects
 duplicate or malformed IDs, spans that do not resolve to the exact bytes of
@@ -338,6 +363,46 @@ serves the capture when
 `EIDNARA_FIXTURE_SUMMARIZER_COMMAND` names a command that answers each
 summarizer prompt from a real model, such as
 `packages/e2e-tests/scripts/bedrock-summarizer.ts`.
+
+**Real-serving replay.** The ignored daemon test
+`real_captures_serve_their_natural_tiers` serves each corpus source from its
+published real capture. `EIDNARA_FIDELITY_REAL_CAPTURE_DIR` names the
+directory the real producer capture wrote, `EIDNARA_FIDELITY_REAL_MODEL` names
+the arm's model, and `EIDNARA_FIDELITY_OBSERVATIONS_DIR` names where the replay
+writes. The evaluation reads one arm directory, so both directories are that
+arm directory. For each source the test reads the published
+`daemon.compression_fidelity.real_capture` record of that model whose
+`output_origin` is `real producer through the host`, takes the attempt output
+whose P1, as the validator's parser reads it, is the published row's, and
+folds it under that model through the real validation and publication path.
+It then records P1 at m0 on the first fold, P1 in the m1 window after a
+test-authored baseline, and each decayed tier at m0 under test-authored newer
+rows. The m1 fold moves every ordinal the output carries past the baseline:
+segment `start` and `end`, `<messages_processed>`, and `<unprocessed_from>`.
+The natural curve sets a row's tier from its importance and position, so a
+probe row with four distinct bodies finds each tier's first age, and the
+captured row must serve its own rendered body for that tier at that age. The
+row is found by its `## start-end` heading, so escaped titles, equal tiers, a
+one-sentence P4, and heading lines in a body all serve. Every record carries
+`output_origin` `real producer through the host` and
+`generation_capture_sha256`, the SHA-256 of the capture file it served. A
+source with no published real capture fails the run. The replay serves
+one-row captures: a scenario's tier is the tier its source's row serves, so a
+capture whose published rows number other than one, or whose row covers less
+than the source's whole message range, fails the run as the captures are
+read, before any source folds. Both folds of a source run under the capture's
+model. The replay writes its records only after every source has served, so
+a failing source leaves the arm directory as it found it. The
+replay serves the natural and omission paths; the pressure scenarios (C1.S5
+and C3.S5) have no bound serving record in a real arm, so the report names
+them missing until a pressure witness serves the capture. Run it with
+`cargo +1.98 test -p daemon --lib --locked real_captures_serve -- --ignored`.
+`a_real_capture_binds_every_tier_the_replay_serves_from_it` runs the same
+serving in the default suite over scripted-producer captures shaped like real
+output: every output carries `<unprocessed_from>`, and the sources add
+whitespace and an escaped entity around P1, a `<p1 >` opener closed by
+`</p2>`, a one-sentence P4, the P1-only fallback, an escaped title, a heading
+line in P1, and a P2 that ends with P3.
 
 **Summarizer recovery guidance.** Two separate facts bound recovery. The
 history summarizer system prompt states once that the primary agent's

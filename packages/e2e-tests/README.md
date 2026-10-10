@@ -159,7 +159,7 @@ at or above the floor `packages/pi-plugin/package.json` declares in
 `engines.node` (Pi's CLI runs under Node and loads the extension into it),
 and the built Pi extension. With
 `EIDNARA_E2E_REQUIRE_PI=1` an unmet prerequisite fails the file instead of
-skipping it; the `gates` job sets it because it provides all three, so a skip
+skipping it; the `native-addon` job sets it because it provides all three, so a skip
 there would mean a resolution or layout regression.
 
 The Bedrock-only files also need the pinned OpenCode (`opencode` on `PATH`
@@ -207,6 +207,16 @@ Environment:
   --build` builds whichever examples are not yet resolved.
 - `EIDNARA_RUST_E2E_FOLD=1` and `EIDNARA_RUST_E2E_DUPLICATE_IDS=1` enable the
   two tests that drive the daemon past its pressure thresholds.
+- `EIDNARA_E2E_PAYLOAD_DIR` names a built payload package, such as
+  `packages/host-linux-x64-gnu` after `bun run payload:dev`, and runs
+  `tests/payload-fused-search.test.ts`. The suite starts that package's
+  `eidnara-host` over the OpenCode harness's data root and points OpenCode and
+  the Pi RPC process at it. It installs the fixture admission pair that the
+  `search_admission_records` example writes for the payload's embedding bundle
+  (`EIDNARA_E2E_SEARCH_ADMISSION_RECORDS_BIN` overrides that binary). Both
+  `eidnara_search` tools must then rank a memory created before admission and
+  one created after it through the fused route's dense lane. With the variable
+  set, a missing payload file, OpenCode, or Pi fails the suite.
 
 ## Incident pool
 
@@ -231,10 +241,11 @@ until the runtime can start the shared-memory channel.
 
 ## CI
 
-The `gates` job installs OpenCode 1.18.22 and Pi 0.80.2 on Node 24.18.0,
-builds both daemon examples, exports their paths through the variables above,
+The `native-addon` job installs OpenCode 1.18.22 and Pi 0.80.2 on Node 24.18.0,
+builds the daemon examples, exports their paths through the variables above,
 and runs `validate-mode-manifest` and `test:rust` with
-`EIDNARA_E2E_REQUIRE_PI=1`.
+`EIDNARA_E2E_REQUIRE_PI=1` after its payload smoke, with
+`EIDNARA_E2E_PAYLOAD_DIR` naming the payload that smoke built.
 
 ## Eidnara on/off evaluation
 

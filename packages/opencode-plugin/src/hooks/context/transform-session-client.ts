@@ -279,6 +279,34 @@ function isAppendOnlyExtension(previous: RetainedOutput, captured: CapturedHisto
 }
 
 /**
+ * How many leading values of the applied output a failed pass may serve: every value after an
+ * append-only extension, or every value but the last when the last applied value and the former
+ * terminal share an ID and every earlier member verified. The fallback then serves the terminal's
+ * current copy in that slot. `undefined` when the applied output has no servable prefix.
+ */
+function failOpenPrefix(
+    source: TransformPassSource,
+    previous: RetainedOutput,
+    captured: CapturedHistory,
+): number | undefined {
+    const applied = previous.applied;
+    if (!applied) return undefined;
+    if (isAppendOnlyExtension(previous, captured)) return applied.values.length;
+    const rawCount = previous.rawCount;
+    const terminal = rawCount > 0 ? captured.members[rawCount - 1] : undefined;
+    const last = applied.values.at(-1);
+    const terminalId = terminal === undefined ? undefined : source.idOf(terminal);
+    if (
+        terminalId === undefined ||
+        last === undefined ||
+        source.idOf(last) !== terminalId ||
+        (captured.verified?.count ?? 0) < rawCount - 1
+    )
+        return undefined;
+    return applied.values.length - 1;
+}
+
+/**
  * Lengths for the submitted native array: members the capture verified against the retained
  * digest keep the lengths measured when they were first sent, and only the rest are measured.
  */
@@ -1052,6 +1080,10 @@ export function createTransformSessionClient(
                   recheck: (phase: string) => void;
                   /** The trusted limit the main publication's invocation gate reads. */
                   contextLimit: number | undefined;
+                  /** Leading applied values the fallback serves; the rest come from the capture. */
+                  prefix: number;
+                  /** The pass's measured lengths of `captured.members`. */
+                  inputLengths?: readonly number[];
               }
             | undefined;
         /**
@@ -1066,18 +1098,17 @@ export function createTransformSessionClient(
             if (!failOpen || !applied || source.failOpen === false) return false;
             try {
                 failOpen.recheck("fail-open");
-                if (
-                    retainedOutputs.peek(sessionId) !== failOpen.previous ||
-                    !isAppendOnlyExtension(failOpen.previous, failOpen.captured)
-                )
-                    return false;
-                if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
+                if (retainedOutputs.peek(sessionId) !== failOpen.previous) return false;
+                const { members } = failOpen.captured;
+                const { prefix } = failOpen;
+                const from = failOpen.previous.rawCount - (applied.values.length - prefix);
+                // The served prefix must match its capture; the kept terminal is the host's
+                // object, which it may have grown in place.
+                if (!capturedMessagesUnchanged(applied.values, applied.capture, prefix)) {
                     retainedOutputs.dropApplied(sessionId, failOpen.previous);
                     return false;
                 }
-                const { members } = failOpen.captured;
-                const rawCount = failOpen.previous.rawCount;
-                const served = [...applied.values, ...members.slice(rawCount)];
+                const served = [...applied.values.slice(0, prefix), ...members.slice(from)];
                 const gated = failOpen.contextLimit !== undefined;
                 if (
                     source.publicationRejection(served.length) !== null ||
@@ -1089,13 +1120,15 @@ export function createTransformSessionClient(
                     return false;
                 // The fallback is a candidate too: it may not grow past the limit the pass would refuse.
                 if (gated) {
-                    const incoming = measureInputLengths(
-                        members,
-                        failOpen.previous,
-                        failOpen.captured.verified?.count ?? 0,
-                    );
+                    const incoming =
+                        failOpen.inputLengths ??
+                        measureInputLengths(
+                            members,
+                            failOpen.previous,
+                            failOpen.captured.verified?.count ?? 0,
+                        );
                     const invocation = validateInvocation(
-                        [...applied.lengths, ...incoming.slice(rawCount)],
+                        [...applied.lengths.slice(0, prefix), ...incoming.slice(from)],
                         incoming,
                         {
                             maxTokens: failOpen.contextLimit,
@@ -1339,13 +1372,18 @@ export function createTransformSessionClient(
             const reportedContextLimit = source.contextLimit(messages);
             // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
             // A disowned record, which every rerun reads, never fails open.
-            if (previous && verified && !previous.disowned)
+            const servedPrefix =
+                previous && verified && !previous.disowned
+                    ? failOpenPrefix(source, previous, captured)
+                    : undefined;
+            if (previous && servedPrefix !== undefined)
                 failOpenSource = {
                     previous,
                     captured,
                     boundaryIndex,
                     recheck: recheckCapture,
                     contextLimit: reportedContextLimit,
+                    prefix: servedPrefix,
                 };
             // The wire charge derives from the capture, so byte pressure declines before the next await.
             let wireBytes = 0;
@@ -1366,6 +1404,8 @@ export function createTransformSessionClient(
                 previous,
                 captured.verified?.count ?? 0,
             );
+            // The fail-open fallback reads the same capture, so it reuses these lengths.
+            if (failOpenSource) failOpenSource.inputLengths = inputLengths;
             // The retained output stays reusable only while the record that applied it survives.
             let previousApplied = previous?.applied;
             if (
@@ -1373,8 +1413,18 @@ export function createTransformSessionClient(
                 previousApplied &&
                 !capturedMessagesUnchanged(previousApplied.values, previousApplied.capture)
             ) {
+                // A kept terminal the host grew in place leaves the fail-open prefix servable.
+                const served = failOpenSource?.prefix ?? previousApplied.values.length;
+                if (
+                    served === previousApplied.values.length ||
+                    !capturedMessagesUnchanged(
+                        previousApplied.values,
+                        previousApplied.capture,
+                        served,
+                    )
+                )
+                    retainedOutputs.dropApplied(sessionId, previous);
                 previousApplied = undefined;
-                retainedOutputs.dropApplied(sessionId, previous);
             }
             const baseRevision = nextBaseRevision();
             const budget = preparation.fields.history_budget_tokens;

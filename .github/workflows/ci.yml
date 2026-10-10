@@ -26,16 +26,32 @@ on:
           tier of one arm for pi-pass, whose measured arm needs about 9000
         type: string
         default: "1200"
+      qualification:
+        description: >-
+          Run the retained-history and outage qualification campaign, with its
+          six witness runs, on the reference host and upload its report
+        type: boolean
+        default: false
+      qualification_cases:
+        description: Campaign cases, `all` or a comma-separated subset
+        type: string
+        default: all
+      qualification_operations:
+        description: Interactive operations per repetition
+        type: string
+        default: "10000"
 
 permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
 # `main` preserves in-progress runs; newer pending runs replace older pending
-# runs. Scale-driver dispatches run independently of other runs on their ref.
+# runs. Scale-driver and qualification dispatches run independently of other
+# runs on their ref.
 concurrency:
   group: >-
-    ${{ github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    ${{ github.event_name == 'workflow_dispatch'
+    && (inputs.scale_driver != '' || inputs.qualification)
     && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -136,6 +152,10 @@ jobs:
               # select this job even when no package file moves.
               - 'crates/host-runtime/**'
               - 'crates/daemon/**'
+              # The payload fused-search E2E exercises the route's ranking and
+              # its eligibility judgments, which these crates own.
+              - 'crates/retrieval/**'
+              - 'crates/kernel/**'
               - 'packages/**'
               - 'scripts/**'
               - 'release/**'
@@ -985,7 +1005,8 @@ jobs:
         # The fixture contract probe requires the built native addon;
         # `check:repo` does not build it.
         # The Pi smoke fails if Node, the Pi package, or the built extension is
-        # missing.
+        # missing. The fused-search suite dials the payload the previous step
+        # built, so it runs here instead of skipping.
         # Both daemon examples are built before the cassette suite runs so its
         # oracle spawns a prebuilt binary instead of compiling within a test
         # timeout. The paths are absolute because `bun run --cwd` changes the
@@ -997,9 +1018,14 @@ jobs:
             /target/debug/examples/direct_host_fixture"
           EIDNARA_E2E_EVAL_RUNNER_BIN: "${{ github.workspace }}\
             /target/debug/examples/eval_runner"
+          EIDNARA_E2E_SEARCH_ADMISSION_RECORDS_BIN: "${{ github.workspace }}\
+            /target/debug/examples/search_admission_records"
+          EIDNARA_E2E_PAYLOAD_DIR: "${{ github.workspace }}\
+            /packages/host-linux-x64-gnu"
         run: |
           npm install -g opencode-ai@1.18.22
           cargo +1.98 build -p daemon --example direct_host_fixture \
+            --example search_admission_records \
             --features direct-host-fixture --locked
           cargo +1.98 build -p daemon --example eval_runner \
             --features eval-runner --locked
@@ -1130,6 +1156,105 @@ jobs:
         with:
           name: scale-report-${{ inputs.scale_driver }}
           path: ${{ runner.temp }}/scale
+          if-no-files-found: warn
+
+  # The retained-history and outage qualification (#864, #872) runs only when
+  # dispatched: each witness test runs first at the checked-out commit and is
+  # recorded with its exit code, then the release campaign runs with those
+  # records. A witness whose run reports no single passed test is recorded as
+  # failed.
+  qualification:
+    name: qualification campaign (dispatched)
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification
+    env:
+      QUALIFICATION_CASES: ${{ inputs.qualification_cases }}
+      QUALIFICATION_OPERATIONS: ${{ inputs.qualification_operations }}
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Witness runs
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/qualification"
+          mkdir -p "$out"
+          commit="$(git rev-parse HEAD)"
+          {
+            echo "commit $commit"
+            echo "nproc $(nproc)"
+            free -b
+            lsblk -d -o NAME,ROTA,SIZE
+            df -h / /mnt
+          } | tee "$out/runner.txt"
+          printf '{' > "$out/witnesses.json"
+          separator=''
+          witness() {
+            local name="$1"
+            shift
+            local code=0
+            "$@" > "$out/$name.log" 2>&1 || code=$?
+            # libtest prints the first summary; a `harness = false` target prints the second.
+            if [ "$code" -eq 0 ] && ! grep -qE '^test result: ok. 1 passed|: 1 run, 0 failed$' "$out/$name.log"; then
+              code=97
+            fi
+            echo "$name exit $code"
+            printf '%s"%s":{"test":"%s","source_commit":"%s","exit_code":%d}' \
+              "$separator" "$name" "$*" "$commit" "$code" >> "$out/witnesses.json"
+            separator=','
+          }
+          daemon_lib=(cargo +1.98 test --release --locked -p daemon --all-features --lib)
+          witness normal_fold "${daemon_lib[@]}" \
+            the_normal_path_folds_again_after_a_source_failure_and_cooldown
+          witness emergency_fold "${daemon_lib[@]}" \
+            the_emergency_path_folds_again_after_a_source_failure_and_cooldown
+          witness wrapup_fold "${daemon_lib[@]}" \
+            the_wrapup_path_folds_again_after_a_source_failure_and_cooldown
+          witness reattach_fold "${daemon_lib[@]}" \
+            the_reattach_path_folds_again_after_a_source_failure_and_cooldown
+          witness rotation_soak cargo +1.98 test --release --locked \
+            -p host-runtime --test model_execution_subprocess \
+            a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner
+          # The runner refuses a witness its catalog does not name, so the
+          # warm-acquisition run is recorded only where `WITNESSES` lists it.
+          if grep -q '"warm_acquisition",' crates/eval-core/src/qualification.rs; then
+            witness warm_acquisition cargo +1.98 test --release --locked \
+              -p host-runtime --test model_execution_supervisor \
+              warm_acquisition_p99_stays_within_one_millisecond -- --ignored --exact
+          fi
+          printf '}\n' >> "$out/witnesses.json"
+          cat "$out/witnesses.json"
+
+      - name: Campaign
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/qualification"
+          # The campaign's stores go on the runner's larger local disk.
+          sudo mkdir -p /mnt/qualification-state
+          sudo chown "$(id -u):$(id -g)" /mnt/qualification-state
+          cargo +1.98 build --release --locked -p daemon --example eval_runner \
+            --features eval-runner
+          target/release/examples/eval_runner qualification \
+            --out "$out/report.json" \
+            --cases "$QUALIFICATION_CASES" \
+            --operations "$QUALIFICATION_OPERATIONS" \
+            --repetitions 5 \
+            --outage-scale 1 \
+            --state-dir /mnt/qualification-state \
+            --witness-runs "$out/witnesses.json" 2>&1 | tee "$out/campaign.log"
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: qualification
+          path: ${{ runner.temp }}/qualification
           if-no-files-found: warn
 
   unlocked-deps:

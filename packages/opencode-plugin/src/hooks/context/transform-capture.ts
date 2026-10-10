@@ -848,8 +848,15 @@ function walkMembers(
     return { members, snapshots, rootSnapshot };
 }
 
-/** Membership is checked through own descriptors; an accessor or inherited slot cannot match. */
-export function capturedMessagesUnchanged(live: unknown, captured: CapturedMessages): boolean {
+/**
+ * Membership requires own data descriptors. Content edits to members at or past `compared` can
+ * pass when those members lie outside the verified prefix and retain their identity and position.
+ */
+export function capturedMessagesUnchanged(
+    live: unknown,
+    captured: CapturedMessages,
+    compared: number = captured.members.length,
+): boolean {
     try {
         const walker = new ReferenceableWalk(TRANSFORM_CAPTURE_MAX_BYTES, false);
         const verifier = captured.verified && new PrefixVerifier(captured.verified);
@@ -864,6 +871,7 @@ export function capturedMessagesUnchanged(live: unknown, captured: CapturedMessa
                     verifier.walk(slot.value, index);
                     return;
                 }
+                if (index >= compared) return;
                 // Bounds precede indexing so a short record cannot read an inherited slot.
                 const snapshot =
                     index < captured.snapshots.length ? captured.snapshots[index] : undefined;
