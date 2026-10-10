@@ -90,7 +90,7 @@ commit; a host that meets the required runner with no cgroup constraint.
 
 ### Q: Does a recorded witness run prove its execution context?
 
-- Sources examined: `WitnessRun` (`qualification.rs:64`),
+- Sources examined: `WitnessRun` (`crates/eval-core/src/qualification.rs:64`),
   `check_witness_runs` (`:79`), the `pending_witnesses` computation in
   `QualificationReport::build` (`:1016`), the runner's `--witness-runs` reader
   (`crates/daemon/examples/eval_runner/qualification.rs:834`).

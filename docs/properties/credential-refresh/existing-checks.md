@@ -22,8 +22,9 @@ Production guard: `recheck_before_spawn` at `aws_refresh.rs:612` re-applies
 | --- | --- | --- | --- |
 | `cross_incarnation_unknown_records_completion_backoff_without_fallback` | `crates/daemon/src/history_summarizer.rs:4621` | unknown outcome under another incarnation; one start, backoff recorded | unaudited |
 | `a_start_failure_with_an_unproven_effect_starts_no_second_model` | `history_summarizer.rs:4690` | start failure without proof the model did not run | unaudited |
-| `a_source_failure_skips_same_provider_models_and_falls_back_to_another_source` | `history_summarizer.rs:4919` | source-scoped failure skips the sibling model, falls back across sources | unaudited |
-| `a_source_failure_whose_cancel_is_unproven_starts_no_further_model` | `history_summarizer.rs:5062` | timed-out cancel stops the fallback and keeps the source's retry | unaudited |
+| `a_source_failure_skips_same_provider_models_and_falls_back_to_another_source` | `history_summarizer.rs:4926` | source-scoped failure skips the sibling model, falls back across sources, under a source-like and a model-like detail text | unaudited |
+| `a_wrapped_source_failure_is_never_a_chunk_failure` | `history_summarizer.rs:5035` | typed scope decides chunk-failure classification, not the detail text | unaudited |
+| `a_source_failure_whose_cancel_is_unproven_starts_no_further_model` | `history_summarizer.rs:5077` | timed-out cancel stops the fallback and keeps the source's retry | unaudited |
 
 ## Recovery after renewal (N9)
 
@@ -32,7 +33,7 @@ Production guard: `recheck_before_spawn` at `aws_refresh.rs:612` re-applies
 | `the_normal_path_folds_again_after_a_source_failure_and_cooldown` | `crates/daemon/src/source_recovery_tests.rs:68` | normal path; `backoff` refusal; two starts | unaudited |
 | `the_emergency_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:93` | emergency path; second start; idle at `firing_seq >= 2` | unaudited |
 | `the_wrapup_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:120` | wrapup `retryable` then `ok` | unaudited |
-| `the_reattach_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:151` | reattach starts no model on the failure, folds after | unaudited |
+| `the_reattach_path_folds_again_after_a_source_failure_and_cooldown` | `source_recovery_tests.rs:153` | reattach starts no model on the failure, folds after | unaudited |
 | `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner` | `model_execution_subprocess.rs:4266` | 49 runs, 26 refreshes, one external login, exact row sequence | unaudited |
 
 Test seams: `TEST_WAIT_BUDGET` and `TEST_WAIT_POLL` at

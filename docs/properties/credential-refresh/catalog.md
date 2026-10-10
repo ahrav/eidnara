@@ -109,14 +109,18 @@ Reachability: explicit-config-only - firing needs an admitted, non-empty
 `model_chain` (`config.rs:181`); the default chain is empty
 Status: active
 Exercised: yes - the producer tests inject an unproven start effect, an
-unproven cancel after a source failure, and a cross-incarnation unknown
-outcome, and count the model calls that follow
+unproven cancel after a source failure, a cross-incarnation unknown outcome,
+and a source-scoped failure under both a source-like and a model-like detail
+text, and count the model calls that follow
 Guarantee: when a model's effect is unknown, the summarizer dispatches no
 fallback model, and a typed source failure skips models on the same source
 without parsing error text.
 Check: `always` - after an outcome with an unproven model effect the count of
 further model dispatches is zero at every evaluation, because one extra
-dispatch is a second billable call.
+dispatch is a second billable call; and after a `CredentialSource`-scoped
+failure no model on the failed source starts, a model on another source may,
+and the decision follows the typed `scope` alone, so a detail text that reads
+like a model error routes the same way.
 Fault/timing angle: a start failure, cancel, or reconnect whose model effect
 the daemon cannot prove.
 Required faults and enabling state: a start failure without proof the model
@@ -128,8 +132,8 @@ The four tests and their fault construction were read at the #872 branch.
 Existing check: `crates/daemon/src/history_summarizer.rs:4621`
 `cross_incarnation_unknown_records_completion_backoff_without_fallback`;
 `:4690` `a_start_failure_with_an_unproven_effect_starts_no_second_model`;
-`:4919` `a_source_failure_skips_same_provider_models_and_falls_back_to_another_source`;
-`:5062` `a_source_failure_whose_cancel_is_unproven_starts_no_further_model`.
+`:4926` `a_source_failure_skips_same_provider_models_and_falls_back_to_another_source`;
+`:5077` `a_source_failure_whose_cancel_is_unproven_starts_no_further_model`.
 Impact: a second billable model call, or a fold published from two lineages.
 Open questions: None.
 
@@ -147,14 +151,14 @@ Guarantee: after a source failure, once the cooldown expires, the source
 answers, and an eligible operation arrives, the same daemon and routes publish
 a valid fold on each of the normal, emergency, wrapup, and reattach paths.
 Check: `sometimes` - each path must reach a valid fold after source failure
-and recovery at least once per campaign, inside a fixed bound: once the
+and recovery at least once per campaign, inside a fixed bound of two
+consecutive 10-second `TEST_WAIT_BUDGET` windows, polled every 2 ms: once the
 backoff has expired, the first operation the summarizer accepts fires one
-model run, and that single firing publishes the fold and returns the
-summarizer to idle within the 10-second `TEST_WAIT_BUDGET`, polled every 2 ms;
-an operation refused as `busy` is retried only inside a second
-`TEST_WAIT_BUDGET` that starts with the first attempt; the recovered wrapup
-request returns `ok` inside the same budget; and any other refusal or a second
-backoff fails the witness. The four paths are witnessed separately because one
+model run, with `busy` retries or the wait for the run's start inside the
+first window, and that single firing publishes the fold and returns the
+summarizer to idle inside the second; the recovered wrapup request returns
+`ok` inside one window; and any other refusal or a second backoff fails the
+witness. The four paths are witnessed separately because one
 path's recovery says nothing about another's. The rotation soak must also
 complete once per campaign: 49 Bedrock runs on one owner and one adapter, with
 exactly the run that observes the external login failing as `Transient`, the
@@ -168,7 +172,7 @@ Confidence: high - [evidence](evidence/eligible-demand-recovers-after-renewal.md
 The five tests and the bound their wait helpers enforce were read at the #872
 branch.
 Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:120`,
-`:151` (normal, emergency, wrapup, reattach);
+`:153` (normal, emergency, wrapup, reattach);
 `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner`.
 Impact: folding stalls after a credential outage until the daemon restarts.
@@ -249,9 +253,9 @@ Open questions:
   leaves no trace. Should the runner audit after every operation, at a cost
   inside the latency gates, or keep an append-only publication trail?
   (needs human input)
-- `WitnessRun` (`qualification.rs:64`) records a test name, a clean source
-  commit, and an exit code; `QualificationReport::build` checks only the
-  commit and the exit code. A `warm_acquisition` run recorded on another host
+- `WitnessRun` (`crates/eval-core/src/qualification.rs:64`) records a test
+  name, a clean source commit, and an exit code; `QualificationReport::build`
+  checks only the commit and the exit code. A `warm_acquisition` run recorded on another host
   or in a debug build clears `pending_witnesses` all the same. Should the
   record carry the host environment and build profile, or should the campaign
   run the measurement itself? (needs human input)

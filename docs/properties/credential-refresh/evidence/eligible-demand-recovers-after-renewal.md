@@ -29,8 +29,9 @@ through `fail_next_run_on_the_source`:
   `MAX_WRAPUP_REQUEST_BUDGET` less a margin (`crates/daemon/src/lib.rs:6160`,
   3,800 seconds at `crates/daemon/src/history_summarizer.rs:1580`), so the
   test's timeout is the bound that applies.
-- `:151` reattach: a seeded awaiting state answers `no_fire: "reattaching"`,
-  the failure starts no model, then `fire_and_settle` publishes.
+- `source_recovery_tests.rs:153` reattach: a seeded awaiting state answers
+  `no_fire: "reattaching"`, the failure starts no model, then
+  `fire_and_settle` publishes.
 
 Shared assertions: `assert_the_source_failure_advanced_nothing` (`:28`) checks
 no segment, no `chunk_retry`, an unchanged `coverage_ordinal`, a backoff at
@@ -66,10 +67,13 @@ continue.
 
 The window is the cooldown boundary: the backoff recorded at the source
 failure must have expired at the next eligible operation. The recovery bound
-is one firing after expiry, with publication and return to idle inside the
-10-second wait budget; `busy` retries before that firing have their own
-10-second deadline. The rotation witness depends on the shifted clock seam
-and a scripted dispatch; the path witnesses depend on the scripted producer.
+is one firing after expiry inside two consecutive 10-second windows: the
+emergency path waits for the second start, then for idle; the normal and
+reattach paths retry `busy` under one deadline, then wait for idle under
+another; the wrapup path has one window around its request. Each window is
+`TEST_WAIT_BUDGET`, so the end-to-end bound is 20 seconds. The rotation
+witness depends on the shifted clock seam and a scripted dispatch; the path
+witnesses depend on the scripted producer.
 
 ## What a test must construct
 
@@ -93,5 +97,7 @@ archive or placeholder; a producer start count that proves exactly one retry.
   witness awaited its recovered request under the handler's 3,800-second
   budget alone; it now awaits under `TEST_WAIT_BUDGET`.
 - Missing evidence: none for the five checks read.
-- Conclusion: resolved with answer - one firing, and 10 seconds per wait
-  including the `busy` retries.
+- Conclusion: resolved with answer - one firing, inside two consecutive
+  10-second windows, 20 seconds end to end; the wrapup path uses one window.
+  Each helper opens its own deadline, so the record states the cumulative
+  bound rather than a single shared one.
