@@ -36,15 +36,33 @@ const WORDS: [&str; 8] = [
 ];
 
 fn message_text(seed: u64, ordinal: u64) -> String {
+    const PADDED_WORDS: [[u8; 8]; WORDS.len()] = {
+        let mut padded = [[0; 8]; WORDS.len()];
+        let mut word = 0;
+        while word < WORDS.len() {
+            let bytes = WORDS[word].as_bytes();
+            let mut byte = 0;
+            while byte < bytes.len() {
+                assert!(bytes[byte] == b' ' || bytes[byte].is_ascii_lowercase());
+                padded[word][byte] = bytes[byte];
+                byte += 1;
+            }
+            word += 1;
+        }
+        padded
+    };
     let mut state = (seed ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
-    let mut text = String::with_capacity(MESSAGE_TOKENS * 8);
+    let mut bytes = [0; MESSAGE_TOKENS * 8];
+    let mut len = 0;
     for _ in 0..MESSAGE_TOKENS {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        text.push_str(WORDS[(state % WORDS.len() as u64) as usize]);
+        let word = (state % WORDS.len() as u64) as usize;
+        bytes[len..len + 8].copy_from_slice(&PADDED_WORDS[word]);
+        len += WORDS[word].len();
     }
-    text
+    String::from_utf8(bytes[..len].to_vec()).expect("concatenated words are UTF-8")
 }
 
 /// ASCII text long enough to fill one transform frame; requests slice it to fit.
@@ -143,10 +161,28 @@ fn window_request(case: &Case, session: &str, anchor: Anchor, turn: u64) -> Valu
 
 /// The seeding pass streams this file from disk, so no generator state stays resident.
 fn write_generator(path: &Path, messages: u64) -> io::Result<()> {
-    let mut out = BufWriter::new(fs::File::create(path)?);
+    let mut out = BufWriter::with_capacity(1024 * 1024, fs::File::create(path)?);
     for ordinal in 1..=messages {
-        serde_json::to_writer(&mut out, &window_message(Shape::Mixed, ordinal))?;
-        out.write_all(b"\n")?;
+        out.write_all(br#"{"ck":{"content":[{"kind":{"text":""#)?;
+        out.write_all(message_text(QUALIFICATION_SEED, ordinal).as_bytes())?;
+        out.write_all(br#"","type":"text"}}"#)?;
+        if ordinal.is_multiple_of(16) {
+            write!(
+                out,
+                r#",{{"kind":{{"id":"call-{ordinal}","input":{{"path":"src/lib.rs"}},"name":"read","type":"tool_call"}}}},{{"kind":{{"id":"call-{ordinal}","output":{{"kind":{{"text":""#,
+            )?;
+            out.write_all(message_text(7, ordinal).as_bytes())?;
+            out.write_all(br#"","type":"text"}},"tool_name":"read","type":"tool_result"}}"#)?;
+        }
+        let role = if ordinal % 2 == 1 {
+            "user"
+        } else {
+            "assistant"
+        };
+        writeln!(
+            out,
+            r#"],"meta":{{"harness_id":"m{ordinal}"}},"role":"{role}"}},"mid":"m{ordinal}","ordinal":{ordinal}}}"#,
+        )?;
     }
     out.flush()
 }
@@ -1016,6 +1052,53 @@ mod tests {
         let bytes = fs::read(&first).unwrap();
         assert_eq!(bytes, fs::read(&second).unwrap());
         assert_eq!(sha256_hex(&bytes), GENERATOR_64_SHA256);
+    }
+
+    #[test]
+    fn seeded_generator_matches_window_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.jsonl");
+        write_generator(&path, 4096).unwrap();
+        let lines: Vec<String> = io::BufReader::new(fs::File::open(&path).unwrap())
+            .lines()
+            .collect::<io::Result<_>>()
+            .unwrap();
+        assert_eq!(lines.len(), 4096);
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(
+                *line,
+                serde_json::to_string(&window_message(Shape::Mixed, index as u64 + 1)).unwrap(),
+                "ordinal {}",
+                index + 1,
+            );
+        }
+        write_generator(&path, 0).unwrap();
+        assert!(fs::read(&path).unwrap().is_empty());
+        assert_eq!(
+            write_generator(&dir.path().join("missing/file"), 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound,
+        );
+        #[cfg(target_os = "linux")]
+        assert!(write_generator(Path::new("/dev/full"), 64).is_err());
+    }
+
+    #[test]
+    fn seeded_generator_text_matches_original_word_stream() {
+        for seed in [0, 7, QUALIFICATION_SEED, u64::MAX] {
+            for ordinal in (0..=256).chain([999, 1_000_000, u64::MAX]) {
+                let mut state = (seed ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
+                let mut expected = String::new();
+                for _ in 0..MESSAGE_TOKENS {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    expected.push_str(WORDS[(state % WORDS.len() as u64) as usize]);
+                }
+                assert_eq!(message_text(seed, ordinal), expected, "{seed}:{ordinal}");
+            }
+        }
     }
 
     #[test]
