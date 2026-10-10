@@ -621,6 +621,22 @@ fn a_retired_consumer_leaves_past_commits_after_its_certified_checkpoint() {
         })
         .unwrap();
     assert_eq!(store.outbox_consumer_checkpoint("retiring").unwrap(), None);
+    let payload: String = inspect(directory.path())
+        .query_row(
+            "SELECT CAST(payload AS TEXT) FROM change_event
+             WHERE change_kind='consumer_deregister' AND object_id='retiring'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        payload.contains(&format!("\"certified_through\":{registered}")),
+        "the retirement audit records the certified checkpoint: {payload}"
+    );
+    assert!(
+        payload.contains(&format!("\"checkpoint_commit_seq\":{later}")),
+        "the retirement audit records the acknowledged tip: {payload}"
+    );
     assert!(
         store.outbox_consumer_checkpoint("successor").unwrap() < Some(later),
         "the successor keeps the commits the retired consumer skipped"

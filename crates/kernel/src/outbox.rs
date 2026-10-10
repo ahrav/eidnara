@@ -137,13 +137,16 @@ impl Envelope<'_> {
         consumer_id: &str,
         recorded_at: i64,
     ) -> Result<(), KernelError> {
-        self.guarded(|envelope| envelope.deregister_outbox_consumer_inner(consumer_id, recorded_at))
+        self.guarded(|envelope| {
+            envelope.deregister_outbox_consumer_inner(consumer_id, recorded_at, None)
+        })
     }
 
     fn deregister_outbox_consumer_inner(
         &mut self,
         consumer_id: &str,
         recorded_at: i64,
+        certified_through: Option<i64>,
     ) -> Result<(), KernelError> {
         let (consumer_id, checkpoint) = self.consumer_checkpoint(consumer_id, recorded_at)?;
         if checkpoint < self.pre_operation_tip()? {
@@ -160,11 +163,14 @@ impl Envelope<'_> {
                 [consumer_id.as_str()],
             )
             .map_err(map_sqlite)?;
-        let audit = serde_json::json!({
+        let mut audit = serde_json::json!({
             "consumer_id": consumer_id.clone(),
             "checkpoint_commit_seq": checkpoint,
             "recorded_at": recorded_at,
         });
+        if let Some(certified_through) = certified_through {
+            audit["certified_through"] = certified_through.into();
+        }
         self.push_control_change(
             consumer_id.clone(),
             "outbox_consumer",
@@ -181,6 +187,7 @@ impl Envelope<'_> {
     ///
     /// - Returns [`KernelError::InvalidInput`] when `recorded_at` is negative or `consumer_id` is empty.
     /// - Returns [`KernelError::NotFound`] when the consumer is not registered.
+    /// - Returns [`KernelError::ConsumerPending`] when the consumer checkpoint is below `certified_through`.
     pub fn retire_outbox_consumer(
         &mut self,
         consumer_id: &str,
@@ -209,7 +216,7 @@ impl Envelope<'_> {
         if checkpoint < tip {
             acknowledge_outbox_in_tx(self.tx, &consumer_id, tip, recorded_at)?;
         }
-        self.deregister_outbox_consumer_inner(&consumer_id, recorded_at)
+        self.deregister_outbox_consumer_inner(&consumer_id, recorded_at, Some(certified_through))
     }
 
     /// # Errors
