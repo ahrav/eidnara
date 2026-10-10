@@ -279,7 +279,7 @@ fn project_messages_from_state(
     // Block ids are `mid#index`, so a repeated mid would give two messages'
     // blocks the same identities and let one message's content stand for the
     // other's. Synthetic messages take part: their block ids collide too.
-    let mut seen_mids = BTreeSet::new();
+    let mut seen_mids = BTreeSet::<&str>::new();
     for msg in ingress.messages {
         if msg.mid.is_empty() {
             return Err(WireError::EmptyMid {
@@ -289,7 +289,7 @@ fn project_messages_from_state(
         if msg.mid.contains('#') {
             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
         }
-        if !seen_mids.insert(msg.mid.clone()) {
+        if !seen_mids.insert(msg.mid.as_str()) {
             return Err(WireError::DuplicateMid(msg.mid.clone()));
         }
 
