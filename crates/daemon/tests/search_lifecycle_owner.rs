@@ -4689,7 +4689,7 @@ async fn corrupt_records_and_reconciling_disables_admit_nothing() {
     };
     let mut notified = false;
     owner
-        .disable(&slice_budget(), &mut |event| {
+        .disable(&slice_budget(), &mut move |event| {
             if matches!(event, DisableEvent::IntentPersisted) && !notified {
                 notified = true;
                 entered_tx.send(()).unwrap();
@@ -5684,5 +5684,324 @@ async fn absent_records_register_nothing() {
             .unwrap_err(),
         Denial::NoManifest
     );
+    daemon.shutdown().await;
+}
+
+/// A daemon over installed records, Current over two seeded memories with the claim-source runner paused, and a route bound with harness `cli` for the operator surface.
+async fn operator_daemon() -> (KernelDaemon, host_runtime::RouteHandle, std::path::PathBuf) {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let kernel_root = home.join("eidnara").join("context");
+    {
+        let seed = KernelStore::open(kernel_root.join("kernel")).unwrap();
+        seed_memories(&seed, "project:operator", &["operator-1", "operator-2"]);
+        drop(seed);
+    }
+    let identity = identity(&kernel_incarnation_id(&kernel_root));
+    write_records(
+        &home,
+        &manifest_json(&identity, &ProjectionHook::ALL),
+        &campaign_json(&identity),
+    );
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let route = daemon.bind_another(2, "cli").await;
+    let status = operator_status(&daemon, route).await;
+    let started = Instant::now();
+    let mut status = status;
+    while status["record"]["state"] != "current" {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the projection never reached Current: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        status = operator_status(&daemon, route).await;
+    }
+    daemon.handler().pause_claim_sources_for_test();
+    (daemon, route, home)
+}
+
+async fn operator_call(
+    daemon: &KernelDaemon,
+    route: host_runtime::RouteHandle,
+    method: &str,
+    body: Value,
+) -> Value {
+    daemon
+        .call_on(
+            route,
+            support::kernel_daemon::envelope(method, daemon.project(), body),
+        )
+        .await
+}
+
+async fn operator_status(daemon: &KernelDaemon, route: host_runtime::RouteHandle) -> Value {
+    operator_call(
+        daemon,
+        route,
+        "search.lifecycle.status",
+        serde_json::json!({}),
+    )
+    .await
+}
+
+/// Polls the operator status until its record is Current under `consumer`.
+async fn current_under(
+    daemon: &KernelDaemon,
+    route: host_runtime::RouteHandle,
+    consumer: &str,
+) -> Value {
+    let started = Instant::now();
+    loop {
+        let status = operator_status(daemon, route).await;
+        if status["record"]["state"] == "current" && status["record"]["consumer_id"] == consumer {
+            return status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the record never became Current under {consumer}: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The operator surface drives the lifecycle record through a `cli` route: a rebuild of the Current family completes through the next consumer under `OperatorRequest`, a disable closes admission and leaves a Disabled record with its consumer deregistered, and only an authorized recovery brings the projection back, through a new consumer. Requests that do not apply to the record answer a terminal and change nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn the_operator_surface_rebuilds_disables_and_recovers_the_projection() {
+    let (daemon, route, _home) = operator_daemon().await;
+    let status = operator_status(&daemon, route).await;
+    assert_eq!(status["kind"], "status");
+    assert_eq!(status["admission"]["state"], "admitted", "{status}");
+    assert_eq!(status["record"]["cause"], "Registration");
+    let empty = serde_json::json!({});
+
+    let rebuilt = operator_call(&daemon, route, "search.lifecycle.rebuild", empty.clone()).await;
+    assert_eq!(rebuilt["kind"], "recorded", "{rebuilt}");
+    assert_eq!(rebuilt["attempt_id"], "rebuild-search-projection-1");
+    let current = current_under(&daemon, route, "search-projection-1").await;
+    assert_eq!(current["record"]["cause"], "OperatorRequest");
+    assert_eq!(
+        operator_call(
+            &daemon,
+            route,
+            "search.lifecycle.recover",
+            serde_json::json!({ "authorization_ref": "operator:early" }),
+        )
+        .await["terminal"],
+        "not_disabled"
+    );
+    assert_eq!(
+        operator_call(
+            &daemon,
+            route,
+            "search.lifecycle.abandon",
+            serde_json::json!({ "operator_id": "op", "reason": "nothing pending" }),
+        )
+        .await["terminal"],
+        "nothing_to_abandon"
+    );
+
+    let disabled = operator_call(&daemon, route, "search.lifecycle.disable", empty.clone()).await;
+    assert_eq!(disabled["kind"], "disabled", "{disabled}");
+    assert_eq!(disabled["record"]["state"], "disabled");
+    assert_eq!(disabled["record"]["consumer_id"], "search-projection-1");
+    assert_eq!(disabled["record"]["deregistered"], true);
+    let status = operator_status(&daemon, route).await;
+    assert_eq!(status["admission"]["state"], "refused", "{status}");
+    assert_eq!(
+        operator_call(&daemon, route, "search.lifecycle.rebuild", empty.clone()).await["terminal"],
+        "not_current"
+    );
+    let malformed = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.recover",
+        serde_json::json!({ "authorization_ref": "not a reference" }),
+    )
+    .await;
+    assert_eq!(malformed["terminal"], "refused", "{malformed}");
+    assert!(matches!(
+        daemon
+            .outcome_on(
+                route,
+                support::kernel_daemon::envelope(
+                    "search.lifecycle.disable",
+                    daemon.project(),
+                    serde_json::json!({ "extra": true }),
+                ),
+            )
+            .await,
+        daemon::dispatch::PreparedOutcome::Error { ref code, .. } if code == "invalid_params"
+    ));
+    assert_eq!(
+        operator_status(&daemon, route).await["record"]["state"],
+        "disabled"
+    );
+
+    let recovered = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.recover",
+        serde_json::json!({ "authorization_ref": "operator:ticket-1" }),
+    )
+    .await;
+    assert_eq!(recovered["kind"], "recorded", "{recovered}");
+    assert_eq!(recovered["attempt_id"], "recovery-search-projection-2");
+    let current = current_under(&daemon, route, "search-projection-2").await;
+    assert_eq!(current["record"]["transition"], "AuthorizedRecovery");
+    assert_eq!(current["record"]["cause"], "DisabledRecovery");
+    assert_eq!(current["admission"]["state"], "admitted", "{current}");
+    daemon.shutdown().await;
+}
+
+/// A commit that lands before the disable deregisters its consumer leaves the consumer pending, since a default disable never abandons. The operator's audited abandonment releases it, and the disable's cleanup then records it deregistered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() {
+    let (daemon, route, _home) = operator_daemon().await;
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    let store = daemon.store();
+    let mut committed = false;
+    let pending = owner
+        .disable(&slice_budget(), &mut move |event| {
+            if event == DisableEvent::BeforeDeregister && !committed {
+                committed = true;
+                store
+                    .commit(
+                        kernel::CommitIntent {
+                            producer: "test".to_string(),
+                            operation_key: "outrun-the-disable".to_string(),
+                            request_digest: "d".repeat(64),
+                            actor: "test".to_string(),
+                            cause: "seed".to_string(),
+                        },
+                        |envelope| {
+                            envelope.insert_decision(seed_decision(
+                                "operator-late",
+                                "project:operator",
+                            ))?;
+                            Ok(String::new())
+                        },
+                    )
+                    .unwrap();
+            }
+        })
+        .await;
+    assert!(
+        matches!(
+            pending,
+            Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
+        ),
+        "{pending:?}"
+    );
+    let status = operator_status(&daemon, route).await;
+    assert_eq!(status["record"]["state"], "disabled");
+    assert_eq!(status["record"]["deregistered"], false, "{status}");
+    let consumer = status["record"]["consumer_id"].as_str().unwrap().to_owned();
+    assert!(
+        daemon
+            .store()
+            .outbox_consumer_checkpoint(&consumer)
+            .unwrap()
+            .is_some()
+    );
+
+    let abandon =
+        serde_json::json!({ "operator_id": "operator-1", "reason": "the tip outran the disable" });
+    let abandoned =
+        operator_call(&daemon, route, "search.lifecycle.abandon", abandon.clone()).await;
+    assert_eq!(abandoned["kind"], "abandoned", "{abandoned}");
+    assert_eq!(abandoned["consumer_id"], consumer.as_str());
+    assert_eq!(abandoned["record"]["deregistered"], true, "{abandoned}");
+    assert!(
+        daemon
+            .store()
+            .outbox_consumer_checkpoint(&consumer)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        operator_call(&daemon, route, "search.lifecycle.abandon", abandon).await["terminal"],
+        "nothing_to_abandon",
+        "a deregistered record leaves nothing to abandon"
+    );
+    daemon.shutdown().await;
+}
+
+/// An abandonment waits for the disable to release the local family: a disable a pinned reader holds back leaves the consumer registered with no recorded prefix, and the abandonment answers `nothing_to_abandon` and releases nothing. Once the reader is gone, the disable completes, and a retried recovery under the same reference reports the recovery already recorded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn an_abandonment_waits_for_the_local_release_and_retries_replay() {
+    let (daemon, route, _home) = operator_daemon().await;
+    let owner = daemon.handler().search_lifecycle().unwrap();
+    let reader = tokio::task::spawn_blocking({
+        let owner = Arc::clone(&owner);
+        move || owner.pin(&slice_budget())
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let held = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.disable",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(held["terminal"], "refused", "{held}");
+    let status = operator_status(&daemon, route).await;
+    assert_eq!(status["record"]["state"], "disabled", "{status}");
+    assert_eq!(status["record"]["through"], Value::Null);
+    let consumer = status["record"]["consumer_id"].as_str().unwrap().to_owned();
+    let early = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.abandon",
+        serde_json::json!({ "operator_id": "operator-1", "reason": "too early" }),
+    )
+    .await;
+    assert_eq!(early["terminal"], "nothing_to_abandon", "{early}");
+    assert!(
+        daemon
+            .store()
+            .outbox_consumer_checkpoint(&consumer)
+            .unwrap()
+            .is_some()
+    );
+    drop(reader);
+    let disabled = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.disable",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(disabled["record"]["deregistered"], true, "{disabled}");
+
+    let recover = serde_json::json!({ "authorization_ref": "operator:ticket-2" });
+    let first = operator_call(&daemon, route, "search.lifecycle.recover", recover.clone()).await;
+    assert_eq!(
+        (first["kind"].as_str(), &first["replayed"]),
+        (Some("recorded"), &Value::Bool(false)),
+        "{first}"
+    );
+    let retried = operator_call(&daemon, route, "search.lifecycle.recover", recover).await;
+    if retried["kind"] == "recorded" {
+        assert_eq!(retried["replayed"], true, "{retried}");
+        assert_eq!(retried["attempt_id"], first["attempt_id"]);
+    } else {
+        // The slice loop may already have completed the recovery.
+        assert_eq!(retried["terminal"], "not_disabled", "{retried}");
+    }
+    let other = operator_call(
+        &daemon,
+        route,
+        "search.lifecycle.recover",
+        serde_json::json!({ "authorization_ref": "operator:another" }),
+    )
+    .await;
+    assert_eq!(other["terminal"], "not_disabled", "{other}");
     daemon.shutdown().await;
 }

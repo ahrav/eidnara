@@ -119,6 +119,21 @@ envelope. `SearchLifecycleOwner::request` with `Transition::AuthorizedRecovery`
 and an authorization reference reopens a Disabled record. Restart and elapsed
 time grant no authorization.
 
+The operator drives these through `eidnara-host search`, which sends the
+`search.lifecycle.*` methods of context application protocol 4 (Section 7.8 of
+`docs/host-wire-protocol.md`) over a route bound with harness `cli`:
+
+| Command | Effect |
+|---|---|
+| `eidnara-host search status` | Reports the record and the search admission. |
+| `eidnara-host search rebuild` | Records a rebuild of the Current family under `Cause::OperatorRequest`. |
+| `eidnara-host search disable` | Closes admission and reconciles the consumer. |
+| `eidnara-host search recover --authorization <ref>` | Records an authorized recovery of a Disabled record. |
+| `eidnara-host search abandon --operator <id> --reason <text>` | Abandons a Disabled record's consumer through the kernel's audited `ConsumerAbandonment`, then reconciles the disable. |
+
+A consumer a commit left behind its tip stays registered after a disable. The
+audited abandonment is the operator action that releases it.
+
 ## Witnesses
 
 `crates/daemon/tests/search_lifecycle_owner.rs` covers registration, restart

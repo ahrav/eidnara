@@ -230,6 +230,10 @@ fn usage_errors_exit_2_with_no_lifecycle_call() {
         &["start", "--payload-dir"],
         &["start", "--payload-dir", "a", "--payload-dir", "b"],
         &["probe", "--version"],
+        &["search"],
+        &["search", "bogus"],
+        &["search", "recover"],
+        &["search", "abandon", "--operator", "op"],
     ];
     for args in cases {
         let out = run(root.path(), args);
@@ -809,6 +813,18 @@ async fn full_dev_mode_lifecycle_roundtrip() {
     let value = out.json();
     assert_result(&value, "restart", true, "running", "started");
     assert_eq!(effects(&value), (true, true));
+
+    // `search status` reaches the running daemon over a `cli` route and prints one JSON answer: the lifecycle record, or `unavailable` while the daemon has no search lifecycle owner.
+    let out = run(&data, &["search", "status"]);
+    let answer = out.json();
+    match answer["kind"].as_str() {
+        Some("status") => assert_eq!(out.code, 0, "{answer}"),
+        Some("terminal") => {
+            assert_eq!(answer["terminal"], "unavailable", "{answer}");
+            assert_eq!(out.code, 1);
+        }
+        _ => panic!("search status answered {answer}: {}", out.stderr),
+    }
 
     // `stop` commits at full-frame acknowledgement and waits for teardown.
     let out = run(&data, &["stop"]);
