@@ -3625,6 +3625,29 @@ describe("fail-open after an applied pass that kept its terminal raw", () => {
         expect(transform.getState(sessionId).failureCount).toBe(1);
     });
 
+    it("serves the applied prefix with a terminal object the host mutated in place", async () => {
+        const sessionId = `rust-fail-open-terminal-mutated-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        const { client } = keepTerminalThenFail(sessionId);
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const [user] = rowMessages(sessionId, rows.slice(0, 1));
+        const terminal = toolMessage(sessionId, "m-2", false);
+        await transform.run(sessionId, { messages: [user, terminal] });
+
+        (terminal.parts as Record<string, unknown>[])[0]!.state = {
+            status: "completed",
+            input: { path: "a" },
+            output: "contents",
+        };
+        const [next] = rowMessages(sessionId, [rows[2] as RawRow]);
+        const output = { messages: [user, terminal, next] as unknown[] };
+        await transform.run(sessionId, output);
+        expect(output.messages).toEqual([folded(sessionId), terminal, next]);
+        expect(output.messages[1]).toBe(terminal);
+        expect(transform.getState(sessionId).failureCount).toBe(1);
+    });
+
     it("gates the fallback with the input lengths the failed pass measured", async () => {
         const sessionId = `rust-fail-open-terminal-lengths-${Date.now()}`;
         const rows = rawRows(3);

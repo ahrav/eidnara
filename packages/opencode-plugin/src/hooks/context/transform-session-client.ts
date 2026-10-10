@@ -279,6 +279,34 @@ function isAppendOnlyExtension(previous: RetainedOutput, captured: CapturedHisto
 }
 
 /**
+ * How many leading values of the applied output a failed pass may serve: every value after an
+ * append-only extension, or every value but the last when the last applied value and the former
+ * terminal share an ID and every earlier member verified. The fallback then serves the terminal's
+ * current copy in that slot. `undefined` when the applied output has no servable prefix.
+ */
+function failOpenPrefix(
+    source: TransformPassSource,
+    previous: RetainedOutput,
+    captured: CapturedHistory,
+): number | undefined {
+    const applied = previous.applied;
+    if (!applied) return undefined;
+    if (isAppendOnlyExtension(previous, captured)) return applied.values.length;
+    const rawCount = previous.rawCount;
+    const terminal = rawCount > 0 ? captured.members[rawCount - 1] : undefined;
+    const last = applied.values.at(-1);
+    const terminalId = terminal === undefined ? undefined : source.idOf(terminal);
+    if (
+        terminalId === undefined ||
+        last === undefined ||
+        source.idOf(last) !== terminalId ||
+        (captured.verified?.count ?? 0) < rawCount - 1
+    )
+        return undefined;
+    return applied.values.length - 1;
+}
+
+/**
  * Lengths for the submitted native array: members the capture verified against the retained
  * digest keep the lengths measured when they were first sent, and only the rest are measured.
  */
@@ -1052,6 +1080,8 @@ export function createTransformSessionClient(
                   recheck: (phase: string) => void;
                   /** The trusted limit the main publication's invocation gate reads. */
                   contextLimit: number | undefined;
+                  /** Leading applied values the fallback serves; the rest come from the capture. */
+                  prefix: number;
                   /** The pass's measured lengths of `captured.members`. */
                   inputLengths?: readonly number[];
               }
@@ -1070,27 +1100,11 @@ export function createTransformSessionClient(
                 failOpen.recheck("fail-open");
                 if (retainedOutputs.peek(sessionId) !== failOpen.previous) return false;
                 const { members } = failOpen.captured;
-                const rawCount = failOpen.previous.rawCount;
-                // OpenCode grows the newest assistant message in place across a tool loop. When the
-                // applied output kept that terminal raw as its last value and every earlier member
-                // verified, the fallback serves the terminal's current copy in its place.
-                let prefix = applied.values.length;
-                let from = rawCount;
-                if (!isAppendOnlyExtension(failOpen.previous, failOpen.captured)) {
-                    const terminal = rawCount > 0 ? members[rawCount - 1] : undefined;
-                    const last = applied.values.at(-1);
-                    const terminalId = terminal === undefined ? undefined : source.idOf(terminal);
-                    if (
-                        terminalId === undefined ||
-                        last === undefined ||
-                        source.idOf(last) !== terminalId ||
-                        (failOpen.captured.verified?.count ?? 0) < rawCount - 1
-                    )
-                        return false;
-                    prefix -= 1;
-                    from -= 1;
-                }
-                if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
+                const { prefix } = failOpen;
+                const from = failOpen.previous.rawCount - (applied.values.length - prefix);
+                // The served prefix must match its capture; the kept terminal is the host's
+                // object, which it may have grown in place.
+                if (!capturedMessagesUnchanged(applied.values, applied.capture, prefix)) {
                     retainedOutputs.dropApplied(sessionId, failOpen.previous);
                     return false;
                 }
@@ -1358,13 +1372,18 @@ export function createTransformSessionClient(
             const reportedContextLimit = source.contextLimit(messages);
             // Tapes are never rebased: a verified prefix was declared at the retained basis anchor.
             // A disowned record, which every rerun reads, never fails open.
-            if (previous && verified && !previous.disowned)
+            const servedPrefix =
+                previous && verified && !previous.disowned
+                    ? failOpenPrefix(source, previous, captured)
+                    : undefined;
+            if (previous && servedPrefix !== undefined)
                 failOpenSource = {
                     previous,
                     captured,
                     boundaryIndex,
                     recheck: recheckCapture,
                     contextLimit: reportedContextLimit,
+                    prefix: servedPrefix,
                 };
             // The wire charge derives from the capture, so byte pressure declines before the next await.
             let wireBytes = 0;
@@ -1394,8 +1413,18 @@ export function createTransformSessionClient(
                 previousApplied &&
                 !capturedMessagesUnchanged(previousApplied.values, previousApplied.capture)
             ) {
+                // A kept terminal the host grew in place leaves the fail-open prefix servable.
+                const served = failOpenSource?.prefix ?? previousApplied.values.length;
+                if (
+                    served === previousApplied.values.length ||
+                    !capturedMessagesUnchanged(
+                        previousApplied.values,
+                        previousApplied.capture,
+                        served,
+                    )
+                )
+                    retainedOutputs.dropApplied(sessionId, previous);
                 previousApplied = undefined;
-                retainedOutputs.dropApplied(sessionId, previous);
             }
             const baseRevision = nextBaseRevision();
             const budget = preparation.fields.history_budget_tokens;
