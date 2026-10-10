@@ -2,10 +2,11 @@
 
 - `Consumed` in `crates/retrieval/src/lexical/retrieve.rs` reports probes,
   counted rows, scanned rows, ranked matches, judgments, batches, exclusions,
-  and `sql_steps`, the `SQLITE_STMTSTATUS_VM_STEP` operations of the count and
-  scan statements for the probes that finished.
-- A ranked probe's FTS5 rank sort runs in a nested statement SQLite keeps
-  internal, so `sql_steps` excludes its scoring; `ranked_matches` bounds it.
+  and `sql_steps`, the `SQLITE_STMTSTATUS_VM_STEP` operations of the count,
+  scan, and lookup statements for the probes that finished.
+- FTS5's rank function reads each ranked match's document size through a
+  statement FTS5 keeps internal, so `sql_steps` excludes that part of scoring;
+  `ranked_matches` bounds it.
 - `crates/retrieval/tests/lexical_retrieval.rs:2381` asserts the counters at
   the scan bound and one row below it, the judgments and batches at the bound,
   equal work under a result cap of one, and SQL steps that grow with one more

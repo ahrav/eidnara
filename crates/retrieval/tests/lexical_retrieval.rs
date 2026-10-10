@@ -2376,7 +2376,7 @@ fn allocations_follow_the_scan_bound_and_the_rank_budget() {
     );
 }
 
-/// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. A smaller scan bound runs fewer steps on the same counted rows, a result cap leaves the scan work unchanged, and one more matching row adds SQL steps on a ranked run and on a common run.
+/// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. Below the match count, a smaller scan bound runs fewer steps on the same counted rows, a result cap leaves the scan work unchanged, and one more matching row adds SQL steps on a ranked run and on a common run.
 #[test]
 fn work_counters_report_exact_and_over_bound_work() {
     let fixture = Fixture::all_admitted();
@@ -2410,11 +2410,17 @@ fn work_counters_report_exact_and_over_bound_work() {
     );
     assert_eq!(over.consumed.scanned_rows, 3);
     assert_eq!(over.consumed.counted_rows, 4);
+    let further = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(2).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(further.consumed.scanned_rows, 2);
+    assert_eq!(further.consumed.counted_rows, 4);
     assert!(
-        over.consumed.sql_steps < consumed.sql_steps,
+        further.consumed.sql_steps < over.consumed.sql_steps,
         "the scan side stops at its bound: {} against {}",
-        over.consumed.sql_steps,
-        consumed.sql_steps
+        further.consumed.sql_steps,
+        over.consumed.sql_steps
     );
 
     let capped = run(RetrievalBounds {
@@ -2457,4 +2463,76 @@ fn work_counters_report_exact_and_over_bound_work() {
         grown.consumed.sql_steps,
         consumed.sql_steps
     );
+}
+
+/// A ranked probe with more matches than the scan bound and one rank per match keeps the first `scan_rows` live matches of the reference order when dead rows sit at its front and inside its first `scan_rows + 1` matches, and reports truncation only while a live match lies past the bound.
+#[test]
+fn dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation() {
+    let fixture = Fixture::all_admitted();
+    // Each row adds one more filler token, so every match has its own document length and rank.
+    let rows: Vec<Row> = (0..150)
+        .map(|n| {
+            Row::claim(
+                &format!("ladder-{n}"),
+                &format!("ladder{}", " pad".repeat(n)),
+            )
+        })
+        .collect();
+    fixture.project(&rows);
+    let request = probes("ladder");
+    let keyed = fixture.keyed_reference(&request);
+    assert_eq!(keyed.len(), 150);
+    assert!(
+        keyed.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "the oracle ranks every match distinctly"
+    );
+    let reference: Vec<String> = keyed.into_iter().map(|(id, _)| id).collect();
+    let scan_rows = bounds().scan_rows.get();
+    assert!(reference.len() > 2 * scan_rows);
+    let scanned = |fixture: &Fixture| {
+        fixture
+            .store
+            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+            .unwrap()
+            .unwrap()
+    };
+
+    let dead: Vec<usize> = (0..10).chain(scan_rows - 4..scan_rows + 6).collect();
+    for &index in &dead {
+        tombstone_raw(&fixture, &reference[index]);
+    }
+    let live: Vec<String> = (0..reference.len())
+        .filter(|index| !dead.contains(index))
+        .map(|index| reference[index].clone())
+        .collect();
+    let kept = scanned(&fixture);
+    assert_eq!(
+        kept.hit_ids().collect::<Vec<_>>(),
+        live[..scan_rows].to_vec()
+    );
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.ranked_matches, reference.len());
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+
+    // Exactly `scan_rows` live matches remain, including three after the dead run, so retrieval reports `Completion::Complete`.
+    let survivors = scan_rows - 3;
+    for occurrence_id in &live[survivors..live.len() - 3] {
+        tombstone_raw(&fixture, occurrence_id);
+    }
+    let mut remaining = live[..survivors].to_vec();
+    remaining.extend_from_slice(&live[live.len() - 3..]);
+    assert_eq!(remaining.len(), scan_rows);
+    let kept = scanned(&fixture);
+    assert_eq!(kept.hit_ids().collect::<Vec<_>>(), remaining);
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(retrieval.completion, Completion::Complete);
 }

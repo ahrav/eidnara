@@ -75,12 +75,14 @@ probe multiset, because a storage-order tie-break makes results depend on
 insertion history.
 Fault/timing angle: none.
 Required faults and enabling state: occurrences hit by several probes; equal
-raw ranks from distinct probes; a large equal-rank group at the scan bound.
+raw ranks from distinct probes; a large equal-rank group at the scan bound;
+dead rows inside a distinct-rank probe past the scan bound.
 Confidence: high - [evidence](evidence/rank-then-occurrence-order.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:641`
 `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`;
 `:682` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:1950`
-`a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`.
+`a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`; `:2470`
+`dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation`.
 Impact: nondeterministic ranking across rebuilds.
 Open questions: None.
 
@@ -145,8 +147,8 @@ allocations are observed at the scan bound and one row below it; judgments and
 batches at the bound; SQL steps grow with one more row on a ranked and on a
 common run; a common scan makes the same number of allocations for 32 more
 matches past its bounds, and ranked allocations grow with the matches inside `rank_budget`;
-SQLite's own allocations stay outside the recorder, and a ranked probe's FTS5
-rank sort runs in a nested statement whose steps `sql_steps` excludes
+SQLite's own allocations stay outside the recorder, and the document-size
+lookups of FTS5's rank function run in internal statements `sql_steps` excludes
 Guarantee: every probe count, scan, rank, and judgment runs under a
 caller-supplied bound, and the request reports the work it did, so a result
 cap alone never bounds the work.
