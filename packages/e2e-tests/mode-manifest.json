@@ -102,6 +102,15 @@
             ]
         },
         {
+            "path": "tests/payload-fused-search.test.ts",
+            "tier": "pi-rust",
+            "rationale": "OpenCode and the Pi RPC process dial the daemon of the built payload package that EIDNARA_E2E_PAYLOAD_DIR names: before admission both eidnara_search tools label the snapshot fallback, and after the fixture admission pair is installed both rank a memory created before activation and one created after it through the fused route's dense lane for queries whose words are disjoint from theirs; the suite skips when EIDNARA_E2E_PAYLOAD_DIR is unset and fails when the payload, OpenCode, or Pi is missing",
+            "contract_refs": [
+                "SB-P33",
+                "SB-P35"
+            ]
+        },
+        {
             "path": "tests/pi-rust-eviction.test.ts",
             "tier": "pi-rust",
             "rationale": "Pi eviction and cold import against the direct-host fixture: an idle eviction keeps the rendered boundary's end entry and m0 bytes; with the daemon down Pi sends m0 text; after a store reset the summary is sent once as content; navigation before the compaction restores full history and refolds keeping the prefix; cold 1M-message Pi and OpenCode sessions upload one half-cap suffix and fire the summarizer",

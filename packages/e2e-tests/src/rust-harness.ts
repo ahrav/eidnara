@@ -62,6 +62,15 @@ function newServeAuth(): ServeAuth {
     };
 }
 
+/** The host a harness's OpenCode dials through the user-tier `host` block. */
+export interface HarnessHost {
+    readonly connectionFile: string;
+    /** The tail of the host's own log, appended to a prompt timeout. */
+    hostLog(): string;
+    /** Stops the host. A successful stop removes the data directory, so its presence afterwards marks leaked state. */
+    stop(): Promise<void>;
+}
+
 export interface RustTestHarnessOptions extends SharedHarnessOptions {
     /** Eidnara USER-tier config overrides (thresholds, memory, etc.). */
     eidnaraConfig?: Record<string, unknown>;
@@ -217,10 +226,10 @@ export function parseRustPassLine(line: string): RustPassLine | null {
     };
 }
 
-export class RustTestHarness {
+export class RustTestHarness<Host extends HarnessHost = HermeticHostStack> {
     readonly mock: MockProvider;
     readonly env: IsolatedEnv;
-    readonly host: HermeticHostStack;
+    readonly host: Host;
     readonly logPath: string;
 
     private opencodeInstance: SpawnedOpencode;
@@ -237,7 +246,7 @@ export class RustTestHarness {
         mock: MockProvider;
         mockBaseURL: string;
         env: IsolatedEnv;
-        host: HermeticHostStack;
+        host: Host;
         opencode: SpawnedOpencode;
         client: SdkClient;
         logPath: string;
@@ -264,6 +273,20 @@ export class RustTestHarness {
     }
 
     static async create(options: RustTestHarnessOptions = {}): Promise<RustTestHarness> {
+        return RustTestHarness.createWithHost(options, async (env) =>
+            HermeticHostStack.start({
+                dataDir: env.dataDir,
+                fixtureBin: await buildDirectHostFixture(),
+                daemonEnv: options.daemonEnv,
+            }),
+        );
+    }
+
+    /** Starts OpenCode against the host `startHost` publishes into the isolated data directory. */
+    static async createWithHost<Host extends HarnessHost>(
+        options: RustTestHarnessOptions,
+        startHost: (env: IsolatedEnv) => Promise<Host>,
+    ): Promise<RustTestHarness<Host>> {
         if (options.forward && options.mockDefault) {
             throw new Error("forwarding serves no scripted default; drop mockDefault");
         }
@@ -274,8 +297,6 @@ export class RustTestHarness {
                     "Guard the suite with RustTestHarness.detectPrereqs() and skip instead of creating.",
             );
         }
-
-        const fixtureBin = await buildDirectHostFixture();
 
         const mock = new MockProvider(options.forward ? { forward: options.forward } : {});
         const { baseURL } = await mock.start();
@@ -290,14 +311,10 @@ export class RustTestHarness {
         const env = createIsolatedEnv();
         const logPath = join(managedSubtreePath(env.dataDir), "eidnara-e2e.log");
 
-        let host: HermeticHostStack | undefined;
+        let host: Host | undefined;
         let opencode: SpawnedOpencode;
         try {
-            host = await HermeticHostStack.start({
-                dataDir: env.dataDir,
-                fixtureBin,
-                daemonEnv: options.daemonEnv,
-            });
+            host = await startHost(env);
             opencode = await RustTestHarness.spawnServe({
                 env,
                 mockURL: baseURL,
@@ -321,7 +338,7 @@ export class RustTestHarness {
             headers: serveAuth?.headers,
         }) as unknown as SdkClient;
 
-        return new RustTestHarness({
+        return new RustTestHarness<Host>({
             mock,
             mockBaseURL: baseURL,
             env,
@@ -684,7 +701,7 @@ export class RustTestHarness {
      */
     private static async teardownStack(
         mock: MockProvider,
-        host: HermeticHostStack | undefined,
+        host: HarnessHost | undefined,
         env: IsolatedEnv,
         options: { preserveState?: boolean } = {},
     ): Promise<void> {

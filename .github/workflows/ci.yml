@@ -985,7 +985,8 @@ jobs:
         # The fixture contract probe requires the built native addon;
         # `check:repo` does not build it.
         # The Pi smoke fails if Node, the Pi package, or the built extension is
-        # missing.
+        # missing. The fused-search suite dials the payload the previous step
+        # built, so it runs here instead of skipping.
         # Both daemon examples are built before the cassette suite runs so its
         # oracle spawns a prebuilt binary instead of compiling within a test
         # timeout. The paths are absolute because `bun run --cwd` changes the
@@ -997,9 +998,14 @@ jobs:
             /target/debug/examples/direct_host_fixture"
           EIDNARA_E2E_EVAL_RUNNER_BIN: "${{ github.workspace }}\
             /target/debug/examples/eval_runner"
+          EIDNARA_E2E_SEARCH_ADMISSION_RECORDS_BIN: "${{ github.workspace }}\
+            /target/debug/examples/search_admission_records"
+          EIDNARA_E2E_PAYLOAD_DIR: "${{ github.workspace }}\
+            /packages/host-linux-x64-gnu"
         run: |
           npm install -g opencode-ai@1.18.22
           cargo +1.98 build -p daemon --example direct_host_fixture \
+            --example search_admission_records \
             --features direct-host-fixture --locked
           cargo +1.98 build -p daemon --example eval_runner \
             --features eval-runner --locked

@@ -16,6 +16,11 @@ required-features = ["direct-host-fixture"]
 test = true
 
 [[example]]
+name = "search_admission_records"
+path = "examples/search_admission_records.rs"
+required-features = ["direct-host-fixture"]
+
+[[example]]
 name = "eval_runner"
 path = "examples/eval_runner/main.rs"
 required-features = ["eval-runner"]
