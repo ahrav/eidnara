@@ -476,7 +476,9 @@ fn flatten_block(
             kind: block.kind().tag().to_string(),
         }
     })?;
-    let content_hash: [u8; 32] = Sha256::digest(bytes.as_bytes()).into();
+    let mut content_hash = [0u8; 32];
+    content_hash
+        .copy_from_slice(ring::digest::digest(&ring::digest::SHA256, bytes.as_bytes()).as_ref());
     let (name, file_path, provider_executed, tool_call_id, output_kind) = match block.kind() {
         BlockKind::ToolCall {
             id,
