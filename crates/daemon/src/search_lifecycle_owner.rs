@@ -193,7 +193,7 @@ pub struct SearchLifecycleOwner {
     claims_paused: Arc<std::sync::atomic::AtomicBool>,
     /// The batch size of the next claim-source slice, at most `CLAIM_SLICE_BOUNDS.batch`.
     claim_batch: std::sync::atomic::AtomicUsize,
-    /// The [`SpecRefusal::code`] of the last slice's preparation, kept so status names it once the gate closes as `no_manifest`.
+    /// `preparation_refused` preserves the last slice's [`SpecRefusal::code`] so status can report the refusal while the gate reports `no_manifest`.
     preparation_refused: Mutex<Option<&'static str>>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
@@ -526,6 +526,15 @@ impl SearchLifecycleOwner {
         Ok((inputs, identity, budget))
     }
 
+    fn close_refused(&self, refusal: SpecRefusal) -> SliceOutcome {
+        *self
+            .preparation_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = refusal.code();
+        let _ = self.admission.refresh(None);
+        SliceOutcome::Closed(refusal)
+    }
+
     /// Runs one bounded claim-source slice, or nothing while paused, so memories present before startup and every later decision change reach the search projection's source descriptors. The slice ends within `SLICE_IDLE` and within `budget`; publication runs with local-only egress and grants no search admission.
     ///
     /// # Errors
@@ -712,10 +721,7 @@ impl SearchLifecycleOwner {
                 let _ = self.admission.refresh(None);
                 return SliceOutcome::RotateMaintenance(handle);
             }
-            Err(Unprepared::Refused(refusal)) => {
-                let _ = self.admission.refresh(None);
-                return SliceOutcome::Closed(refusal);
-            }
+            Err(Unprepared::Refused(refusal)) => return self.close_refused(refusal),
         };
         #[cfg(feature = "test-support")]
         self.tap(SliceEvent::Prepared {
@@ -775,10 +781,7 @@ impl SearchLifecycleOwner {
             &intent.consumer.generation_id,
         ) {
             Ok(spec) => spec,
-            Err(refusal) => {
-                let _ = self.admission.refresh(None);
-                return SliceOutcome::Closed(refusal);
-            }
+            Err(refusal) => return self.close_refused(refusal),
         };
         // An active record's own duration is charged against the transition's bound, as recovery charges it; a record a reloaded bound no longer fits is refused by every slice, so the records are installed with no coverage, as for an expired record: ordinary hooks are denied while a cleanup keeps its evidence.
         if !completed && let Err(denial) = duration_within_bound(inputs.manifest(), &intent) {

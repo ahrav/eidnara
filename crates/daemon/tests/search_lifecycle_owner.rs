@@ -4945,7 +4945,12 @@ fn limits_too_small_to_bound_a_slice_refuse_the_specification() {
             "{overrides:?}: {outcome:?}"
         );
         assert!(matches!(control(home), ControlState::Intent(_)));
-        assert!(owner.pin(&slice_budget()).is_err());
+        assert_eq!(owner.admission_state(), Err("limits_unbounded"));
+        let refused = owner
+            .pin(&slice_budget())
+            .err()
+            .expect("the gate is closed");
+        assert_eq!(owner.pin_refusal(&refused), "limits_unbounded");
     }
 }
 
