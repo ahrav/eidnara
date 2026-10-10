@@ -579,6 +579,64 @@ fn one_snapshot_reports_the_tip_identity_and_checkpoint_that_separate_reads_repo
 }
 
 #[test]
+fn a_retired_consumer_leaves_past_commits_after_its_certified_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    commit_domain(&store, 1);
+    let registered = store
+        .commit(intent("register"), |envelope| {
+            envelope.register_outbox_consumer("retiring", 10)?;
+            envelope.register_outbox_consumer("successor", 10)?;
+            Ok("registered".to_string())
+        })
+        .unwrap()
+        .commit_seq;
+    store
+        .acknowledge_outbox("retiring", registered, 11)
+        .unwrap();
+    let later = commit_domain(&store, 2);
+    assert_eq!(
+        store
+            .commit(intent("retire-uncertified"), |envelope| {
+                envelope.retire_outbox_consumer("retiring", later, 12)?;
+                Ok("retired".to_string())
+            })
+            .unwrap_err(),
+        KernelError::ConsumerPending,
+        "a consumer below its certified checkpoint stays registered"
+    );
+    assert_eq!(
+        store
+            .commit(intent("deregister-behind"), |envelope| {
+                envelope.deregister_outbox_consumer("retiring", 12)?;
+                Ok("removed".to_string())
+            })
+            .unwrap_err(),
+        KernelError::ConsumerPending
+    );
+    store
+        .commit(intent("retire"), |envelope| {
+            envelope.retire_outbox_consumer("retiring", registered, 13)?;
+            Ok("retired".to_string())
+        })
+        .unwrap();
+    assert_eq!(store.outbox_consumer_checkpoint("retiring").unwrap(), None);
+    assert!(
+        store.outbox_consumer_checkpoint("successor").unwrap() < Some(later),
+        "the successor keeps the commits the retired consumer skipped"
+    );
+    assert_eq!(
+        store
+            .commit(intent("retire-absent"), |envelope| {
+                envelope.retire_outbox_consumer("retiring", registered, 14)?;
+                Ok("retired".to_string())
+            })
+            .unwrap_err(),
+        KernelError::NotFound
+    );
+}
+
+#[test]
 fn argument_validation_is_separate_from_checkpoint_rejection() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();

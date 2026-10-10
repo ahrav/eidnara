@@ -44,11 +44,15 @@ selected family needs a replacement:
 | Cause | Condition |
 |---|---|
 | `CatchUpHoldLost` | The catch-up episode cannot extend the family's source hold: the hold is bound to an earlier kernel lease (`SourceHoldError::BindingMismatch`), or it is missing, released, expired, purge-degraded, or missing bytes (`SourceHoldError::Invalid`). Hold errors a retry may clear end the episode without a rebuild. |
-| `Corruption` | The selected family is quarantined, or its reopen fails with an integrity failure of its own store, connection, or rows. Kernel errors and operator-repair refusals report the slice blocked. |
+| `Corruption` | The selected family is quarantined, or its reopen fails with an integrity failure of its own store, connection, or rows, or with a stored prefix that contradicts the kernel's census of it (`BuildError::FamilyPrefix`: its checkpoint, its consumer's acknowledgement, or its per-class live inventory). Kernel errors and operator-repair refusals report the slice blocked. |
 | `SchemaMismatch`, `AnalysisMismatch`, `TokenizerMismatch`, `EmbeddingModelMismatch`, `ProjectionPolicyMismatch`, `IdentityContractMismatch` | The selected seed was built under an identity that differs from the running identity in that dimension, checked in this order. The embeddings lane supplies the tokenizer, model, dimension, and table epoch; the schema, analysis, policy, and contract versions are constants of the build. |
 
 A family built over another kernel incarnation earns no rebuild; the slice
-reports it blocked. The slice loop records the replacement through
+reports it blocked. A slice that finds the selected family quarantined
+withdraws it from selection before reporting `Corruption`, as a reopen that
+quarantines a family does. Admission then judges the rebuild request on the
+unregistered observation a first build is admitted on, because a quarantined
+family reports no coverage. The slice loop records the replacement through
 `SearchLifecycleOwner::request_rebuild` after the slice releases the manager.
 The rebuild names the Current seed as the generation it replaces and reads
 through the next registered consumer (`search-projection-1`, then
@@ -59,12 +63,29 @@ replacement is selected, and retirement releases the old consumer.
 Kernel source holds belong to one lease, so a daemon restart followed by any
 commit rebuilds the projection under a fresh capture.
 
-Retirement acknowledges the old consumer through the replacement's certified
-target and then deregisters it, and the kernel deregisters only a consumer at
-its tip. A commit that lands between the certified target and the
-deregistration leaves the rebuild in its intent record, and the slice reports
-`outbox consumer has not reached the commit-log tip` while the old family keeps
-serving. A rebuild therefore completes in a quiet window after its target.
+Retirement certifies the old consumer through the replacement's fixed target:
+it removes the old family, records the retirement receipt, and acknowledges the
+old consumer through that target. The deregistering commit then calls
+`Envelope::retire_outbox_consumer`, which acknowledges the old consumer through
+the tip that commit finds and deregisters it in the same transaction. Commits
+that land after the target therefore complete the rebuild instead of holding
+it in its intent record. The replacement's consumer is acknowledged through
+the target, so it still reads those commits, and the Current family catches up
+to them under its construction hold.
+
+A record whose deadline passes before it completes stays in its intent record
+with every hook denied; `request_rebuild` records only over a Current record.
+
+## Rollback
+
+The lifecycle record stores its cause by name, and a binary reads only the
+causes it was built with: a record it cannot decode is `Unavailable` and every
+hook is denied. A home whose record names `Registration` or `CatchUpHoldLost`
+is therefore unreadable to a build that predates that cause. Rolling such a
+home back to an older binary requires removing
+`<data_home>/search-lifecycle/intent.json` first. An older binary that
+registers projections then records a fresh build from the installed admission
+records.
 
 ## Readers and exact-lookup certificates
 
@@ -97,10 +118,14 @@ time grant no authorization.
 resumption, catch-up, the real daemon loop rebuilding after a post-restart
 commit, direct FTS5 probes over a Current family, and exact-proof invalidation
 across a daemon restart. Rebuilds driven through the owner reach Current for
-`CatchUpHoldLost` (after a restart and after a released hold within one lease),
-`Corruption`, `TokenizerMismatch`, and `EmbeddingModelMismatch` (model and table
+`CatchUpHoldLost` (after a restart, after a released hold within one lease, and
+with a commit landing between selection and retirement), `Corruption` (damaged
+payload bytes, a missing canonical row, and a family quarantined while
+selected), `TokenizerMismatch`, and `EmbeddingModelMismatch` (model and table
 epoch). The build-constant dimensions are covered by the cause mapping's unit
 tests and by `crates/daemon/tests/search_replacement/recovery.rs`, which
 rebuilds each mismatch cause through the recovery coordinator.
 `crates/daemon/tests/search_replacement/` covers construction, selection,
 retirement, disable, and recovery, including child-process cuts.
+`crates/kernel/tests/kernel_outbox.rs` covers consumer retirement past later
+commits.

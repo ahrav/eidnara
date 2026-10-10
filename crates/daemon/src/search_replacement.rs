@@ -236,6 +236,8 @@ pub enum BuildError {
     Blocked(Blocked),
     #[error("replacement contract mismatch: {0}")]
     Invalid(&'static str),
+    #[error("selected family prefix contradicts the kernel: {0}")]
+    FamilyPrefix(&'static str),
     #[error("fresh snapshot {snapshot} exceeds fixed target {target}")]
     SnapshotBeyondTarget { snapshot: i64, target: i64 },
     #[error("staging outcome requires reconciliation; capture and family remain owned")]

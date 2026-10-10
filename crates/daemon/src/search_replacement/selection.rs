@@ -254,11 +254,16 @@ impl SearchSelection {
         Some(certificate.seed.identity())
     }
 
-    pub fn selected_quarantined(&self) -> bool {
-        self.selected
+    pub fn withdraw_quarantined(&self) -> bool {
+        let quarantined = self
+            .selected
             .load()
             .as_ref()
-            .is_some_and(|family| family.projection.quarantine().is_some())
+            .is_some_and(|family| family.projection.quarantine().is_some());
+        if quarantined {
+            self.selected.store(None);
+        }
+        quarantined
     }
 
     pub fn pin(
@@ -487,8 +492,6 @@ impl SearchSelection {
         budget: &EvalBudget,
         transaction: &LifecycleTransactionLock,
     ) -> Result<(), BuildError> {
-        // Refusing an infinite budget here keeps `family_damage`'s `Invalid` arm exact: past this
-        // point the only `Invalid` `validate_family` can raise is one of its own prefix checks.
         self.admit(gate, budget)?;
         let store = GenerationStore::open(Some(&self.data_home))?;
         match store.reconcile_search(transaction)? {
@@ -665,7 +668,7 @@ impl SearchSelection {
                     .capture_commit_read_target_within_budget(budget)?
                     .through_commit
         {
-            return Err(BuildError::Invalid(
+            return Err(BuildError::FamilyPrefix(
                 "active checkpoint differs from certified prefix",
             ));
         }
@@ -676,7 +679,9 @@ impl SearchSelection {
         if ack.is_none_or(|ack| {
             ack < seed.checkpoint_commit_seq || ack > report.checkpoint.checkpoint_commit_seq
         }) {
-            return Err(BuildError::Invalid("selected consumer checkpoint mismatch"));
+            return Err(BuildError::FamilyPrefix(
+                "selected consumer checkpoint mismatch",
+            ));
         }
         for class in kernel::source_identity::OccurrenceClass::ALL {
             let inventory = kernel.live_source_descriptors(
@@ -687,7 +692,9 @@ impl SearchSelection {
                 budget,
             )?;
             if inventory.next.is_some() || inventory.rows.len() != report.class(class).lexical {
-                return Err(BuildError::Invalid("canonical prefix inventory mismatch"));
+                return Err(BuildError::FamilyPrefix(
+                    "canonical prefix inventory mismatch",
+                ));
             }
             family.projection.read_within(deadline(budget)?, |conn| {
                 if retrieval::batch::read_checkpoint(conn, &self.identity.kernel_incarnation_id)?
@@ -1181,18 +1188,19 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
         BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow) => {
             Some(QuarantineKind::Integrity)
         }
-        BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
+        BuildError::FamilyPrefix(_) => Some(QuarantineKind::Integrity),
         _ => None,
     }
 }
 
-/// `damages_family` identifies errors that report integrity damage to a family's own database or rows: a store integrity failure, a lost connection, or a stored row that contradicts itself.
+/// `damages_family` identifies errors that report integrity damage to a family's own database or rows: a store integrity failure, a lost connection, a stored row that contradicts itself, or a stored prefix that contradicts the kernel's census of it.
 pub(crate) fn damages_family(error: &BuildError) -> bool {
     match error {
         BuildError::Projection(SearchProjectionError::Store(store)) => {
             matches!(classify_store_failure(store), StoreFailure::Integrity)
         }
-        BuildError::Projection(SearchProjectionError::Connection(_)) => true,
+        BuildError::Projection(SearchProjectionError::Connection(_))
+        | BuildError::FamilyPrefix(_) => true,
         BuildError::Projection(SearchProjectionError::Projection(error))
         | BuildError::Mutation(error) => matches!(classify(error), Refusal::Integrity),
         _ => false,
@@ -1275,8 +1283,14 @@ mod tests {
             BuildError::Projection(SearchProjectionError::Projection(
                 ProjectionError::CorruptRow,
             )),
+            BuildError::Projection(SearchProjectionError::Connection("lost".to_owned())),
+            BuildError::FamilyPrefix("canonical prefix inventory mismatch"),
         ] {
             assert!(damages_family(&damaged), "{damaged:?}");
+            assert!(
+                matches!(family_damage(&damaged), Some(QuarantineKind::Integrity)),
+                "the reopen quarantine agrees: {damaged:?}"
+            );
         }
         for refused in [
             BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow),

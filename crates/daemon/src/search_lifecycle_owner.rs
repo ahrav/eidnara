@@ -1424,7 +1424,8 @@ fn refused(
     error: &BuildError,
     running: &ProjectionIdentity,
 ) -> SliceOutcome {
-    rebuild_cause(selection, error, running).map_or_else(
+    let quarantined = selection.withdraw_quarantined();
+    rebuild_cause(selection, quarantined, error, running).map_or_else(
         || SliceOutcome::Blocked(error.to_string()),
         SliceOutcome::Rebuild,
     )
@@ -1433,10 +1434,11 @@ fn refused(
 /// The cause a Current family's refusal earns a rebuild for: `Corruption` when the family's own database or rows are damaged, the first differing identity dimension when the running identity differs from the one the selected seed was built under, and `None` for every other refusal, including a family built over another kernel.
 fn rebuild_cause(
     selection: &SearchSelection,
+    quarantined: bool,
     error: &BuildError,
     running: &ProjectionIdentity,
 ) -> Option<Cause> {
-    if selection.selected_quarantined() || damages_family(error) {
+    if quarantined || damages_family(error) {
         return Some(Cause::Corruption);
     }
     if !matches!(

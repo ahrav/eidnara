@@ -175,6 +175,40 @@ impl Envelope<'_> {
         Ok(())
     }
 
+    /// The owner certifies disposal of everything the consumer read through `certified_through`. Retirement acknowledges the consumer through the pre-operation tip, covering commits that arrive after certification, and deregisters it in the same operation.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`KernelError::InvalidInput`] when `recorded_at` is negative or `consumer_id` is empty.
+    /// - Returns [`KernelError::NotFound`] when the consumer is not registered.
+    pub fn retire_outbox_consumer(
+        &mut self,
+        consumer_id: &str,
+        certified_through: i64,
+        recorded_at: i64,
+    ) -> Result<(), KernelError> {
+        self.guarded(|envelope| {
+            envelope.retire_outbox_consumer_inner(consumer_id, certified_through, recorded_at)
+        })
+    }
+
+    fn retire_outbox_consumer_inner(
+        &mut self,
+        consumer_id: &str,
+        certified_through: i64,
+        recorded_at: i64,
+    ) -> Result<(), KernelError> {
+        let (consumer_id, checkpoint) = self.consumer_checkpoint(consumer_id, recorded_at)?;
+        if checkpoint < certified_through {
+            return Err(KernelError::ConsumerPending);
+        }
+        let tip = self.pre_operation_tip()?;
+        if checkpoint < tip {
+            acknowledge_outbox_in_tx(self.tx, &consumer_id, tip, recorded_at)?;
+        }
+        self.deregister_outbox_consumer_inner(&consumer_id, recorded_at)
+    }
+
     /// # Errors
     ///
     /// - Returns [`KernelError::InvalidInput`] when `abandoned_at` is negative, or when `consumer_id`, `operator_id`, or `reason` is empty.
