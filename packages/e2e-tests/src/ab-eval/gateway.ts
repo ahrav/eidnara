@@ -17,6 +17,7 @@ import {
     ConverseCommand,
     ConverseStreamCommand,
 } from "@aws-sdk/client-bedrock-runtime";
+import { callerOf } from "../bedrock-peer/answers";
 import { encodeEvent } from "../bedrock-peer/eventstream";
 import type { Turn } from "./world";
 
@@ -73,9 +74,10 @@ interface Sink {
     status(code: number, headers: Record<string, string>): void;
     write(chunk: Buffer): void;
     end(): void;
+    signal: AbortSignal;
 }
 
-interface ConverseBody {
+export interface ConverseBody {
     system?: Array<Record<string, unknown>>;
     messages?: Array<{ role: string; content: Array<Record<string, unknown>> }>;
     toolConfig?: {
@@ -107,9 +109,16 @@ function blockText(blocks: Array<Record<string, unknown>> | undefined): string {
         .join("\n");
 }
 
-function classify(body: ConverseBody): Caller {
+export function classify(body: ConverseBody): Caller {
     const system = blockText(body.system);
-    const messages = (body.messages ?? []).map((m) => blockText(m.content)).join("\n");
+    const messages = body.messages ?? [];
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    const eidnara = callerOf({
+        system,
+        messages: messages.map((m) => blockText(m.content)).join("\n"),
+        lastUser: blockText(lastUser?.content),
+    });
+    if (eidnara !== "conversation") return eidnara;
     const tools = body.toolConfig?.tools ?? [];
     if (system.includes("title generator")) return "title";
     if (
@@ -118,10 +127,6 @@ function classify(body: ConverseBody): Caller {
     ) {
         return "native_compaction";
     }
-    if (system.includes("Extract durable project memory")) return "memory_capture";
-    if (system.includes("You are a memory classifier")) return "memory_classifier";
-    if (system.includes("You are ContextResearcher")) return "context_researcher";
-    if (messages.includes("<new_messages>")) return "history_summarizer";
     if (tools.some((tool) => tool.toolSpec?.name === "bash")) return "main";
     return "other";
 }
@@ -142,9 +147,80 @@ function orphanToolResult(body: ConverseBody): boolean {
     return false;
 }
 
+export interface RetryOptions {
+    /** Epoch-millisecond deadline; retries require their backoff to end strictly before `deadlineAt`. */
+    deadlineAt: number;
+    signal: AbortSignal;
+    onRetry: () => void;
+    backoffMs?: (attempt: number) => number;
+}
+
+const MAX_RETRIES = 12;
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+const TRANSIENT_NETWORK_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT"]);
+
+const defaultBackoffMs = (attempt: number): number =>
+    Math.min(60_000, 2_000 * 2 ** Math.min(attempt, 5)) * (0.5 + Math.random());
+
+function retryable(caught: unknown): boolean {
+    const failure = caught as {
+        $metadata?: { httpStatusCode?: number };
+        $retryable?: unknown;
+        code?: string;
+    };
+    return (
+        RETRYABLE_STATUS.has(failure.$metadata?.httpStatusCode ?? 0) ||
+        Boolean(failure.$retryable) ||
+        TRANSIENT_NETWORK_CODES.has(failure.code ?? "")
+    );
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+        };
+        const timer = setTimeout(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+}
+
+export async function sendWithRetry<T>(send: () => Promise<T>, opts: RetryOptions): Promise<T> {
+    const backoffMs = opts.backoffMs ?? defaultBackoffMs;
+    for (let attempt = 0; ; attempt++) {
+        opts.signal.throwIfAborted();
+        try {
+            return await send();
+        } catch (caught) {
+            if (opts.signal.aborted || !retryable(caught) || attempt >= MAX_RETRIES) throw caught;
+            const delay = backoffMs(attempt);
+            if (Date.now() + delay >= opts.deadlineAt) throw caught;
+            opts.onRetry();
+            await abortableSleep(delay, opts.signal);
+        }
+    }
+}
+
 export function estimateTokens(bytes: number): number {
     return Math.round(bytes / 3);
 }
+
+export interface TurnScope {
+    key: string;
+    /** The scripted turn the main gateway answers; the closure gateway's scope carries `null`. */
+    turn: Turn | null;
+    probe: { answer: string; stale?: string } | null;
+    /** Epoch milliseconds when the harness stops waiting for this turn; `Infinity` for closure work. */
+    deadlineAt: number;
+}
+
+const REQUEST_DEADLINE_MS = 900_000;
 
 export interface GatewayOptions {
     arm: string;
@@ -158,10 +234,8 @@ export interface GatewayOptions {
 }
 
 export class BedrockGateway {
-    turn: Turn | null = null;
-    turnKey: string | null = null;
-    probeTokens: { answer: string; stale?: string } | null = null;
-    readonly records: CallRecord[] = [];
+    scope: TurnScope | null = null;
+    forwardedCalls = 0;
     scriptMismatches = 0;
     private http1: Server | undefined;
     private h2: Http2Server | undefined;
@@ -174,7 +248,7 @@ export class BedrockGateway {
     constructor(private readonly options: GatewayOptions) {
         this.client = new BedrockRuntimeClient({
             region: process.env.AWS_REGION ?? "us-west-2",
-            maxAttempts: 3,
+            maxAttempts: 1,
         });
     }
 
@@ -191,6 +265,10 @@ export class BedrockGateway {
     async start(): Promise<void> {
         this.http1 = createHttp1Server((req, res) => {
             const chunks: Buffer[] = [];
+            const disconnected = new AbortController();
+            res.on("close", () => {
+                if (!res.writableFinished) disconnected.abort();
+            });
             req.on("data", (chunk: Buffer) => chunks.push(chunk));
             req.on("end", () => {
                 void this.handle(
@@ -199,6 +277,7 @@ export class BedrockGateway {
                         status: (code, headers) => res.writeHead(code, headers),
                         write: (chunk) => res.write(chunk),
                         end: () => res.end(),
+                        signal: disconnected.signal,
                     },
                 );
             });
@@ -207,6 +286,10 @@ export class BedrockGateway {
         this.h2 = createHttp2Server();
         this.h2.on("stream", (stream: ServerHttp2Stream, headers: Http2Headers) => {
             const chunks: Buffer[] = [];
+            const disconnected = new AbortController();
+            stream.on("close", () => {
+                if (!stream.writableFinished) disconnected.abort();
+            });
             stream.on("data", (chunk: Buffer) => chunks.push(chunk));
             stream.on("error", () => undefined);
             stream.on("end", () => {
@@ -224,6 +307,7 @@ export class BedrockGateway {
                         end: () => {
                             if (!stream.destroyed) stream.end();
                         },
+                        signal: disconnected.signal,
                     },
                 );
             });
@@ -247,7 +331,7 @@ export class BedrockGateway {
     }
 
     private record(record: CallRecord): void {
-        this.records.push(record);
+        if (record.caller !== "main_scripted") this.forwardedCalls++;
         this.options.onCall(record);
     }
 
@@ -278,13 +362,14 @@ export class BedrockGateway {
             return;
         }
         const caller = classify(body);
+        const scope = this.scope;
         const base: CallBase = {
             invalidToolPairing: orphanToolResult(body),
             ts: Date.now(),
             arm: this.options.arm,
             role: this.options.role,
             caller,
-            turn: this.turnKey,
+            turn: scope?.key ?? null,
             estimatedInputTokens: estimateTokens(received.body.length),
             requestBytes: received.body.length,
         };
@@ -312,13 +397,9 @@ export class BedrockGateway {
             });
             return;
         }
-        if (
-            this.options.role === "main" &&
-            caller === "main" &&
-            this.turn &&
-            this.turn.kind !== "probe"
-        ) {
-            const step = this.scriptedStep(body);
+        const turn = scope?.turn;
+        if (this.options.role === "main" && caller === "main" && turn && turn.kind !== "probe") {
+            const step = this.scriptedStep(body, turn);
             if (step) {
                 const usage = {
                     inputTokens: base.estimatedInputTokens,
@@ -344,7 +425,8 @@ export class BedrockGateway {
             }
             this.scriptMismatches++;
         }
-        if (this.probeTokens && caller === "main") {
+        const probe = scope?.probe;
+        if (probe && caller === "main") {
             const text = received.body.toString("utf8");
             const messages = body.messages ?? [];
             const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
@@ -352,9 +434,9 @@ export class BedrockGateway {
             const tokenIn = (haystack: string, token: string | undefined) =>
                 token !== undefined && token.length > 0 && haystack.includes(token);
             base.delivered = {
-                answer: tokenIn(text, this.probeTokens.answer),
-                stale: tokenIn(text, this.probeTokens.stale),
-                inLastUser: tokenIn(lastUser, this.probeTokens.answer),
+                answer: tokenIn(text, probe.answer),
+                stale: tokenIn(text, probe.stale),
+                inLastUser: tokenIn(lastUser, probe.answer),
             };
             let anchor = -1;
             for (let i = messages.length - 1; i >= 0; i--) {
@@ -373,11 +455,14 @@ export class BedrockGateway {
                 .flatMap((m) => m.content)
                 .flatMap((b) => (b.toolUse ? [String((b.toolUse as { name?: string }).name)] : []));
         }
-        await this.forward(modelId, streaming, body, sink, base, started);
+        const deadlineAt = Math.min(
+            scope?.deadlineAt ?? Number.POSITIVE_INFINITY,
+            Date.now() + REQUEST_DEADLINE_MS,
+        );
+        await this.forward(modelId, streaming, body, sink, base, started, deadlineAt);
     }
 
-    private scriptedStep(body: ConverseBody): Array<[string, unknown]> | null {
-        const turn = this.turn as Turn;
+    private scriptedStep(body: ConverseBody, turn: Turn): Array<[string, unknown]> | null {
         const messages = body.messages ?? [];
         let anchor = -1;
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -445,6 +530,7 @@ export class BedrockGateway {
         sink: Sink,
         base: CallBase,
         started: number,
+        deadlineAt: number,
     ): Promise<void> {
         const usage = {
             inputTokens: 0,
@@ -466,29 +552,21 @@ export class BedrockGateway {
             this.temperatureStripped++;
         }
         let localRetries = 0;
-        const send = async (command: ConverseStreamCommand | ConverseCommand): Promise<any> => {
-            for (let attempt = 0; ; attempt++) {
-                try {
-                    return await this.client.send(command as ConverseStreamCommand);
-                } catch (caught) {
-                    const code =
-                        (caught as { $metadata?: { httpStatusCode?: number } }).$metadata
-                            ?.httpStatusCode ?? 0;
-                    const retryable =
-                        code === 429 ||
-                        code === 503 ||
-                        code === 500 ||
-                        code === 502 ||
-                        code === 504;
-                    if (!retryable || attempt >= 12) throw caught;
-                    this.retries++;
-                    localRetries++;
-                    await Bun.sleep(
-                        Math.min(60_000, 2_000 * 2 ** Math.min(attempt, 5)) * (0.5 + Math.random()),
-                    );
-                }
-            }
-        };
+        const send = (command: ConverseStreamCommand | ConverseCommand): Promise<any> =>
+            sendWithRetry(
+                () =>
+                    this.client.send(command as ConverseStreamCommand, {
+                        abortSignal: sink.signal,
+                    }),
+                {
+                    deadlineAt,
+                    signal: sink.signal,
+                    onRetry: () => {
+                        this.retries++;
+                        localRetries++;
+                    },
+                },
+            );
         try {
             if (streaming) {
                 const response = await send(
@@ -499,6 +577,7 @@ export class BedrockGateway {
                 for await (const event of response.stream as AsyncIterable<
                     Record<string, unknown>
                 >) {
+                    if (sink.signal.aborted) break;
                     for (const [type, member] of Object.entries(event)) {
                         if (member === undefined) continue;
                         if (firstByteMs === null) firstByteMs = performance.now() - started;

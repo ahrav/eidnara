@@ -7,7 +7,7 @@ describe("A/B world", () => {
         expect(JSON.stringify(buildWorld(11, "s"))).not.toBe(JSON.stringify(buildWorld(12, "s")));
     });
 
-    for (const tier of Object.keys(TIERS).filter((name) => name !== "l")) {
+    for (const tier of Object.keys(TIERS)) {
         it(`probes every fact of tier ${tier} once, after its statement`, () => {
             const world = buildWorld(5, tier);
             const probes = world.sessions.flatMap((session) =>
@@ -32,6 +32,23 @@ describe("A/B world", () => {
                 ).toBe(true);
             }
         });
+    }
+
+    for (const seed of [5, 21]) {
+        for (const tier of Object.keys(TIERS)) {
+            it(`asks each question of seed ${seed} tier ${tier} about one fact only`, () => {
+                const world = buildWorld(seed, tier);
+                const factByQuestion = new Map<string, string>();
+                for (const session of world.sessions) {
+                    for (const turn of session.turns) {
+                        if (!turn.probe) continue;
+                        const earlier = factByQuestion.get(turn.user);
+                        expect(earlier ?? turn.probe.factId).toBe(turn.probe.factId);
+                        factByQuestion.set(turn.user, turn.probe.factId);
+                    }
+                }
+            });
+        }
     }
 
     it("grades by whole-word match and separates stale and abstained answers", () => {

@@ -111,6 +111,12 @@ const NUMERIC_ATTRS = [
     "max connection pool size",
     "cache TTL in seconds",
     "worker concurrency",
+    "read replica count",
+    "max payload size in kilobytes",
+    "circuit breaker error threshold",
+    "log retention in days",
+    "lease duration in seconds",
+    "rebalance interval in seconds",
 ];
 
 const NAME_ATTRS = [
@@ -120,6 +126,11 @@ const NAME_ATTRS = [
     "on-call rotation alias",
     "dead-letter queue name",
     "canary cohort label",
+    "primary region alias",
+    "metrics namespace",
+    "deploy pipeline name",
+    "secrets path prefix",
+    "alarm channel",
 ];
 
 const ADJ = [
@@ -210,22 +221,64 @@ const TESTS = [
     "caps_fanout_batches",
 ];
 
+const CONSUMERS = [
+    "settlement consumer",
+    "replay consumer",
+    "audit consumer",
+    "backfill consumer",
+    "fanout consumer",
+    "retry consumer",
+    "export consumer",
+    "alerting consumer",
+];
+
+/** Rejection sampling stops after this many draws, so an undersized value space fails loudly. */
+const MAX_DRAWS = 100_000;
+
 class Tokens {
     private used = new Set<string>();
+    private serials = 0;
     constructor(private readonly r: () => number) {}
 
     pick<T>(items: readonly T[]): T {
         return items[Math.floor(this.r() * items.length)] as T;
     }
 
-    private fresh(make: () => string): string {
-        for (;;) {
+    /**
+     * Draws until `keyOf` yields an unclaimed key. Answer tokens and fact subjects share one
+     * claim set, so no two facts share an answer or a question.
+     */
+    unique<T>(make: () => T, keyOf: (value: T) => string): T {
+        for (let draw = 0; draw < MAX_DRAWS; draw++) {
             const value = make();
-            if (!this.used.has(value)) {
-                this.used.add(value);
+            const key = keyOf(value);
+            if (!this.used.has(key)) {
+                this.used.add(key);
                 return value;
             }
         }
+        throw new Error(
+            `no unclaimed value after ${MAX_DRAWS} draws; the value space is too small`,
+        );
+    }
+
+    private fresh(make: () => string): string {
+        return this.unique(make, (value) => value);
+    }
+
+    /**
+     * Filler identifiers are letter-only serials: they never repeat, draw nothing from the
+     * generator, and contain no digits, so no answer token appears inside one.
+     */
+    serial(prefix: string): string {
+        let n = ++this.serials;
+        let letters = "";
+        while (n > 0) {
+            n--;
+            letters = String.fromCharCode(97 + (n % 26)) + letters;
+            n = Math.floor(n / 26);
+        }
+        return `${prefix}-${letters}`;
     }
 
     number(): string {
@@ -355,7 +408,7 @@ function testLog(
 ): { log: string; failed: number; passed: number } {
     const lines: string[] = [
         `$ ./scripts/test.sh ${comp}`,
-        `running ${comp} suite (seed ${t.number()})`,
+        `running ${comp} suite (seed ${t.serial("s")})`,
     ];
     const n = 40 + Math.floor(r() * 50);
     for (let i = 0; i < n; i++) {
@@ -382,7 +435,7 @@ function serviceLog(r: () => number, t: Tokens, comp: string): string {
     for (let i = 0; i < 60; i++) {
         const lvl = r() < 0.08 ? "WARN" : r() < 0.03 ? "ERROR" : "INFO";
         lines.push(
-            `2026-09-${String(1 + Math.floor(r() * 28)).padStart(2, "0")}T${String(Math.floor(r() * 24)).padStart(2, "0")}:${String(Math.floor(r() * 60)).padStart(2, "0")}:11Z ${lvl} ${comp} req=${t.number()} ${prose(r, t, 1)}`,
+            `2026-09-${String(1 + Math.floor(r() * 28)).padStart(2, "0")}T${String(Math.floor(r() * 24)).padStart(2, "0")}:${String(Math.floor(r() * 60)).padStart(2, "0")}:11Z ${lvl} ${comp} req=${t.serial("r")} ${prose(r, t, 1)}`,
         );
     }
     return lines.join("\n");
@@ -422,18 +475,11 @@ export function buildWorld(seed: number, tierName: string): World {
 
     const facts: Fact[] = [];
     const sessions: Session[] = [];
-    const usedSubjects = new Set<string>();
-    const subject = (attrs: readonly string[]): { comp: string; attr: string } => {
-        for (;;) {
-            const comp = t.pick(COMPONENTS);
-            const attr = t.pick(attrs);
-            const key = `${comp} ${attr}`;
-            if (!usedSubjects.has(key)) {
-                usedSubjects.add(key);
-                return { comp, attr };
-            }
-        }
-    };
+    const subject = (attrs: readonly string[]): { comp: string; attr: string } =>
+        t.unique(
+            () => ({ comp: t.pick(COMPONENTS), attr: t.pick(attrs) }),
+            ({ comp, attr }) => `subject:${comp} ${attr}`,
+        );
     let factSeq = 0;
     const nextId = (kind: FactKind) => `${kind}-${String(++factSeq).padStart(3, "0")}`;
     let runSeq = 0;
@@ -507,7 +553,10 @@ export function buildWorld(seed: number, tierName: string): World {
                 (r() < 0.5 ? inSessionProbes : owedCross).push(pf);
             }
             if (s < tier.sessions - 1) {
-                const comp = t.pick(COMPONENTS);
+                const comp = t.unique(
+                    () => `${t.pick(COMPONENTS)} ${t.pick(CONSUMERS)}`,
+                    (consumer) => `hop:${consumer}`,
+                );
                 const queue = t.codename();
                 pendingHops.push({ comp, queue, firstSession: s });
                 planned.push({
@@ -515,7 +564,7 @@ export function buildWorld(seed: number, tierName: string): World {
                     make: (index) => ({
                         index,
                         kind: "fact",
-                        user: `FYI the ${comp} service now consumes from the ${queue} queue.`,
+                        user: `FYI the ${comp} now consumes from the ${queue} queue.`,
                         steps: [{ kind: "text", text: ack(t) }],
                         factIds: [`hop:${queue}`],
                     }),
@@ -537,7 +586,7 @@ export function buildWorld(seed: number, tierName: string): World {
                 const pf: PlannedFact = {
                     fact,
                     statement: `The ${hop.queue} queue is getting ${shards} shards starting this week.`,
-                    question: `how many shards does the queue that the ${hop.comp} service consumes from have?`,
+                    question: `how many shards does the queue that the ${hop.comp} consumes from have?`,
                 };
                 planned.push({ at: slot(), make: (index) => factTurn(index, pf) });
                 owedCross.push(pf);
@@ -746,8 +795,10 @@ export function buildWorld(seed: number, tierName: string): World {
             };
         }
         if (kind === "rationale") {
-            const comp = t.pick(COMPONENTS);
-            const lib = t.pick(LIBS);
+            const { comp, lib } = t.unique(
+                () => ({ comp: t.pick(COMPONENTS), lib: t.pick(LIBS) }),
+                ({ comp, lib }) => `rationale:${comp} ${lib}`,
+            );
             const incident = t.incident();
             const fact: Fact = {
                 id,
@@ -764,8 +815,13 @@ export function buildWorld(seed: number, tierName: string): World {
             };
         }
         if (kind === "constraint") {
-            const comp = t.pick(COMPONENTS);
-            const other = t.pick(COMPONENTS.filter((c) => c !== comp));
+            const { comp, other } = t.unique(
+                () => {
+                    const comp = t.pick(COMPONENTS);
+                    return { comp, other: t.pick(COMPONENTS.filter((c) => c !== comp)) };
+                },
+                ({ comp, other }) => `constraint:${comp} ${other}`,
+            );
             const proxy = t.codename();
             const fact: Fact = {
                 id,
@@ -782,8 +838,13 @@ export function buildWorld(seed: number, tierName: string): World {
             };
         }
         if (kind === "tool_detail") {
-            const comp = t.pick(COMPONENTS);
-            const test = `${t.pick(TESTS)}_${Math.floor(r() * 900)}`;
+            const { comp, test } = t.unique(
+                () => ({
+                    comp: t.pick(COMPONENTS),
+                    test: `${t.pick(TESTS)}_${Math.floor(r() * 900)}`,
+                }),
+                ({ comp, test }) => `tool:${comp} ${test}`,
+            );
             const code = t.errorCode();
             const fact: Fact = {
                 id,

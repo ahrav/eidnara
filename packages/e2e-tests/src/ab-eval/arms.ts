@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import {
     existsSync,
     mkdirSync,
@@ -7,7 +7,7 @@ import {
     realpathSync,
     writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
     connectionFilePath,
@@ -19,10 +19,13 @@ import {
     writeHarnessRuntime,
 } from "../bedrock-peer/harness-runtime";
 import { type SpawnedOpencode, spawnOpencode } from "../opencode-runner/spawn";
-import { attachStrictJsonlReader, type PiRpcEvent, PiRpcProtocol } from "../pi-runner/rpc-client";
+import { type PiRpcEvent, PiRpcProcess, PiRpcProtocol } from "../pi-runner/rpc-client";
 import { HermeticHostStack } from "../rust-runner/hermetic-host";
-import { BedrockGateway, type CallRecord } from "./gateway";
-import type { Turn } from "./world";
+import { isSensitiveEnvKey } from "../secret-env-keys";
+import { StillRunningError, settleWithin } from "./deadline";
+import { BedrockGateway, type CallRecord, type TurnScope } from "./gateway";
+import { stopOwnedTree } from "./procs";
+import { ensureSandboxScript, nodeRoot, opencodeBinary, sandboxKeep, sandboxPath } from "./sandbox";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const PI_PLUGIN_ROOT = join(REPO_ROOT, "packages/pi-plugin");
@@ -30,6 +33,9 @@ const PI_PLUGIN_ROOT = join(REPO_ROOT, "packages/pi-plugin");
 export const MODEL = "global.anthropic.claude-opus-5-5";
 export const MODEL_REF = `amazon-bedrock/${MODEL}`;
 export const CONTEXT_LIMIT = 200_000;
+
+/** A timed-out prompt gets this long to stop after its abort before the arm fails. */
+const DRAIN_MS = 60_000;
 
 const DUMMY_AWS = {
     AWS_ACCESS_KEY_ID: "AKIDABEVALPLACEHOLDER",
@@ -99,111 +105,6 @@ function treeBytes(dir: string): number {
     };
     walk(dir);
     return total;
-}
-
-export function procStats(pid: number | undefined): { rss: number; cpuMs: number } | null {
-    if (!pid) return null;
-    try {
-        const status = readFileSync(`/proc/${pid}/status`, "utf8");
-        const rss = Number(/VmRSS:\s+(\d+)/.exec(status)?.[1] ?? 0) * 1024;
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-        const ticks = Number(fields[11]) + Number(fields[12]);
-        return { rss, cpuMs: (ticks * 1000) / 100 };
-    } catch {
-        return null;
-    }
-}
-
-function descendants(pid: number): number[] {
-    const out: number[] = [];
-    try {
-        for (const entry of readdirSync("/proc")) {
-            if (!/^\d+$/.test(entry)) continue;
-            try {
-                const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
-                const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
-                if (ppid === pid) out.push(Number(entry), ...descendants(Number(entry)));
-            } catch {}
-        }
-    } catch {
-        return out;
-    }
-    return out;
-}
-
-export function treeStats(pid: number | undefined): { rss: number; cpuMs: number } | null {
-    if (!pid) return null;
-    const own = procStats(pid);
-    if (!own) return null;
-    for (const child of descendants(pid)) {
-        const s = procStats(child);
-        if (s) {
-            own.rss += s.rss;
-            own.cpuMs += s.cpuMs;
-        }
-    }
-    return own;
-}
-
-/**
- * The script enters a private mount namespace as root, hides `/tmp` and the invoking user's home
- * behind empty tmpfs mounts, binds the kept paths back, and drops to the invoking user. Agents in
- * an arm then see only their own arm, the harness binaries, and the repository.
- */
-function sandboxScript(hidden: readonly string[]): string {
-    const mounts = hidden.map((dir) => `mount -t tmpfs -o mode=1777 tmpfs ${dir}`).join("\n");
-    return `#!/bin/sh
-AB_PATH="$PATH" exec sudo -n --preserve-env unshare --mount --propagation private /bin/sh -c '
-set -e
-keep=""
-while [ "$1" != "--" ]; do keep="$keep $1"; shift; done
-shift
-st=$(mktemp -d /dev/shm/abst.XXXXXX)
-for p in $keep; do mkdir -p "$st$p"; mount --rbind "$p" "$st$p"; done
-${mounts}
-for p in $keep; do mkdir -p "$p"; mount --rbind "$st$p" "$p"; done
-export PATH="$AB_PATH"
-exec setpriv --reuid=${process.getuid?.() ?? 0} --regid=${process.getgid?.() ?? 0} --init-groups -- "$@"' sh "$@"
-`;
-}
-
-export function nodeRoot(): string {
-    return resolve(realpathSync(Bun.which("node") as string), "../..");
-}
-
-/** The pinned OpenCode binary: `opencode` on PATH resolved to its real file. */
-export function opencodeBinary(): string {
-    const found = Bun.which("opencode");
-    if (!found) throw new Error("opencode is not on PATH");
-    return realpathSync(found);
-}
-
-export function sandboxKeep(armRoot: string): string[] {
-    return [
-        REPO_ROOT,
-        nodeRoot(),
-        ensurePiInstall(),
-        resolve(opencodeBinary(), "../../.."),
-        armRoot,
-    ];
-}
-
-export function sandboxPath(): string {
-    return [join(nodeRoot(), "bin"), "/usr/local/bin", "/usr/bin", "/bin"].join(":");
-}
-
-/** Writes the sandbox script under `dir` and returns its path. */
-export function ensureSandboxScript(dir: string): string {
-    const path = join(dir, "sandbox.sh");
-    const hidden = [...new Set(["/tmp", realpathSync(homedir())])];
-    writeFileSync(path, sandboxScript(hidden), { mode: 0o755 });
-    return path;
-}
-
-/** Whether passwordless `sudo` can run the sandbox on this host. */
-export function sandboxAvailable(): boolean {
-    return spawnSync("sudo", ["-n", "true"]).status === 0 && Bun.which("unshare") !== null;
 }
 
 export abstract class Arm {
@@ -282,15 +183,14 @@ export abstract class Arm {
         }
     }
 
-    setTurn(
-        turn: Turn | null,
-        key: string | null,
-        probeTokens: { answer: string; stale?: string } | null = null,
-    ): void {
-        this.main.probeTokens = probeTokens;
-        this.main.turn = turn;
-        this.main.turnKey = key;
-        this.closure.turnKey = key;
+    setTurn(scope: TurnScope | null): void {
+        this.main.scope = scope;
+        this.closure.scope = scope && {
+            ...scope,
+            turn: null,
+            probe: null,
+            deadlineAt: Number.POSITIVE_INFINITY,
+        };
     }
 
     abstract openSession(index: number): Promise<void>;
@@ -316,10 +216,18 @@ export abstract class Arm {
     }
 }
 
+export function inheritedHarnessEnv(source: NodeJS.ProcessEnv): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(source)) {
+        if (v === undefined || isSensitiveEnvKey(k) || k.startsWith("EIDNARA_") || k === "NODE_ENV")
+            continue;
+        env[k] = v;
+    }
+    return env;
+}
+
 export class PiArm extends Arm {
-    private child: ChildProcess | null = null;
-    private protocol: PiRpcProtocol | null = null;
-    private stderr = "";
+    private rpc: PiRpcProcess | null = null;
     private sid: string | null = null;
     readonly agentDir: string;
     readonly configDir: string;
@@ -394,17 +302,7 @@ export class PiArm extends Arm {
         ];
         if (this.spec.eidnara) args.push("--extension", PI_PLUGIN_ROOT);
         args.push("--model", MODEL_REF);
-        const env: Record<string, string> = {};
-        for (const [k, v] of Object.entries(process.env)) {
-            if (
-                v === undefined ||
-                k.startsWith("AWS_") ||
-                k.startsWith("EIDNARA_") ||
-                k === "NODE_ENV"
-            )
-                continue;
-            env[k] = v;
-        }
+        const env = inheritedHarnessEnv(process.env);
         Object.assign(env, DUMMY_AWS, {
             HOME: join(this.ctx.root, "home"),
             PI_CODING_AGENT_DIR: this.agentDir,
@@ -428,21 +326,7 @@ export class PiArm extends Arm {
             env,
             stdio: ["pipe", "pipe", "pipe"],
         });
-        this.child = child;
-        this.stderr = "";
-        child.stderr?.on("data", (chunk: Buffer) => {
-            this.stderr = (this.stderr + chunk.toString()).slice(-20_000);
-        });
-        const protocol = new PiRpcProtocol();
-        this.protocol = protocol;
-        attachStrictJsonlReader(child.stdout as NonNullable<typeof child.stdout>, (line) =>
-            protocol.dispatchLine(line),
-        );
-        child.once("close", (code, signal) =>
-            protocol.rejectPending(
-                new Error(`pi exited ${code} ${signal}\n${this.stderr.slice(-3000)}`),
-            ),
-        );
+        this.rpc = new PiRpcProcess(child, new PiRpcProtocol(), { stderrLimit: 20_000 });
         await Bun.sleep(300);
         const state = await this.command<{ sessionId?: string }>("get_state", {}, 120_000);
         this.sid = state.sessionId ?? null;
@@ -453,32 +337,34 @@ export class PiArm extends Arm {
         params: Record<string, unknown>,
         timeoutMs: number,
     ): Promise<T> {
-        const protocol = this.protocol;
-        const stdin = this.child?.stdin;
-        if (!protocol || !stdin) throw new Error("pi not running");
-        const response = await protocol.sendCommand<T>(
-            (line) => stdin.write(line),
-            method,
-            params,
-            { timeoutMs },
-        );
+        const rpc = this.rpc;
+        if (!rpc) throw new Error("pi not running");
+        const response = await rpc.sendCommand<T>(method, params, { timeoutMs });
         if (response.success === false)
             throw new Error(`${method} failed: ${JSON.stringify(response)}`);
         return response.data as T;
     }
 
     async prompt(text: string, timeoutMs: number): Promise<PromptResult> {
-        const protocol = this.protocol as PiRpcProtocol;
+        const rpc = this.rpc as PiRpcProcess;
         const started = performance.now();
-        const end = protocol.waitForEvent((event: PiRpcEvent) => event.type === "agent_end", {
-            timeoutMs,
+        const cancel = new AbortController();
+        const end = rpc.waitForEvent((event: PiRpcEvent) => event.type === "agent_end", {
+            timeoutMs: timeoutMs + 2 * DRAIN_MS,
             label: "agent_end",
+            signal: cancel.signal,
         });
+        end.catch(() => undefined);
+        const work = this.command("prompt", { message: text }, timeoutMs).then(() => end);
         try {
-            await this.command("prompt", { message: text }, timeoutMs);
-            const event = await end;
+            const outcome = await settleWithin(work, timeoutMs, {
+                abort: () => this.command("abort", {}, DRAIN_MS),
+                drainMs: DRAIN_MS,
+            });
             const ms = performance.now() - started;
-            const messages = (event.messages as Array<Record<string, unknown>> | undefined) ?? [];
+            if (outcome.timedOut) return { answer: "", ms, error: "timeout" };
+            const messages =
+                (outcome.value.messages as Array<Record<string, unknown>> | undefined) ?? [];
             const textOf = (m: Record<string, unknown> | undefined): string =>
                 ((m?.content as Array<Record<string, unknown>> | undefined) ?? [])
                     .filter((b) => b.type === "text")
@@ -492,32 +378,30 @@ export class PiArm extends Arm {
                 last?.stopReason === "error" ? String(last.errorMessage ?? "error") : undefined;
             return { answer, ms, ...(stop ? { error: stop } : {}) };
         } catch (error) {
-            end.catch(() => undefined);
+            if (error instanceof StillRunningError) throw error;
             return {
                 answer: "",
                 ms: performance.now() - started,
                 error: String(error).slice(0, 2000),
             };
+        } finally {
+            cancel.abort();
         }
     }
 
     async closeSession(): Promise<void> {
-        const child = this.child;
-        if (!child) return;
-        this.child = null;
-        this.protocol = null;
-        if (child.exitCode !== null) return;
+        const rpc = this.rpc;
+        if (!rpc) return;
+        this.rpc = null;
+        const { child } = rpc;
+        if (child.exitCode !== null || child.signalCode !== null) return;
         child.stdin?.end();
-        child.kill("SIGTERM");
-        const exited = await Promise.race([
-            new Promise<boolean>((done) => child.once("exit", () => done(true))),
-            Bun.sleep(10_000).then(() => false),
-        ]);
-        if (!exited) child.kill("SIGKILL");
+        if (child.pid !== undefined) await stopOwnedTree(child.pid, 10_000);
+        await rpc.shutdown(5_000).catch(() => undefined);
     }
 
     harnessPid(): number | undefined {
-        return this.child?.pid;
+        return this.rpc?.child.pid;
     }
 
     harnessDataDirs(): string[] {
@@ -529,7 +413,7 @@ export class PiArm extends Arm {
     }
 
     stderrTail(): string {
-        return this.stderr.slice(-4000);
+        return (this.rpc?.getStderr() ?? "").slice(-4000);
     }
 }
 
@@ -537,8 +421,14 @@ function ensurePiCli(): string {
     return ensurePiInstall();
 }
 
+interface OpencodePromptResponse {
+    error?: unknown;
+    data?: { parts?: Array<Record<string, unknown>>; info?: Record<string, unknown> };
+}
+
 export class OpencodeArm extends Arm {
     private oc: SpawnedOpencode | null = null;
+    private servePid: number | undefined;
     private client: any = null;
     private sid: string | null = null;
     private env: { configDir: string; dataDir: string; cacheDir: string; workdir: string };
@@ -618,19 +508,23 @@ export class OpencodeArm extends Arm {
 
     async prompt(text: string, timeoutMs: number): Promise<PromptResult> {
         const started = performance.now();
+        const client = this.client;
+        const sid = this.sid;
         try {
-            const result = await Promise.race([
-                this.client.session.prompt({
-                    path: { id: this.sid },
+            const outcome = await settleWithin<OpencodePromptResponse>(
+                client.session.prompt({
+                    path: { id: sid },
                     body: {
                         model: { providerID: "amazon-bedrock", modelID: MODEL },
                         parts: [{ type: "text", text }],
                     },
                 }),
-                Bun.sleep(timeoutMs).then(() => null),
-            ]);
+                timeoutMs,
+                { abort: () => client.session.abort({ path: { id: sid } }), drainMs: DRAIN_MS },
+            );
             const ms = performance.now() - started;
-            if (result === null) return { answer: "", ms, error: "timeout" };
+            if (outcome.timedOut) return { answer: "", ms, error: "timeout" };
+            const result = outcome.value;
             if (result.error)
                 return { answer: "", ms, error: JSON.stringify(result.error).slice(0, 2000) };
             const parts = (result.data?.parts ?? []) as Array<Record<string, unknown>>;
@@ -642,6 +536,7 @@ export class OpencodeArm extends Arm {
             const error = info?.error ? JSON.stringify(info.error).slice(0, 2000) : undefined;
             return { answer, ms, ...(error ? { error } : {}) };
         } catch (error) {
+            if (error instanceof StillRunningError) throw error;
             return {
                 answer: "",
                 ms: performance.now() - started,
@@ -652,22 +547,33 @@ export class OpencodeArm extends Arm {
 
     async closeSession(): Promise<void> {
         const oc = this.oc;
+        const pid = this.harnessPid();
         this.oc = null;
         this.client = null;
-        if (oc) await oc.kill();
+        this.servePid = undefined;
+        if (!oc) return;
+        if (pid !== undefined) await stopOwnedTree(pid, 10_000);
+        await oc.kill();
     }
 
     harnessPid(): number | undefined {
         if (!this.oc) return undefined;
+        if (this.servePid !== undefined && existsSync(`/proc/${this.servePid}`)) {
+            return this.servePid;
+        }
         const port = String(this.oc.port);
+        this.servePid = undefined;
         for (const entry of readdirSync("/proc")) {
             if (!/^\d+$/.test(entry)) continue;
             try {
                 const cmd = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
-                if (cmd.includes("serve") && cmd.includes(port)) return Number(entry);
+                if (cmd.includes("serve") && cmd.includes(port)) {
+                    this.servePid = Number(entry);
+                    break;
+                }
             } catch {}
         }
-        return undefined;
+        return this.servePid;
     }
 
     harnessDataDirs(): string[] {

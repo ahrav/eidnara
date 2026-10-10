@@ -257,9 +257,19 @@ turn latency, model calls and tokens per caller, and memory.
   `oc-on`. `pi-on` strips the summarizer's temperature at the gateway;
   `pi-onraw` sends requests as the plugin builds them. Eidnara arms run the
   release `direct_host_fixture` with the pinned harness closures.
-- With passwordless `sudo`, each harness runs in a mount namespace that hides
-  `/tmp` and the home directory except its own arm, so an agent cannot read
-  another arm or the answer key. `--sandbox off` runs without it.
+- With passwordless `sudo`, each harness runs in its own mount and PID
+  namespace. Empty mounts cover `/tmp`, the home directory, and the run
+  directory, and the arm's own directory is mounted back; the arm's `/proc`
+  lists only its own processes. The harness runs as the invoking user with
+  `no_new_privs` set, so `sudo` inside the arm stays unprivileged. The run
+  directory must sit outside the repository and the harness install
+  directories. `--sandbox off` runs without isolation.
+- Each run writes to a fresh directory: `--out` must be missing or empty, and
+  the default is a timestamped directory under `<tmp>/ab-eval/runs/` that
+  `runs/latest` links to.
+- A turn that reaches its timeout is aborted, and the next turn starts once
+  the harness has stopped it. The gateway retries throttled Bedrock calls
+  until the turn's deadline.
 - `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
   those prompts, to exercise a pass that misses its deadline.
 - The gateway answers a request whose estimated input exceeds the arms'

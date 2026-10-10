@@ -1,17 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import {
-    type Arm,
-    type ArmSpec,
-    armRoot,
-    makeArm,
-    procStats,
-    sandboxAvailable,
-    treeStats,
-} from "../src/ab-eval/arms";
+import { dirname, join, resolve } from "node:path";
+import { type Arm, type ArmSpec, armRoot, makeArm } from "../src/ab-eval/arms";
 import type { CallRecord } from "../src/ab-eval/gateway";
+import { procStats, treeStats } from "../src/ab-eval/procs";
+import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
+import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
 import { buildWorld, grade, type World, writeRepo } from "../src/ab-eval/world";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
@@ -21,6 +16,8 @@ interface Options {
     seed: number;
     arms: string[];
     out: string;
+    /** True when `out` is the default timestamped directory, which `runs/latest` then names. */
+    linkLatest: boolean;
     paceMs: number;
     sessionGapMs: number;
     fixtureBin: string;
@@ -36,11 +33,13 @@ function parseArgs(argv: string[]): Options {
         const i = argv.indexOf(`--${name}`);
         return i >= 0 && argv[i + 1] !== undefined ? (argv[i + 1] as string) : fallback;
     };
+    const out = get("out", "");
     return {
         tier: get("tier", "xs"),
         seed: Number(get("seed", "7")),
         arms: get("arms", "pi-on,pi-off,oc-on,oc-off").split(","),
-        out: resolve(get("out", join(tmpdir(), "ab-eval/runs/latest"))),
+        out: out ? resolve(out) : timestampedRunDir(join(tmpdir(), "ab-eval/runs")),
+        linkLatest: !out,
         paceMs: Number(get("pace-ms", "1500")),
         sessionGapMs: Number(get("session-gap-ms", "30000")),
         fixtureBin: get(
@@ -100,30 +99,31 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
             const probed = turn.probe
                 ? world.facts.find((f) => f.id === turn.probe?.factId)
                 : undefined;
-            arm.setTurn(
-                turn,
+            const timeout = turn.kind === "probe" ? 900_000 : 600_000;
+            arm.setTurn({
                 key,
-                probed && probed.kind !== "abstain"
-                    ? { answer: probed.answer, ...(probed.stale ? { stale: probed.stale } : {}) }
-                    : null,
-            );
+                turn,
+                probe:
+                    probed && probed.kind !== "abstain"
+                        ? {
+                              answer: probed.answer,
+                              ...(probed.stale ? { stale: probed.stale } : {}),
+                          }
+                        : null,
+                deadlineAt: Date.now() + timeout,
+            });
             const mismatchesBefore = arm.main.scriptMismatches;
-            const forwardedBefore = arm.main.records.filter(
-                (r) => r.caller !== "main_scripted",
-            ).length;
+            const forwardedBefore = arm.main.forwardedCalls;
             const hostPid = arm.hostPid();
             if (opts.stallAt.has(key) && hostPid !== undefined) {
                 process.kill(hostPid, "SIGSTOP");
                 setTimeout(() => process.kill(hostPid, "SIGCONT"), opts.stallMs);
                 log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
             }
-            const timeout = turn.kind === "probe" ? 900_000 : 600_000;
             const result = await arm.prompt(turn.user, timeout);
             const harness = treeStats(arm.harnessPid());
             const host = procStats(arm.hostPid());
-            const forwarded =
-                arm.main.records.slice(0).filter((r) => r.caller !== "main_scripted").length -
-                forwardedBefore;
+            const forwarded = arm.main.forwardedCalls - forwardedBefore;
             const fact = turn.probe
                 ? world.facts.find((f) => f.id === turn.probe?.factId)
                 : undefined;
@@ -165,7 +165,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
                 );
             await Bun.sleep(turn.kind === "probe" ? 500 : opts.paceMs);
         }
-        arm.setTurn(null, null);
+        arm.setTurn(null);
         await arm.closeSession();
         const disk = arm.diskBytes();
         appendFileSync(
@@ -194,9 +194,10 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
 
 async function main(): Promise<void> {
     const opts = parseArgs(process.argv.slice(2));
-    mkdirSync(opts.out, { recursive: true });
-    if (!opts.sandbox)
-        console.warn("arms run unsandboxed: agents can read other arms and the answer key");
+    claimRunDir(opts.out);
+    if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
+    if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep());
+    else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
     const world = buildWorld(opts.seed, opts.tier);
     writeFileSync(
         join(opts.out, "world.json"),
