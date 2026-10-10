@@ -732,23 +732,104 @@ fn render_aged(row: &StoredHistorySegment, newer: i64) -> String {
     render_natural(&rows)
 }
 
-/// The first number of newer rows at which `row` serves each tier.
+/// Each tier's first age: the least number of newer rows under which the natural curve serves
+/// `row` at that tier. The search requires `rank_at(newer)` to be nondecreasing in `newer`.
 fn first_ages(row: &StoredHistorySegment, approved: &[String; 4], id: &str) -> [i64; 5] {
-    let mut first: [Option<i64>; 5] = [None; 5];
+    const MAX_NEWER: i64 = crate::decay_render::PRESSURE_WINDOW as i64 + 2;
     let mut rows = vec![row.clone()];
-    for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
-        if newer > 0 {
-            rows.push(filler_row(row.sequence + newer, row.end_message + newer));
+    let mut ranks: Vec<Option<usize>> = Vec::new();
+    let mut rank_at = |newer: i64| -> usize {
+        let at = usize::try_from(newer).unwrap();
+        while rows.len() <= at {
+            let k = rows.len() as i64;
+            rows.push(filler_row(row.sequence + k, row.end_message + k));
         }
-        let tier = served_tier(&render_natural(&rows), &row.title, approved);
-        first[rank(tier)].get_or_insert(newer);
-        if first.iter().all(Option::is_some) {
-            break;
+        if ranks.len() <= at {
+            ranks.resize(at + 1, None);
         }
+        *ranks[at].get_or_insert_with(|| {
+            rank(served_tier(
+                &render_natural(&rows[..=at]),
+                &row.title,
+                approved,
+            ))
+        })
+    };
+    let mut first = [0i64; 5];
+    let mut below = 0i64;
+    for wanted in 1..TIERS.len() {
+        let mut step = 1;
+        let mut at_or_past = loop {
+            let probe = (below + step).min(MAX_NEWER);
+            if rank_at(probe) >= wanted {
+                break probe;
+            }
+            if probe == MAX_NEWER {
+                panic!("{id}: natural decay never served {:?}", TIERS[wanted]);
+            }
+            below = probe;
+            step *= 2;
+        };
+        while at_or_past - below > 1 {
+            let middle = below + (at_or_past - below) / 2;
+            if rank_at(middle) >= wanted {
+                at_or_past = middle;
+            } else {
+                below = middle;
+            }
+        }
+        assert_eq!(
+            rank_at(at_or_past),
+            wanted,
+            "{id}: natural decay never served {:?}",
+            TIERS[wanted]
+        );
+        first[wanted] = at_or_past;
+        below = at_or_past;
     }
-    TIERS.map(|tier| {
-        first[rank(tier)].unwrap_or_else(|| panic!("{id}: natural decay never served {tier:?}"))
-    })
+    assert_eq!(rank_at(0), 0, "{id}: the fresh row serves P1");
+    first
+}
+
+#[test]
+fn first_ages_match_an_exhaustive_scan_at_every_decay_rate() {
+    let approved = [
+        "Alpha ships the first body in full.".to_owned(),
+        "Alpha ships the body.".to_owned(),
+        "Alpha ships.".to_owned(),
+        String::new(),
+    ];
+    for importance in [1, 25, 50, 75, 100] {
+        let row = StoredHistorySegment {
+            sequence: 1,
+            start_message: 1,
+            end_message: 4,
+            end_message_id: "cf-alpha-4#0".to_owned(),
+            title: "Alpha".to_owned(),
+            content: approved[0].clone(),
+            p1: Some(approved[0].clone()),
+            p2: Some(approved[1].clone()),
+            p3: Some(approved[2].clone()),
+            p4: Some(String::new()),
+            importance,
+            ..Default::default()
+        };
+        let mut scanned: [Option<i64>; 5] = [None; 5];
+        let mut rows = vec![row.clone()];
+        for newer in 0..=crate::decay_render::PRESSURE_WINDOW as i64 + 2 {
+            if newer > 0 {
+                rows.push(filler_row(row.sequence + newer, row.end_message + newer));
+            }
+            let tier = served_tier(&render_natural(&rows), &row.title, &approved);
+            scanned[rank(tier)].get_or_insert(newer);
+        }
+        let scanned = scanned.map(|age| age.unwrap_or_else(|| panic!("importance {importance}")));
+        assert_eq!(
+            first_ages(&row, &approved, "alpha"),
+            scanned,
+            "importance {importance}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2876,14 +2957,36 @@ fn bound(detail: Value, capture: &RealCapture) -> Value {
     detail
 }
 
+/// Folds a test-authored baseline, then `source` with `output` translated past it, through one
+/// handler, and serves the result: the m1-window scenario of [`serve_capture`].
+async fn windowed_fold(case: &'static Case, source: &'static Source, output: &str) -> Value {
+    let count = source.messages.len() as u64;
+    let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
+    let shifted = source_ingress(case, source)
+        .into_iter()
+        .map(|mut message| {
+            message.ordinal += SCAFFOLD_MESSAGES;
+            message
+        })
+        .collect();
+    let outputs = [
+        baseline_output,
+        translated(output, count, SCAFFOLD_MESSAGES),
+    ];
+    let windowed = two_folds(baseline, shifted, follow_up_for(case, source), outputs).await;
+    windowed.pass(None, "cfg0").await
+}
+
 /// Folds `source` once with its captured output under the capture's model, then serves it
 /// naturally: P1 at m0 on the first fold, P1 in the m1 window after a test-authored baseline,
 /// and each decayed tier at m0 under test-authored newer rows. Every observation names the
-/// capture it serves.
+/// capture it serves. `windowed` is the source's [`windowed_fold`], which the caller runs
+/// alongside the first fold.
 async fn serve_capture(
     case: &'static Case,
-    source: &Source,
+    source: &'static Source,
     capture: &RealCapture,
+    windowed: tokio::task::JoinHandle<Value>,
 ) -> Vec<Observation> {
     let output = &capture.output;
     let config = || DaemonConfig {
@@ -2941,26 +3044,9 @@ async fn serve_capture(
         )),
     );
 
-    let count = source.messages.len() as u64;
-    let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
-    let shifted = source_ingress(case, source)
-        .into_iter()
-        .map(|mut message| {
-            message.ordinal += SCAFFOLD_MESSAGES;
-            message
-        })
-        .collect();
-    let windowed = two_folds(
-        baseline,
-        shifted,
-        follow_up_for(case, source),
-        [
-            baseline_output,
-            translated(output, count, SCAFFOLD_MESSAGES),
-        ],
-    )
-    .await;
-    let served = windowed.pass(None, "cfg0").await;
+    let served = windowed
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()));
     assert!(
         synthetic_text(&served, 1).contains(&p1),
         "{}: P1 rides m1",
@@ -3021,7 +3107,7 @@ async fn serve_capture(
 /// Serves every corpus source from its published real capture of `EIDNARA_FIDELITY_REAL_MODEL`
 /// in `EIDNARA_FIDELITY_REAL_CAPTURE_DIR`, and writes the bound observations under
 /// `EIDNARA_FIDELITY_OBSERVATIONS_DIR`. A source with no published real capture fails the run.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "opt-in real-serving replay; needs EIDNARA_FIDELITY_REAL_CAPTURE_DIR naming published \
             real captures, EIDNARA_FIDELITY_REAL_MODEL naming the arm's model, and \
             EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
@@ -3035,14 +3121,52 @@ async fn real_captures_serve_their_natural_tiers() {
         "{OBSERVATIONS_DIR} names no observation directory"
     );
     let captures = real_captures(Path::new(&dir), &model);
-    for (case, source) in sources() {
-        let capture = captures
-            .get(&source.id)
-            .unwrap_or_else(|| panic!("{}: no published real capture", source.id));
-        for observation in serve_capture(case, source, capture).await {
-            observation.emit();
-        }
+    serve_captures(&captures, true).await;
+}
+
+/// Serves every corpus source from its capture concurrently and returns the observations in
+/// corpus order. A missing capture or a failing serving assertion panics the caller.
+async fn serve_captures(
+    captures: &BTreeMap<String, RealCapture>,
+    emit: bool,
+) -> Vec<Vec<Observation>> {
+    let captured: Vec<(&'static Case, &'static Source, RealCapture)> = sources()
+        .map(|(case, source)| {
+            let capture = captures
+                .get(&source.id)
+                .unwrap_or_else(|| panic!("{}: no published real capture", source.id))
+                .clone();
+            (case, source, capture)
+        })
+        .collect();
+    // The windowed folds carry the most work, so they start first and the first folds fill in.
+    let windowed: Vec<_> = captured
+        .iter()
+        .map(|&(case, source, ref capture)| {
+            let output = capture.output.clone();
+            tokio::spawn(async move { windowed_fold(case, source, &output).await })
+        })
+        .collect();
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, ((case, source, capture), windowed)) in
+        captured.into_iter().zip(windowed).enumerate()
+    {
+        tasks.spawn(async move {
+            let mut observations = serve_capture(case, source, &capture, windowed).await;
+            if emit {
+                observations = observations.into_iter().map(Observation::emit).collect();
+            }
+            (index, observations)
+        });
     }
+    let mut served: Vec<Option<Vec<Observation>>> = (0..tasks.len()).map(|_| None).collect();
+    while let Some(joined) = tasks.join_next().await {
+        let (index, observations) = joined.unwrap_or_else(|error| {
+            std::panic::resume_unwind(error.into_panic());
+        });
+        served[index] = Some(observations);
+    }
+    served.into_iter().map(Option::unwrap).collect()
 }
 
 /// A capture file published with the real origin binds what the real-serving replay serves: the
@@ -3050,7 +3174,7 @@ async fn real_captures_serve_their_natural_tiers() {
 /// keyed by the capture file's SHA-256; every observation the replay records names that digest,
 /// the real origin, and the capture's model. A capture of another model, another corpus, a
 /// scripted origin, or an unpublished terminal binds nothing.
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
     const MODEL: &str = "probe/model";
     // One source answers with whitespace-wrapped, escaped tier bodies, as a real model may.
@@ -3112,9 +3236,8 @@ async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
     }
 
     let mut witnessed = 0;
-    for (case, source) in sources() {
+    for ((_, source), observations) in sources().zip(serve_captures(&captures, false).await) {
         let capture = &captures[&source.id];
-        let observations = serve_capture(case, source, capture).await;
         witnessed += observations
             .iter()
             .filter(|observation| observation.scenario.is_some())
