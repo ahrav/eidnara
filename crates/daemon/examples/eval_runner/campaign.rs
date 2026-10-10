@@ -1891,13 +1891,23 @@ pub fn parse_flags(
     flags: &[&str],
     usage: &str,
 ) -> Result<BTreeMap<String, String>, String> {
+    parse_flags_with_optional(args, flags, &[], usage)
+}
+
+/// [`parse_flags`] that also accepts each of `optional` at most once without requiring it.
+pub fn parse_flags_with_optional(
+    args: impl IntoIterator<Item = String>,
+    flags: &[&str],
+    optional: &[&str],
+    usage: &str,
+) -> Result<BTreeMap<String, String>, String> {
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let Some(name) = flag.strip_prefix("--") else {
             return Err(format!("unexpected argument {flag:?}; {usage}"));
         };
-        if !flags.contains(&name) {
+        if !flags.contains(&name) && !optional.contains(&name) {
             return Err(format!("unknown flag --{name}; {usage}"));
         }
         let value = match args.next() {

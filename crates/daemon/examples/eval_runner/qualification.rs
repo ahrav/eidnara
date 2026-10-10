@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, BufWriter, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use daemon::synthetic_history::SyntheticHistory;
 use eval_core::{
-    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, Environment, FAKE_MODEL_LATENCY_MS, Histogram,
-    HostManifest, MESSAGE_TOKENS, OutageRun, OutageSchedule, Phase, Publication,
-    QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape, StoreObservation,
-    audit_lineage, catalog,
+    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, DIRTY_SOURCE_SUFFIX, Environment,
+    FAKE_MODEL_LATENCY_MS, Histogram, HostManifest, MESSAGE_TOKENS, OutageRun, OutageSchedule,
+    Phase, Publication, QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape,
+    StoreObservation, WitnessRun, audit_lineage, catalog, check_witness_runs,
 };
 use flate2::{Compression, write::DeflateEncoder};
 use host_runtime::{CallError, Client, ClientRoute, RequestOptions, TargetKind};
@@ -19,14 +19,15 @@ use memory_store::MemoryStore;
 use rusqlite::params;
 use serde_json::{Value, json};
 
-use super::campaign::{command, parse_flags, sha256_hex};
+use super::campaign::{command, parse_flags_with_optional, sha256_hex};
 use super::scale::commit_anchor;
 use super::support::direct_host::{FixtureProcess, Launch, fixture_binary, wait_for_store};
 use super::support::eval_surface::block_on;
 
 pub const USAGE: &str = "qualification --out <report.json> --cases <all|name,...> \
      --operations <per repetition> --repetitions <n> --outage-scale <divisor> \
-     --state-dir <dir on the measured filesystem>";
+     --state-dir <dir on the measured filesystem> \
+     [--witness-runs <witnesses.json: witness name to {test, source_commit, exit_code}>]";
 
 const RAW_CAP_BYTES: u64 = memory_store::MAX_SESSION_TRANSCRIPT_COMPRESSED_BYTES as u64;
 
@@ -35,15 +36,33 @@ const WORDS: [&str; 8] = [
 ];
 
 fn message_text(seed: u64, ordinal: u64) -> String {
+    const PADDED_WORDS: [[u8; 8]; WORDS.len()] = {
+        let mut padded = [[0; 8]; WORDS.len()];
+        let mut word = 0;
+        while word < WORDS.len() {
+            let bytes = WORDS[word].as_bytes();
+            let mut byte = 0;
+            while byte < bytes.len() {
+                assert!(bytes[byte] == b' ' || bytes[byte].is_ascii_lowercase());
+                padded[word][byte] = bytes[byte];
+                byte += 1;
+            }
+            word += 1;
+        }
+        padded
+    };
     let mut state = (seed ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
-    let mut text = String::with_capacity(MESSAGE_TOKENS * 8);
+    let mut bytes = [0; MESSAGE_TOKENS * 8];
+    let mut len = 0;
     for _ in 0..MESSAGE_TOKENS {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        text.push_str(WORDS[(state % WORDS.len() as u64) as usize]);
+        let word = (state % WORDS.len() as u64) as usize;
+        bytes[len..len + 8].copy_from_slice(&PADDED_WORDS[word]);
+        len += WORDS[word].len();
     }
-    text
+    String::from_utf8(bytes[..len].to_vec()).expect("concatenated words are UTF-8")
 }
 
 /// ASCII text long enough to fill one transform frame; requests slice it to fit.
@@ -142,10 +161,28 @@ fn window_request(case: &Case, session: &str, anchor: Anchor, turn: u64) -> Valu
 
 /// The seeding pass streams this file from disk, so no generator state stays resident.
 fn write_generator(path: &Path, messages: u64) -> io::Result<()> {
-    let mut out = BufWriter::new(fs::File::create(path)?);
+    let mut out = BufWriter::with_capacity(1024 * 1024, fs::File::create(path)?);
     for ordinal in 1..=messages {
-        serde_json::to_writer(&mut out, &window_message(Shape::Mixed, ordinal))?;
-        out.write_all(b"\n")?;
+        out.write_all(br#"{"ck":{"content":[{"kind":{"text":""#)?;
+        out.write_all(message_text(QUALIFICATION_SEED, ordinal).as_bytes())?;
+        out.write_all(br#"","type":"text"}}"#)?;
+        if ordinal.is_multiple_of(16) {
+            write!(
+                out,
+                r#",{{"kind":{{"id":"call-{ordinal}","input":{{"path":"src/lib.rs"}},"name":"read","type":"tool_call"}}}},{{"kind":{{"id":"call-{ordinal}","output":{{"kind":{{"text":""#,
+            )?;
+            out.write_all(message_text(7, ordinal).as_bytes())?;
+            out.write_all(br#"","type":"text"}},"tool_name":"read","type":"tool_result"}}"#)?;
+        }
+        let role = if ordinal % 2 == 1 {
+            "user"
+        } else {
+            "assistant"
+        };
+        writeln!(
+            out,
+            r#"],"meta":{{"harness_id":"m{ordinal}"}},"role":"{role}"}},"mid":"m{ordinal}","ordinal":{ordinal}}}"#,
+        )?;
     }
     out.flush()
 }
@@ -739,7 +776,7 @@ fn source_commit() -> String {
     if command("git", &["status", "--porcelain"]).is_empty() {
         head
     } else {
-        format!("{head}-dirty")
+        format!("{head}{DIRTY_SOURCE_SUFFIX}")
     }
 }
 
@@ -789,6 +826,23 @@ pub struct Config {
     pub repetitions: u32,
     pub outage_scale: u64,
     pub state_dir: PathBuf,
+    /// The witness runs the operator recorded, carried into the report unchanged.
+    pub witness_runs: BTreeMap<String, WitnessRun>,
+}
+
+/// Reads the optional `--witness-runs` file: a JSON object from each witness name to the test that witnessed it and that test's exit code.
+fn witness_runs(path: Option<&str>) -> Result<BTreeMap<String, WitnessRun>, String> {
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let read = || {
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let runs: BTreeMap<String, WitnessRun> =
+            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        check_witness_runs(&runs)?;
+        Ok(runs)
+    };
+    read().map_err(|error: String| format!("--witness-runs {path}: {error}"))
 }
 
 pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config, String> {
@@ -800,7 +854,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         "outage-scale",
         "state-dir",
     ];
-    let values = parse_flags(args, &flags, USAGE)?;
+    let values = parse_flags_with_optional(args, &flags, &["witness-runs"], USAGE)?;
     let number = |name: &str| {
         values[name]
             .parse::<u64>()
@@ -829,6 +883,7 @@ pub fn config_from_args(args: impl IntoIterator<Item = String>) -> Result<Config
         repetitions: u32::try_from(number("repetitions")?).map_err(|e| e.to_string())?,
         outage_scale: number("outage-scale")?,
         state_dir: PathBuf::from(&values["state-dir"]),
+        witness_runs: witness_runs(values.get("witness-runs").map(String::as_str))?,
     })
 }
 
@@ -898,7 +953,7 @@ pub fn run(config: &Config) -> io::Result<QualificationReport> {
         environment,
         results.into_iter().map(|(result, _)| result).collect(),
         outage,
-        &[],
+        config.witness_runs.clone(),
     );
     fs::write(&config.out, serde_json::to_vec_pretty(&report)?)?;
     Ok(report)
@@ -906,8 +961,156 @@ pub fn run(config: &Config) -> io::Result<QualificationReport> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use eval_core::LineageViolation;
+
+    /// SHA-256 of the first 64 generator messages under seed 702.
+    const GENERATOR_64_SHA256: &str =
+        "f90f928c23bcdd86c4b6f6862d80490e1d0ff6f5f9999b0f7e94f386dda2a3ea";
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        [
+            "--out",
+            "report.json",
+            "--cases",
+            "all",
+            "--operations",
+            "10",
+            "--repetitions",
+            "5",
+            "--outage-scale",
+            "1",
+            "--state-dir",
+            "state",
+        ]
+        .iter()
+        .chain(extra)
+        .map(|arg| (*arg).to_owned())
+        .collect()
+    }
+
+    #[test]
+    fn witness_runs_are_read_from_the_named_file_and_validated() {
+        assert!(config_from_args(args(&[])).unwrap().witness_runs.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("witnesses.json");
+        let all: BTreeMap<String, WitnessRun> = eval_core::WITNESSES
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    WitnessRun {
+                        test: format!("daemon --lib {name}"),
+                        source_commit: "c".into(),
+                        exit_code: 0,
+                    },
+                )
+            })
+            .collect();
+        fs::write(&path, serde_json::to_vec(&all).unwrap()).unwrap();
+        let file = path.to_str().unwrap();
+        assert_eq!(
+            config_from_args(args(&["--witness-runs", file]))
+                .unwrap()
+                .witness_runs,
+            all
+        );
+        let mut unknown = all.clone();
+        unknown.insert(
+            "warm_soak".into(),
+            WitnessRun {
+                test: "t".into(),
+                source_commit: "c".into(),
+                exit_code: 0,
+            },
+        );
+        let refusal = |extra: &[&str]| config_from_args(args(extra)).err().unwrap_or_default();
+        fs::write(&path, serde_json::to_vec(&unknown).unwrap()).unwrap();
+        assert!(refusal(&["--witness-runs", file]).contains("is outside"));
+        fs::write(
+            &path,
+            br#"{"normal_fold": {"test": "t", "source_commit": "c"}}"#,
+        )
+        .unwrap();
+        assert!(
+            refusal(&["--witness-runs", file]).contains("exit_code"),
+            "a run without its exit code is refused"
+        );
+        fs::write(
+            &path,
+            format!(
+                r#"{{"normal_fold": {{"test": "t", "source_commit": "c{DIRTY_SOURCE_SUFFIX}", "exit_code": 0}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(
+            refusal(&["--witness-runs", file]).contains("clean source commit"),
+            "a run on a dirty tree is refused"
+        );
+        assert!(refusal(&["--witness-runs"]).contains("needs a value"));
+        assert!(refusal(&["--witness-runs", "--out", "x"]).contains("needs a value"));
+        assert!(refusal(&["--witness-runs", file, "--witness-runs", file]).contains("given twice"));
+    }
+
+    /// Seed 702 makes the streamed generator byte-identical across runs; the pin catches any change to the fixture text, roles, or tool cadence.
+    #[test]
+    fn the_seeded_generator_is_reproducible_and_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("a.jsonl"), dir.path().join("b.jsonl"));
+        write_generator(&first, 64).unwrap();
+        write_generator(&second, 64).unwrap();
+        let bytes = fs::read(&first).unwrap();
+        assert_eq!(bytes, fs::read(&second).unwrap());
+        assert_eq!(sha256_hex(&bytes), GENERATOR_64_SHA256);
+    }
+
+    #[test]
+    fn seeded_generator_matches_window_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.jsonl");
+        write_generator(&path, 4096).unwrap();
+        let lines: Vec<String> = io::BufReader::new(fs::File::open(&path).unwrap())
+            .lines()
+            .collect::<io::Result<_>>()
+            .unwrap();
+        assert_eq!(lines.len(), 4096);
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(
+                *line,
+                serde_json::to_string(&window_message(Shape::Mixed, index as u64 + 1)).unwrap(),
+                "ordinal {}",
+                index + 1,
+            );
+        }
+        write_generator(&path, 0).unwrap();
+        assert!(fs::read(&path).unwrap().is_empty());
+        assert_eq!(
+            write_generator(&dir.path().join("missing/file"), 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound,
+        );
+        #[cfg(target_os = "linux")]
+        assert!(write_generator(Path::new("/dev/full"), 64).is_err());
+    }
+
+    #[test]
+    fn seeded_generator_text_matches_original_word_stream() {
+        for seed in [0, 7, QUALIFICATION_SEED, u64::MAX] {
+            for ordinal in (0..=256).chain([999, 1_000_000, u64::MAX]) {
+                let mut state = (seed ^ ordinal.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
+                let mut expected = String::new();
+                for _ in 0..MESSAGE_TOKENS {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    expected.push_str(WORDS[(state % WORDS.len() as u64) as usize]);
+                }
+                assert_eq!(message_text(seed, ordinal), expected, "{seed}:{ordinal}");
+            }
+        }
+    }
 
     #[test]
     fn ordinary_messages_hold_exactly_the_measured_token_count() {
@@ -965,6 +1168,7 @@ mod tests {
             repetitions: 1,
             outage_scale: 60,
             state_dir: dir.path().join("state"),
+            witness_runs: BTreeMap::new(),
         };
         let report = run(&config).unwrap();
         assert!(!report.qualified, "a smoke run is never qualification");
