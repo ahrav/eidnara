@@ -9,8 +9,10 @@
 // requested temperature. Generation revision 2 can leave temperature absent
 // so reasoning-only models keep their native decoding behavior. A model whose
 // Pi registry entry sets `compat.supportsTemperature: false` receives no
-// temperature from the hook, as Pi's own provider sends none: that API refuses
-// the field, and a refused request costs a whole retried run.
+// temperature at all: the hook sends none, as Pi's own provider does, and
+// removes any `temperature` an earlier handler left in a spelling it owns,
+// since that API refuses the field and a refused request costs a whole
+// retried run.
 // The hook preserves every
 // unrelated payload field, and REJECTS (throws, failing the request)
 // payload shapes it does not recognize — silently dropping generation
@@ -52,7 +54,8 @@ export default function (pi) {
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
 		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined
 			? undefined : requiredNumber(TEMPERATURE_ENV);
-		const temperature = modelRefusesTemperature(ctx) ? undefined : requestedTemperature;
+		const refusesTemperature = modelRefusesTemperature(ctx);
+		const temperature = refusesTemperature ? undefined : requestedTemperature;
 		const payload = event.payload;
 		if (!isPlainObject(payload)) {
 			throw new Error(
@@ -98,12 +101,18 @@ export default function (pi) {
 		if (spellings.length > 0 && temperature !== undefined) {
 			next.temperature = temperature;
 		}
+		if (refusesTemperature) {
+			delete next.temperature;
+		}
 		if (generationConfig !== null) {
 			next.generationConfig = {
 				...generationConfig,
 				maxOutputTokens,
 				...(temperature === undefined ? {} : { temperature }),
 			};
+			if (refusesTemperature) {
+				delete next.generationConfig.temperature;
+			}
 		}
 		if (inferenceConfig !== null) {
 			next.inferenceConfig = {
@@ -111,6 +120,9 @@ export default function (pi) {
 				maxTokens: maxOutputTokens,
 				...(temperature === undefined ? {} : { temperature }),
 			};
+			if (refusesTemperature) {
+				delete next.inferenceConfig.temperature;
+			}
 		}
 		return next;
 	});

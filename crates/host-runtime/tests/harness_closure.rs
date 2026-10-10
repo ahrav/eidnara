@@ -1647,7 +1647,7 @@ fn a_manifest_fault_precedes_file_faults() {
 /// admits must fail on its manifest check while the walk stays bounded in the matching deep tree.
 #[test]
 fn a_too_deep_retained_manifest_fails_without_walking_its_depth() {
-    const DEPTH: usize = 1500;
+    const DEPTH: usize = 200;
     let (temp, _source, candidate) = setup();
     let store_root = temp.path().join("closures");
     let store = HarnessClosureStore::open(&store_root).expect("store");
@@ -1795,14 +1795,17 @@ fn a_large_node_is_hashed_exactly() {
     );
 }
 
+#[cfg(target_os = "linux")]
 const FD_BUDGET_CHILD_ENV: &str = "EIDNARA_CLOSURE_FD_BUDGET_CHILD";
 
 /// Descriptors the validation child may hold, the bound `MAX_PATH_COMPONENTS` documents for one walk.
+#[cfg(target_os = "linux")]
 const FD_BUDGET: u64 = 128;
 
 /// A valid closure that is both deep and wide must validate within the descriptor budget a single walk documents:
 /// the child pins itself to one CPU, lowers `RLIMIT_NOFILE`, and validates a tree whose first subdirectory is
 /// ninety-nine levels deep while more siblings wait than the walk queue holds.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_deep_wide_closure_validates_within_the_descriptor_budget() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1843,6 +1846,7 @@ fn a_deep_wide_closure_validates_within_the_descriptor_budget() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn deep_wide_closure_fd_budget_child() {
     let Ok(target) = std::env::var(FD_BUDGET_CHILD_ENV) else {

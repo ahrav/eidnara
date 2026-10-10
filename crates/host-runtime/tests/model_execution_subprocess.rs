@@ -166,6 +166,10 @@ fn main() {
             pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider,
         ),
         (
+            "pi_alias_refusal_then_credential_failure_keeps_temperature_for_canonical_provider",
+            pi_alias_refusal_then_credential_failure_keeps_temperature_for_canonical_provider,
+        ),
+        (
             "pi_model_execution_hook_omits_temperature_for_registry_refusing_models",
             pi_model_execution_hook_omits_temperature_for_registry_refusing_models,
         ),
@@ -670,6 +674,8 @@ mod fixture {
                 serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "No API key found for provider", "content": []}})
             } else if temperature.is_some() {
                 serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "Unsupported parameter: 'temperature' is not supported with this model.", "content": []}})
+            } else if out.join("alias-expires-without-temperature").exists() {
+                serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": "No API key found for provider", "content": []}})
             } else {
                 serde_json::json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [{"type": "text", "text": "alias answer"}]}})
             }
@@ -1943,6 +1949,9 @@ console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }
 console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, unflagged)));
 console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, stale)));
 console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, undefined)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, temperature: 9, messages: [] }}, refusing)));
+console.log(JSON.stringify(apply({{ contents: [], generationConfig: {{ maxOutputTokens: 9, temperature: 1.9, topK: 3 }} }}, refusing)));
+console.log(JSON.stringify(apply({{ modelId: "b", messages: [], inferenceConfig: {{ maxTokens: 9, temperature: 1.9, topP: 0.8 }} }}, refusing)));
 "#,
         hook = hook_path.to_string_lossy()
     );
@@ -1968,7 +1977,7 @@ console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }
         .lines()
         .map(|line| serde_json::from_str(line).expect("payload json"))
         .collect();
-    assert_eq!(payloads.len(), 6, "{stdout}");
+    assert_eq!(payloads.len(), 9, "{stdout}");
 
     assert_eq!(payloads[0]["max_tokens"], 32_000);
     assert!(payloads[0].get("temperature").is_none(), "{}", payloads[0]);
@@ -1979,10 +1988,27 @@ console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }
         "{}",
         payloads[1]
     );
-    for payload in &payloads[2..] {
+    for payload in &payloads[2..6] {
         assert_eq!(payload["max_tokens"], 32_000);
         assert_eq!(payload["temperature"], 0.25, "{payload}");
     }
+    // The hook clears a preexisting `temperature` in every spelling it owns for a registry-refusing model.
+    assert_eq!(payloads[6]["max_tokens"], 32_000);
+    assert!(payloads[6].get("temperature").is_none(), "{}", payloads[6]);
+    assert_eq!(payloads[7]["generationConfig"]["maxOutputTokens"], 32_000);
+    assert_eq!(payloads[7]["generationConfig"]["topK"], 3);
+    assert!(
+        payloads[7]["generationConfig"].get("temperature").is_none(),
+        "{}",
+        payloads[7]
+    );
+    assert_eq!(payloads[8]["inferenceConfig"]["maxTokens"], 32_000);
+    assert_eq!(payloads[8]["inferenceConfig"]["topP"], 0.8);
+    assert!(
+        payloads[8]["inferenceConfig"].get("temperature").is_none(),
+        "{}",
+        payloads[8]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2753,6 +2779,39 @@ fn pi_remembered_alias_refusal_keeps_temperature_for_canonical_provider() {
     ));
     fs::write(setup.out.path().join("alias-credentials-expired"), b"1")
         .expect("expire alias credentials");
+    let (terminal, events) = execute(
+        &backend,
+        request(setup.project.path(), Harness::Pi, "openai/m", None),
+    );
+    assert!(
+        matches!(terminal, BackendTerminal::Completed { .. }),
+        "{terminal:?}"
+    );
+    assert!(events.iter().any(
+        |event| matches!(event, BackendEvent::AssistantText { text, .. } if text == "canonical answer")
+    ));
+    assert_eq!(
+        fs::read_to_string(setup.out.path().join("canonical-temperature"))
+            .expect("canonical attempt ran"),
+        "0.25"
+    );
+}
+
+/// A temperature refusal applies to the model ref that refused it: when the alias refuses the temperature and its
+/// no-temperature retry then fails on credentials, the canonical provider still receives the admitted temperature.
+fn pi_alias_refusal_then_credential_failure_keeps_temperature_for_canonical_provider() {
+    let setup = RunSetup::new();
+    let backend = pi_backend(
+        &setup,
+        &[(BEHAVIOR_ENV, "alias_refuses_temperature")],
+        Vec::new(),
+        None,
+    );
+    fs::write(
+        setup.out.path().join("alias-expires-without-temperature"),
+        b"1",
+    )
+    .expect("expire alias credentials after the refusal");
     let (terminal, events) = execute(
         &backend,
         request(setup.project.path(), Harness::Pi, "openai/m", None),

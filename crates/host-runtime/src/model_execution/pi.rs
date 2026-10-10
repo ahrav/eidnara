@@ -289,6 +289,8 @@ async fn run_pi_with_provider_fallback(
         if provider_retry && error.class == ErrorClass::AuthRequired {
             provider_retry = false;
             model_ref.clone_from(&canonical);
+            // The refusal belonged to the aliased model ref.
+            temperature_refused = false;
         } else if temperature_retry && error.message == PI_TEMPERATURE_REJECTED_MESSAGE {
             run.temperature_refusals.record(&model_ref);
             temperature_refused = true;
@@ -756,17 +758,20 @@ const PI_TEMPERATURE_REJECTED_MESSAGE: &str = "pi provider rejected the requeste
 /// Whether provider error text refuses the `temperature` parameter itself, as Bedrock does for a
 /// model that accepts only its native decoding (`temperature` is deprecated for this model) and
 /// OpenAI does for a reasoning model (Unsupported parameter: 'temperature').
+///
+/// A provider can report several validation errors in one message, so the refusal phrase must sit in the
+/// same sentence or clause as `temperature`; clauses end at `.`, `;`, or a line break.
 fn rejects_temperature(provider_text: &str) -> bool {
+    const PHRASES: [&str; 4] = [
+        "deprecated",
+        "not supported",
+        "unsupported",
+        "does not support",
+    ];
     let lower = provider_text.to_ascii_lowercase();
-    lower.contains("temperature")
-        && [
-            "deprecated",
-            "not supported",
-            "unsupported",
-            "does not support",
-        ]
-        .iter()
-        .any(|phrase| lower.contains(phrase))
+    lower.split(['.', ';', '\n']).any(|clause| {
+        clause.contains("temperature") && PHRASES.iter().any(|phrase| clause.contains(phrase))
+    })
 }
 
 /// `message_end` and `agent_end` share this classification: `stop` and `length` succeed unless content requests tools; `error` and `aborted` fail; other spellings return `None`.
@@ -898,6 +903,7 @@ mod tests {
         for text in [
             "The model returned the following errors: `temperature` is deprecated for this model.",
             "Unsupported parameter: 'temperature' is not supported with this model.",
+            "Unsupported value: 'temperature' does not support 0.2 with this model. Only the default (1) value is supported.",
             "This model does not support temperature",
         ] {
             assert!(rejects_temperature(text), "{text}");
@@ -918,6 +924,8 @@ mod tests {
             "temperature must be at most 1",
             "model not found: prov/typo",
             "Unsupported parameter: 'top_k'",
+            "`temperature` must be at most 1; `top_k` is unsupported",
+            "`top_k` is deprecated for this model.\n`temperature` must be at most 1.",
         ] {
             assert!(!rejects_temperature(text), "{text}");
         }

@@ -2242,7 +2242,7 @@ pub mod group_registry {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .get_or_insert(err);
-                        return;
+                        continue;
                     }
                 }
             }
