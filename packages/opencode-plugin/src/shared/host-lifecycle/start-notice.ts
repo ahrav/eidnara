@@ -14,6 +14,7 @@ const RETRIED_TIMEOUT_REASONS: ReadonlySet<string> = new Set([
     "startup_timeout",
     "native_probe_unavailable",
 ]);
+const REPEATED_TIMEOUT_ANNOUNCE_COUNT = 3;
 
 const AWS_CONFIG_MAX_BYTES = 256 * 1024;
 const AWS_MAX_PROFILES = 5;
@@ -130,8 +131,12 @@ export function managedStartNotice(
     reason: string,
     remediation: string | null,
     env: Readonly<Record<string, string | undefined>>,
+    attempts = 1,
 ): string {
-    const lead = `Eidnara is off in this process: its daemon did not start (${reason}).`;
+    const lead =
+        attempts > 1
+            ? `Eidnara is off in this process: its daemon did not start in ${attempts} attempts (${reason}).`
+            : `Eidnara is off in this process: its daemon did not start (${reason}).`;
     const suggested = remediation ? `Suggested fix: ${remediation.replaceAll("_", " ")}.` : "";
     const hint =
         reason === "harness_unavailable"
@@ -143,20 +148,30 @@ export function managedStartNotice(
 }
 
 /**
- * Each announcer delivers each persistent refusal reason once. Refusals received before listener
- * registration are queued for the first listener.
+ * Each announcer delivers each persistent refusal reason once, and each retried timeout reason once it
+ * has recurred `REPEATED_TIMEOUT_ANNOUNCE_COUNT` times. Refusals received before listener registration
+ * are queued for the first listener.
  */
 export function createStartRefusalAnnouncer(
     env: () => Readonly<Record<string, string | undefined>>,
 ) {
     const announced = new Set<string>();
+    const timeouts = new Map<string, number>();
     const pending: string[] = [];
     let deliver: ((notice: string) => void) | undefined;
     return {
         refused(reason: string, remediation: string | null): void {
-            if (!isPersistentStartRefusal(reason) || announced.has(reason)) return;
+            if (announced.has(reason)) return;
+            let attempts = 1;
+            if (RETRIED_TIMEOUT_REASONS.has(reason)) {
+                attempts = (timeouts.get(reason) ?? 0) + 1;
+                timeouts.set(reason, attempts);
+                if (attempts < REPEATED_TIMEOUT_ANNOUNCE_COUNT) return;
+            } else if (!isPersistentStartRefusal(reason)) {
+                return;
+            }
             announced.add(reason);
-            const notice = managedStartNotice(reason, remediation, env());
+            const notice = managedStartNotice(reason, remediation, env(), attempts);
             if (deliver) deliver(notice);
             else pending.push(notice);
         },

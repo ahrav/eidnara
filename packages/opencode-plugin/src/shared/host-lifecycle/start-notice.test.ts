@@ -197,6 +197,26 @@ describe("managed start notice", () => {
         expect(seen).toEqual([]);
     });
 
+    it("announces a timeout reason once it repeats", () => {
+        const announcer = createStartRefusalAnnouncer(() => ({}));
+        const seen: string[] = [];
+        announcer.listen((notice) => seen.push(notice));
+        announcer.refused("native_probe_unavailable", "run_daemon_restart");
+        announcer.refused("native_probe_unavailable", "run_daemon_restart");
+        expect(seen).toEqual([]);
+        announcer.refused("native_probe_unavailable", "run_daemon_restart");
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toContain("did not start in 3 attempts (native_probe_unavailable)");
+        expect(seen[0]).toContain("Suggested fix: run daemon restart.");
+        announcer.refused("native_probe_unavailable", "run_daemon_restart");
+        announcer.refused("startup_timeout", "inspect_daemon_process");
+        announcer.refused("startup_timeout", "inspect_daemon_process");
+        expect(seen).toHaveLength(1);
+        announcer.refused("startup_timeout", "inspect_daemon_process");
+        expect(seen).toHaveLength(2);
+        expect(seen[1]).toContain("startup_timeout");
+    });
+
     it("announces each persistent reason once and holds notices until a listener exists", () => {
         const announcer = createStartRefusalAnnouncer(() => ({}));
         announcer.refused("unsupported_install_layout", null);

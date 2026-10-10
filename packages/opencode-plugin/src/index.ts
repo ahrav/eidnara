@@ -38,6 +38,7 @@ import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
+import { createStartNoticeDelivery } from "./plugin/start-notice-delivery";
 import { createToolRegistry } from "./plugin/tool-registry";
 import {
     type ConflictResult,
@@ -77,15 +78,10 @@ const server: Plugin = async (ctx) => {
         return {};
     }
     configureManagedDemandStart(managedDemandStart);
+    const startNotices = createStartNoticeDelivery(ctx.client);
     startRefusals.listen((notice) => {
         log(`[eidnara] ${notice}`);
-        void Promise.resolve()
-            .then(() =>
-                ctx.client.tui.showToast({
-                    body: { title: "Eidnara is off", message: notice, variant: "warning" },
-                }),
-            )
-            .catch(() => undefined);
+        void startNotices.announce(notice);
     });
     const loadedPluginConfig = loadPluginConfigDetailed(ctx.directory);
     const pluginConfig = loadedPluginConfig.config;
@@ -302,8 +298,9 @@ const server: Plugin = async (ctx) => {
         },
         "chat.message": async (input, output) => {
             // Fire-and-forget: a pending delivery must not delay the user's prompt.
-            if (configWarning?.pending && input.sessionID) {
-                void configWarning.deliverTo(input.sessionID);
+            if (input.sessionID) {
+                if (configWarning?.pending) void configWarning.deliverTo(input.sessionID);
+                void startNotices.deliverTo(input.sessionID);
             }
             await eidnara?.["chat.message"]?.(input, output);
         },
