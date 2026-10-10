@@ -29,6 +29,7 @@ use aws_refresh::SourceOwner;
 use aws_source::AwsProfileSource;
 use backend::{Harness, LlmExecutionBackend};
 use protocol::{Request, RequestError};
+use source_claim::ClaimKey;
 use source_health::{SourceHealthCell, SourceKind, SourceObservation, SourceState};
 use subprocess::EnvSnapshot;
 use subprocess::group_registry::StateRoot;
@@ -53,7 +54,7 @@ pub struct ModelExecutionComponent {
 struct CredentialVerifier {
     env: EnvSnapshot,
     aws_source: Option<AwsProfileSource>,
-    key: OnceLock<[u8; 32]>,
+    key: OnceLock<ClaimKey>,
 }
 
 impl CredentialVerifier {
@@ -68,7 +69,7 @@ impl CredentialVerifier {
             .map_err(|error| error.subreason())?;
         let expected = self
             .env
-            .source_claim(key, harness.as_str(), provider, self.aws_source.as_ref())
+            .source_claim_under(key, harness.as_str(), provider, self.aws_source.as_ref())
             .map_err(|error| error.subreason())?;
         if source_claim::presented_claim_matches(&expected, presented, canonical) {
             Ok(())
@@ -185,7 +186,7 @@ async fn respond(ctx: &RequestCtx, body: Vec<u8>) -> RequestOutcome {
 impl CompositeComponent for ModelExecutionComponent {
     fn install_connection_key(&self, key: [u8; 32]) {
         if let Some(verifier) = &self.credential_verifier {
-            let _ = verifier.key.set(key);
+            let _ = verifier.key.set(ClaimKey::new(&key));
         }
     }
 
