@@ -1,3 +1,11 @@
+/// The daemon's allocation recorder: it records only on the thread that opened a window, so the other tests in this binary run unrecorded.
+#[path = "../../daemon/tests/support/alloc_recorder.rs"]
+#[allow(dead_code)]
+mod alloc_recorder;
+
+#[global_allocator]
+static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
+
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -402,6 +410,29 @@ impl Fixture {
                     bounds,
                     budget,
                 ))
+            })
+            .unwrap()
+    }
+
+    /// `retrieve` with the allocator recording only the retrieval call, after the connection is checked out.
+    fn retrieve_recorded(
+        &self,
+        probes: &[Probe],
+        bounds: RetrievalBounds,
+    ) -> (Retrieval, alloc_recorder::Ledger) {
+        self.store
+            .with_conn(|conn| {
+                Ok(alloc_recorder::record_window(|| {
+                    retrieve(
+                        conn,
+                        &self.kernel,
+                        probes,
+                        self.authority(),
+                        bounds,
+                        &EvalBudget::unbounded(),
+                    )
+                    .unwrap()
+                }))
             })
             .unwrap()
     }
@@ -2274,6 +2305,75 @@ fn equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader() {
             "{request}: equal bytes tie"
         );
     }
+}
+
+/// Allocations follow the work the bounds admit. A scan bound one row lower allocates less. A common-term scan stops counting at its qualifying threshold and scanning at its scan bound, so matching rows past both add no allocation. A ranked probe scores every match within `rank_budget`, so its allocations grow with `ranked_matches`. The recorder sees Rust allocations on the calling thread; SQLite's own allocator stays outside it.
+#[test]
+fn allocations_follow_the_scan_bound_and_the_rank_budget() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse parse");
+    let measure = |bounds: RetrievalBounds| {
+        // The first run prepares and caches the statements, so the recorded run measures steady-state work.
+        fixture.retrieve_recorded(&request, bounds);
+        let (retrieval, ledger) = fixture.retrieve_recorded(&request, bounds);
+        assert!(!ledger.overflow);
+        (retrieval, ledger)
+    };
+    let scan = |scan_rows: usize, thresholds: RetrievalBounds| RetrievalBounds {
+        scan_rows: NonZeroUsize::new(scan_rows).unwrap(),
+        ..thresholds
+    };
+    let (exact, at_bound) = measure(scan(4, bounds()));
+    assert_eq!(exact.consumed.scanned_rows, 4);
+    let (below, under) = measure(scan(3, bounds()));
+    assert_eq!(below.consumed.scanned_rows, 3);
+    assert!(
+        under.allocation_events < at_bound.allocation_events
+            && under.requested_bytes < at_bound.requested_bytes,
+        "{under:?} against {at_bound:?}"
+    );
+    let (common, common_before) = measure(scan(3, small_thresholds()));
+    assert_eq!(
+        common.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+
+    let extra: Vec<String> = (0..32)
+        .map(|index| format!("parse-extra-{index}"))
+        .collect();
+    let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    fixture.admit(&extra_refs);
+    let rows: Vec<Row> = extra
+        .iter()
+        .map(|object| Row::claim(object, "parse past the bound"))
+        .collect();
+    fixture.project(&rows);
+
+    let (common_grown, common_after) = measure(scan(3, small_thresholds()));
+    // The common scan reads newest rows first, so it now scans three of the new rows; their text sets the requested bytes, and the count of allocations stays fixed.
+    assert_eq!(
+        (
+            common_grown.consumed.counted_rows,
+            common_grown.consumed.scanned_rows,
+            common_grown.consumed.sql_steps,
+        ),
+        (
+            common.consumed.counted_rows,
+            common.consumed.scanned_rows,
+            common.consumed.sql_steps,
+        ),
+    );
+    assert_eq!(
+        common_after.allocation_events, common_before.allocation_events,
+        "a common scan stops counting at its threshold and scanning at its bound, so matches past both allocate nothing"
+    );
+    let (ranked, ranked_after) = measure(scan(3, bounds()));
+    assert_eq!(ranked.consumed.ranked_matches, 36);
+    assert_eq!(ranked.consumed.scanned_rows, 3);
+    assert!(
+        ranked_after.allocation_events > under.allocation_events,
+        "ranked scoring allocates for each match within the rank budget: {ranked_after:?} against {under:?}"
+    );
 }
 
 /// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. A smaller scan bound runs fewer steps on the same counted rows, a result cap leaves the scan work unchanged, and one more matching row adds SQL steps on a ranked run and on a common run.

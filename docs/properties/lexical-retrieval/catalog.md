@@ -32,7 +32,7 @@ compiler and both engine tests were read at the branch.
 Existing check: `crates/retrieval/tests/lexical_engine.rs:196`
 `literal_operators_are_terms`; `:213`
 `removing_the_quotes_makes_operators_operate`;
-`crates/retrieval/tests/lexical_retrieval.rs:520`
+`crates/retrieval/tests/lexical_retrieval.rs:551`
 `a_probe_matches_only_its_term_and_operators_in_text_stay_literal`;
 `crates/retrieval/tests/lexical_analysis.rs:236` `atoms_never_contain_quotes`.
 Impact: a crafted request widens retrieval past its literal terms.
@@ -53,7 +53,7 @@ Fault/timing angle: none.
 Required faults and enabling state: separator-only and empty request text; a
 nonempty control request.
 Confidence: high - [evidence](evidence/zero-terms-run-no-match.md).
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:551`
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:582`
 `zero_probes_run_no_match_while_a_control_probe_contributes`;
 `crates/retrieval/tests/lexical_engine.rs:268`
 `zero_atoms_issue_no_probe_while_a_nonempty_control_completes`.
@@ -77,9 +77,9 @@ Fault/timing angle: none.
 Required faults and enabling state: occurrences hit by several probes; equal
 raw ranks from distinct probes; a large equal-rank group at the scan bound.
 Confidence: high - [evidence](evidence/rank-then-occurrence-order.md).
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:610`
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:641`
 `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`;
-`:651` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:1919`
+`:682` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:1950`
 `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`.
 Impact: nondeterministic ranking across rebuilds.
 Open questions: None.
@@ -101,10 +101,10 @@ Fault/timing angle: one-row kernel batches against the accepted bound.
 Required faults and enabling state: a hidden leader; equal-byte occurrences of
 distinct objects; `batch_rows` of one.
 Confidence: high - [evidence](evidence/eligibility-before-accepted-slots.md).
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:685`
-`an_ineligible_leader_is_excluded_without_taking_an_accepted_slot`; `:719`
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:716`
+`an_ineligible_leader_is_excluded_without_taking_an_accepted_slot`; `:750`
 `the_accepted_bound_inside_a_batch_still_tallies_the_rest_and_an_exact_fill_stays_complete`;
-`:2222` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`.
+`:2253` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`.
 Impact: an eligible memory is dropped behind a hidden one.
 Open questions: None.
 
@@ -140,11 +140,13 @@ Open questions: None.
 Type: safety
 Reachability: default-production
 Status: active
-Exercised: partial - probes, counted and scanned rows, and SQL VM steps are
-observed at the scan bound and one row below it; judgments and batches at the
-bound; SQL steps grow with one more row on a ranked and on a common run;
-allocation counts are not observed, and a ranked probe's FTS5 rank sort runs
-in a nested statement whose steps `sql_steps` excludes
+Exercised: partial - probes, counted and scanned rows, SQL VM steps, and Rust
+allocations are observed at the scan bound and one row below it; judgments and
+batches at the bound; SQL steps grow with one more row on a ranked and on a
+common run; a common scan makes the same number of allocations for 32 more
+matches past its bounds, and ranked allocations grow with the matches inside `rank_budget`;
+SQLite's own allocations stay outside the recorder, and a ranked probe's FTS5
+rank sort runs in a nested statement whose steps `sql_steps` excludes
 Guarantee: every probe count, scan, rank, and judgment runs under a
 caller-supplied bound, and the request reports the work it did, so a result
 cap alone never bounds the work.
@@ -154,13 +156,16 @@ scan hides behind a small result.
 Fault/timing angle: none.
 Required faults and enabling state: a repeated probe; a scan bound one below
 the match count; a result cap of one; one more matching row under ranked and
-common thresholds.
+common thresholds; 32 more matching rows past the common thresholds and the
+scan bound.
 Confidence: medium - [evidence](evidence/lexical-work-is-bounded-and-observed.md).
-Counters were read and asserted; allocation observation is missing.
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:758`
+Counters and Rust allocation events were read and asserted; RP2.9 has not
+approved an allocation bound to compare them with.
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:789`
 `the_scan_bound_marks_incomplete_only_past_the_bound_and_refusals_precede_every_probe`;
-`:1038` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`; `:1545`
-`ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2281`
+`:1069` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`; `:1576`
+`ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2312`
+`allocations_follow_the_scan_bound_and_the_rank_budget`; `:2381`
 `work_counters_report_exact_and_over_bound_work`.
 Impact: a request does unbounded work under a small result cap.
 Open questions:
@@ -188,9 +193,9 @@ the connection's interrupt.
 Confidence: high - [evidence](evidence/original-budget-stops-sql.md).
 Existing check: `crates/daemon/tests/query_route.rs:74`
 `cancellation_and_deadline_are_observed_in_every_phase`;
-`crates/retrieval/tests/lexical_retrieval.rs:1376`
+`crates/retrieval/tests/lexical_retrieval.rs:1407`
 `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`;
-`:2018`
+`:2049`
 `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`.
 Impact: a cancelled request keeps the engine busy.
 Open questions: None.
@@ -211,7 +216,7 @@ Fault/timing angle: none.
 Required faults and enabling state: a projection whose `payloads` table is
 renamed, so any payload read fails.
 Confidence: high - [evidence](evidence/retrieval-reads-no-payload.md).
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:1244`
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:1275`
 `retrieval_reads_no_payload_bytes`.
 Impact: a denied request loads payload bytes.
 Open questions: None.
