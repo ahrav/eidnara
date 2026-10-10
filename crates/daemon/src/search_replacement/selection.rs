@@ -292,6 +292,14 @@ impl SearchSelection {
         self.admit_reader(gate)
     }
 
+    pub(crate) fn admit_selected_hooks(&self, gate: &HookGate) -> Result<(), BuildError> {
+        self.admit_reader(gate)?;
+        match self.selected.load_full() {
+            Some(family) => admit_transition_hook(gate, &family.certificate),
+            None => Ok(()),
+        }
+    }
+
     /// The admission every reader of this manager's family takes: the gate's hook admission for this data home, then the family's limits.
     ///
     /// # Errors

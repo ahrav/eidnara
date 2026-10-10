@@ -1229,6 +1229,31 @@ async fn a_pin_refused_while_maintenance_drains_names_the_records_refusal() {
     owner.shutdown().await.unwrap();
 }
 
+#[test]
+fn a_slice_refused_on_the_lane_names_the_lane_in_status_and_pin_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        LocalEmbeddingsComponent::unsupported("no lane"),
+    );
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Closed(SpecRefusal::LaneNotReady("disabled"))
+    ));
+    assert_eq!(owner.admission_state(), Err("lane_not_ready"));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("no family is selected");
+    assert_eq!(owner.pin_refusal(&refused), "lane_not_ready");
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {
@@ -4594,6 +4619,70 @@ fn admission_recovers_in_process_after_the_gate_denies_the_selected_family() {
     gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Dispatch)
         .expect("the restored manifest admits the family again");
     owner.pin(&slice_budget()).unwrap();
+}
+
+/// A family recovered under `AuthorizedRecovery` reads through `EmbeddingBackfill`; the status surface judges that hook as a reader's pin does, so disabling it in the manifest refuses both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_judges_the_recovered_family_on_its_transition_hook() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().to_owned();
+    let corpus = Corpus::open(&home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(&home);
+    let owner = owner(&home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(&home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    let staged = match control(&home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
+    let mut recovery = rebuild(&home);
+    recovery.transition = Transition::AuthorizedRecovery;
+    recovery.cause = Cause::DisabledRecovery;
+    recovery.selected_generation = staged;
+    recovery.attempt_id = "recovery-attempt".to_owned();
+    recovery.consumer.consumer_id = "search-recovered".to_owned();
+    recovery.consumer.generation_id = "gen-2".to_owned();
+    recovery.authorization_ref = Some("operator:recovery-ticket".to_owned());
+    owner.request(&recovery, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    assert!(matches!(control(&home), ControlState::Current(_)));
+    assert_eq!(owner.admission_state(), Ok(()));
+    owner.pin(&slice_budget()).unwrap();
+
+    let identity = identity(&kernel_incarnation_id(&home));
+    let without_backfill: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBackfill)
+        .collect();
+    write_records(
+        &home,
+        &manifest_json(&identity, &without_backfill),
+        &campaign_json(&identity),
+    );
+    let _ = owner.run_slice(&slice_budget());
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the disabled transition hook refuses the pin");
+    assert_eq!(owner.pin_refusal(&refused), "hook_disabled");
+    assert_eq!(owner.admission_state(), Err("hook_disabled"));
 }
 
 /// An active record past its deadline starts nothing. The slice still judges admission on the current observation, so it denies a selected family that trails the kernel instead of serving it on pre-deadline evidence.

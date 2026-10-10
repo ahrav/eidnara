@@ -110,6 +110,18 @@ pub enum SpecRefusal {
     Kernel(String),
 }
 
+impl SpecRefusal {
+    /// Status surfaces use these stable codes to identify refusal categories. Absent records yield `None`, which the gate reports as `no_manifest`.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::LaneNotReady(_) => Some("lane_not_ready"),
+            Self::Inputs(refusal) => refusal.code(),
+            Self::TooSmall(_) | Self::LimitRange(_) => Some("limits_unbounded"),
+            Self::Kernel(_) => Some("kernel_unreadable"),
+        }
+    }
+}
+
 /// Why `prepare` produced no identity: the records refused, or a manager with a running supervisor must be joined before it can be replaced.
 enum Unprepared {
     Refused(SpecRefusal),
@@ -181,8 +193,8 @@ pub struct SearchLifecycleOwner {
     claims_paused: Arc<std::sync::atomic::AtomicBool>,
     /// The batch size of the next claim-source slice, at most `CLAIM_SLICE_BOUNDS.batch`.
     claim_batch: std::sync::atomic::AtomicUsize,
-    /// The [`InputRefusal::code`] of the records the last slice refused to read, kept so status names it once the gate closes as `no_manifest`.
-    records_refused: Mutex<Option<&'static str>>,
+    /// The [`SpecRefusal::code`] of the last slice's preparation, kept so status names it once the gate closes as `no_manifest`.
+    preparation_refused: Mutex<Option<&'static str>>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
@@ -265,7 +277,7 @@ impl SearchLifecycleOwner {
             claims: Mutex::new(ClaimProgress::default()),
             claims_paused: Arc::default(),
             claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
-            records_refused: Mutex::new(None),
+            preparation_refused: Mutex::new(None),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -484,12 +496,10 @@ impl SearchLifecycleOwner {
             _ => None,
         };
         *self
-            .records_refused
+            .preparation_refused
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = match &prepared {
-            Err(SpecRefusal::Inputs(refusal)) => refusal.code(),
-            _ => None,
-        };
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            prepared.as_ref().err().and_then(SpecRefusal::code);
         let (inputs, identity, bounds, budget) = match prepared {
             Ok(prepared) => {
                 self.remember_grace(&prepared.0, &prepared.1);
@@ -1294,7 +1304,7 @@ impl SearchLifecycleOwner {
     pub fn admission_state(&self) -> Result<(), &'static str> {
         let gate = self.admission.gate();
         let selected = self.try_lock_free().and_then(|managed| match &*managed {
-            Managed::Selection(selection) => Some(selection.admit_reader(gate).map(|_| ())),
+            Managed::Selection(selection) => Some(selection.admit_selected_hooks(gate)),
             _ => None,
         });
         let verdict = match selected {
@@ -1318,7 +1328,7 @@ impl SearchLifecycleOwner {
     fn named_refusal(&self, code: &'static str) -> &'static str {
         match code {
             "no_manifest" => self
-                .records_refused
+                .preparation_refused
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .unwrap_or(code),
