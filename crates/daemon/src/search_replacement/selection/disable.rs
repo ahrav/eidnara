@@ -329,7 +329,7 @@ impl SearchSelection {
             let family = match self.selected.load_full() {
                 Some(family) => family,
                 None => {
-                    let family = Arc::new(self.open_family(digest, kernel, budget)?);
+                    let family = Arc::new(self.open_family(digest, kernel, budget)?.0);
                     self.selected.store(Some(Arc::clone(&family)));
                     family
                 }

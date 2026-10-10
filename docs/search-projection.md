@@ -79,6 +79,15 @@ family keeps serving, and the next slice recertifies again. Each retry spends
 one episode, so a tip that outruns every attempt leaves the record blocked once
 its allowance is spent.
 
+The completion slice validates the selected family's rows against the kernel
+inventory before it retires the old consumer. The reopen at the start of the
+slice covers a family already at the target, and a family that caught up is
+validated again at the new target. The check before Current repeats that
+validation unless the family database's commit counters show the retirement
+receipt transaction as its only change since, the selected consumer's
+acknowledgement lies inside the validated prefix, and no pending job's episode
+deadline has passed.
+
 ## Readers and exact-lookup certificates
 
 `SearchLifecycleOwner::pin` returns a `SearchReader` for the selected family

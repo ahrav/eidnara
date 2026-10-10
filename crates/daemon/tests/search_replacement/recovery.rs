@@ -1296,6 +1296,112 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
     }
 }
 
+/// A completion slice whose predecessor has retired and whose next step publishes Current, with the selected family's database path.
+fn retired_before_current(
+    root: &Path,
+) -> (
+    Corpus,
+    HookGate,
+    SearchSelection,
+    ReplacementSpec,
+    std::path::PathBuf,
+) {
+    let corpus = Corpus::open(root);
+    corpus.seed();
+    corpus.publish("base", "bytes");
+    let mut config = spec(root);
+    let gate = home_gate(root, &config);
+    record(root, &gate, None, &config.identity);
+    let mut selection = selector(root);
+    finish(&mut selection, &corpus, &gate, &config);
+    select_next(root, &corpus, &gate, &mut selection, &mut config);
+    let path = selection
+        .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
+        .unwrap()
+        .projection()
+        .path()
+        .to_owned();
+    (corpus, gate, selection, config, path)
+}
+
+/// The check before Current reuses the validation made before retirement only while the receipt transaction is the family's one change since. A commit from another connection after retirement changes a row the kernel inventory names, and the slice refuses to publish it.
+#[test]
+fn a_family_changed_after_retirement_is_validated_again_before_current() {
+    let root = tempfile::tempdir().unwrap();
+    let (corpus, gate, mut selection, config, path) = retired_before_current(root.path());
+    let mut retired = false;
+    let result = selection.recover_slice(
+        &corpus.kernel,
+        &gate,
+        &config,
+        &budget(Duration::from_secs(20)),
+        &mut |event| {
+            retired |= matches!(event, RecoveryEvent::Retirement(_));
+            if event == RecoveryEvent::BeforeCurrent {
+                Connection::open(&path)
+                    .unwrap()
+                    .execute(
+                        "UPDATE occurrences SET source_object_id=source_object_id||'-changed'",
+                        [],
+                    )
+                    .unwrap();
+            }
+        },
+    );
+    assert!(retired);
+    assert!(result.is_err());
+    assert!(matches!(
+        ProjectionLifecycle::open(root.path()).unwrap().read(),
+        ControlState::Intent(_)
+    ));
+}
+
+/// A pending job's episode that ends after the validation before retirement is refused before Current, as a full validation at that moment refuses it, although no commit reached the family.
+#[test]
+fn an_episode_deadline_passing_after_retirement_is_refused_before_current() {
+    let root = tempfile::tempdir().unwrap();
+    let (corpus, gate, mut selection, config, path) = retired_before_current(root.path());
+    let conn = Connection::open(&path).unwrap();
+    let job: String = conn
+        .query_row(
+            "SELECT job_id FROM embedding_jobs WHERE state='pending' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let deadline = now() + 1_000;
+    conn.execute(
+        "UPDATE embedding_jobs SET episode_id=?1,episode_allowance=1,episode_deadline=?2 WHERE job_id=?3",
+        rusqlite::params![retrieval::dispatch::first_episode_id(&job), deadline, job],
+    )
+    .unwrap();
+    drop(conn);
+    let result = selection.recover_slice(
+        &corpus.kernel,
+        &gate,
+        &config,
+        &budget(Duration::from_secs(20)),
+        &mut |event| {
+            if event == RecoveryEvent::BeforeCurrent {
+                std::thread::sleep(Duration::from_millis(
+                    u64::try_from(deadline + 50 - now()).unwrap_or(0),
+                ));
+            }
+        },
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(RecoveryFailure::Blocked(BuildError::Projection(_)))
+        ),
+        "{result:?}"
+    );
+    assert!(matches!(
+        ProjectionLifecycle::open(root.path()).unwrap().read(),
+        ControlState::Intent(_)
+    ));
+}
+
 /// Recertification spends the attempt's episode, so a predecessor the tip keeps outrunning leaves the record blocked once its allowance is spent rather than retrying without bound.
 #[test]
 fn recertification_stops_when_the_allowance_is_spent() {

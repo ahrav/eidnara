@@ -352,7 +352,7 @@ impl SearchSelection {
         if lifecycle.read() != ControlState::Intent(intent.clone()) {
             return Err(BuildError::Invalid("recovery operation changed").into());
         }
-        self.reopen_locked(kernel, gate, budget, &transaction)?;
+        let reopened = self.reopen_locked(kernel, gate, budget, &transaction)?;
         let family = self
             .selected
             .load_full()
@@ -397,27 +397,37 @@ impl SearchSelection {
             family.check_kernel(kernel, budget)
         };
         check()?;
-        let mut report = self.validate_family(&family, kernel, budget)?;
+        // The reopen above validated this family; a second scan runs only when its database, the clock, or the consumer's acknowledgement moved since.
+        let mut validated = match reopened {
+            Some(validated)
+                if self.unchanged_since(
+                    &family,
+                    kernel,
+                    budget,
+                    &validated.report,
+                    validated.version,
+                )? =>
+            {
+                validated
+            }
+            _ => self.validate_family(&family, kernel, budget)?,
+        };
         let target = intent
             .recovery_target
             .ok_or(BuildError::Invalid("missing fixed target"))?
             .commit_seq;
-        if report.checkpoint.checkpoint_commit_seq < target {
+        if validated.report.checkpoint.checkpoint_commit_seq < target {
             self.catch_up_selected(&family, kernel, gate, spec, budget, &intent)?;
             check()?;
-            let now = wall_ms()?;
-            report = family
-                .projection
-                .read_within(deadline(budget)?, |conn| {
-                    verify_active(conn, &self.identity, &family.generation(), self.bounds, now)
-                })
-                .map_err(BuildError::from)?;
+            validated = self.validate_family(&family, kernel, budget)?;
         }
-        if report.checkpoint.checkpoint_commit_seq != target {
+        if validated.report.checkpoint.checkpoint_commit_seq != target {
             return Err(BuildError::Invalid("local prefix differs from target").into());
         }
-        if family.certificate.retiring.is_some() {
-            self.retire_bound(
+        // The counters the check before Current expects: the validation's, advanced by the receipt transaction when retirement wrote one right after it.
+        let mut expected = Some(validated.version);
+        if family.certificate.retiring.is_some()
+            && let Some(write) = self.retire_bound(
                 &family,
                 retirement::RetirementRun {
                     kernel,
@@ -428,7 +438,9 @@ impl SearchSelection {
                     check: &check,
                 },
                 &mut |event| observer(RecoveryEvent::Retirement(event)),
-            )?;
+            )?
+        {
+            expected = (write.before == validated.version).then_some(write.after);
         }
         observer(RecoveryEvent::BeforeFinalAcknowledgement);
         check()?;
@@ -464,7 +476,16 @@ impl SearchSelection {
             .map_err(BuildError::from)?;
         observer(RecoveryEvent::BeforeCurrent);
         self.check_recovery_admission(gate, spec, budget, &cleaned)?;
-        self.validate_family(&family, kernel, budget)?;
+        // The validation before retirement still holds when the receipt transaction is the family's only change since.
+        let still_valid = match expected {
+            Some(version) => {
+                self.unchanged_since(&family, kernel, budget, &validated.report, version)?
+            }
+            None => false,
+        };
+        if !still_valid {
+            self.validate_family(&family, kernel, budget)?;
+        }
         lifecycle
             .complete(gate, &cleaned)
             .map_err(BuildError::from)?;

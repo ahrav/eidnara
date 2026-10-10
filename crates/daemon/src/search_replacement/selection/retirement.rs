@@ -106,6 +106,7 @@ impl SearchSelection {
             },
             observer,
         )
+        .map(drop)
     }
 
     /// Rejects a budget that ends after `intent.episodes.deadline`.
@@ -146,12 +147,13 @@ impl SearchSelection {
         Ok(grants)
     }
 
+    /// Returns the receipt transaction's counters, or `None` when a recorded receipt left the family unwritten.
     pub(super) fn retire_bound(
         &self,
         family: &SelectedFamily,
         run: RetirementRun<'_>,
         observer: &mut dyn FnMut(RetirementEvent),
-    ) -> Result<(), BuildError> {
+    ) -> Result<Option<ReceiptWrite>, BuildError> {
         let RetirementRun {
             kernel,
             through,
@@ -209,6 +211,7 @@ impl SearchSelection {
         })?;
         let checkpoint =
             kernel.outbox_consumer_checkpoint_within_budget(budget, receipt.old_consumer)?;
+        let mut written = None;
         if recovered {
             self.remove_retiring_family(old, transaction)?;
         } else {
@@ -277,7 +280,8 @@ impl SearchSelection {
             self.remove_retiring_family(old, transaction)?;
             observer(RetirementEvent::Removed);
             check()?;
-            family.projection.write_within(deadline(budget)?, |conn| {
+            written = Some(family.projection.write_within(deadline(budget)?, |conn| {
+                let before = FamilyVersion::read(conn)?;
                 record_receipt(
                     conn,
                     &receipt,
@@ -285,13 +289,17 @@ impl SearchSelection {
                     super::super::wall_ms().map_err(|_| ProjectionError::MutationConflict)?,
                 )?;
                 observer(RetirementEvent::BeforeReceiptCommit);
-                check().map_err(|_| ProjectionError::MutationConflict)
-            })?;
+                check().map_err(|_| ProjectionError::MutationConflict)?;
+                Ok(ReceiptWrite {
+                    before,
+                    after: FamilyVersion::read(conn)?,
+                })
+            })?);
         }
         observer(RetirementEvent::LocalReleased);
         check()?;
         if checkpoint.is_none() {
-            return Ok(());
+            return Ok(written);
         }
         observer(RetirementEvent::BeforeAcknowledgement);
         check()?;
@@ -322,7 +330,7 @@ impl SearchSelection {
                 Ok(String::new())
             },
         )?;
-        Ok(())
+        Ok(written)
     }
 
     fn remove_retiring_family(
