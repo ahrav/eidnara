@@ -5,7 +5,8 @@
 //! The module assigns each content block a session-stable `mid#block_index` identity.
 //! Projections hold `Arc` shells of the ingress messages, so an unreduced response serves them without rebuilding.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use memory_store::BlockIdentity;
@@ -139,7 +140,7 @@ pub struct FlatBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_kind: Option<String>,
+    pub output_kind: Option<&'static str>,
     #[serde(skip_serializing)]
     pub wire: SharedWireBlock,
 }
@@ -172,9 +173,13 @@ impl FlatBlock {
 
 /// Tool-arc state the projector carries from one message to the next.
 #[derive(Debug, Default)]
-struct ProjectionState {
-    pending_calls: BTreeMap<String, VecDeque<String>>,
-    call_arcs: BTreeMap<String, String>,
+struct ProjectionState<'a> {
+    /// The latest assistant message's unanswered calls in block order: the call id, borrowed
+    /// from the ingress message, and the arc its result joins. A result takes the first entry
+    /// with its id.
+    pending_calls: Vec<(&'a str, String)>,
+    /// The arcs of the latest assistant message's calls, keyed by block index in that message.
+    call_arcs: BTreeMap<usize, String>,
 }
 
 /// Flattened message projection.
@@ -266,22 +271,30 @@ impl<'a> MessageProjection<'a> {
 }
 
 #[derive(Default)]
-struct FlatProjectionBuilder {
+struct FlatProjectionBuilder<'a> {
     blocks: Vec<FlatBlock>,
     identity_by_mid: BTreeMap<String, Vec<BlockIdentity>>,
-    state: ProjectionState,
+    state: ProjectionState<'a>,
     scratch: crate::served_json::CanonicalScratch,
 }
 
-fn project_messages_from_state(
-    ingress: &MessageProjection<'_>,
-    mut builder: FlatProjectionBuilder,
+fn project_messages_from_state<'a>(
+    ingress: &MessageProjection<'a>,
+    mut builder: FlatProjectionBuilder<'a>,
 ) -> Result<FlatProjection, WireError> {
+    builder.blocks.reserve(
+        ingress
+            .messages
+            .iter()
+            .map(|message| message.ck.content().len())
+            .sum(),
+    );
     // Block ids are `mid#index`, so a repeated mid would give two messages'
     // blocks the same identities and let one message's content stand for the
-    // other's. Synthetic messages take part: their block ids collide too.
-    let mut seen_mids = BTreeSet::<&str>::new();
-    for msg in ingress.messages {
+    // other's. Synthetic messages take part: their block ids collide too. Live
+    // mids are the keys of `identity_by_mid`; synthetic mids are kept apart.
+    let mut synthetic_mids = BTreeSet::<&str>::new();
+    for (position, msg) in ingress.messages.iter().enumerate() {
         if msg.mid.is_empty() {
             return Err(WireError::EmptyMid {
                 ordinal: msg.ordinal,
@@ -290,11 +303,25 @@ fn project_messages_from_state(
         if msg.mid.contains('#') {
             return Err(WireError::MidContainsReservedHash(msg.mid.clone()));
         }
-        if !seen_mids.insert(msg.mid.as_str()) {
-            return Err(WireError::DuplicateMid(msg.mid.clone()));
-        }
-
         let synthetic = ingress.is_synthetic(msg);
+        let identity_slot = if synthetic {
+            if builder.identity_by_mid.contains_key(msg.mid.as_str())
+                || !synthetic_mids.insert(msg.mid.as_str())
+            {
+                return Err(WireError::DuplicateMid(msg.mid.clone()));
+            }
+            None
+        } else {
+            if synthetic_mids.contains(msg.mid.as_str()) {
+                return Err(WireError::DuplicateMid(msg.mid.clone()));
+            }
+            match builder.identity_by_mid.entry(msg.mid.clone()) {
+                Entry::Occupied(_) => return Err(WireError::DuplicateMid(msg.mid.clone())),
+                Entry::Vacant(slot) => Some(slot),
+            }
+        };
+
+        let content: &'a [WireBlock] = msg.ck.content();
         // The shell is shared unless the effective synthetic flag differs.
         let msg = if msg.ck.meta.synthetic == synthetic {
             Arc::clone(msg)
@@ -313,27 +340,21 @@ fn project_messages_from_state(
                     *call_counts.entry(id.as_str()).or_default() += 1;
                 }
             }
-            for (index, block) in msg.ck.content().iter().enumerate() {
+            for (index, block) in content.iter().enumerate() {
                 if let BlockKind::ToolCall { id, .. } = block.kind() {
-                    let block_id = block_id(&msg.mid, index);
                     let arc_id = if call_counts.get(id.as_str()).copied().unwrap_or(0) > 1 {
                         tool_arc_id(&msg.mid, id)
                     } else {
-                        block_id.clone()
+                        block_id(&msg.mid, index)
                     };
-                    builder.state.call_arcs.insert(block_id, arc_id.clone());
-                    builder
-                        .state
-                        .pending_calls
-                        .entry(id.clone())
-                        .or_default()
-                        .push_back(arc_id);
+                    builder.state.call_arcs.insert(index, arc_id.clone());
+                    builder.state.pending_calls.push((id.as_str(), arc_id));
                 }
             }
         }
 
-        let covered_head = ingress.covered_head && seen_mids.len() == 1;
-        let mut identities = Vec::new();
+        let covered_head = ingress.covered_head && position == 0;
+        let mut identities = Vec::with_capacity(if synthetic { 0 } else { msg.ck.content().len() });
         for index in 0..msg.ck.content().len() {
             let arc_id = match arc_for_block(
                 &msg.mid,
@@ -362,8 +383,8 @@ fn project_messages_from_state(
         if role != "assistant" && role != "tool" {
             builder.state.pending_calls.clear();
         }
-        if !synthetic {
-            builder.identity_by_mid.insert(msg.mid.clone(), identities);
+        if let Some(slot) = identity_slot {
+            slot.insert(identities);
         }
     }
 
@@ -374,7 +395,23 @@ fn project_messages_from_state(
 }
 
 pub fn block_id(mid: &str, index: usize) -> String {
-    format!("{mid}#{index}")
+    let mut digits = [0u8; 20];
+    let mut start = digits.len();
+    let mut rest = index;
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let digits = std::str::from_utf8(&digits[start..]).expect("decimal digits are ASCII");
+    let mut id = String::with_capacity(mid.len() + 1 + digits.len());
+    id.push_str(mid);
+    id.push('#');
+    id.push_str(digits);
+    id
 }
 
 pub fn split_block_id(id: &str) -> Option<(&str, usize)> {
@@ -504,7 +541,7 @@ fn flatten_block(
             None,
             *provider_executed,
             Some(id.clone()),
-            Some(output.kind.tag().to_string()),
+            Some(output.kind.tag()),
         ),
         _ => (None, None, false, None, None),
     };
@@ -540,34 +577,25 @@ fn arc_for_block(
     mid: &str,
     index: usize,
     msg: &WireMessage,
-    pending_calls: &mut BTreeMap<String, VecDeque<String>>,
-    call_arcs: &BTreeMap<String, String>,
+    pending_calls: &mut Vec<(&str, String)>,
+    call_arcs: &BTreeMap<usize, String>,
 ) -> Result<Option<String>, WireError> {
     match msg.content()[index].kind() {
-        BlockKind::ToolCall { .. } if msg.role == "assistant" => {
-            Ok(call_arcs.get(&block_id(mid, index)).cloned())
-        }
+        BlockKind::ToolCall { .. } if msg.role == "assistant" => Ok(call_arcs.get(&index).cloned()),
         BlockKind::ToolResult { id, .. } => {
-            let Some(queue) = pending_calls.get_mut(id) else {
+            let Some(pending) = pending_calls.iter().position(|(call, _)| *call == id) else {
                 return Err(WireError::UnpairedToolResult {
                     mid: mid.to_string(),
                     block_index: index,
                     tool_call_id: id.clone(),
                 });
             };
-            let Some(call_block_id) = queue.pop_front() else {
-                return Err(WireError::UnpairedToolResult {
-                    mid: mid.to_string(),
-                    block_index: index,
-                    tool_call_id: id.clone(),
-                });
-            };
-            Ok(Some(call_block_id))
+            Ok(Some(pending_calls.remove(pending).1))
         }
         BlockKind::Reasoning { .. } | BlockKind::RedactedReasoning { .. }
             if msg.role == "assistant" =>
         {
-            Ok(adjacent_tool_call_arc(mid, index, msg.content(), call_arcs))
+            Ok(adjacent_tool_call_arc(index, msg.content(), call_arcs))
         }
         _ => Ok(None),
     }
@@ -577,13 +605,11 @@ fn arc_for_block(
 /// because a call whose id repeats within the message carries the shared
 /// `mid#call:<id>` arc rather than `mid#index`.
 fn adjacent_tool_call_arc(
-    mid: &str,
     index: usize,
     content: &[WireBlock],
-    call_arcs: &BTreeMap<String, String>,
+    call_arcs: &BTreeMap<usize, String>,
 ) -> Option<String> {
-    let neighbour =
-        |neighbour_index: usize| call_arcs.get(&block_id(mid, neighbour_index)).cloned();
+    let neighbour = |neighbour_index: usize| call_arcs.get(&neighbour_index).cloned();
     if index > 0 && matches!(content[index - 1].kind(), BlockKind::ToolCall { .. }) {
         return neighbour(index - 1);
     }
@@ -603,12 +629,11 @@ fn extract_file_path(input: &Value) -> Option<String> {
 
 pub(crate) fn fingerprint_digest(content_hash: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(content_hash.len() * 2);
-    for &byte in content_hash {
-        out.push(HEX[usize::from(byte >> 4)]);
-        out.push(HEX[usize::from(byte & 0x0f)]);
+    let mut digits = [0u8; 64];
+    for (pair, &byte) in digits.as_chunks_mut::<2>().0.iter_mut().zip(content_hash) {
+        *pair = [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0x0f)]];
     }
-    String::from_utf8(out).expect("hex digits are ASCII")
+    String::from(std::str::from_utf8(&digits).expect("hex digits are ASCII"))
 }
 
 pub(crate) fn fingerprint(bytes: &str) -> String {
@@ -754,6 +779,61 @@ mod tests {
             projection.blocks[0].arc_id.as_deref(),
             Some("assistant-1#call:duplicate")
         );
+    }
+
+    #[test]
+    fn block_id_joins_the_mid_and_the_decimal_index() {
+        for index in [0, 1, 9, 10, 99, 100, 12_345, usize::MAX] {
+            assert_eq!(block_id("m40", index), format!("m40#{index}"));
+            assert_eq!(
+                split_block_id(&block_id("m40", index)),
+                Some(("m40", index))
+            );
+        }
+    }
+
+    #[test]
+    fn each_result_takes_its_own_call_arc_in_any_order_and_answers_it_once() {
+        let call = |id: &str| {
+            WireBlock::bare(BlockKind::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                provider_executed: false,
+            })
+        };
+        let assistant = Arc::new(IngressMessage {
+            mid: "a1".to_string(),
+            ordinal: 1,
+            ck: WireMessage::from_parts(
+                "assistant",
+                vec![call("call_a"), call("call_b")],
+                None,
+                ProviderExtras::new(),
+                HarnessMeta::default(),
+            ),
+        });
+        let mut messages = vec![
+            assistant,
+            tool_result_msg("r1", 2, "call_b"),
+            tool_result_msg("r2", 3, "call_a"),
+        ];
+        let projection = project_messages(&messages).expect("every result has its call");
+        let arc = |id: &str| {
+            projection
+                .blocks
+                .iter()
+                .find(|block| block.id == id)
+                .and_then(|block| block.arc_id.as_deref())
+        };
+        assert_eq!(arc("r1#0"), Some("a1#1"));
+        assert_eq!(arc("r2#0"), Some("a1#0"));
+        messages.push(tool_result_msg("r3", 4, "call_a"));
+        let err = project_messages(&messages).expect_err("a call answers one result");
+        assert!(matches!(
+            err,
+            WireError::UnpairedToolResult { ref mid, .. } if mid == "r3"
+        ));
     }
 
     #[test]
