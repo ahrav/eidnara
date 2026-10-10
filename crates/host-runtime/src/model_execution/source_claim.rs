@@ -158,12 +158,34 @@ pub fn presented_claim_matches(
 ) -> bool {
     presented
         .get(canonical_provider)
-        .is_some_and(|actual| expected.as_bytes().ct_eq(actual.as_bytes()).into())
+        .is_some_and(|actual| equal_in_constant_time(expected.as_bytes(), actual.as_bytes()))
+}
+
+/// For equal-length inputs, comparison time depends only on input length.
+fn equal_in_constant_time(expected: &[u8], actual: &[u8]) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let (expected_words, expected_tail) = expected.as_chunks::<8>();
+    let (actual_words, actual_tail) = actual.as_chunks::<8>();
+    let words = expected_words
+        .iter()
+        .zip(actual_words)
+        .fold(0, |diff, (expected, actual)| {
+            diff | (u64::from_ne_bytes(*expected) ^ u64::from_ne_bytes(*actual))
+        });
+    let diff = expected_tail
+        .iter()
+        .zip(actual_tail)
+        .fold(words, |diff, (expected, actual)| {
+            diff | u64::from(expected ^ actual)
+        });
+    diff.ct_eq(&0).into()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ClaimKey, decimal, source_claim};
+    use super::{ClaimKey, decimal, equal_in_constant_time, source_claim};
 
     #[test]
     fn a_reused_claim_key_matches_a_fresh_derivation_for_every_preimage() {
@@ -179,6 +201,28 @@ mod tests {
         for value in [0, 9, 10, 4_096, usize::MAX] {
             let mut digits = [0; 20];
             assert_eq!(decimal(value, &mut digits), value.to_string().as_bytes());
+        }
+    }
+
+    #[test]
+    fn the_word_comparison_finds_every_differing_byte_at_every_length() {
+        for len in [0, 1, 7, 8, 9, 63, 64, 65] {
+            let expected: Vec<u8> = (0..len).map(|i| b'a' + (i % 26) as u8).collect();
+            assert!(equal_in_constant_time(&expected, &expected.clone()));
+            for at in 0..len {
+                for bit in 0..8 {
+                    let mut actual = expected.clone();
+                    actual[at] ^= 1 << bit;
+                    assert!(
+                        !equal_in_constant_time(&expected, &actual),
+                        "len {len} at {at}"
+                    );
+                }
+            }
+            let mut longer = expected.clone();
+            longer.push(b'a');
+            assert!(!equal_in_constant_time(&expected, &longer));
+            assert!(!equal_in_constant_time(&longer, &expected));
         }
     }
 }
