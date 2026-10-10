@@ -207,6 +207,8 @@ export interface StatusDetail extends SidebarSnapshot {
     compactionTiming?: string[];
     foldAuthorityLines?: string[];
     awsCredentials: string;
+    /** The daemon's search admission line; absent when the status carries no search admission block. */
+    searchAdmission?: string;
 }
 
 export interface RpcNotificationMessage {

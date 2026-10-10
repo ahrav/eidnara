@@ -287,6 +287,15 @@ impl SearchSelection {
 
     fn admit(&self, gate: &HookGate, budget: &EvalBudget) -> Result<Admission, BuildError> {
         deadline(budget)?;
+        self.admit_reader(gate)
+    }
+
+    /// The admission every reader of this manager's family takes: the gate's hook admission for this data home, then the family's limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the gate's denial.
+    pub(crate) fn admit_reader(&self, gate: &HookGate) -> Result<Admission, BuildError> {
         gate.require_selection_home(&self.data_home)?;
         let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
         gate.check_limits(

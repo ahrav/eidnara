@@ -7099,6 +7099,12 @@ impl HandlerCore {
         if let Some(cell) = source_health {
             response["aws_credentials"] = cell.get().to_json();
         }
+        if let Some(owner) = self.lifecycle_owner() {
+            response["search_admission"] = match owner.admission_state() {
+                Ok(()) => json!({"state": "admitted"}),
+                Err(reason) => json!({"state": "refused", "reason": reason}),
+            };
+        }
         if let Some(page) = history_segment_page {
             let history_segments = page
                 .history_segments

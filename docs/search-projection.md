@@ -74,6 +74,21 @@ lease epoch, the selected seed digest, and the consumer. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
 current epoch, checkpoint, or tip.
 
+## Admission status
+
+`session.status` carries a `search_admission` block whenever the daemon runs a
+lifecycle owner: `{"state": "admitted"}` when the gate admits the selected
+family's reads, or `{"state": "refused", "reason": <code>}` with the
+`Denial::code` of the gate's refusal, for example `no_manifest`,
+`manifest_identity`, `evidence_identity`, `evidence_failed`, or
+`coverage_stale`. Records the last slice refused to read report
+`records_unreadable`, `records_refused` (for example a record readable by
+other users), or `records_malformed` in place of `no_manifest`. A `retrieval.query` whose pin the gate refuses answers
+`lane_unavailable` with the same code as its `reason`, and `no_family` once
+the gate admits but no family is selected. Codes name the gate or condition,
+never record content. OpenCode's `/eidnara-status` renders the block as
+`Search admission`.
+
 ## Disable and recovery
 
 `SearchLifecycleOwner::disable` closes admission before any write, persists the

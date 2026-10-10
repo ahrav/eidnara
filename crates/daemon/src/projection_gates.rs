@@ -654,6 +654,30 @@ pub enum Denial {
     },
 }
 
+impl Denial {
+    /// The stable code a status surface or a route refusal reports for this denial. It names the gate or condition, never a record's content.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RecoveryRequired => "recovery_required",
+            Self::ControlUnreadable(_) => "control_unreadable",
+            Self::Invalidated => "invalidated",
+            Self::NoManifest => "no_manifest",
+            Self::Disabled(_) => "hook_disabled",
+            Self::ManifestIdentity => "manifest_identity",
+            Self::EvidenceIdentity => "evidence_identity",
+            Self::Missing(_) => "evidence_missing",
+            Self::Failed(..) => "evidence_failed",
+            Self::Stale { .. } => "coverage_stale",
+            Self::UnapprovedObserver(_) => "unapproved_observer",
+            Self::Unsupported { .. } => "capability_unsupported",
+            Self::LimitExceeded { .. } => "limit_exceeded",
+            Self::CompressionDisabled => "compression_disabled",
+            Self::Revoked => "compression_revoked",
+            Self::LimitChanged { .. } => "limit_changed",
+        }
+    }
+}
+
 /// A grant. `invalidated` fires when the gate's manifest or identity changes after the grant; the holder cancels its budget and lets admitted work join.
 #[derive(Debug, Clone)]
 pub struct Admission {

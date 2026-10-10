@@ -33,6 +33,7 @@ import {
 } from "../hooks/context/session-directory";
 import { calibrateBuckets, resolveModelCalibration } from "../hooks/context/tokenizer-calibration";
 import type { RustModeModuleClient } from "../hooks/context/transform-session-client";
+import { formatSearchAdmission } from "../shared/admission-status";
 import { BoundedSessionMap } from "../shared/bounded-session-map";
 import {
     formatCompactionTimingLines,
@@ -199,6 +200,7 @@ export interface RustSessionStatus {
     pass_trace?: { last_reject_error?: string | null; scheduler_history?: unknown } | null;
     history_summarizer?: Record<string, unknown>;
     aws_credentials?: unknown;
+    search_admission?: unknown;
     summary?: string;
 }
 const rustStatusCache = new CoalescedTtlCache<RustSessionStatus>(
@@ -678,6 +680,8 @@ export function buildStatusDetail(
     if (ownership.foldAuthority) {
         detail.foldAuthorityLines = formatFoldAuthorityLines(ownership.foldAuthority);
     }
+    const searchAdmission = formatSearchAdmission(moduleStatus?.search_admission);
+    if (searchAdmission !== null) detail.searchAdmission = searchAdmission;
 
     try {
         if (activeModel) {

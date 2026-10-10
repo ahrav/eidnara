@@ -181,6 +181,8 @@ pub struct SearchLifecycleOwner {
     claims_paused: Arc<std::sync::atomic::AtomicBool>,
     /// The batch size of the next claim-source slice, at most `CLAIM_SLICE_BOUNDS.batch`.
     claim_batch: std::sync::atomic::AtomicUsize,
+    /// The [`InputRefusal::code`] of the records the last slice refused to read, kept so status names it once the gate closes as `no_manifest`.
+    records_refused: Mutex<Option<&'static str>>,
     /// Makes the directory sync after the next authorized recovery's record rename fail once, on every selection this owner creates.
     #[cfg(feature = "test-support")]
     /// `(armed, _)`: while armed, the directory sync after the next record rename in a recovery write fails once, on whichever selection this owner created.
@@ -263,6 +265,7 @@ impl SearchLifecycleOwner {
             claims: Mutex::new(ClaimProgress::default()),
             claims_paused: Arc::default(),
             claim_batch: std::sync::atomic::AtomicUsize::new(CLAIM_SLICE_BOUNDS.batch.get()),
+            records_refused: Mutex::new(None),
             #[cfg(feature = "test-support")]
             recovery_sync_failure: Arc::default(),
         }
@@ -478,6 +481,13 @@ impl SearchLifecycleOwner {
             });
         let live = match &mut *managed {
             Managed::Selection(current) => current.maintenance(),
+            _ => None,
+        };
+        *self
+            .records_refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = match &prepared {
+            Err(SpecRefusal::Inputs(refusal)) => refusal.code(),
             _ => None,
         };
         let (inputs, identity, bounds, budget) = match prepared {
@@ -1276,6 +1286,35 @@ impl SearchLifecycleOwner {
         Ok(recorded)
     }
 
+    /// The search admission a status surface reports, judged as a reader's pin judges it: the gate's hook admission and, while no slice holds the manager, the selected family's limits. The gate reads its durable stop record as every admission does. Records the last slice refused to read report their [`InputRefusal::code`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`Denial::code`] of the refusal.
+    pub fn admission_state(&self) -> Result<(), &'static str> {
+        let gate = self.admission.gate();
+        let selected = self.try_lock_free().and_then(|managed| match &*managed {
+            Managed::Selection(selection) => Some(selection.admit_reader(gate).map(|_| ())),
+            _ => None,
+        });
+        let verdict = match selected {
+            Some(admitted) => admitted.map_err(|error| refusal_code(&error).unwrap_or("no_family")),
+            None => gate
+                .admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)
+                .map(|_| ())
+                .map_err(|denial| denial.code()),
+        };
+        // A gate closed over refused records reports `no_manifest`; the records' refusal names why.
+        verdict.map_err(|code| match code {
+            "no_manifest" => self
+                .records_refused
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or(code),
+            code => code,
+        })
+    }
+
     /// Pins the selected family for one reader. Freshness is judged on the coverage the last slice observed, so a reader can trail the kernel by the commits that arrived since that slice on top of `catchup_lag_commits`; the next slice observes the family again.
     ///
     /// # Errors
@@ -1416,6 +1455,16 @@ fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
             SourceHoldError::BindingMismatch | SourceHoldError::Invalid(_)
         ))
     )
+}
+
+/// The admission code a selection refusal carries when the gate refused it: the records, the evidence, the observation, or the limits the last slice installed.
+pub(crate) fn refusal_code(error: &BuildError) -> Option<&'static str> {
+    match error {
+        BuildError::Denied(denial) | BuildError::Intent(IntentRefusal::Denied(denial)) => {
+            Some(denial.code())
+        }
+        _ => None,
+    }
 }
 
 /// The outcome of a Current family's refusal: the rebuild its cause earns, or the refusal itself.

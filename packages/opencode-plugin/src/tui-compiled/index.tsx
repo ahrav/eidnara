@@ -553,8 +553,8 @@ const StatusDialog = props => {
           }
         })), null);
         _$insert(_el$48, (() => {
-          var _c$10 = _$memo(() => s().readyConditionalNoteCount > 0);
-          return () => _c$10() && _$createComponent(R, {
+          var _c$11 = _$memo(() => s().readyConditionalNoteCount > 0);
+          return () => _c$11() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -568,8 +568,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$48, (() => {
-          var _c$11 = _$memo(() => !!s().lastMemoryClassifierRunAt);
-          return () => _c$11() && _$createComponent(R, {
+          var _c$12 = _$memo(() => !!s().lastMemoryClassifierRunAt);
+          return () => _c$12() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -812,8 +812,8 @@ const StatusDialog = props => {
         _$insertNode(_el$77, _el$78);
         _$insertNode(_el$78, _$createTextNode(`History Compression`));
         _$insert(_el$68, (() => {
-          var _c$12 = _$memo(() => typeof s().boundaryPresent === "boolean");
-          return () => _c$12() && _$createComponent(R, {
+          var _c$13 = _$memo(() => typeof s().boundaryPresent === "boolean");
+          return () => _c$13() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -824,8 +824,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$68, (() => {
-          var _c$13 = _$memo(() => s().coverageOrdinal !== undefined);
-          return () => _c$13() && _$createComponent(R, {
+          var _c$14 = _$memo(() => s().coverageOrdinal !== undefined);
+          return () => _c$14() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -836,8 +836,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$68, (() => {
-          var _c$14 = _$memo(() => typeof s().boundaryPresent === "boolean");
-          return () => _c$14() && _$createComponent(R, {
+          var _c$15 = _$memo(() => typeof s().boundaryPresent === "boolean");
+          return () => _c$15() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -857,8 +857,8 @@ const StatusDialog = props => {
           }
         }), null);
         _$insert(_el$68, (() => {
-          var _c$15 = _$memo(() => s().compressionBudget != null);
-          return () => _c$15() && _$createComponent(R, {
+          var _c$16 = _$memo(() => s().compressionBudget != null);
+          return () => _c$16() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -869,8 +869,8 @@ const StatusDialog = props => {
           });
         })(), null);
         _$insert(_el$68, (() => {
-          var _c$16 = _$memo(() => !!s().lastMemoryClassifierRunAt);
-          return () => _c$16() && _$createComponent(R, {
+          var _c$17 = _$memo(() => !!s().lastMemoryClassifierRunAt);
+          return () => _c$17() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -975,6 +975,21 @@ const StatusDialog = props => {
         return t().textMuted;
       }
     }), null);
+    _$insert(_el$18, (() => {
+      var _c$0 = _$memo(() => !!s().searchAdmission);
+      return () => _c$0() && _$createComponent(R, {
+        get t() {
+          return t();
+        },
+        l: "Search admission",
+        get v() {
+          return s().searchAdmission ?? "";
+        },
+        get fg() {
+          return t().textMuted;
+        }
+      });
+    })(), null);
     _$insertNode(_el$22, _el$23);
     _$setProp(_el$22, "marginTop", 1);
     _$setProp(_el$22, "width", "100%");
@@ -993,8 +1008,8 @@ const StatusDialog = props => {
       }
     }), null);
     _$insert(_el$22, (() => {
-      var _c$0 = _$memo(() => !!s().loggerDiagnostics?.lastErrorMessage);
-      return () => _c$0() && _$createComponent(R, {
+      var _c$1 = _$memo(() => !!s().loggerDiagnostics?.lastErrorMessage);
+      return () => _c$1() && _$createComponent(R, {
         get t() {
           return t();
         },
@@ -1008,8 +1023,8 @@ const StatusDialog = props => {
       });
     })(), null);
     _$insert(_el$22, (() => {
-      var _c$1 = _$memo(() => !!s().loggerDiagnostics?.lastErrorTime);
-      return () => _c$1() && _$createComponent(R, {
+      var _c$10 = _$memo(() => !!s().loggerDiagnostics?.lastErrorTime);
+      return () => _c$10() && _$createComponent(R, {
         get t() {
           return t();
         },
