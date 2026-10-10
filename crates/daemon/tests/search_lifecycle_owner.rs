@@ -1255,6 +1255,36 @@ fn a_slice_refused_on_the_lane_names_the_lane_in_status_and_pin_refusals() {
 }
 
 #[test]
+fn a_kernel_tip_unread_after_preparation_is_named_in_status() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    assert_eq!(owner.admission_state(), Err("no_family"));
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::clone(&cancel),
+    );
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let outcome = owner.run_slice(&budget);
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    assert_eq!(owner.admission_state(), Err("kernel_unreadable"));
+}
+
+#[test]
 fn status_reports_no_family_until_a_family_is_selected() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();

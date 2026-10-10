@@ -92,6 +92,8 @@ fn next_claim_batch(batch: NonZeroUsize, report: &MaterializationReport) -> NonZ
 /// The daemon's own projection serves local reads, so maintenance judges eligibility for local egress; a remote destination would retire every non-normal row as provider-sensitive.
 const MAINTENANCE_DESTINATION: ArtifactDestination = ArtifactDestination::Local;
 
+const KERNEL_UNREADABLE: &str = "kernel_unreadable";
+
 /// The bound projects maintenance rotates across, each under the project digest that orders the rotation, read at each slice so bindings take effect at the next one.
 pub type ProjectRoster = Arc<dyn Fn() -> Vec<(String, ProjectScope)> + Send + Sync>;
 
@@ -117,7 +119,7 @@ impl SpecRefusal {
             Self::LaneNotReady(_) => Some("lane_not_ready"),
             Self::Inputs(refusal) => refusal.code(),
             Self::TooSmall(_) | Self::LimitRange(_) => Some("limits_unbounded"),
-            Self::Kernel(_) => Some("kernel_unreadable"),
+            Self::Kernel(_) => Some(KERNEL_UNREADABLE),
         }
     }
 }
@@ -1097,6 +1099,10 @@ impl SearchLifecycleOwner {
         let tip = match self.kernel.tip_within_budget(budget) {
             Ok(tip) => tip,
             Err(_) => {
+                *self
+                    .preparation_refused
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(KERNEL_UNREADABLE);
                 self.admission.gate().close();
                 return Refresh::Closed(Closed::NoProjection);
             }
