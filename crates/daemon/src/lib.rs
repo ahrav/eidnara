@@ -41845,12 +41845,12 @@ mod tests {
         assert!(state_sync_epoch_compatible(epochs));
     }
 
-    /// Once a session's row stops changing, a steady pass takes the row's core from the
-    /// memory store's row memo: no statement parses `core_state`, and every `cache_state`
-    /// read returns at most the row version and `meta`, though the row's frozen m0 core is
-    /// many times larger.
+    /// Once a session's row stops changing, a steady pass takes the row's core, its `meta`,
+    /// and its fold-authority fields from the memory store's row memo: no statement parses
+    /// `core_state` or `meta`, and every `cache_state` read returns at most the row version
+    /// and one more integer, though the row's frozen m0 core is many times larger.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_steady_pass_over_an_unchanged_row_reads_no_core_state_bytes() {
+    async fn a_steady_pass_over_an_unchanged_row_reads_no_core_state_or_meta_bytes() {
         const SEGMENTS: usize = 1_000;
         let (handler, store, _dir, _project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
@@ -41920,7 +41920,15 @@ mod tests {
         assert!(!reads.is_empty());
         for run in reads {
             assert!(
-                !run.sql.contains("json_extract(core_state") && run.bytes <= 8 + meta_bytes as u64,
+                [
+                    "json_extract(core_state",
+                    "json_extract(meta",
+                    "json_type(meta",
+                    "meta ->>"
+                ]
+                .iter()
+                .all(|parse| !run.sql.contains(parse))
+                    && run.bytes <= 16,
                 "{} bytes from {}",
                 run.bytes,
                 run.sql

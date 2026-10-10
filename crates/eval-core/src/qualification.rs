@@ -44,12 +44,14 @@ pub const REQUIRED_MEMORY_BYTES: u64 = 16 << 30;
 pub const MEMORY_TOLERANCE_BYTES: u64 = 1 << 30;
 pub const REQUIRED_MODEL_WORKERS: u32 = 8;
 /// A report qualifies only after every witness in `WITNESSES` has a recorded run at the report's source commit that exited zero.
-pub const WITNESSES: [&str; 5] = [
+pub const WITNESSES: [&str; 6] = [
     "normal_fold",
     "emergency_fold",
     "wrapup_fold",
     "reattach_fold",
     "rotation_soak",
+    // The warm-acquisition p99 bound runs in release only, so its run is recorded beside the others.
+    "warm_acquisition",
 ];
 
 /// One run of the test that witnesses a named behavior.
