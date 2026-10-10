@@ -41618,6 +41618,7 @@ mod tests {
     }
 
     async fn fire_and_settle(handler: &Handler, store: &MemoryStore, messages: &[IngressMessage]) {
+        let deadline = std::time::Instant::now() + TEST_WAIT_BUDGET;
         loop {
             let firing_seq = match store.load("ses") {
                 Ok(loaded) => {
@@ -41639,6 +41640,10 @@ mod tests {
             assert_eq!(
                 response["history_summarizer"]["no_fire"], "busy",
                 "{response}"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "history_summarizer stayed busy for the whole wait budget"
             );
             tokio::time::sleep(TEST_WAIT_POLL).await;
         }

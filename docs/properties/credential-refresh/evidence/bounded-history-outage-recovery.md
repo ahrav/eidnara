@@ -71,6 +71,22 @@ commit; a host that meets the required runner with no cgroup constraint.
 
 ## Investigation log
 
+### Q: Does a recorded witness run prove its execution context?
+
+- Sources examined: `WitnessRun` (`qualification.rs:64`),
+  `check_witness_runs` (`:79`), the `pending_witnesses` computation in
+  `QualificationReport::build` (`:1016`), the runner's `--witness-runs` reader
+  (`crates/daemon/examples/eval_runner/qualification.rs:834`).
+- Findings: a run carries a test string, a source commit, and an exit code.
+  `build` requires a known name, a clean commit equal to the report's, and
+  exit zero. No field names the host, the build profile, or the cgroup state,
+  so a `warm_acquisition` run from the authoring host or a debug build clears
+  the pending set as well as one from the dedicated runner in release.
+- Missing evidence: a binding between a witness run and the environment the
+  report itself records.
+- Conclusion: needs human input - extend `WitnessRun` with the environment and
+  profile, or run the measurement inside the campaign.
+
 ### Q: Has the campaign passed anywhere?
 
 - Sources examined: `QualificationReport::build`, the runner, the host this

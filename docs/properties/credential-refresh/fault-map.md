@@ -35,9 +35,10 @@ need the fault-free interval after it.
 
 - A counter on the owner's refresh path, asserted unchanged across a health
   read, for the no-I/O half of N10. Awaits the open question in the record.
-- A cap on consecutive `busy` responses in `fire_and_settle`, so the normal and
-  reattach N9 witnesses fail inside a stated attempt bound rather than at the
-  runner's timeout. Awaits the open question in the record.
+- A binding between a `WitnessRun` and the environment and build profile it
+  ran under, so a `warm_acquisition` run from the wrong host or a debug build
+  cannot clear `pending_witnesses`. Awaits the open question in the N13
+  record.
 - A recorded campaign run on the dedicated runner, which is the only coverage
   N13 accepts.
 

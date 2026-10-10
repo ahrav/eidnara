@@ -39,8 +39,9 @@ The bound comes from the wait helpers in `crates/daemon/src/lib.rs`:
 `wait_for_idle` (`:36616`), `wait_for_count` (`:36641`), and
 `wait_for_history_summarizer_state` (`:36652`) panic at the budget.
 `fire_and_settle` (`:41620`) expires the backoff, calls transform, accepts only
-`fired` or `no_fire: "busy"`, and on `fired` waits within the budget for a
-higher `firing_seq` at idle.
+`fired` or `no_fire: "busy"`, retries `busy` only until a deadline of
+`TEST_WAIT_BUDGET` from its first attempt, and on `fired` waits within the
+budget for a higher `firing_seq` at idle.
 
 Rotation witness: `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner` runs
@@ -62,7 +63,8 @@ continue.
 The window is the cooldown boundary: the backoff recorded at the source
 failure must have expired at the next eligible operation. The recovery bound
 is one firing after expiry, with publication and return to idle inside the
-10-second wait budget. The rotation witness depends on the shifted clock seam
+10-second wait budget; `busy` retries before that firing have their own
+10-second deadline. The rotation witness depends on the shifted clock seam
 and a scripted dispatch; the path witnesses depend on the scripted producer.
 
 ## What a test must construct
@@ -80,9 +82,10 @@ archive or placeholder; a producer start count that proves exactly one retry.
   helpers, `TEST_WAIT_BUDGET`.
 - Findings: attempts are bounded to one firing after expiry (the start counts
   and `firing_seq` assertions); time is bounded by the 10-second budget per
-  wait. `fire_and_settle` places no cap on consecutive `busy` responses, each
-  of which costs one 2 ms poll; a summarizer that stayed busy forever would run
-  the test to the runner's timeout rather than fail the witness.
-- Missing evidence: a retry cap on `busy`.
-- Conclusion: needs human input - whether the normal and reattach witnesses
-  should cap `busy` retries.
+  wait. An earlier revision of `fire_and_settle` retried `busy` without a cap,
+  so a summarizer that stayed busy would have run the normal and reattach
+  witnesses to the runner's timeout instead of failing them; the helper now
+  asserts a `TEST_WAIT_BUDGET` deadline across those retries.
+- Missing evidence: none for the five checks read.
+- Conclusion: resolved with answer - one firing, and 10 seconds per wait
+  including the `busy` retries.

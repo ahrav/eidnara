@@ -66,6 +66,9 @@ Production oracles: `gate` at `qualification.rs:459`, `OutageRun::judge` at
 ## Suspiciously quiet areas
 
 - No check records a credential I/O count across `health()`.
+- No check binds a recorded `WitnessRun` to the host or build profile it ran
+  under; `only_a_complete_passing_run_on_the_dedicated_runner_qualifies`
+  covers the campaign's own environment, not the witness runs' environments.
 - No qualifying campaign run exists; every N13 check is a failing control or
   a unit of the harness.
 - The soak and the path witnesses use scripted producers and dispatches; no

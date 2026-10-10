@@ -27,16 +27,23 @@ catalog; this part does not restate them.
 ## Reachability classes
 
 Each record carries its own class with the evidence in its `Reachability`
-field.
+field. The classes follow the fold-authority catalog: `default-production` is
+reached by a default install; `explicit-config-only` needs an admitted,
+non-empty summarizer chain or another operator selection.
 
-- `default-production`: N8 runs in every daemon's history summarizer, and N10
-  in every host's health report, with no enabling state. N2 and the rotation
-  half of N9 run whenever the host envelope carries an `aws_source` selection:
-  `crates/daemon/src/bin/eidnara_host/serve.rs:1313` builds the source owner
-  from that selection and `:1336` installs it. The selection is the user's
-  choice of credential source in the shipped build, with no build feature or
-  deployment flag behind it, so the class is default-production rather than
-  explicit-config-only.
+- `default-production`: N10. Every host health report serializes the
+  `aws_credentials` block from the cached cell
+  (`crates/host-runtime/src/model_execution/mod.rs:451`, `:463`), with or
+  without a source owner.
+- `explicit-config-only`: N2, N8, and N9. The source owner exists only when
+  the host envelope carries an `aws_source` selection
+  (`crates/daemon/src/bin/eidnara_host/serve.rs:92`, built at `:1313`,
+  installed at `:1336`); a daemon without it never evaluates `covers`. Model
+  folding needs an admitted, non-empty `model_chain`
+  (`crates/daemon/src/config.rs:181` `eidnara_folds`); a default
+  `DaemonConfig` leaves the chain empty and the summarizer answers
+  `no_fire: "no_models"` (`crates/daemon/src/lib.rs:5686`), so the N8 and N9
+  paths are never entered.
 - `test-only`: N13 is a campaign. The gates, the outage judge, and the lineage
   oracle live in `crates/eval-core/src/qualification.rs`; the runner is
   `crates/daemon/examples/eval_runner/qualification.rs`. Production code
@@ -69,7 +76,8 @@ Semantics distribution: three `always`, two `sometimes`.
 ### credential-lifetime-covers-dispatch
 
 Type: safety
-Reachability: default-production
+Reachability: explicit-config-only - the owner exists only under an
+`aws_source` selection (`serve.rs:1313`)
 Status: active
 Exercised: yes - the owner unit test drives lifetimes one second below, equal
 to, and one second above the deadline plus skew, and the subprocess suite
@@ -97,7 +105,8 @@ Open questions: None.
 ### typed-source-failure-preserves-model-certainty
 
 Type: safety
-Reachability: default-production
+Reachability: explicit-config-only - firing needs an admitted, non-empty
+`model_chain` (`config.rs:181`); the default chain is empty
 Status: active
 Exercised: yes - the producer tests inject an unproven start effect, an
 unproven cancel after a source failure, and a cross-incarnation unknown
@@ -127,7 +136,9 @@ Open questions: None.
 ### eligible-demand-recovers-after-renewal
 
 Type: liveness
-Reachability: default-production
+Reachability: explicit-config-only - folding needs the admitted, non-empty
+`model_chain` (`config.rs:181`) and the rotation half needs the `aws_source`
+selection (`serve.rs:1313`)
 Status: active
 Exercised: yes - each folding path folds again after a source failure and its
 cooldown, and the 24-hour soak rotates 24 rows and survives an external login
@@ -140,9 +151,10 @@ and recovery at least once per campaign, inside a fixed bound: once the
 backoff has expired, the first operation the summarizer accepts fires one
 model run, and that single firing publishes the fold and returns the
 summarizer to idle within the 10-second `TEST_WAIT_BUDGET`, polled every 2 ms;
-an operation refused as `busy` while the prior firing settles is retried, and
-any other refusal or a second backoff fails the witness. The four paths are
-witnessed separately because one path's recovery says nothing about another's.
+an operation refused as `busy` is retried only inside a second
+`TEST_WAIT_BUDGET` that starts with the first attempt, and any other refusal
+or a second backoff fails the witness. The four paths are witnessed separately
+because one path's recovery says nothing about another's.
 Fault/timing angle: the cooldown boundary, and an external login between
 rotations.
 Required faults and enabling state: a typed source failure on each path; the
@@ -156,15 +168,13 @@ Existing check: `crates/daemon/src/source_recovery_tests.rs:68`, `:93`, `:120`,
 `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner`.
 Impact: folding stalls after a credential outage until the daemon restarts.
-Open questions:
-- `fire_and_settle` bounds each settle wait at 10 seconds but places no cap on
-  `busy` retries; should the normal and reattach witnesses cap that retry
-  count? (needs human input)
+Open questions: None.
 
 ### source-health-is-advisory-and-secret-free
 
 Type: safety
-Reachability: default-production
+Reachability: default-production - every health report serializes the block
+(`mod.rs:463`), with or without a source owner
 Status: active
 Exercised: partial - the shared vectors cover every state, the bounds,
 malformed blocks, and selector and token canaries in Rust and TypeScript, and
@@ -195,7 +205,8 @@ Open questions:
 ### bounded-history-outage-recovery
 
 Type: liveness
-Reachability: test-only
+Reachability: test-only - the campaign runner and the `eval-core` oracles
+have no production caller
 Status: active
 Exercised: partial - the campaign harness, its gates, the outage judge, and
 the lineage oracle run, and their failing controls fire; no run on the
@@ -224,6 +235,12 @@ Impact: a million-message or outage claim without evidence that it holds.
 Open questions:
 - Supply the dedicated Linux x64 GNU runner with 4 logical CPUs, 16 GiB, and
   local SSD. (needs human input)
+- `WitnessRun` (`qualification.rs:64`) records a test name, a clean source
+  commit, and an exit code; `QualificationReport::build` checks only the
+  commit and the exit code. A `warm_acquisition` run recorded on another host
+  or in a debug build clears `pending_witnesses` all the same. Should the
+  record carry the host environment and build profile, or should the campaign
+  run the measurement itself? (needs human input)
 
 ## Relationship map
 
