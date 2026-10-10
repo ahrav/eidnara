@@ -531,7 +531,7 @@ impl SearchSelection {
                             .projection
                             .read_within(deadline(budget)?, verify_pages)
                             .map_err(BuildError::from)
-                            .and_then(|()| self.validate_family(&family, kernel, budget))
+                            .and_then(|()| self.validate_family(&family, kernel, budget).map(drop))
                         {
                             if let Some(kind) = family_damage(&error) {
                                 family.projection.enter_quarantine(kind, &error);
@@ -651,7 +651,7 @@ impl SearchSelection {
         family: &SelectedFamily,
         kernel: &KernelStore,
         budget: &EvalBudget,
-    ) -> Result<(), BuildError> {
+    ) -> Result<CoverageReport, BuildError> {
         family.check_kernel(kernel, budget)?;
         let now = wall_ms()?;
         let report = family.projection.read_within(deadline(budget)?, |conn| {
@@ -724,7 +724,8 @@ impl SearchSelection {
                 Ok(())
             })?;
         }
-        family.check_kernel(kernel, budget)
+        family.check_kernel(kernel, budget)?;
+        Ok(report)
     }
 
     pub fn reclaim(&self, digest: &str) -> Result<(), BuildError> {
