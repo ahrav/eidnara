@@ -2438,6 +2438,12 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     fingerprints
 }
 
+/// A segment end the host evicted. An empty id or a bare mid is a publisher-vocabulary error,
+/// which the fold reports instead of recovering from.
+fn names_evicted_block(id: &str, live: &[&FlatBlock]) -> bool {
+    wire::split_block_id(id).is_some() && !live.iter().any(|block| block.id() == id)
+}
+
 /// The sequence of the newest stored history segment whose end block is live, or `-1` when no
 /// segment ends on a live block.
 fn newest_live_segment_sequence(
@@ -4122,6 +4128,15 @@ fn apply_once(
     } else if lineage_state.force_hard {
         plan = PassPlan::Hard;
     }
+    let evicted_end_fold_due = !req.is_subagent
+        && matches!(plan, PassPlan::Soft)
+        && history_segment_seq_changed_since_meta
+        && store
+            .newest_history_segment(&req.session_id)?
+            .is_some_and(|newest| names_evicted_block(&newest.end_message_id, &live));
+    if evicted_end_fold_due {
+        plan = PassPlan::Hard;
+    }
     let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
         && loaded.meta.last_serializer_profile != req.serializer_profile;
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
@@ -4132,7 +4147,7 @@ fn apply_once(
         profile_transition,
         first_fold_due,
         ttl_expired: scheduler_outcome.idle_ttl_fired,
-        coverage_fold_due,
+        coverage_fold_due: coverage_fold_due || evicted_end_fold_due,
         project_memory_delta: external_revision_changed || project_memory_epoch_hard_due,
         reconcile_hard_due,
         coverage_delta: history_segment_seq_changed_since_meta,
@@ -4419,7 +4434,7 @@ fn apply_once(
                         // fold keeps the newest segment whose end message is live and removes
                         // the rest, or resets coverage when none is, as spec D10's reset does.
                         let evicted_keep_through = (!loaded.core.reconcile_pending
-                            && wire::split_block_id(minted).is_some())
+                            && names_evicted_block(minted, &live))
                         .then(|| newest_live_segment_sequence(store, &req.session_id, &live))
                         .transpose()?;
                         if loaded.core.reconcile_pending || evicted_keep_through.is_some() {
@@ -20885,6 +20900,64 @@ pub(crate) mod tests {
         assert_eq!(served.boundary_id, "a#0");
         assert_eq!(tail_ids(&served), vec!["k2", "k3"]);
         assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_soft_pass_over_a_segment_ending_on_an_evicted_message_folds_from_the_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(0, 1, 1, "a", "S0")])
+            .unwrap();
+        let before = vec![item("a", 1, "raw"), item("gone", 2, "evicted")];
+        let boot = run(&s, &req("ses", "cfg0", before), &spine());
+        assert_eq!(boot.boundary_id, "a#0");
+        s.append_history_segments("ses", &[comp(1, 2, 2, "gone", "S1")])
+            .unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let live = vec![
+            item("a", 1, "raw"),
+            item("k2", 2, "kept"),
+            item("k3", 3, "tail"),
+        ];
+        let served = run(&s, &req("ses", "cfg0", live.clone()), &spine());
+        assert_eq!(served.boundary_id, "a#0");
+        assert_eq!(tail_ids(&served), vec!["k2", "k3"]);
+        assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
+        let again = run(&s, &req("ses", "cfg0", live), &spine());
+        assert_eq!(tail_ids(&again), vec!["k2", "k3"]);
+    }
+
+    #[test]
+    fn a_pressure_refold_over_a_segment_ending_on_an_evicted_message_folds_from_the_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let ids = ["a", "b", "c", "d", "e", "gone"];
+        let rows: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| comp(i as i64 + 1, i as i64 + 1, i as i64 + 1, id, "S"))
+            .collect();
+        s.replace_history_segments("ses", &rows).unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let mut live: Vec<_> = ids[..5]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| item(id, i as u64 + 1, "raw"))
+            .collect();
+        live.push(item("k6", 6, "kept"));
+        live.push(item("tail", 7, "tail"));
+        let mut request = req("ses", "cfg0", live);
+        request.geometry = Some(TransformGeometry {
+            usable_soft: 1_024,
+            usable_hard: 1_024,
+            derivation: "test".to_string(),
+        });
+        let served = run(&s, &request, &spine());
+        assert_eq!(served.action, "HARD");
+        assert_eq!(served.boundary_id, "e#0");
+        assert_eq!(tail_ids(&served), vec!["k6", "tail"]);
+        assert_eq!(s.load_history_segments("ses").unwrap().len(), 5);
     }
 
     #[test]
