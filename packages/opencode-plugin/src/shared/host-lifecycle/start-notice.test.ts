@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createLazyManagedDemandStart } from "../../hooks/context/module-transport";
+import { _resetProcessAwsSourceForTesting } from "../host-client/aws-source";
 import {
     createStartRefusalAnnouncer,
     credentialProcessProfile,
+    isPersistentStartRefusal,
     managedStartNotice,
 } from "./start-notice";
 
@@ -28,6 +31,29 @@ function awsEnv(config: string, profile: string): Record<string, string> {
     return { HOME: dir, AWS_PROFILE: profile, AWS_REGION: "us-west-2", AWS_CONFIG_FILE: file };
 }
 
+async function withProcessEnv<T>(
+    overrides: Record<string, string | undefined>,
+    body: () => Promise<T>,
+): Promise<T> {
+    const saved = Object.fromEntries(
+        Object.keys(overrides).map((name) => [name, process.env[name]]),
+    );
+    const apply = (values: Record<string, string | undefined>): void => {
+        for (const [name, value] of Object.entries(values)) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+        }
+    };
+    apply(overrides);
+    _resetProcessAwsSourceForTesting();
+    try {
+        return await body();
+    } finally {
+        apply(saved);
+        _resetProcessAwsSourceForTesting();
+    }
+}
+
 describe("managed start notice", () => {
     it("names a selected profile whose section runs credential_process", () => {
         const config = [
@@ -44,6 +70,42 @@ describe("managed start notice", () => {
         expect(credentialProcessProfile({ AWS_REGION: "us-west-2" })).toBeUndefined();
     });
 
+    it("reads section headers with trailing comments as the AWS profile parser does", () => {
+        const following = [
+            "[profile dev]",
+            "sso_session = corp",
+            "[profile midway] # ada",
+            "credential_process = ada credentials print",
+        ].join("\n");
+        expect(credentialProcessProfile(awsEnv(following, "dev"))).toBeUndefined();
+        expect(credentialProcessProfile(awsEnv(following, "midway"))).toBe("midway");
+        const selected = "[profile midway] ; corp\ncredential_process = ada\n";
+        expect(credentialProcessProfile(awsEnv(selected, "midway"))).toBe("midway");
+    });
+
+    it("ignores a credential_process continuation line nested under another property", () => {
+        const nested = "[profile dev]\nsso_session = corp\ns3 =\n  credential_process = x\n";
+        expect(credentialProcessProfile(awsEnv(nested, "dev"))).toBeUndefined();
+    });
+
+    it("skips a config path that is not a bounded regular file without blocking", () => {
+        const dir = root();
+        const fifo = join(dir, "config");
+        execFileSync("mkfifo", [fifo]);
+        const env = {
+            HOME: dir,
+            AWS_PROFILE: "dev",
+            AWS_REGION: "us-west-2",
+            AWS_CONFIG_FILE: fifo,
+        };
+        expect(credentialProcessProfile(env)).toBeUndefined();
+        const large = awsEnv(
+            `[profile dev]\ncredential_process = x\n#${"x".repeat(256 * 1024)}\n`,
+            "dev",
+        );
+        expect(credentialProcessProfile(large)).toBeUndefined();
+    });
+
     it("explains a credential_process refusal and an install-layout refusal", () => {
         const env = awsEnv("[profile midway]\ncredential_process = ada\n", "midway");
         const harness = managedStartNotice("harness_unavailable", null, env);
@@ -51,10 +113,37 @@ describe("managed start notice", () => {
         expect(harness).toContain(
             'AWS profile "midway" supplies credentials through credential_process',
         );
+        expect(harness).not.toContain("static-key profiles");
+        expect(harness).toContain(
+            "role profiles, including a role whose source profile holds static keys",
+        );
         expect(managedStartNotice("unsupported_install_layout", null, {})).toContain("npm install");
         expect(managedStartNotice("native_payload_missing", "reinstall_eidnara", {})).toContain(
             "Suggested fix: reinstall eidnara.",
         );
+    });
+
+    it("explains an inadmissible AWS source selection", () => {
+        const notice = managedStartNotice("harness_unavailable", null, {
+            HOME: "/home/u",
+            AWS_PROFILE: "corp",
+        });
+        expect(notice).toContain(
+            "The AWS source selection is not admissible (AWS_REGION: missing)",
+        );
+    });
+
+    it("stays silent for a compatibility probe that missed its budget after a start", () => {
+        expect(isPersistentStartRefusal("native_probe_unavailable")).toBe(false);
+        expect(isPersistentStartRefusal("startup_timeout")).toBe(false);
+        expect(isPersistentStartRefusal("lifecycle_busy")).toBe(false);
+        expect(isPersistentStartRefusal("unsupported_install_layout")).toBe(true);
+        expect(isPersistentStartRefusal("harness_unavailable")).toBe(true);
+        const announcer = createStartRefusalAnnouncer(() => ({}));
+        const seen: string[] = [];
+        announcer.listen((notice) => seen.push(notice));
+        announcer.refused("native_probe_unavailable", "run_daemon_restart");
+        expect(seen).toEqual([]);
     });
 
     it("announces each persistent reason once and holds notices until a listener exists", () => {
@@ -88,5 +177,29 @@ describe("managed start notice", () => {
             if (saved === undefined) delete process.env.XDG_DATA_HOME;
             else process.env.XDG_DATA_HOME = saved;
         }
+    });
+
+    it("reports an inadmissible selector that refuses the startup envelope", async () => {
+        const dir = root();
+        const reasons: string[] = [];
+        await withProcessEnv(
+            {
+                HOME: dir,
+                AWS_PROFILE: "corp",
+                AWS_REGION: undefined,
+                XDG_DATA_HOME: join(dir, "data"),
+            },
+            async () => {
+                const start = createLazyManagedDemandStart({
+                    declaringModuleUrl: pathToFileURL(join(dir, "dist", "index.js")).href,
+                    parentPackageName: "@eidnara/opencode",
+                    onRefusal: (reason) => reasons.push(reason),
+                });
+                await expect(
+                    start({ origin: "managed-default", capability: "context" }),
+                ).rejects.toMatchObject({ code: "harness_unavailable" });
+            },
+        );
+        expect(reasons).toEqual(["harness_unavailable"]);
     });
 });

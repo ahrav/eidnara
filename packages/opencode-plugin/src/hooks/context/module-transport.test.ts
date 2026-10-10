@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import hostRelease from "../../../../../release/host-release.json";
 import productionInputs from "../../../../../release/production-inputs.lock.json";
 import {
@@ -30,6 +31,7 @@ import { WaiterDetachedError } from "../../shared/host-lifecycle/policy";
 import {
     __moduleTransportTest,
     buildManagedStartupEnvelope,
+    createLazyManagedDemandStart,
     HostModuleTransport,
     harnessForParentPackage,
     isModuleCallBodyValid,
@@ -1141,6 +1143,44 @@ describe("managed startup envelope harness closures", () => {
             expect((thrown as { code?: string }).code, JSON.stringify(env)).toBe(
                 "harness_unavailable",
             );
+        }
+    });
+
+    test("a managed route reports an inadmissible selector through the demand start's onRefusal", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "eidnara-selector-refusal-"));
+        const saved = {
+            HOME: process.env.HOME,
+            AWS_PROFILE: process.env.AWS_PROFILE,
+            AWS_REGION: process.env.AWS_REGION,
+            XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+        };
+        process.env.HOME = dir;
+        process.env.AWS_PROFILE = "corp";
+        delete process.env.AWS_REGION;
+        process.env.XDG_DATA_HOME = join(dir, "data");
+        _resetProcessAwsSourceForTesting();
+        const reasons: string[] = [];
+        try {
+            const transport = internals(
+                new HostModuleTransport({
+                    demandStart: createLazyManagedDemandStart({
+                        declaringModuleUrl: pathToFileURL(join(dir, "dist", "index.js")).href,
+                        parentPackageName: "@eidnara/opencode",
+                        onRefusal: (reason) => reasons.push(reason),
+                    }),
+                }),
+            );
+            await expect(
+                transport.ensureRoute("session", dir, Deadline.start(1_000)),
+            ).rejects.toMatchObject({ code: "harness_unavailable" });
+            expect(reasons).toEqual(["harness_unavailable"]);
+        } finally {
+            for (const [name, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[name];
+                else process.env[name] = value;
+            }
+            _resetProcessAwsSourceForTesting();
+            rmSync(dir, { recursive: true, force: true });
         }
     });
 

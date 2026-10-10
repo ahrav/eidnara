@@ -1,51 +1,90 @@
-import { readFileSync } from "node:fs";
-import { selectAwsSource } from "../host-client/aws-source";
+import {
+    type AwsProfileSource,
+    AwsSourceError,
+    type AwsSourceSelection,
+    selectAwsSource,
+} from "../host-client/aws-source";
+import { readRegularFileSync } from "../regular-file";
+import { isDaemonReason, remediationForReason } from "./contract";
 
-const TRANSIENT_REASONS: ReadonlySet<string> = new Set([
-    "starting",
-    "stopping",
-    "lifecycle_busy",
-    "storage_starting",
-    "kernel_starting",
-    "local_embeddings_starting",
+/**
+ * A start that ran out of its budget and a compatibility probe that missed the policy budget after a successful start are both retried by the next demand.
+ */
+const RETRIED_TIMEOUT_REASONS: ReadonlySet<string> = new Set([
     "startup_timeout",
+    "native_probe_unavailable",
 ]);
 
 const AWS_CONFIG_MAX_BYTES = 256 * 1024;
 
 export function isPersistentStartRefusal(reason: string): boolean {
-    return !TRANSIENT_REASONS.has(reason);
+    if (RETRIED_TIMEOUT_REASONS.has(reason)) return false;
+    return !(isDaemonReason(reason) && remediationForReason(reason) === "wait_and_retry");
+}
+
+const trimBlank = (text: string): string => text.replace(/^[ \t]+|[ \t]+$/g, "");
+
+/** A section header key as `section_header` in `crates/host-runtime/src/model_execution/aws_profile.rs` reads it. */
+function sectionKey(line: string): { prefix: string | null; name: string } | undefined {
+    if (!line.startsWith("[")) return undefined;
+    const comment = line.search(/[#;]/);
+    const text = trimBlank(comment === -1 ? line : line.slice(0, comment));
+    if (!text.endsWith("]")) return undefined;
+    const raw = trimBlank(text.slice(1, -1));
+    const split = raw.search(/[ \t]/);
+    return split === -1
+        ? { prefix: null, name: raw.trim() }
+        : { prefix: raw.slice(0, split).trim(), name: raw.slice(split + 1).trim() };
+}
+
+function profileRunsCredentialProcess(source: AwsProfileSource): boolean {
+    let text: string;
+    try {
+        text = readRegularFileSync(source.config_file, AWS_CONFIG_MAX_BYTES);
+    } catch {
+        return false;
+    }
+    const selected = (key: { prefix: string | null; name: string }): boolean =>
+        key.prefix === null
+            ? key.name === "default" && source.profile === "default"
+            : key.prefix === "profile" && key.name === source.profile;
+    let inSection = false;
+    for (const line of text.split(/\r?\n/)) {
+        const key = sectionKey(line);
+        if (key) {
+            inSection = selected(key);
+            continue;
+        }
+        if (inSection && /^credential_process[ \t]*=/.test(line)) return true;
+    }
+    return false;
 }
 
 export function credentialProcessProfile(
     env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
-    let source: ReturnType<typeof selectAwsSource>;
-    let text: string;
+    let selection: AwsSourceSelection;
     try {
-        source = selectAwsSource(env);
-        if (source.mode !== "profile") return undefined;
-        const bytes = readFileSync(source.source.config_file);
-        if (bytes.length > AWS_CONFIG_MAX_BYTES) return undefined;
-        text = bytes.toString("utf8");
+        selection = selectAwsSource(env);
     } catch {
         return undefined;
     }
-    const profile = source.source.profile;
-    const headers = new Set(
-        profile === "default" ? ["default", "profile default"] : [`profile ${profile}`],
-    );
-    let inSection = false;
-    for (const raw of text.split(/\r?\n/)) {
-        const line = raw.trim();
-        const header = /^\[\s*(.+?)\s*\]$/.exec(line);
-        if (header) {
-            inSection = headers.has((header[1] as string).replace(/\s+/g, " "));
-            continue;
-        }
-        if (inSection && /^credential_process\s*=/.test(line)) return profile;
+    return selection.mode === "profile" && profileRunsCredentialProcess(selection.source)
+        ? selection.source.profile
+        : undefined;
+}
+
+function harnessHint(env: Readonly<Record<string, string | undefined>>): string {
+    let selection: AwsSourceSelection;
+    try {
+        selection = selectAwsSource(env);
+    } catch (error) {
+        return error instanceof AwsSourceError
+            ? `The AWS source selection is not admissible (${error.field}: ${error.code}); AWS_PROFILE needs AWS_REGION and an absolute HOME.`
+            : "";
     }
-    return undefined;
+    if (selection.mode !== "profile" || !profileRunsCredentialProcess(selection.source)) return "";
+    return `AWS profile "${selection.source.profile}" supplies credentials through credential_process. The daemon accepts SSO profiles, role profiles, including a role whose source profile holds static keys, or the AWS_* environment credentials when AWS_PROFILE is unset.`;
 }
 
 export function managedStartNotice(
@@ -54,14 +93,13 @@ export function managedStartNotice(
     env: Readonly<Record<string, string | undefined>>,
 ): string {
     const lead = `Eidnara is off in this process: its daemon did not start (${reason}).`;
-    const profile = reason === "harness_unavailable" ? credentialProcessProfile(env) : undefined;
-    const hint = profile
-        ? `AWS profile "${profile}" supplies credentials through credential_process. The daemon accepts SSO, role, and static-key profiles, or the AWS_* environment credentials when AWS_PROFILE is unset.`
-        : reason === "unsupported_install_layout"
-          ? "The daemon payload resolves from an npm install of the Eidnara package; install it with npm or `eidnara setup`."
-          : remediation
-            ? `Suggested fix: ${remediation.replaceAll("_", " ")}.`
-            : "";
+    const suggested = remediation ? `Suggested fix: ${remediation.replaceAll("_", " ")}.` : "";
+    const hint =
+        reason === "harness_unavailable"
+            ? harnessHint(env) || suggested
+            : reason === "unsupported_install_layout"
+              ? "The daemon payload resolves from an npm install of the Eidnara package; install it with npm or `eidnara setup`."
+              : suggested;
     return [lead, hint, "Run `eidnara doctor` for details."].filter(Boolean).join(" ");
 }
 
