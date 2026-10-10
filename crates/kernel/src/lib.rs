@@ -119,7 +119,7 @@ pub use memory_reviewer_hold::{
 #[cfg(feature = "test-support")]
 pub use open::{ClassificationChange, OpenPhase};
 pub use open::{KernelError, KernelStore, kernel_baseline_digest};
-pub use outbox::{ConsumerAbandonment, OutboxEntry, OutboxPruneResult};
+pub use outbox::{ConsumerAbandonment, ConsumerTipSnapshot, OutboxEntry, OutboxPruneResult};
 pub use retention::{
     STAGING_DELETE_BATCH_RUNS, STAGING_RETENTION_MS, StagingMaintenanceResult, StagingTerminalState,
 };
