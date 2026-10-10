@@ -185,18 +185,23 @@ impl LlmExecutionBackend for PiBackend {
         if self.descriptor.provider_extension_nodes.len() > MAX_PI_PROVIDER_EXTENSIONS {
             return Some("extension_budget_exceeded");
         }
-        // The probe re-verifies the whole closure exactly as `run_pi` does before launch, so a rejected send and a failed run report the same subreason.
-        let Ok(closure) = self.descriptor.closure.revalidate() else {
-            return Some("closure_incomplete");
-        };
-        let mut required = [
-            &self.descriptor.interpreter_node,
-            &self.descriptor.entrypoint_node,
+        // The probe re-verifies the whole closure and resolves every launched node exactly as `run_pi` does before launch, so a rejected send and a failed run report the same subreason.
+        let nodes: Vec<&str> = [
+            self.descriptor.interpreter_node.as_str(),
+            self.descriptor.entrypoint_node.as_str(),
         ]
         .into_iter()
-        .chain(self.descriptor.provider_extension_nodes.iter());
-        required
-            .any(|node| closure.resolve_node_descriptor(node).is_err())
+        .chain(
+            self.descriptor
+                .provider_extension_nodes
+                .iter()
+                .map(String::as_str),
+        )
+        .collect();
+        self.descriptor
+            .closure
+            .revalidate_resolving(&nodes)
+            .is_err()
             .then_some("closure_incomplete")
     }
 }
@@ -348,16 +353,17 @@ async fn run_pi(
     let interpreter_node = descriptor.interpreter_node.clone();
     let entrypoint_node = descriptor.entrypoint_node.clone();
     let extension_nodes = descriptor.provider_extension_nodes.clone();
-    // The whole closure is re-verified immediately before launch and every node resolved from that fresh handle; see `ValidatedHarnessClosure::revalidate`.
+    // The whole closure is re-verified immediately before launch, and every launched node resolves from that same pass; see `ValidatedHarnessClosure::revalidate_resolving`.
     let mut resolve = std::pin::pin!(subprocess::off_runtime(move || {
-        let closure = closure.revalidate().ok()?;
-        let interpreter = closure.resolve_node_descriptor(&interpreter_node).ok()?;
-        let entrypoint = closure.resolve_node_descriptor(&entrypoint_node).ok()?;
-        let mut extensions = Vec::with_capacity(extension_nodes.len());
-        for node in &extension_nodes {
-            extensions.push(closure.resolve_node_descriptor(node).ok()?);
-        }
-        Some((interpreter, entrypoint, extensions))
+        let nodes: Vec<&str> = [interpreter_node.as_str(), entrypoint_node.as_str()]
+            .into_iter()
+            .chain(extension_nodes.iter().map(String::as_str))
+            .collect();
+        let (_closure, resolved) = closure.revalidate_resolving(&nodes).ok()?;
+        let mut resolved = resolved.into_iter();
+        let interpreter = resolved.next()?;
+        let entrypoint = resolved.next()?;
+        Some((interpreter, entrypoint, resolved.collect::<Vec<_>>()))
     }));
     // An abandoned resolution only reads the closure store, so it leaves no residue.
     let resolved = match subprocess::race_setup(&cancel, setup_deadline, &mut resolve).await {

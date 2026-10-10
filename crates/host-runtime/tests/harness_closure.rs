@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use host_runtime::harness_closure::{
@@ -1475,5 +1475,316 @@ fn duplicate_dependency_targets_are_rejected_across_kinds() {
             .expect_err("one target named twice")
             .detail(),
         "node dependencies are not uniquely sorted by target path"
+    );
+}
+
+/// A closure with `modules` entrypoint dependencies spread across sixteen nested package directories, so validation walks it on several threads.
+fn wide_fixture(source: &Path, modules: usize) -> ClosureCandidate {
+    let mut files: Vec<(String, Vec<u8>)> = vec![("bin/node".to_owned(), b"node-runtime".to_vec())];
+    for index in 0..modules {
+        files.push((
+            format!("node_modules/pkg{:02}/lib/m{index:03}.js", index % 16),
+            format!("export const value = {index};").into_bytes(),
+        ));
+    }
+    let mut module_paths: Vec<String> = files[1..].iter().map(|(path, _)| path.clone()).collect();
+    module_paths.sort();
+    let entry = module_paths
+        .iter()
+        .map(|path| format!("import '{path}';"))
+        .collect::<String>()
+        .into_bytes();
+    files.push(("node_modules/pi/dist/cli.js".to_owned(), entry));
+    for (path, bytes) in &files {
+        let destination = source.join(path);
+        std::fs::create_dir_all(destination.parent().expect("parent")).expect("create parent");
+        std::fs::write(&destination, bytes).expect("write source");
+    }
+    let mut nodes: Vec<ClosureNode> = files
+        .iter()
+        .map(|(path, bytes)| {
+            let (kind, dependencies) = match path.as_str() {
+                "bin/node" => (NodeKind::Interpreter, vec![]),
+                "node_modules/pi/dist/cli.js" => (
+                    NodeKind::Module,
+                    module_paths
+                        .iter()
+                        .map(|module| dependency(module, DependencyKind::Static))
+                        .collect(),
+                ),
+                _ => (NodeKind::Module, vec![]),
+            };
+            node(path, path, kind, bytes, dependencies)
+        })
+        .collect();
+    nodes.sort_by(|left, right| left.path.cmp(&right.path));
+    ClosureCandidate {
+        manifest: ClosureManifest {
+            schema: "eidnara.host-harness-closure/v1".to_owned(),
+            harness: "pi".to_owned(),
+            package: "@earendil-works/pi-coding-agent".to_owned(),
+            version: "0.80.2".to_owned(),
+            argument_variant: "run_prompt".to_owned(),
+            source_roots: vec!["install".to_owned()],
+            executable: None,
+            interpreter: Some("bin/node".to_owned()),
+            entrypoint: Some("node_modules/pi/dist/cli.js".to_owned()),
+            extensions: vec![],
+            nodes,
+        },
+        source_roots: BTreeMap::from([("install".to_owned(), source.to_path_buf())]),
+    }
+}
+
+/// Validation walks and hashes on several threads, so with two faults in one closure it must still report the fault a sorted walk reaches first.
+#[test]
+fn the_fault_earliest_in_walk_order_decides_validation() {
+    const MODULES: usize = 200;
+    const EARLY: &str = "files/node_modules/pkg00/lib/m000.js";
+    const LATE: &str = "files/node_modules/pkg15/lib/m191.js";
+    let flip_byte = |path: &Path| {
+        let mut bytes = std::fs::read(path).expect("read retained node");
+        let last = bytes.last_mut().expect("nonempty node");
+        *last ^= 1;
+        std::fs::write(path, bytes).expect("rewrite retained node");
+    };
+    let widen_mode = |path: &Path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .expect("change retained mode");
+    };
+    let hash = "closure node hash diverges from manifest";
+    let mode = "closure file is not owner-only single-link";
+    let unlisted = "closure contains an unlisted file";
+    type Fault<'a> = &'a dyn Fn(&Path);
+    let unlisted_file = |path: &Path| {
+        std::fs::write(path.with_file_name("zz-unlisted.js"), b"extra").expect("extra file");
+    };
+    let unlisted_dir = |path: &Path| {
+        let dir = path.with_file_name("zz-unlisted");
+        std::fs::create_dir(&dir).expect("extra directory");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("owner-only extra directory");
+    };
+    let cases: [(&str, Fault<'_>, &str, Fault<'_>, &str); 6] = [
+        (EARLY, &flip_byte, LATE, &widen_mode, hash),
+        (EARLY, &widen_mode, LATE, &flip_byte, mode),
+        ("files/bin/node", &flip_byte, LATE, &unlisted_file, hash),
+        (EARLY, &unlisted_file, LATE, &flip_byte, unlisted),
+        (
+            EARLY,
+            &unlisted_dir,
+            LATE,
+            &flip_byte,
+            "closure contains an unlisted directory",
+        ),
+        (LATE, &unlisted_dir, EARLY, &widen_mode, mode),
+    ];
+    for (first_path, first_fault, second_path, second_fault, expected) in cases {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        let candidate = wide_fixture(&source, MODULES);
+        let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+        let closure = store
+            .materialize(&candidate, &BTreeSet::new())
+            .expect("materialize");
+        store
+            .validate(closure.digest())
+            .expect("an intact wide closure validates");
+        first_fault(&closure.path().join(first_path));
+        second_fault(&closure.path().join(second_path));
+        for _ in 0..8 {
+            assert_eq!(
+                store
+                    .validate(closure.digest())
+                    .expect_err("a faulted closure must fail")
+                    .detail(),
+                expected,
+                "{first_path} then {second_path}"
+            );
+        }
+    }
+}
+
+/// The manifest checks run beside the file walk, so a non-canonical manifest must still be the reported fault when a file is also corrupt.
+#[test]
+fn a_manifest_fault_precedes_file_faults() {
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
+    let canonical = std::fs::read(closure.path().join("manifest.json")).expect("manifest");
+    // Compact JSON keeps the manifest's meaning but not its canonical bytes.
+    let value: serde_json::Value = serde_json::from_slice(&canonical).expect("manifest json");
+    let compact = serde_json::to_vec(&value).expect("compact manifest");
+    assert_ne!(compact, canonical);
+    let digest = sha256(&compact);
+    let renamed = store_root.join(&digest);
+    std::fs::rename(closure.path(), &renamed).expect("rename to the compact digest");
+    std::fs::write(renamed.join("manifest.json"), &compact).expect("write compact manifest");
+    let helper = renamed.join("files/node_modules/pi/dist/helper.js");
+    std::fs::write(&helper, b"export const answer = 41").expect("corrupt a node");
+    for _ in 0..8 {
+        assert_eq!(
+            store
+                .validate(&digest)
+                .expect_err("a non-canonical manifest must fail")
+                .detail(),
+            "retained manifest is not canonical"
+        );
+    }
+}
+
+/// The file walk runs beside the manifest checks, so a retained manifest naming a path deeper than any valid manifest
+/// admits must fail on its manifest check while the walk stays bounded in the matching deep tree.
+#[test]
+fn a_too_deep_retained_manifest_fails_without_walking_its_depth() {
+    const DEPTH: usize = 1500;
+    let (temp, _source, candidate) = setup();
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let deep = vec!["d"; DEPTH].join("/");
+    let leaf = format!("{deep}/leaf.js");
+    let mut manifest = candidate.manifest.clone();
+    manifest
+        .nodes
+        .push(node(&leaf, &leaf, NodeKind::Module, b"deep", vec![]));
+    let bytes = serde_json::to_vec_pretty(&manifest).expect("manifest bytes");
+    let digest = sha256(&bytes);
+    let closure = store_root.join(&digest);
+    let files = closure.join("files");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(files.join(&deep))
+        .expect("deep tree");
+    std::fs::write(closure.join("manifest.json"), &bytes).expect("manifest");
+    std::fs::set_permissions(
+        closure.join("manifest.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("manifest mode");
+    let leaf_path = files.join(&leaf);
+    std::fs::write(&leaf_path, b"deep").expect("leaf");
+    std::fs::set_permissions(&leaf_path, std::fs::Permissions::from_mode(0o600))
+        .expect("leaf mode");
+    assert_eq!(
+        store
+            .validate(&digest)
+            .expect_err("a too-deep manifest must fail")
+            .detail(),
+        "manifest path is too deep"
+    );
+}
+
+/// `revalidate_resolving` hands out the descriptors its own pass hashed: each starts at offset 0 and reads the
+/// node's bytes, a name listed twice still resolves, an unlisted name fails as `resolve_node_descriptor` does, and an
+/// in-place overwrite of a launched node fails the whole call.
+#[test]
+fn revalidate_resolving_hands_out_the_descriptors_it_verified() {
+    let (temp, _source, candidate) = setup();
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize");
+    let nodes = [
+        "bin/node",
+        "node_modules/pi/dist/cli.js",
+        "node_modules/provider/a.js",
+        "node_modules/provider/a.js",
+    ];
+    let (_fresh, resolved) = closure
+        .revalidate_resolving(&nodes)
+        .expect("revalidate and resolve");
+    assert_eq!(resolved.len(), nodes.len());
+    let expected: [&[u8]; 4] = [
+        b"node-runtime",
+        b"import './helper.js'; import './addon.node'",
+        b"export const provider = 'a'",
+        b"export const provider = 'a'",
+    ];
+    for ((node, resolved), bytes) in nodes.iter().zip(&resolved).zip(expected) {
+        // SAFETY: `resolved` owns this descriptor for the duration of the borrow.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(resolved.inherited_fd()) };
+        let offset =
+            rustix::fs::seek(fd, rustix::fs::SeekFrom::Current(0)).expect("descriptor offset");
+        assert_eq!(offset, 0, "{node}");
+        let mut read = vec![0u8; 128];
+        let count = rustix::io::pread(fd, &mut read, 0).expect("pread resolved descriptor");
+        assert_eq!(&read[..count], bytes, "{node}");
+        assert_eq!(
+            resolved.closure_path(),
+            closure.path().join("files").join(node)
+        );
+    }
+    assert_eq!(
+        closure
+            .revalidate_resolving(&["node_modules/pi/dist/missing.js"])
+            .err()
+            .map(|error| error.detail()),
+        Some("resolved node is not listed by the manifest")
+    );
+    std::fs::write(
+        closure.path().join("files/node_modules/pi/dist/cli.js"),
+        b"import './helper.js'; import './addon.nodf'",
+    )
+    .expect("overwrite the entrypoint in place");
+    assert_eq!(
+        closure
+            .revalidate_resolving(&nodes)
+            .err()
+            .map(|error| error.detail()),
+        Some("closure node hash diverges from manifest")
+    );
+}
+
+/// A node large enough for the pipelined hash validates when intact and fails on a one-byte change, like a small node.
+#[test]
+fn a_large_node_is_hashed_exactly() {
+    const LARGE: usize = 17 * 1024 * 1024 + 3;
+    let (temp, source, mut candidate) = setup();
+    let mut runtime: Vec<u8> = (0..LARGE).map(|index| (index % 251) as u8).collect();
+    std::fs::write(source.join("bin/node"), &runtime).expect("large runtime");
+    let interpreter = candidate
+        .manifest
+        .nodes
+        .iter_mut()
+        .find(|node| node.path == "bin/node")
+        .expect("interpreter node");
+    *interpreter = node(
+        "bin/node",
+        "bin/node",
+        NodeKind::Interpreter,
+        &runtime,
+        vec![],
+    );
+    let store = HarnessClosureStore::open(&temp.path().join("closures")).expect("store");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize a large node");
+    store
+        .validate(closure.digest())
+        .expect("an intact large node validates");
+    let (_fresh, resolved) = closure
+        .revalidate_resolving(&["bin/node"])
+        .expect("resolve the large node");
+    assert_eq!(resolved.len(), 1);
+    runtime[LARGE / 2] ^= 1;
+    std::fs::write(closure.path().join("files/bin/node"), &runtime).expect("overwrite in place");
+    assert_eq!(
+        store
+            .validate(closure.digest())
+            .expect_err("a changed large node must fail")
+            .detail(),
+        "closure node hash diverges from manifest"
+    );
+    assert_eq!(
+        closure
+            .resolve_node_descriptor("bin/node")
+            .err()
+            .map(|error| error.detail()),
+        Some("closure node hash diverges from manifest")
     );
 }
