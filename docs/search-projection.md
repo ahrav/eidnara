@@ -44,8 +44,9 @@ selected family needs a replacement:
 | Cause | Condition |
 |---|---|
 | `CatchUpHoldLost` | The catch-up episode cannot extend the family's source hold: the hold is bound to an earlier kernel lease (`SourceHoldError::BindingMismatch`), or it is missing, released, expired, purge-degraded, or missing bytes (`SourceHoldError::Invalid`). Hold errors a retry may clear end the episode without a rebuild. |
-| `Corruption` | The selected family is quarantined, or its reopen fails with an integrity failure of its own store, connection, or rows, or with a stored prefix that contradicts the kernel's census of it (`BuildError::FamilyPrefix`: its checkpoint, its consumer's acknowledgement, or its per-class live inventory). Kernel errors and operator-repair refusals report the slice blocked. |
+| `Corruption` | The selected family is quarantined, its coverage observation fails with an integrity failure of its own store, connection, or rows, or its reopen fails with an integrity failure of its own store, connection, or rows, or with a stored prefix that contradicts the kernel's census of it (`BuildError::FamilyPrefix`: its checkpoint, its consumer's acknowledgement, or its per-class live inventory). Kernel errors and operator-repair refusals report the slice blocked. A coverage observation that finds a class over the family's coverage bounds (`CoverageUnavailable::OverBound` or `TombstonedOverBound`) also reports the slice blocked and leaves the family unquarantined, so a manifest that raises those bounds serves the same family again. |
 | `SchemaMismatch`, `AnalysisMismatch`, `TokenizerMismatch`, `EmbeddingModelMismatch`, `ProjectionPolicyMismatch`, `IdentityContractMismatch`, `LimitProtocolMismatch` | The selected seed was built under an identity that differs from the running identity in that dimension, checked in this order. The embeddings lane supplies the tokenizer, model, dimension, and table epoch; the schema, analysis, policy, and contract versions are constants of the build; the installed manifest supplies the limit protocol version. |
+| `KernelRestored` | The selected seed's identity equals the running identity and the kernel's commit-read incarnation differs from the one the family was opened under, as after a kernel restore within the same database lineage. The kernel is judged before the family's coverage, so a selected checkpoint past the restored tip still earns this cause, and admission treats the family as unregistered while it is selected. Its retirement needs no checkpoint for the old consumer: a backup predating that consumer's registration restores a kernel that holds none. A family built over another kernel incarnation earns no rebuild. |
 
 A family built over another kernel incarnation earns no rebuild; the slice
 reports it blocked. A slice that finds the selected family quarantined
@@ -82,7 +83,7 @@ with every hook denied; `request_rebuild` records only over a Current record.
 The lifecycle record stores its cause by name, and a binary reads only the
 causes it was built with: a record it cannot decode is `Unavailable` and every
 hook is denied. A home whose record names `Registration`, `CatchUpHoldLost`,
-or `LimitProtocolMismatch` is therefore unreadable to a build that predates
+`LimitProtocolMismatch`, or `KernelRestored` is therefore unreadable to a build that predates
 that cause. Rolling such a
 home back to an older binary requires removing
 `<data_home>/search-lifecycle/intent.json` first. An older binary that

@@ -1083,7 +1083,8 @@ impl SearchLifecycleOwner {
             Some(selection)
                 if selection.has_selected()
                     && !selection.selected_quarantined()
-                    && *selection.identity() == *identity =>
+                    && *selection.identity() == *identity
+                    && !selection.selected_over_another_kernel(&self.kernel, budget) =>
             {
                 selection
                     .observe_selected(budget)
@@ -1451,7 +1452,11 @@ fn rebuild_cause(
     ) {
         return None;
     }
-    identity_mismatch_cause(&selection.selected_seed_identity()?, running)
+    let stored = selection.selected_seed_identity()?;
+    if stored == *running {
+        return Some(Cause::KernelRestored);
+    }
+    identity_mismatch_cause(&stored, running)
 }
 
 /// The cause naming the first dimension in which `stored` differs from `running`; `None` when both name another kernel or agree on every dimension a rebuild changes.

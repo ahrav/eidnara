@@ -13,7 +13,9 @@ use host_runtime::generation::{
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
 use retrieval::batch::{VectorGeneration, read_checkpoint};
-use retrieval::coverage::{CoverageBounds, CoverageReport, observe, verify_active, verify_pages};
+use retrieval::coverage::{
+    CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active, verify_pages,
+};
 use retrieval::exact::{CompletenessCertificate, EXTRACTION_VERSION};
 use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
@@ -142,7 +144,7 @@ pub struct SearchSelection {
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
     maintenance: Option<disable::Maintenance>,
-    recovery_incarnation: Option<CommitReadIncarnation>,
+    recovery_incarnation: Option<(String, CommitReadIncarnation)>,
     #[cfg(feature = "test-support")]
     disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
     #[cfg(feature = "test-support")]
@@ -193,7 +195,7 @@ impl SearchSelection {
     ///
     /// # Errors
     ///
-    /// Returns `BuildError::Invalid` when no family is selected or the family is unavailable or quarantined; propagates errors from `deadline` and `read_within`.
+    /// Returns `BuildError::Invalid` when no family is selected, the family is unavailable or quarantined, or a class exceeds the family's coverage bounds; propagates errors from `deadline` and `read_within`. Any other unavailable observation returns `ProjectionError::CorruptRow`, and an error `family_damage` classifies quarantines the family before it returns.
     pub fn observe_selected(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         let family = self
             .selected
@@ -206,34 +208,52 @@ impl SearchSelection {
         {
             return Err(BuildError::Invalid("selected family unavailable"));
         }
-        Ok(family.projection.read_within(deadline(budget)?, |conn| {
-            observe(
-                conn,
-                &family.certificate.seed.kernel_incarnation_id,
-                &family.generation(),
-                family.bounds,
-            )?
-            .map_err(|_| ProjectionError::CorruptRow)
-        })?)
+        let observed = family
+            .projection
+            .read_within(deadline(budget)?, |conn| {
+                observe(
+                    conn,
+                    &family.certificate.seed.kernel_incarnation_id,
+                    &family.generation(),
+                    family.bounds,
+                )
+            })
+            .map_err(BuildError::from)
+            .and_then(|observed| match observed {
+                Ok(report) => Ok(report),
+                Err(
+                    CoverageUnavailable::OverBound { .. }
+                    | CoverageUnavailable::TombstonedOverBound { .. },
+                ) => Err(BuildError::Invalid(
+                    "coverage exceeds its observation bound",
+                )),
+                Err(_) => Err(ProjectionError::CorruptRow.into()),
+            });
+        if let Err(error) = &observed
+            && let Some(kind) = family_damage(error)
+        {
+            family.projection.enter_quarantine(kind, error);
+        }
+        observed
     }
 
     /// Judges the selected family under the gate and the kernel without rehashing its seed or rereading its certificate.
     ///
     /// # Errors
     ///
-    /// Returns the gate's denial, the kernel mismatch, or `BuildError::Invalid` when no family is selected or it is quarantined.
+    /// Returns the kernel mismatch, the gate's denial, or `BuildError::Invalid` when no family is selected or it is quarantined. The kernel mismatch takes precedence over the gate's denial, so a selected checkpoint beyond a restored kernel's tip earns its rebuild.
     pub fn check_selected(
         &self,
         kernel: &KernelStore,
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
-        self.admit(gate, budget)?;
         let family = self
             .selected
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
         family.check_kernel(kernel, budget)?;
+        self.admit(gate, budget)?;
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
@@ -259,6 +279,15 @@ impl SearchSelection {
             .load()
             .as_ref()
             .is_some_and(|family| family.projection.quarantine().is_some())
+    }
+
+    pub fn selected_over_another_kernel(&self, kernel: &KernelStore, budget: &EvalBudget) -> bool {
+        self.selected.load().as_ref().is_some_and(|family| {
+            matches!(
+                family.check_kernel(kernel, budget),
+                Err(BuildError::Mutation(ProjectionError::IdentityMismatch))
+            )
+        })
     }
 
     pub fn pin(

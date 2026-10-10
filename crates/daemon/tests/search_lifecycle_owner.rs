@@ -132,6 +132,7 @@ fn every_recorded_cause_keeps_the_name_a_lifecycle_record_stores() {
         (Cause::ProjectionPolicyMismatch, "ProjectionPolicyMismatch"),
         (Cause::IdentityContractMismatch, "IdentityContractMismatch"),
         (Cause::LimitProtocolMismatch, "LimitProtocolMismatch"),
+        (Cause::KernelRestored, "KernelRestored"),
         (Cause::DeletedAfterPruning, "DeletedAfterPruning"),
         (Cause::DisabledRecovery, "DisabledRecovery"),
         (Cause::Registration, "Registration"),
@@ -1819,6 +1820,231 @@ async fn a_quarantined_family_keeps_earning_its_rebuild_until_one_is_recorded() 
             "slice {slice} serves the quarantined family"
         );
     }
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_same_lineage_kernel_restore_records_a_rebuild_of_the_current_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restore_behind_the_selected_checkpoint_records_a_kernel_restore_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::CaughtUp(_)),
+        "catch-up moves the family past the backup: {outcome:?}"
+    );
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel behind the selected checkpoint earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restore_predating_the_current_consumer_still_rebuilds_to_current() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_whose_coverage_turns_corrupt_records_its_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let path = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .projection()
+        .path()
+        .to_owned();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.busy_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        raw.execute("DELETE FROM projection_checkpoint", [])
+            .unwrap(),
+        1,
+        "the open family loses its checkpoint row"
+    );
+    drop(raw);
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+        "a family whose coverage cannot be observed earns a corruption rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the corruption rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::Corruption);
+    assert_ne!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the rebuilt family is a new database"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_over_its_coverage_bound_blocks_without_a_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    let bounded = |rows| {
+        manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("export_page_rows", rows)],
+        )
+    };
+    write_records(home, &bounded(1), &campaign_json(&identity));
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let (before, _) = current_attempt(home).unwrap();
+    let projection = Arc::clone(owner.pin(&slice_budget()).unwrap().projection());
+    let path = projection.path().to_owned();
+
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::CaughtUp(_)),
+        "catch-up moves the family past its one-row class bound: {outcome:?}"
+    );
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Blocked(_)),
+        "a family over its coverage bound is blocked: {outcome:?}"
+    );
+    assert!(
+        projection.quarantine().is_none(),
+        "a coverage bound refusal leaves the family unquarantined"
+    );
+    assert_eq!(current_attempt(home).unwrap().0, before);
+    drop(projection);
+
+    write_records(home, &bounded(64), &campaign_json(&identity));
+    let slices = drive(&owner, 20, || owner.pin(&slice_budget()).is_ok()).await;
+    assert!(slices < 20, "the raised bound serves the family again");
+    assert_eq!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the same family serves after the reload"
+    );
+    assert_eq!(current_attempt(home).unwrap().0, before);
     owner.shutdown().await.unwrap();
 }
 
