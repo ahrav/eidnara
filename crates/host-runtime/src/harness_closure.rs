@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::file_mode::raw_mode;
 use crate::instance::{
     S_IFDIR, S_IFMT, S_IFREG, hex, mode_bits, owner_uid, read_all_fd, secure_runtime_dir,
+    stat_identity,
 };
 use crate::lifecycle::is_canonical_payload_digest;
 use crate::store_fs::{
@@ -992,7 +993,8 @@ fn create_parent_dirs(
 /// Threads that walk and hash one closure tree, at most this many per validation.
 const MAX_WALK_THREADS: usize = 8;
 
-/// Directories queued for any walk thread, at most this many; past the bound a thread walks the directory itself.
+/// Up to this many queued directories retain open descriptors; additional directories close their descriptors and
+/// reopen by path from the files directory when a thread takes them.
 const MAX_QUEUED_DIRS: usize = 64;
 
 /// The walk-order key of `name` inside the directory keyed `parent`.
@@ -1037,19 +1039,26 @@ impl FirstFailure {
     }
 }
 
-/// A directory the walk admitted by membership, owner, and mode; its entries await inspection.
-struct DirJob {
+/// A queued directory whose descriptor was closed keeps only its place, so reopening it by path must reach `identity`.
+struct DirPlace {
     key: String,
     relative: String,
     /// Path components in `relative`; the files directory itself has none.
     depth: usize,
+    identity: (u64, u64),
+}
+
+/// A directory the walk admitted by membership, owner, and mode; its entries await inspection.
+struct DirJob {
+    place: DirPlace,
     fd: OwnedFd,
 }
 
-/// Queued directories and the number of directories a thread is inspecting; the walk ends when both are zero.
 #[derive(Default)]
 struct WalkQueue {
-    dirs: Vec<DirJob>,
+    open: Vec<DirJob>,
+    closed: Vec<DirPlace>,
+    /// Number of directories being inspected by threads.
     active: usize,
 }
 
@@ -1067,7 +1076,10 @@ fn validate_files(
 ) -> Result<(usize, Vec<Option<OwnedFd>>), HarnessClosureError> {
     let root = rustix::io::fcntl_dupfd_cloexec(files_fd, 0)
         .map_err(|_| invalid("closure files directory open failed"))?;
+    let root_stat =
+        rustix::fs::fstat(&root).map_err(|_| invalid("closure directory stat failed"))?;
     let walk = TreeWalk {
+        files_fd,
         expected,
         slots,
         uid: owner_uid(),
@@ -1075,12 +1087,16 @@ fn validate_files(
         failure: FirstFailure::default(),
         retained: Mutex::new((0..slot_count).map(|_| None).collect()),
         queue: Mutex::new(WalkQueue {
-            dirs: vec![DirJob {
-                key: String::new(),
-                relative: String::new(),
-                depth: 0,
+            open: vec![DirJob {
+                place: DirPlace {
+                    key: String::new(),
+                    relative: String::new(),
+                    depth: 0,
+                    identity: stat_identity(&root_stat),
+                },
                 fd: root,
             }],
+            closed: Vec::new(),
             active: 0,
         }),
         ready: Condvar::new(),
@@ -1116,6 +1132,7 @@ fn validate_files(
 
 /// The state every walk thread of one [`validate_files`] call shares.
 struct TreeWalk<'a> {
+    files_fd: &'a OwnedFd,
     expected: &'a BTreeMap<&'a str, &'a ClosureNode>,
     slots: &'a BTreeMap<&'a str, usize>,
     uid: u32,
@@ -1132,75 +1149,116 @@ impl TreeWalk<'_> {
         let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
         let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
-            if let Some(dir) = queue.dirs.pop() {
-                queue.active += 1;
-                drop(queue);
-                self.visit(dir, &mut buffer);
-                queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-                queue.active -= 1;
-                if queue.active == 0 && queue.dirs.is_empty() {
-                    self.ready.notify_all();
-                }
-            } else if queue.active == 0 {
-                return;
+            let open = queue.open.pop();
+            let closed = if open.is_none() {
+                queue.closed.pop()
             } else {
+                None
+            };
+            if open.is_none() && closed.is_none() {
+                if queue.active == 0 {
+                    return;
+                }
                 queue = self
                     .ready
                     .wait(queue)
                     .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            queue.active += 1;
+            drop(queue);
+            if let Some(dir) = open.or_else(|| closed.and_then(|place| self.reopen(place))) {
+                self.visit(dir, &mut buffer);
+            }
+            queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            queue.active -= 1;
+            if queue.active == 0 && queue.open.is_empty() && queue.closed.is_empty() {
+                self.ready.notify_all();
             }
         }
     }
 
-    /// Hands `dir` to the queue, or walks it on this thread when the queue is full.
-    fn spill(&self, dir: DirJob, buffer: &mut [u8]) {
+    fn spill(&self, dir: DirJob) {
         let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
-        if queue.dirs.len() < MAX_QUEUED_DIRS {
-            queue.dirs.push(dir);
-            drop(queue);
-            self.ready.notify_one();
+        let closed_fd = if queue.open.len() < MAX_QUEUED_DIRS {
+            queue.open.push(dir);
+            None
         } else {
-            drop(queue);
-            self.visit(dir, buffer);
+            queue.closed.push(dir.place);
+            Some(dir.fd)
+        };
+        drop(queue);
+        self.ready.notify_one();
+        drop(closed_fd);
+    }
+
+    fn reopen(&self, place: DirPlace) -> Option<DirJob> {
+        if self.failure.precedes(&place.key) {
+            return None;
+        }
+        let reopened = open_rel_nofollow(self.files_fd, &place.relative, true)
+            .map_err(|_| invalid("closure tree entry open failed"))
+            .and_then(|fd| {
+                let stat = rustix::fs::fstat(&fd)
+                    .map_err(|_| invalid("closure tree entry stat failed"))?;
+                if stat_identity(&stat) != place.identity {
+                    return Err(invalid("closure directory changed during validation"));
+                }
+                owned_directory_stat(&stat, self.uid)?;
+                Ok(fd)
+            });
+        match reopened {
+            Ok(fd) => Some(DirJob { place, fd }),
+            Err(error) => {
+                self.failure.record(place.key, error);
+                None
+            }
         }
     }
 
-    fn visit(&self, dir: DirJob, buffer: &mut [u8]) {
+    /// Each directory closes before the thread lists its first subdirectory, so a thread holds at most the directory
+    /// it lists, the first subdirectory it will descend into, and the entry it inspects, whatever the tree's depth.
+    fn visit(&self, mut dir: DirJob, buffer: &mut [u8]) {
+        while let Some(subdir) = self.visit_entries(dir, buffer) {
+            dir = subdir;
+        }
+    }
+
+    /// Inspects every entry of `dir`, queues each subdirectory but the first, and returns that first subdirectory.
+    fn visit_entries(&self, dir: DirJob, buffer: &mut [u8]) -> Option<DirJob> {
         let names = match list_names(&dir.fd) {
             Ok(names) => names,
             Err(error) => {
                 // A listing failure follows the directory's own entry and precedes everything inside it.
-                self.failure.record(format!("{}\0", dir.key), error);
-                return;
+                self.failure.record(format!("{}\0", dir.place.key), error);
+                return None;
             }
         };
         // This thread walks the directory's first subdirectory itself once the directory is done and queues the
         // others, so the subtree that sorts first, and any large file in it, starts at once.
         let mut first_subdir = None;
         for name in names {
-            let key = walk_key(&dir.key, &name);
+            let key = walk_key(&dir.place.key, &name);
             // Names arrive sorted, so once an earlier failure precedes this entry it precedes the rest of the directory.
             if self.failure.precedes(&key) {
                 break;
             }
-            let relative = if dir.relative.is_empty() {
+            let relative = if dir.place.relative.is_empty() {
                 name.clone()
             } else {
-                format!("{}/{name}", dir.relative)
+                format!("{}/{name}", dir.place.relative)
             };
             match self.inspect(&dir, &name, key.clone(), relative, buffer) {
                 Ok(None) => {}
                 Ok(Some(subdir)) if first_subdir.is_none() => first_subdir = Some(subdir),
-                Ok(Some(subdir)) => self.spill(subdir, buffer),
+                Ok(Some(subdir)) => self.spill(subdir),
                 Err(error) => {
                     self.failure.record(key, error);
                     break;
                 }
             }
         }
-        if let Some(subdir) = first_subdir {
-            self.visit(subdir, buffer);
-        }
+        first_subdir
     }
 
     fn inspect(
@@ -1221,10 +1279,9 @@ impl TreeWalk<'_> {
         let stat = rustix::fs::fstat(&fd).map_err(|_| invalid("closure tree entry stat failed"))?;
         match mode_bits(&stat) & S_IFMT {
             S_IFDIR => {
-                let depth = dir.depth + 1;
+                let depth = dir.place.depth + 1;
                 // A valid manifest path has at most `MAX_PATH_COMPONENTS` components, so no listed directory reaches
-                // that depth. The walk can run before the manifest's own checks finish, and this bound keeps its
-                // recursion and open descriptors within what a valid manifest admits.
+                // that depth.
                 if depth >= MAX_PATH_COMPONENTS {
                     return Err(invalid("closure contains an unlisted directory"));
                 }
@@ -1241,9 +1298,12 @@ impl TreeWalk<'_> {
                 }
                 owned_directory_stat(&stat, self.uid)?;
                 Ok(Some(DirJob {
-                    key,
-                    relative,
-                    depth,
+                    place: DirPlace {
+                        key,
+                        relative,
+                        depth,
+                        identity: stat_identity(&stat),
+                    },
                     fd,
                 }))
             }

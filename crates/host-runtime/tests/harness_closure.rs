@@ -1480,12 +1480,18 @@ fn duplicate_dependency_targets_are_rejected_across_kinds() {
 
 /// A closure with `modules` entrypoint dependencies spread across sixteen nested package directories, so validation walks it on several threads.
 fn wide_fixture(source: &Path, modules: usize) -> ClosureCandidate {
+    modules_fixture(
+        source,
+        (0..modules)
+            .map(|index| format!("node_modules/pkg{:02}/lib/m{index:03}.js", index % 16))
+            .collect(),
+    )
+}
+
+fn modules_fixture(source: &Path, module_paths: Vec<String>) -> ClosureCandidate {
     let mut files: Vec<(String, Vec<u8>)> = vec![("bin/node".to_owned(), b"node-runtime".to_vec())];
-    for index in 0..modules {
-        files.push((
-            format!("node_modules/pkg{:02}/lib/m{index:03}.js", index % 16),
-            format!("export const value = {index};").into_bytes(),
-        ));
+    for (index, path) in module_paths.into_iter().enumerate() {
+        files.push((path, format!("export const value = {index};").into_bytes()));
     }
     let mut module_paths: Vec<String> = files[1..].iter().map(|(path, _)| path.clone()).collect();
     module_paths.sort();
@@ -1787,4 +1793,84 @@ fn a_large_node_is_hashed_exactly() {
             .map(|error| error.detail()),
         Some("closure node hash diverges from manifest")
     );
+}
+
+const FD_BUDGET_CHILD_ENV: &str = "EIDNARA_CLOSURE_FD_BUDGET_CHILD";
+
+/// Descriptors the validation child may hold, the bound `MAX_PATH_COMPONENTS` documents for one walk.
+const FD_BUDGET: u64 = 128;
+
+/// A valid closure that is both deep and wide must validate within the descriptor budget a single walk documents:
+/// the child pins itself to one CPU, lowers `RLIMIT_NOFILE`, and validates a tree whose first subdirectory is
+/// ninety-nine levels deep while more siblings wait than the walk queue holds.
+#[test]
+fn a_deep_wide_closure_validates_within_the_descriptor_budget() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source).expect("source");
+    let deep = format!("a-deep/{}leaf.js", "d/".repeat(98));
+    let mut modules = vec![deep];
+    modules.extend((0..70).map(|index| format!("s{index:02}/m.js")));
+    let candidate = modules_fixture(&source, modules);
+    let store_root = temp.path().join("closures");
+    let store = HarnessClosureStore::open(&store_root).expect("store");
+    let closure = store
+        .materialize(&candidate, &BTreeSet::new())
+        .expect("materialize a deep wide closure");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "deep_wide_closure_fd_budget_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(
+            FD_BUDGET_CHILD_ENV,
+            format!("{}\n{}", store_root.display(), closure.digest()),
+        )
+        .output()
+        .expect("run the validation child");
+    assert!(
+        output.status.success(),
+        "validation child failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("validated within the descriptor budget"),
+        "the child did not run: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn deep_wide_closure_fd_budget_child() {
+    let Ok(target) = std::env::var(FD_BUDGET_CHILD_ENV) else {
+        return;
+    };
+    let (store_root, digest) = target.split_once('\n').expect("store root and digest");
+    let allowed = rustix::thread::sched_getaffinity(None).expect("affinity");
+    let cpu = (0..rustix::thread::CpuSet::MAX_CPU)
+        .find(|cpu| allowed.is_set(*cpu))
+        .expect("an allowed CPU");
+    let mut one = rustix::thread::CpuSet::new();
+    one.set(cpu);
+    rustix::thread::sched_setaffinity(None, &one).expect("pin to one CPU");
+    let limit = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    rustix::process::setrlimit(
+        rustix::process::Resource::Nofile,
+        rustix::process::Rlimit {
+            current: Some(FD_BUDGET),
+            maximum: limit.maximum,
+        },
+    )
+    .expect("lower RLIMIT_NOFILE");
+    let store = HarnessClosureStore::open(Path::new(store_root)).expect("store");
+    if let Err(error) = store.validate(digest) {
+        panic!(
+            "validation exceeded the descriptor budget: {}",
+            error.detail()
+        );
+    }
+    println!("validated within the descriptor budget");
 }
