@@ -528,16 +528,11 @@ function hasGitDir(canonical: string): boolean {
     return gitRootDirectory(canonical) !== null;
 }
 
-function gitRootInAncestorChain(startDirectory: string): string | null {
+/** Lexical ancestors of a physical `startDirectory` retain physical spelling, so a root found from a physical start is already physical. */
+function nearestGitAncestor(startDirectory: string): string | null {
     let current = startDirectory;
     while (true) {
-        if (existsSync(path.join(current, ".git"))) {
-            try {
-                return realpathSync.native(current);
-            } catch {
-                return path.resolve(current);
-            }
-        }
+        if (existsSync(path.join(current, ".git"))) return current;
         const parent = path.dirname(current);
         if (parent === current) {
             return null;
@@ -546,10 +541,21 @@ function gitRootInAncestorChain(startDirectory: string): string | null {
     }
 }
 
+/** Lexical ancestors can traverse symlinks, so the root resolves to its physical spelling when possible and keeps its absolute lexical spelling when resolution throws. */
+function gitRootInAncestorChain(startDirectory: string): string | null {
+    const root = nearestGitAncestor(startDirectory);
+    if (root === null) return null;
+    try {
+        return realpathSync.native(root);
+    } catch {
+        return path.resolve(root);
+    }
+}
+
 function gitRootDirectory(canonical: string): string | null {
     try {
         const realCanonical = realpathSync.native(canonical);
-        return gitRootInAncestorChain(realCanonical);
+        return nearestGitAncestor(realCanonical);
     } catch {
         return gitRootInAncestorChain(canonical);
     }
@@ -566,7 +572,7 @@ export function resolveProjectRootDirectory(directory: string): string {
         // A path with a missing component has no physical spelling; the raw ancestor chain still finds an existing `.git`.
         return gitRootInAncestorChain(resolved) ?? resolved;
     }
-    return gitRootInAncestorChain(canonical) ?? canonical;
+    return nearestGitAncestor(canonical) ?? canonical;
 }
 
 export function resolveProjectIdentityForSession(
