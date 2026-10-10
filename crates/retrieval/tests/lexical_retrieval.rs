@@ -2536,3 +2536,105 @@ fn dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation
     assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
     assert_eq!(retrieval.completion, Completion::Complete);
 }
+
+/// When a ranked probe's `scan_rows` bound ends at a rank change, one match from the next rank group suffices to prove truncation, so that group's size leaves the probe's SQL steps unchanged.
+#[test]
+fn a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group() {
+    let scan_rows = bounds().scan_rows.get();
+    let tail = 5 * scan_rows;
+    let run = |tail_text: &dyn Fn(usize) -> String| {
+        let fixture = Fixture::all_admitted();
+        let mut head: Vec<Row> = (0..scan_rows)
+            .map(|n| Row::claim(&format!("head-{n}"), "align align align"))
+            .collect();
+        let rows: Vec<Row> = (0..tail)
+            .map(|n| Row::claim(&format!("tail-{n}"), &tail_text(n)))
+            .collect();
+        fixture.project(&head);
+        fixture.project(&rows);
+        let request = probes("align");
+        let keyed = fixture.keyed_reference(&request);
+        assert_eq!(keyed.len(), scan_rows + tail);
+        assert!(
+            keyed[scan_rows - 1].1 < keyed[scan_rows].1,
+            "the bound ends at a rank change"
+        );
+        head.sort_by_key(Row::occurrence_id);
+        let expected: Vec<String> = head.iter().map(Row::occurrence_id).collect();
+        let scanned = fixture
+            .store
+            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+            .unwrap()
+            .unwrap();
+        assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+        let retrieval = fixture
+            .retrieve(&request, bounds(), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(
+            retrieval.completion,
+            Completion::Incomplete(IncompleteReason::ScanBound)
+        );
+        assert_eq!(retrieval.consumed.ranked_matches, scan_rows + tail);
+        assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+        (keyed, retrieval.consumed.sql_steps)
+    };
+
+    let (tied, tied_steps) = run(&|n| format!("align filler {n}"));
+    assert!(
+        tied[scan_rows..]
+            .windows(2)
+            .all(|pair| pair[0].1.to_bits() == pair[1].1.to_bits()),
+        "every row past the bound shares one rank"
+    );
+    // Each row adds one more filler token, so every row past the bound has its own document length and rank.
+    let (distinct, distinct_steps) = run(&|n| format!("align{}", " pad".repeat(n + 1)));
+    assert!(
+        distinct[scan_rows..]
+            .windows(2)
+            .all(|pair| pair[0].1 < pair[1].1),
+        "every row past the bound has its own rank"
+    );
+    assert_eq!(
+        tied_steps, distinct_steps,
+        "one tied group past the bound costs the SQL steps of rows with one rank each"
+    );
+}
+
+/// A dead row inside a bound that ends at a rank change opens a slot for the next rank group, and that group's lowest occurrence identifier takes it, whichever of its rows was stored first.
+#[test]
+fn a_slot_a_dead_row_opens_goes_to_the_next_rank_groups_lowest_identifier() {
+    let fixture = Fixture::all_admitted();
+    let scan_rows = bounds().scan_rows.get();
+    let mut head: Vec<Row> = (0..scan_rows)
+        .map(|n| Row::claim(&format!("head-{n}"), "align align align"))
+        .collect();
+    let mut tail: Vec<Row> = (0..3 * scan_rows)
+        .map(|n| Row::claim(&format!("tail-{n}"), &format!("align filler {n}")))
+        .collect();
+    // Rowid order reaches the tail row with the highest occurrence identifier first.
+    tail.sort_by_key(|row| std::cmp::Reverse(row.occurrence_id()));
+    fixture.project(&head);
+    fixture.project(&tail);
+    let request = probes("align");
+    let keyed = fixture.keyed_reference(&request);
+    assert!(keyed[scan_rows - 1].1 < keyed[scan_rows].1);
+    head.sort_by_key(Row::occurrence_id);
+    tombstone_raw(&fixture, &head[0].occurrence_id());
+    let mut expected: Vec<String> = head[1..].iter().map(Row::occurrence_id).collect();
+    expected.push(tail.last().unwrap().occurrence_id());
+
+    let scanned = fixture
+        .store
+        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+        .unwrap()
+        .unwrap();
+    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+}

@@ -643,8 +643,9 @@ fn scan_whole(
 }
 
 /// Keeps the best `bound` live matches of a probe with more matches than the bound, in rank order and then occurrence identifier order, and returns `true` when a live match lies past the bound, with the VM steps its statements ran.
-/// Identifiers are read for the rows the bound can still reach, extended to the end of the last rank among them, so occurrence identifiers decide which equal-rank rows the bound keeps.
-/// Occurrences are read for the rows the bound still needs plus one, which shows whether a live row lies past it.
+/// `scan_ranked` reads identifiers for the open slots and the rest of their final rank group, so occurrence identifiers decide which equal-rank rows the bound keeps.
+/// A window that exactly fills the open slots adds one witness row to detect live rows past the bound. `scan_ranked` reads the witness's rank group only when an open slot could accept the witness.
+/// Once the bound is full, `scan_ranked` reads one row at a time until it finds a live row, which witnesses that live rows extend past the bound.
 fn scan_ranked(
     conn: &GuardedConn<'_>,
     probe: &Probe,
@@ -661,18 +662,29 @@ fn scan_ranked(
     details.reset_status(StatementStatus::VmStep);
     let mut next = 0;
     let mut pending: VecDeque<(f64, String)> = VecDeque::new();
+    let mut witness: Option<(f64, String)> = None;
     let truncated = loop {
         budget.check().map_err(|_| ScanStop::Budget)?;
-        let wanted = bound - taken.hits.len() + 1;
+        let open = bound - taken.hits.len();
         if pending.is_empty() {
             if next == rows.len() {
                 break false;
             }
-            let mut end = rows.len().min(next + wanted);
-            while end < rows.len() && rows[end].0.total_cmp(&rows[end - 1].0) == Ordering::Equal {
-                end += 1;
+            let mut end = rows.len().min(next + open.max(1));
+            if open > 0 {
+                while end < rows.len() && rows[end].0.total_cmp(&rows[end - 1].0) == Ordering::Equal
+                {
+                    end += 1;
+                }
             }
-            let mut identified = identify(&mut ids, &rows[next..end])?;
+            // `rows` is in ascending rank order and the window ends at a rank change, so a witness ranks after every window row.
+            let read = if open > 0 && end == next + open && end < rows.len() {
+                end + 1
+            } else {
+                end
+            };
+            let mut identified = identify(&mut ids, &rows[next..read])?;
+            witness = if read > end { identified.pop() } else { None };
             identified.sort_by(|left, right| {
                 left.0
                     .total_cmp(&right.0)
@@ -681,8 +693,12 @@ fn scan_ranked(
             pending.extend(identified);
             next = end;
         }
-        let batch: Vec<(f64, String)> = pending.drain(..pending.len().min(wanted)).collect();
-        if resolve(&mut details, &batch, ordinal, bound, taken)? {
+        let mut batch: Vec<(f64, String)> = pending.drain(..pending.len().min(open + 1)).collect();
+        let keep = batch.len();
+        if keep <= open && pending.is_empty() {
+            batch.extend(witness.take());
+        }
+        if resolve(&mut details, &batch, keep, ordinal, bound, taken)? {
             break true;
         }
     };
@@ -740,10 +756,12 @@ fn identify(
 }
 
 /// Offers each of `batch`'s occurrences to `taken` in the order of `batch` and returns `true` when a live one lies past `bound`.
+/// Entries from index `keep` on are witnesses: a live witness returns `true` once the bound is full and `false` while a slot is open, leaving that row for the next window.
 /// The statement reads the identifiers in ascending order, which keeps successive lookups near each other in the index.
 fn resolve(
     statement: &mut storage::CachedStatement<'_>,
     batch: &[(f64, String)],
+    keep: usize,
     ordinal: usize,
     bound: usize,
     taken: &mut Taken<'_>,
@@ -773,9 +791,15 @@ fn resolve(
     }
     drop(cursor);
     debug_assert_eq!(taken.hits.len(), start);
-    for hit in found.into_iter().flatten() {
+    for (index, hit) in found.into_iter().enumerate() {
+        let Some(hit) = hit else {
+            continue;
+        };
         if taken.hits.len() == bound {
             return Ok(true);
+        }
+        if index >= keep {
+            return Ok(false);
         }
         taken.hits.push(hit);
     }

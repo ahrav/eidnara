@@ -11,6 +11,10 @@
   the scan bound and one row below it, the judgments and batches at the bound,
   equal work under a result cap of one, and SQL steps that grow with one more
   matching row on a ranked run and on a common run.
+- `crates/retrieval/tests/lexical_retrieval.rs:2542` ends a ranked probe's
+  scan bound at a rank change. A tied group of 320 rows past the bound runs the
+  same SQL steps as 320 rows with one rank each, because one row past the bound
+  shows truncation.
 - `crates/retrieval/tests/lexical_retrieval.rs:2312` records the retrieval
   call's Rust allocations with the daemon's `alloc_recorder` after a warm-up
   run. One row below the scan bound allocates fewer events and bytes. After 32

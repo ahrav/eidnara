@@ -10,3 +10,7 @@
   its own rank and tombstones rows at the front and around the scan bound; the
   scan keeps the first `scan_rows` live rows of the reference order and reports
   truncation only while a live row lies past the bound.
+- `crates/retrieval/tests/lexical_retrieval.rs:2605` ends the scan bound at a
+  rank change and tombstones one row inside it; the open slot goes to the next
+  rank group's lowest occurrence identifier, although rowid order reaches that
+  group's highest identifier first.
