@@ -123,3 +123,25 @@ array both assume.
   contract, not a fault: the hook then leaves temperature to the provider.
 - Missing evidence: no test drives the absent-bound or non-numeric path.
 - Conclusion: resolved as a mechanism; the negative paths are unexercised.
+
+### Q: Does the hook write a temperature for a model whose API refuses it?
+
+- Sources examined: `crates/host-runtime/assets/pi-model_execution-extension.mjs:39-56`;
+  Pi 0.80.2 `pi-ai/dist/api/anthropic-messages.js:115` and `:698`, which read
+  `model.compat.supportsTemperature` and send no temperature when it is false;
+  `pi-coding-agent/dist/core/extensions/runner.js:411-441`, where the handler
+  context's `model` getter returns the session model.
+- Findings: `modelRefusesTemperature` (`:42`) reads
+  `ctx.model.compat.supportsTemperature` and returns true only for `false`; a
+  context that throws or carries no model counts as accepting. The handler
+  still validates a present temperature variable (`:53-54`) and then drops it
+  for a refusing model (`:55`), so such a model keeps its native decoding and
+  the provider sees no refused field. Every other model keeps the admitted
+  temperature, and the host's refusal retry in
+  `crates/host-runtime/src/model_execution/pi.rs` still covers models the
+  registry does not mark.
+  `pi_model_execution_hook_omits_temperature_for_registry_refusing_models`
+  drives refusing, accepting, unmarked, throwing, and absent contexts.
+- Missing evidence: the driver passes a context object; no test runs the hook
+  inside a real Pi process.
+- Conclusion: resolved; the guarantee names the registry exception.

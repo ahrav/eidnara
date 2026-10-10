@@ -7,7 +7,11 @@
 //
 // It replaces the provider-native output-token fields and any explicitly
 // requested temperature. Generation revision 2 can leave temperature absent
-// so reasoning-only models keep their native decoding behavior. The hook preserves every
+// so reasoning-only models keep their native decoding behavior. A model whose
+// Pi registry entry sets `compat.supportsTemperature: false` receives no
+// temperature from the hook, as Pi's own provider sends none: that API refuses
+// the field, and a refused request costs a whole retried run.
+// The hook preserves every
 // unrelated payload field, and REJECTS (throws, failing the request)
 // payload shapes it does not recognize — silently dropping generation
 // controls would let a provider default exceed the caller's budget.
@@ -32,11 +36,23 @@ function isPlainObject(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Pi's model registry marks models whose API refuses `temperature`. A context
+// that cannot report its model counts as accepting, so the requested
+// temperature is sent and the host's refusal retry still applies.
+function modelRefusesTemperature(ctx) {
+	try {
+		return ctx?.model?.compat?.supportsTemperature === false;
+	} catch {
+		return false;
+	}
+}
+
 export default function (pi) {
-	pi.on("before_provider_request", (event) => {
+	pi.on("before_provider_request", (event, ctx) => {
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
-		const temperature = process.env[TEMPERATURE_ENV] === undefined
+		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined
 			? undefined : requiredNumber(TEMPERATURE_ENV);
+		const temperature = modelRefusesTemperature(ctx) ? undefined : requestedTemperature;
 		const payload = event.payload;
 		if (!isPlainObject(payload)) {
 			throw new Error(

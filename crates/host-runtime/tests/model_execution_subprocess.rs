@@ -162,6 +162,10 @@ fn main() {
             pi_rejected_temperature_retries_without_temperature,
         ),
         (
+            "pi_model_execution_hook_omits_temperature_for_registry_refusing_models",
+            pi_model_execution_hook_omits_temperature_for_registry_refusing_models,
+        ),
+        (
             "pi_project_pi_resources_ignored",
             pi_project_pi_resources_ignored,
         ),
@@ -1879,6 +1883,70 @@ console.log(JSON.stringify(apply({{ modelId: "thinking-model", inferenceConfig: 
         serde_json::from_str(lines.next().expect("native bedrock")).unwrap();
     assert_eq!(native_bedrock["inferenceConfig"]["maxTokens"], 32_000);
     assert_eq!(native_bedrock["inferenceConfig"]["temperature"], 1);
+}
+
+/// Pi's registry marks models whose API refuses `temperature`; the hook sends none to them, so the request skips the refused attempt, and every other model context keeps the requested temperature.
+fn pi_model_execution_hook_omits_temperature_for_registry_refusing_models() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let hook_path = scratch.path().join(PI_MODEL_EXECUTION_EXTENSION_FILE);
+    fs::write(&hook_path, PI_MODEL_EXECUTION_EXTENSION_BYTES).expect("materialize hook");
+    let driver_path = scratch.path().join("driver.mjs");
+    let driver = format!(
+        r#"import hook from "file://{hook}";
+const handlers = [];
+const pi = {{ on(name, fn) {{ if (name === "before_provider_request") handlers.push(fn); }} }};
+hook(pi);
+const apply = (payload, ctx) => handlers[0]({{ payload }}, ctx);
+const refusing = {{ get model() {{ return {{ compat: {{ supportsTemperature: false }} }}; }} }};
+const accepting = {{ model: {{ compat: {{ supportsTemperature: true }} }} }};
+const unflagged = {{ model: {{ compat: {{ forceAdaptiveThinking: true }} }} }};
+const stale = {{ get model() {{ throw new Error("stale extension context"); }} }};
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, refusing)));
+console.log(JSON.stringify(apply({{ modelId: "b", messages: [], inferenceConfig: {{ maxTokens: 9, topP: 0.8 }} }}, refusing)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, accepting)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, unflagged)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, stale)));
+console.log(JSON.stringify(apply({{ model: "m", max_tokens: 4096, messages: [] }}, undefined)));
+"#,
+        hook = hook_path.to_string_lossy()
+    );
+    fs::write(&driver_path, driver).expect("driver");
+    let output = ["node", "bun"]
+        .iter()
+        .find_map(|runtime| {
+            std::process::Command::new(runtime)
+                .arg(&driver_path)
+                .env(MODEL_EXECUTION_MAX_OUTPUT_TOKENS_ENV, "32000")
+                .env(MODEL_EXECUTION_TEMPERATURE_ENV, "0.25")
+                .output()
+                .ok()
+        })
+        .expect("a JavaScript runtime (node or bun) is required for the hook fixture");
+    assert!(
+        output.status.success(),
+        "hook driver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("driver output");
+    let payloads: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("payload json"))
+        .collect();
+    assert_eq!(payloads.len(), 6, "{stdout}");
+
+    assert_eq!(payloads[0]["max_tokens"], 32_000);
+    assert!(payloads[0].get("temperature").is_none(), "{}", payloads[0]);
+    assert_eq!(payloads[1]["inferenceConfig"]["maxTokens"], 32_000);
+    assert_eq!(payloads[1]["inferenceConfig"]["topP"], 0.8);
+    assert!(
+        payloads[1]["inferenceConfig"].get("temperature").is_none(),
+        "{}",
+        payloads[1]
+    );
+    for payload in &payloads[2..] {
+        assert_eq!(payload["max_tokens"], 32_000);
+        assert_eq!(payload["temperature"], 0.25, "{payload}");
+    }
 }
 
 // ---------------------------------------------------------------------------
