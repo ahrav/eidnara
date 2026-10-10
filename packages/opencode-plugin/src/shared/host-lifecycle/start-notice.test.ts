@@ -24,11 +24,15 @@ afterEach(() => {
     for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function awsEnv(config: string, profile: string): Record<string, string> {
+function awsEnv(config: string, profile: string, credentials?: string): Record<string, string> {
     const dir = root();
     const file = join(dir, "config");
     writeFileSync(file, config);
-    return { HOME: dir, AWS_PROFILE: profile, AWS_REGION: "us-west-2", AWS_CONFIG_FILE: file };
+    const env = { HOME: dir, AWS_PROFILE: profile, AWS_REGION: "us-west-2", AWS_CONFIG_FILE: file };
+    if (credentials === undefined) return env;
+    const shared = join(dir, "credentials");
+    writeFileSync(shared, credentials);
+    return { ...env, AWS_SHARED_CREDENTIALS_FILE: shared };
 }
 
 async function withProcessEnv<T>(
@@ -81,6 +85,53 @@ describe("managed start notice", () => {
         expect(credentialProcessProfile(awsEnv(following, "midway"))).toBe("midway");
         const selected = "[profile midway] ; corp\ncredential_process = ada\n";
         expect(credentialProcessProfile(awsEnv(selected, "midway"))).toBe("midway");
+    });
+
+    it("finds credential_process in the shared credentials file as native admission merges it", () => {
+        const config = "[profile midway]\nregion = us-west-2\n";
+        const credentials = "[midway]\ncredential_process = ada credentials print\n";
+        expect(credentialProcessProfile(awsEnv(config, "midway", credentials))).toBe("midway");
+        expect(
+            credentialProcessProfile(
+                awsEnv(config, "midway", "[default]\naws_access_key_id = k\n"),
+            ),
+        ).toBeUndefined();
+        // A `[profile x]` header is a plain section named "profile x" in the credentials file.
+        expect(
+            credentialProcessProfile(
+                awsEnv(config, "midway", "[profile midway]\ncredential_process = x\n"),
+            ),
+        ).toBeUndefined();
+    });
+
+    it("follows a role chain to the source profile that runs credential_process", () => {
+        const role = "role_arn = arn:aws:iam::123456789012:role/dev";
+        const chain = [
+            "[profile dev]",
+            role,
+            "source_profile = midway",
+            "[profile midway]",
+            "credential_process = ada credentials print",
+        ].join("\n");
+        expect(credentialProcessProfile(awsEnv(chain, "dev"))).toBe("midway");
+        const notice = managedStartNotice("harness_unavailable", null, awsEnv(chain, "dev"));
+        expect(notice).toContain('AWS profile "midway", the source profile of "dev", supplies');
+        const sourceInCredentials = awsEnv(
+            `[profile dev]\n${role}\nsource_profile = midway\n`,
+            "dev",
+            "[midway]\ncredential_process = x\n",
+        );
+        expect(credentialProcessProfile(sourceInCredentials)).toBe("midway");
+        // Traversal requires role_arn and an existing source section.
+        const roleless =
+            "[profile dev]\nsource_profile = midway\n[profile midway]\ncredential_process = x\n";
+        expect(credentialProcessProfile(awsEnv(roleless, "dev"))).toBeUndefined();
+        const missing = `[profile dev]\n${role}\nsource_profile = gone\n`;
+        expect(credentialProcessProfile(awsEnv(missing, "dev"))).toBeUndefined();
+        const cycle = `[profile a]\n${role}\nsource_profile = b\n[profile b]\n${role}\nsource_profile = a\n`;
+        expect(credentialProcessProfile(awsEnv(cycle, "a"))).toBeUndefined();
+        const self = `[profile a]\n${role}\nsource_profile = a\n`;
+        expect(credentialProcessProfile(awsEnv(self, "a"))).toBeUndefined();
     });
 
     it("ignores a credential_process continuation line nested under another property", () => {

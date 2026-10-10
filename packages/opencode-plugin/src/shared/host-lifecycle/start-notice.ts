@@ -16,6 +16,7 @@ const RETRIED_TIMEOUT_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 const AWS_CONFIG_MAX_BYTES = 256 * 1024;
+const AWS_MAX_PROFILES = 5;
 
 export function isPersistentStartRefusal(reason: string): boolean {
     if (RETRIED_TIMEOUT_REASONS.has(reason)) return false;
@@ -37,27 +38,61 @@ function sectionKey(line: string): { prefix: string | null; name: string } | und
         : { prefix: raw.slice(0, split).trim(), name: raw.slice(split + 1).trim() };
 }
 
-function profileRunsCredentialProcess(source: AwsProfileSource): boolean {
-    let text: string;
-    try {
-        text = readRegularFileSync(source.config_file, AWS_CONFIG_MAX_BYTES);
-    } catch {
-        return false;
-    }
-    const selected = (key: { prefix: string | null; name: string }): boolean =>
-        key.prefix === null
-            ? key.name === "default" && source.profile === "default"
-            : key.prefix === "profile" && key.name === source.profile;
-    let inSection = false;
+type Profiles = Map<string, Map<string, string>>;
+
+function profileName(
+    key: { prefix: string | null; name: string },
+    config: boolean,
+): string | undefined {
+    if (key.prefix === null) return config && key.name !== "default" ? undefined : key.name;
+    return config && key.prefix === "profile" ? key.name : undefined;
+}
+
+function parseProfiles(text: string, config: boolean, into: Profiles): void {
+    let section: Map<string, string> | undefined;
     for (const line of text.split(/\r?\n/)) {
         const key = sectionKey(line);
         if (key) {
-            inSection = selected(key);
+            const name = profileName(key, config);
+            if (name === undefined) {
+                section = undefined;
+                continue;
+            }
+            section = into.get(name) ?? new Map();
+            into.set(name, section);
             continue;
         }
-        if (inSection && /^credential_process[ \t]*=/.test(line)) return true;
+        const eq = line.indexOf("=");
+        if (!section || eq === -1 || /^[ \t#;]/.test(line)) continue;
+        const value = line.slice(eq + 1).replace(/[ \t][#;].*$/, "");
+        section.set(trimBlank(line.slice(0, eq)), trimBlank(value));
     }
-    return false;
+}
+
+function readProfileFile(path: string): string {
+    try {
+        return readRegularFileSync(path, AWS_CONFIG_MAX_BYTES);
+    } catch {
+        return "";
+    }
+}
+
+function credentialProcessIn(source: AwsProfileSource): string | undefined {
+    const profiles: Profiles = new Map();
+    parseProfiles(readProfileFile(source.config_file), true, profiles);
+    parseProfiles(readProfileFile(source.credentials_file), false, profiles);
+    const visited = new Set<string>();
+    let name = source.profile;
+    while (!visited.has(name) && visited.size < AWS_MAX_PROFILES) {
+        visited.add(name);
+        const profile = profiles.get(name);
+        if (!profile) return undefined;
+        if (profile.has("credential_process")) return name;
+        const next = profile.get("source_profile");
+        if (next === undefined || !profile.has("role_arn")) return undefined;
+        name = next;
+    }
+    return undefined;
 }
 
 export function credentialProcessProfile(
@@ -69,9 +104,7 @@ export function credentialProcessProfile(
     } catch {
         return undefined;
     }
-    return selection.mode === "profile" && profileRunsCredentialProcess(selection.source)
-        ? selection.source.profile
-        : undefined;
+    return selection.mode === "profile" ? credentialProcessIn(selection.source) : undefined;
 }
 
 function harnessHint(env: Readonly<Record<string, string | undefined>>): string {
@@ -83,8 +116,14 @@ function harnessHint(env: Readonly<Record<string, string | undefined>>): string 
             ? `The AWS source selection is not admissible (${error.field}: ${error.code}); AWS_PROFILE needs AWS_REGION and an absolute HOME.`
             : "";
     }
-    if (selection.mode !== "profile" || !profileRunsCredentialProcess(selection.source)) return "";
-    return `AWS profile "${selection.source.profile}" supplies credentials through credential_process. The daemon accepts SSO profiles, role profiles, including a role whose source profile holds static keys, or the AWS_* environment credentials when AWS_PROFILE is unset.`;
+    if (selection.mode !== "profile") return "";
+    const found = credentialProcessIn(selection.source);
+    if (found === undefined) return "";
+    const subject =
+        found === selection.source.profile
+            ? `AWS profile "${found}"`
+            : `AWS profile "${found}", the source profile of "${selection.source.profile}",`;
+    return `${subject} supplies credentials through credential_process. The daemon accepts SSO profiles, role profiles, including a role whose source profile holds static keys, or the AWS_* environment credentials when AWS_PROFILE is unset.`;
 }
 
 export function managedStartNotice(
