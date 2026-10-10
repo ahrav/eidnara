@@ -5858,7 +5858,7 @@ async fn the_operator_surface_rebuilds_disables_and_recovers_the_projection() {
     daemon.shutdown().await;
 }
 
-/// A commit that lands before the disable deregisters its consumer leaves the consumer pending, since a default disable never abandons. The operator's audited abandonment releases it, and the disable's cleanup then records it deregistered.
+/// A commit that lands before the disable deregisters its consumer leaves the consumer pending, since a default disable never abandons. The operator's audited abandonment releases it, a retry after a lost answer runs the disable's cleanup, and the record ends deregistered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() {
     let (daemon, route, _home) = operator_daemon().await;
@@ -5909,6 +5909,27 @@ async fn an_operator_abandonment_releases_a_consumer_the_disable_left_pending() 
             .is_some()
     );
 
+    // The first abandonment commits and its answer is lost before the disable's cleanup runs; the retry finds the consumer released and completes the cleanup.
+    let first = owner
+        .abandon_disabled_consumer(
+            "operator-1",
+            "the tip outran the disable",
+            1,
+            &slice_budget(),
+        )
+        .unwrap();
+    assert_eq!(first.as_deref(), Some(consumer.as_str()));
+    assert!(
+        daemon
+            .store()
+            .outbox_consumer_checkpoint(&consumer)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        operator_status(&daemon, route).await["record"]["deregistered"],
+        false
+    );
     let abandon =
         serde_json::json!({ "operator_id": "operator-1", "reason": "the tip outran the disable" });
     let abandoned =
