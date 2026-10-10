@@ -397,25 +397,21 @@ impl SearchSelection {
             family.check_kernel(kernel, budget)
         };
         check()?;
-        self.validate_family(&family, kernel, budget)?;
+        let mut report = self.validate_family(&family, kernel, budget)?;
         let target = intent
             .recovery_target
             .ok_or(BuildError::Invalid("missing fixed target"))?
             .commit_seq;
-        let active = |budget: &EvalBudget| {
+        if report.checkpoint.checkpoint_commit_seq < target {
+            self.catch_up_selected(&family, kernel, gate, spec, budget, &intent)?;
+            check()?;
             let now = wall_ms()?;
-            family
+            report = family
                 .projection
                 .read_within(deadline(budget)?, |conn| {
                     verify_active(conn, &self.identity, &family.generation(), self.bounds, now)
                 })
-                .map_err(BuildError::from)
-        };
-        let mut report = active(budget)?;
-        if report.checkpoint.checkpoint_commit_seq < target {
-            self.catch_up_selected(&family, kernel, gate, spec, budget, &intent)?;
-            check()?;
-            report = active(budget)?;
+                .map_err(BuildError::from)?;
         }
         if report.checkpoint.checkpoint_commit_seq != target {
             return Err(BuildError::Invalid("local prefix differs from target").into());
