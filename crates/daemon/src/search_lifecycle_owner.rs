@@ -1078,9 +1078,13 @@ impl SearchLifecycleOwner {
                 return Refresh::Closed(Closed::NoProjection);
             }
         };
-        // A selection kept under another identity, as after a reload the slice loop has not yet rotated on, is foreign evidence: the new identity has no registered family, so it is judged as unregistered rather than denied on the old family's report. No manager at all, before the first slice, is judged the same way.
+        // Admission treats an absent selection, an identity mismatch, or a quarantined selected family as unregistered, allowing bootstrap rebuilds for the requested identity.
         let coverage = match selection {
-            Some(selection) if selection.has_selected() && *selection.identity() == *identity => {
+            Some(selection)
+                if selection.has_selected()
+                    && !selection.selected_quarantined()
+                    && *selection.identity() == *identity =>
+            {
                 selection
                     .observe_selected(budget)
                     .ok()
@@ -1424,7 +1428,7 @@ fn refused(
     error: &BuildError,
     running: &ProjectionIdentity,
 ) -> SliceOutcome {
-    let quarantined = selection.withdraw_quarantined();
+    let quarantined = selection.selected_quarantined();
     rebuild_cause(selection, quarantined, error, running).map_or_else(
         || SliceOutcome::Blocked(error.to_string()),
         SliceOutcome::Rebuild,

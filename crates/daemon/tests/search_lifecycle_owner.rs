@@ -1786,6 +1786,41 @@ async fn a_family_quarantined_while_selected_records_its_corruption_rebuild() {
     owner.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_quarantined_family_keeps_earning_its_rebuild_until_one_is_recorded() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let reader = owner.pin(&slice_budget()).unwrap();
+    reader
+        .projection()
+        .enter_quarantine_for_test(QuarantineKind::Integrity, &"damaged in place");
+    drop(reader);
+
+    for slice in 0..3 {
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(
+            matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+            "slice {slice} without a recorded rebuild: {outcome:?}"
+        );
+        assert!(
+            owner.pin(&slice_budget()).is_err(),
+            "slice {slice} serves the quarantined family"
+        );
+    }
+    owner.shutdown().await.unwrap();
+}
+
 const EXACT_BOUNDS: ResolveBounds = ResolveBounds {
     page_rows: NonZeroUsize::new(16).unwrap(),
     max_rows: NonZeroUsize::new(64).unwrap(),

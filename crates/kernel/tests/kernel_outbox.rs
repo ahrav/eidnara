@@ -637,6 +637,38 @@ fn a_retired_consumer_leaves_past_commits_after_its_certified_checkpoint() {
 }
 
 #[test]
+fn a_negative_retirement_certificate_is_rejected_before_the_checkpoint_comparison() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    commit_domain(&store, 1);
+    let registered = store
+        .commit(intent("register"), |envelope| {
+            envelope.register_outbox_consumer("retiring", 10)?;
+            Ok("registered".to_string())
+        })
+        .unwrap()
+        .commit_seq;
+    store
+        .acknowledge_outbox("retiring", registered, 11)
+        .unwrap();
+    assert_eq!(
+        store
+            .commit(intent("retire-negative"), |envelope| {
+                envelope.retire_outbox_consumer("retiring", -1, 12)?;
+                Ok("retired".to_string())
+            })
+            .unwrap_err(),
+        KernelError::InvalidInput,
+        "a negative certificate is an argument error, not a satisfied checkpoint"
+    );
+    assert_eq!(
+        store.outbox_consumer_checkpoint("retiring").unwrap(),
+        Some(registered),
+        "the consumer stays registered at its checkpoint"
+    );
+}
+
+#[test]
 fn argument_validation_is_separate_from_checkpoint_rejection() {
     let directory = tempfile::tempdir().unwrap();
     let store = KernelStore::open(directory.path()).unwrap();

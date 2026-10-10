@@ -49,10 +49,11 @@ selected family needs a replacement:
 
 A family built over another kernel incarnation earns no rebuild; the slice
 reports it blocked. A slice that finds the selected family quarantined
-withdraws it from selection before reporting `Corruption`, as a reopen that
-quarantines a family does. Admission then judges the rebuild request on the
-unregistered observation a first build is admitted on, because a quarantined
-family reports no coverage. The slice loop records the replacement through
+reports `Corruption` and keeps the family selected, so every later slice
+reports the same cause until the rebuild is recorded. Admission judges a
+quarantined selection on the unregistered observation a first build is
+admitted on, so the rebuild request is admitted while the quarantine marker
+survives a refused or expired request. The slice loop records the replacement through
 `SearchLifecycleOwner::request_rebuild` after the slice releases the manager.
 The rebuild names the Current seed as the generation it replaces and reads
 through the next registered consumer (`search-projection-1`, then
@@ -100,7 +101,11 @@ acknowledged that checkpoint. One kernel statement
 (`KernelStore::capture_consumer_tip_within_budget`) reads the tip, the kernel
 database identity, and the acknowledgement from one snapshot. The certificate names
 `SearchReader::inventory_epoch`, a digest of the kernel incarnation, the kernel
-lease epoch, the selected seed digest, and the consumer. A proof minted before a
+lease epoch, the selected seed digest, and the consumer. It also records the
+`CommitReadIncarnation` the kernel snapshot reported; `resolve` refuses a
+certificate whose incarnation differs from the kernel's current one, so a
+restore to the same tip within one lease invalidates certificates issued
+before it. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
 current epoch, checkpoint, or tip.
 

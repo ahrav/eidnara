@@ -254,16 +254,11 @@ impl SearchSelection {
         Some(certificate.seed.identity())
     }
 
-    pub fn withdraw_quarantined(&self) -> bool {
-        let quarantined = self
-            .selected
+    pub fn selected_quarantined(&self) -> bool {
+        self.selected
             .load()
             .as_ref()
-            .is_some_and(|family| family.projection.quarantine().is_some());
-        if quarantined {
-            self.selected.store(None);
-        }
-        quarantined
+            .is_some_and(|family| family.projection.quarantine().is_some())
     }
 
     pub fn pin(
@@ -1112,6 +1107,7 @@ impl SearchReader {
         }
         Ok(CompletenessCertificate {
             canonical_incarnation_id: observed.database_incarnation_id,
+            kernel_incarnation: observed.target.incarnation,
             inventory_epoch: self.inventory_epoch(kernel),
             identity_contract_version: seed.identity_contract_version.clone(),
             extraction_version: EXTRACTION_VERSION,

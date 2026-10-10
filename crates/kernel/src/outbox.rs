@@ -198,6 +198,9 @@ impl Envelope<'_> {
         certified_through: i64,
         recorded_at: i64,
     ) -> Result<(), KernelError> {
+        if certified_through < 0 {
+            return Err(KernelError::InvalidInput);
+        }
         let (consumer_id, checkpoint) = self.consumer_checkpoint(consumer_id, recorded_at)?;
         if checkpoint < certified_through {
             return Err(KernelError::ConsumerPending);
