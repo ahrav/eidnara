@@ -5,11 +5,22 @@
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
+use super::commit_read::CommitReadTarget;
 use super::envelope::{Envelope, ObjectRow, PendingChange, Sensitivity};
+use super::open::checked_database_incarnation_id;
 use super::redaction::{RedactedField, identity, redact};
 use super::retention::begin_fenced_write;
 use super::source_hold::release_consumer_holds_in_tx;
 use super::{CachedSql, KernelError, KernelStore, current_time_ms, map_sqlite};
+
+/// The committed tip, the database identity, and one consumer's checkpoint, as one reader snapshot saw them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerTipSnapshot {
+    pub target: CommitReadTarget,
+    pub database_incarnation_id: String,
+    /// `None` when the consumer is unregistered.
+    pub consumer_checkpoint: Option<i64>,
+}
 
 /// Result of pruning rows through the minimum consumer checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +562,43 @@ impl KernelStore {
             .map_err(map_sqlite)?;
         limit.check()?;
         Ok(checkpoint)
+    }
+
+    /// Reads the committed tip with its incarnation, the durable database identity, and `consumer_id`'s checkpoint from one reader snapshot, so a caller comparing the three takes one reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError::InvalidInput`] when `consumer_id` is empty, [`KernelError::CorruptCanonicalRow`] when the database identity is missing or malformed, and [`KernelError::Deadline`] when the budget is exhausted.
+    pub fn capture_consumer_tip_within_budget(
+        &self,
+        budget: &crate::applicability::EvalBudget,
+        consumer_id: &str,
+    ) -> Result<ConsumerTipSnapshot, KernelError> {
+        let limit = budget.acquire_limit();
+        limit.run(|| {
+            let consumer_id = consumer_identity(consumer_id)?;
+            let reader = self.reader_with_limit(&limit)?;
+            // One statement is its own snapshot, so its three subqueries read one committed state without a transaction.
+            let (through_commit, database_incarnation_id, consumer_checkpoint) = reader
+                .query_row_cached(
+                    "SELECT (SELECT COALESCE(MAX(commit_seq),0) FROM commit_log),
+                            (SELECT database_incarnation_id FROM kernel_format_marker WHERE singleton=1),
+                            (SELECT checkpoint_commit_seq FROM outbox_consumers WHERE consumer_id=?1)",
+                    [&consumer_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(map_sqlite)?;
+            let snapshot = ConsumerTipSnapshot {
+                target: CommitReadTarget {
+                    through_commit,
+                    incarnation: self.incarnation(),
+                },
+                database_incarnation_id: checked_database_incarnation_id(database_incarnation_id)?,
+                consumer_checkpoint,
+            };
+            limit.check()?;
+            Ok(snapshot)
+        })
     }
 
     /// Advances a registered consumer checkpoint monotonically.

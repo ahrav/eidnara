@@ -132,6 +132,8 @@ struct SelectedFamily {
     bounds: CoverageBounds,
     _seed_pin: ValidatedGeneration,
     unavailable: std::sync::atomic::AtomicBool,
+    /// The inventory epoch under the first kernel lease epoch a reader presented.
+    inventory_epoch: std::sync::OnceLock<(u64, String)>,
 }
 
 pub struct SearchSelection {
@@ -634,6 +636,7 @@ impl SearchSelection {
                 .incarnation,
             bounds: self.bounds,
             _seed_pin: seed_pin,
+            inventory_epoch: std::sync::OnceLock::new(),
         };
         // Run the page scan before readers share the family's connection.
         family
@@ -994,24 +997,17 @@ impl SelectedFamily {
     }
 
     fn check_kernel(&self, kernel: &KernelStore, budget: &EvalBudget) -> Result<(), BuildError> {
-        self.checked_kernel_tip(kernel, budget).map(drop)
-    }
-
-    /// `checked_kernel_tip` returns the tip captured during kernel identity verification so checkpoint comparison uses the same observation.
-    fn checked_kernel_tip(
-        &self,
-        kernel: &KernelStore,
-        budget: &EvalBudget,
-    ) -> Result<i64, BuildError> {
         deadline(budget)?;
-        let target = kernel.capture_commit_read_target_within_budget(budget)?;
-        if target.incarnation != self.incarnation
+        if kernel
+            .capture_commit_read_target_within_budget(budget)?
+            .incarnation
+            != self.incarnation
             || kernel.database_incarnation_id_within_budget(budget)?
                 != self.certificate.seed.kernel_incarnation_id
         {
             return Err(ProjectionError::IdentityMismatch.into());
         }
-        Ok(target.through_commit)
+        Ok(())
     }
 }
 
@@ -1053,11 +1049,24 @@ impl SearchReader {
 
     /// The inventory epoch binds completeness certificates to the family's kernel incarnation, the kernel lease epoch, the seed digest, and the consumer ID.
     pub fn inventory_epoch(&self, kernel: &KernelStore) -> String {
+        let lease_epoch = kernel.lease_epoch();
+        let (computed_for, epoch) = self
+            .family
+            .inventory_epoch
+            .get_or_init(|| (lease_epoch, self.digest_inventory_epoch(lease_epoch)));
+        if *computed_for == lease_epoch {
+            epoch.clone()
+        } else {
+            self.digest_inventory_epoch(lease_epoch)
+        }
+    }
+
+    fn digest_inventory_epoch(&self, lease_epoch: u64) -> String {
         let seed = &self.family.certificate.seed;
         let mut digest = Sha256::new();
         for part in [
             seed.kernel_incarnation_id.as_bytes(),
-            &kernel.lease_epoch().to_be_bytes(),
+            &lease_epoch.to_be_bytes(),
             self.digest().as_bytes(),
             self.consumer().consumer_id.as_bytes(),
         ] {
@@ -1067,7 +1076,7 @@ impl SearchReader {
         format!("inventory-{:x}", digest.finalize())
     }
 
-    /// Certifies that this reader's family covers the kernel's exact-lookup inventory: the family's checkpoint equals the kernel tip, and the family's consumer has acknowledged that checkpoint. The certificate names [`Self::inventory_epoch`].
+    /// Certifies that this reader's family covers the kernel's exact-lookup inventory: the family's checkpoint equals the kernel tip, and the family's consumer has acknowledged that checkpoint. One kernel snapshot supplies the tip, the kernel identity, and the acknowledgement. The certificate names [`Self::inventory_epoch`].
     ///
     /// # Errors
     ///
@@ -1077,17 +1086,26 @@ impl SearchReader {
         kernel: &KernelStore,
         budget: &EvalBudget,
     ) -> Result<CompletenessCertificate, BuildError> {
-        let tip = self.family.checked_kernel_tip(kernel, budget)?;
-        let incarnation = self.family.certificate.seed.kernel_incarnation_id.clone();
+        deadline(budget)?;
+        let observed =
+            kernel.capture_consumer_tip_within_budget(budget, &self.consumer().consumer_id)?;
+        let seed = &self.family.certificate.seed;
+        if observed.target.incarnation != self.family.incarnation
+            || observed.database_incarnation_id != seed.kernel_incarnation_id
+        {
+            return Err(ProjectionError::IdentityMismatch.into());
+        }
         let checkpoint = self
-            .read(budget, |conn| read_checkpoint(conn, &incarnation))?
+            .read(budget, |conn| {
+                read_checkpoint(conn, &seed.kernel_incarnation_id)
+            })?
             .ok_or(BuildError::Invalid("the family has no applied prefix"))?;
         let complete_through = checkpoint.checkpoint_commit_seq;
-        if tip != complete_through {
+        if observed.target.through_commit != complete_through {
             return Err(BuildError::Invalid("the family trails the kernel tip"));
         }
-        if kernel
-            .outbox_consumer_checkpoint_within_budget(budget, &self.consumer().consumer_id)?
+        if observed
+            .consumer_checkpoint
             .is_none_or(|acknowledged| acknowledged < complete_through)
         {
             return Err(BuildError::Invalid(
@@ -1095,14 +1113,9 @@ impl SearchReader {
             ));
         }
         Ok(CompletenessCertificate {
-            canonical_incarnation_id: incarnation,
+            canonical_incarnation_id: observed.database_incarnation_id,
             inventory_epoch: self.inventory_epoch(kernel),
-            identity_contract_version: self
-                .family
-                .certificate
-                .seed
-                .identity()
-                .identity_contract_version,
+            identity_contract_version: seed.identity_contract_version.clone(),
             extraction_version: EXTRACTION_VERSION,
             complete_through_commit_seq: complete_through,
             projection: checkpoint,

@@ -920,13 +920,18 @@ impl EvidenceEvaluator {
     }
 
     fn capability(&self) -> Result<(), Denial> {
-        for capability in CAPABILITIES {
-            for harness in HARNESSES {
-                let proved = self
-                    .evidence
-                    .capabilities
-                    .get(&(harness.to_owned(), capability.name.to_owned()))
-                    .copied();
+        let mut proved = [[None; HARNESSES.len()]; CAPABILITIES.len()];
+        for ((harness, capability), evidence) in &self.evidence.capabilities {
+            let harness = HARNESSES.iter().position(|known| known == harness);
+            let capability = CAPABILITIES
+                .iter()
+                .position(|known| known.name == capability);
+            if let (Some(harness), Some(capability)) = (harness, capability) {
+                proved[capability][harness] = Some(*evidence);
+            }
+        }
+        for (capability, proved) in CAPABILITIES.iter().zip(proved) {
+            for (harness, proved) in HARNESSES.into_iter().zip(proved) {
                 let ok = match capability.disposition {
                     CapabilityDisposition::Required => {
                         proved == Some(CapabilityEvidence::Supported)
