@@ -3722,9 +3722,11 @@ fn evict_history_receipts_beyond(
             "SELECT copies.owner_copy_id, copies.scan_id, scans.scan_batch_id
                FROM scan_owner_copies copies
                JOIN field_scans scans USING(scan_id)
-              WHERE copies.domain_owner_id IN (SELECT value FROM json_each(?1))
-                AND copies.field_id IN (SELECT value FROM json_each(?2))
-              ORDER BY copies.rowid DESC LIMIT -1 OFFSET ?3",
+              WHERE copies.rowid IN (
+                    SELECT rowid FROM scan_owner_copies
+                     WHERE domain_owner_id IN (SELECT value FROM json_each(?1))
+                       AND field_id IN (SELECT value FROM json_each(?2))
+                     ORDER BY rowid DESC LIMIT -1 OFFSET ?3)",
         )?
         .query_map(
             params![
@@ -3787,7 +3789,8 @@ const CACHE_STATE_RETAINED_OWNER_KEY: &str = "cache_state_retained";
 /// session's accumulated overlays; the owner index covers `domain_owner_id` only.
 const CACHE_STATE_HISTORY_OWNER_KEY: &str = "cache_state_history";
 
-/// Mirrors the `256` and `255` literals in the `commit_transform` UPSERT.
+/// `PASS_TRACE_HISTORY_RING_LEN` matches the ring length encoded by the `256` and `255`
+/// literals in the `trace_pass_stable` and `commit_transform` upserts.
 const PASS_TRACE_HISTORY_RING_LEN: usize = 256;
 
 /// The receipt field ids of the two writers that append to `scheduler_history`.
@@ -6834,6 +6837,21 @@ const FOLD_AUTHORITY_SELECT: &str = "SELECT row_version, json_type(meta, '$.eidn
      coalesce(meta ->> '$.folded_history_segment_seq', 0), meta ->> '$.history_summarizer.state', \
      EXISTS(SELECT 1 FROM history_summarizer_pending_publications WHERE session_id = ?1) \
      FROM cache_state WHERE session_id = ?1";
+/// The row version and the pending-publication probe of [`FOLD_AUTHORITY_SELECT`]; it reads
+/// no `meta` byte, so a row whose meta fields are memoized at that version touches no meta
+/// overflow page.
+const FOLD_AUTHORITY_VERSION_SELECT: &str = "SELECT row_version, \
+     EXISTS(SELECT 1 FROM history_summarizer_pending_publications WHERE session_id = ?1) \
+     FROM cache_state WHERE session_id = ?1";
+
+/// The `meta` fields [`FOLD_AUTHORITY_SELECT`] extracts, as SQLite returned them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoldMetaScalars {
+    eidnara_folds: Option<String>,
+    has_coverage: bool,
+    folded_seq: i64,
+    summarizer_state: Option<String>,
+}
 
 /// See [`MemoryStore::load_fold_authority`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6873,11 +6891,18 @@ const CACHE_STATE_META_SELECT: &str =
     "SELECT row_version, meta FROM cache_state WHERE session_id = ?1";
 const CACHE_STATE_FULL_SELECT: &str =
     "SELECT row_version, core_state, meta FROM cache_state WHERE session_id = ?1";
-/// The full row read of a committed-read load, with the memoized core's row version as `?2`.
-/// A row still at that version yields NULL for `core_state`, so SQLite never copies the
-/// column's bytes; `?2` is NULL when no core is memoized for the session.
+/// The full row read of a committed-read load, with the memoized core's row version as `?2`
+/// and the memoized meta's row version as `?3`. A row still at a memoized version yields NULL
+/// for that column, so SQLite never reads the column's bytes or its overflow pages; a NULL
+/// parameter names no memoized column for the session.
 const CACHE_STATE_MEMO_SELECT: &str = "SELECT row_version, \
-     CASE WHEN row_version = ?2 THEN NULL ELSE core_state END, meta \
+     CASE WHEN row_version = ?2 THEN NULL ELSE core_state END, \
+     CASE WHEN row_version = ?3 THEN NULL ELSE meta END \
+     FROM cache_state WHERE session_id = ?1";
+/// [`CACHE_STATE_META_SELECT`] with the memoized meta's row version as `?2`, under the same
+/// NULL rule as [`CACHE_STATE_MEMO_SELECT`].
+const CACHE_STATE_META_MEMO_SELECT: &str = "SELECT row_version, \
+     CASE WHEN row_version = ?2 THEN NULL ELSE meta END \
      FROM cache_state WHERE session_id = ?1";
 /// The row version alone; it sits in the row's first page, so the read touches no
 /// `core_state` or `meta` overflow page.
@@ -6885,8 +6910,8 @@ const CACHE_STATE_VERSION_SELECT: &str =
     "SELECT row_version FROM cache_state WHERE session_id = ?1";
 
 /// Bytes [`MemoryStore`]'s session row memo may retain: one session id, its rendered-coverage
-/// scalars, and one decoded `core_state`. A row whose memo would exceed the bound keeps
-/// reading its core from SQLite on every load.
+/// scalars, its `meta` text, and one decoded `core_state`. A row whose memo would exceed the
+/// bound keeps reading its meta, and then its core, from SQLite on every load.
 pub const ROW_MEMO_RETAINED_BYTES_BOUND: usize = 4 * 1024 * 1024;
 
 /// What committed reads decoded from one `cache_state` row, keyed by session and row version.
@@ -6903,6 +6928,8 @@ struct RowMemo {
     row_version: u64,
     coverage: Option<CoverageScalars>,
     core: Option<CoreState>,
+    meta: Option<String>,
+    fold: Option<FoldMetaScalars>,
 }
 
 /// The `cache_state` fields [`rendered_coverage_tx`] reads.
@@ -6951,7 +6978,52 @@ impl RowMemo {
             .as_ref()
             .and_then(|coverage| coverage.boundary_id.as_ref())
             .map_or(0, String::capacity);
-        std::mem::size_of::<Self>() + self.session_id.capacity() + coverage + core
+        let meta = self.meta.as_ref().map_or(0, String::capacity);
+        let fold = self.fold.as_ref().map_or(0, |fold| {
+            fold.eidnara_folds.as_ref().map_or(0, String::capacity)
+                + fold.summarizer_state.as_ref().map_or(0, String::capacity)
+        });
+        std::mem::size_of::<Self>() + self.session_id.capacity() + coverage + meta + fold + core
+    }
+
+    /// The memoized meta text of `session_id` at `row_version`, if any.
+    fn meta_at(&self, session_id: &str, row_version: u64) -> Option<String> {
+        self.at(session_id, row_version)
+            .then(|| self.meta.clone())
+            .flatten()
+    }
+
+    /// The row version a memoized core of `session_id` names, as a statement parameter.
+    fn core_version(&self, session_id: &str) -> Option<i64> {
+        (self.session_id == session_id && self.core.is_some())
+            .then(|| i64::try_from(self.row_version).ok())
+            .flatten()
+    }
+
+    /// The memoized fold-authority fields of `session_id` and the row version they name.
+    fn fold_for(&self, session_id: &str) -> Option<(u64, FoldMetaScalars)> {
+        self.fold
+            .as_ref()
+            .filter(|_| self.session_id == session_id)
+            .map(|fold| (self.row_version, fold.clone()))
+    }
+
+    /// The row version a memoized meta of `session_id` names, as a statement parameter.
+    fn meta_version(&self, session_id: &str) -> Option<i64> {
+        (self.session_id == session_id && self.meta.is_some())
+            .then(|| i64::try_from(self.row_version).ok())
+            .flatten()
+    }
+
+    /// Memoizes `meta` for `session_id` at `row_version` when the memo's other fields plus
+    /// the text fit the retention bound.
+    fn record_meta(&mut self, session_id: &str, row_version: u64, meta: &str) {
+        self.record(session_id, row_version, |memo| {
+            memo.meta = None;
+            if memo.retained_bytes() + meta.len() <= ROW_MEMO_RETAINED_BYTES_BOUND {
+                memo.meta = Some(meta.to_owned());
+            }
+        });
     }
 
     /// Records `update` against the memo for `session_id` at `row_version`, replacing a memo
@@ -6966,6 +7038,9 @@ impl RowMemo {
         }
         update(self);
         if self.retained_bytes() > ROW_MEMO_RETAINED_BYTES_BOUND {
+            self.meta = None;
+        }
+        if self.retained_bytes() > ROW_MEMO_RETAINED_BYTES_BOUND {
             self.core = None;
         }
         if self.retained_bytes() > ROW_MEMO_RETAINED_BYTES_BOUND {
@@ -6974,11 +7049,21 @@ impl RowMemo {
     }
 
     /// Memoizes `core` for `session_id` at `row_version` when the memo's other fields plus
-    /// the core fit the retention bound; the measurement precedes the clone.
+    /// the core fit the retention bound. A memoized `meta` is dropped first when that alone
+    /// makes room, and kept when the core exceeds the bound without it. The retention
+    /// measurement precedes cloning `core`.
     fn record_core(&mut self, session_id: &str, row_version: u64, core: &CoreState) {
         self.record(session_id, row_version, |memo| {
             memo.core = None;
-            if memo.retained_bytes() + Self::core_bytes(core) <= ROW_MEMO_RETAINED_BYTES_BOUND {
+            let needed = Self::core_bytes(core);
+            let with_meta = memo.retained_bytes();
+            let without_meta = with_meta - memo.meta.as_ref().map_or(0, String::capacity);
+            if with_meta + needed > ROW_MEMO_RETAINED_BYTES_BOUND
+                && without_meta + needed <= ROW_MEMO_RETAINED_BYTES_BOUND
+            {
+                memo.meta = None;
+            }
+            if memo.retained_bytes() + needed <= ROW_MEMO_RETAINED_BYTES_BOUND {
                 memo.core = Some(core.clone());
             }
         });
@@ -6997,7 +7082,7 @@ pub enum CacheStateSelect {
 impl CacheStateSelect {
     fn sql(self) -> &'static str {
         match self {
-            Self::Meta => CACHE_STATE_META_SELECT,
+            Self::Meta => CACHE_STATE_META_MEMO_SELECT,
             Self::Full => CACHE_STATE_MEMO_SELECT,
         }
     }
@@ -8790,24 +8875,24 @@ impl MemoryStore {
         conn: &GuardedConn<'_>,
         session_id: &str,
     ) -> rusqlite::Result<Option<(u64, SessionCore, String)>> {
-        let memoized = {
+        let (probe, meta_probe) = {
             let memo = self.lock_row_memo();
-            (memo.session_id == session_id && memo.core.is_some()).then_some(memo.row_version)
+            (memo.core_version(session_id), memo.meta_version(session_id))
         };
-        let probe = memoized.and_then(|version| i64::try_from(version).ok());
         let row = conn
             .prepare_cached(CACHE_STATE_MEMO_SELECT)?
-            .query_row(params![session_id, probe], |r| {
+            .query_row(params![session_id, probe, meta_probe], |r| {
                 Ok((
                     r.get::<_, i64>(0)? as u64,
                     r.get::<_, Option<String>>(1)?,
-                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(2)?,
                 ))
             })
             .optional()?;
         let Some((row_version, core_json, meta_json)) = row else {
             return Ok(None);
         };
+        let meta_json = self.memoized_meta(conn, session_id, row_version, meta_json)?;
         let core = match core_json {
             Some(text) => SessionCore::Text(text),
             None => {
@@ -8830,6 +8915,30 @@ impl MemoryStore {
             }
         };
         Ok(Some((row_version, core, meta_json)))
+    }
+
+    /// The meta text a memo-aware read returned, from the memo when the read yielded NULL for
+    /// the memoized version, and recorded in the memo when the read returned the text. A memo
+    /// replaced between the read and this call is answered by a full read of the column.
+    fn memoized_meta(
+        &self,
+        conn: &GuardedConn<'_>,
+        session_id: &str,
+        row_version: u64,
+        meta_json: Option<String>,
+    ) -> rusqlite::Result<String> {
+        if let Some(text) = meta_json {
+            self.lock_row_memo()
+                .record_meta(session_id, row_version, &text);
+            return Ok(text);
+        }
+        let memoized = self.lock_row_memo().meta_at(session_id, row_version);
+        match memoized {
+            Some(text) => Ok(text),
+            None => conn
+                .prepare_cached(CACHE_STATE_META_SELECT)?
+                .query_row(params![session_id], |r| r.get::<_, String>(1)),
+        }
     }
 
     fn decode_session_core(
@@ -8894,9 +9003,17 @@ impl MemoryStore {
     /// whose core is corrupt still answers here where [`Self::load`] fails.
     pub fn load_meta(&self, session_id: &str) -> Result<ModuleMeta, MemoryStoreError> {
         let meta_json = self.inner.with_conn(|conn| {
-            conn.prepare_cached(CACHE_STATE_META_SELECT)?
-                .query_row(params![session_id], |r| r.get::<_, String>(1))
-                .optional()
+            let probe = self.lock_row_memo().meta_version(session_id);
+            let row = conn
+                .prepare_cached(CACHE_STATE_META_MEMO_SELECT)?
+                .query_row(params![session_id, probe], |r| {
+                    Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Option<String>>(1)?))
+                })
+                .optional()?;
+            row.map(|(row_version, meta_json)| {
+                self.memoized_meta(conn, session_id, row_version, meta_json)
+            })
+            .transpose()
         })?;
         match meta_json {
             None => Ok(ModuleMeta::default()),
@@ -9467,6 +9584,11 @@ impl MemoryStore {
                      scheduler_history = CASE
                          WHEN json_array_length(pass_trace.scheduler_history) < 256 THEN
                              json_insert(pass_trace.scheduler_history, '$[#]', json(?3))
+                         WHEN json_array_length(pass_trace.scheduler_history) = 256 THEN
+                             json_insert(
+                                 json_remove(pass_trace.scheduler_history, '$[0]'),
+                                 '$[#]', json(?3)
+                             )
                          ELSE
                              json_insert(
                                  (SELECT json_group_array(json(value))
@@ -9480,6 +9602,11 @@ impl MemoryStore {
                          WHEN json_array_length(pass_trace.scheduler_interesting_history) < 256 THEN
                              json_insert(
                                  pass_trace.scheduler_interesting_history,
+                                 '$[#]', json(?4)
+                             )
+                         WHEN json_array_length(pass_trace.scheduler_interesting_history) = 256 THEN
+                             json_insert(
+                                 json_remove(pass_trace.scheduler_interesting_history, '$[0]'),
                                  '$[#]', json(?4)
                              )
                          ELSE
@@ -11468,6 +11595,11 @@ impl MemoryStore {
                          WHEN ?5 IS NULL THEN pass_trace.scheduler_history
                          WHEN json_array_length(pass_trace.scheduler_history) < 256 THEN
                              json_insert(pass_trace.scheduler_history, '$[#]', json(?5))
+                         WHEN json_array_length(pass_trace.scheduler_history) = 256 THEN
+                             json_insert(
+                                 json_remove(pass_trace.scheduler_history, '$[0]'),
+                                 '$[#]', json(?5)
+                             )
                          ELSE
                              json_insert(
                                  (SELECT json_group_array(json(value))
@@ -11481,6 +11613,11 @@ impl MemoryStore {
                           WHEN json_array_length(pass_trace.scheduler_interesting_history) < 256 THEN
                               json_insert(
                                   pass_trace.scheduler_interesting_history,
+                                  '$[#]', json(?6)
+                              )
+                          WHEN json_array_length(pass_trace.scheduler_interesting_history) = 256 THEN
+                              json_insert(
+                                  json_remove(pass_trace.scheduler_interesting_history, '$[0]'),
                                   '$[#]', json(?6)
                               )
                           ELSE
@@ -13434,7 +13571,8 @@ impl MemoryStore {
                   WHERE session_id = ?1 AND row_version = ?5",
                 params![
                     request.prior_key,
-                    prior_version.saturating_add(1),
+                    i64::try_from(next_row_version(prior_version)?)
+                        .expect("next_row_version keeps the successor within i64"),
                     prior_meta_json,
                     request.now_ms,
                     prior_version
@@ -13584,20 +13722,47 @@ impl MemoryStore {
         session_id: &str,
     ) -> Result<FoldAuthorityRecord, MemoryStoreError> {
         let row = self.inner.with_conn(|conn| {
-            conn.prepare_cached(FOLD_AUTHORITY_SELECT)?
+            let memoized = self.lock_row_memo().fold_for(session_id);
+            if let Some((memo_version, fold)) = memoized {
+                let current = conn
+                    .prepare_cached(FOLD_AUTHORITY_VERSION_SELECT)?
+                    .query_row(params![session_id], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+                    })
+                    .optional()?;
+                match current {
+                    None => return Ok(None),
+                    Some((version, pending)) if u64::try_from(version) == Ok(memo_version) => {
+                        return Ok(Some((version, fold, pending)));
+                    }
+                    Some(_) => {}
+                }
+            }
+            let row = conn
+                .prepare_cached(FOLD_AUTHORITY_SELECT)?
                 .query_row(params![session_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, bool>(2)?,
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, Option<String>>(4)?,
+                        FoldMetaScalars {
+                            eidnara_folds: r.get::<_, Option<String>>(1)?,
+                            has_coverage: r.get::<_, bool>(2)?,
+                            folded_seq: r.get::<_, i64>(3)?,
+                            summarizer_state: r.get::<_, Option<String>>(4)?,
+                        },
                         r.get::<_, bool>(5)?,
                     ))
                 })
-                .optional()
+                .optional()?;
+            if let Some((version, fold, _)) = &row
+                && let Ok(version) = u64::try_from(*version)
+            {
+                self.lock_row_memo().record(session_id, version, |memo| {
+                    memo.fold = Some(fold.clone());
+                });
+            }
+            Ok(row)
         })?;
-        let Some((version, adopted, has_coverage, folded_seq, state, pending)) = row else {
+        let Some((version, fold, pending)) = row else {
             return Ok(FoldAuthorityRecord {
                 row_version: None,
                 applied: None,
@@ -13605,7 +13770,7 @@ impl MemoryStore {
                 quiescent: true,
             });
         };
-        let adopted = match adopted.as_deref() {
+        let adopted = match fold.eidnara_folds.as_deref() {
             None | Some("null") => None,
             Some("true") => Some(true),
             Some("false") => Some(false),
@@ -13615,8 +13780,11 @@ impl MemoryStore {
                 )));
             }
         };
-        let summarizer_idle = state.as_deref().is_none_or(|state| state == "idle");
-        let artifacts = fold_artifacts_present(has_coverage, folded_seq, summarizer_idle);
+        let summarizer_idle = fold
+            .summarizer_state
+            .as_deref()
+            .is_none_or(|state| state == "idle");
+        let artifacts = fold_artifacts_present(fold.has_coverage, fold.folded_seq, summarizer_idle);
         Ok(FoldAuthorityRecord {
             row_version: Some(version as u64),
             applied: adopted.or(artifacts.then_some(true)),
@@ -19767,9 +19935,9 @@ mod tests {
             .collect()
     }
 
-    /// A load of an unchanged row takes the core from the memo, so its row read returns the
-    /// row version and `meta` alone; a coverage read of an unchanged row runs only the
-    /// version select. A commit advances the version, and the next load and coverage read
+    /// A load of an unchanged row takes the core and `meta` from the memo, so its row read and
+    /// a meta load return the row version alone; a coverage read of an unchanged row runs only
+    /// the version select. A commit advances the version, and the next load and coverage read
     /// answer with the committed core and boundary.
     #[test]
     fn an_unchanged_row_is_read_from_the_memo_until_a_commit_advances_its_version() {
@@ -19793,6 +19961,7 @@ mod tests {
         store.start_statement_work_ledger();
         let cold = store.load("ses").unwrap();
         let warm = store.load("ses").unwrap();
+        let warm_meta = store.load_meta("ses").unwrap();
         let read_coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
         let memo_coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
         let work = store.take_statement_work();
@@ -19807,10 +19976,21 @@ mod tests {
             cold_bytes > payload.len() as u64,
             "the cold load reads the core"
         );
+        assert!(
+            cold_bytes > payload.len() as u64 + meta_bytes,
+            "the cold load reads the core and meta"
+        );
+        assert_eq!(warm_bytes, 8, "the warm load returns no core or meta bytes");
+        assert_eq!(warm_meta, memo_meta(2));
+        let meta_reads: Vec<u64> = work
+            .iter()
+            .filter(|run| run.sql == CACHE_STATE_META_MEMO_SELECT.trim())
+            .map(|run| run.bytes)
+            .collect();
         assert_eq!(
-            warm_bytes,
-            8 + meta_bytes,
-            "the warm load returns no core bytes"
+            meta_reads,
+            [8],
+            "the warm meta load returns the row version alone"
         );
         assert_eq!(read_coverage.rendered, memo_coverage.rendered);
         assert_eq!(memo_coverage.rendered.map(|row| row.sequence), Some(1));
@@ -19829,6 +20009,8 @@ mod tests {
             (reloaded.core, reloaded.row_version),
             (second, Some(second_version))
         );
+        assert_eq!(reloaded.meta, memo_meta(4));
+        assert_eq!(store.load_meta("ses").unwrap(), memo_meta(4));
         let coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
         assert_eq!(coverage.row_version, Some(second_version));
         assert_eq!(coverage.rendered.map(|row| row.sequence), Some(2));
@@ -19858,6 +20040,7 @@ mod tests {
         );
 
         assert_eq!(store.load("ses").unwrap().core, recreated);
+        assert_eq!(store.load_meta("ses").unwrap(), meta(20));
         let coverage = store.coverage_snapshot("ses", None, &[]).unwrap();
         assert_eq!(coverage.continuation_base, Some(20));
     }
@@ -19902,9 +20085,61 @@ mod tests {
         memo.record_core("ses", 3, &kept);
         assert_eq!(memo.core.as_ref(), Some(&kept));
 
+        // A meta that alone breaks the bound stays out; a core that fits only without the
+        // memoized meta displaces it.
+        memo.record_meta("ses", 3, &"m".repeat(ROW_MEMO_RETAINED_BYTES_BOUND));
+        assert!(memo.meta.is_none(), "an over-bound meta is dropped");
+        let mut fresh = RowMemo::default();
+        fresh.record("ses", 3, |_| {});
+        let without_meta = fresh.retained_bytes();
+        let meta = "m".repeat(1024);
+        fresh.record_meta("ses", 3, &meta);
+        assert_eq!(fresh.meta.as_deref(), Some(meta.as_str()));
+        // Fits with 512 bytes to spare alone, and 512 bytes short beside the 1 KiB meta.
+        let target = ROW_MEMO_RETAINED_BYTES_BOUND - without_meta - 512;
+        let overhead = RowMemo::core_bytes(&memo_core("m2#0", ""));
+        let core_needs_the_meta_room = memo_core("m2#0", &"x".repeat(target - overhead));
+        assert_eq!(RowMemo::core_bytes(&core_needs_the_meta_room), target);
+        fresh.record_core("ses", 3, &core_needs_the_meta_room);
+        assert_eq!(fresh.core.as_ref(), Some(&core_needs_the_meta_room));
+        assert!(fresh.meta.is_none(), "the core outranks the meta");
+        assert!(fresh.retained_bytes() <= ROW_MEMO_RETAINED_BYTES_BOUND);
+
+        // A core that breaks the bound even without the meta leaves the meta in place.
+        let mut oversized = RowMemo::default();
+        oversized.record("ses", 3, |_| {});
+        oversized.record_meta("ses", 3, &meta);
+        oversized.record_core(
+            "ses",
+            3,
+            &memo_core("m2#0", &"x".repeat(ROW_MEMO_RETAINED_BYTES_BOUND)),
+        );
+        assert!(oversized.core.is_none(), "an over-bound core is dropped");
+        assert_eq!(
+            oversized.meta.as_deref(),
+            Some(meta.as_str()),
+            "a core that cannot fit displaces nothing"
+        );
+        memo.record_core("ses", 3, &kept);
+        memo.record_meta("ses", 3, "{}");
+        memo.record("ses", 3, |memo| {
+            memo.fold = Some(FoldMetaScalars {
+                eidnara_folds: Some("true".to_string()),
+                has_coverage: true,
+                folded_seq: 1,
+                summarizer_state: None,
+            });
+        });
+
         memo.record("ses", 4, |_| {});
         assert!(memo.at("ses", 4));
-        assert!(memo.core.is_none() && memo.coverage.is_none());
+        assert!(
+            memo.core.is_none()
+                && memo.coverage.is_none()
+                && memo.meta.is_none()
+                && memo.fold.is_none(),
+            "another version starts an empty memo"
+        );
     }
 
     #[test]
@@ -21241,6 +21476,98 @@ mod tests {
         assert!(
             receipts.is_disjoint(&commit_receipt),
             "the commit's receipt left with its evicted entry"
+        );
+    }
+
+    /// A full ring drops its first entry with `json_remove`, and the result is the same text
+    /// the trimming subquery builds for rings above the bound, escapes and nesting included.
+    #[test]
+    fn a_full_ring_drops_its_oldest_entry_as_the_trimming_subquery_does() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut entries: Vec<serde_json::Value> = (0..PASS_TRACE_HISTORY_RING_LEN)
+            .map(|n| {
+                serde_json::json!({
+                    "timestamp_ms": n,
+                    "scheduler_decision": format!("Defer \"{n}\" \\ caf\u{e9} \u{1f600}\n"),
+                    "usage": {"percent": n as f64 / 3.0, "limits": [n, null, true]},
+                })
+            })
+            .collect();
+        let mut texts: Vec<String> = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect();
+        texts[5] = r#"{ "timestamp_ms" : 5, "scheduler_decision" : "Defer \u0022\u00e9\\",
+            "usage" : { "percent" : 1.6666666666666667, "limits" : [ 5, null, true ] } }"#
+            .to_string();
+        let ring = format!("[{}]", texts.join(","));
+        entries[5] = serde_json::from_str(&texts[5]).unwrap();
+        let next = r#"{"timestamp_ms":256,"scheduler_decision":"Execute \u00e9\\"}"#;
+        let (removed, trimmed): (String, String) = conn
+            .query_row(
+                "SELECT json_insert(json_remove(?1, '$[0]'), '$[#]', json(?2)),
+                        json_insert(
+                            (SELECT json_group_array(json(value)) FROM json_each(?1)
+                              WHERE key >= json_array_length(?1) - 255),
+                            '$[#]', json(?2))",
+                params![ring, next],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(removed, trimmed);
+        let kept: Vec<serde_json::Value> = serde_json::from_str(&removed).unwrap();
+        assert_eq!(kept.len(), PASS_TRACE_HISTORY_RING_LEN);
+        assert_eq!(kept[..PASS_TRACE_HISTORY_RING_LEN - 1], entries[1..]);
+        assert_eq!(kept[PASS_TRACE_HISTORY_RING_LEN - 1]["timestamp_ms"], 256);
+    }
+
+    /// Once `scheduler_history` holds 256 entries, a stable pass replaces its oldest entry,
+    /// and its `pass_trace` upsert runs at most twice the VM steps of the upsert that
+    /// appended the second entry.
+    #[test]
+    fn a_stable_pass_on_a_full_ring_edits_it_without_walking_the_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::empty(), &ModuleMeta::default())
+            .unwrap();
+        let observation = |timestamp_ms| PassSchedulerObservation {
+            timestamp_ms,
+            scheduler_decision: "Defer".into(),
+            ..Default::default()
+        };
+        let upsert_steps = |timestamp_ms| {
+            store.start_statement_work_ledger();
+            store
+                .trace_pass_stable("ses", &observation(timestamp_ms), None)
+                .unwrap();
+            store
+                .take_statement_work()
+                .iter()
+                .filter(|run| run.sql.starts_with("INSERT INTO pass_trace"))
+                .map(|run| run.vm_steps)
+                .sum::<u64>()
+        };
+        upsert_steps(1);
+        let short_ring = upsert_steps(2);
+        for timestamp_ms in 3..300 {
+            store
+                .trace_pass_stable("ses", &observation(timestamp_ms), None)
+                .unwrap();
+        }
+        let full_ring = upsert_steps(300);
+        let history: Vec<i64> = store
+            .load_pass_trace("ses")
+            .unwrap()
+            .unwrap()
+            .scheduler_history
+            .iter()
+            .map(|entry| entry.timestamp_ms)
+            .collect();
+        assert_eq!(history, (45..=300).collect::<Vec<i64>>());
+        assert!(
+            full_ring <= 2 * short_ring,
+            "the full-ring upsert ran {full_ring} VM steps against {short_ring} on a short ring"
         );
     }
 
@@ -30380,10 +30707,15 @@ mod tests {
         drop(raw);
 
         assert!(matches!(store.load("ses"), Err(MemoryStoreError::Serde(_))));
-        assert!(matches!(
-            store.load_fold_authority("ses"),
-            Err(MemoryStoreError::Serde(_))
-        ));
+        for read in ["cold", "memoized"] {
+            assert!(
+                matches!(
+                    store.load_fold_authority("ses"),
+                    Err(MemoryStoreError::Serde(_))
+                ),
+                "{read} read"
+            );
+        }
     }
 
     #[test]
@@ -30467,6 +30799,69 @@ mod tests {
                 .is_none()
         );
         assert_eq!(store.load("ses").unwrap().meta.eidnara_folds, Some(true));
+    }
+
+    /// A fold-authority read of an unchanged row takes its meta fields from the row memo and
+    /// reads only the row version and the pending-publication probe, so a publication pending
+    /// at the same version still ends quiescence; a commit advances the version, and the next
+    /// read answers with the committed fields.
+    #[test]
+    fn an_unchanged_row_answers_fold_authority_from_the_memo_but_rechecks_pending_publications() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(&descriptor(dir.path())).unwrap();
+        let meta = ModuleMeta {
+            eidnara_folds: Some(true),
+            coverage_ordinal: Some(4),
+            ..Default::default()
+        };
+        let version = store
+            .commit("ses", None, &CoreState::empty(), &meta)
+            .unwrap();
+        store.start_statement_work_ledger();
+        let cold = store.load_fold_authority("ses").unwrap();
+        let warm = store.load_fold_authority("ses").unwrap();
+        let work = store.take_statement_work();
+        assert_eq!(cold, warm);
+        assert_eq!(
+            (cold.applied, cold.adopted, cold.quiescent),
+            (Some(true), Some(true), true)
+        );
+        let runs: Vec<&str> = work
+            .iter()
+            .map(|run| run.sql.as_str())
+            .filter(|sql| sql.contains("cache_state"))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                FOLD_AUTHORITY_SELECT.trim(),
+                FOLD_AUTHORITY_VERSION_SELECT.trim()
+            ],
+            "the warm read touches no meta field"
+        );
+
+        let raw = rusqlite::Connection::open(dir.path().join("memory.sqlite")).unwrap();
+        raw.execute(
+            "INSERT INTO history_summarizer_pending_publications(session_id, firing_seq, payload_deflate, created_at_ms)
+             VALUES ('ses', 1, x'00', 1)",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        assert!(!store.load_fold_authority("ses").unwrap().quiescent);
+
+        let native = ModuleMeta {
+            eidnara_folds: Some(false),
+            ..Default::default()
+        };
+        store
+            .commit("ses", Some(version), &CoreState::empty(), &native)
+            .unwrap();
+        let committed = store.load_fold_authority("ses").unwrap();
+        assert_eq!(
+            (committed.applied, committed.adopted),
+            (Some(false), Some(false))
+        );
     }
 
     #[test]
