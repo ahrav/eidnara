@@ -1904,6 +1904,66 @@ async fn a_current_family_whose_coverage_turns_corrupt_records_its_corruption_re
     owner.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_over_its_coverage_bound_blocks_without_a_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    let bounded = |rows| {
+        manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("export_page_rows", rows)],
+        )
+    };
+    write_records(home, &bounded(1), &campaign_json(&identity));
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let (before, _) = current_attempt(home).unwrap();
+    let projection = Arc::clone(owner.pin(&slice_budget()).unwrap().projection());
+    let path = projection.path().to_owned();
+
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::CaughtUp(_)),
+        "catch-up moves the family past its one-row class bound: {outcome:?}"
+    );
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Blocked(_)),
+        "a family over its coverage bound is blocked: {outcome:?}"
+    );
+    assert!(
+        projection.quarantine().is_none(),
+        "a coverage bound refusal leaves the family unquarantined"
+    );
+    assert_eq!(current_attempt(home).unwrap().0, before);
+    drop(projection);
+
+    write_records(home, &bounded(64), &campaign_json(&identity));
+    let slices = drive(&owner, 20, || owner.pin(&slice_budget()).is_ok()).await;
+    assert!(slices < 20, "the raised bound serves the family again");
+    assert_eq!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the same family serves after the reload"
+    );
+    assert_eq!(current_attempt(home).unwrap().0, before);
+    owner.shutdown().await.unwrap();
+}
+
 const EXACT_BOUNDS: ResolveBounds = ResolveBounds {
     page_rows: NonZeroUsize::new(16).unwrap(),
     max_rows: NonZeroUsize::new(64).unwrap(),

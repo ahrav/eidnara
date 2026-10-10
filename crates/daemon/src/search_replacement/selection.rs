@@ -13,7 +13,9 @@ use host_runtime::generation::{
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
 use retrieval::batch::{VectorGeneration, read_checkpoint};
-use retrieval::coverage::{CoverageBounds, CoverageReport, observe, verify_active, verify_pages};
+use retrieval::coverage::{
+    CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active, verify_pages,
+};
 use retrieval::exact::{CompletenessCertificate, EXTRACTION_VERSION};
 use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
@@ -193,7 +195,7 @@ impl SearchSelection {
     ///
     /// # Errors
     ///
-    /// Returns `BuildError::Invalid` when no family is selected or the family is unavailable or quarantined; propagates errors from `deadline` and `read_within`.
+    /// Returns `BuildError::Invalid` when no family is selected, the family is unavailable or quarantined, or a class exceeds the family's coverage bounds; propagates errors from `deadline` and `read_within`. Any other unavailable observation returns `ProjectionError::CorruptRow`, and an error `family_damage` classifies quarantines the family before it returns.
     pub fn observe_selected(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         let family = self
             .selected
@@ -214,10 +216,19 @@ impl SearchSelection {
                     &family.certificate.seed.kernel_incarnation_id,
                     &family.generation(),
                     family.bounds,
-                )?
-                .map_err(|_| ProjectionError::CorruptRow)
+                )
             })
-            .map_err(BuildError::from);
+            .map_err(BuildError::from)
+            .and_then(|observed| match observed {
+                Ok(report) => Ok(report),
+                Err(
+                    CoverageUnavailable::OverBound { .. }
+                    | CoverageUnavailable::TombstonedOverBound { .. },
+                ) => Err(BuildError::Invalid(
+                    "coverage exceeds its observation bound",
+                )),
+                Err(_) => Err(ProjectionError::CorruptRow.into()),
+            });
         if let Err(error) = &observed
             && let Some(kind) = family_damage(error)
         {
