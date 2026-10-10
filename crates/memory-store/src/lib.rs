@@ -12396,6 +12396,26 @@ impl MemoryStore {
         })?)
     }
 
+    pub fn newest_history_segment_ending_on(
+        &self,
+        session_id: &str,
+        mut ends_live: impl FnMut(&str) -> bool,
+    ) -> Result<Option<i64>, MemoryStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT sequence, end_message_id FROM history_segments
+                  WHERE session_id = ?1 ORDER BY sequence DESC",
+            )?;
+            let mut rows = statement.query(params![session_id])?;
+            while let Some(row) = rows.next()? {
+                if row.get_ref(1)?.as_str().is_ok_and(&mut ends_live) {
+                    return Ok(Some(row.get(0)?));
+                }
+            }
+            Ok(None)
+        })?)
+    }
+
     /// The history_segment at `sequence`, by primary key.
     pub fn history_segment_at_sequence(
         &self,
@@ -25208,6 +25228,34 @@ mod tests {
                 .history_segment_at_sequence("ses", 11)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn the_newest_segment_ending_on_a_live_id_stops_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = bounded_read_store(dir.path(), 10, &[]);
+        let live = ["m4#0", "m12#0", "m14#0"];
+        let mut visited = Vec::new();
+        let found = store
+            .newest_history_segment_ending_on("ses", |end| {
+                visited.push(end.to_string());
+                live.contains(&end)
+            })
+            .unwrap();
+        assert_eq!(found, Some(7));
+        assert_eq!(visited, ["m20#0", "m18#0", "m16#0", "m14#0"]);
+        assert_eq!(
+            store
+                .newest_history_segment_ending_on("ses", |_| false)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .newest_history_segment_ending_on("absent", |_| true)
+                .unwrap(),
+            None
         );
     }
 
