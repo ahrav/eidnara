@@ -2786,3 +2786,375 @@ fn publication_refuses_to_replace_a_completed_record() {
         "the refused writer's temporary file is removed"
     );
 }
+
+/// Names a directory of published real captures; the opt-in real-serving replay serves each
+/// source's captured output in place of its approved example.
+const REAL_CAPTURE_DIR: &str = "EIDNARA_FIDELITY_REAL_CAPTURE_DIR";
+/// The `output_origin` a capture of a real producer through the host records.
+const REAL_ORIGIN: &str = "real producer through the host";
+
+/// A source's captured output, the model that produced it, and the SHA-256 of the capture file
+/// that published it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RealCapture {
+    output: String,
+    model: String,
+    capture_sha256: String,
+}
+
+/// The first `<p1>` body of `output`, trimmed and unescaped as the validator publishes it.
+fn published_p1(output: &str) -> Option<String> {
+    let start = output.find("<p1>")? + "<p1>".len();
+    let end = start + output[start..].find("</p1>")?;
+    Some(crate::history_summarizer_validate::unescape_xml(
+        output[start..end].trim(),
+    ))
+}
+
+/// Reads every published real capture of `model` in `dir`, keyed by source. A capture names its
+/// output by the attempt output whose P1, as the validator publishes it, is its published row's.
+fn real_captures(dir: &Path, model: &str) -> BTreeMap<String, RealCapture> {
+    let mut captures = BTreeMap::new();
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+    {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !(name.starts_with(&format!("{REAL_OWNER}.")) && name.ends_with(".capture.json")) {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        let detail = &record["detail"];
+        if record["owner"] != REAL_OWNER
+            || record["corpus_sha256"] != CORPUS_SHA256
+            || record["terminal"] != "published"
+            || detail["output_origin"] != REAL_ORIGIN
+            || detail["model"] != model
+        {
+            continue;
+        }
+        let p1 = detail["published_rows"][0]["p1"]
+            .as_str()
+            .filter(|p1| !p1.is_empty())
+            .unwrap_or_else(|| panic!("{name}: the published row has no P1"));
+        let output = detail["attempts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .flat_map(|attempt| attempt["outputs"].as_array().into_iter().flatten().rev())
+            .filter_map(|output| output["text"].as_str())
+            .find(|text| published_p1(text).as_deref() == Some(p1))
+            .unwrap_or_else(|| panic!("{name}: no attempt output carries the published P1"));
+        let source = record["source"].as_str().unwrap().to_owned();
+        let previous = captures.insert(
+            source,
+            RealCapture {
+                output: output.to_owned(),
+                model: model.to_owned(),
+                capture_sha256: format!("{:x}", sha2::Sha256::digest(&bytes)),
+            },
+        );
+        assert!(previous.is_none(), "{name}: a second capture of one source");
+    }
+    captures
+}
+
+/// `detail` with the origin of the output it was served from and the capture that published it.
+fn bound(detail: Value, capture: &RealCapture) -> Value {
+    let mut detail = detail;
+    detail["output_origin"] = json!(REAL_ORIGIN);
+    detail["generation_capture_sha256"] = json!(capture.capture_sha256);
+    detail
+}
+
+/// Folds `source` once with its captured output under the capture's model, then serves it
+/// naturally: P1 at m0 on the first fold, P1 in the m1 window after a test-authored baseline,
+/// and each decayed tier at m0 under test-authored newer rows. Every observation names the
+/// capture it serves.
+async fn serve_capture(
+    case: &'static Case,
+    source: &Source,
+    capture: &RealCapture,
+) -> Vec<Observation> {
+    let output = &capture.output;
+    let config = || DaemonConfig {
+        model_chain: vec![capture.model.clone()],
+        ..default_test_config()
+    };
+    let mut observations = Vec::new();
+    let fold = fold_with(
+        config(),
+        source_ingress(case, source),
+        follow_up_for(case, source),
+        vec![output.clone()],
+    )
+    .await;
+    let attempt = fold.attempts().remove(0);
+    let rows = fold.rows();
+    let [row] = rows.as_slice() else {
+        panic!("{}: the captured output publishes one row", source.id);
+    };
+    // The validator trims and unescapes tier bodies, so the published row, not the raw output,
+    // names what each tier serves.
+    let tier = |body: &Option<String>| body.clone().unwrap_or_default();
+    assert_eq!(
+        published_p1(output),
+        row.p1.clone(),
+        "{}: the captured P1 publishes",
+        source.id
+    );
+    // History renders escape `&`, `<`, and `>`, so served text is matched in its rendered form.
+    let tiers = [&row.p1, &row.p2, &row.p3, &row.p4]
+        .map(|body| crate::decay_render::escape_xml_content(&tier(body)));
+    let p1 = tiers[0].clone();
+    observations.push(
+        observation(&case.id, &source.id, "generation", Terminal::Published).with(bound(
+            json!({
+                "attempts": [{
+                    "attempt": 1,
+                    "model": attempt.model,
+                    "system_sha256": sha256_hex(&attempt.system),
+                    "prompt_sha256": sha256_hex(&attempt.prompt),
+                    "output_sha256": sha256_hex(output),
+                    "output_origin": REAL_ORIGIN,
+                }],
+                "chunk": [1, source.messages.len()],
+            }),
+            capture,
+        )),
+    );
+    let served = fold.pass(None, "cfg0").await;
+    assert!(m0_text(&served).contains(&p1), "{}: P1 at m0", source.id);
+    observations.push(
+        observation(&case.id, &source.id, "m0", Terminal::Served).with(bound(
+            json!({"tier": "p1", "path": "natural", "first_fold_direct_to_m0": true}),
+            capture,
+        )),
+    );
+
+    let count = source.messages.len() as u64;
+    let (baseline, baseline_output) = scaffold(1, "Baseline workspace setup");
+    let shifted = source_ingress(case, source)
+        .into_iter()
+        .map(|mut message| {
+            message.ordinal += SCAFFOLD_MESSAGES;
+            message
+        })
+        .collect();
+    let windowed = two_folds(
+        baseline,
+        shifted,
+        follow_up_for(case, source),
+        [
+            baseline_output,
+            translated(output, count, SCAFFOLD_MESSAGES),
+        ],
+    )
+    .await;
+    let served = windowed.pass(None, "cfg0").await;
+    assert!(
+        synthetic_text(&served, 1).contains(&p1),
+        "{}: P1 rides m1",
+        source.id
+    );
+    let m0 = m0_text(&served);
+    assert!(
+        m0.contains("Baseline workspace setup") && !m0.contains(&p1),
+        "{}: m0 stays frozen at the baseline",
+        source.id
+    );
+    for scenario in scenarios_serving(case, source, ServingPath::Natural, Tier::P1, Stage::M1) {
+        observations.push(
+            observation(&case.id, &source.id, "m1", Terminal::Served)
+                .scenario(&scenario.id)
+                .with(bound(json!({"tier": "p1", "path": "natural"}), capture)),
+        );
+    }
+
+    let ages = first_ages(row, &tiers, &source.id);
+    assert!(
+        ages.windows(2).all(|pair| pair[0] < pair[1]),
+        "{}: tiers decay in order: {ages:?}",
+        source.id
+    );
+    for (tier, age) in TIERS.into_iter().zip(ages) {
+        let path = if tier == Tier::P5 {
+            ServingPath::Omission
+        } else {
+            ServingPath::Natural
+        };
+        let tier_name = format!("{tier:?}").to_lowercase();
+        for scenario in scenarios_serving(case, source, path, tier, Stage::M0) {
+            observations.push(
+                observation(
+                    &case.id,
+                    &source.id,
+                    format!("m0_decay_{tier_name}"),
+                    Terminal::Served,
+                )
+                .scenario(&scenario.id)
+                .with(bound(
+                    json!({
+                        "tier": tier_name,
+                        "path": if tier == Tier::P5 { "omission" } else { "natural" },
+                        "newer_rows": age,
+                        "newer_rows_are": "test-authored filler",
+                        "history_budget_tokens": 0,
+                    }),
+                    capture,
+                )),
+            );
+        }
+    }
+    observations
+}
+
+/// Serves every corpus source from its published real capture of `EIDNARA_FIDELITY_REAL_MODEL`
+/// in `EIDNARA_FIDELITY_REAL_CAPTURE_DIR`, and writes the bound observations under
+/// `EIDNARA_FIDELITY_OBSERVATIONS_DIR`. A source with no published real capture fails the run.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "opt-in real-serving replay; needs EIDNARA_FIDELITY_REAL_CAPTURE_DIR naming published \
+            real captures, EIDNARA_FIDELITY_REAL_MODEL naming the arm's model, and \
+            EIDNARA_FIDELITY_OBSERVATIONS_DIR"]
+async fn real_captures_serve_their_natural_tiers() {
+    let dir = std::env::var_os(REAL_CAPTURE_DIR)
+        .unwrap_or_else(|| panic!("{REAL_CAPTURE_DIR} names no capture directory"));
+    let model = std::env::var(REAL_MODEL)
+        .unwrap_or_else(|_| panic!("{REAL_MODEL} names no model; the arm binds one model"));
+    assert!(
+        std::env::var_os(OBSERVATIONS_DIR).is_some(),
+        "{OBSERVATIONS_DIR} names no observation directory"
+    );
+    let captures = real_captures(Path::new(&dir), &model);
+    for (case, source) in sources() {
+        let capture = captures
+            .get(&source.id)
+            .unwrap_or_else(|| panic!("{}: no published real capture", source.id));
+        for observation in serve_capture(case, source, capture).await {
+            observation.emit();
+        }
+    }
+}
+
+/// A capture file published with the real origin binds what the real-serving replay serves: the
+/// reader takes the attempt output that published, as the validator trims and unescapes it,
+/// keyed by the capture file's SHA-256; every observation the replay records names that digest,
+/// the real origin, and the capture's model. A capture of another model, another corpus, a
+/// scripted origin, or an unpublished terminal binds nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_real_capture_binds_every_tier_the_replay_serves_from_it() {
+    const MODEL: &str = "probe/model";
+    // One source answers with whitespace-wrapped, escaped tier bodies, as a real model may.
+    let (_, wrapped) = case_source("C1", "C1.V1");
+    let wrapped_output = |source: &Source| {
+        if source.id != wrapped.id {
+            return source.approved_example.clone();
+        }
+        let [p1, ..] = approved_tiers(&source.approved_example);
+        source.approved_example.replacen(
+            &format!("<p1>{p1}</p1>"),
+            &format!("<p1>\n{} &amp; more\n</p1>", p1.replace('&', "&amp;")),
+            1,
+        )
+    };
+    let producer = Arc::new(ProducerState::default());
+    producer
+        .await_results
+        .lock()
+        .unwrap()
+        .extend(sources().map(|(_, source)| {
+            Ok(ProducerOutput {
+                text: wrapped_output(source),
+                length_capped: false,
+            })
+        }));
+    let records = capture_sources(
+        Arc::new(TestProducerFactory {
+            state: Arc::clone(&producer),
+        }),
+        MODEL,
+        REAL_ORIGIN,
+        Duration::from_secs(10),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut digests = BTreeMap::new();
+    for record in &records {
+        let path = record.emit_to(dir.path());
+        digests.insert(
+            record.source.clone(),
+            format!("{:x}", sha2::Sha256::digest(std::fs::read(path).unwrap())),
+        );
+    }
+    let captures = real_captures(dir.path(), MODEL);
+    assert_eq!(captures.len(), sources().count());
+    assert!(real_captures(dir.path(), "other/model").is_empty());
+    for (_, source) in sources() {
+        assert_eq!(
+            captures[&source.id],
+            RealCapture {
+                output: wrapped_output(source),
+                model: MODEL.to_owned(),
+                capture_sha256: digests[&source.id].clone(),
+            },
+            "{}",
+            source.id
+        );
+    }
+
+    let mut witnessed = 0;
+    for (case, source) in sources() {
+        let capture = &captures[&source.id];
+        let observations = serve_capture(case, source, capture).await;
+        witnessed += observations
+            .iter()
+            .filter(|observation| observation.scenario.is_some())
+            .count();
+        for observation in &observations {
+            assert_eq!(observation.detail["output_origin"], REAL_ORIGIN);
+            assert_eq!(
+                observation.detail["generation_capture_sha256"],
+                capture.capture_sha256.as_str(),
+                "{}: {}",
+                source.id,
+                observation.stage
+            );
+        }
+        let attempt = &observations[0].detail["attempts"][0];
+        assert_eq!(attempt["output_sha256"], sha256_hex(&capture.output));
+        assert_eq!(
+            attempt["model"], MODEL,
+            "the replay runs the capture's model"
+        );
+    }
+    assert!(witnessed > 0, "the replay witnesses corpus scenarios");
+
+    let twins = tempfile::tempdir().unwrap();
+    for (index, change) in [
+        |record: &mut Observation| {
+            record.detail["output_origin"] = json!("scripted approved example")
+        },
+        |record: &mut Observation| record.terminal = Terminal::Unsettled,
+        |record: &mut Observation| record.corpus_sha256 = "0".repeat(64).leak(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut twin = Observation::new(
+            REAL_OWNER,
+            CORPUS_SHA256,
+            &records[index].case,
+            &records[index].source,
+            "capture",
+            Terminal::Published,
+        )
+        .with(records[index].detail.clone());
+        change(&mut twin);
+        twin.emit_to(twins.path());
+    }
+    assert!(
+        real_captures(twins.path(), MODEL).is_empty(),
+        "a scripted, unpublished, or foreign-corpus capture binds nothing"
+    );
+}

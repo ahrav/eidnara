@@ -1289,7 +1289,7 @@ fn split_anchor_prefix(text: &str) -> (Option<u64>, String) {
 
 /// Decodes the five XML entities in one pass, so `&amp;lt;` yields the literal
 /// text `&lt;` rather than `<`.
-fn unescape_xml(s: &str) -> String {
+pub(crate) fn unescape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find('&') {
