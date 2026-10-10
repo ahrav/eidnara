@@ -759,7 +759,7 @@ async fn installed_records_alone_register_a_family_the_route_serves() {
         .set_query_route_limits(Some(limits()))
         .unwrap();
     await_admission(&daemon, json!({"state": "admitted"})).await;
-    let lifecycle = ProjectionLifecycle::open(&home).unwrap();
+    let lifecycle = support::flock::open_lifecycle(&home);
     let started = Instant::now();
     let project = daemon.project().to_owned();
     let fused = loop {
