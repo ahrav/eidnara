@@ -5386,7 +5386,8 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
     }
     drop(reader);
     // The restart renews nothing: the record is the registered one, or the claim-source runner's commits since the restart already left that family behind and the loop recorded its replacement.
-    match ProjectionLifecycle::open(&home).unwrap().read() {
+    // The running daemon holds the lifecycle directory's flock while it writes, so each read retries a held lock.
+    match control(&home) {
         ControlState::Current(resumed) if resumed.attempt_id == current.attempt_id => {
             assert_eq!(
                 resumed, current,
@@ -5423,7 +5424,7 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         )
         .unwrap();
     let rebuilt = loop {
-        if let ControlState::Current(intent) = ProjectionLifecycle::open(&home).unwrap().read()
+        if let ControlState::Current(intent) = control(&home)
             && intent.attempt_id != current.attempt_id
         {
             break intent;

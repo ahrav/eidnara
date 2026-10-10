@@ -566,6 +566,58 @@ fn value_span_excludes_quotes_the_secret_capture_includes() {
     );
 }
 
+/// The entropy and length gates evaluate the rule's capture with its quotes;
+/// quote stripping affects only `value_span`.
+#[test]
+fn quote_stripping_leaves_the_detection_gates_on_the_captured_bytes() {
+    let scanner = comprehensive_scanner();
+    let rule_id = "hashicorp-tf-password";
+    // The 18-byte quoted capture measures 3.06 bits per byte against the
+    // rule's 3.0 floor, and the 16 bytes inside the quotes measure 2.88.
+    let reported = "password: \"letmein_letmein1\"";
+    let finding = scanner
+        .scan(reported)
+        .unwrap()
+        .findings
+        .into_iter()
+        .find(|finding| finding.rule_id == rule_id)
+        .unwrap_or_else(|| panic!("{rule_id} dropped {reported:?}"));
+    assert_eq!(
+        &reported[finding.value_span.start()..finding.value_span.end()],
+        "letmein_letmein1"
+    );
+    // The 17-byte quoted capture reaches the rule's 16-byte `min_len`, so the
+    // rule measures its entropy and rejects it. The 15 bytes inside the quotes
+    // fall below `min_len`, which skips the entropy measurement.
+    let rejected = "password: \"zzzzzzzzzzzzzzz\"";
+    let findings = scanner.scan(rejected).unwrap().findings;
+    assert!(
+        findings.iter().all(|finding| finding.rule_id != rule_id),
+        "{rule_id} reported {rejected:?}: {findings:?}"
+    );
+}
+
+/// Quotes the pattern matches as ordinary value bytes are password bytes, so
+/// redacting `value_span` must remove them with the rest of the password.
+#[test]
+fn value_span_keeps_quotes_that_belong_to_the_secret() {
+    let scanner = comprehensive_scanner();
+    // `nuget-config-password` captures the attribute text inside its own
+    // delimiting double quotes, so the apostrophes are password bytes.
+    let input = "<add key=\"ClearTextPassword\" value=\"'Q7m9Pv2Lr8Wk4Zd6'\" />";
+    let finding = scanner
+        .scan(input)
+        .unwrap()
+        .findings
+        .into_iter()
+        .find(|finding| finding.rule_id == "nuget-config-password")
+        .expect("nuget-config-password did not report the password");
+    assert_eq!(
+        &input[finding.value_span.start()..finding.value_span.end()],
+        "'Q7m9Pv2Lr8Wk4Zd6'"
+    );
+}
+
 /// A caller redacting `value_span` must delete the credential and nothing else.
 #[test]
 fn value_span_excludes_surrounding_command_text_for_alternation_rules() {
