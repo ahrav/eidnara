@@ -1083,7 +1083,8 @@ impl SearchLifecycleOwner {
             Some(selection)
                 if selection.has_selected()
                     && !selection.selected_quarantined()
-                    && *selection.identity() == *identity =>
+                    && *selection.identity() == *identity
+                    && !selection.selected_over_another_kernel(&self.kernel, budget) =>
             {
                 selection
                     .observe_selected(budget)

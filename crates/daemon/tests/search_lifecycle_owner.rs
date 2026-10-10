@@ -1862,6 +1862,90 @@ async fn a_same_lineage_kernel_restore_records_a_rebuild_of_the_current_family()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restore_behind_the_selected_checkpoint_records_a_kernel_restore_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::CaughtUp(_)),
+        "catch-up moves the family past the backup: {outcome:?}"
+    );
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel behind the selected checkpoint earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restore_predating_the_current_consumer_still_rebuilds_to_current() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_current_family_whose_coverage_turns_corrupt_records_its_corruption_rebuild() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path();

@@ -241,19 +241,19 @@ impl SearchSelection {
     ///
     /// # Errors
     ///
-    /// Returns the gate's denial, the kernel mismatch, or `BuildError::Invalid` when no family is selected or it is quarantined.
+    /// Returns the kernel mismatch, the gate's denial, or `BuildError::Invalid` when no family is selected or it is quarantined. The kernel mismatch takes precedence over the gate's denial, so a selected checkpoint beyond a restored kernel's tip earns its rebuild.
     pub fn check_selected(
         &self,
         kernel: &KernelStore,
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
-        self.admit(gate, budget)?;
         let family = self
             .selected
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
         family.check_kernel(kernel, budget)?;
+        self.admit(gate, budget)?;
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
@@ -279,6 +279,15 @@ impl SearchSelection {
             .load()
             .as_ref()
             .is_some_and(|family| family.projection.quarantine().is_some())
+    }
+
+    pub fn selected_over_another_kernel(&self, kernel: &KernelStore, budget: &EvalBudget) -> bool {
+        self.selected.load().as_ref().is_some_and(|family| {
+            matches!(
+                family.check_kernel(kernel, budget),
+                Err(BuildError::Mutation(ProjectionError::IdentityMismatch))
+            )
+        })
     }
 
     pub fn pin(
