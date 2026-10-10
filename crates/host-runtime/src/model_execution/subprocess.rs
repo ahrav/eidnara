@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -936,8 +936,10 @@ async fn wait_exited_unreaped(group: Option<rustix::process::Pid>, budget: Durat
     let Some(pid) = group else {
         return LeaderExit::Running;
     };
-    // Tokio owns the child's `SIGCHLD` handling, so the function uses a 10 ms bounded poll.
-    const POLL: Duration = Duration::from_millis(10);
+    // Tokio owns the child's `SIGCHLD` handling, so the function polls. A leader that closed its
+    // pipes is usually already exiting, so the interval starts at 1 ms and doubles to a 10 ms cap.
+    const POLL_MAX: Duration = Duration::from_millis(10);
+    let mut poll = Duration::from_millis(1);
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         let options = rustix::process::WaitIdOptions::EXITED
@@ -955,7 +957,8 @@ async fn wait_exited_unreaped(group: Option<rustix::process::Pid>, budget: Durat
         if tokio::time::Instant::now() >= deadline {
             return LeaderExit::Running;
         }
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(poll).await;
+        poll = poll.saturating_mul(2).min(POLL_MAX);
     }
 }
 
@@ -2188,31 +2191,126 @@ pub mod group_registry {
         Ok(environ.split(|byte| *byte == 0).any(|item| item == entry))
     }
 
+    /// At most this many threads split one `/proc` scan.
+    const MAX_SCAN_THREADS: usize = 4;
+
+    /// Scans every `/proc` entry except `exclude_pid` for a live member of `pgid`.
+    ///
+    /// Up to [`MAX_SCAN_THREADS`] threads split the entries. A live member makes the scan report
+    /// `true`; otherwise an unreadable entry fails it; otherwise it reports `false`. Callers treat a
+    /// failed scan like a live member, so the group stays unproven either way.
     fn scan_group_members(pgid: i32, exclude_pid: Option<i32>) -> io::Result<bool> {
+        // One `/proc` descriptor serves every stat read in the scan, so each candidate costs one open, one read, and one close.
+        let proc_dir = rustix::fs::openat(
+            rustix::fs::CWD,
+            "/proc",
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )?;
+        let mut pids = Vec::new();
         for proc_entry in fs::read_dir("/proc")? {
-            let Some(pid) = proc_entry?
+            if let Some(pid) = proc_entry?
                 .file_name()
                 .to_str()
                 .and_then(|name| name.parse::<i32>().ok())
-            else {
-                continue;
-            };
-            if Some(pid) == exclude_pid {
-                continue;
-            }
-            // A process that exits mid-scan is not a member.
-            // Harness descendants run as this user, so a process whose stat is unreadable under `hidepid` is not a member.
-            match proc_stat_pgrp_state(pid) {
-                Ok(Some((pgrp, state))) if pgrp == pgid && state != 'Z' && state != 'X' => {
-                    return Ok(true);
-                }
-                Ok(_) => {}
-                Err(err) if pid_vanished(&err) => {}
-                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {}
-                Err(err) => return Err(err),
+                .filter(|pid| Some(*pid) != exclude_pid)
+            {
+                pids.push(pid);
             }
         }
-        Ok(false)
+        let member = std::sync::atomic::AtomicBool::new(false);
+        let failure: Mutex<Option<io::Error>> = Mutex::new(None);
+        let scan = |chunk: &[i32]| {
+            for &pid in chunk {
+                if member.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                // A process that exits mid-scan is not a member.
+                // Harness descendants run as this user, so a process whose stat is unreadable under `hidepid` is not a member.
+                match proc_stat_pgrp_state_at(&proc_dir, pid) {
+                    Ok(Some((pgrp, state))) if pgrp == pgid && state != 'Z' && state != 'X' => {
+                        member.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(err) if pid_vanished(&err) => {}
+                    Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {}
+                    Err(err) => {
+                        failure
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .get_or_insert(err);
+                        return;
+                    }
+                }
+            }
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(MAX_SCAN_THREADS);
+        let chunk_len = pids.len().div_ceil(threads).max(1);
+        std::thread::scope(|scope| {
+            let mut chunks = pids.chunks(chunk_len);
+            let own = chunks.next().unwrap_or_default();
+            for chunk in chunks {
+                // A chunk whose thread cannot start is scanned here instead.
+                if std::thread::Builder::new()
+                    .name("group-scan".to_owned())
+                    .spawn_scoped(scope, || scan(chunk))
+                    .is_err()
+                {
+                    scan(chunk);
+                }
+            }
+            scan(own);
+        });
+        if member.into_inner() {
+            return Ok(true);
+        }
+        match failure.into_inner().unwrap_or_else(PoisonError::into_inner) {
+            Some(err) => Err(err),
+            None => Ok(false),
+        }
+    }
+
+    /// [`proc_stat_pgrp_state`] through an open `/proc` descriptor: a stat line that fits one fixed read parses in place, and a longer one takes the full read.
+    fn proc_stat_pgrp_state_at(
+        proc_dir: &rustix::fd::OwnedFd,
+        pid: i32,
+    ) -> io::Result<Option<(i32, char)>> {
+        const STAT_READ_BYTES: usize = 1024;
+        let stat = rustix::fs::openat(
+            proc_dir,
+            format!("{pid}/stat"),
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )?;
+        let mut buffer = [0u8; STAT_READ_BYTES];
+        let count = loop {
+            match rustix::io::read(&stat, &mut buffer) {
+                Err(rustix::io::Errno::INTR) => {}
+                result => break result?,
+            }
+        };
+        if count == STAT_READ_BYTES {
+            return proc_stat_pgrp_state(pid);
+        }
+        let unreadable = || io::Error::other("unreadable /proc stat format");
+        let line = std::str::from_utf8(&buffer[..count]).map_err(|_| unreadable())?;
+        let rest = line.rsplit_once(')').ok_or_else(unreadable)?.1;
+        let mut fields = rest.split_ascii_whitespace();
+        let state = fields
+            .next()
+            .and_then(|field| field.chars().next())
+            .ok_or_else(unreadable)?;
+        let pgrp = fields
+            .nth(1)
+            .ok_or_else(unreadable)?
+            .parse()
+            .map_err(|_| unreadable())?;
+        Ok(Some((pgrp, state)))
     }
 
     /// `/proc/<pid>/stat` stores state and process group as the first and third fields after `comm`.
