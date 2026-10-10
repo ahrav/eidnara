@@ -165,7 +165,8 @@ pub use qualification::{
     ACTIVE_WINDOW, BacklogSample, Case, CaseResult, Environment, FAKE_MODEL_LATENCY_MS,
     GateFailure, HostShortfall, LineageViolation, MESSAGE_TOKENS, OutageRun, OutageSchedule, Phase,
     Publication, QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape,
-    StoreObservation, audit_lineage, catalog, frozen_arrival,
+    StoreObservation, WITNESSES, WitnessRun, audit_lineage, catalog, check_witness_runs,
+    frozen_arrival,
 };
 pub use reducer::*;
 pub use render::*;

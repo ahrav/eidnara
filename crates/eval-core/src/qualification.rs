@@ -1,4 +1,4 @@
-//! `eval-qualification/v2`: the fixed retained-history and outage qualification campaign.
+//! `eval-qualification/v3`: the fixed retained-history and outage qualification campaign.
 //! The case catalog, the required host, the numeric gates, the drain estimate, the outage and
 //! virtual rotation schedules, and the per-publication lineage oracle are values; the runner
 //! shell measures and this module judges.
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scale::{Histogram, HostManifest};
 
-pub const QUALIFICATION_SCHEMA: &str = "eval-qualification/v2";
+pub const QUALIFICATION_SCHEMA: &str = "eval-qualification/v3";
 /// Fixture seed every generated history uses.
 pub const QUALIFICATION_SEED: u64 = 702;
 /// Measured lexical tokens in each ordinary message under the pinned tokenizer.
@@ -43,7 +43,7 @@ pub const REQUIRED_CPUS: u32 = 4;
 pub const REQUIRED_MEMORY_BYTES: u64 = 16 << 30;
 pub const MEMORY_TOLERANCE_BYTES: u64 = 1 << 30;
 pub const REQUIRED_MODEL_WORKERS: u32 = 8;
-/// A report qualifies only after every witness in `WITNESSES` is recorded as passed.
+/// A report qualifies only after every witness in `WITNESSES` has a recorded run at the report's source commit that exited zero.
 pub const WITNESSES: [&str; 5] = [
     "normal_fold",
     "emergency_fold",
@@ -52,11 +52,39 @@ pub const WITNESSES: [&str; 5] = [
     "rotation_soak",
 ];
 
+/// One run of the test that witnesses a named behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WitnessRun {
+    /// The test as the operator invoked it, for example its cargo target and name.
+    pub test: String,
+    /// The source commit the test ran at; a run counts only toward a report measured at the same commit.
+    pub source_commit: String,
+    pub exit_code: i32,
+}
+
+/// Checks that every recorded run names a witness in `WITNESSES` and a test.
+///
+/// # Errors
+///
+/// Returns a message naming the first unknown witness or empty test.
+pub fn check_witness_runs(runs: &BTreeMap<String, WitnessRun>) -> Result<(), String> {
+    for (name, run) in runs {
+        if !WITNESSES.contains(&name.as_str()) {
+            return Err(format!("witness {name:?} is outside {WITNESSES:?}"));
+        }
+        if run.test.trim().is_empty() {
+            return Err(format!("witness {name:?} names no test"));
+        }
+    }
+    Ok(())
+}
+
 /// The message mix of one case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
-    /// Alternating user and assistant text with a tool call and result every eighth turn.
+    /// Alternating user and assistant text with a tool call and result at every sixteenth ordinal.
     Mixed,
     /// One message at the largest admitted size.
     LargestAdmitted,
@@ -940,7 +968,9 @@ pub struct QualificationReport {
     pub control_dispersion: Vec<GateFailure>,
     /// Virtual seconds of the 24-hour auth soak's rotations.
     pub planned_rotations: Vec<u64>,
-    /// Witnesses still to be recorded as passed before the report can qualify.
+    /// The witness runs the operator recorded, keyed by witness.
+    pub witness_runs: BTreeMap<String, WitnessRun>,
+    /// Witnesses with no recorded run that exited zero at the report's source commit; the report cannot qualify until none remain.
     pub pending_witnesses: Vec<String>,
     /// A report from a host with shortfalls is baseline evidence, never qualification.
     pub qualified: bool,
@@ -953,7 +983,7 @@ impl QualificationReport {
         environment: Environment,
         cases: Vec<CaseResult>,
         outage: Result<OutageRun, String>,
-        passed_witnesses: &[String],
+        witness_runs: BTreeMap<String, WitnessRun>,
     ) -> Self {
         let gates: BTreeMap<_, _> = cases
             .iter()
@@ -970,9 +1000,15 @@ impl QualificationReport {
         let complete = catalog().iter().all(|c| cases.iter().any(|r| r.case == *c));
         let pending_witnesses: Vec<String> = WITNESSES
             .iter()
-            .filter(|w| !passed_witnesses.iter().any(|p| p == *w))
+            .filter(|w| {
+                witness_runs
+                    .get(**w)
+                    .is_none_or(|run| run.exit_code != 0 || run.source_commit != source_commit)
+            })
             .map(|w| (*w).to_owned())
             .collect();
+        // `build` accepts runs from any caller, so a run naming no known witness or no test keeps the report unqualified here too.
+        let witnesses_known = check_witness_runs(&witness_runs).is_ok();
         let control_dispersion = catalog()
             .iter()
             .find(|c| c.control.is_none())
@@ -983,6 +1019,7 @@ impl QualificationReport {
             );
         let qualified = host_shortfalls.is_empty()
             && pending_witnesses.is_empty()
+            && witnesses_known
             && control_dispersion.is_empty()
             && !environment.constrained_by_cgroup
             && complete
@@ -1004,6 +1041,7 @@ impl QualificationReport {
             outage_failures,
             control_dispersion,
             planned_rotations: rotation_schedule(),
+            witness_runs,
             pending_witnesses,
             qualified,
         }
@@ -1553,9 +1591,24 @@ mod tests {
                 .map(|c| result(&c.name, 10_000, 4_096))
                 .collect::<Vec<_>>()
         };
-        let passed: Vec<String> = WITNESSES.iter().map(|w| (*w).to_owned()).collect();
-        let report = |env, cases, outage, witnesses: &[String]| {
-            QualificationReport::build("c".into(), "t".into(), env, cases, outage, witnesses)
+        let run = |exit_code| WitnessRun {
+            test: "daemon::source_recovery_tests".into(),
+            source_commit: "c".into(),
+            exit_code,
+        };
+        let passed: BTreeMap<String, WitnessRun> = WITNESSES
+            .iter()
+            .map(|w| ((*w).to_owned(), run(0)))
+            .collect();
+        let report = |env, cases, outage, witnesses: &BTreeMap<String, WitnessRun>| {
+            QualificationReport::build(
+                "c".into(),
+                "t".into(),
+                env,
+                cases,
+                outage,
+                witnesses.clone(),
+            )
         };
         let full = report(environment(4, false), all(), Ok(passing_outage()), &passed);
         assert!(full.host_shortfalls.is_empty());
@@ -1564,14 +1617,47 @@ mod tests {
         assert!(full.control_dispersion.is_empty());
         assert!(full.qualified);
         assert_eq!(full.planned_rotations.len(), 24);
-        let pending = report(
-            environment(4, false),
-            all(),
-            Ok(passing_outage()),
-            &passed[1..],
+        assert_eq!(full.witness_runs, passed);
+        for missing in WITNESSES {
+            let mut runs = passed.clone();
+            runs.remove(missing);
+            let pending = report(environment(4, false), all(), Ok(passing_outage()), &runs);
+            assert_eq!(pending.pending_witnesses, vec![missing.to_owned()]);
+            assert!(!pending.qualified);
+            runs.insert(missing.to_owned(), run(1));
+            let failed = report(environment(4, false), all(), Ok(passing_outage()), &runs);
+            assert_eq!(failed.pending_witnesses, vec![missing.to_owned()]);
+            assert!(
+                !failed.qualified,
+                "a failed {missing} run keeps the report pending"
+            );
+            let mut stale = run(0);
+            stale.source_commit = "earlier".into();
+            runs.insert(missing.to_owned(), stale);
+            let stale = report(environment(4, false), all(), Ok(passing_outage()), &runs);
+            assert_eq!(stale.pending_witnesses, vec![missing.to_owned()]);
+            assert!(
+                !stale.qualified,
+                "a {missing} run at another commit keeps the report pending"
+            );
+        }
+        let mut unknown = passed.clone();
+        unknown.insert("warm_soak".into(), run(0));
+        assert!(check_witness_runs(&unknown).is_err());
+        assert!(!report(environment(4, false), all(), Ok(passing_outage()), &unknown).qualified);
+        let mut untested = passed.clone();
+        untested.get_mut(WITNESSES[0]).unwrap().test = " ".into();
+        assert!(check_witness_runs(&untested).is_err());
+        assert!(
+            !report(
+                environment(4, false),
+                all(),
+                Ok(passing_outage()),
+                &untested
+            )
+            .qualified
         );
-        assert_eq!(pending.pending_witnesses, vec![WITNESSES[0].to_owned()]);
-        assert!(!pending.qualified);
+        assert!(check_witness_runs(&passed).is_ok());
         assert!(!report(environment(4, true), all(), Ok(passing_outage()), &passed).qualified);
         let scaled = OutageRun::new(
             OutageSchedule::scaled(2),
