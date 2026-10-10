@@ -294,10 +294,11 @@ impl SearchSelection {
 
     pub(crate) fn admit_selected_hooks(&self, gate: &HookGate) -> Result<(), BuildError> {
         self.admit_reader(gate)?;
-        match self.selected.load_full() {
-            Some(family) => admit_transition_hook(gate, &family.certificate),
-            None => Ok(()),
-        }
+        let family = self
+            .selected
+            .load_full()
+            .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        admit_transition_hook(gate, &family.certificate)
     }
 
     /// The admission every reader of this manager's family takes: the gate's hook admission for this data home, then the family's limits.

@@ -1254,6 +1254,27 @@ fn a_slice_refused_on_the_lane_names_the_lane_in_status_and_pin_refusals() {
     assert_eq!(owner.pin_refusal(&refused), "lane_not_ready");
 }
 
+#[test]
+fn status_reports_no_family_until_a_family_is_selected() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("no family is selected");
+    assert_eq!(owner.pin_refusal(&refused), "no_family");
+    assert_eq!(owner.admission_state(), Err("no_family"));
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {
