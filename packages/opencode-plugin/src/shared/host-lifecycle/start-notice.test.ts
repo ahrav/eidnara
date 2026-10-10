@@ -174,6 +174,20 @@ describe("managed start notice", () => {
         );
     });
 
+    it("prefers the native harness remediation over the AWS profile hint", () => {
+        const env = awsEnv("[profile midway]\ncredential_process = ada\n", "midway");
+        const notice = managedStartNotice(
+            "harness_unavailable",
+            "restart_with_supported_harness",
+            env,
+        );
+        expect(notice).toContain("Suggested fix: restart with supported harness.");
+        expect(notice).not.toContain("credential_process");
+        expect(managedStartNotice("harness_unavailable", null, env)).toContain(
+            'AWS profile "midway" supplies credentials through credential_process',
+        );
+    });
+
     it("explains an inadmissible AWS source selection", () => {
         const notice = managedStartNotice("harness_unavailable", null, {
             HOME: "/home/u",

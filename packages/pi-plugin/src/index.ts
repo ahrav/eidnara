@@ -101,8 +101,8 @@ const managedDemandStart = createLazyManagedDemandStart({
 });
 
 /** Shows the daemon start refusals queued since the last hook that had a UI. */
-export function showPendingStartNotices(ctx: Pick<ExtensionContext, "ui">): void {
-    if (pendingStartNotices.length === 0) return;
+export function showPendingStartNotices(ctx: Pick<ExtensionContext, "ui" | "hasUI">): void {
+    if (!ctx.hasUI || pendingStartNotices.length === 0) return;
     for (const notice of pendingStartNotices.splice(0)) ctx.ui.notify(notice, "warning");
 }
 
@@ -536,7 +536,6 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
     info("registered /eidnara-status");
     registerStatusLine(pi, { projectIdentity });
     pi.on("session_start", (_event, ctx) => showPendingStartNotices(ctx));
-    pi.on("agent_end", (_event, ctx) => showPendingStartNotices(ctx));
     info("registered eidnara status line");
 
     registerCtxFlushCommand(pi, daemonSessionDeps);
@@ -833,7 +832,12 @@ async function startPiEidnaraRuntime(pi: ExtensionAPI): Promise<boolean> {
         // A compaction offered during the previous run has committed or failed by now.
         const ended = sessionIdFromContext(ctx);
         if (ended) offered.delete(ended);
-        await checkpointAndDrainMemory(ctx);
+        try {
+            await checkpointAndDrainMemory(ctx);
+        } finally {
+            // The checkpoint is this turn's daemon demand, so a refusal it raised is queued by now.
+            showPendingStartNotices(ctx);
+        }
         // A run that ended in an error or an abort is Pi's to retry or recover; the eviction
         // waits for an `agent_end` that closes a completed run.
         const last = (event as { messages?: unknown[] }).messages?.at(-1);

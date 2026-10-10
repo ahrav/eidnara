@@ -140,7 +140,7 @@ export function managedStartNotice(
     const suggested = remediation ? `Suggested fix: ${remediation.replaceAll("_", " ")}.` : "";
     const hint =
         reason === "harness_unavailable"
-            ? harnessHint(env) || suggested
+            ? suggested || harnessHint(env)
             : reason === "unsupported_install_layout"
               ? "The daemon payload resolves from an npm install of the Eidnara package; install it with npm or `eidnara setup`."
               : suggested;
