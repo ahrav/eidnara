@@ -437,10 +437,15 @@ const ROW_SELECT: &str = "o.source_kind,o.object_id,o.source_revision,e.evidence
 /// invalidation fact and export no text. `?1` is `through` and `?2` is the
 /// window's start, S for a whole catch-up and `after` for one delta.
 /// `idx_objects_source_descriptor_page` has no commit column, so catch-up scans
-/// every descriptor row; its cost follows the corpus, not the window.
+/// every descriptor row; its cost follows the corpus, not the window. The
+/// leading conjunct, implied by each disjunct, tests the registry row's own
+/// commits, so a row outside the window is refused before its observation and
+/// evidence lookups.
 fn catch_up_body() -> String {
     format!(
-        "{rows} AND (({created}) OR ({live_at_s}
+        "{rows} AND ((o.created_commit_seq>?2 AND o.created_commit_seq<=?1)
+               OR (o.invalidated_commit_seq>?2 AND o.invalidated_commit_seq<=?1))
+             AND (({created}) OR ({live_at_s}
                AND o.invalidated_commit_seq>?2 AND o.invalidated_commit_seq<=?1))",
         rows = descriptor_rows_sql("idx_objects_source_descriptor_page"),
         created = Descriptors::CreatedInWindow.predicate("?1", "?2"),

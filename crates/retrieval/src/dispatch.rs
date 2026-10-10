@@ -701,9 +701,11 @@ pub fn job_ledger(
     job_id: &str,
 ) -> Result<Option<JobLedger>, ProjectionError> {
     Ok(conn
-        .query_row(
+        .prepare_cached(
             "SELECT state,attempts,episode_id,episode_allowance,episode_deadline,host_job_id,host_incarnation,last_failure_kind,stop_reason,authorization_ref
              FROM embedding_jobs WHERE job_id=?1",
+        )?
+        .query_row(
             [job_id],
             |row| {
                 Ok(JobLedger {

@@ -455,6 +455,18 @@ pub fn verify_active(
     bounds: CoverageBounds,
     now: i64,
 ) -> Result<CoverageReport, ProjectionError> {
+    verify_active_visiting(conn, expected, generation, bounds, now, |_| Ok(()))
+}
+
+/// [`verify_active`] that hands `visit` each occurrence it verified, inside the same read transaction, so a caller can compare the verified rows without reading them again.
+pub fn verify_active_visiting(
+    conn: &GuardedConn<'_>,
+    expected: &ProjectionIdentity,
+    generation: &VectorGeneration,
+    bounds: CoverageBounds,
+    now: i64,
+    mut visit: impl FnMut(crate::StoredOccurrence) -> Result<(), ProjectionError>,
+) -> Result<CoverageReport, ProjectionError> {
     read_identity(conn)?
         .ok_or(ProjectionError::IdentityMismatch)?
         .require_compatible(expected)?;
@@ -479,9 +491,7 @@ pub fn verify_active(
     {
         return Err(ProjectionError::CorruptRow);
     }
-    let mut statement = conn.prepare("SELECT occurrence_id FROM occurrences")?;
-    for id in statement.query_map([], |row| row.get::<_, String>(0))? {
-        let row = crate::read_occurrence(conn, &id?)?.ok_or(ProjectionError::CorruptRow)?;
+    crate::for_each_occurrence(conn, |row| {
         if row.created_commit_seq > report.checkpoint.checkpoint_commit_seq
             || row
                 .tombstone
@@ -489,7 +499,8 @@ pub fn verify_active(
         {
             return Err(ProjectionError::CorruptRow);
         }
-    }
+        visit(row)
+    })?;
     let mut vectors = conn.prepare(
         "SELECT v.vector_dimension,CASE WHEN length(v.vector)=4*v.vector_dimension THEN v.vector END
          FROM occurrence_vectors v JOIN vector_generations g USING(generation_id)
@@ -514,11 +525,11 @@ pub fn verify_active(
             return Err(ProjectionError::CorruptRow);
         }
         if let Some(reference) = ledger.authorization_ref.as_deref() {
-            let recorded: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM embedding_recovery_authorizations WHERE job_id=?1 AND authorization_ref=?2)",
-                params![id, reference],
-                |row| row.get(0),
-            )?;
+            let recorded: bool = conn
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM embedding_recovery_authorizations WHERE job_id=?1 AND authorization_ref=?2)",
+                )?
+                .query_row(params![id, reference], |row| row.get(0))?;
             if !recorded {
                 return Err(ProjectionError::CorruptRow);
             }
@@ -540,6 +551,20 @@ pub fn verify_active(
         return Err(ProjectionError::CorruptRow);
     }
     Ok(report)
+}
+
+/// Whether a pending or admitted job's open episode ended before `now`, the condition under which [`verify_active`] refuses a job whose columns it otherwise accepts. Over rows `verify_active` accepted, a deadline is present exactly when an episode is open.
+///
+/// # Errors
+///
+/// Returns the SQLite error when the probe fails.
+pub fn open_episode_expired(conn: &GuardedConn<'_>, now: i64) -> Result<bool, ProjectionError> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM embedding_jobs
+             WHERE state IN ('pending','admitted') AND episode_deadline<?1)",
+        )?
+        .query_row([now], |row| row.get(0))?)
 }
 
 fn invalid_episode_state(
