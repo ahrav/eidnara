@@ -846,6 +846,206 @@ async fn a_profile_only_host_admits_only_the_current_bearers_source_claim() {
     host.shutdown().await.expect("host shutdown");
 }
 
+/// One profile source claim keeps admitting runs on routes opened before the attached owner rotates its row, for both harnesses. Each admitted run acquires its row from that one owner, so pi and opencode runs in the same round share one row and each rotation hands both the next row. A claim under another key stays refused after the rotations.
+#[tokio::test]
+async fn one_source_claim_and_its_routes_survive_row_rotations_on_one_owner() {
+    use host_runtime::model_execution::aws_profile::{GraphIdentity, RootIdentity};
+    use host_runtime::model_execution::aws_refresh::{
+        OwnerClock, Refresh, RefreshFuture, RefreshRequest, SourceOwner, SystemClock,
+    };
+    use host_runtime::model_execution::aws_transaction::{
+        CredentialRow, RenewalEvidence, TransactionOutcome,
+    };
+    use host_runtime::model_execution::backend::{BackendEvent, BackendTerminal, FinishReason};
+    use host_runtime::model_execution::source_health::{
+        SourceHealthCell, SourceKind, SourceObservation,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const LIFETIME: u64 = 3_600;
+    /// The wall clock plus an offset the test advances past each row's lifetime.
+    #[derive(Clone)]
+    struct Shifted(Arc<AtomicU64>);
+    impl OwnerClock for Shifted {
+        fn wall(&self) -> Option<Duration> {
+            SystemClock
+                .wall()
+                .map(|wall| wall + Duration::from_secs(self.0.load(Ordering::SeqCst)))
+        }
+        fn jitter(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+    /// Each refresh mints the next row, valid for `LIFETIME` seconds from the shifted wall.
+    struct Rows {
+        calls: Arc<AtomicU64>,
+        clock: Shifted,
+    }
+    impl Refresh for Rows {
+        fn refresh(&self, _: RefreshRequest, _: CancellationToken) -> RefreshFuture {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let now = self.clock.wall().expect("wall").as_secs();
+            Box::pin(async move {
+                TransactionOutcome {
+                    identity: Some(identity()),
+                    row: Some(CredentialRow {
+                        access_key_id: format!("ASIAROTATED{call}"),
+                        secret_access_key: zeroize::Zeroizing::new(format!("secret-{call}")),
+                        session_token: zeroize::Zeroizing::new(format!("session-{call}")),
+                        expires_at_unix_seconds: now + LIFETIME,
+                    }),
+                    successor: None,
+                    observation: None,
+                    renewal: RenewalEvidence::NotStarted,
+                    lost_succession: false,
+                    record_retained: false,
+                    failure: None,
+                }
+            })
+        }
+    }
+    fn identity() -> GraphIdentity {
+        GraphIdentity {
+            profile: "corp".into(),
+            region: "us-east-1".into(),
+            roles: Vec::new(),
+            root: RootIdentity::Static {
+                profile: "base".into(),
+                access_key_id: "AKIA".into(),
+                secret_sha256: [0; 32],
+            },
+        }
+    }
+
+    let env = EnvSnapshot::capture_from(Vec::new()).expect("empty snapshot");
+    let source: AwsProfileSource = serde_json::from_value(serde_json::json!({
+        "kind": "profile", "profile": "corp", "region": "us-east-1",
+        "config_file": "/home/u/.aws/config", "credentials_file": "/home/u/.aws/credentials",
+        "sso_cache_root": "/home/u/.aws/sso/cache",
+    }))
+    .expect("selector");
+    let calls = Arc::new(AtomicU64::new(0));
+    let clock = Shifted(Arc::new(AtomicU64::new(0)));
+    let owner = SourceOwner::new(
+        Rows {
+            calls: Arc::clone(&calls),
+            clock: clock.clone(),
+        },
+        clock.clone(),
+        identity(),
+        SourceHealthCell::new(SourceObservation::unknown(SourceKind::Profile)),
+    );
+    let served = Arc::new(std::sync::Mutex::new(Vec::<(Harness, String)>::new()));
+    let backend = ScriptedBackend::with_behavior({
+        let owner = owner.clone();
+        let served = Arc::clone(&served);
+        move |request, events, _cancel| {
+            let owner = owner.clone();
+            let served = Arc::clone(&served);
+            Box::pin(async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                let lease = owner
+                    .acquire(deadline, &CancellationToken::new())
+                    .await
+                    .expect("the owner serves a row");
+                served
+                    .lock()
+                    .unwrap()
+                    .push((request.harness, lease.row.access_key_id.clone()));
+                events.emit(BackendEvent::AssistantText {
+                    text: "out".to_owned(),
+                    finish_reason: None,
+                });
+                BackendTerminal::Completed {
+                    finish_reason: FinishReason::Completed,
+                }
+            })
+        }
+    });
+    let component = ModelExecutionComponent::new_with_credentials(
+        Arc::clone(&backend) as Arc<_>,
+        env.clone(),
+        Some(source.clone()),
+        support::model_execution::state_root(),
+    )
+    .with_source_owner(Some(owner));
+    let host = start_model_execution_host(component).await;
+    let mut client = host.client().await;
+    let key: [u8; 32] = host.info.key.clone().try_into().expect("32-byte key");
+    let send = send_params("prompt", None, "amazon-bedrock/model");
+    // Every route is opened before the first rotation; each round runs on its own pair, since a session runs one send.
+    let mut routes = Vec::new();
+    for (round, harness) in (0..3).flat_map(|round| [(round, "pi"), (round, "opencode")]) {
+        let claim = env
+            .source_claim(&key, harness, "amazon-bedrock", Some(&source))
+            .expect("profile claim");
+        routes.push(
+            client
+                .route_open_target_with_fingerprints(
+                    "management_surface",
+                    "model_execution",
+                    support::model_execution::ROOT,
+                    harness,
+                    &format!("rotating-{harness}-{round}"),
+                    serde_json::Map::from_iter([(
+                        "amazon-bedrock".to_owned(),
+                        serde_json::Value::String(claim),
+                    )]),
+                )
+                .await
+                .expect("claim-bound route"),
+        );
+    }
+    let mut expected = Vec::new();
+    for (round, pair) in routes.chunks(2).enumerate() {
+        for (harness, (ch, ep)) in [Harness::Pi, Harness::OpenCode].into_iter().zip(pair) {
+            let outcome = call(&mut client, *ch, *ep, "session.send", send.clone()).await;
+            assert_eq!(
+                outcome.ty,
+                support::raw_client::TY_RESPONSE,
+                "round {round}: the route opened before {round} rotations admits the run"
+            );
+            expected.push((harness, format!("ASIAROTATED{round}")));
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while served.lock().unwrap().len() < expected.len()
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        clock.0.fetch_add(LIFETIME + 60, Ordering::SeqCst);
+    }
+    assert_eq!(
+        *served.lock().unwrap(),
+        expected,
+        "both harnesses share each row, and each rotation hands both the next"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    let foreign = env
+        .source_claim(&[9u8; 32], "pi", "amazon-bedrock", Some(&source))
+        .expect("claim under another key");
+    let (ch, ep) = client
+        .route_open_target_with_fingerprints(
+            "management_surface",
+            "model_execution",
+            support::model_execution::ROOT,
+            "pi",
+            "foreign",
+            serde_json::Map::from_iter([(
+                "amazon-bedrock".to_owned(),
+                serde_json::Value::String(foreign),
+            )]),
+        )
+        .await
+        .expect("foreign-claim route");
+    let refused = call(&mut client, ch, ep, "session.send", send).await;
+    assert_eq!(refused.error_code(), "harness_unavailable");
+    assert_eq!(backend.starts(), 6, "the refused claim starts nothing");
+    drop(client);
+    host.shutdown().await.expect("host shutdown");
+}
+
 #[tokio::test]
 async fn five_operation_round_trip_matches_the_consumed_wire_shapes() {
     let backend = ScriptedBackend::completing("history_summarizer output");
