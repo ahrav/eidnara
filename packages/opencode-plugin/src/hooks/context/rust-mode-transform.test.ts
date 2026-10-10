@@ -3567,6 +3567,61 @@ describe("fail-open after an applied pass", () => {
     });
 });
 
+describe("fail-open after an applied pass that kept its terminal raw", () => {
+    const folded = (sessionId: string): MessageLike => ({
+        info: { id: "fold-1", role: "user", sessionID: sessionId },
+        parts: [{ type: "text", text: "folded history" }],
+    });
+
+    function toolMessage(sessionId: string, id: string, completed: boolean): MessageLike {
+        return {
+            info: { id, role: "assistant", sessionID: sessionId },
+            parts: [
+                {
+                    type: "tool",
+                    callID: `call-${id}`,
+                    tool: "read",
+                    state: completed
+                        ? { status: "completed", input: { path: "a" }, output: "contents" }
+                        : { status: "running", input: { path: "a" } },
+                },
+            ],
+        };
+    }
+
+    it("serves the applied prefix with the current copy of a terminal that grew in place", async () => {
+        const sessionId = `rust-fail-open-terminal-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        const { client } = recordingClient((request, index) => {
+            if (index > 0) throw new Error("request deadline expired after a possible send");
+            const count = (request.native_messages as unknown[]).length;
+            return {
+                boundary: null,
+                base_revision: request.base_revision,
+                output_revision: "out-terminal",
+                operations: [
+                    { op: "insert", values: [folded(sessionId)] },
+                    { op: "keep", source: "input", start: count - 1, count: 1 },
+                ],
+            };
+        });
+        const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+        const [user] = rowMessages(sessionId, rows.slice(0, 1));
+        await transform.run(sessionId, {
+            messages: [user, toolMessage(sessionId, "m-2", false)],
+        });
+
+        const grown = toolMessage(sessionId, "m-2", true);
+        const [next] = rowMessages(sessionId, [rows[2] as RawRow]);
+        const output = { messages: [user, grown, next] as unknown[] };
+        await transform.run(sessionId, output);
+        expect(output.messages).toEqual([folded(sessionId), grown, next]);
+        expect(output.messages[1]).toBe(grown);
+        expect(transform.getState(sessionId).failureCount).toBe(1);
+    });
+});
+
 describe("capture verified against the retained prefix", () => {
     const folded = (sessionId: string): MessageLike => ({
         info: { id: "fold-1", role: "user", sessionID: sessionId },

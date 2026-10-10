@@ -1066,18 +1066,33 @@ export function createTransformSessionClient(
             if (!failOpen || !applied || source.failOpen === false) return false;
             try {
                 failOpen.recheck("fail-open");
-                if (
-                    retainedOutputs.peek(sessionId) !== failOpen.previous ||
-                    !isAppendOnlyExtension(failOpen.previous, failOpen.captured)
-                )
-                    return false;
+                if (retainedOutputs.peek(sessionId) !== failOpen.previous) return false;
+                const { members } = failOpen.captured;
+                const rawCount = failOpen.previous.rawCount;
+                // OpenCode grows the newest assistant message in place across a tool loop. When the
+                // applied output kept that terminal raw as its last value and every earlier member
+                // verified, the fallback serves the terminal's current copy in its place.
+                let prefix = applied.values.length;
+                let from = rawCount;
+                if (!isAppendOnlyExtension(failOpen.previous, failOpen.captured)) {
+                    const terminal = rawCount > 0 ? members[rawCount - 1] : undefined;
+                    const last = applied.values.at(-1);
+                    const terminalId = terminal === undefined ? undefined : source.idOf(terminal);
+                    if (
+                        terminalId === undefined ||
+                        last === undefined ||
+                        source.idOf(last) !== terminalId ||
+                        (failOpen.captured.verified?.count ?? 0) < rawCount - 1
+                    )
+                        return false;
+                    prefix -= 1;
+                    from -= 1;
+                }
                 if (!capturedMessagesUnchanged(applied.values, applied.capture)) {
                     retainedOutputs.dropApplied(sessionId, failOpen.previous);
                     return false;
                 }
-                const { members } = failOpen.captured;
-                const rawCount = failOpen.previous.rawCount;
-                const served = [...applied.values, ...members.slice(rawCount)];
+                const served = [...applied.values.slice(0, prefix), ...members.slice(from)];
                 const gated = failOpen.contextLimit !== undefined;
                 if (
                     source.publicationRejection(served.length) !== null ||
@@ -1095,7 +1110,7 @@ export function createTransformSessionClient(
                         failOpen.captured.verified?.count ?? 0,
                     );
                     const invocation = validateInvocation(
-                        [...applied.lengths, ...incoming.slice(rawCount)],
+                        [...applied.lengths.slice(0, prefix), ...incoming.slice(from)],
                         incoming,
                         {
                             maxTokens: failOpen.contextLimit,
