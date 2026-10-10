@@ -26,16 +26,24 @@ on:
           tier of one arm for pi-pass, whose measured arm needs about 9000
         type: string
         default: "1200"
+      warm_acquisition:
+        description: >-
+          Run the release-only warm credential acquisition p99 witness on the
+          reference host and upload its log
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
 # `main` preserves in-progress runs; newer pending runs replace older pending
-# runs. Scale-driver dispatches run independently of other runs on their ref.
+# runs. Scale-driver and warm-acquisition dispatches run independently of
+# other runs on their ref.
 concurrency:
   group: >-
-    ${{ github.event_name == 'workflow_dispatch' && inputs.scale_driver != ''
+    ${{ github.event_name == 'workflow_dispatch'
+    && (inputs.scale_driver != '' || inputs.warm_acquisition)
     && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -1130,6 +1138,48 @@ jobs:
         with:
           name: scale-report-${{ inputs.scale_driver }}
           path: ${{ runner.temp }}/scale
+          if-no-files-found: warn
+
+  # The warm credential acquisition p99 bound (#870) runs in release on the
+  # reference host only when dispatched. The log records the runner's CPUs,
+  # memory, and disks beside the witness output.
+  warm-acquisition:
+    name: warm acquisition p99 (dispatched)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'workflow_dispatch' && inputs.warm_acquisition
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Warm acquisition p99
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/warm-acquisition"
+          log="$RUNNER_TEMP/warm-acquisition/warm-acquisition.log"
+          {
+            echo "commit $(git rev-parse HEAD)"
+            echo "nproc $(nproc)"
+            free -b
+            lsblk -d -o NAME,ROTA,SIZE
+            uname -r
+          } | tee "$log"
+          cargo +1.98 test --release --locked -p host-runtime \
+            --test model_execution_supervisor \
+            warm_acquisition_p99_stays_within_one_millisecond \
+            -- --ignored --exact --nocapture 2>&1 | tee -a "$log"
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: warm-acquisition
+          path: ${{ runner.temp }}/warm-acquisition
           if-no-files-found: warn
 
   unlocked-deps:
