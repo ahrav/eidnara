@@ -1654,27 +1654,34 @@ fn validate_slack(value: &[u8]) -> OfflineVerdict {
         segments
             .next()
             .is_some_and(|segment| segment.first().is_some_and(u8::is_ascii_digit))
+    } else if config_access || prefix == b"xoxb" {
+        after_digit_segments(body, 1).is_some()
+    } else if matches!(prefix, b"xoxp" | b"xoxo" | b"xoxs") {
+        after_digit_segments(body, 3).is_some()
+    } else if prefix.eq_ignore_ascii_case(b"xoxe") {
+        // The two-segment refresh shape holds exactly one `-` in its body.
+        after_digit_segments(body, 1).is_some_and(|rest| {
+            after_digit_segments(rest, 2).is_some() || memchr::memchr(b'-', rest).is_none()
+        })
     } else {
-        let segment_count = segments.clone().count();
-        let fixed = if config_access || prefix == b"xoxb" {
-            1
-        } else if matches!(prefix, b"xoxp" | b"xoxo" | b"xoxs") {
-            3
-        } else if prefix.eq_ignore_ascii_case(b"xoxe") {
-            if segment_count == 2 { 1 } else { 3 }
-        } else {
-            return OfflineVerdict::Indeterminate;
-        };
-        segment_count > fixed
-            && segments
-                .take(fixed)
-                .all(|segment| !segment.is_empty() && segment.iter().all(u8::is_ascii_digit))
+        return OfflineVerdict::Indeterminate;
     };
     if shaped {
         OfflineVerdict::Valid
     } else {
         OfflineVerdict::Invalid
     }
+}
+
+fn after_digit_segments(mut body: &[u8], count: usize) -> Option<&[u8]> {
+    for _ in 0..count {
+        let digits = body.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        if digits == 0 || body.get(digits) != Some(&b'-') {
+            return None;
+        }
+        body = &body[digits + 1..];
+    }
+    Some(body)
 }
 
 fn base64_prefix(input: &[u8], prefix: &[u8]) -> bool {
@@ -2510,6 +2517,90 @@ mod tests {
                 },
             );
             assert!(matches!(outcome, Err(Abort::Work)), "{key}: {outcome:?}");
+        }
+    }
+
+    const SLACK_DIGIT_PREFIXES: [&str; 8] = [
+        "xoxb-",
+        "xoxp-",
+        "xoxo-",
+        "xoxs-",
+        "xoxe-",
+        "XOXE-",
+        "xoxe.xoxb-",
+        "XOXE.XOXP-",
+    ];
+
+    const SLACK_BODY_PIECES: [&str; 10] =
+        ["0", "1", "12", "9876543210", "-", "-", "a", "Z", "x", "AbC"];
+
+    /// `validate_slack` must agree with this split-and-count reading for the prefixes whose shape fixes leading all-digit segments.
+    fn slack_digit_shape_oracle(prefix: &str, body: &[u8]) -> Option<bool> {
+        if prefix.len() + body.len() < 10 {
+            return None;
+        }
+        let segments: Vec<&[u8]> = body.split(|byte| *byte == b'-').collect();
+        let fixed = match prefix {
+            "xoxb-" | "xoxe.xoxb-" | "XOXE.XOXP-" => 1,
+            "xoxe-" | "XOXE-" if segments.len() == 2 => 1,
+            _ => 3,
+        };
+        Some(
+            segments.len() > fixed
+                && segments[..fixed]
+                    .iter()
+                    .all(|segment| !segment.is_empty() && segment.iter().all(u8::is_ascii_digit)),
+        )
+    }
+
+    fn assert_slack_digit_shape_matches_oracle(prefix: &str, body: &str) {
+        let value = format!("{prefix}{body}");
+        let observed = match validate_slack(value.as_bytes()) {
+            OfflineVerdict::Valid => Some(true),
+            OfflineVerdict::Invalid => Some(false),
+            OfflineVerdict::Indeterminate => None,
+        };
+        assert_eq!(
+            observed,
+            slack_digit_shape_oracle(prefix, body.as_bytes()),
+            "{value}"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2_000))]
+        #[test]
+        fn slack_digit_shapes_match_the_segment_count_reading(
+            prefix in 0..SLACK_DIGIT_PREFIXES.len(),
+            pieces in proptest::collection::vec(0..SLACK_BODY_PIECES.len(), 0..16)
+        ) {
+            let body: String = pieces.iter().map(|&piece| SLACK_BODY_PIECES[piece]).collect();
+            assert_slack_digit_shape_matches_oracle(SLACK_DIGIT_PREFIXES[prefix], &body);
+        }
+    }
+
+    #[test]
+    fn slack_digit_shapes_match_the_segment_count_reading_on_rule_shapes() {
+        let refresh: String = "ABCDEF0123456789".repeat(10).chars().take(146).collect();
+        for prefix in SLACK_DIGIT_PREFIXES {
+            for body in [
+                "1234567890-1234567890-1234567890-AbCdEfGhIjKlMn-OpQrStUvWxYz1234",
+                "1234567890-1234567890-Ab-Cd-efgh",
+                "1234567890-1234567890-1234567890-",
+                "1-22-333-abcdef123456",
+                "1-22-333",
+                "1-22-333-",
+                "1-",
+                "1",
+                "-1-2-3-4",
+                "1--2-3-4",
+                "12a-34-56-tail",
+                &format!("1-{refresh}"),
+                &format!("1-{refresh}-tail"),
+                "",
+            ] {
+                assert_slack_digit_shape_matches_oracle(prefix, body);
+            }
         }
     }
 }
