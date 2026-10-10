@@ -309,6 +309,66 @@ enum StoredIntent {
     Current(CurrentIntent),
 }
 
+impl StoredIntent {
+    fn decode(bytes: &[u8]) -> serde_json::Result<Self> {
+        match serde_json::from_slice::<StoredKeys>(bytes) {
+            Ok(StoredKeys { current: true, .. }) => {
+                serde_json::from_slice(bytes).map(Self::Current)
+            }
+            Ok(StoredKeys {
+                deregistered: true, ..
+            }) => serde_json::from_slice(bytes).map(Self::Disabled),
+            Ok(_) => serde_json::from_slice(bytes).map(Self::Active),
+            Err(_) => serde_json::from_slice(bytes),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StoredKeys {
+    current: bool,
+    deregistered: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(field_identifier, rename_all = "snake_case")]
+enum StoredKey {
+    Current,
+    Deregistered,
+    #[serde(other)]
+    Other,
+}
+
+impl<'de> Deserialize<'de> for StoredKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Keys;
+        impl<'de> serde::de::Visitor<'de> for Keys {
+            type Value = StoredKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a control record object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<StoredKeys, A::Error> {
+                let mut keys = StoredKeys::default();
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        StoredKey::Current => keys.current = true,
+                        StoredKey::Deregistered => keys.deregistered = true,
+                        StoredKey::Other => {}
+                    }
+                    map.next_value::<serde::de::IgnoredAny>()?;
+                }
+                Ok(keys)
+            }
+        }
+        deserializer.deserialize_map(Keys)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CurrentIntent {
@@ -516,7 +576,7 @@ impl ProjectionLifecycle {
             RecordRead::Refused(reason) => return Ok(ControlState::Unavailable(reason.to_owned())),
             RecordRead::Bytes(bytes) => bytes,
         };
-        Ok(match serde_json::from_slice::<StoredIntent>(&bytes) {
+        Ok(match StoredIntent::decode(&bytes) {
             Ok(StoredIntent::Current(record)) => {
                 let intent = record.current;
                 if record.schema != CURRENT_SCHEMA
@@ -1385,5 +1445,145 @@ fn store_refusal(error: StoreError) -> IntentRefusal {
             IntentRefusal::DurabilityUnknown(error.kind().to_string())
         }
         other => IntentRefusal::Io(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{
+        ACTIVE_SCHEMA, CURRENT_SCHEMA, Cause, ConsumerBinding, CurrentIntent, DISABLED_SCHEMA,
+        DisabledIntent, EpisodeAccounting, LifecycleIntent, RecoveryTarget, StoredIntent,
+        Transition,
+    };
+
+    fn active() -> LifecycleIntent {
+        LifecycleIntent {
+            schema: ACTIVE_SCHEMA,
+            transition: Transition::Rebuilding,
+            selected_generation: "generation".to_owned(),
+            kernel_incarnation_id: "kernel".to_owned(),
+            consumer: ConsumerBinding {
+                consumer_id: "consumer".to_owned(),
+                generation_id: "generation".to_owned(),
+            },
+            cause: Cause::Registration,
+            attempt_id: "attempt".to_owned(),
+            recovery_target: Some(RecoveryTarget { commit_seq: 3 }),
+            episodes: EpisodeAccounting {
+                allowance: 2,
+                consumed: 1,
+                deadline: 9,
+            },
+            authorization_ref: None,
+            staged_seed_digest: None,
+            replacement_capture: None,
+            recorded_at: 1,
+            prior_disabled: None,
+        }
+    }
+
+    /// The variant and content a decode yields; every decode error reads the same, as `probe_at` reports each as one malformed record.
+    fn decoded(result: serde_json::Result<StoredIntent>) -> Option<(&'static str, Value)> {
+        Some(match result.ok()? {
+            StoredIntent::Active(intent) => ("active", serde_json::to_value(intent).unwrap()),
+            StoredIntent::Disabled(intent) => ("disabled", serde_json::to_value(intent).unwrap()),
+            StoredIntent::Current(intent) => ("current", serde_json::to_value(intent).unwrap()),
+        })
+    }
+
+    /// Each stored record, each with a key removed, retyped, or added, records naming another variant's distinguishing key, and inputs that are not one JSON object.
+    fn corpus() -> Vec<Vec<u8>> {
+        let disabled = DisabledIntent {
+            schema: DISABLED_SCHEMA,
+            handoff: Some(Box::new(active())),
+            recorded_at: 2,
+            episodes: None,
+            through: Some(4),
+            deregistered: true,
+        };
+        let current = CurrentIntent {
+            schema: CURRENT_SCHEMA,
+            current: active(),
+        };
+        let bases = [
+            serde_json::to_value(active()).unwrap(),
+            serde_json::to_value(disabled).unwrap(),
+            serde_json::to_value(current).unwrap(),
+        ];
+        let mut values = Vec::new();
+        for base in &bases {
+            values.push(base.clone());
+            let fields = base.as_object().unwrap();
+            values.push(Value::Array(fields.values().cloned().collect()));
+            for key in fields.keys() {
+                let mut removed = base.clone();
+                removed.as_object_mut().unwrap().remove(key);
+                values.push(removed);
+                for replacement in [json!(null), json!("x"), json!(4.0), json!(-1), json!([])] {
+                    let mut retyped = base.clone();
+                    retyped[key] = replacement;
+                    values.push(retyped);
+                }
+            }
+            for (key, value) in [
+                ("current", serde_json::to_value(active()).unwrap()),
+                ("deregistered", json!(false)),
+                ("unknown", json!(1)),
+            ] {
+                let mut added = base.clone();
+                added[key] = value;
+                values.push(added);
+            }
+        }
+        let mut corpus: Vec<Vec<u8>> = values
+            .iter()
+            .flat_map(|value| {
+                [
+                    serde_json::to_vec(value).unwrap(),
+                    serde_json::to_vec_pretty(value).unwrap(),
+                ]
+            })
+            .collect();
+        let current = serde_json::to_string(&bases[2]).unwrap();
+        let disabled = serde_json::to_string(&bases[1]).unwrap();
+        corpus.extend(
+            [
+                current.replacen("\"current\"", "\"curr\\u0065nt\"", 1),
+                disabled.replacen("\"deregistered\"", "\"d\\u0065registered\"", 1),
+                current.replacen('{', "{\"schema\":4,", 1),
+                disabled.replacen('{', "{\"deregistered\":true,", 1),
+                format!("{current} "),
+                format!("{current}{{}}"),
+                format!("[{current}]"),
+                current[..current.len() - 1].to_owned(),
+                "{}".to_owned(),
+                "null".to_owned(),
+                "4".to_owned(),
+                String::new(),
+            ]
+            .map(String::into_bytes),
+        );
+        corpus
+    }
+
+    #[test]
+    fn decode_selects_the_variant_the_untagged_enum_selects() {
+        let mut variants = std::collections::BTreeSet::new();
+        for bytes in corpus() {
+            let expected = decoded(serde_json::from_slice::<StoredIntent>(&bytes));
+            assert_eq!(
+                decoded(StoredIntent::decode(&bytes)),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            variants.extend(expected.map(|(variant, _)| variant));
+        }
+        assert_eq!(
+            variants.into_iter().collect::<Vec<_>>(),
+            ["active", "current", "disabled"]
+        );
     }
 }

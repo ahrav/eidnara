@@ -4,6 +4,11 @@
 
 #![cfg(feature = "test-support")]
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
+
+use kernel::applicability::EvalBudget;
 use kernel::{CommitIntent, DomainSpec, KernelError, KernelStore, Sensitivity};
 use rusqlite::{Connection, OpenFlags};
 
@@ -507,6 +512,69 @@ fn a_consumer_id_that_redaction_rewrites_is_rejected() {
             })
             .unwrap_err(),
         KernelError::InvalidInput
+    );
+}
+
+#[test]
+fn one_snapshot_reports_the_tip_identity_and_checkpoint_that_separate_reads_report() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = KernelStore::open(directory.path()).unwrap();
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    commit_domain(&store, 1);
+    store
+        .commit(intent("register"), |envelope| {
+            envelope.register_outbox_consumer("search", 10)?;
+            Ok("registered".to_string())
+        })
+        .unwrap();
+    let inspected = inspect(directory.path());
+    let marker: String = inspected
+        .query_row(
+            "SELECT database_incarnation_id FROM kernel_format_marker",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let snapshot = |consumer: &str| {
+        let snapshot = store
+            .capture_consumer_tip_within_budget(&budget, consumer)
+            .unwrap();
+        assert_eq!(snapshot.target, store.capture_commit_read_target().unwrap());
+        assert_eq!(snapshot.database_incarnation_id, marker);
+        assert_eq!(
+            snapshot.consumer_checkpoint,
+            store.outbox_consumer_checkpoint(consumer).unwrap()
+        );
+        snapshot
+    };
+    let registered = snapshot("search");
+    assert!(registered.consumer_checkpoint.is_some());
+    assert_eq!(snapshot("absent").consumer_checkpoint, None);
+
+    let tip = commit_domain(&store, 2);
+    assert!(snapshot("search").consumer_checkpoint < Some(tip));
+    store.acknowledge_outbox("search", tip, 11).unwrap();
+    let acknowledged = snapshot("search");
+    assert_eq!(acknowledged.target.through_commit, tip);
+    assert_eq!(acknowledged.consumer_checkpoint, Some(tip));
+
+    for consumer in ["", "  ", &format!("search-{SECRET}")] {
+        assert_eq!(
+            store
+                .capture_consumer_tip_within_budget(&budget, consumer)
+                .unwrap_err(),
+            KernelError::InvalidInput
+        );
+    }
+    let spent = EvalBudget::new(Some(Instant::now()), Arc::new(AtomicBool::new(false)));
+    assert_eq!(
+        store
+            .capture_consumer_tip_within_budget(&spent, "search")
+            .unwrap_err(),
+        KernelError::Deadline
     );
 }
 
