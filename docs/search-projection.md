@@ -59,6 +59,13 @@ replacement is selected, and retirement releases the old consumer.
 Kernel source holds belong to one lease, so a daemon restart followed by any
 commit rebuilds the projection under a fresh capture.
 
+Retirement acknowledges the old consumer through the replacement's certified
+target and then deregisters it, and the kernel deregisters only a consumer at
+its tip. A commit that lands between the certified target and the
+deregistration leaves the rebuild in its intent record, and the slice reports
+`outbox consumer has not reached the commit-log tip` while the old family keeps
+serving. A rebuild therefore completes in a quiet window after its target.
+
 ## Readers and exact-lookup certificates
 
 `SearchLifecycleOwner::pin` returns a `SearchReader` for the selected family
@@ -68,7 +75,9 @@ revalidate canonical authorization at use.
 `SearchReader::completeness_certificate` issues the `CompletenessCertificate`
 that `retrieval::exact::resolve` requires for an exact proof. It issues one only
 when the family's checkpoint equals the kernel tip and the family's consumer has
-acknowledged that checkpoint. The certificate names
+acknowledged that checkpoint. One kernel statement
+(`KernelStore::capture_consumer_tip_within_budget`) reads the tip, the kernel
+database identity, and the acknowledgement from one snapshot. The certificate names
 `SearchReader::inventory_epoch`, a digest of the kernel incarnation, the kernel
 lease epoch, the selected seed digest, and the consumer. A proof minted before a
 restart, a replacement, or a later commit fails `validate_for_use` against the
