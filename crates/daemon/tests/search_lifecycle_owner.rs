@@ -1275,6 +1275,42 @@ fn status_reports_no_family_until_a_family_is_selected() {
     assert_eq!(owner.admission_state(), Err("no_family"));
 }
 
+#[test]
+fn a_selected_family_that_refuses_its_pin_is_named_apart_from_no_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let staged = match control(home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.pin(&slice_budget()).unwrap();
+
+    std::fs::remove_file(
+        home.join("search-families")
+            .join(&staged)
+            .join("bootstrap.json"),
+    )
+    .unwrap();
+    assert_eq!(owner.admission_state(), Ok(()));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the certificate is gone");
+    assert_eq!(owner.pin_refusal(&refused), "family_refused");
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {

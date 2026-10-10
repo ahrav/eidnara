@@ -95,8 +95,9 @@ family's reads, or `{"state": "refused", "reason": <code>}` with the
 other users), or `records_malformed` in place of `no_manifest`; a slice whose
 preparation of valid records failed reports `lane_not_ready`,
 `limits_unbounded`, or `kernel_unreadable` the same way. A `retrieval.query` whose pin the gate refuses answers
-`lane_unavailable` with the same code as its `reason`, and `no_family` once
-the gate admits but no family is selected. Codes name the gate or condition,
+`lane_unavailable` with the same code as its `reason`, `no_family` once
+the gate admits but no family is selected, and `family_refused` when the gate
+admits a selected family whose own checks refused the pin. Codes name the gate or condition,
 never record content. OpenCode's `/eidnara-status` renders the block as
 `Search admission`.
 

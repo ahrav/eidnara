@@ -1324,7 +1324,7 @@ impl SearchLifecycleOwner {
         refusal_code(error)
             .map(|code| self.named_refusal(code))
             .or_else(|| self.admission_state().err())
-            .unwrap_or("no_family")
+            .unwrap_or("family_refused")
     }
 
     /// A recorded refusal code preserves the specific cause behind `no_manifest`.
