@@ -1161,7 +1161,8 @@ jobs:
   # The retained-history and outage qualification (#864, #872) runs only when
   # dispatched: each witness test runs first at the checked-out commit and is
   # recorded with its exit code, then the release campaign runs with those
-  # records. A witness whose filter selects no test is recorded as failed.
+  # records. A witness whose run reports no single passed test is recorded as
+  # failed.
   qualification:
     name: qualification campaign (dispatched)
     runs-on: ubuntu-latest
@@ -1199,7 +1200,8 @@ jobs:
             shift
             local code=0
             "$@" > "$out/$name.log" 2>&1 || code=$?
-            if [ "$code" -eq 0 ] && ! grep -q '^test result: ok. 1 passed' "$out/$name.log"; then
+            # libtest prints the first summary; a `harness = false` target prints the second.
+            if [ "$code" -eq 0 ] && ! grep -qE '^test result: ok. 1 passed|: 1 run, 0 failed$' "$out/$name.log"; then
               code=97
             fi
             echo "$name exit $code"
@@ -1219,9 +1221,13 @@ jobs:
           witness rotation_soak cargo +1.98 test --release --locked \
             -p host-runtime --test model_execution_subprocess \
             a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner
-          witness warm_acquisition cargo +1.98 test --release --locked \
-            -p host-runtime --test model_execution_supervisor \
-            warm_acquisition_p99_stays_within_one_millisecond -- --ignored --exact
+          # The runner refuses a witness its catalog does not name, so the
+          # warm-acquisition run is recorded only where `WITNESSES` lists it.
+          if grep -q '"warm_acquisition",' crates/eval-core/src/qualification.rs; then
+            witness warm_acquisition cargo +1.98 test --release --locked \
+              -p host-runtime --test model_execution_supervisor \
+              warm_acquisition_p99_stays_within_one_millisecond -- --ignored --exact
+          fi
           printf '}\n' >> "$out/witnesses.json"
           cat "$out/witnesses.json"
 
