@@ -91,8 +91,8 @@ export interface HostModuleTransportOptions {
 export interface LazyManagedDemandStartOptions {
     declaringModuleUrl: string;
     parentPackageName: string;
-    /** Receives the reason and remediation of every refused start. */
-    onRefusal?: (reason: string, remediation: string | null) => void;
+    /** Receives the reason, remediation, and shared attempt of every refused start. */
+    onRefusal?: (reason: string, remediation: string | null, attempt?: object) => void;
 }
 
 let configuredManagedDemandStart: ManagedDemandStart | undefined;
@@ -300,7 +300,11 @@ export function createLazyManagedDemandStart(
             startupEnvelope,
         });
         if (!outcome.result.ok) {
-            options.onRefusal?.(outcome.result.reason, outcome.result.remediation ?? null);
+            options.onRefusal?.(
+                outcome.result.reason,
+                outcome.result.remediation ?? null,
+                outcome.attempt,
+            );
         }
         return {
             ok: outcome.result.ok,

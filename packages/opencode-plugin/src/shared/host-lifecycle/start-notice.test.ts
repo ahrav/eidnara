@@ -231,6 +231,22 @@ describe("managed start notice", () => {
         expect(seen[1]).toContain("startup_timeout");
     });
 
+    it("counts a timeout result shared by coalesced demands as one attempt", () => {
+        const announcer = createStartRefusalAnnouncer(() => ({}));
+        const seen: string[] = [];
+        announcer.listen((notice) => seen.push(notice));
+        const shared = {};
+        announcer.refused("startup_timeout", "inspect_daemon_process", shared);
+        announcer.refused("startup_timeout", "inspect_daemon_process", shared);
+        announcer.refused("startup_timeout", "inspect_daemon_process", shared);
+        expect(seen).toEqual([]);
+        announcer.refused("startup_timeout", "inspect_daemon_process", {});
+        expect(seen).toEqual([]);
+        announcer.refused("startup_timeout", "inspect_daemon_process", {});
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toContain("did not start in 3 attempts (startup_timeout)");
+    });
+
     it("announces each persistent reason once and holds notices until a listener exists", () => {
         const announcer = createStartRefusalAnnouncer(() => ({}));
         announcer.refused("unsupported_install_layout", null);

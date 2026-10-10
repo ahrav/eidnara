@@ -347,6 +347,12 @@ export interface DemandStartOutcome {
     storage: StorageReadiness | null;
     /** Authenticated incarnation that passed compatibility; bind application traffic to it. */
     authenticatedDaemonId?: Uint8Array;
+    /**
+     * Identity of the shared native start or compatibility probe this outcome derives from.
+     * Coalesced demands return outcomes with one `attempt`, so a consumer counting failures
+     * counts the attempt, not its waiters.
+     */
+    attempt?: object;
 }
 
 /**
@@ -541,13 +547,14 @@ export class HostLifecyclePolicy {
                 return {
                     result: timeoutResult("start", rootResolution.root, false),
                     storage: null,
+                    attempt: shared,
                 };
             }
         } else {
             result = await this.raceDetached(shared, request.signal, callerDeadlineAt);
         }
         if (!result.ok) {
-            return { result, storage: null };
+            return { result, storage: null, attempt: shared };
         }
         if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
             throw new WaiterDetachedError("deadline");
@@ -557,17 +564,18 @@ export class HostLifecyclePolicy {
         // fences on the certified id, has nothing to fence on.
         const compatibilityProbe = this.compatibilityProbe;
         if (compatibilityProbe === undefined) {
-            return { result: unprovenCompatibility(result), storage: null };
+            return { result: unprovenCompatibility(result), storage: null, attempt: shared };
         }
         // The shared start consumes part of this demand's aggregate budget. The
         // shared probe keeps the full aggregate so a late joiner is not truncated.
         if (monotonicNow() >= aggregateDeadlineAt) {
-            return { result: unprovenCompatibility(result), storage: null };
+            return { result: unprovenCompatibility(result), storage: null, attempt: shared };
         }
+        const probe = this.sharedCompatibility(compatibilityProbe, rootKey, aggregateMs);
         let snapshot: CompatibilitySnapshot;
         try {
             snapshot = await this.raceWithinPolicy(
-                this.sharedCompatibility(compatibilityProbe, rootKey, aggregateMs),
+                probe,
                 request.signal,
                 callerDeadlineAt,
                 aggregateDeadlineAt,
@@ -578,11 +586,11 @@ export class HostLifecyclePolicy {
             // compatibility claim, so it becomes a typed closed result rather
             // than an unclassified rejection callers cannot act on.
             if (error instanceof WaiterDetachedError) throw error;
-            return { result: unprovenCompatibility(result), storage: null };
+            return { result: unprovenCompatibility(result), storage: null, attempt: probe };
         }
         const applied = this.applyCompatibility(result, snapshot);
         const compatibleResult = applied.result;
-        if (!applied.verdict.ok) return { result: compatibleResult, storage: null };
+        if (!applied.verdict.ok) return { result: compatibleResult, storage: null, attempt: probe };
         const authenticatedDaemonId = Uint8Array.from(snapshot.authenticatedPeer.daemonId);
         if (callerDeadlineAt !== undefined && monotonicNow() >= callerDeadlineAt) {
             throw new WaiterDetachedError("deadline");

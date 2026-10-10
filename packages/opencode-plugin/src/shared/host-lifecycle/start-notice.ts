@@ -157,13 +157,19 @@ export function createStartRefusalAnnouncer(
 ) {
     const announced = new Set<string>();
     const timeouts = new Map<string, number>();
+    const countedAttempts = new WeakSet<object>();
     const pending: string[] = [];
     let deliver: ((notice: string) => void) | undefined;
     return {
-        refused(reason: string, remediation: string | null): void {
+        /** Refusals that share an `attempt` came from one native start or probe and count once. */
+        refused(reason: string, remediation: string | null, attempt?: object): void {
             if (announced.has(reason)) return;
             let attempts = 1;
             if (RETRIED_TIMEOUT_REASONS.has(reason)) {
+                if (attempt) {
+                    if (countedAttempts.has(attempt)) return;
+                    countedAttempts.add(attempt);
+                }
                 attempts = (timeouts.get(reason) ?? 0) + 1;
                 timeouts.set(reason, attempts);
                 if (attempts < REPEATED_TIMEOUT_ANNOUNCE_COUNT) return;
