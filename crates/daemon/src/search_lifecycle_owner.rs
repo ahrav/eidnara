@@ -1304,15 +1304,26 @@ impl SearchLifecycleOwner {
                 .map(|_| ())
                 .map_err(|denial| denial.code()),
         };
-        // A gate closed over refused records reports `no_manifest`; the records' refusal names why.
-        verdict.map_err(|code| match code {
+        verdict.map_err(|code| self.named_refusal(code))
+    }
+
+    pub fn pin_refusal(&self, error: &BuildError) -> &'static str {
+        refusal_code(error)
+            .map(|code| self.named_refusal(code))
+            .or_else(|| self.admission_state().err())
+            .unwrap_or("no_family")
+    }
+
+    /// A recorded refusal code preserves the specific cause behind `no_manifest`.
+    fn named_refusal(&self, code: &'static str) -> &'static str {
+        match code {
             "no_manifest" => self
                 .records_refused
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .unwrap_or(code),
             code => code,
-        })
+        }
     }
 
     /// Pins the selected family for one reader. Freshness is judged on the coverage the last slice observed, so a reader can trail the kernel by the commits that arrived since that slice on top of `catchup_lag_commits`; the next slice observes the family again.
@@ -1458,7 +1469,7 @@ fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
 }
 
 /// The admission code a selection refusal carries when the gate refused it: the records, the evidence, the observation, or the limits the last slice installed.
-pub(crate) fn refusal_code(error: &BuildError) -> Option<&'static str> {
+fn refusal_code(error: &BuildError) -> Option<&'static str> {
     match error {
         BuildError::Denied(denial) | BuildError::Intent(IntentRefusal::Denied(denial)) => {
             Some(denial.code())

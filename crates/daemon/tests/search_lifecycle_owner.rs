@@ -1184,6 +1184,51 @@ async fn a_refused_manifest_closes_admission_before_maintenance_drains() {
     owner.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_pin_refused_while_maintenance_drains_names_the_records_refusal() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+
+    support::projection_gate::write_record(
+        home,
+        daemon::projection_admission::MANIFEST_RECORD,
+        b"{\"protocol_version\": malformed",
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(owner.admission_state(), Err("records_malformed"));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the gate is closed");
+    assert_eq!(owner.pin_refusal(&refused), "records_malformed");
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {
