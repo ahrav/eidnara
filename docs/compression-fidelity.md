@@ -91,14 +91,20 @@ corpus identity and holds:
   `sha256sum crates/daemon/testdata/compression-fidelity.json` at the
   reviewed commit;
 - the reviewed commit;
-- two distinct reviewers, each approving the native spans, the source
-  revisions, the materiality marks, the permissible omission and abstention
-  cases, and the C3 memory example;
+- two distinct reviewers, each approving the whole corpus at that digest:
+  every case's native spans, source revisions, obligation and allowed-loss
+  statements, materiality marks, forbidden conclusions, follow-up prompts,
+  accepted dispositions and abstention, and approved example, plus the C3
+  memory example;
 - the time of approval, which precedes inspection of any candidate output.
 
 A corpus edit moves both pins, so a record naming another digest covers
 nothing. Until a record names the current digest, the corpus stays
-unapproved and every arm built on it stays unaccepted.
+unapproved and every arm built on it stays unaccepted. This gate is
+procedural: `eval:compression-fidelity` derives `accepted` from the review
+batch's two approvers in `controls.json`, and the operator checks the
+tracker record against the report's `corpus_sha256` before accepting a
+result.
 
 The Rust corpus module owns source, span, and revision validation, and
 `compression_fidelity_tests.rs` holds its negative controls. It rejects
