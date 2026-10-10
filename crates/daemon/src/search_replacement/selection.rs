@@ -12,10 +12,12 @@ use host_runtime::generation::{
 };
 use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
-use retrieval::batch::VectorGeneration;
+use retrieval::batch::{VectorGeneration, read_checkpoint};
 use retrieval::coverage::{CoverageBounds, CoverageReport, observe, verify_active, verify_pages};
+use retrieval::exact::{CompletenessCertificate, EXTRACTION_VERSION};
 use retrieval::{ProjectionError, ProjectionIdentity};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use storage::GuardedConn;
 
 use super::{BuildError, VerifiedReplacement, wall_ms};
@@ -234,6 +236,27 @@ impl SearchSelection {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
         admit_transition_hook(gate, &family.certificate)
+    }
+
+    /// The identity the selected seed was built under, read from the selected family's durable bootstrap certificate. `None` when nothing is selected or the selector or certificate cannot be read.
+    pub fn selected_seed_identity(&self) -> Option<ProjectionIdentity> {
+        let CurrentProfile::Current(digest) = GenerationStore::open(Some(&self.data_home))
+            .ok()?
+            .read_search_current()
+            .ok()?
+        else {
+            return None;
+        };
+        let bytes = certificate_bytes(&self.family_home(&digest).ok()?).ok()?;
+        let certificate: Bootstrap = serde_json::from_slice(&bytes).ok()?;
+        Some(certificate.seed.identity())
+    }
+
+    pub fn selected_quarantined(&self) -> bool {
+        self.selected
+            .load()
+            .as_ref()
+            .is_some_and(|family| family.projection.quarantine().is_some())
     }
 
     pub fn pin(
@@ -1012,6 +1035,64 @@ impl SearchReader {
             .read_within(deadline(budget)?, read)?)
     }
 
+    /// The inventory epoch binds completeness certificates to the family's kernel incarnation, the kernel lease epoch, the seed digest, and the consumer ID.
+    pub fn inventory_epoch(&self, kernel: &KernelStore) -> String {
+        let seed = &self.family.certificate.seed;
+        let mut digest = Sha256::new();
+        for part in [
+            seed.kernel_incarnation_id.as_bytes(),
+            &kernel.lease_epoch().to_be_bytes(),
+            self.digest().as_bytes(),
+            self.consumer().consumer_id.as_bytes(),
+        ] {
+            digest.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(part);
+        }
+        format!("inventory-{:x}", digest.finalize())
+    }
+
+    /// Certifies that this reader's family covers the kernel's exact-lookup inventory: the family's checkpoint equals the kernel tip, and the family's consumer has acknowledged that checkpoint. The certificate names [`Self::inventory_epoch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `BuildError::Invalid` if the family's checkpoint is absent, differs from the kernel tip, or exceeds its consumer's acknowledgement, or if that acknowledgement is absent. Propagates errors from family validation, checkpoint reads, and kernel queries.
+    pub fn completeness_certificate(
+        &self,
+        kernel: &KernelStore,
+        budget: &EvalBudget,
+    ) -> Result<CompletenessCertificate, BuildError> {
+        self.family.check_kernel(kernel, budget)?;
+        let incarnation = self.family.certificate.seed.kernel_incarnation_id.clone();
+        let checkpoint = self
+            .read(budget, |conn| read_checkpoint(conn, &incarnation))?
+            .ok_or(BuildError::Invalid("the family has no applied prefix"))?;
+        let complete_through = checkpoint.checkpoint_commit_seq;
+        if kernel.tip_within_budget(budget)? != complete_through {
+            return Err(BuildError::Invalid("the family trails the kernel tip"));
+        }
+        if kernel
+            .outbox_consumer_checkpoint_within_budget(budget, &self.consumer().consumer_id)?
+            .is_none_or(|acknowledged| acknowledged < complete_through)
+        {
+            return Err(BuildError::Invalid(
+                "the family's consumer has not acknowledged its checkpoint",
+            ));
+        }
+        Ok(CompletenessCertificate {
+            canonical_incarnation_id: incarnation,
+            inventory_epoch: self.inventory_epoch(kernel),
+            identity_contract_version: self
+                .family
+                .certificate
+                .seed
+                .identity()
+                .identity_contract_version,
+            extraction_version: EXTRACTION_VERSION,
+            complete_through_commit_seq: complete_through,
+            projection: checkpoint,
+        })
+    }
+
     pub fn coverage(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         self.read(budget, |conn| {
             observe(
@@ -1085,6 +1166,19 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
     }
 }
 
+/// `damages_family` identifies errors that report integrity damage to a family's own database or rows: a store integrity failure, a lost connection, or a stored row that contradicts itself.
+pub(crate) fn damages_family(error: &BuildError) -> bool {
+    match error {
+        BuildError::Projection(SearchProjectionError::Store(store)) => {
+            matches!(classify_store_failure(store), StoreFailure::Integrity)
+        }
+        BuildError::Projection(SearchProjectionError::Connection(_)) => true,
+        BuildError::Projection(SearchProjectionError::Projection(error))
+        | BuildError::Mutation(error) => matches!(classify(error), Refusal::Integrity),
+        _ => false,
+    }
+}
+
 /// Authorized recovery also needs the hook its transition names, as construction did.
 fn admit_transition_hook(gate: &HookGate, certificate: &Bootstrap) -> Result<(), BuildError> {
     let hook = certificate.intent.transition.hook();
@@ -1148,4 +1242,30 @@ fn open_directory(path: &Path) -> std::io::Result<File> {
         return Err(std::io::ErrorKind::PermissionDenied.into());
     }
     Ok(directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_integrity_damage_to_the_family_counts_as_damage() {
+        for damaged in [
+            BuildError::Mutation(ProjectionError::CorruptRow),
+            BuildError::Projection(SearchProjectionError::Projection(
+                ProjectionError::CorruptRow,
+            )),
+        ] {
+            assert!(damages_family(&damaged), "{damaged:?}");
+        }
+        for refused in [
+            BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow),
+            BuildError::Mutation(ProjectionError::IdentityMismatch),
+            BuildError::Mutation(ProjectionError::Interrupted),
+            BuildError::Invalid("bootstrap binding mismatch"),
+            BuildError::Expired,
+        ] {
+            assert!(!damages_family(&refused), "{refused:?}");
+        }
+    }
 }

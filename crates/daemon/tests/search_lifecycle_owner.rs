@@ -21,18 +21,26 @@ use daemon::search_lifecycle_owner::{
     SliceOutcome, SpecRefusal,
 };
 use daemon::search_replacement::BuildError;
+use daemon::search_replacement::selection::SearchReader;
 use daemon::search_replacement::selection::disable::DisableEvent;
 use daemon::search_replacement::selection::recovery::RecoveryProgress;
 use host_runtime::lifecycle::LifecycleTransactionLock;
+use host_runtime::local_embeddings::LaneInfo;
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
 use kernel::applicability::EvalBudget;
 use kernel::source_identity::OccurrenceClass;
 use kernel::{
-    CommitPageBounds, KernelStore, ProjectScope, SourceHoldAdmission, SourceHoldBinding,
-    SourcePageBounds,
+    ArtifactDestination, CommitPageBounds, KernelStore, ProjectScope, SourceHoldAdmission,
+    SourceHoldBinding, SourcePageBounds,
 };
-use retrieval::PersistBounds;
 use retrieval::batch::BatchBounds;
+use retrieval::exact::{
+    Authority, CertificateRefusal, CompletenessCertificate, ExactProof, ExactQuery,
+    ProofInvalidation, RequestIntent, Resolution, ResolveBounds, ResolveRefusal, ResolveRequest,
+    resolve, validate_for_use,
+};
+use retrieval::lexical::{LexicalBounds, RetrievalBounds, analyze_segments, compile, scan};
+use retrieval::{PersistBounds, ProjectionIdentity};
 use serde_json::Value;
 use support::embedding_fixtures::{
     Corpus, GENERATION, TestEngine, budget, component, identity, kernel_incarnation_id,
@@ -556,14 +564,10 @@ async fn a_current_family_catches_up_under_its_hold_until_the_lease_changes() {
     ));
     corpus.publish("after-restart", "text");
     let outcome = restarted.run_slice(&slice_budget());
-    let SliceOutcome::CaughtUp(report) = outcome else {
-        panic!("{outcome:?}");
-    };
     assert!(
-        matches!(report.end, EpisodeEnd::Blocked(Blocked::HoldExtension(_))),
-        "{report:?}"
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
+        "{outcome:?}"
     );
-    assert_eq!(report.batches_applied, 0);
     restarted
         .pin(&slice_budget())
         .expect("a family within the freshness limit still serves");
@@ -1162,7 +1166,7 @@ async fn a_refused_manifest_closes_admission_before_maintenance_drains() {
     owner.shutdown().await.unwrap();
 }
 
-/// A Current family whose catch-up is blocked on a dead hold still rotates its supervisor when the roster changes.
+/// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {
     use support::embedding_fixtures::{PROJECT, PROJECT_B};
@@ -1196,7 +1200,7 @@ async fn a_blocked_catch_up_still_reconciles_maintenance() {
     owner.shutdown().await.unwrap();
     drop(owner);
 
-    // The restarted owner's dead hold blocks catch-up while the family continues serving.
+    // The restarted owner's dead hold cannot extend, so the slice asks for a rebuild while the family continues serving.
     drop(corpus);
     let corpus = Corpus::open(home);
     let owner = {
@@ -1213,7 +1217,7 @@ async fn a_blocked_catch_up_still_reconciles_maintenance() {
     corpus.publish("later", "later text");
     let outcome = owner.run_slice(&slice_budget());
     assert!(
-        matches!(&outcome, SliceOutcome::CaughtUp(report) if matches!(report.end, EpisodeEnd::Blocked(Blocked::HoldExtension(_)))),
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
         "{outcome:?}"
     );
 
@@ -1227,6 +1231,670 @@ async fn a_blocked_catch_up_still_reconciles_maintenance() {
     };
     owner.stop_maintenance(&handle).await.unwrap();
     owner.shutdown().await.unwrap();
+}
+
+/// The source object ids of the selected family's live occurrences.
+fn indexed_objects(owner: &SearchLifecycleOwner) -> Vec<String> {
+    owner
+        .pin(&slice_budget())
+        .unwrap()
+        .read(&slice_budget(), |conn| {
+            Ok(conn
+                .prepare("SELECT source_object_id FROM occurrences ORDER BY source_object_id")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .unwrap()
+}
+
+fn current_attempt(home: &Path) -> Option<(String, Cause)> {
+    match control(home) {
+        ControlState::Current(intent) => Some((intent.attempt_id, intent.cause)),
+        _ => None,
+    }
+}
+
+/// Builds a Current family over the published rows through a recorded rebuild, shuts its owner down, and returns the family's database path.
+async fn converge_once(home: &Path, corpus: &Corpus) -> std::path::PathBuf {
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the first rebuild reached Current");
+    let path = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .projection()
+        .path()
+        .to_owned();
+    owner.shutdown().await.unwrap();
+    path
+}
+
+/// Drives `owner` as the slice loop does: a slice asking for a rebuild records it through `request_rebuild`.
+async fn drive_recording(
+    owner: &SearchLifecycleOwner,
+    limit: usize,
+    mut done: impl FnMut() -> bool,
+) -> usize {
+    for slice in 1..=limit {
+        if done() {
+            return slice - 1;
+        }
+        match owner.run_slice(&slice_budget()) {
+            SliceOutcome::RotateMaintenance(handle) => {
+                owner.stop_maintenance(&handle).await.unwrap();
+            }
+            SliceOutcome::Rebuild(cause) => {
+                owner
+                    .request_rebuild(cause, now(), &slice_budget())
+                    .unwrap()
+                    .expect("a Current record takes the rebuild");
+            }
+            SliceOutcome::Blocked(reason) => panic!("blocked: {reason}"),
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    limit
+}
+
+/// AC1: after a restart the selected family's catch-up hold belongs to the dead lease, so a commit made after the restart is reached by a rebuild the slice asks for. Withholding the recording leaves the record on its old attempt and the commit unindexed; recording it converges to a Current family that holds every row and whose consumer acknowledged the tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restarted_family_that_trails_the_kernel_rebuilds_to_current() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let first = corpus.publish("a-row", "alpha text");
+    records(home);
+    converge_once(home, &corpus).await;
+    let (before, _) = current_attempt(home).unwrap();
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Current
+    ));
+    let later = corpus.publish("later", "later text");
+    for _ in 0..3 {
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(
+            matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
+            "{outcome:?}"
+        );
+    }
+    assert_eq!(
+        current_attempt(home).unwrap().0,
+        before,
+        "an unrecorded rebuild changes nothing"
+    );
+    assert!(!indexed_objects(&owner).contains(&later));
+    let stale_epoch = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .inventory_epoch(&corpus.kernel);
+
+    owner
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    let recorded = control(home);
+    assert!(
+        owner
+            .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+            .unwrap()
+            .is_none(),
+        "a repeated request over the recorded intent records nothing"
+    );
+    assert_eq!(control(home), recorded);
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the recorded rebuild reached Current");
+    assert_eq!(
+        current_attempt(home).unwrap(),
+        (
+            "rebuild-search-projection-1".to_owned(),
+            Cause::CatchUpHoldLost
+        )
+    );
+    let indexed = indexed_objects(&owner);
+    assert!(
+        indexed.contains(&first) && indexed.contains(&later),
+        "{indexed:?}"
+    );
+    let reader = owner.pin(&slice_budget()).unwrap();
+    assert_eq!(reader.consumer().consumer_id, "search-projection-1");
+    assert_ne!(
+        reader.inventory_epoch(&corpus.kernel),
+        stale_epoch,
+        "a replacement under one lease moves the inventory epoch"
+    );
+    drop(reader);
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None,
+        "retirement deregisters the replaced family's consumer"
+    );
+    // The replacement's own retirement commits move the tip once more; the new family's hold catches up to it.
+    let mut settled = false;
+    for _ in 0..10 {
+        if matches!(owner.run_slice(&slice_budget()), SliceOutcome::Current) {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the rebuilt family settles at the tip");
+    assert_eq!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint("search-projection-1")
+            .unwrap(),
+        Some(corpus.tip())
+    );
+    owner.shutdown().await.unwrap();
+}
+
+/// A tokenizer fingerprint other than the fixture lane's.
+const RETOKENIZED: &str = "b3c5d7e9f1a02345b3c5d7e9f1a02345b3c5d7e9f1a02345b3c5d7e9f1a02345";
+
+/// AC1: within one lease, a Current family whose catch-up hold was released asks for a `CatchUpHoldLost` rebuild once a commit leaves it behind the tip, and the recorded rebuild reaches Current holding that commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_released_catch_up_hold_asks_for_a_rebuild_within_one_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let hold_id = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .completeness_certificate(&corpus.kernel, &slice_budget())
+        .unwrap()
+        .projection
+        .hold_id;
+    corpus
+        .kernel
+        .release_source_hold(
+            &SourceHoldBinding {
+                consumer_id: CONSUMER.to_owned(),
+                lease_epoch: corpus.kernel.lease_epoch(),
+                source_policy_version: support::embedding_fixtures::POLICY.to_owned(),
+            },
+            &hold_id,
+            now(),
+        )
+        .unwrap();
+    let later = corpus.publish("later", "later text");
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
+        "{outcome:?}"
+    );
+    let (before, _) = current_attempt(home).unwrap();
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the recorded rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::CatchUpHoldLost);
+    assert!(indexed_objects(&owner).contains(&later));
+    owner.shutdown().await.unwrap();
+}
+
+/// Changes one dimension of the lane and of the identity its records name.
+type LaneChange = fn(&mut LaneInfo, &mut ProjectionIdentity);
+
+/// AC1: a restart under a lane that differs from the one the selected seed was built under, in its tokenizer, its embedding model, or its table epoch, asks for the rebuild that dimension names. Each converges to a Current family under the running identity: the next slice over it asks for nothing more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restart_under_another_lane_rebuilds_with_the_dimension_it_changed() {
+    let cases: [(LaneChange, Cause); 3] = [
+        (
+            |lane, identity| {
+                lane.fingerprint = RETOKENIZED.to_owned();
+                identity.tokenizer_fingerprint = RETOKENIZED.to_owned();
+            },
+            Cause::TokenizerMismatch,
+        ),
+        (
+            |lane, identity| {
+                lane.model = "another-test-model".to_owned();
+                identity.embedding_model = "another-test-model".to_owned();
+            },
+            Cause::EmbeddingModelMismatch,
+        ),
+        (
+            |lane, identity| {
+                lane.table_epoch = 2;
+                identity.generation_epoch = 2;
+            },
+            Cause::EmbeddingModelMismatch,
+        ),
+    ];
+    for (change, cause) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path();
+        let corpus = Corpus::open(home);
+        corpus.seed();
+        let first = corpus.publish("a-row", "alpha text");
+        records(home);
+        converge_once(home, &corpus).await;
+        let (before, _) = current_attempt(home).unwrap();
+
+        let mut lane = support::embedding_fixtures::lane(support::embedding_fixtures::FINGERPRINT);
+        let mut running = identity(&kernel_incarnation_id(home));
+        change(&mut lane, &mut running);
+        write_records(
+            home,
+            &manifest_json(&running, &ProjectionHook::ALL),
+            &campaign_json(&running),
+        );
+        let owner = SearchLifecycleOwner::for_home(
+            home,
+            Arc::clone(&corpus.kernel),
+            support::embedding_fixtures::component_with_lane(
+                &TestEngine::new(),
+                LocalEmbeddingsLimits::default(),
+                lane,
+            ),
+        );
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(
+            matches!(&outcome, SliceOutcome::Rebuild(asked) if *asked == cause),
+            "{cause:?}: {outcome:?}"
+        );
+        let slices = drive_recording(&owner, 20, || {
+            current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+        })
+        .await;
+        assert!(slices < 20, "the {cause:?} rebuild reached Current");
+        assert_eq!(current_attempt(home).unwrap().1, cause);
+        assert!(indexed_objects(&owner).contains(&first));
+        for _ in 0..3 {
+            let outcome = owner.run_slice(&slice_budget());
+            assert!(
+                matches!(outcome, SliceOutcome::Current | SliceOutcome::CaughtUp(_)),
+                "the rebuilt family runs under the running identity: {outcome:?}"
+            );
+        }
+        owner.shutdown().await.unwrap();
+    }
+}
+
+/// AC1: a restart over a selected family whose payload bytes were damaged asks for a `Corruption` rebuild, which converges to a Current family holding the canonical row again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restart_over_a_damaged_family_rebuilds_for_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let first = corpus.publish("a-row", "alpha text");
+    records(home);
+    let path = converge_once(home, &corpus).await;
+    let (before, _) = current_attempt(home).unwrap();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    assert!(
+        raw.execute("UPDATE payloads SET bytes=zeroblob(length(bytes))", [])
+            .unwrap()
+            >= 1
+    );
+    drop(raw);
+
+    let owner = owner(home, &corpus.kernel);
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+        "{outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the corruption rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::Corruption);
+    assert!(indexed_objects(&owner).contains(&first));
+    let reader = owner.pin(&slice_budget()).unwrap();
+    assert_ne!(
+        reader.projection().path(),
+        path,
+        "the rebuilt family is a new database"
+    );
+    let damaged: i64 = reader
+        .read(&slice_budget(), |conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM payloads WHERE bytes=zeroblob(length(bytes))",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(damaged, 0, "the rebuilt family serves the canonical bytes");
+    drop(reader);
+    owner.shutdown().await.unwrap();
+}
+
+const EXACT_BOUNDS: ResolveBounds = ResolveBounds {
+    page_rows: NonZeroUsize::new(16).unwrap(),
+    max_rows: NonZeroUsize::new(64).unwrap(),
+    max_pages: NonZeroUsize::new(8).unwrap(),
+    max_retained: NonZeroUsize::new(16).unwrap(),
+    max_retained_bytes: NonZeroUsize::new(64 * 1024).unwrap(),
+};
+
+/// Resolves the whole-request exact query for `object` on `reader` under `certificate`, presenting `epoch` as the current inventory epoch.
+fn resolve_object(
+    reader: &SearchReader,
+    kernel: &KernelStore,
+    object: &str,
+    certificate: &CompletenessCertificate,
+    epoch: &str,
+) -> Result<Resolution, ResolveRefusal> {
+    let project = memory_project();
+    let request = ResolveRequest {
+        query: ExactQuery::CanonicalObject(object.as_bytes()),
+        intent: RequestIntent::WholeRequest,
+        certificate,
+        authority: Authority {
+            project: &project,
+            destination: ArtifactDestination::Local,
+            inventory_epoch: epoch,
+        },
+        bounds: EXACT_BOUNDS,
+    };
+    let mut resolved = None;
+    reader
+        .read(&slice_budget(), |conn| {
+            resolved = Some(resolve(conn, kernel, &request, &slice_budget()));
+            Ok(())
+        })
+        .unwrap();
+    resolved.unwrap()
+}
+
+/// Validates `proof` for final use on `reader`, presenting `epoch` as the current inventory epoch.
+fn use_proof(
+    reader: &SearchReader,
+    kernel: &KernelStore,
+    proof: &ExactProof,
+    epoch: &str,
+) -> Result<(), ProofInvalidation> {
+    let project = memory_project();
+    let mut validated = None;
+    reader
+        .read(&slice_budget(), |conn| {
+            validated = Some(validate_for_use(
+                conn,
+                kernel,
+                proof,
+                Authority {
+                    project: &project,
+                    destination: ArtifactDestination::Local,
+                    inventory_epoch: epoch,
+                },
+                &slice_budget(),
+            ));
+            Ok(())
+        })
+        .unwrap();
+    validated.unwrap().unwrap()
+}
+
+/// The project the seeded memory scope's exact project term names.
+fn memory_project() -> ProjectScope {
+    ProjectScope::new(&"e".repeat(64)).unwrap()
+}
+
+/// Polls the running daemon's owner until its selected family pins, covers the canonical object `object`, and certifies its inventory.
+async fn daemon_certified(
+    daemon: &KernelDaemon,
+    object: &str,
+) -> (SearchReader, CompletenessCertificate) {
+    let started = Instant::now();
+    loop {
+        if let Some(owner) = daemon.handler().search_lifecycle() {
+            let kernel = daemon.store();
+            let object = object.to_owned();
+            let certified = tokio::task::spawn_blocking(move || {
+                let reader = owner.pin(&slice_budget()).ok()?;
+                let certificate = reader
+                    .completeness_certificate(&kernel, &slice_budget())
+                    .ok()?;
+                let covered = resolve_object(
+                    &reader,
+                    &kernel,
+                    &object,
+                    &certificate,
+                    &reader.inventory_epoch(&kernel),
+                )
+                .ok()?
+                .proof
+                .is_some();
+                covered.then_some((reader, certificate))
+            })
+            .await
+            .unwrap();
+            if let Some(certified) = certified {
+                return certified;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "the daemon never certified an inventory covering {object}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The source objects whose occurrences a direct FTS5 probe for `term` hits on `reader`, within `bounds`.
+fn lexical_objects(reader: &SearchReader, term: &str, bounds: RetrievalBounds) -> Vec<String> {
+    let analysis = analyze_segments(
+        &[term],
+        LexicalBounds {
+            max_input_bytes: NonZeroUsize::new(256).unwrap(),
+            max_atoms: NonZeroUsize::new(8).unwrap(),
+        },
+    )
+    .unwrap();
+    let probes = compile(&analysis);
+    reader
+        .read(&slice_budget(), |conn| {
+            let scanned = scan(conn, &probes, bounds, &slice_budget())
+                .map_err(|_| retrieval::ProjectionError::CorruptRow)?;
+            assert!(scanned.hits() <= bounds.max_accepted.get());
+            let mut objects = Vec::new();
+            for occurrence in scanned.hit_ids() {
+                objects.push(conn.query_row(
+                    "SELECT source_object_id FROM occurrences WHERE occurrence_id=?1",
+                    [occurrence],
+                    |row| row.get::<_, String>(0),
+                )?);
+            }
+            objects.sort();
+            Ok(objects)
+        })
+        .unwrap()
+}
+
+/// AC8: once a recorded rebuild reaches Current, a direct FTS5 probe through the real engine over the selected family returns exactly the authored rows whose text holds the term, within the declared bound. The family certifies its inventory at the tip under its epoch; a restart moves that epoch, and a later commit withholds the certificate until the family covers the new tip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_answers_direct_fts_probes_with_the_authored_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let alpha = corpus.publish("alpha-row", "alpha harbor text");
+    let beta = corpus.publish("beta-row", "beta harbor text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let bounds = RetrievalBounds {
+        max_probes: NonZeroUsize::new(4).unwrap(),
+        scan_rows: NonZeroUsize::new(8).unwrap(),
+        max_accepted: NonZeroUsize::new(8).unwrap(),
+        batch_rows: NonZeroUsize::new(8).unwrap(),
+        qualifying_matches: NonZeroUsize::new(8).unwrap(),
+        rank_budget: NonZeroUsize::new(16).unwrap(),
+    };
+    assert_eq!(
+        lexical_objects(&reader, "alpha", bounds),
+        vec![alpha.clone()]
+    );
+    let mut both = vec![alpha, beta];
+    both.sort();
+    assert_eq!(lexical_objects(&reader, "harbor", bounds), both);
+    assert!(lexical_objects(&reader, "absent", bounds).is_empty());
+
+    let certificate = reader
+        .completeness_certificate(&corpus.kernel, &slice_budget())
+        .unwrap();
+    assert_eq!(certificate.complete_through_commit_seq, corpus.tip());
+    assert_eq!(
+        certificate.inventory_epoch,
+        reader.inventory_epoch(&corpus.kernel)
+    );
+    corpus.publish("gamma-row", "gamma text");
+    assert!(
+        matches!(
+            reader.completeness_certificate(&corpus.kernel, &slice_budget()),
+            Err(BuildError::Invalid("the family trails the kernel tip"))
+        ),
+        "a family behind the tip certifies nothing"
+    );
+    drop(reader);
+    owner.shutdown().await.unwrap();
+    drop(owner);
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let restarted = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane());
+    assert!(
+        restarted.pin(&slice_budget()).is_err(),
+        "nothing is pinned or certified before the restarted owner reopens the family"
+    );
+    let _ = restarted.run_slice(&slice_budget());
+    let reader = restarted.pin(&slice_budget()).unwrap();
+    assert_ne!(
+        reader.inventory_epoch(&corpus.kernel),
+        certificate.inventory_epoch,
+        "the restart moves the inventory epoch"
+    );
+    assert!(
+        matches!(
+            reader.completeness_certificate(&corpus.kernel, &slice_budget()),
+            Err(BuildError::Invalid("the family trails the kernel tip"))
+        ),
+        "the reopened family trails the commit made before the restart and certifies nothing"
+    );
+    drop(reader);
+    restarted.shutdown().await.unwrap();
+}
+
+/// AC8: through the running daemon, an exact query for a memory proves its one target under the family's completeness certificate. A daemon restart invalidates that proof and certificate: the pre-restart proof fails final use under the restarted epoch, the pre-restart certificate is refused, and only the restarted family's fresh certificate proves the target again. A commit after that invalidates the fresh proof.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_daemon_restart_invalidates_exact_proofs_until_the_inventory_is_certified_again() {
+    let data = tempfile::tempdir().unwrap();
+    let home = data.path().to_owned();
+    let kernel_root = home.join("eidnara").join("context");
+    {
+        let seed = KernelStore::open(kernel_root.join("kernel")).unwrap();
+        seed_memories(
+            &seed,
+            "project:registered",
+            &["registered-1", "registered-2"],
+        );
+        drop(seed);
+    }
+    let identity = identity(&kernel_incarnation_id(&kernel_root));
+    write_records(
+        &home,
+        &manifest_json(&identity, &ProjectionHook::ALL),
+        &campaign_json(&identity),
+    );
+    let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let (reader, certificate) = daemon_certified(&daemon, "registered-1").await;
+    let kernel = daemon.store();
+    let epoch = reader.inventory_epoch(&kernel);
+    let proof = resolve_object(&reader, &kernel, "registered-1", &certificate, &epoch)
+        .unwrap()
+        .proof
+        .unwrap();
+    assert_eq!(proof.target_id(), "registered-1");
+    assert_eq!(use_proof(&reader, &kernel, &proof, &epoch), Ok(()));
+    drop((reader, kernel));
+    let data = daemon.shutdown_keeping_data().await;
+
+    let restarted = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
+        data: Some(data),
+        claim_sources: true,
+        ..support::kernel_daemon::StartOptions::default()
+    })
+    .await;
+    let (reader, fresh) = daemon_certified(&restarted, "registered-1").await;
+    let kernel = restarted.store();
+    let current = reader.inventory_epoch(&kernel);
+    assert_ne!(current, epoch, "the restart moves the inventory epoch");
+    assert_eq!(
+        use_proof(&reader, &kernel, &proof, &current),
+        Err(ProofInvalidation::InventoryEpochChanged)
+    );
+    assert!(matches!(
+        resolve_object(&reader, &kernel, "registered-1", &certificate, &current),
+        Err(ResolveRefusal::Certificate(
+            CertificateRefusal::InventoryEpochMismatch { .. }
+        ))
+    ));
+    let proof = resolve_object(&reader, &kernel, "registered-1", &fresh, &current)
+        .unwrap()
+        .proof
+        .expect("the restarted family proves again under its own certificate");
+    assert_eq!(use_proof(&reader, &kernel, &proof, &current), Ok(()));
+    kernel
+        .commit(
+            kernel::CommitIntent {
+                producer: "test".to_string(),
+                operation_key: "seed:after-certificate".to_string(),
+                request_digest: "c".repeat(64),
+                actor: "test".to_string(),
+                cause: "seed".to_string(),
+            },
+            |envelope| {
+                envelope.insert_decision(seed_decision("registered-3", "project:registered"))?;
+                admitted(envelope, "registered-3")?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        use_proof(&reader, &kernel, &proof, &current),
+        Err(ProofInvalidation::CanonicalChanged { .. })
+    ));
+    drop((reader, kernel));
+    restarted.shutdown().await;
 }
 
 /// Cancelling the caller's budget while a catch-up episode waits for a kernel reader ends the slice promptly.
@@ -1790,13 +2458,13 @@ async fn retirement_verifies_a_long_commit_span_page_by_page() {
         owner.run_slice(&slice_budget()),
         SliceOutcome::Current
     ));
-    // The dead hold blocks catch-up, so the family trails the target commits.
+    // The dead hold cannot extend, so the family trails the target commits until the rebuild below.
     for index in 0..50 {
         corpus.publish(&format!("trail-{index}"), "trail text");
     }
     let outcome = owner.run_slice(&slice_budget());
     assert!(
-        matches!(&outcome, SliceOutcome::CaughtUp(report) if matches!(report.end, EpisodeEnd::Blocked(Blocked::HoldExtension(_)))),
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
         "{outcome:?}"
     );
     let ControlState::Current(current) = control(home) else {
@@ -4591,7 +5259,7 @@ async fn a_large_source_backlog_shares_the_maintenance_loop_with_lifecycle_slice
     daemon.shutdown().await;
 }
 
-/// Installed records alone register the projection: the running daemon records the first build, reaches Current over the memories the claim-source runner published, and a restart resumes Current without a request.
+/// Installed records alone register the projection: the running daemon records the first build, reaches Current over the memories the claim-source runner published, and a restart resumes Current without a request. A memory committed after the restart reaches the projection through the rebuild the restarted daemon's slice loop records for its dead catch-up hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
     let data = tempfile::tempdir().unwrap();
@@ -4717,11 +5385,106 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     drop(reader);
+    // The restart renews nothing: the record is the registered one, or the claim-source runner's commits since the restart already left that family behind and the loop recorded its replacement.
+    match ProjectionLifecycle::open(&home).unwrap().read() {
+        ControlState::Current(resumed) if resumed.attempt_id == current.attempt_id => {
+            assert_eq!(
+                resumed, current,
+                "the restart resumed the registered record unchanged"
+            );
+        }
+        ControlState::Current(replacing) | ControlState::Intent(replacing) => {
+            assert_eq!(replacing.cause, Cause::CatchUpHoldLost);
+            assert_eq!(replacing.attempt_id, "rebuild-search-projection-1");
+            assert_eq!(replacing.consumer.consumer_id, "search-projection-1");
+            assert_eq!(
+                Some(&replacing.selected_generation),
+                current.staged_seed_digest.as_ref()
+            );
+        }
+        other => panic!("the restart left {other:?}"),
+    }
+    // The registered family's catch-up hold died with the first daemon's lease, so a memory committed after the restart reaches search through the rebuild the slice loop records on its own.
+    restarted
+        .store()
+        .commit(
+            kernel::CommitIntent {
+                producer: "test".to_string(),
+                operation_key: "seed:after-restart".to_string(),
+                request_digest: "c".repeat(64),
+                actor: "test".to_string(),
+                cause: "seed".to_string(),
+            },
+            |envelope| {
+                envelope.insert_decision(seed_decision("after-restart-1", "project:registered"))?;
+                admitted(envelope, "after-restart-1")?;
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+    let rebuilt = loop {
+        if let ControlState::Current(intent) = ProjectionLifecycle::open(&home).unwrap().read()
+            && intent.attempt_id != current.attempt_id
+        {
+            break intent;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "the restarted daemon did not rebuild its trailing projection"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(rebuilt.cause, Cause::CatchUpHoldLost);
     assert_eq!(
-        ProjectionLifecycle::open(&home).unwrap().read(),
-        ControlState::Current(current),
-        "the restart resumed the registered record unchanged"
+        rebuilt.selected_generation,
+        current.staged_seed_digest.unwrap()
     );
+    loop {
+        let pinned = tokio::task::spawn_blocking({
+            let owner = Arc::clone(&owner);
+            move || owner.pin(&slice_budget())
+        })
+        .await
+        .unwrap();
+        if let Ok(reader) = pinned {
+            let live = reader
+                .projection()
+                .read(|conn| {
+                    retrieval::eligibility::live_candidates(
+                        conn,
+                        None,
+                        NonZeroUsize::new(64).unwrap(),
+                    )
+                })
+                .unwrap();
+            if live.len() >= 3 {
+                assert_eq!(reader.consumer().consumer_id, rebuilt.consumer.consumer_id);
+                let bounds = RetrievalBounds {
+                    max_probes: NonZeroUsize::new(4).unwrap(),
+                    scan_rows: NonZeroUsize::new(8).unwrap(),
+                    max_accepted: NonZeroUsize::new(8).unwrap(),
+                    batch_rows: NonZeroUsize::new(8).unwrap(),
+                    qualifying_matches: NonZeroUsize::new(8).unwrap(),
+                    rank_budget: NonZeroUsize::new(16).unwrap(),
+                };
+                // Only `after-restart-1`'s summary holds `restart`; its canonical claim and promoted memory are two descriptors, none shared with the registered memories.
+                let restarted = lexical_objects(&reader, "restart", bounds);
+                let registered = lexical_objects(&reader, "registered", bounds);
+                assert_eq!(restarted.len(), 2, "{restarted:?}");
+                assert_eq!(registered.len(), 4, "{registered:?}");
+                assert!(
+                    restarted.iter().all(|object| !registered.contains(object)),
+                    "the memory committed after the restart is indexed"
+                );
+                break;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "the rebuilt projection never served the memory committed after the restart"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     restarted.shutdown().await;
 }
 

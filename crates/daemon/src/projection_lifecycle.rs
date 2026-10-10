@@ -75,6 +75,8 @@ pub enum Cause {
     DisabledRecovery,
     /// No projection exists yet; the installed records admit its first build from the kernel.
     Registration,
+    /// Catch-up hold extension for the Current family returned `SourceHoldError::BindingMismatch` or `SourceHoldError::Invalid(_)`.
+    CatchUpHoldLost,
 }
 
 /// The kernel consumer the projection reads through and the vector generation it produces.
