@@ -35,19 +35,15 @@ function formatResult(result: KernelMemorySearchResult, index: number): string {
         const policy = result.policyLabel
             ? ` status=${boundDynamicField(result.policyLabel)}`
             : " status=active";
-        return [
-            `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${lanesOf(result)}${policy}`,
-            renderAntiMemoryWarning(result),
-            // The rationale renders only in this full-result view; the compact auto-search hint keeps the warning-line field set.
-            ...(result.rationale ? [`Rationale: ${boundDynamicField(result.rationale)}`] : []),
-        ].join("\n");
+        // The rationale renders only in this full-result view; the compact auto-search hint keeps the warning-line field set.
+        const rationale = result.rationale
+            ? `\nRationale: ${boundDynamicField(result.rationale)}`
+            : "";
+        return `[${index}] [anti-memory warning] score=${result.score.toFixed(2)} id=${result.objectId} match=${result.matchType}${lanesOf(result)}${policy}\n${renderAntiMemoryWarning(result)}${rationale}`;
     }
     const source = result.sourceName ? ` source=${boundDynamicField(result.sourceName)}` : "";
     const policy = result.policyLabel ? ` trust=[${boundDynamicField(result.policyLabel)}]` : "";
-    return [
-        `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${lanesOf(result)}${policy}`,
-        boundDynamicField(result.content),
-    ].join("\n");
+    return `[${index}] [memory] score=${result.score.toFixed(2)} id=${result.objectId} category=${boundDynamicField(result.category)}${source} match=${result.matchType}${lanesOf(result)}${policy}\n${boundDynamicField(result.content)}`;
 }
 
 const SECTION_SEPARATOR = "\n\n";
