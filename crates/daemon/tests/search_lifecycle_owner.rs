@@ -1350,6 +1350,39 @@ fn a_selected_family_that_refuses_its_pin_is_named_apart_from_no_family() {
     assert_eq!(owner.pin_refusal(&refused), "family_refused");
 }
 
+#[test]
+fn a_refused_request_over_an_unbounded_record_names_the_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(control(home), ControlState::Current(_)));
+
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    assert!(matches!(
+        owner.request(&foreign, now(), &slice_budget()),
+        Err(BuildError::Invalid(_))
+    ));
+    assert_eq!(owner.admission_state(), Err("limits_unbounded"));
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {

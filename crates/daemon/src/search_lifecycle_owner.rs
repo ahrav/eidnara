@@ -1195,7 +1195,7 @@ impl SearchLifecycleOwner {
         }
         // Whether the manifest still bounds the operation already recorded, as its next slice would check. A replacement that fits the reduced limits may replace what no longer does; a request that does not fit either, or one refused for another reason, leaves the gate as that slice would: closed over an operation the manifest cannot bound, and on the records with no coverage over an active record past its duration bound, so a cleanup keeps its envelope.
         let recorded = ProjectionLifecycle::read_at(&self.home);
-        let spec_fits = |current: &LifecycleIntent| {
+        let spec_refusal = |current: &LifecycleIntent| {
             replacement_spec(
                 inputs.manifest(),
                 identity.clone(),
@@ -1203,19 +1203,23 @@ impl SearchLifecycleOwner {
                 current.episodes.allowance,
                 &current.consumer.generation_id,
             )
-            .is_ok()
+            .err()
         };
         let current_fit = match &recorded {
-            ControlState::Intent(current) if !spec_fits(current) => RecordFit::Unbounded,
+            ControlState::Intent(current) if let Some(refusal) = spec_refusal(current) => {
+                RecordFit::Unbounded(refusal.code())
+            }
             // An active record's duration is charged as its slices charge it; a completed record's construction is history.
             ControlState::Intent(current)
                 if duration_within_bound(inputs.manifest(), current).is_err() =>
             {
                 RecordFit::OverDuration
             }
-            ControlState::Current(current) if !spec_fits(current) => RecordFit::Unbounded,
+            ControlState::Current(current) if let Some(refusal) = spec_refusal(current) => {
+                RecordFit::Unbounded(refusal.code())
+            }
             // An unreadable record is what the next slice closes admission on.
-            ControlState::Unavailable(_) => RecordFit::Unbounded,
+            ControlState::Unavailable(_) => RecordFit::Unbounded(None),
             _ => RecordFit::Fits,
         };
         let leave_gate_as_a_slice_would = || match current_fit {
@@ -1229,8 +1233,8 @@ impl SearchLifecycleOwner {
                     },
                 );
             }
-            RecordFit::Unbounded => {
-                self.close_gate(None);
+            RecordFit::Unbounded(code) => {
+                self.close_gate(code);
             }
         };
         // Judged after the records are installed, so a request for another kernel still leaves the gate on the current records rather than on the evidence a reload replaced; over a recorded operation those records cannot bound, the gate the last slice closed stays closed.
@@ -1641,8 +1645,8 @@ enum RecordFit {
     Fits,
     /// An active record's duration exceeds its transition's bound; the records still bound a cleanup.
     OverDuration,
-    /// The manifest cannot bound the recorded operation, or the record is unreadable.
-    Unbounded,
+    /// The manifest cannot bound the recorded operation, with the refusal's code, or the record is unreadable.
+    Unbounded(Option<&'static str>),
 }
 
 /// Charges an active record's own duration, its deadline less the clock it was recorded at, against its transition's bound in `manifest`, as recovery charges it at every admission.
