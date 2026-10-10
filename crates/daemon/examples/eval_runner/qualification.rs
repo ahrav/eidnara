@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use daemon::synthetic_history::SyntheticHistory;
 use eval_core::{
-    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, Environment, FAKE_MODEL_LATENCY_MS, Histogram,
-    HostManifest, MESSAGE_TOKENS, OutageRun, OutageSchedule, Phase, Publication,
-    QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape, StoreObservation,
-    WitnessRun, audit_lineage, catalog, check_witness_runs,
+    ACTIVE_WINDOW, BacklogSample, Case, CaseResult, DIRTY_SOURCE_SUFFIX, Environment,
+    FAKE_MODEL_LATENCY_MS, Histogram, HostManifest, MESSAGE_TOKENS, OutageRun, OutageSchedule,
+    Phase, Publication, QUALIFICATION_SEED, QualificationReport, RawRange, Repetition, Shape,
+    StoreObservation, WitnessRun, audit_lineage, catalog, check_witness_runs,
 };
 use flate2::{Compression, write::DeflateEncoder};
 use host_runtime::{CallError, Client, ClientRoute, RequestOptions, TargetKind};
@@ -776,7 +776,7 @@ fn source_commit() -> String {
     if command("git", &["status", "--porcelain"]).is_empty() {
         head
     } else {
-        format!("{head}-dirty")
+        format!("{head}{DIRTY_SOURCE_SUFFIX}")
     }
 }
 
@@ -1036,6 +1036,17 @@ mod tests {
         assert!(
             refusal(&["--witness-runs", file]).contains("exit_code"),
             "a run without its exit code is refused"
+        );
+        fs::write(
+            &path,
+            format!(
+                r#"{{"normal_fold": {{"test": "t", "source_commit": "c{DIRTY_SOURCE_SUFFIX}", "exit_code": 0}}}}"#
+            ),
+        )
+        .unwrap();
+        assert!(
+            refusal(&["--witness-runs", file]).contains("clean source commit"),
+            "a run on a dirty tree is refused"
         );
         assert!(refusal(&["--witness-runs"]).contains("needs a value"));
         assert!(refusal(&["--witness-runs", "--out", "x"]).contains("needs a value"));
