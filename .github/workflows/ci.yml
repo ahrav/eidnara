@@ -40,18 +40,24 @@ on:
         description: Interactive operations per repetition
         type: string
         default: "10000"
+      lexical_scale:
+        description: >-
+          Run the D26b lexical scan p99 gate at one million occurrences on the
+          reference host and upload its samples
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 # A newer push to the same ref supersedes the run in flight.
 # `main` preserves in-progress runs; newer pending runs replace older pending
-# runs. Scale-driver and qualification dispatches run independently of other
-# runs on their ref.
+# runs. Scale-driver, qualification, and lexical-scale dispatches run
+# independently of other runs on their ref.
 concurrency:
   group: >-
     ${{ github.event_name == 'workflow_dispatch'
-    && (inputs.scale_driver != '' || inputs.qualification)
+    && (inputs.scale_driver != '' || inputs.qualification || inputs.lexical_scale)
     && format('scale-{0}', github.run_id) || format('ci-{0}', github.ref) }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -1249,6 +1255,45 @@ jobs:
         with:
           name: qualification
           path: ${{ runner.temp }}/qualification
+          if-no-files-found: warn
+
+  # The D26b lexical gate (#391) builds a one-million-occurrence projection
+  # and runs only when dispatched, in release on the reference host.
+  lexical-scale:
+    name: lexical scan p99 (dispatched)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: github.event_name == 'workflow_dispatch' && inputs.lexical_scale
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: rustup toolchain install 1.98 --profile minimal
+
+      - name: Lexical scan p99
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/lexical-scale"
+          mkdir -p "$out"
+          {
+            echo "commit $(git rev-parse HEAD)"
+            echo "nproc $(nproc)"
+            free -b
+          } | tee "$out/lexical-scale.log"
+          EIDNARA_LEXICAL_SCALE_SAMPLES="$out/samples.json" \
+            cargo +1.98 test --release --locked -p retrieval \
+            --test lexical_retrieval lexical_scan_p99_at_one_million_occurrences \
+            -- --ignored --exact --nocapture 2>&1 | tee -a "$out/lexical-scale.log"
+
+      # actions/upload-artifact v7.0.1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: lexical-scale
+          path: ${{ runner.temp }}/lexical-scale
           if-no-files-found: warn
 
   unlocked-deps:
