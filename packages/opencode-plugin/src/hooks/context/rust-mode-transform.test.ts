@@ -3589,11 +3589,8 @@ describe("fail-open after an applied pass that kept its terminal raw", () => {
         };
     }
 
-    it("serves the applied prefix with the current copy of a terminal that grew in place", async () => {
-        const sessionId = `rust-fail-open-terminal-${Date.now()}`;
-        const rows = rawRows(3);
-        installRawRows(sessionId, rows);
-        const { client } = recordingClient((request, index) => {
+    function keepTerminalThenFail(sessionId: string) {
+        return recordingClient((request, index) => {
             if (index > 0) throw new Error("request deadline expired after a possible send");
             const count = (request.native_messages as unknown[]).length;
             return {
@@ -3606,6 +3603,13 @@ describe("fail-open after an applied pass that kept its terminal raw", () => {
                 ],
             };
         });
+    }
+
+    it("serves the applied prefix with the current copy of a terminal that grew in place", async () => {
+        const sessionId = `rust-fail-open-terminal-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        const { client } = keepTerminalThenFail(sessionId);
         const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
         const [user] = rowMessages(sessionId, rows.slice(0, 1));
         await transform.run(sessionId, {
@@ -3619,6 +3623,51 @@ describe("fail-open after an applied pass that kept its terminal raw", () => {
         expect(output.messages).toEqual([folded(sessionId), grown, next]);
         expect(output.messages[1]).toBe(grown);
         expect(transform.getState(sessionId).failureCount).toBe(1);
+    });
+
+    it("gates the fallback with the input lengths the failed pass measured", async () => {
+        const sessionId = `rust-fail-open-terminal-lengths-${Date.now()}`;
+        const rows = rawRows(3);
+        installRawRows(sessionId, rows);
+        const limitSpy = spyOn(eventResolvers, "resolveTrustedContextLimit").mockReturnValue(
+            1_000_000,
+        );
+        const debugSpy = spyOn(logger.sessionLog, "debug");
+        try {
+            const { client } = keepTerminalThenFail(sessionId);
+            const transform = createRustModeTransform(makeDeps(), { moduleClient: client });
+            const [user] = rowMessages(sessionId, rows.slice(0, 1)) as [MessageLike];
+            (user.info as Record<string, unknown>).model = {
+                providerID: "eidnara-test",
+                modelID: "gated-window",
+            };
+            await transform.run(sessionId, {
+                messages: [user, toolMessage(sessionId, "m-2", false)],
+            });
+
+            const grown = toolMessage(sessionId, "m-2", true);
+            const [next] = rowMessages(sessionId, [rows[2] as RawRow]);
+            const lengthSpy = spyOn(editRecipe, "canonicalJsonLength");
+            try {
+                const output = { messages: [user, grown, next] as unknown[] };
+                await transform.run(sessionId, output);
+                expect(output.messages).toEqual([folded(sessionId), grown, next]);
+                const measured = lengthSpy.mock.calls
+                    .map(([value]) => value)
+                    .filter((value) => value === user || value === grown || value === next);
+                expect(measured).toEqual([grown, next]);
+            } finally {
+                lengthSpy.mockRestore();
+            }
+            const passLines = sessionLogs(debugSpy, sessionId).filter((line) =>
+                line.startsWith("rust pass:"),
+            );
+            expect(passLines[1]).toContain("served_from=last_applied in=3 out=3 applied=false");
+            expect(passLines[1]).toContain("admission=fits");
+        } finally {
+            debugSpy.mockRestore();
+            limitSpy.mockRestore();
+        }
     });
 });
 

@@ -1052,6 +1052,8 @@ export function createTransformSessionClient(
                   recheck: (phase: string) => void;
                   /** The trusted limit the main publication's invocation gate reads. */
                   contextLimit: number | undefined;
+                  /** The pass's measured lengths of `captured.members`. */
+                  inputLengths?: readonly number[];
               }
             | undefined;
         /**
@@ -1104,11 +1106,13 @@ export function createTransformSessionClient(
                     return false;
                 // The fallback is a candidate too: it may not grow past the limit the pass would refuse.
                 if (gated) {
-                    const incoming = measureInputLengths(
-                        members,
-                        failOpen.previous,
-                        failOpen.captured.verified?.count ?? 0,
-                    );
+                    const incoming =
+                        failOpen.inputLengths ??
+                        measureInputLengths(
+                            members,
+                            failOpen.previous,
+                            failOpen.captured.verified?.count ?? 0,
+                        );
                     const invocation = validateInvocation(
                         [...applied.lengths.slice(0, prefix), ...incoming.slice(from)],
                         incoming,
@@ -1381,6 +1385,8 @@ export function createTransformSessionClient(
                 previous,
                 captured.verified?.count ?? 0,
             );
+            // The fail-open fallback reads the same capture, so it reuses these lengths.
+            if (failOpenSource) failOpenSource.inputLengths = inputLengths;
             // The retained output stays reusable only while the record that applied it survives.
             let previousApplied = previous?.applied;
             if (
