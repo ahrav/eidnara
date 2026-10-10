@@ -41627,7 +41627,11 @@ mod tests {
                 }
                 Err(_) => 0,
             };
-            let response = call_transform(handler, messages.to_vec()).await;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let response =
+                tokio::time::timeout(remaining, call_transform(handler, messages.to_vec()))
+                    .await
+                    .expect("the transform answered within the wait budget");
             if response["history_summarizer"]["fired"] == true {
                 // The spawned firing persists its fired state after the response, so the
                 // settled row is the one whose sequence advanced and returned to idle.

@@ -43,10 +43,11 @@ The bound comes from the wait helpers in `crates/daemon/src/lib.rs`:
 `TEST_WAIT_BUDGET` is 10 seconds and `TEST_WAIT_POLL` 2 ms (`:36613`);
 `wait_for_idle` (`:36616`), `wait_for_count` (`:36641`), and
 `wait_for_history_summarizer_state` (`:36652`) panic at the budget.
-`fire_and_settle` (`:41620`) expires the backoff, calls transform, accepts only
-`fired` or `no_fire: "busy"`, retries `busy` only until a deadline of
-`TEST_WAIT_BUDGET` from its first attempt, and on `fired` waits within the
-budget for a higher `firing_seq` at idle.
+`fire_and_settle` (`:41620`) expires the backoff, awaits each transform under
+the time remaining to a `TEST_WAIT_BUDGET` deadline set at its first attempt,
+accepts only `fired` or `no_fire: "busy"`, retries `busy` only inside that
+deadline, and on `fired` waits within a second budget for a higher
+`firing_seq` at idle.
 
 Rotation witness: `crates/host-runtime/tests/model_execution_subprocess.rs:4266`
 `a_day_of_rotations_and_an_external_login_reuses_one_adapter_and_owner` runs
@@ -93,7 +94,9 @@ archive or placeholder; a producer start count that proves exactly one retry.
   wait. An earlier revision of `fire_and_settle` retried `busy` without a cap,
   so a summarizer that stayed busy would have run the normal and reattach
   witnesses to the runner's timeout instead of failing them; the helper now
-  asserts a `TEST_WAIT_BUDGET` deadline across those retries. The wrapup
+  awaits each transform under the remaining `TEST_WAIT_BUDGET` deadline and
+  asserts that deadline before each retry, so a stalled request or a late
+  `fired` fails inside the first window. The wrapup
   witness awaited its recovered request under the handler's 3,800-second
   budget alone; it now awaits under `TEST_WAIT_BUDGET`.
 - Missing evidence: none for the five checks read.
