@@ -132,6 +132,7 @@ fn every_recorded_cause_keeps_the_name_a_lifecycle_record_stores() {
         (Cause::ProjectionPolicyMismatch, "ProjectionPolicyMismatch"),
         (Cause::IdentityContractMismatch, "IdentityContractMismatch"),
         (Cause::LimitProtocolMismatch, "LimitProtocolMismatch"),
+        (Cause::KernelRestored, "KernelRestored"),
         (Cause::DeletedAfterPruning, "DeletedAfterPruning"),
         (Cause::DisabledRecovery, "DisabledRecovery"),
         (Cause::Registration, "Registration"),
@@ -1819,6 +1820,87 @@ async fn a_quarantined_family_keeps_earning_its_rebuild_until_one_is_recorded() 
             "slice {slice} serves the quarantined family"
         );
     }
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_same_lineage_kernel_restore_records_a_rebuild_of_the_current_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_whose_coverage_turns_corrupt_records_its_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let path = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .projection()
+        .path()
+        .to_owned();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.busy_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        raw.execute("DELETE FROM projection_checkpoint", [])
+            .unwrap(),
+        1,
+        "the open family loses its checkpoint row"
+    );
+    drop(raw);
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+        "a family whose coverage cannot be observed earns a corruption rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the corruption rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::Corruption);
+    assert_ne!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the rebuilt family is a new database"
+    );
     owner.shutdown().await.unwrap();
 }
 

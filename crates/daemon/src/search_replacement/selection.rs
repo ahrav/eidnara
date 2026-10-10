@@ -142,7 +142,7 @@ pub struct SearchSelection {
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
     maintenance: Option<disable::Maintenance>,
-    recovery_incarnation: Option<CommitReadIncarnation>,
+    recovery_incarnation: Option<(String, CommitReadIncarnation)>,
     #[cfg(feature = "test-support")]
     disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
     #[cfg(feature = "test-support")]
@@ -206,15 +206,24 @@ impl SearchSelection {
         {
             return Err(BuildError::Invalid("selected family unavailable"));
         }
-        Ok(family.projection.read_within(deadline(budget)?, |conn| {
-            observe(
-                conn,
-                &family.certificate.seed.kernel_incarnation_id,
-                &family.generation(),
-                family.bounds,
-            )?
-            .map_err(|_| ProjectionError::CorruptRow)
-        })?)
+        let observed = family
+            .projection
+            .read_within(deadline(budget)?, |conn| {
+                observe(
+                    conn,
+                    &family.certificate.seed.kernel_incarnation_id,
+                    &family.generation(),
+                    family.bounds,
+                )?
+                .map_err(|_| ProjectionError::CorruptRow)
+            })
+            .map_err(BuildError::from);
+        if let Err(error) = &observed
+            && let Some(kind) = family_damage(error)
+        {
+            family.projection.enter_quarantine(kind, error);
+        }
+        observed
     }
 
     /// Judges the selected family under the gate and the kernel without rehashing its seed or rereading its certificate.
