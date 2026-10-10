@@ -1592,7 +1592,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let run = |exit_code| WitnessRun {
-            test: "daemon::source_recovery_tests".into(),
+            test: "source_recovery_tests".into(),
             source_commit: "c".into(),
             exit_code,
         };
