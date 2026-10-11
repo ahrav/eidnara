@@ -224,6 +224,23 @@ describe("eval-ab", () => {
         },
     );
 
+    it.skipIf(!nodeBin.ok)("refuses a Pi arm when npm is absent", () => {
+        fresh();
+        const bin = join(root, "bin");
+        mkdirSync(bin);
+        symlinkSync(join(nodeBin.ok ? nodeBin.root : "", "node"), join(bin, "node"));
+        const result = run(root, ["--arms", "pi-off", "--sandbox", "off"], {
+            path: `${bin}:/usr/bin:/bin`,
+        });
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("npm");
+            expect(existsSync(join(root, "run"))).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",

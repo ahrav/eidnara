@@ -149,6 +149,59 @@ describe("gateway upstream retries", () => {
 });
 
 describe("forwarding a stream", () => {
+    it("records a disconnect that lands after the last event as a failed call", async () => {
+        const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
+        const records: CallRecord[] = [];
+        const gateway = new BedrockGateway({
+            arm: "test",
+            role: "main",
+            workdir: dumpDir,
+            dumpDir,
+            stripTemperature: false,
+            onCall: (record) => records.push(record),
+        });
+        // The harness drops the connection after the only event, before the provider ends the
+        // stream with messageStop.
+        const disconnected = new AbortController();
+        (gateway as unknown as { client: { send: unknown } }).client.send = async () => ({
+            stream: (async function* () {
+                yield { messageStart: { role: "assistant" } };
+                disconnected.abort();
+            })(),
+        });
+        const sink = {
+            status: () => {},
+            write: () => {},
+            end: () => {},
+            signal: disconnected.signal,
+        };
+        const base = {
+            ts: Date.now(),
+            arm: "test",
+            role: "main" as const,
+            caller: "main" as const,
+            turn: null,
+            estimatedInputTokens: 0,
+            requestBytes: 0,
+        };
+        try {
+            await (
+                gateway as unknown as { forward: (...args: unknown[]) => Promise<void> }
+            ).forward(
+                "model",
+                true,
+                { messages: [] },
+                sink,
+                base,
+                performance.now(),
+                Date.now() + 10_000,
+            );
+            expect(records[0]?.status).toBe(499);
+        } finally {
+            rmSync(dumpDir, { recursive: true, force: true });
+        }
+    });
+
     it("records a stream the harness disconnected from as a failed call", async () => {
         const dumpDir = mkdtempSync(join(tmpdir(), "ab-gateway-"));
         const records: CallRecord[] = [];

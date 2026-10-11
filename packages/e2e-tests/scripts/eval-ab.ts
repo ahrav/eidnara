@@ -221,6 +221,8 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
         await Bun.sleep(opts.sessionGapMs);
     }
     if (arm.host) {
+        // A daemon that cannot answer its status request was not serving the arm; the arm fails
+        // rather than finishing as an Eidnara result.
         try {
             const status = await arm.host.primaryStatus(
                 arm.sessionId() ?? "",
@@ -228,10 +230,9 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
                 "status",
             );
             writeFileSync(join(outDir, "host-status.json"), JSON.stringify(status, null, 2));
-        } catch (error) {
-            log(`status failed: ${String(error).slice(0, 200)}`);
+        } finally {
+            writeFileSync(join(outDir, "host.log"), arm.host.hostLog());
         }
-        writeFileSync(join(outDir, "host.log"), arm.host.hostLog());
     }
     await arm.stop();
     writeFileSync(join(outDir, "done.json"), JSON.stringify({ ts: Date.now() }));
@@ -276,6 +277,10 @@ async function main(): Promise<void> {
         const found = check();
         if (!found.ok)
             throw new Error(`${harness} arms need the pinned toolchain: ${found.reason}`);
+    }
+    // A Pi arm installs the pinned Pi CLI through npm at its first session.
+    if (harnesses.has("pi") && !Bun.which("npm")) {
+        throw new Error("pi arms need npm on PATH to install the pinned Pi CLI");
     }
     // An Eidnara arm materializes both harness closures, so it needs npm and both toolchains.
     if (eidnaraArms) {

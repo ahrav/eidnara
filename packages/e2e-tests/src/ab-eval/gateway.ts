@@ -554,6 +554,7 @@ export class BedrockGateway {
             cacheWriteInputTokens: 0,
         };
         let firstByteMs: number | null = null;
+        let ended = false;
         let status = 200;
         let error: string | undefined;
         let headersSent = false;
@@ -606,6 +607,7 @@ export class BedrockGateway {
                         if (firstByteMs === null) firstByteMs = performance.now() - started;
                         if (type === "metadata")
                             Object.assign(usage, (member as { usage?: object }).usage ?? {});
+                        if (type === "messageStop") ended = true;
                         // Bedrock reports a failure after the response began as a stream member,
                         // so the record carries it as the call's outcome while the harness
                         // still receives the event.
@@ -615,6 +617,12 @@ export class BedrockGateway {
                         }
                         sink.write(encodeEvent(type, member));
                     }
+                }
+                // A disconnect between the last event and the stream's end leaves the same
+                // short response as one seen mid-stream.
+                if (sink.signal.aborted && !ended && status === 200) {
+                    status = 499;
+                    error = "client disconnected before the stream ended";
                 }
             } else {
                 const response = await send(new ConverseCommand({ ...body, modelId } as never));

@@ -255,6 +255,28 @@ export abstract class Arm {
     }
 }
 
+/** The answer and failure of a Pi turn, read from the `agent_end` messages. */
+export function piOutcome(messages: Array<Record<string, unknown>>): Omit<PromptResult, "ms"> {
+    const textOf = (m: Record<string, unknown> | undefined): string =>
+        ((m?.content as Array<Record<string, unknown>> | undefined) ?? [])
+            .filter((b) => b.type === "text")
+            .map((b) => String(b.text))
+            .join("\n")
+            .trim();
+    // The final assistant message is the turn's result; an earlier message's text would stand
+    // in for a response that was aborted or failed.
+    const assistants = messages.filter((m) => m.role === "assistant");
+    const last = assistants[assistants.length - 1];
+    const answer = textOf(last);
+    const stop =
+        last?.stopReason === "error"
+            ? String(last.errorMessage ?? "error")
+            : last?.stopReason === "aborted"
+              ? "aborted"
+              : undefined;
+    return { answer, ...(stop ? { error: stop } : {}) };
+}
+
 export function inheritedHarnessEnv(source: NodeJS.ProcessEnv): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(source)) {
@@ -264,6 +286,9 @@ export function inheritedHarnessEnv(source: NodeJS.ProcessEnv): Record<string, s
     }
     return env;
 }
+
+/** Pi's stdout carried a line outside the RPC protocol, so the arm's result channel is corrupt. */
+class RpcOutputError extends Error {}
 
 export class PiArm extends Arm {
     private rpc: PiRpcProcess | null = null;
@@ -394,6 +419,7 @@ export class PiArm extends Arm {
             signal: cancel.signal,
         });
         end.catch(() => undefined);
+        const malformedBefore = rpc.getMalformedLines().length;
         const work = this.command("prompt", { message: text }, timeoutMs).then(() => end);
         try {
             const outcome = await settleWithin(work, timeoutMs, {
@@ -401,23 +427,20 @@ export class PiArm extends Arm {
                 drainMs: DRAIN_MS,
             });
             const ms = performance.now() - started;
+            // A line outside the RPC protocol on Pi's stdout means the plugin or the CLI broke
+            // the channel the arm reads its results through; the arm ends there.
+            const malformed = rpc.getMalformedLines().slice(malformedBefore);
+            if (malformed.length > 0) {
+                throw new RpcOutputError(
+                    `Pi wrote ${malformed.length} line(s) outside the RPC protocol: ${malformed[0]?.slice(0, 200)}`,
+                );
+            }
             if (outcome.timedOut) return { answer: "", ms, error: "timeout" };
             const messages =
                 (outcome.value.messages as Array<Record<string, unknown>> | undefined) ?? [];
-            const textOf = (m: Record<string, unknown> | undefined): string =>
-                ((m?.content as Array<Record<string, unknown>> | undefined) ?? [])
-                    .filter((b) => b.type === "text")
-                    .map((b) => String(b.text))
-                    .join("\n")
-                    .trim();
-            const assistants = messages.filter((m) => m.role === "assistant");
-            const last = assistants[assistants.length - 1];
-            const answer = textOf([...assistants].reverse().find((m) => textOf(m).length > 0));
-            const stop =
-                last?.stopReason === "error" ? String(last.errorMessage ?? "error") : undefined;
-            return { answer, ms, ...(stop ? { error: stop } : {}) };
+            return { ms, ...piOutcome(messages) };
         } catch (error) {
-            if (error instanceof StillRunningError) throw error;
+            if (error instanceof StillRunningError || error instanceof RpcOutputError) throw error;
             return {
                 answer: "",
                 ms: performance.now() - started,

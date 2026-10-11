@@ -3,7 +3,15 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Arm, armSpec, inheritedHarnessEnv, OpencodeArm, PiArm, type PromptResult } from "./arms";
+import {
+    Arm,
+    armSpec,
+    inheritedHarnessEnv,
+    OpencodeArm,
+    PiArm,
+    type PromptResult,
+    piOutcome,
+} from "./arms";
 import { descendants } from "./procs";
 
 describe("Pi arm process", () => {
@@ -189,6 +197,58 @@ describe("OpenCode arm process", () => {
             (arm as unknown as { oc: unknown; servePid: number }).oc = { port: 65_431 };
             (arm as unknown as { servePid: number }).servePid = process.pid;
             expect(arm.harnessPid()).toBeUndefined();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("Pi prompt outcome", () => {
+    const text = (t: string, extra: Record<string, unknown> = {}) => ({
+        role: "assistant",
+        content: [{ type: "text", text: t }],
+        ...extra,
+    });
+
+    it("reads the answer and the failure from the final assistant message", () => {
+        expect(piOutcome([text("draft"), text("final", { stopReason: "stop" })])).toEqual({
+            answer: "final",
+        });
+        expect(
+            piOutcome([text("draft"), { role: "assistant", content: [], stopReason: "aborted" }]),
+        ).toEqual({ answer: "", error: "aborted" });
+        expect(
+            piOutcome([
+                text("draft"),
+                { role: "assistant", content: [], stopReason: "error", errorMessage: "boom" },
+            ]),
+        ).toEqual({ answer: "", error: "boom" });
+    });
+});
+
+describe("Pi RPC output", () => {
+    it("fails a turn after which Pi wrote lines outside the RPC protocol", async () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-pi-arm-"));
+        try {
+            const arm = new PiArm(armSpec("pi-off"), {
+                root,
+                resultsDir: root,
+                workdir: root,
+                sandboxDir: "",
+                enforceWindow: false,
+                onCall: () => {},
+                fixtureBin: "/nonexistent/fixture",
+            });
+            const malformed: string[] = [];
+            (arm as unknown as { rpc: unknown }).rpc = {
+                sendCommand: async () => {
+                    malformed.push("plugin: unexpected stdout line");
+                    return { success: true, data: {} };
+                },
+                waitForEvent: async () => ({ messages: [] }),
+                getMalformedLines: () => malformed,
+            };
+            await expect(arm.prompt("hello", 1_000)).rejects.toThrow(/RPC/);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
