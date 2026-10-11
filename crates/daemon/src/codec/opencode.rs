@@ -19,7 +19,7 @@ use crate::wire::{
 
 use super::sidecar::{
     BlockMeta, DecodeSidecar, DecodedHarnessMessages, ExtractedBoundary, HarnessMessageMeta,
-    block_is_unchanged, decoded_block_fingerprint, is_synthetic_part, match_block_metas,
+    decoded_block_fingerprint, is_synthetic_part, json_holds_float_zero, match_block_metas,
     meta_for_ck, stable_hash_prefix, stamp_block_identity,
 };
 
@@ -607,9 +607,13 @@ fn encode_with_meta(
             };
 
             if let Some(part) = shared_native_index.and_then(|index| parts.get_mut(index)) {
-                for (arc_block, arc_meta) in [(block, block_meta), (result, result_meta)] {
-                    if !arc_meta.is_some_and(|meta| block_is_unchanged(arc_block, meta)) {
-                        update_part_from_block(part, arc_block);
+                for (arc_index, arc_meta) in
+                    [(block_index, block_meta), (block_index + 1, result_meta)]
+                {
+                    if !arc_meta.is_some_and(|meta| {
+                        matched_metas.block_is_unchanged(msg.content(), arc_index, meta)
+                    }) {
+                        update_part_from_block(part, &msg.content()[arc_index]);
                     }
                 }
                 block_index += 2;
@@ -629,7 +633,9 @@ fn encode_with_meta(
         if let Some(part_index) = block_meta.and_then(|block_meta| block_meta.native_index)
             && let Some(part) = parts.get_mut(part_index)
         {
-            if block_meta.is_some_and(|meta| block_is_unchanged(block, meta)) {
+            if block_meta.is_some_and(|meta| {
+                matched_metas.block_is_unchanged(msg.content(), block_index, meta)
+            }) {
                 block_index += 1;
                 continue;
             }
@@ -668,7 +674,9 @@ fn encode_with_meta(
             "parts": parts,
         });
     }
-    if raw == *meta.raw {
+    // JSON value equality treats `0.0` and `-0.0` as equal although they serialize apart, so
+    // returning `meta.raw` for an equal envelope preserves the original float-zero signs.
+    if json_holds_float_zero(&meta.raw) && raw == *meta.raw {
         meta.raw.as_ref().clone()
     } else {
         raw
@@ -1622,6 +1630,33 @@ mod tests {
         assert_eq!(parts[1]["text"], "§3§ Queue is x.");
         assert_eq!(parts[1]["time"], raw[0]["parts"][1]["time"]);
         assert_eq!(parts[2]["state"]["output"], "§4§ out");
+    }
+
+    #[test]
+    fn value_equal_envelope_keeps_native_float_zero_signs() {
+        let raw = vec![json!({
+            "info": { "id": "msg_zero", "role": "assistant" },
+            "parts": [{
+                "id": "prt_tool", "type": "tool", "callID": "call_zero", "tool": "probe",
+                "state": { "status": "running", "input": { "offset": -0.0 } }
+            }]
+        })];
+        let decoded = decode_opencode(&raw);
+        let mut message = decoded.messages[0].ck.clone();
+        for block in message.content_mut() {
+            block
+                .provider_extras
+                .remove(crate::codec::sidecar::BLOCK_IDENTITY_NAMESPACE);
+            if let BlockKind::ToolCall { input, .. } = block.kind_mut() {
+                *input = json!({ "offset": 0.0 });
+            }
+        }
+
+        let served = encode_opencode(&[message], &decoded.sidecar, None);
+        assert_eq!(
+            serde_json::to_string(&served[0]).unwrap(),
+            serde_json::to_string(&raw[0]).unwrap()
+        );
     }
 
     #[test]
