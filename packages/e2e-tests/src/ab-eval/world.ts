@@ -1028,6 +1028,10 @@ export function grade(fact: Fact, answer: string): Grade {
     // An abstention beside a guessed value is a guess; the question's own subject words, which
     // a larger project's component names can shape like codenames, are set aside first.
     if (fact.kind === "abstain") {
+        // The probe asks for the value or UNKNOWN, so a first line that is UNKNOWN alone is the
+        // answer; later lines may cite other components' values as evidence.
+        const lead = answer.trim().split("\n", 1)[0] ?? "";
+        if (/^\W*UNKNOWN\W*$/i.test(lead)) return "correct";
         const rest = fact.subject
             .split(/\s+/)
             .filter((word) => word.length > 0)

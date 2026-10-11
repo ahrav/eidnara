@@ -90,6 +90,16 @@ describe("A/B world", () => {
         // A hedge beside a guessed value is a guess.
         expect(grade(abstain, "I don't know; maybe 41234")).toBe("wrong");
         expect(grade(abstain, "Not sure, perhaps amber-falcon-42")).toBe("wrong");
+        expect(
+            grade(
+                abstain,
+                "UNKNOWN\n\nMemory has no value for it. The only ones saved are export-worker (69835) and auth-gateway (gilded-badger-54).",
+            ),
+        ).toBe("correct");
+        expect(grade(abstain, "Unknown\n\nThe only saved value is export-worker (69835).")).toBe(
+            "correct",
+        );
+        expect(grade(abstain, "UNKNOWN, maybe 41234")).toBe("wrong");
     });
 });
 
