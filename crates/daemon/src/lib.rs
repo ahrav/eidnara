@@ -1811,13 +1811,14 @@ impl TransformRequest {
         self.effective_execute_threshold.unwrap_or_else(fallback)
     }
 
-    /// The ready snapshot of this request. The clone shares the CK message `Arc`s, so the only
-    /// copy it discards is the native pointer vector.
     fn ready_snapshot(&self) -> Self {
         Self {
             native_messages: None,
             serve_native: false,
-            coverage: None,
+            coverage: self
+                .coverage
+                .as_deref()
+                .map(|coverage| Arc::new(coverage.resolution_only())),
             ..self.clone()
         }
     }
@@ -1903,6 +1904,23 @@ impl TransformRequest {
             .as_ref()
             .and_then(Option::as_ref)
             .map_or(0, |anchor| anchor.mid.capacity());
+        let coverage = self.coverage.as_deref().map_or(0, |coverage| {
+            let resolved = &coverage.resolved;
+            ARC_ALLOCATION_OVERHEAD_BYTES
+                .saturating_add(size_of::<transform::WindowCoverage>())
+                .saturating_add(
+                    resolved
+                        .ordinals
+                        .capacity()
+                        .saturating_mul(size_of::<u64>()),
+                )
+                .saturating_add(resolved.anchor.as_ref().map_or(0, |anchor| {
+                    anchor
+                        .start_message_id
+                        .capacity()
+                        .saturating_add(anchor.end_message_id.capacity())
+                }))
+        });
         let constituents = self
             .constituents
             .capacity()
@@ -1926,6 +1944,7 @@ impl TransformRequest {
             .saturating_add(prompt_surface)
             .saturating_add(messages)
             .saturating_add(boundary)
+            .saturating_add(coverage)
             .saturating_add(constituents)
             .saturating_add(ARC_ALLOCATION_OVERHEAD_BYTES)
             .saturating_add(cache_metadata)
@@ -7457,7 +7476,7 @@ impl HandlerCore {
                 "wrapup unavailable until a full session transform has been observed",
             );
         }
-        let projection = match crate::wire::project_messages(&parsed.messages) {
+        let projection = match transform::window_projection(&parsed).project() {
             Ok(projection) => projection,
             Err(error) => {
                 return Self::retryable_wrapup_response(
@@ -39620,6 +39639,55 @@ mod tests {
         assert_eq!(body["disposition"], json!("nothing_to_compact"));
         assert_eq!(body["rounds"], json!(0));
         assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// A segment can end on a tool result, so the next window opens on a result whose call the
+    /// segment covers. The pass's ready snapshot projects that head as covered for wrapup too.
+    #[tokio::test(flavor = "current_thread")]
+    async fn wrapup_projects_a_snapshot_window_that_opens_on_a_covered_tool_result() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        store
+            .replace_history_segments("ses", &[stored_comp(1, 1, 40, "result-40", "covered")])
+            .unwrap();
+        let loaded = store.load("ses").unwrap();
+        let mut core = loaded.core.clone();
+        core.boundary_id = "result-40#0".to_string();
+        let mut meta = loaded.meta.clone();
+        meta.coverage_ordinal = Some(40);
+        store
+            .commit("ses", loaded.row_version, &core, &meta)
+            .unwrap();
+        let mut messages = vec![tool_result("result-40", 40, "covered output")];
+        messages.extend((41..=120).map(|ordinal| {
+            wire_with_role(
+                &format!("m{ordinal}"),
+                ordinal,
+                if ordinal % 2 == 0 {
+                    "assistant"
+                } else {
+                    "user"
+                },
+                &format!("message {ordinal} {}", "word ".repeat(800)),
+            )
+        }));
+        let mut pass = request_with_usage(messages, 1, 200_000);
+        pass["boundary"] = json!({ "mid": "result-40", "sequence": 1 });
+        let response = call_transform_request(&handler, pass).await;
+        assert_eq!(response["status"], "ok", "{response}");
+
+        let body = tool_body(
+            handler
+                .dispatch_value(
+                    test_route(7),
+                    json!({ "method": "session.wrapup", "v": 1, "session_id": "ses" }),
+                )
+                .await,
+        );
+        assert_eq!(body["ok"], json!(true), "{body}");
+        assert_eq!(body["disposition"], json!("completed"), "{body}");
+        assert!(producer.starts.load(Ordering::SeqCst) > 0);
     }
 
     /// The wrapup's entry load reads the full row before any scalar `meta` read, so a row

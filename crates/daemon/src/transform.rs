@@ -615,6 +615,15 @@ pub(crate) struct WindowCoverage {
     cut_prefix: Vec<Arc<IngressMessage>>,
 }
 
+impl WindowCoverage {
+    pub(crate) fn resolution_only(&self) -> Self {
+        Self {
+            resolved: self.resolved.clone(),
+            cut_prefix: Vec::new(),
+        }
+    }
+}
+
 /// The host resolves context geometry into a shape shared by OpenCode and Claude Code.
 /// `derivation` records the rule and numeric inputs used to calculate the geometry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2440,7 +2449,7 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
 
 /// The projection of a resolved window. An anchored window starts at its anchor's end message,
 /// which the anchor covers, so that message's tool results may answer calls before the window.
-fn window_projection(request: &TransformRequest) -> wire::MessageProjection<'_> {
+pub(crate) fn window_projection(request: &TransformRequest) -> wire::MessageProjection<'_> {
     let projection = wire::MessageProjection::new(&request.messages);
     let head_covered = request
         .coverage
