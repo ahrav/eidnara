@@ -81,6 +81,7 @@ pub(crate) enum RowSelection<'a> {
     All,
     /// Applied in the kernel query, so a targeted lookup addresses a row the bounded unfiltered read drops.
     Objects(&'a [String]),
+    /// Applied in the kernel query as well; `keeps` re-checks each returned row.
     DomainDecisions(&'a str),
 }
 
@@ -170,14 +171,20 @@ pub(crate) fn read_visible(
         Some(as_of) => as_of,
         None => store.tip()?,
     };
-    let object_ids = match selection {
-        RowSelection::Objects(ids) => Some(ids),
-        RowSelection::All | RowSelection::DomainDecisions(_) => None,
-    };
     // The kernel keeps rows whose scope names another project out of the
-    // snapshot, so the read costs the project's rows and not the store's.
-    let visible =
-        store.visible_as_of_in_scope(surface, requested, object_ids, Some(project.scope_term()))?;
+    // snapshot, so the read costs the project's rows and not the store's. A
+    // domain selection is matched in the kernel query too, so rows of other
+    // domains are never decoded or judged.
+    let scope = Some(project.scope_term());
+    let visible = match selection {
+        RowSelection::All => store.visible_as_of_in_scope(surface, requested, None, scope)?,
+        RowSelection::Objects(ids) => {
+            store.visible_as_of_in_scope(surface, requested, Some(ids), scope)?
+        }
+        RowSelection::DomainDecisions(domain_id) => {
+            store.visible_domain_decisions_as_of_in_scope(surface, requested, domain_id, scope)?
+        }
+    };
     let mut filter = ScopeFilter::new(project);
     let mut terms = stored_terms(store);
     // `ScopeFilter` judges scope-term operators the kernel query keeps for the caller, so the row bound cannot be a SQL `LIMIT`; it applies here, after the filter.

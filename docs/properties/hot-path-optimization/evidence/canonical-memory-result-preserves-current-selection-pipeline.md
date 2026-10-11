@@ -53,7 +53,11 @@ lineage restrictions, and both row and payload boundaries. Existing checks are
   excluded row can affect the baseline outcome before filtering.
 - Missing evidence: The proposed pushdown and an owner decision for these errors
   are not supplied. The fixed reference identity does not approve suppression.
-- Conclusion: Error observability remains an owner gate before M1 pushdown.
+- Later finding (#443): the owner approved suppression. The memory read's
+  query matches `o.domain_id=:domain_id AND o.object_kind='decision'` before
+  any row is decoded, so a corrupt row outside the domain no longer withholds
+  memory; a read that serves that row still decodes it and fails on it.
+- Conclusion: Error observability was an owner gate before M1 pushdown; the owner decision closes it.
   Oracle packaging as a test-only adapter or reference executable is a test-design
   choice, not an open semantic acceptance rule; candidate helpers are not oracles.
 

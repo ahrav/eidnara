@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "283aa10bdc19af0174f0f33b599cc9b76fb4613d30687e33a5c553af6d68a4e4";
+    "0dd165ceb9e495cdd759a48aae095fb557beb21558c7402e04a72a7197247a78";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -2912,8 +2912,39 @@ impl KernelStore {
         let ids = ids
             .map(|ids| serde_json::to_string(ids).map_err(|_| KernelError::InvalidInput))
             .transpose()?;
+        let selection = ids
+            .as_deref()
+            .map_or(ServedSelection::All, ServedSelection::Named);
+        self.visible_selected_as_of(surface, requested, selection, scope)
+    }
+
+    /// [`Self::visible_as_of_in_scope`] restricted to the decision objects of `domain_id`. The domain and kind are
+    /// matched in SQL before any row is read, so rows of other domains are neither decoded nor counted against a
+    /// caller's bounds, and a corrupt row outside the domain never fails this read.
+    pub fn visible_domain_decisions_as_of_in_scope(
+        &self,
+        surface: Surface,
+        requested: i64,
+        domain_id: &str,
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<VisibleAsOf, KernelError> {
+        self.visible_selected_as_of(
+            surface,
+            requested,
+            ServedSelection::DomainDecisions(domain_id),
+            scope,
+        )
+    }
+
+    fn visible_selected_as_of(
+        &self,
+        surface: Surface,
+        requested: i64,
+        selection: ServedSelection<'_>,
+        scope: Option<ScopeTermFilter<'_>>,
+    ) -> Result<VisibleAsOf, KernelError> {
         let (tip, rows) = self.read_snapshot(requested, |tx, _| {
-            let rows = served_rows(tx, surface, requested, ids.as_deref(), scope)?
+            let rows = served_rows(tx, surface, requested, selection, scope)?
                 .into_iter()
                 .filter_map(|(object, visibility, scope_id)| match visibility {
                     SurfaceVisibility::Hidden => None,
@@ -3169,10 +3200,10 @@ fn served_rows(
     tx: &Transaction<'_>,
     surface: Surface,
     requested: i64,
-    ids: Option<&str>,
+    selection: ServedSelection<'_>,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<(ObjectRow, SurfaceVisibility, Option<String>)>, KernelError> {
-    Ok(served_classes(tx, requested, ids, scope)?
+    Ok(served_classes_selected(tx, requested, selection, scope)?
         .into_iter()
         .map(|row| {
             let visibility = row.visibility(surface);
@@ -3181,13 +3212,26 @@ fn served_rows(
         .collect())
 }
 
-/// Whether a served-class query names its objects or covers every object at the snapshot.
+/// Which objects a served-class query returns. Each shape is its own prepared statement, so every predicate it
+/// carries is a plain equality the planner can serve from an index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IdsPredicate {
     /// `:ids` is a JSON string array and only those objects are returned.
     Named,
     /// Every object at the snapshot is returned.
     All,
+    /// Only decision objects of the domain `:domain_id` are returned.
+    DomainDecisions,
+}
+
+/// The objects a served-class read returns, with the bound value its statement shape needs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ServedSelection<'a> {
+    All,
+    /// A JSON string array of object identifiers.
+    Named(&'a str),
+    /// Decision objects of one domain.
+    DomainDecisions(&'a str),
 }
 
 /// The served-class query text for one `ids` shape. It embeds only constants, so each shape is identical on every call.
@@ -3206,15 +3250,20 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
     // set term in the scope algebra, so the prefilter keeps every scope
     // constrained on the dimension for the caller to judge.
     let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
-    let own_approval_valid = approval_chain_valid_at_snapshot_sql("d.approval_object_id");
-    let lineage_approval_valid = approval_chain_valid_at_snapshot_sql("s.approval_object_id");
+    // Each distinct approval is judged once, however many served rows name it as their own or lineage approval.
+    let approval_valid = approval_chain_valid_at_snapshot_sql("ap.approval_object_id");
     let ids_predicate = match ids {
         IdsPredicate::Named => "AND o.object_id IN (SELECT value FROM json_each(:ids))",
         IdsPredicate::All => "",
+        IdsPredicate::DomainDecisions => "AND o.domain_id=:domain_id AND o.object_kind='decision'",
     };
     format!(
-        "SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
-                    o.source_revision,o.created_commit_seq,NULL,NULL,o.sensitivity_class,
+        "WITH served AS MATERIALIZED (
+             SELECT o.object_id AS o_object_id,o.object_kind AS o_object_kind,
+                    o.domain_id AS o_domain_id,o.source_kind AS o_source_kind,
+                    o.source_id AS o_source_id,o.source_revision AS o_source_revision,
+                    o.created_commit_seq AS o_created_commit_seq,
+                    o.sensitivity_class AS o_sensitivity_class,
                     d.maturity AS d_maturity,
                     d.effective_maturity AS d_effective_maturity,
                     d.disposition AS d_disposition,d.visibility AS d_visibility,
@@ -3242,8 +3291,6 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
                     {own_history_inconsistent} AS own_history_inconsistent,
                     COALESCE(dec.scope_id,obs.scope_id) AS scope_id,
                     ev.sensitivity_class AS evidence_sensitivity_class,
-                    {own_approval_valid} AS d_approval_valid,
-                    {lineage_approval_valid} AS s_approval_valid,
                     cited.sensitivity_class AS cited_evidence_sensitivity_class,
                     d_trigger.sensitivity_class AS d_trigger_sensitivity_class,
                     d_trigger_ev.sensitivity_class AS d_trigger_evidence_sensitivity_class,
@@ -3284,7 +3331,42 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
                                OR EXISTS(SELECT 1 FROM json_each(t.set_values)
                                          WHERE value=:scope_value
                                             OR {set_redacted}))))
-             ORDER BY o.object_id"
+         ),
+         approvals(approval_object_id) AS (
+             SELECT d_approval_object_id FROM served WHERE d_approval_object_id IS NOT NULL
+             UNION
+             SELECT s_approval_object_id FROM served WHERE s_approval_object_id IS NOT NULL
+         ),
+         approval_valid(approval_object_id,valid) AS MATERIALIZED (
+             SELECT ap.approval_object_id,{approval_valid} FROM approvals ap
+         )
+         SELECT served.o_object_id AS object_id,served.o_object_kind AS object_kind,
+                served.o_domain_id AS domain_id,served.o_source_kind AS source_kind,
+                served.o_source_id AS source_id,served.o_source_revision AS source_revision,
+                served.o_created_commit_seq AS created_commit_seq,NULL,NULL,
+                served.o_sensitivity_class AS sensitivity_class,
+                served.d_maturity,served.d_effective_maturity,served.d_disposition,
+                served.d_visibility,served.d_taint_class,served.d_source_class,
+                served.d_policy_revision,served.d_sensitivity_class,served.d_approval_object_id,
+                served.s_maturity,served.s_effective_maturity,served.s_disposition,
+                served.s_visibility,served.s_taint_class,served.s_source_class,
+                served.s_policy_revision,served.s_sensitivity_class,served.s_approval_object_id,
+                served.accepted_decision,served.history_sensitivity_class,
+                served.own_history_inconsistent,served.scope_id,
+                served.evidence_sensitivity_class,
+                CASE WHEN served.d_approval_object_id IS NULL THEN 0 ELSE dv.valid END
+                    AS d_approval_valid,
+                CASE WHEN served.s_approval_object_id IS NULL THEN 0 ELSE sv.valid END
+                    AS s_approval_valid,
+                served.cited_evidence_sensitivity_class,
+                served.d_trigger_sensitivity_class,
+                served.d_trigger_evidence_sensitivity_class,
+                served.s_trigger_sensitivity_class,
+                served.s_trigger_evidence_sensitivity_class
+         FROM served
+         LEFT JOIN approval_valid dv ON dv.approval_object_id=served.d_approval_object_id
+         LEFT JOIN approval_valid sv ON sv.approval_object_id=served.s_approval_object_id
+         ORDER BY served.o_object_id"
     )
 }
 // policy-digest:serving-end
@@ -3296,26 +3378,46 @@ pub(crate) fn served_classes(
     ids: Option<&str>,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<ServedRow>, KernelError> {
+    let selection = ids.map_or(ServedSelection::All, ServedSelection::Named);
+    served_classes_selected(tx, requested, selection, scope)
+}
+
+/// [`served_classes`] for any [`ServedSelection`]; only the selected objects' rows are read and decoded.
+pub(crate) fn served_classes_selected(
+    tx: &Transaction<'_>,
+    requested: i64,
+    selection: ServedSelection<'_>,
+    scope: Option<ScopeTermFilter<'_>>,
+) -> Result<Vec<ServedRow>, KernelError> {
     // Each shape's text is identical on every call, so building it once lets `prepare_cached` hash a stable string instead of a per-call `format!`.
     static NAMED_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::Named));
     static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::All));
-    let sql = match ids {
-        Some(_) => NAMED_SQL.as_str(),
-        None => ALL_SQL.as_str(),
+    static DOMAIN_SQL: LazyLock<String> =
+        LazyLock::new(|| served_classes_sql(IdsPredicate::DomainDecisions));
+    let sql = match selection {
+        ServedSelection::Named(_) => NAMED_SQL.as_str(),
+        ServedSelection::All => ALL_SQL.as_str(),
+        ServedSelection::DomainDecisions(_) => DOMAIN_SQL.as_str(),
     };
     let mut statement = tx.prepare_cached(sql).map_err(map_sqlite)?;
     assert_served_columns(&statement);
     let scope_dimension = scope.map(|scope| scope.dimension.as_str());
     let scope_value = scope.map(|scope| scope.value);
-    // Binding a name the statement lacks is an error, and only the named shape has `:ids`.
-    let params: &[(&str, &dyn rusqlite::ToSql)] = match &ids {
-        Some(ids) => &[
+    // Binding a name the statement lacks is an error, so each shape binds only its own selector.
+    let params: &[(&str, &dyn rusqlite::ToSql)] = match &selection {
+        ServedSelection::Named(ids) => &[
             (":governing_as_of", &requested),
             (":ids", ids),
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
         ],
-        None => &[
+        ServedSelection::DomainDecisions(domain_id) => &[
+            (":governing_as_of", &requested),
+            (":domain_id", domain_id),
+            (":scope_dimension", &scope_dimension),
+            (":scope_value", &scope_value),
+        ],
+        ServedSelection::All => &[
             (":governing_as_of", &requested),
             (":scope_dimension", &scope_dimension),
             (":scope_value", &scope_value),
@@ -5207,6 +5309,51 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(policy));
         assert_eq!(POLICY_REVISION, 1);
         assert_eq!(digest, REVISION_1_SOURCE_DIGEST);
+    }
+
+    /// A domain read seeks the registry's domain index, so its cost follows the domain's objects rather than the
+    /// store's, and every distinct approval is judged once in its own materialized step.
+    #[test]
+    fn served_classes_for_one_domain_seek_the_domain_index_and_judge_approvals_once() {
+        let directory = tempfile::tempdir().unwrap();
+        KernelStore::open(directory.path()).unwrap();
+        let connection = rusqlite::Connection::open_with_flags(
+            directory.path().join("kernel.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                served_classes_sql(IdsPredicate::DomainDecisions)
+            ))
+            .unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::named_params! {
+                    ":governing_as_of": 1_i64,
+                    ":domain_id": "memory",
+                    ":scope_dimension": Option::<&str>::None,
+                    ":scope_value": Option::<&str>::None,
+                },
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let registry = plan
+            .iter()
+            .find(|step| step.contains(" o ") || step.ends_with(" o"))
+            .unwrap_or_else(|| panic!("no plan step for object_registry o in {plan:?}"));
+        assert!(
+            registry.starts_with("SEARCH o USING") && registry.contains("idx_objects_domain_fk"),
+            "expected a domain seek on object_registry, planner chose: {registry}"
+        );
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("MATERIALIZE approval_valid")),
+            "approvals are judged in one materialized step: {plan:?}"
+        );
     }
 
     /// Named object lookups must seek the append-only registry; a scan grows with every registered object.
