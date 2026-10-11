@@ -1,0 +1,359 @@
+import {
+    appendFileSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    realpathSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import { probeCapabilities } from "@eidnara/shm-native";
+import { type Arm, armRoot, armSpec, makeArm, type PromptResult } from "../src/ab-eval/arms";
+import type { CallRecord } from "../src/ab-eval/gateway";
+import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
+import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
+import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
+import {
+    buildWorld,
+    gradeOutcome,
+    initRepo,
+    PROJECT_SIZES,
+    type World,
+    writeRepo,
+} from "../src/ab-eval/world";
+import {
+    detectHarnessRuntimeSources,
+    pinnedNodeOnPath,
+    pinnedOpencodeOnPath,
+} from "../src/bedrock-peer/harness-runtime";
+import {
+    cargoBuildExampleArgs,
+    DIRECT_HOST_FIXTURE,
+    isExecutableFile,
+} from "../src/rust-runner/daemon-examples";
+
+const REPO_ROOT = resolve(import.meta.dir, "../../..");
+
+interface Options {
+    tier: string;
+    seed: number;
+    arms: string[];
+    out: string;
+    /** True when `out` is the default timestamped directory, which `runs/latest` then names. */
+    linkLatest: boolean;
+    paceMs: number;
+    sessionGapMs: number;
+    fixtureBin: string;
+    sandbox: boolean;
+    enforceWindow: boolean;
+    projectSize: string;
+    /** `session:turn` keys before whose prompt the arm's daemon stops for `stallMs`. */
+    stallAt: Set<string>;
+    stallMs: number;
+}
+
+function parseArgs(argv: string[]): Options {
+    /** Positions `get` consumed, as a flag or its operand; every argument must be one of them. */
+    const consumed = new Set<number>();
+    const get = (name: string, fallback: string): string => {
+        const flag = `--${name}`;
+        const i = argv.indexOf(flag);
+        if (i < 0) return fallback;
+        if (argv.indexOf(flag, i + 1) >= 0) throw new Error(`${flag} given twice`);
+        const value = argv[i + 1];
+        if (value === undefined || value.startsWith("--")) throw new Error(`${flag} needs a value`);
+        consumed.add(i).add(i + 1);
+        return value;
+    };
+    const num = (name: string, fallback: string): number => {
+        const value = Number(get(name, fallback));
+        if (!Number.isFinite(value) || value < 0) {
+            throw new Error(`--${name} must be a non-negative number`);
+        }
+        return value;
+    };
+    // The world's generator keeps the low 32 bits of the seed, so wider or fractional seeds
+    // would label one world with several seed values.
+    const seed = num("seed", "7");
+    if (!Number.isInteger(seed) || seed >= 2 ** 32) {
+        throw new Error("--seed must be an integer below 2^32");
+    }
+    const choice = <T extends string>(name: string, values: readonly T[], fallback: T): T => {
+        const value = get(name, fallback);
+        if (!values.includes(value as T)) {
+            throw new Error(`--${name} ${JSON.stringify(value)}; accepted: ${values.join(", ")}`);
+        }
+        return value as T;
+    };
+    const out = get("out", "");
+    const arms = get("arms", "pi-on,pi-off,oc-on,oc-off").split(",");
+    const repeated = arms.find((name, i) => arms.indexOf(name) !== i);
+    if (repeated !== undefined) throw new Error(`--arms names ${repeated} twice`);
+    const sandbox = choice("sandbox", ["auto", "on", "off"], "auto");
+    const options: Options = {
+        tier: get("tier", "xs"),
+        seed,
+        arms,
+        out: out ? resolve(out) : timestampedRunDir(join(tmpdir(), "ab-eval/runs")),
+        linkLatest: !out,
+        paceMs: num("pace-ms", "1500"),
+        sessionGapMs: num("session-gap-ms", "30000"),
+        fixtureBin: resolve(
+            get("fixture-bin", join(REPO_ROOT, "target/release/examples/direct_host_fixture")),
+        ),
+        sandbox: sandbox === "auto" ? sandboxAvailable() : sandbox === "on",
+        stallAt: new Set(
+            get("stall-at", "")
+                .split(",")
+                .filter((key) => key.length > 0),
+        ),
+        stallMs: num("stall-ms", "6000"),
+        enforceWindow: choice("enforce-window", ["on", "off"], "on") === "on",
+        projectSize: choice("project-size", Object.keys(PROJECT_SIZES), "small"),
+    };
+    const unexpected = argv.filter((_, i) => !consumed.has(i));
+    if (unexpected.length > 0) throw new Error(`unexpected arguments: ${unexpected.join(", ")}`);
+    return options;
+}
+
+function prepareWorkdir(world: World, dir: string): void {
+    mkdirSync(dir, { recursive: true });
+    writeRepo(world, dir);
+    writeFileSync(join(dir, ".gitignore"), ".runs/\n");
+    initRepo(dir);
+}
+
+async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Promise<void> {
+    const turnsFile = join(outDir, "turns.jsonl");
+    const log = (msg: string) => console.log(`[${arm.spec.name}] ${msg}`);
+    await arm.start();
+    log("started");
+    for (const session of world.sessions) {
+        await arm.openSession(session.index);
+        log(`session ${session.index} open (${arm.sessionId()})`);
+        for (const turn of session.turns) {
+            const key = `${session.index}:${turn.index}`;
+            const probed = turn.probe
+                ? world.facts.find((f) => f.id === turn.probe?.factId)
+                : undefined;
+            const timeout = turn.kind === "probe" ? 900_000 : 600_000;
+            arm.setTurn({
+                key,
+                turn,
+                probe:
+                    probed && probed.kind !== "abstain"
+                        ? {
+                              answer: probed.answer,
+                              ...(probed.stale ? { stale: probed.stale } : {}),
+                          }
+                        : null,
+                deadlineAt: Date.now() + timeout,
+            });
+            const mismatchesBefore = arm.main.scriptMismatches;
+            const forwardedBefore = arm.main.forwardedCalls;
+            const hostPid = arm.hostPid();
+            let resume = () => {};
+            if (opts.stallAt.has(key) && arm.spec.eidnara) {
+                if (hostPid === undefined) throw new Error(`no daemon PID to stall before ${key}`);
+                resume = await stallFor(hostPid, opts.stallMs);
+                log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
+            }
+            let result: PromptResult;
+            try {
+                result = await arm.prompt(turn.user, timeout);
+            } finally {
+                // The stall belongs to this turn alone; the daemon runs again before the next one.
+                resume();
+            }
+            arm.assertAlive(key);
+            const harness = treeStats(arm.harnessPid());
+            const host = procStats(arm.hostPid());
+            const forwarded = arm.main.forwardedCalls - forwardedBefore;
+            const fact = turn.probe
+                ? world.facts.find((f) => f.id === turn.probe?.factId)
+                : undefined;
+            const row = {
+                arm: arm.spec.name,
+                session: session.index,
+                turn: turn.index,
+                kind: turn.kind,
+                ms: Math.round(result.ms),
+                error: result.error ?? null,
+                scriptMismatch: arm.main.scriptMismatches - mismatchesBefore,
+                forwardedMainCalls: forwarded,
+                harnessRss: harness?.rss ?? null,
+                harnessCpuMs: harness?.cpuMs ?? null,
+                hostRss: host?.rss ?? null,
+                hostCpuMs: host?.cpuMs ?? null,
+                ...(fact
+                    ? {
+                          factId: fact.id,
+                          factKind: fact.kind,
+                          scope: turn.probe?.scope,
+                          expected: fact.answer,
+                          stale: fact.stale ?? null,
+                          answer: result.answer.slice(0, 2000),
+                          grade: gradeOutcome(fact, result),
+                      }
+                    : {}),
+                ts: Date.now(),
+            };
+            appendFileSync(turnsFile, `${JSON.stringify(row)}\n`);
+            if (turn.kind === "probe")
+                log(
+                    `probe ${key} ${fact?.kind} -> ${row.grade} (${Math.round(result.ms)}ms) ${result.answer.slice(0, 80).replace(/\n/g, " ")}`,
+                );
+            if (result.error) log(`turn ${key} error: ${result.error.slice(0, 300)}`);
+            if (turn.index % 25 === 0)
+                log(
+                    `turn ${key} ${Math.round(result.ms)}ms rss=${Math.round((harness?.rss ?? 0) / 1e6)}MB host=${Math.round((host?.rss ?? 0) / 1e6)}MB`,
+                );
+            await Bun.sleep(turn.kind === "probe" ? 500 : opts.paceMs);
+        }
+        arm.setTurn(null);
+        await arm.closeSession();
+        const disk = arm.diskBytes();
+        appendFileSync(
+            join(outDir, "sessions.jsonl"),
+            `${JSON.stringify({ arm: arm.spec.name, session: session.index, disk, host: procStats(arm.hostPid()), ts: Date.now() })}\n`,
+        );
+        log(`session ${session.index} closed disk=${JSON.stringify(disk)}`);
+        await Bun.sleep(opts.sessionGapMs);
+    }
+    if (arm.host) {
+        // A daemon that cannot answer its status request was not serving the arm; the arm fails
+        // rather than finishing as an Eidnara result.
+        try {
+            const status = await arm.host.primaryStatus(
+                arm.sessionId() ?? "",
+                arm.ctx.workdir,
+                "status",
+            );
+            writeFileSync(join(outDir, "host-status.json"), JSON.stringify(status, null, 2));
+        } finally {
+            writeFileSync(join(outDir, "host.log"), arm.host.hostLog());
+        }
+    }
+    await arm.stop();
+    writeFileSync(join(outDir, "done.json"), JSON.stringify({ ts: Date.now() }));
+    log("done");
+}
+
+/** `out` with its existing ancestor resolved through symlinks, as the sandbox will see it once it exists. */
+function realRunRoot(out: string): string {
+    const missing: string[] = [];
+    let dir = out;
+    while (!existsSync(dir)) {
+        missing.unshift(basename(dir));
+        dir = dirname(dir);
+    }
+    return join(realpathSync(dir), ...missing);
+}
+
+async function main(): Promise<void> {
+    const opts = parseArgs(process.argv.slice(2));
+    const specs = opts.arms.map(armSpec);
+    const eidnaraArms = specs.some((spec) => spec.eidnara);
+    if (opts.sandbox && !sandboxAvailable()) {
+        throw new Error(
+            "--sandbox on needs passwordless sudo that can create mount and PID namespaces",
+        );
+    }
+    const componentCount = PROJECT_SIZES[opts.projectSize];
+    if (componentCount === undefined) throw new Error(`unknown --project-size ${opts.projectSize}`);
+    const world = buildWorld(opts.seed, opts.tier, componentCount);
+    const turnKeys = new Set(
+        world.sessions.flatMap((s) => s.turns.map((t) => `${s.index}:${t.index}`)),
+    );
+    const missing = [...opts.stallAt].filter((key) => !turnKeys.has(key));
+    if (missing.length > 0) {
+        throw new Error(`--stall-at names turns the world does not have: ${missing.join(", ")}`);
+    }
+    if (opts.stallAt.size > 0 && !eidnaraArms) {
+        throw new Error("--stall-at stops an arm's daemon; no selected arm runs one");
+    }
+    if (eidnaraArms && !isExecutableFile(opts.fixtureBin)) {
+        throw new Error(
+            `${opts.fixtureBin} is not an executable file; build the release fixture with \`cargo ${cargoBuildExampleArgs(DIRECT_HOST_FIXTURE).join(" ")} --release\` or pass --fixture-bin`,
+        );
+    }
+    const channel = probeCapabilities();
+    if (eidnaraArms && !channel.available) {
+        throw new Error(
+            `the shared-memory channel cannot start here (${channel.reason}); build the addon with \`bun run --cwd packages/shm-native build:native\` so the Eidnara arms apply instead of failing open`,
+        );
+    }
+    // Off arms launch the harness from PATH, so the baseline runs the pinned toolchain too.
+    const harnesses = new Set(specs.map((spec) => spec.harness));
+    for (const [harness, check] of [
+        ["pi", pinnedNodeOnPath],
+        ["opencode", pinnedOpencodeOnPath],
+    ] as const) {
+        if (!harnesses.has(harness)) continue;
+        const found = check();
+        if (!found.ok)
+            throw new Error(`${harness} arms need the pinned toolchain: ${found.reason}`);
+    }
+    // A Pi arm installs the pinned Pi CLI through npm at its first session.
+    if (harnesses.has("pi") && !Bun.which("npm")) {
+        throw new Error("pi arms need npm on PATH to install the pinned Pi CLI");
+    }
+    // An Eidnara arm materializes both harness closures, so it needs npm and both toolchains.
+    if (eidnaraArms) {
+        const sources = detectHarnessRuntimeSources();
+        if (!sources.ok) throw new Error(`Eidnara arms need both toolchains: ${sources.reason}`);
+    }
+    // The run root is checked against the kept paths before it exists, so a refused location
+    // leaves nothing behind.
+    if (opts.sandbox) assertRunRootMaskable(realRunRoot(opts.out), sharedKeep(specs));
+    else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
+    claimRunDir(opts.out);
+    if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
+    writeFileSync(
+        join(opts.out, "world.json"),
+        JSON.stringify({ ...world, files: Object.keys(world.files).length }, null, 1),
+    );
+    writeFileSync(
+        join(opts.out, "options.json"),
+        JSON.stringify({ ...opts, stallAt: [...opts.stallAt] }, null, 2),
+    );
+    const results = await Promise.allSettled(
+        specs.map(async (spec) => {
+            const name = spec.name;
+            const root = armRoot(join(opts.out, "arms"), name);
+            const workdir = join(root, "work");
+            prepareWorkdir(world, workdir);
+            const outDir = armRoot(join(opts.out, "results"), name);
+            const callsFile = join(outDir, "calls.jsonl");
+            const arm = makeArm(spec, {
+                root,
+                resultsDir: outDir,
+                sandboxDir: opts.sandbox ? opts.out : "",
+                enforceWindow: opts.enforceWindow,
+                workdir,
+                fixtureBin: opts.fixtureBin,
+                onCall: (record: CallRecord) =>
+                    appendFileSync(callsFile, `${JSON.stringify(record)}\n`),
+            });
+            try {
+                await runArm(arm, world, opts, outDir);
+                return name;
+            } catch (error) {
+                console.error(`[${name}] failed: ${String(error)}`);
+                await arm.stop().catch(() => undefined);
+                throw error;
+            }
+        }),
+    );
+    for (const [i, r] of results.entries()) {
+        console.log(
+            `${opts.arms[i]}: ${r.status}${r.status === "rejected" ? ` ${String(r.reason).slice(0, 500)}` : ""}`,
+        );
+    }
+    if (results.some((r) => r.status === "rejected")) process.exitCode = 1;
+    const summary = readFileSync(join(opts.out, "options.json"), "utf8");
+    console.log(`out: ${opts.out}\n${summary}`);
+}
+
+await main();

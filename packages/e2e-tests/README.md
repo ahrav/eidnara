@@ -246,3 +246,76 @@ builds the daemon examples, exports their paths through the variables above,
 and runs `validate-mode-manifest` and `test:rust` with
 `EIDNARA_E2E_REQUIRE_PI=1` after its payload smoke, with
 `EIDNARA_E2E_PAYLOAD_DIR` naming the payload that smoke built.
+
+## Eidnara on/off evaluation
+
+`bun run eval:ab` builds the OpenCode plugin bundle and the Pi extension
+from the current sources, then runs one seeded project world through Pi and OpenCode with and without
+Eidnara and records every turn and model call. `bun run eval:ab:report <out>`
+prints accuracy by fact kind, a paired on/off test, turn latency, model calls
+and tokens per caller, and memory.
+
+- The world (`src/ab-eval/world.ts`) is a synthetic service repository plus
+  coding sessions. Fact turns plant decisions, corrections, constraints,
+  incident IDs, cross-session facts, and error codes that exist only in test
+  output; probe turns ask about each fact once. Grading is a whole-word token
+  match, so no judge runs.
+- The Bedrock gateway (`src/ab-eval/gateway.ts`) answers filler and fact turns
+  with scripted assistant steps whose tool calls run in the harness, and
+  forwards probes, native compaction, and every Eidnara model call to Bedrock
+  with the caller's AWS credentials. A scripted turn spends no model time, so
+  its wall time is harness and plugin overhead.
+- Arms (`src/ab-eval/arms.ts`): `pi-off`, `pi-on`, `pi-onraw`, `oc-off`,
+  `oc-on`. The `on` arms strip the temperature from every Eidnara model call
+  at the gateway, since Opus 5.5 on Bedrock refuses the parameter; `pi-onraw`
+  forwards those calls with the temperature the plugin set. On every arm the
+  gateway removes the harness's `thinking` request field from each forwarded
+  call. Eidnara arms run the release `direct_host_fixture` with the pinned
+  harness closures: `target/release/examples/direct_host_fixture`, or the
+  `--fixture-bin` path, built with `cargo build -p daemon --example
+  direct_host_fixture --features direct-host-fixture --locked --release`, and
+  the shared-memory addon from `bun run --cwd packages/shm-native
+  build:native`. An unknown or repeated arm name, a flag value outside its
+  documented set, a flag the command does not know or sees twice, a stray
+  argument, a missing fixture, an
+  addon that cannot load, or a `node` or `opencode` on PATH other than the
+  pinned release fails the run before any arm starts, and an arm whose
+  harness or daemon exits fails at the next turn.
+- When passwordless `sudo` can create mount and PID namespaces, each harness
+  runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the
+  home directory, and the run directory, and the arm's own directory is
+  mounted back; the arm's `/proc` lists only its own processes. The harness
+  runs as the invoking user with
+  `no_new_privs` set, so `sudo` inside the arm stays unprivileged. The run
+  directory must sit outside the repository and the harness install
+  directories. `--sandbox off` runs without isolation.
+- Each run writes to a fresh directory: `--out` must be missing or empty, one
+  run claims it exclusively, and the default is a timestamped directory under
+  `<tmp>/ab-eval/runs/` that `runs/latest` links to. The command exits nonzero when any arm fails, and
+  the other arms' results stay in the directory. An arm writes
+  `results/<arm>/done.json` once its teardown succeeds; the report reads the
+  requested arms from `options.json` and refuses an arm without the marker,
+  one whose recorded turns differ from the world's count, and a record that
+  does not parse.
+- A turn that reaches its timeout is aborted, and the next turn starts once
+  the harness has stopped it. The gateway retries throttled Bedrock calls
+  until the turn's deadline.
+- `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
+  those prompts, once the daemon is observed stopped, to exercise a pass that
+  misses its deadline. A key the world
+  has no turn for, or a selection without an Eidnara arm, fails the run before
+  it starts.
+- The gateway answers a request whose estimated input exceeds the arms'
+  200k window with `prompt is too long`, as a model with that window does;
+  `--enforce-window off` forwards it to Bedrock.
+
+```sh
+PATH=<dir with opencode 1.18.22>:$PATH bun run eval:ab --tier m --seed 21 \
+  --arms pi-off,pi-on,oc-off,oc-on --out /tmp/ab-eval/runs/m1 --pace-ms 2000
+bun run eval:ab:report /tmp/ab-eval/runs/m1
+```
+
+Tiers: `xs` (2 x 24 turns), `c` (1 x 170), `s` (3 x 110), `m` (12 x 260),
+`l` (40 x 600). The count is the work turns of every work session, for every
+seed; a later session opens with the cross-session probes that are due, and
+one final session holds only probes. Run reports stay outside the repository.

@@ -23,13 +23,17 @@
         "mutation:rust-fm": "bun scripts/run-rust-fm-mutation.ts",
         "mutation:goldens": "bun scripts/run-goldens-mutation.ts",
         "ensure:plugin-dist": "test -f ../opencode-plugin/dist/index.js || bun run --cwd ../opencode-plugin build",
-        "ensure:pi-dist": "(test -f ../shm-native/index.js || bun run --cwd ../shm-native build:js) && bun run --cwd ../pi-plugin build"
+        "ensure:pi-dist": "(test -f ../shm-native/index.js || bun run --cwd ../shm-native build:js) && bun run --cwd ../pi-plugin build",
+        "eval:ab": "bun run --cwd ../opencode-plugin build && bun run ensure:pi-dist && bun scripts/eval-ab.ts",
+        "eval:ab:report": "bun scripts/eval-ab-report.ts",
+        "eval:ab:sweep": "bun scripts/eval-ab-sweep.ts"
     },
     "dependencies": {
         "@eidnara/shm-native": "0.1.0",
         "@opencode-ai/sdk": "^1.17.11"
     },
     "devDependencies": {
+        "@aws-sdk/client-bedrock-runtime": "3.1048.0",
         "@types/bun": "1.3.14",
         "@types/node": "^22.20.0",
         "typescript": "5.9.3"

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
 import {
     attachStrictJsonlReader,
     type PiRpcEvent,
+    PiRpcProcess,
     PiRpcProtocol,
     serializeRpcMessage,
 } from "./rpc-client";
@@ -116,5 +118,42 @@ describe("Pi RPC protocol", () => {
         // A settled wait no longer observes events: dispatch must not throw or resurrect it.
         protocol.dispatchLine(JSON.stringify({ type: "agent_end" }));
         protocol.rejectPending(new Error("second"));
+    });
+
+    it("fails a cancelled event wait", async () => {
+        const protocol = new PiRpcProtocol();
+        const cancel = new AbortController();
+        const wait = protocol.waitForEvent((event) => event.type === "agent_end", {
+            timeoutMs: 60_000,
+            label: "agent_end",
+            signal: cancel.signal,
+        });
+        cancel.abort();
+        await expect(wait).rejects.toThrow(/cancelled/);
+    });
+});
+
+describe("Pi RPC process", () => {
+    it("fails a command promptly once Pi has exited", async () => {
+        const child = spawn("/bin/sh", ["-c", "exit 3"], { stdio: ["pipe", "pipe", "pipe"] });
+        const rpc = new PiRpcProcess(child);
+        await new Promise((resolve) => child.once("close", resolve));
+        const started = Date.now();
+        await expect(rpc.sendCommand("get_state", {}, { timeoutMs: 5_000 })).rejects.toThrow(
+            /exited with code 3/,
+        );
+        expect(Date.now() - started).toBeLessThan(1_000);
+    });
+
+    it("fails a pending command when Pi exits", async () => {
+        const child = spawn("/bin/sh", ["-c", "read line; exit 4"], {
+            stdio: ["pipe", "pipe", "pipe"],
+        });
+        const rpc = new PiRpcProcess(child);
+        const started = Date.now();
+        await expect(rpc.sendCommand("get_state", {}, { timeoutMs: 5_000 })).rejects.toThrow(
+            /exited with code 4/,
+        );
+        expect(Date.now() - started).toBeLessThan(1_000);
     });
 });

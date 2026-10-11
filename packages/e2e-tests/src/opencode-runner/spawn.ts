@@ -85,6 +85,11 @@ export interface SpawnOptions {
     existingEnv?: IsolatedEnv;
     /** User-tier host connection file. When set, the user config carries `host.connection_file`. */
     userHostConnectionFile?: string;
+    /**
+     * `false` keeps `EIDNARA_E2E_MODE=rust` from provisioning a direct host for this spawn; the
+     * caller runs its own host or none.
+     */
+    provisionHost?: boolean;
     /** `projectEidnaraConfig` is written to `<workdir>/.eidnara/eidnara.jsonc` when set. */
     projectEidnaraConfig?: Record<string, unknown>;
     /**
@@ -585,7 +590,10 @@ async function spawnOpencodeWithProvision(
     if (mode !== undefined && mode !== "rust") {
         throw new Error(`EIDNARA_E2E_MODE=${mode} is unsupported; the only accepted value is rust`);
     }
-    const resources = mode === "rust" && !opts.userHostConnectionFile ? await provision() : null;
+    const resources =
+        mode === "rust" && !opts.userHostConnectionFile && opts.provisionHost !== false
+            ? await provision()
+            : null;
 
     let child: ChildProcess | undefined;
     let cleanupPromise: Promise<void> | undefined;

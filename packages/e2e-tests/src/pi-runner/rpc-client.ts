@@ -34,6 +34,7 @@ export interface PiRpcResponse<T = unknown> {
 export interface PiRpcWaitOptions {
     timeoutMs?: number;
     label?: string;
+    signal?: AbortSignal;
 }
 
 interface PendingRequest {
@@ -145,7 +146,11 @@ export class PiRpcProtocol {
             const settle = () => {
                 clearTimeout(timer);
                 unsubscribe();
+                opts.signal?.removeEventListener("abort", onAbort);
                 this.pendingWaits.delete(wait);
+            };
+            const onAbort = () => {
+                wait.fail(new Error(`Pi RPC event wait${label} was cancelled`));
             };
             const unsubscribe = this.onEvent((event) => {
                 try {
@@ -162,6 +167,8 @@ export class PiRpcProtocol {
                 );
             }, timeoutMs);
             this.pendingWaits.add(wait);
+            if (opts.signal?.aborted) onAbort();
+            else opts.signal?.addEventListener("abort", onAbort, { once: true });
         });
     }
 
@@ -236,18 +243,168 @@ export interface PiState extends Record<string, unknown> {
 export type PiMessage = Record<string, unknown>;
 export type PiSessionStats = Record<string, unknown>;
 
-export class PiRpcClient {
-    readonly env: PiIsolatedEnv;
-    readonly protocol = new PiRpcProtocol();
+export interface PiRpcProcessOptions {
+    stderrLimit?: number;
+}
 
-    private readonly options: PiRpcClientOptions;
-    private process: ChildProcess | null = null;
-    private stopReadingStdout: (() => void) | null = null;
+export class PiRpcProcess {
     private stderr = "";
     /** Every non-JSON stdout line since spawn, including lines written while the extension loads. */
     private readonly malformedLines: string[] = [];
     /** Set once the child has closed; later commands fail with it instead of writing to a dead stdin. */
     private exitError: Error | null = null;
+    private readonly stopReadingStdout: () => void;
+
+    constructor(
+        readonly child: ChildProcess,
+        readonly protocol: PiRpcProtocol = new PiRpcProtocol(),
+        options: PiRpcProcessOptions = {},
+    ) {
+        const limit = options.stderrLimit ?? Number.POSITIVE_INFINITY;
+        child.stderr?.on("data", (chunk: Buffer) => {
+            this.stderr += chunk.toString();
+            if (this.stderr.length > limit) this.stderr = this.stderr.slice(-limit);
+        });
+        // A write to a pipe whose reader has exited emits an asynchronous `error` on `stdin`; without a listener, Node treats it as unhandled.
+        child.stdin?.on("error", (error: Error) => {
+            this.protocol.rejectPending(this.stdinWriteError(error));
+        });
+        if (!child.stdout) throw new Error("Pi RPC process has no stdout pipe");
+        this.protocol.onEvent((event) => {
+            if (event.type === "rpc_parse_error") this.malformedLines.push(String(event.line));
+        });
+        this.stopReadingStdout = attachStrictJsonlReader(child.stdout, (line) => {
+            this.protocol.dispatchLine(line);
+        });
+        // `close` follows `exit` once the stdio pipes have drained, so an `agent_end` written just
+        // before the process died reaches its waiter before the waiter is failed.
+        child.once("close", (code, signal) => {
+            const error = this.processExitError(code, signal);
+            this.exitError = error;
+            this.protocol.rejectPending(error);
+        });
+    }
+
+    onEvent(listener: (event: PiRpcEvent) => void): () => void {
+        return this.protocol.onEvent(listener);
+    }
+
+    waitForEvent(
+        predicate: (event: PiRpcEvent) => boolean,
+        opts: PiRpcWaitOptions = {},
+    ): Promise<PiRpcEvent> {
+        return this.protocol.waitForEvent(predicate, opts);
+    }
+
+    async sendCommand<T = unknown>(
+        method: string,
+        params: Record<string, unknown> = {},
+        opts: PiRpcWaitOptions = {},
+    ): Promise<PiRpcResponse<T>> {
+        const child = this.child;
+        const stdin = child.stdin;
+        if (!stdin || child.killed) {
+            throw new Error("Pi RPC process is not running");
+        }
+        // `killed` only records kills sent through this client.
+        if (child.exitCode !== null || child.signalCode !== null) {
+            throw this.exitError ?? this.processExitError(child.exitCode, child.signalCode);
+        }
+        // Reject pending requests when a stdin write fails because no pending command can complete after the pipe closes.
+        return this.protocol.sendCommand<T>(
+            (line) => {
+                stdin.write(line, (error) => {
+                    if (error) this.protocol.rejectPending(this.stdinWriteError(error));
+                });
+            },
+            method,
+            params,
+            opts,
+        );
+    }
+
+    getStderr(): string {
+        return this.stderr;
+    }
+
+    getMalformedLines(): readonly string[] {
+        return this.malformedLines;
+    }
+
+    private stdinWriteError(error: Error): Error {
+        return new Error(`Pi RPC stdin write failed: ${error.message}\n${this.stderr}`);
+    }
+
+    /** Both fields are `null` while the child is alive; either one is set once it has exited. */
+    processStatus(): { exitCode: number | null; signalCode: NodeJS.Signals | null } {
+        return { exitCode: this.child.exitCode, signalCode: this.child.signalCode };
+    }
+
+    /**
+     * A response and the child's `exit` are separate notifications; the response arrives first.
+     * Racing `exit` against a grace period makes a death right after the response observable.
+     */
+    async settledProcessStatus(graceMs = 50): Promise<ReturnType<PiRpcProcess["processStatus"]>> {
+        const child = this.child;
+        if (child.exitCode === null && child.signalCode === null) {
+            await new Promise<void>((resolve) => {
+                const onExit = () => {
+                    clearTimeout(timer);
+                    resolve();
+                };
+                const timer = setTimeout(() => {
+                    child.off("exit", onExit);
+                    resolve();
+                }, graceMs);
+                child.once("exit", onExit);
+            });
+        }
+        return this.processStatus();
+    }
+
+    private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
+        return new Error(
+            `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,
+        );
+    }
+
+    async shutdown(timeoutMs = 2_000): Promise<void> {
+        const child = this.child;
+        this.stopReadingStdout();
+
+        const exited = () => child.exitCode !== null || child.signalCode !== null;
+        const waitForExit = (ms: number) =>
+            new Promise<boolean>((resolve) => {
+                if (exited()) return resolve(true);
+                const onExit = () => {
+                    clearTimeout(timer);
+                    resolve(true);
+                };
+                const timer = setTimeout(() => {
+                    child.off("exit", onExit);
+                    resolve(exited());
+                }, ms);
+                child.once("exit", onExit);
+            });
+
+        if (exited()) return;
+        child.kill("SIGTERM");
+        if (await waitForExit(timeoutMs)) return;
+        child.kill("SIGKILL");
+        if (await waitForExit(timeoutMs)) return;
+        throw new Error(
+            `Pi RPC process ${child.pid ?? "?"} did not exit within ${timeoutMs}ms of SIGKILL\n${this.stderr}`,
+        );
+    }
+}
+
+export class PiRpcClient {
+    readonly env: PiIsolatedEnv;
+    readonly protocol = new PiRpcProtocol();
+
+    private readonly options: PiRpcClientOptions;
+    private process: PiRpcProcess | null = null;
+    private last: PiRpcProcess | null = null;
 
     constructor(options: PiRpcClientOptions) {
         this.env = options.env ?? createPiIsolatedEnv();
@@ -284,34 +441,14 @@ export class PiRpcClient {
                 stdio: ["pipe", "pipe", "pipe"],
             },
         );
-        this.process = child;
-
-        child.stderr?.on("data", (chunk: Buffer) => {
-            this.stderr += chunk.toString();
-        });
-        // A write to a pipe whose reader has exited emits an asynchronous `error` on `stdin`; without a listener, Node treats it as unhandled.
-        child.stdin?.on("error", (error: Error) => {
-            this.protocol.rejectPending(this.stdinWriteError(error));
-        });
-        if (!child.stdout) throw new Error("Pi RPC process has no stdout pipe");
-        this.protocol.onEvent((event) => {
-            if (event.type === "rpc_parse_error") this.malformedLines.push(String(event.line));
-        });
-        this.stopReadingStdout = attachStrictJsonlReader(child.stdout, (line) => {
-            this.protocol.dispatchLine(line);
-        });
-        // `close` follows `exit` once the stdio pipes have drained, so an `agent_end` written just
-        // before the process died reaches its waiter before the waiter is failed.
-        child.once("close", (code, signal) => {
-            const error = this.processExitError(code, signal);
-            this.exitError = error;
-            this.protocol.rejectPending(error);
-        });
+        const process = new PiRpcProcess(child, this.protocol);
+        this.process = process;
+        this.last = process;
 
         await Bun.sleep(100);
         if (child.exitCode !== null) {
             throw new Error(
-                `Pi RPC process exited during startup with code ${child.exitCode}\n${this.stderr}`,
+                `Pi RPC process exited during startup with code ${child.exitCode}\n${process.getStderr()}`,
             );
         }
     }
@@ -332,106 +469,32 @@ export class PiRpcClient {
         params: Record<string, unknown> = {},
         opts: PiRpcWaitOptions = {},
     ): Promise<PiRpcResponse<T>> {
-        const child = this.process;
-        const stdin = child?.stdin;
-        if (!child || !stdin || child.killed) {
-            throw new Error("Pi RPC process is not running");
-        }
-        // `killed` only records kills sent through this client.
-        if (child.exitCode !== null || child.signalCode !== null) {
-            throw this.exitError ?? this.processExitError(child.exitCode, child.signalCode);
-        }
-        // Reject pending requests when a stdin write fails because no pending command can complete after the pipe closes.
-        return this.protocol.sendCommand<T>(
-            (line) => {
-                stdin.write(line, (error) => {
-                    if (error) this.protocol.rejectPending(this.stdinWriteError(error));
-                });
-            },
-            method,
-            params,
-            opts,
-        );
+        if (!this.process) throw new Error("Pi RPC process is not running");
+        return this.process.sendCommand<T>(method, params, opts);
     }
 
     getStderr(): string {
-        return this.stderr;
+        return this.last?.getStderr() ?? "";
     }
 
     getMalformedLines(): readonly string[] {
-        return this.malformedLines;
-    }
-
-    private stdinWriteError(error: Error): Error {
-        return new Error(`Pi RPC stdin write failed: ${error.message}\n${this.stderr}`);
+        return this.last?.getMalformedLines() ?? [];
     }
 
     /** Both fields are `null` while the child is alive; either one is set once it has exited. */
     processStatus(): { exitCode: number | null; signalCode: NodeJS.Signals | null } {
-        return {
-            exitCode: this.process?.exitCode ?? null,
-            signalCode: this.process?.signalCode ?? null,
-        };
+        return this.process?.processStatus() ?? { exitCode: null, signalCode: null };
     }
 
-    /**
-     * A response and the child's `exit` are separate notifications; the response arrives first.
-     * Racing `exit` against a grace period makes a death right after the response observable.
-     */
     async settledProcessStatus(graceMs = 50): Promise<ReturnType<PiRpcClient["processStatus"]>> {
-        const child = this.process;
-        if (child && child.exitCode === null && child.signalCode === null) {
-            await new Promise<void>((resolve) => {
-                const onExit = () => {
-                    clearTimeout(timer);
-                    resolve();
-                };
-                const timer = setTimeout(() => {
-                    child.off("exit", onExit);
-                    resolve();
-                }, graceMs);
-                child.once("exit", onExit);
-            });
-        }
-        return this.processStatus();
-    }
-
-    private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
-        return new Error(
-            `Pi RPC process exited with code ${code ?? "null"} signal ${signal ?? "null"}\n${this.stderr}`,
-        );
+        return this.process ? this.process.settledProcessStatus(graceMs) : this.processStatus();
     }
 
     async shutdown(timeoutMs = 2_000): Promise<void> {
-        if (!this.process) return;
-        const child = this.process;
-        this.stopReadingStdout?.();
-        this.stopReadingStdout = null;
+        const process = this.process;
+        if (!process) return;
         this.process = null;
-
-        const exited = () => child.exitCode !== null || child.signalCode !== null;
-        const waitForExit = (ms: number) =>
-            new Promise<boolean>((resolve) => {
-                if (exited()) return resolve(true);
-                const onExit = () => {
-                    clearTimeout(timer);
-                    resolve(true);
-                };
-                const timer = setTimeout(() => {
-                    child.off("exit", onExit);
-                    resolve(exited());
-                }, ms);
-                child.once("exit", onExit);
-            });
-
-        if (exited()) return;
-        child.kill("SIGTERM");
-        if (await waitForExit(timeoutMs)) return;
-        child.kill("SIGKILL");
-        if (await waitForExit(timeoutMs)) return;
-        throw new Error(
-            `Pi RPC process ${child.pid ?? "?"} did not exit within ${timeoutMs}ms of SIGKILL\n${this.stderr}`,
-        );
+        await process.shutdown(timeoutMs);
     }
 }
 
