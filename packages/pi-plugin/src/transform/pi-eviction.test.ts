@@ -353,7 +353,7 @@ describe("Pi eviction", () => {
             expect(ends.find((end) => end.reason === "overflow")?.aborted).toBe(false);
             const latest = compactions(harness).at(-1);
             expect(latest?.fromHook).not.toBe(true);
-            expect(latest?.summary).not.toBe(M0);
+            expect(latest?.summary).toBe("pi summary");
         } finally {
             call.mockRestore();
         }
