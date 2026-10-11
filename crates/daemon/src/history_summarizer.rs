@@ -1572,12 +1572,14 @@ pub fn completion_wait_budget() -> Duration {
     Duration::from_secs(660)
 }
 
-/// How long an Emergency95 pass waits on a history_summarizer run before it answers.
+/// An Emergency95 pass shares one wait budget across history_summarizer runs.
 ///
-/// The harness plugins give a transform pass `TRANSFORM_SEND_TIMEOUT_MS` (5 s) end to end, so the
-/// wait leaves room for admission, the pass's own work, the rerun, and the reply. A run that
-/// outlasts the wait keeps running; its publication lands on a later pass.
+/// The live-run wait and an inline firing the rerun prepares share one deadline. A run that
+/// outlasts the deadline keeps running; a later pass receives its publication.
 pub const EMERGENCY_WAIT_BUDGET: Duration = Duration::from_secs(3);
+
+#[cfg(test)]
+pub(crate) const EMERGENCY_REPLY_MARGIN: Duration = Duration::from_millis(1_500);
 
 /// Consumers must pass `MAX_WRAPUP_REQUEST_BUDGET` unchanged because it includes the margin.
 /// Consumers must not add margin to `MAX_WRAPUP_REQUEST_BUDGET` because it includes the margin.
@@ -1594,8 +1596,6 @@ pub fn wrapup_round_wait_budget() -> Duration {
 /// Consumers must pass the transform-call deadline unchanged because the transform module includes the margin.
 /// Consumers must not add local margin because that would double-count the module's margin.
 ///
-/// Emergency95 can wait for an active run and then refire inline, requiring two 660-second completion waits.
-/// `MAX_EMERGENCY_REQUEST_BUDGET` includes a 180-second margin beyond two 660-second completion waits.
 /// The timeout path forwards the raw request array and discards the transform result.
 pub const MAX_EMERGENCY_REQUEST_BUDGET: Duration = Duration::from_secs(1500);
 
@@ -2856,7 +2856,7 @@ mod tests {
             })
             .and_then(|value| value.trim_end_matches(';').replace('_', "").parse().ok())
             .expect("module-transport.ts declares TRANSFORM_SEND_TIMEOUT_MS");
-        let margin_ms = 1_500;
+        let margin_ms = EMERGENCY_REPLY_MARGIN.as_millis() as u64;
         assert!(
             EMERGENCY_WAIT_BUDGET.as_millis() as u64 + margin_ms <= deadline_ms,
             "a {}ms emergency wait leaves under {margin_ms}ms of a {deadline_ms}ms transform deadline",
