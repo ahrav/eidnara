@@ -10,14 +10,14 @@ Reachability is test-only because no production RP2.1 pending driver exists.
 
 ## Evidence trail
 
-- `crates/host-runtime/src/local_embeddings/mod.rs:206-225` owns one JobTable, CPU
+- `crates/host-runtime/src/local_embeddings/mod.rs:222-241` owns one JobTable, CPU
   semaphore, query admission set, tracker, and closing token per component.
 - `crates/host-runtime/src/local_embeddings/jobs.rs:162-196` stores jobs in memory.
 - `jobs.rs:387-428` compares retained keys and payload digests under one lock;
   equal nonretryable retained work returns Existing.
 - `jobs.rs:430-453` checks queue and result capacity before insertion.
 - `jobs.rs:455-488` replaces a retryable failure only after admission succeeds.
-- `mod.rs:795-838` spawns a worker only for Admitted, not Existing.
+- `mod.rs:811-854` spawns a worker only for Admitted, not Existing.
 - `crates/host-runtime/src/local_embeddings/protocol.rs:923-947` derives the canonical
   batch key from ordered hashes, IDs, model, epoch, and fingerprint.
 - `crates/retrieval/src/dispatch.rs:174-181` derives the host item identity from

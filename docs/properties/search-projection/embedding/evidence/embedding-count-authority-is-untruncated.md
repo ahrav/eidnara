@@ -16,9 +16,9 @@ RP2.1 exact-count path exists at the pinned revision.
 - `bundle.rs:259-278` reads their verified bytes and checks the fingerprint.
 - `bundle.rs:652-702` binds these hashes and embedding-space scalars. Model
   name is deliberately excluded; it is not interchangeable with fingerprint.
-- `crates/host-runtime/src/local_embeddings/inference.rs:297-318` constructs FastEmbed
+- `crates/host-runtime/src/local_embeddings/inference.rs:298-319` constructs FastEmbed
   from those buffers with the manifest's maximum length.
-- `inference.rs:577-589` explicitly counts after truncation. It can certify
+- `inference.rs:578-590` explicitly counts after truncation. It can certify
   reaching the model window but cannot distinguish at-limit from over-limit.
 - `crates/tokenizer/src/lib.rs:1-8`, `:30-35`, and `:58` describe a separate
   embedded Claude BPE vocabulary, with bounded-piece behavior. It cannot serve
@@ -61,7 +61,7 @@ Route fixture and type-boundary decisions to `/testing:test-strategy`.
 
 ### Q: Does the existing private token_count already satisfy the plan?
 
-- Sources examined: `inference.rs:313-318`, `:577-589`; P1 line 83.
+- Sources examined: `inference.rs:314-319`, `:578-590`; P1 line 83.
 - Findings: The count uses the truncating tokenizer and is documented as such.
 - Missing evidence: None for the distinction between this count and the claim.
 - Conclusion: Resolved. Reuse verified artifacts, not the truncated count.

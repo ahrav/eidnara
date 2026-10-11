@@ -78,17 +78,17 @@ branch; it is not a proposed RP2.1 error vocabulary.
 | `crates/host-runtime/src/local_embeddings/bundle.rs:259-278`, `:782-795` | Read verified tokenizer artifacts and compare canonical fingerprint; failures report artifact hash mismatch or canonical embedding-space mismatch. | unaudited |
 | `crates/host-runtime/src/local_embeddings/bundle.rs:836-869` | `model_max_length` must be integral and at least manifest max_tokens; pad token must exist. This validates configuration, not full input length. | unaudited |
 | `crates/host-runtime/src/local_embeddings/bundle.rs:447-619` | Serving-limit validation covers result capacity, wire pages, query permits, request scratch, queue metadata, and retained metadata. It does not approve RP2.9 values. | unaudited |
-| `crates/host-runtime/src/local_embeddings/inference.rs:222-240` | Dimension, finiteness, and unit-norm validation reports `vector contains a non-finite component` or the corresponding dimension/norm error. | unaudited |
-| `crates/host-runtime/src/local_embeddings/inference.rs:344-385` | Empty or zero-token input is rejected; result count and vector shape are checked. No untruncated over-token rejection is present. | unaudited |
-| `crates/host-runtime/src/local_embeddings/inference.rs:466-470` | `debug_assert_eq!` checks certification rows with message `load_bundle admits only certifiable corpora`; it is not an input-token guard. | unaudited |
-| `crates/host-runtime/src/local_embeddings/mod.rs:344-399` | In-process embedding checks item count, per-text bytes, aggregate bytes, lane state, CPU admission, and output shape. | unaudited |
+| `crates/host-runtime/src/local_embeddings/inference.rs:223-241` | Dimension, finiteness, and unit-norm validation reports `vector contains a non-finite component` or the corresponding dimension/norm error. | unaudited |
+| `crates/host-runtime/src/local_embeddings/inference.rs:345-386` | Empty or zero-token input is rejected; result count and vector shape are checked. No untruncated over-token rejection is present. | unaudited |
+| `crates/host-runtime/src/local_embeddings/inference.rs:467-471` | `debug_assert_eq!` checks certification rows with message `load_bundle admits only certifiable corpora`; it is not an input-token guard. | unaudited |
+| `crates/host-runtime/src/local_embeddings/mod.rs:360-415` | In-process embedding checks item count, per-text bytes, aggregate bytes, lane state, CPU admission, and output shape. | unaudited |
 | `crates/host-runtime/src/local_embeddings/protocol.rs:781-887` | Model/fingerprint/epoch constraints, bytes, exact input hash, and duplicate IDs are validated before batch dispatch. | unaudited |
 | `crates/host-runtime/src/local_embeddings/jobs.rs:173-185` | Debug assertions check sufficient queued/result bytes before release; release uses saturating subtraction. | unaudited |
 | `crates/host-runtime/src/local_embeddings/jobs.rs:387-489` | Closed/full/result-too-large/key-conflict outcomes gate admission; retained equal payloads reuse the job except retryable failure. | unaudited |
 | `crates/host-runtime/src/local_embeddings/jobs.rs:491-535`, `:568-594` | Only queued work starts; completed work resists late publication; count/dimension mismatch fails the job. No source revision is compared. | unaudited |
 | `crates/host-runtime/src/local_embeddings/jobs.rs:597-658` | Incarnation/key/cursor validation and page lease preserve local result identity and lifetime. | unaudited |
-| `crates/host-runtime/src/local_embeddings/mod.rs:647-722`, `:725-767` | Query deadline gates admission, native start, result receipt, and output construction. Worker owns query permit and text charge through the native call. | unaudited |
-| `crates/host-runtime/src/local_embeddings/mod.rs:1148-1161` | Shutdown closes admission, joins tracked work, clears jobs, and waits for an in-process CPU holder. There is no finite native-call deadline here. | unaudited |
+| `crates/host-runtime/src/local_embeddings/mod.rs:663-738`, `:741-783` | Query deadline gates admission, native start, result receipt, and output construction. Worker owns query permit and text charge through the native call. | unaudited |
+| `crates/host-runtime/src/local_embeddings/mod.rs:1164-1177` | Shutdown closes admission, joins tracked work, clears jobs, and waits for an in-process CPU holder. There is no finite native-call deadline here. | unaudited |
 | `crates/kernel/src/applicability/checkout.rs:170-203` | Cancellation is sticky; crossing the deadline raises the shared interrupt and `check` returns BudgetExhausted. | unaudited |
 | `crates/kernel/src/open.rs:1413-1443` | SQLite progress calls the shared stop predicate, but the installer is crate-private. | unaudited |
 | `crates/daemon/src/memory_classifier_scheduler.rs:163-220` | Cancellation can drop an in-flight tick; failed store work waits the idle poll. This is not an embedding sweep. | unaudited |
@@ -152,8 +152,8 @@ Closely related checks are grouped by file; each named check is unaudited.
 | `boundary_waiters_with_maximal_texts_are_all_admitted`, `crates/host-runtime/tests/local_embeddings_protocol.rs:493` | Ignored boundary scenario; do not count it as exercised. | unaudited |
 | `queued_query_wait_is_bounded_by_its_deadline`, `crates/host-runtime/tests/local_embeddings_jobs.rs:389` | Existing query deadline during wait. | unaudited |
 | `shutdown_with_queued_running_and_retained_jobs_is_graceful`, `crates/host-runtime/tests/local_embeddings_jobs.rs:499` | Mixed local job states at shutdown. | unaudited |
-| `embed_blocking_shares_the_cpu_permit_and_reports_a_held_lane`, `crates/host-runtime/src/local_embeddings/mod.rs:1308` | Synchronous and routed calls share CPU admission. | unaudited |
-| `shutdown_disables_the_lane_for_late_callers`, `crates/host-runtime/src/local_embeddings/mod.rs:1338` | Late callers cannot restart a shut-down lane. | unaudited |
+| `embed_blocking_shares_the_cpu_permit_and_reports_a_held_lane`, `crates/host-runtime/src/local_embeddings/mod.rs:1324` | Synchronous and routed calls share CPU admission. | unaudited |
+| `shutdown_disables_the_lane_for_late_callers`, `crates/host-runtime/src/local_embeddings/mod.rs:1354` | Late callers cannot restart a shut-down lane. | unaudited |
 
 ### Shared scheduler checks
 

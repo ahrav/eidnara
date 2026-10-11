@@ -15,9 +15,9 @@ verified untruncated counting to dispatch at the pinned revision.
 - `protocol.rs:825-842` checks query identity, bytes, and deadline shape.
 - `protocol.rs:850-887` checks batch identity, aggregate/per-item bytes, input
   hashes, and duplicate IDs before building the request.
-- `crates/host-runtime/src/local_embeddings/mod.rs:344-399` checks in-process item and
+- `crates/host-runtime/src/local_embeddings/mod.rs:360-415` checks in-process item and
   byte limits before calling the engine. It has no exact-token check.
-- `crates/host-runtime/src/local_embeddings/inference.rs:344-376` rejects empty and
+- `crates/host-runtime/src/local_embeddings/inference.rs:345-377` rejects empty and
   zero-token input but relies on the inference tokenizer's truncation window.
 - `docs/host-wire-protocol.md:472` explicitly permits silent truncation while
   the hash covers all input bytes. Product preflight is an additional boundary.
@@ -61,7 +61,7 @@ Existing DeterministicEngine captures calls and text at
 
 ### Q: Are current boundary tests already exact-token tests?
 
-- Sources examined: `protocol.rs:810-887`, `mod.rs:344-399`, P1 U3.
+- Sources examined: `protocol.rs:810-887`, `mod.rs:360-415`, P1 U3.
 - Findings: Current admission measures bytes and rows. The only private token
   count is truncated. Matching current boundary tests cannot certify P1 U3.
 - Missing evidence: The proposed product counter-to-dispatch path.

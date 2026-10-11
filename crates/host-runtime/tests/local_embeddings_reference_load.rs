@@ -1,8 +1,9 @@
 //! Reference-host load measurements for the certified production lane (#825 D25 and D26).
 //!
 //! The test needs the certified production bundle at `EIDNARA_LOCAL_EMBEDDINGS_PRODUCTION_BUNDLE` and the locked
-//! ONNX Runtime library at `EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY`, so it is `#[ignore]`d and fails, rather than
-//! passes, when run without them. Run it in release on the D21 host:
+//! ONNX Runtime library at `EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY`, so it is `#[ignore]`d and a run without them
+//! fails. Activation certifies both against the digests `release/production-inputs.lock.json` pins, so a path to any
+//! other artifact fails before it is measured. Run it in release on the D21 host:
 //! `cargo test --release -p host-runtime --test local_embeddings_reference_load -- --ignored --nocapture`.
 //! `EIDNARA_LOCAL_EMBEDDINGS_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
 //! The page cache is warm for every timed phase: activation reads the whole model and certification runs it.
@@ -19,7 +20,9 @@ use host_runtime::local_embeddings::{
     LocalEmbeddingsConfig, LocalEmbeddingsLimits, LocalEmbeddingsStatus, PollOutcome,
     SubmitOutcome,
 };
-use sha2::{Digest, Sha256};
+
+const PRODUCTION_INPUTS_LOCK_JSON: &str =
+    include_str!("../../../release/production-inputs.lock.json");
 
 /// The parent's declared open-loop query rate for the embedding gates.
 const QUERY_RATE_PER_SECOND: f64 = 2.0;
@@ -115,11 +118,13 @@ impl Stream {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+fn locked_sha256(key: &str) -> String {
+    let lock: serde_json::Value =
+        serde_json::from_str(PRODUCTION_INPUTS_LOCK_JSON).expect("production inputs lock parses");
+    lock["inputs"][key]["sha256"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the lock pins inputs.{key}.sha256"))
+        .to_owned()
 }
 
 fn required_path(name: &str) -> PathBuf {
@@ -385,14 +390,15 @@ async fn run_queries(
 async fn production_lane_meets_the_reference_query_and_backfill_budgets() {
     let bundle_dir = required_path("EIDNARA_LOCAL_EMBEDDINGS_PRODUCTION_BUNDLE");
     let ort = required_path("EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY");
-    let ort_sha256 = sha256_hex(&std::fs::read(&ort).expect("ORT library is readable"));
-    let manifest_sha256 =
-        sha256_hex(&std::fs::read(bundle_dir.join("manifest.json")).expect("bundle manifest"));
+    // Activation certifies the supplied bundle and library against the shipped digests, so a path to any other
+    // artifact fails here before it is measured as the production lane.
+    let manifest_sha256 = locked_sha256("bundle_manifest");
+    let ort_sha256 = locked_sha256("ort_runtime");
     let lane_limits = LocalEmbeddingsLimits::shipped_lane();
     let max_waiting_queries = lane_limits.max_waiting_queries;
     let component = LocalEmbeddingsComponent::new(Some(LocalEmbeddingsConfig {
         bundle_dir,
-        bundle_manifest_sha256: None,
+        bundle_manifest_sha256: Some(manifest_sha256.clone()),
         ort_library: ort,
         ort_library_sha256: ort_sha256.clone(),
         limits: lane_limits,

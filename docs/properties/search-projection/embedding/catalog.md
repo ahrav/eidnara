@@ -49,7 +49,7 @@ Existing paths have distinct classifications:
 Each new record carries its own proposed-only reachability explanation. Searches
 find no Rust `search.sqlite`, `untruncated_token_len`, `EmbedTokens`, or
 `ClaudeTokens` implementation. The current count is explicitly truncated
-(`crates/host-runtime/src/local_embeddings/inference.rs:577-589`). The scheduler only runs
+(`crates/host-runtime/src/local_embeddings/inference.rs:578-590`). The scheduler only runs
 the review-user-memories task (`crates/daemon/src/memory_classifier_scheduler.rs:334-371`).
 These observations support absence of the RP2.1 embedding path; they do not
 classify the existing host or tokenizer as test-only.
@@ -147,7 +147,7 @@ acceptance-situation check; unapproved RP2.9 bounds block liveness acceptance.
 Type: safety
 Reachability: test-only - this is a proposed contract; no production RP2.1
 untruncated count path exists. Backend's private count truncates at
-`crates/host-runtime/src/local_embeddings/inference.rs:577-589`.
+`crates/host-runtime/src/local_embeddings/inference.rs:578-590`.
 Status: active
 Exercised: not yet - the exact-count API, typed units, and model-specific token
 oracle are missing.
@@ -178,7 +178,7 @@ Open questions:
 
 Type: safety
 Reachability: test-only - no production RP2.1 product preflight exists. Existing
-`crates/host-runtime/src/local_embeddings/mod.rs:344-399` checks bytes and rows, not exact
+`crates/host-runtime/src/local_embeddings/mod.rs:360-415` checks bytes and rows, not exact
 untruncated tokens.
 Status: active
 Exercised: not yet - no product path joins exact counting to the inference-call
@@ -368,12 +368,12 @@ Reachability: default-production - every native call takes a grant from one
 scheduler that serves queries first and a background text after eight query
 grants (`crates/host-runtime/src/local_embeddings/scheduler.rs:50-59`,
 `:126-172`, `:188-200`). Routed and in-process queries wait as `Query`
-(`mod.rs:1117-1173`, `:511-543`); batch texts wait one text at a time as
-`Background` (`mod.rs:907-940`).
+(`mod.rs:1133-1189`, `:527-559`); batch texts wait one text at a time as
+`Background` (`mod.rs:923-956`).
 Status: active
 Exercised: partial - the scheduler queues, priority, the ninth grant, and the
 fifth-waiter refusal behind a background holder are constructed
-(`scheduler.rs:271-315`, `mod.rs:1798-1850`,
+(`scheduler.rs:271-315`, `mod.rs:1814-1866`,
 `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The shipped
 lane lets four queries wait (`crates/daemon/src/bin/eidnara_host/serve.rs`
 `lane_limits` returns `LocalEmbeddingsLimits::shipped_lane()`). The ignored
@@ -458,7 +458,7 @@ Reachability: test-only - no production RP2.1 embedding supervisor slice exists.
 The fused route now awaits in-process query embedding under its request budget
 before any scan unit (`crates/daemon/src/query_route.rs:1712-1736`, `:616-637`), and a
 started native call keeps its grant and admission permit after its caller's
-deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1117-1173`). The
+deadline (`crates/host-runtime/src/local_embeddings/mod.rs:1133-1189`). The
 existing scheduler and kernel budget are separate paths
 (`crates/daemon/src/memory_classifier_scheduler.rs:163-220`;
 `crates/kernel/src/applicability/checkout.rs:146-203`).
@@ -485,7 +485,7 @@ P2 line 53 and P7 line 81 require composition; existing ownership paths are
 source-verified but not composed for RP2.1.
 Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:240-313` and
 `crates/daemon/src/memory_classifier_scheduler.rs:1180-1254` are unaudited cancellation
-checks. `crates/host-runtime/src/local_embeddings/mod.rs:1853-1889` asserts a timed-out
+checks. `crates/host-runtime/src/local_embeddings/mod.rs:1869-1905` asserts a timed-out
 query keeps its grant and permit until the native call returns;
 `crates/host-runtime/src/local_embeddings/scheduler.rs:318-375` and `scheduler.rs:427-458` asserts cancelled,
 handed-but-untaken, and closed waiters release exactly once. No shared

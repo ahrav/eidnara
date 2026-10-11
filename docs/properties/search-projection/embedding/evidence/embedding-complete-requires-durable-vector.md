@@ -15,9 +15,9 @@ persistence path exists at the pinned revision.
   page boundaries, and a ResultLease. It contains no persistent store handle.
 - `jobs.rs:502-557` converts vectors to Arc-backed memory and sets Ready.
 - `jobs.rs:623-655` serves pages from that resident allocation.
-- `crates/host-runtime/src/local_embeddings/mod.rs:873-899` validates native output and
+- `crates/host-runtime/src/local_embeddings/mod.rs:889-915` validates native output and
   publishes it to JobTable. It does not commit a product vector.
-- `mod.rs:1148-1155` clears local jobs after shutdown drains tracked work.
+- `mod.rs:1164-1171` clears local jobs after shutdown drains tracked work.
 - P1 lines 108-110 separate Pending, Embedded, and Published in the intended
   product flow. U2 owns the pending row transaction; U3 owns vector completion.
 - The existing host admission/result-lease record is reused for memory

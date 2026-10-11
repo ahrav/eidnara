@@ -18,7 +18,7 @@ Reachability is test-only: no production RP2.1 completion transaction exists.
 - `jobs.rs:502-535` ignores late publication to a completed local job and
   rejects wrong item count or dimensions. These are narrower local fences.
 - `jobs.rs:640-654` returns stored ID/hash metadata paired with result vectors.
-- `crates/host-runtime/src/local_embeddings/inference.rs:222-240` validates vector
+- `crates/host-runtime/src/local_embeddings/inference.rs:223-241` validates vector
   dimensions, finiteness, and norm; numerical validity does not imply freshness.
 - `crates/host-runtime/src/local_embeddings/bundle.rs:652-702` excludes model name from
   fingerprint. Equal fingerprints therefore do not prove equal model labels.
