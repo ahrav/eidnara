@@ -16,8 +16,8 @@ use retrieval::dense::codec::{
 };
 use retrieval::dense::export::{ExportRefusal, LiveRows, live_rows};
 use retrieval::dense::{
-    Completion, DenseCoverage, IncompleteReason, OracleBounds, OracleRefusal, Ranked, Window,
-    exhaustive, inner_product, rank_order, rescore,
+    Completion, DenseCoverage, ExhaustiveRanking, IncompleteReason, OracleBounds, OracleRefusal,
+    Ranked, Window, exhaustive, inner_product, rank_order, rescore,
 };
 use retrieval::eligibility::{
     AuthorityMoved, EligibilityReport, authority_moved, judge_occurrences,
@@ -2077,4 +2077,375 @@ fn live_rows_exports_every_live_vector_in_identifier_order_and_refuses_over_boun
         export(&fixture, 64, layout()),
         Err(ExportRefusal::NoCheckpoint { .. })
     ));
+}
+
+/// Every cell of the frozen oracle witness matrix; the aggregate fails when a cell is missing, duplicated, or undeclared.
+const ORACLE_WITNESS_CELLS: [&str; 27] = [
+    "population/zero/page/one",
+    "population/zero/page/three",
+    "population/zero/page/population",
+    "population/below_k/page/one",
+    "population/below_k/page/three",
+    "population/below_k/page/population",
+    "population/equal_k/page/one",
+    "population/equal_k/page/three",
+    "population/equal_k/page/population",
+    "population/above_k/page/one",
+    "population/above_k/page/three",
+    "population/above_k/page/population",
+    "rejection/truncated_word",
+    "rejection/dimension",
+    "rejection/nan",
+    "rejection/positive_infinity",
+    "rejection/negative_infinity",
+    "rejection/zero_norm",
+    "rejection/normalization",
+    "rejection/tolerance",
+    "stop/coverage_shortfall_pending",
+    "stop/coverage_shortfall_without_pending",
+    "stop/row_bound",
+    "stop/snapshot_changed",
+    "stop/kernel_incarnation_changed",
+    "stop/cancel",
+    "stop/deadline",
+];
+
+fn fire(fired: &mut std::collections::BTreeSet<&'static str>, cell: &'static str) {
+    assert!(
+        ORACLE_WITNESS_CELLS.contains(&cell),
+        "{cell} is not a declared cell"
+    );
+    assert!(fired.insert(cell), "{cell} fired twice");
+}
+
+/// The oracle score and identifier order an independent recomputation predicts: scores built by hand in f64 coordinate order, sorted with `f64::total_cmp` then identifier bytes.
+fn witness_reference(fixture: &Fixture, query: &[f32], k: usize) -> Vec<(String, u64)> {
+    let mut scored: Vec<(String, f64)> = fixture
+        .rows
+        .iter()
+        .filter(|row| row.class != OccurrenceClass::RawToolSpans)
+        .filter_map(|row| {
+            let vector = row.vector.as_ref()?;
+            let score = query
+                .iter()
+                .zip(vector)
+                .fold(0.0f64, |sum, (q, d)| sum + f64::from(*q) * f64::from(*d));
+            Some((row.occurrence_id(), score))
+        })
+        .collect();
+    scored.sort_by(|(a_id, a), (b_id, b)| {
+        b.total_cmp(a)
+            .then_with(|| a_id.as_bytes().cmp(b_id.as_bytes()))
+    });
+    scored.truncate(k);
+    scored
+        .into_iter()
+        .map(|(id, score)| (id, score.to_bits()))
+        .collect()
+}
+
+fn stored_row_refusal(bytes: Vec<u8>, dimension: u32) -> Result<ExhaustiveRanking, OracleRefusal> {
+    let fixture = Fixture::all_admitted();
+    fixture
+        .raw()
+        .execute(
+            "UPDATE occurrence_vectors SET vector=?2, vector_dimension=?3 WHERE occurrence_id=?1",
+            rusqlite::params![fixture.id("zeta"), bytes, dimension],
+        )
+        .unwrap();
+    let outcome = fixture.rank(&axis(0), bounds(3), &EvalBudget::unbounded());
+    if let Err(OracleRefusal::StoredRow { occurrence_id, .. }) = &outcome {
+        assert_eq!(occurrence_id, &fixture.id("zeta"));
+    }
+    outcome
+}
+
+#[test]
+fn the_frozen_oracle_witness_matrix_fires_every_declared_cell() {
+    const K: usize = 4;
+    let mut fired = std::collections::BTreeSet::new();
+    let query = unit([0.8, 0.3, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1]);
+
+    // Population cells: K is 4, and the equal-K population carries the identical-vector pair so ties order by identifier.
+    let populations: [(&str, &[&str]); 4] = [
+        ("zero", &["tool"]),
+        ("below_k", &["alpha", "theta", "tool"]),
+        ("equal_k", &["beta", "epsilon", "eta", "zeta"]),
+        ("above_k", &OBJECTS),
+    ];
+    for (population, objects) in populations {
+        let fixture = Fixture::new(
+            &OBJECTS,
+            corpus()
+                .into_iter()
+                .filter(|row| objects.contains(&row.object.as_str()))
+                .collect(),
+        );
+        let size = fixture.dense_ids().len();
+        let expected = witness_reference(&fixture, &query, K);
+        assert_eq!(expected.len(), size.min(K), "{population}");
+        for (page, page_rows) in [("one", 1), ("three", 3), ("population", size.max(1))] {
+            let cell_bounds = OracleBounds {
+                page_rows: NonZeroUsize::new(page_rows).unwrap(),
+                ..bounds(K)
+            };
+            let (ranking, visited) = fixture.rank_recording(&query, cell_bounds);
+            let label = format!("population/{population}/page/{page}");
+            assert_eq!(ranking.completion, Completion::Complete, "{label}");
+            let actual: Vec<(String, u64)> = ranking
+                .ranked
+                .iter()
+                .map(|row| (row.occurrence_id.clone(), row.score.to_bits()))
+                .collect();
+            assert_eq!(actual, expected, "{label}");
+            assert_visited_once(&fixture, &visited);
+            assert_eq!(ranking.coverage.required, size, "{label}");
+            assert_eq!(ranking.coverage.with_vector, size, "{label}");
+            fire(
+                &mut fired,
+                ORACLE_WITNESS_CELLS
+                    .iter()
+                    .copied()
+                    .find(|cell| *cell == label)
+                    .unwrap(),
+            );
+        }
+    }
+
+    // Row rejections. The schema CHECK keeps a truncated word out of storage, so that cell runs through the codec the oracle decodes with.
+    assert_eq!(
+        codec::decode(&[0u8; 30], &layout()),
+        Err(RowRejection::TruncatedWord { bytes: 30 })
+    );
+    fire(&mut fired, "rejection/truncated_word");
+    let mut infinite = [0.0f32; 8];
+    infinite[3] = f32::INFINITY;
+    let mut negative_infinite = [0.0f32; 8];
+    negative_infinite[5] = f32::NEG_INFINITY;
+    let stored: [(&'static str, Vec<u8>, u32, RowRejection); 6] = [
+        (
+            "rejection/dimension",
+            codec::encode(&axis(0)[..7]),
+            7,
+            RowRejection::Dimension {
+                expected: 8,
+                actual: 7,
+            },
+        ),
+        (
+            "rejection/nan",
+            codec::encode(&[0.0, 0.0, f32::NAN, 0.0, 0.0, 0.0, 0.0, 1.0]),
+            8,
+            RowRejection::NonFinite { coordinate: 2 },
+        ),
+        (
+            "rejection/positive_infinity",
+            codec::encode(&infinite),
+            8,
+            RowRejection::NonFinite { coordinate: 3 },
+        ),
+        (
+            "rejection/negative_infinity",
+            codec::encode(&negative_infinite),
+            8,
+            RowRejection::NonFinite { coordinate: 5 },
+        ),
+        (
+            "rejection/zero_norm",
+            codec::encode(&[0.0; 8]),
+            8,
+            RowRejection::ZeroNorm,
+        ),
+        (
+            "rejection/normalization",
+            codec::encode(&[2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            8,
+            RowRejection::Normalization { norm: 2.0 },
+        ),
+    ];
+    for (cell, bytes, dimension, rejection) in stored {
+        match stored_row_refusal(bytes, dimension) {
+            Err(OracleRefusal::StoredRow {
+                rejection: seen, ..
+            }) => assert_eq!(seen, rejection, "{cell}"),
+            other => panic!("{cell}: {other:?}"),
+        }
+        fire(&mut fired, cell);
+    }
+    let fixture = Fixture::all_admitted();
+    let generation = generation();
+    let axis_query = axis(0);
+    let refused = fixture
+        .store
+        .with_conn(|conn| {
+            let mut request = fixture.query(&axis_query, &generation, bounds(K));
+            request.unit_norm_tolerance = -1e-3;
+            Ok(exhaustive(
+                conn,
+                &fixture.kernel,
+                &request,
+                &EvalBudget::unbounded(),
+            ))
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            refused,
+            Err(OracleRefusal::Query(RowRejection::Tolerance { tolerance })) if tolerance == -1e-3
+        ),
+        "{refused:?}"
+    );
+    fire(&mut fired, "rejection/tolerance");
+
+    // Stop cells: each ends the walk with its own incomplete reason, never `Complete`.
+    for (cell, state, pending, without_pending) in [
+        ("stop/coverage_shortfall_pending", "pending", 1, 0),
+        ("stop/coverage_shortfall_without_pending", "failed", 0, 1),
+    ] {
+        let fixture = Fixture::all_admitted();
+        fixture.drop_vector("beta");
+        fixture.job_state("beta", state);
+        let ranking = fixture
+            .rank(&axis(0), bounds(K), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(
+            ranking.completion,
+            Completion::Incomplete(IncompleteReason::DenseCoverageShortfall),
+            "{cell}"
+        );
+        assert_eq!(ranking.coverage.missing_pending, pending, "{cell}");
+        assert_eq!(
+            ranking.coverage.missing_without_pending, without_pending,
+            "{cell}"
+        );
+        fire(&mut fired, cell);
+    }
+
+    let fixture = Fixture::all_admitted();
+    let capped = OracleBounds {
+        max_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds(K)
+    };
+    let (ranking, visited) = fixture.rank_recording(&axis(0), capped);
+    assert_eq!(
+        ranking.completion,
+        Completion::Incomplete(IncompleteReason::RowBound)
+    );
+    assert_eq!(visited.len(), 5);
+    fire(&mut fired, "stop/row_bound");
+
+    let moved = fixture
+        .rank_with_hook(&axis(0), bounds(K), &EvalBudget::unbounded(), |window| {
+            if window == Window::AfterPage(1) {
+                fixture.retire("theta");
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        moved.completion,
+        Completion::Incomplete(IncompleteReason::SnapshotChanged)
+    );
+    fire(&mut fired, "stop/snapshot_changed");
+
+    let fixture = Fixture::all_admitted();
+    let manifest = fixture.backup();
+    let restored = fixture
+        .rank_with_hook(&axis(0), bounds(K), &EvalBudget::unbounded(), |window| {
+            if window == Window::AfterPage(1) {
+                fixture.kernel.restore(&manifest).unwrap();
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        restored.completion,
+        Completion::Incomplete(IncompleteReason::KernelIncarnationChanged)
+    );
+    fire(&mut fired, "stop/kernel_incarnation_changed");
+
+    let fixture = Fixture::all_admitted();
+    let budget = EvalBudget::unbounded();
+    let cancelled = fixture
+        .rank_with_hook(&axis(0), bounds(K), &budget, |window| {
+            if window == Window::AfterPage(1) {
+                budget.cancel();
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        cancelled.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(cancelled.ranked.is_empty());
+    fire(&mut fired, "stop/cancel");
+
+    // The hook holds the walk after its first page until the deadline has passed, so the expiry lands mid-walk.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let budget = EvalBudget::new(Some(deadline), Arc::new(AtomicBool::new(false)));
+    let expired = fixture
+        .rank_with_hook(&axis(0), bounds(K), &budget, |window| {
+            if window == Window::AfterPage(1) {
+                while Instant::now() <= deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        expired.completion,
+        Completion::Incomplete(IncompleteReason::BudgetExhausted)
+    );
+    assert!(expired.ranked.is_empty());
+    fire(&mut fired, "stop/deadline");
+
+    assert_eq!(
+        fired,
+        ORACLE_WITNESS_CELLS.into_iter().collect(),
+        "every declared witness cell fires exactly once"
+    );
+}
+
+#[test]
+fn the_original_row_artifact_bytes_match_their_pinned_digest() {
+    // Signed zeros and subnormal coordinates sit inside unit rows, so the golden covers every bit pattern the codec must carry through unchanged.
+    let subnormal = f32::from_bits(0x0000_0001);
+    let largest_subnormal = f32::from_bits(0x007F_FFFF);
+    let rows: Vec<Vec<f32>> = vec![
+        vec![
+            -0.0,
+            0.6,
+            subnormal,
+            0.8,
+            -subnormal,
+            0.0,
+            -0.0,
+            largest_subnormal,
+        ],
+        vec![0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0, 1.0],
+        vec![
+            -largest_subnormal,
+            -1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            f32::MIN_POSITIVE,
+        ],
+        unit([0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]),
+    ];
+    use sha2::Digest as _;
+    let bytes = codec::encode_rows(&layout(), rows.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(bytes.len(), ARTIFACT_HEADER_BYTES + 4 * 32);
+    assert_eq!(
+        format!("{:x}", sha2::Sha256::digest(&bytes)),
+        "3894b929a81e322ba14a8aa7fd76eec292186193316cfe3f34ad7cb0192f92c2",
+        "the header is EIDF32R\\0, version 1, metric 1, reserved 0, dimension 8, count 4, then little-endian f32 words"
+    );
+    let decoded = codec::decode_rows(&bytes, &layout()).unwrap();
+    let bits = |rows: &[Vec<f32>]| -> Vec<Vec<u32>> {
+        rows.iter()
+            .map(|row| row.iter().map(|value| value.to_bits()).collect())
+            .collect()
+    };
+    assert_eq!(bits(&decoded.rows), bits(&rows));
 }
