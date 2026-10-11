@@ -1988,6 +1988,39 @@ fn admission_batch_sizes_follow_each_sizing_rule() {
     );
 }
 
+/// After an eligible prefix leaves one accepted slot open, each batch that accepts nothing doubles the next batch up to `batch_rows`, so an ineligible tail is judged in seven admission batches.
+#[test]
+fn a_dry_batch_after_an_eligible_prefix_doubles_the_next_batch() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 64);
+    let request = probes("bulk");
+    let order = fixture.reference(&request);
+    assert_eq!(order.len(), 64);
+    let prefix: Vec<&str> = order[..15].iter().map(|id| object_of(&bulk, id)).collect();
+    fixture.admit(&prefix);
+
+    let retrieval = fixture
+        .retrieve(
+            &request,
+            RetrievalBounds {
+                max_accepted: NonZeroUsize::new(16).unwrap(),
+                batch_rows: NonZeroUsize::new(16).unwrap(),
+                ..bounds()
+            },
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ids_of(&retrieval), order[..15].to_vec());
+    assert_eq!(retrieval.completion, Completion::Complete);
+    // Sixteen open slots accept fifteen; one slot left takes ceil(1 * 16 / 15) = 2 rows, and each batch that accepts nothing doubles the next: 4, 8, then 16, 16, and the last 2 rows. Revalidation re-judges the fifteen.
+    assert_eq!(retrieval.consumed.judged, 64 + 15);
+    assert_eq!(retrieval.consumed.batches, 7 + 1);
+    assert_eq!(
+        retrieval.consumed.excluded,
+        vec![(EligibilityVerdict::Retracted, 64 - 15)]
+    );
+}
+
 /// Projects `rows` and admits their sources, so every one of their occurrences is an eligible contribution.
 fn project_admitted(fixture: &Fixture, rows: &[Row]) {
     fixture.project(rows);

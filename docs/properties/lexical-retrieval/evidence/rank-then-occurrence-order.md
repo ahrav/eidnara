@@ -28,7 +28,7 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   `Kept::tail` is truncated at the bound, so identifiers decide which
   equal-rank matches the bound keeps. A dead row keeps its slot;
   `admit_batches` (`:1005`) drops it unjudged.
-- `admit_batches` and `revalidate` (`:1099`) carry each accepted hit's
+- `admit_batches` and `revalidate` (`:1108`) carry each accepted hit's
   `rank` and `ordinal` into `Contribution` unchanged.
 
 Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1099`)
@@ -52,25 +52,25 @@ written through `apply_batch` (`Fixture::project`, `:378`) and a real
 - `:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal` confirms
   `note` and `unrelated` rank delta equally, asserts ordinal 0 under both
   probe orders, and equal keyed output.
-- `:2385` `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`
+- `:2418` `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`
   projects 3000 tied rows in reversed order over three batches, asserts the
   scan keeps exactly the 64 lowest identifiers, that the reference agrees,
   `ScanBound`, and `ranked_matches == 3000`. The tied rows fill the table, so
   `identify` reaches each kept rowid by stepping its cursor.
-- `:2419` `a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers`
+- `:2452` `a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers`
   projects 240 tied rows among 3000 rows no probe matches, asserts a 240-row
   window identifies every tied row in identifier order and a 64-row window
   keeps exactly the 64 lowest identifiers, with `ScanBound`,
   `ranked_matches == 240`, and `scanned_rows == 64`. The kept rowids are a
   sparse subsequence of the table, so `identify` falls back to seeking each
   one.
-- `:2937` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`
+- `:2970` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`
   projects 150 rows with distinct ranks, tombstones indexes 0..10 and 60..70
   through `tombstone_raw` (`:1028`), asserts the scan keeps the first 64
   reference rows whatever their liveness, and asserts the contributions are
   the 50 live ones among them, with `dead_rows == 14`, `scanned_rows == 64`,
   and `ScanBound`.
-- `:3137` `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group`
+- `:3170` `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group`
   ends the bound at a rank change, stores the tail with its highest identifier
   first, tombstones the head's lowest identifier, and asserts the window is
   still the whole head with `dead_rows == 1` and `ScanBound`.

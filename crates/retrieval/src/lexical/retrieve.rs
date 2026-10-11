@@ -999,7 +999,7 @@ fn judge_batch(
     Ok(Some((report, moved)))
 }
 
-/// Judges candidates in comparator order and accepts eligible ones until `max_accepted` fills. The first batch takes the open accepted slots; each later batch takes the open slots scaled by the matches read per accepted occurrence so far, so a mostly eligible window reads few occurrences past the bound and a sparse one still advances a whole batch at a time. Every batch takes at most `batch_rows` kept matches, reads their occurrence rows, and judges the live ones.
+/// Judges candidates in comparator order and accepts eligible ones until `max_accepted` fills. The first batch targets the open accepted slots; each later batch scales the open slots by the matches read per accepted occurrence so far. After a batch with no new acceptance, the next target is the larger of that estimate and twice the previous batch. Every batch takes at most `batch_rows` kept matches, reads their occurrence rows, and judges the live ones.
 /// An ineligible leader consumes judgment work and no accepted slot, so eligible tails behind it are still reached.
 #[allow(clippy::too_many_arguments)]
 fn admit_batches(
@@ -1015,6 +1015,8 @@ fn admit_batches(
     let mut accepted: Vec<Accepted> = Vec::new();
     let mut reached: HashSet<String> = HashSet::new();
     let mut next = 0;
+    // `previous` holds the previous batch's kept-match count and the accepted count before that batch ran.
+    let mut previous: (usize, usize) = (0, 0);
     while next < kept.len() {
         if accepted.len() == bounds.max_accepted.get() {
             incomplete(retrieval, IncompleteReason::AcceptedBound);
@@ -1026,14 +1028,21 @@ fn admit_batches(
         }
         let open = bounds.max_accepted.get() - accepted.len();
         // The matches read per accepted occurrence so far predict how many fill the open slots; a batch that has accepted none yet takes a whole batch.
+        // A batch that adds no accepted occurrence sets the next batch's floor at twice its own size, capped at `batch_rows`, so a run of such batches grows geometrically to whole batches.
+        let (previous_rows, accepted_before) = previous;
         let want = match (next, accepted.len()) {
             (0, _) => open,
             (_, 0) => bounds.batch_rows.get(),
+            (read, kept) if kept == accepted_before => open
+                .saturating_mul(read)
+                .div_ceil(kept)
+                .max(previous_rows.saturating_mul(2)),
             (read, kept) => open.saturating_mul(read).div_ceil(kept),
         };
         let end = kept
             .len()
             .min(next + want.clamp(1, bounds.batch_rows.get()));
+        previous = (end - next, accepted.len());
         retrieval.consumed.sql_steps += kept.name_through(conn, end, budget)?;
         let mut batch: Vec<&Named> = Vec::with_capacity(end - next);
         let mut ids: Vec<&str> = Vec::with_capacity(end - next);

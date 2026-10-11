@@ -81,7 +81,7 @@ Tests:
   eleventh poll while `parse` is counted: one probe consumed, counted rows
   above zero, zero scanned rows, `Incomplete(BudgetExhausted)`, no
   contributions, and the `EvalBudget` itself stays unexhausted.
-- `:2554`
+- `:2543`
   `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`
   uses the 10,001-row threshold corpus (`project_thresholds`, `:1682`). For
   `t20001` tight and wide, `t20000`, and `c15000 d15000`, it measures the
@@ -130,7 +130,7 @@ most of the work in a count, a ranked read, or a common scan.
   `lexical_read`. The cancel and the sleep therefore end the request at the
   phase entry check, not inside a MATCH statement. In-flight interruption is
   proved only by the retrieval tests at `lexical_retrieval.rs:1457` and
-  `:2510`, which install the handler through `with_conn_interruptible`, the
+  `:2543`, which install the handler through `with_conn_interruptible`, the
   same storage entry `read_under` uses in production.
 - Missing evidence: a route-level test that cancels while a lexical statement
   is stepping.

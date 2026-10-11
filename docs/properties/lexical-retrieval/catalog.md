@@ -144,10 +144,10 @@ distinct-rank probe's window, which keep their slots.
 Confidence: high - [evidence](evidence/rank-then-occurrence-order.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:687`
 `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`;
-`:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:2385`
-`a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`; `:2419`
+`:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:2418`
+`a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`; `:2452`
 `a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers`;
-`:2937` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`.
+`:2970` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`.
 Impact: nondeterministic ranking across rebuilds.
 Open questions: None.
 
@@ -171,7 +171,7 @@ Confidence: high - [evidence](evidence/eligibility-before-accepted-slots.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:762`
 `an_ineligible_leader_is_excluded_without_taking_an_accepted_slot`; `:797`
 `admission_batches_scale_the_open_slots_by_the_acceptance_so_far_and_an_exact_fill_stays_complete`;
-`:2709` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`.
+`:2742` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`.
 Impact: an eligible memory is dropped behind a hidden one.
 Open questions: None.
 
@@ -231,8 +231,8 @@ approved an allocation bound to compare them with.
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:838`
 `the_scan_bound_marks_incomplete_only_past_the_bound_and_refusals_precede_every_probe`;
 `:1119` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`; `:1626`
-`ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2768`
-`allocations_follow_the_scan_bound_and_the_rank_budget`; `:2843`
+`ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2801`
+`allocations_follow_the_scan_bound_and_the_rank_budget`; `:2876`
 `work_counters_report_exact_and_over_bound_work`;
 `crates/daemon/tests/query_route.rs:320`
 `each_bound_saturates_before_its_protected_work`; `:532`
@@ -265,7 +265,7 @@ Existing check: `crates/daemon/tests/query_route.rs:74`
 `cancellation_and_deadline_are_observed_in_every_phase`;
 `crates/retrieval/tests/lexical_retrieval.rs:1457`
 `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`;
-`:2510`
+`:2543`
 `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`.
 Impact: a cancelled request keeps the engine busy.
 Open questions: None.

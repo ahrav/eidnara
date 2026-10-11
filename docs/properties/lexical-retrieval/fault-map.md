@@ -17,19 +17,19 @@ reachability record needs a host campaign. Locations are verified against the
 | Query syntax in request text | request strings holding `OR`, `NEAR`, `*`, `"`, parentheses, and column filters; `probe_matches` (`crates/retrieval/tests/lexical_engine.rs:80`) for the engine, `probes` (`crates/retrieval/tests/lexical_retrieval.rs:164`) for `retrieve` | `lexical_engine.rs`, `lexical_retrieval.rs`, `lexical_analysis.rs` |
 | Unquoted control | the raw expression passed to `matches` (`lexical_engine.rs:71`) | `lexical_engine.rs:213` |
 | Zero atoms | separator-only and empty request text | `lexical_retrieval.rs:627`, `lexical_engine.rs:268` |
-| Equal raw ranks across probes, objects, or storage orders | `corpus()` rows (`lexical_retrieval.rs:228`) and `project_bulk` (`:1012`) with identical text; permuted and duplicated probe lists | `lexical_retrieval.rs:687`, `:728`, `:2385`, `:2597` |
-| Dead rows inside and past the scan bound | `tombstone_raw` (`lexical_retrieval.rs:1028`); an orphaned lexical row | `lexical_retrieval.rs:916`, `:934`, `:1040`, `:1084`, `:2457`, `:2660`, `:2937`, `:3137` |
-| Ineligible leader | a scope decision that hides the comparator's first occurrence; `batch_rows` of one | `lexical_retrieval.rs:762`, `:797`, `:2597` |
+| Equal raw ranks across probes, objects, or storage orders | `corpus()` rows (`lexical_retrieval.rs:228`) and `project_bulk` (`:1012`) with identical text; permuted and duplicated probe lists | `lexical_retrieval.rs:687`, `:728`, `:2418`, `:2630` |
+| Dead rows inside and past the scan bound | `tombstone_raw` (`lexical_retrieval.rs:1028`); an orphaned lexical row | `lexical_retrieval.rs:916`, `:934`, `:1040`, `:1084`, `:2490`, `:2693`, `:2970`, `:3170` |
+| Ineligible leader | a scope decision that hides the comparator's first occurrence; `batch_rows` of one | `lexical_retrieval.rs:762`, `:797`, `:2630` |
 | Retirement, correction, or snapshot move after a grant | `retrieve_with_hook_for_test` (`crates/retrieval/src/lexical/retrieve.rs:373`) between admission batches; a kernel restore; a foreign project | `lexical_retrieval.rs:1200`, `:1223`, `:1253`, `:1293`; `crates/daemon/tests/claim_eligibility.rs:184` |
 | A second eligibility caller | a planted `judge_eligibility` mention in any workspace member's `src` | `claim_eligibility.rs:456` (the scan; the plant is manual) |
-| Match counts at and past the thresholds | `project_thresholds` (`lexical_retrieval.rs:1599`), `small_thresholds` (`:2597`), a scan bound one below the match count, a result cap of one | `lexical_retrieval.rs:838`, `:1119`, `:1626`, `:2606`, `:2768`, `:2843` |
+| Match counts at and past the thresholds | `project_thresholds` (`lexical_retrieval.rs:1599`), `small_thresholds` (`:2630`), a scan bound one below the match count, a result cap of one | `lexical_retrieval.rs:838`, `:1119`, `:1626`, `:2639`, `:2801`, `:2876` |
 | Cancellation or deadline inside a phase | `before_phase` hooks in the route (`crates/daemon/src/query_route.rs:1383` for `Phase::Lexical`) | `crates/daemon/tests/query_route.rs:74` |
-| Engine interrupt mid-statement | `with_conn_interruptible` with a stop closure the progress handler polls every `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`) | `lexical_retrieval.rs:1457`, `:2510` |
+| Engine interrupt mid-statement | `with_conn_interruptible` with a stop closure the progress handler polls every `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`) | `lexical_retrieval.rs:1457`, `:2543` |
 | Budget that ends between probes or holds a kernel reader | an `EvalBudget` deadline between probes | `lexical_retrieval.rs:1350`, `:1566` |
 | Payload table absent | `ALTER TABLE payloads RENAME` before `retrieve` | `lexical_retrieval.rs:1325` |
 | Schema drift | the frozen inventory in `schema_inventory.rs` against `crates/retrieval/baseline.sql:94` | `crates/retrieval/tests/schema_inventory.rs:312` |
 | Prefix or expansion path | the prefix-operator control | `lexical_engine.rs:248`, `:233`, `:340` |
-| One million occurrences under open-loop load | `lexical_scan_p99_at_one_million_occurrences` (`lexical_retrieval.rs:2170`); `#[ignore]`, release, D21 host | #896: warm p99 43.2 ms at 10/s and 28.6 ms at 2/s on four pinned EPYC 9R14 cores; cold misses the gate |
+| One million occurrences under open-loop load | `lexical_scan_p99_at_one_million_occurrences` (`lexical_retrieval.rs:2203`); `#[ignore]`, release, D21 host | #896: warm p99 43.2 ms at 10/s and 28.6 ms at 2/s on four pinned EPYC 9R14 cores; cold misses the gate |
 | Host application through fusion and packing | none in the repository | needs host owners (AC8) |
 
 ## Required faults per record

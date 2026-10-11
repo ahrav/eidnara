@@ -49,9 +49,11 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
   group's identification visits at most five table rows per kept row.
 - `admit` (`:499`) and `admit_batches` (`:1005`) take at most `batch_rows`
   kept matches per batch, sized from the open accepted slots and the
-  acceptance so far (`:1029`),
+  acceptance so far (`:1033`); a batch after one with no new acceptance
+  takes twice that batch up to `batch_rows`, so a dry tail reaches whole batches after
+  about log2(`batch_rows`) batches. They
   read their occurrence rows through `resolve` (`:920`), count dead ones in
-  `dead_rows` (`:1059`), and stop at `max_accepted` (`:1019`); `judge_batch`
+  `dead_rows` (`:1068`), and stop at `max_accepted` (`:1021`); `judge_batch`
   (`:971`) increments `batches` and `judged` (`:922`, `:994`).
 - The daemon installs the production bounds through
   `QueryRouteLimits::production` (`crates/daemon/src/query_route.rs:135`:
@@ -80,16 +82,16 @@ Tests, `crates/retrieval/tests/lexical_retrieval.rs`:
   ranks zero, and is `CommonTerms` with `scanned_rows` equal to `scan_rows`.
   Pairs summing to 14,999 and 15,000 rank both; 15,001 ranks only the 7,500
   probe and is `RankBudget`, in either request order.
-- `:2843` `work_counters_report_exact_and_over_bound_work`: `parse parse` at
+- `:2876` `work_counters_report_exact_and_over_bound_work`: `parse parse` at
   `scan_rows` 4 reports probes 2, counted 4, scanned 4, ranked 4, `(judged,
   batches)` of `(8, 3)` under `batch_rows` 2 (`bounds()`, `:153`), and
   `sql_steps > 0`. `scan_rows` 3 and 2 keep counted 4 and scan fewer rows with
   fewer steps. `max_accepted` 1 keeps scanned rows equal to the uncapped run
   and runs fewer steps, because admission reads occurrence rows only for the
-  candidates it judges. Under `small_thresholds` (`:2446`, qualifying 2, budget 2)
+  candidates it judges. Under `small_thresholds` (`:2630`, qualifying 2, budget 2)
   one more matching row adds one scanned row and more steps; a fifth ranked
   row adds steps over four.
-- `:2768` `allocations_follow_the_scan_bound_and_the_rank_budget`:
+- `:2801` `allocations_follow_the_scan_bound_and_the_rank_budget`:
   `retrieve_recorded` (`:463`) wraps only the `retrieve` call in
   `alloc_recorder::record_window` (`crates/daemon/tests/support/alloc_recorder.rs:359`),
   included by `#[path]` (`:2`) as the binary's `#[global_allocator]` (`:6`).
@@ -101,7 +103,7 @@ Tests, `crates/retrieval/tests/lexical_retrieval.rs`:
   three-row scan; a ranked run reports `ranked_matches` 36 with
   `scanned_rows` 3 and more events than the three-row run. Each ledger asserts
   `!overflow` (`Ledger`, `:165`).
-- `:3078` `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group`:
+- `:3111` `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group`:
   64 head rows and 320 tail rows; a tied tail runs the same `sql_steps` as a
   tail with one rank per row, with `scanned_rows` 64 and `ranked_matches` 384.
 
@@ -143,7 +145,7 @@ row loop ends work at the original deadline, covered by
 
 - Sources examined: `Ledger` fields `allocation_events`, `requested_bytes`,
   and `overflow` (`alloc_recorder.rs:168`, `:172`, `:180`); the assertions in
-  `lexical_retrieval.rs:2768`; the PR #967 description; the catalog record.
+  `lexical_retrieval.rs:2801`; the PR #967 description; the catalog record.
 - Findings: the test compares runs with each other. One row below the scan
   bound allocates fewer events and bytes; 32 more common matches add no
   events; ranked work allocates more as `ranked_matches` grows to 36. No
@@ -169,7 +171,7 @@ row loop ends work at the original deadline, covered by
 ### Q: Is `sql_steps` exercised by a projection or only a fixture engine?
 
 - Sources examined: `Fixture::project` (`lexical_retrieval.rs:378`) and the
-  tests at `:2843` and `:2768`.
+  tests at `:2876` and `:2801`.
 - Findings: the fixture projects rows with the production `apply_batch`
   (`:408`) into a `SqliteStore` and runs `retrieve` against it; the
   daemon handler test (`crates/daemon/tests/query_route_handler.rs:247`)
