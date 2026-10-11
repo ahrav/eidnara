@@ -158,6 +158,67 @@ impl FamilyVersion {
     }
 }
 
+/// A verified occurrence as the kernel's live-descriptor inventory describes it: the columns both sides carry, so `validate_family` compares the inventory against the single scan that verified the family without rereading rows. A tombstoned row keeps nothing beyond its presence, since an inventory row naming it is a mismatch.
+enum InventoriedOccurrence {
+    Tombstoned,
+    Live {
+        tuple: Vec<u8>,
+        payload_id: String,
+        source_object_id: String,
+        domain_id: String,
+        sensitivity: kernel::Sensitivity,
+        created_commit_seq: i64,
+        source_evidence_id: String,
+        source_artifact_digest: String,
+    },
+}
+
+impl From<retrieval::StoredOccurrence> for InventoriedOccurrence {
+    fn from(row: retrieval::StoredOccurrence) -> Self {
+        if row.tombstone.is_some() {
+            return Self::Tombstoned;
+        }
+        Self::Live {
+            tuple: row.tuple,
+            payload_id: row.payload_id,
+            source_object_id: row.source_object_id,
+            domain_id: row.domain_id,
+            sensitivity: row.sensitivity,
+            created_commit_seq: row.created_commit_seq,
+            source_evidence_id: row.source_evidence_id,
+            source_artifact_digest: row.source_artifact_digest,
+        }
+    }
+}
+
+impl InventoriedOccurrence {
+    /// Whether this live row carries exactly the columns the kernel inventory records for `source`.
+    fn matches(&self, source: &kernel::LiveDescriptor) -> bool {
+        match self {
+            Self::Tombstoned => false,
+            Self::Live {
+                tuple,
+                payload_id,
+                source_object_id,
+                domain_id,
+                sensitivity,
+                created_commit_seq,
+                source_evidence_id,
+                source_artifact_digest,
+            } => {
+                *tuple == source.detail.occurrence_tuple
+                    && *payload_id == source.detail.payload_id
+                    && *source_object_id == source.object_id
+                    && *domain_id == source.domain_id
+                    && *sensitivity == source.sensitivity
+                    && *created_commit_seq == source.created_commit_seq
+                    && *source_evidence_id == source.detail.evidence_id
+                    && *source_artifact_digest == source.detail.artifact_digest
+            }
+        }
+    }
+}
+
 struct SelectedFamily {
     projection: Arc<SearchProjection>,
     certificate: Bootstrap,
@@ -726,7 +787,7 @@ impl SearchSelection {
     ) -> Result<Validated, BuildError> {
         family.check_kernel(kernel, budget)?;
         let now = wall_ms()?;
-        // The kernel inventory is compared with the rows this one transaction verified, held without their payload bytes.
+        // The kernel inventory is compared with the rows this one transaction verified, each kept as the columns the inventory names.
         let mut occurrences = std::collections::HashMap::new();
         let (version, report) = family.projection.read_within(deadline(budget)?, |conn| {
             let version = FamilyVersion::read(conn)?;
@@ -736,14 +797,9 @@ impl SearchSelection {
                 &family.generation(),
                 self.bounds,
                 now,
-                |row| {
-                    occurrences.insert(
-                        row.occurrence_id.clone(),
-                        retrieval::StoredOccurrence {
-                            bytes: Vec::new(),
-                            ..row
-                        },
-                    );
+                |mut row| {
+                    let occurrence_id = std::mem::take(&mut row.occurrence_id);
+                    occurrences.insert(occurrence_id, InventoriedOccurrence::from(row));
                     Ok(())
                 },
             )
@@ -796,17 +852,7 @@ impl SearchSelection {
             for source in inventory.rows {
                 if occurrences
                     .get(&source.detail.occurrence_id)
-                    .is_none_or(|row| {
-                        row.tombstone.is_some()
-                            || row.tuple != source.detail.occurrence_tuple
-                            || row.payload_id != source.detail.payload_id
-                            || row.source_object_id != source.object_id
-                            || row.domain_id != source.domain_id
-                            || row.sensitivity != source.sensitivity
-                            || row.created_commit_seq != source.created_commit_seq
-                            || row.source_evidence_id != source.detail.evidence_id
-                            || row.source_artifact_digest != source.detail.artifact_digest
-                    })
+                    .is_none_or(|row| !row.matches(&source))
                 {
                     return Err(SearchProjectionError::from(ProjectionError::CorruptRow).into());
                 }

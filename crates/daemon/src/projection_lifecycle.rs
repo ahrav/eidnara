@@ -1379,7 +1379,7 @@ fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
 /// The hex SHA-256 a staged seed's digest takes; the record reserves room for one before any is pinned.
 const DIGEST_HEX_LEN: usize = 64;
 
-/// Reserves space for exhausted `episodes`, a staged seed digest, and a `recovery_target` so later valid updates do not make the intent [`IntentRefusal::Oversized`].
+/// Reserves space for exhausted `episodes`, a staged seed digest, and the widest `recovery_target`, which recertification moves forward, so later valid updates keep the intent within [`MAX_RECORD_BYTES`].
 fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
     let exhausted = LifecycleIntent {
         episodes: EpisodeAccounting {
@@ -1392,9 +1392,9 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
                 .clone()
                 .unwrap_or_else(|| "0".repeat(DIGEST_HEX_LEN)),
         ),
-        recovery_target: Some(intent.recovery_target.unwrap_or(RecoveryTarget {
+        recovery_target: Some(RecoveryTarget {
             commit_seq: i64::MAX,
-        })),
+        }),
         ..intent.clone()
     };
     // `disable` wraps the active record and cleanup later fills every optional field, so the accepted intent must fit in that form too.

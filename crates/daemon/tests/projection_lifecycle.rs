@@ -1180,22 +1180,30 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     );
     assert_eq!(lifecycle.read(), ControlState::Absent);
 
-    // The record reserves the seed digest it may later pin as well as the terminal `consumed`: a request that fits only without the digest is refused up front, so an accepted intent can always be pinned and every episode consumed.
+    // The record reserves the seed digest it may later pin, the terminal `consumed`, and the widest target recertification may move to: a request that fits only without them is refused up front, so an accepted intent can always be pinned, recertified, and consumed to its allowance.
     let dir = tempfile::tempdir().unwrap();
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     let digest = "d".repeat(64);
     let transaction = LifecycleTransactionLock::acquire_exclusive(Some(dir.path())).unwrap();
     let terminal = LifecycleIntent {
         staged_seed_digest: Some(digest.clone()),
+        recovery_target: Some(RecoveryTarget {
+            commit_seq: i64::MAX,
+        }),
         ..expected(&base, base.allowance)
     };
-    // One byte short of fitting with the digest at the terminal size; without the digest it fits.
+    // One byte short of fitting at the terminal size; with its two-digit target and with the digest it fits.
     let slack = 64 * 1024 + 1 - reserved(&terminal);
     let pin_cap = LifecycleRequest {
         attempt_id: format!("{}{}", base.attempt_id, "a".repeat(slack)),
         ..base.clone()
     };
-    assert!(reserved(&expected(&pin_cap, base.allowance)) <= 64 * 1024);
+    assert!(
+        reserved(&LifecycleIntent {
+            staged_seed_digest: Some(digest.clone()),
+            ..expected(&pin_cap, base.allowance)
+        }) <= 64 * 1024
+    );
     assert!(
         reserved(&terminal)
             >= serde_json::to_vec(&json!({"schema": 4, "current": &terminal}))
@@ -1273,6 +1281,9 @@ fn the_lifecycle_entry_is_gated_and_control_state_never_enables_a_hook() {
     let lifecycle = ProjectionLifecycle::open(dir.path()).unwrap();
     let terminal = LifecycleIntent {
         staged_seed_digest: Some(digest.clone()),
+        recovery_target: Some(RecoveryTarget {
+            commit_seq: i64::MAX,
+        }),
         ..expected(&base, base.allowance)
     };
     let accepted = LifecycleRequest {

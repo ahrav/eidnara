@@ -15,7 +15,7 @@ pub enum RecoveryEvent {
     BeforeCatchUp {
         target: i64,
     },
-    /// The selected family applied `target`, the tip a still-registered predecessor trailed, and the recorded target moves forward to it.
+    /// The selected family applied `target`, the tip a still-registered predecessor trailed, and the record now names it as the recovery target.
     Recertified {
         target: i64,
     },
@@ -420,7 +420,6 @@ impl SearchSelection {
                     check_operation(&intent)?;
                     validated = self.validate_family(&family, kernel, budget)?;
                 }
-                observer(RecoveryEvent::Recertified { target: tip });
                 intent = lifecycle
                     .recertify_target(
                         gate,
@@ -429,6 +428,7 @@ impl SearchSelection {
                         wall_ms()?,
                     )
                     .map_err(BuildError::from)?;
+                observer(RecoveryEvent::Recertified { target: tip });
             }
         }
         let check = || check_operation(&intent);

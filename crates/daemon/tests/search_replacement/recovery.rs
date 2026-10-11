@@ -1121,7 +1121,16 @@ fn an_advancing_tip_recertifies_the_target_and_retires_the_predecessor_at_it() {
             &gate,
             &config,
             &budget(Duration::from_secs(20)),
-            &mut |event| events.push(event),
+            &mut |event| {
+                // `Recertified` reports a recorded target: the record names it when the observer runs.
+                if let RecoveryEvent::Recertified { target } = event {
+                    assert_eq!(
+                        control(root.path()).recovery_target,
+                        Some(RecoveryTarget { commit_seq: target })
+                    );
+                }
+                events.push(event);
+            },
         )
         .unwrap();
     assert_eq!(progress, RecoveryProgress::Current);
