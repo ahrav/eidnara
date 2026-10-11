@@ -329,13 +329,25 @@ impl SearchSelection {
             let family = match self.selected.load_full() {
                 Some(family) => family,
                 None => {
-                    let family = Arc::new(self.open_family(digest, kernel, budget)?);
+                    let family = Arc::new(self.open_family(digest, kernel, budget)?.0);
                     self.selected.store(Some(Arc::clone(&family)));
                     family
                 }
             };
             family.unavailable.store(true, Ordering::Release);
-            if !family.names_operation(intent) {
+            // A recertified target never passes the kernel tip it was certified at.
+            let past_tip = match intent.recovery_target {
+                Some(target)
+                    if target.commit_seq > family.certificate.seed.checkpoint_commit_seq =>
+                {
+                    target.commit_seq
+                        > kernel
+                            .capture_commit_read_target_within_budget(budget)?
+                            .through_commit
+                }
+                _ => false,
+            };
+            if !family.names_operation(intent) || past_tip {
                 return Err(BuildError::Invalid(
                     "disabled handoff differs from selected certificate",
                 ));
@@ -350,10 +362,21 @@ impl SearchSelection {
             let incarnation = family.incarnation;
             history = incarnation;
             if family.certificate.retiring.is_some() {
+                let applied = family.projection.read_within(deadline(budget)?, |conn| {
+                    retrieval::batch::read_checkpoint(conn, &self.identity.kernel_incarnation_id)?
+                        .map(|c| c.checkpoint_commit_seq)
+                        .ok_or(ProjectionError::CorruptRow)
+                })?;
                 self.retire_bound(
                     &family,
                     retirement::RetirementRun {
                         kernel,
+                        // The handoff's target is the seed's checkpoint or a later recertified commit the selected family applied; the bound by the family's checkpoint keeps retirement within what the family applied.
+                        through: intent
+                            .recovery_target
+                            .map_or(family.certificate.seed.checkpoint_commit_seq, |target| {
+                                target.commit_seq.min(applied)
+                            }),
                         spec,
                         budget,
                         transaction: &transaction,

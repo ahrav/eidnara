@@ -943,6 +943,92 @@ pub(crate) fn decode_tombstone(
     }
 }
 
+/// The columns [`decode_stored_occurrence`] reads, joined to the payload and tombstone; `?1` bounds the payload length.
+macro_rules! stored_occurrence_select {
+    () => {
+        "SELECT o.occurrence_id,o.tuple,o.lineage_id,o.class,o.revision,o.representation,
+                o.span_start,o.span_end,o.payload_id,
+                CASE WHEN p.byte_length=length(p.bytes)
+                               AND p.byte_length BETWEEN 0 AND ?1
+                     THEN p.bytes END,
+                o.domain_id,o.sensitivity,
+                o.source_object_id,o.source_evidence_id,o.source_artifact_digest,
+                o.created_commit_seq,t.invalidated_commit_seq,t.reason,
+                p.byte_length,length(p.bytes)
+         FROM occurrences o
+         LEFT JOIN payloads p ON p.payload_id=o.payload_id
+         LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id"
+    };
+}
+
+fn max_payload_bytes() -> Result<i64, ProjectionError> {
+    i64::try_from(MAX_PAYLOAD_BYTES).map_err(|_| ProjectionError::CorruptRow)
+}
+
+/// Decodes one row of `stored_occurrence_select!`. Corruption is signalled through `InvalidQuery`, which [`occurrence_error`] maps back, because a row closure can only fail with a rusqlite error.
+fn decode_stored_occurrence(
+    row: &rusqlite::Row<'_>,
+    max_payload_bytes: i64,
+) -> rusqlite::Result<StoredOccurrence> {
+    let corrupt = || rusqlite::Error::InvalidQuery;
+    let declared_length = row.get::<_, Option<i64>>(18)?.ok_or_else(corrupt)?;
+    let actual_length = row.get::<_, Option<i64>>(19)?.ok_or_else(corrupt)?;
+    if declared_length != actual_length || !(0..=max_payload_bytes).contains(&actual_length) {
+        return Err(corrupt());
+    }
+    let span = decode_span(row.get(6)?, row.get(7)?).map_err(|_| corrupt())?;
+    let created_commit_seq: i64 = row.get(15)?;
+    let tombstone = decode_tombstone(
+        row.get(16)?,
+        row.get::<_, Option<String>>(17)?.as_deref(),
+        created_commit_seq,
+    )
+    .map_err(|_| corrupt())?;
+    Ok(StoredOccurrence {
+        occurrence_id: row.get(0)?,
+        tuple: row.get(1)?,
+        lineage_id: row.get(2)?,
+        class: row.get(3)?,
+        revision: row.get(4)?,
+        representation: row.get(5)?,
+        span,
+        payload_id: row.get(8)?,
+        bytes: row.get::<_, Option<Vec<u8>>>(9)?.ok_or_else(corrupt)?,
+        domain_id: row.get(10)?,
+        sensitivity: parse_sensitivity(&row.get::<_, String>(11)?).ok_or_else(corrupt)?,
+        source_object_id: row.get(12)?,
+        source_evidence_id: row.get(13)?,
+        source_artifact_digest: row.get(14)?,
+        created_commit_seq,
+        tombstone,
+    })
+}
+
+fn occurrence_error(error: rusqlite::Error) -> ProjectionError {
+    match error {
+        rusqlite::Error::InvalidQuery => ProjectionError::CorruptRow,
+        other => other.into(),
+    }
+}
+
+/// A tuple, payload, or lineage that no longer hashes to its stored identifier is `CorruptRow`.
+fn verify_stored_identity(stored: &StoredOccurrence) -> Result<(), ProjectionError> {
+    let lineage = derived_lineage_id(
+        &stored.tuple,
+        &stored.class,
+        stored.revision,
+        &stored.representation,
+        stored.span.map(|(start, end)| Span { start, end }),
+    );
+    if identity_digest(&stored.tuple) != stored.occurrence_id
+        || identity_digest(&stored.bytes) != stored.payload_id
+        || lineage.as_deref() != Some(stored.lineage_id.as_str())
+    {
+        return Err(ProjectionError::CorruptRow);
+    }
+    Ok(())
+}
+
 /// One stored occurrence with its payload bytes and tombstone, or `None`. A
 /// row whose columns do not decode to the shape the schema promises is
 /// `CorruptRow`, as is a tuple or payload that no longer hashes to its stored
@@ -951,83 +1037,35 @@ pub fn read_occurrence(
     conn: &GuardedConn<'_>,
     occurrence_id: &str,
 ) -> Result<Option<StoredOccurrence>, ProjectionError> {
-    let max_payload_bytes =
-        i64::try_from(MAX_PAYLOAD_BYTES).map_err(|_| ProjectionError::CorruptRow)?;
-    // The closure can only fail with a rusqlite error, so corruption is
-    // signalled through `InvalidQuery` and mapped back below.
-    let corrupt = || rusqlite::Error::InvalidQuery;
+    let max_payload_bytes = max_payload_bytes()?;
     let stored = conn
-        .query_row(
-            "SELECT o.occurrence_id,o.tuple,o.lineage_id,o.class,o.revision,o.representation,
-                    o.span_start,o.span_end,o.payload_id,
-                    CASE WHEN p.byte_length=length(p.bytes)
-                                   AND p.byte_length BETWEEN 0 AND ?2
-                         THEN p.bytes END,
-                    o.domain_id,o.sensitivity,
-                    o.source_object_id,o.source_evidence_id,o.source_artifact_digest,
-                    o.created_commit_seq,t.invalidated_commit_seq,t.reason,
-                    p.byte_length,length(p.bytes)
-             FROM occurrences o
-             LEFT JOIN payloads p ON p.payload_id=o.payload_id
-             LEFT JOIN occurrence_tombstones t ON t.occurrence_id=o.occurrence_id
-             WHERE o.occurrence_id=?1",
-            params![occurrence_id, max_payload_bytes],
-            |row| {
-                let declared_length = row.get::<_, Option<i64>>(18)?.ok_or_else(corrupt)?;
-                let actual_length = row.get::<_, Option<i64>>(19)?.ok_or_else(corrupt)?;
-                if declared_length != actual_length
-                    || !(0..=max_payload_bytes).contains(&actual_length)
-                {
-                    return Err(corrupt());
-                }
-                let span = decode_span(row.get(6)?, row.get(7)?).map_err(|_| corrupt())?;
-                let created_commit_seq: i64 = row.get(15)?;
-                let tombstone = decode_tombstone(
-                    row.get(16)?,
-                    row.get::<_, Option<String>>(17)?.as_deref(),
-                    created_commit_seq,
-                )
-                .map_err(|_| corrupt())?;
-                Ok(StoredOccurrence {
-                    occurrence_id: row.get(0)?,
-                    tuple: row.get(1)?,
-                    lineage_id: row.get(2)?,
-                    class: row.get(3)?,
-                    revision: row.get(4)?,
-                    representation: row.get(5)?,
-                    span,
-                    payload_id: row.get(8)?,
-                    bytes: row.get::<_, Option<Vec<u8>>>(9)?.ok_or_else(corrupt)?,
-                    domain_id: row.get(10)?,
-                    sensitivity: parse_sensitivity(&row.get::<_, String>(11)?)
-                        .ok_or_else(corrupt)?,
-                    source_object_id: row.get(12)?,
-                    source_evidence_id: row.get(13)?,
-                    source_artifact_digest: row.get(14)?,
-                    created_commit_seq,
-                    tombstone,
-                })
-            },
-        )
+        .prepare_cached(concat!(
+            stored_occurrence_select!(),
+            " WHERE o.occurrence_id=?2"
+        ))?
+        .query_row(params![max_payload_bytes, occurrence_id], |row| {
+            decode_stored_occurrence(row, max_payload_bytes)
+        })
         .optional()
-        .map_err(|error| match error {
-            rusqlite::Error::InvalidQuery => ProjectionError::CorruptRow,
-            other => other.into(),
-        })?;
+        .map_err(occurrence_error)?;
     if let Some(stored) = &stored {
-        let lineage = derived_lineage_id(
-            &stored.tuple,
-            &stored.class,
-            stored.revision,
-            &stored.representation,
-            stored.span.map(|(start, end)| Span { start, end }),
-        );
-        if identity_digest(&stored.tuple) != stored.occurrence_id
-            || identity_digest(&stored.bytes) != stored.payload_id
-            || lineage.as_deref() != Some(stored.lineage_id.as_str())
-        {
-            return Err(ProjectionError::CorruptRow);
-        }
+        verify_stored_identity(stored)?;
     }
     Ok(stored)
+}
+
+/// Hands `visit` every stored occurrence in one scan, each decoded and checked as [`read_occurrence`] checks it.
+pub(crate) fn for_each_occurrence(
+    conn: &GuardedConn<'_>,
+    mut visit: impl FnMut(StoredOccurrence) -> Result<(), ProjectionError>,
+) -> Result<(), ProjectionError> {
+    let max_payload_bytes = max_payload_bytes()?;
+    let mut statement = conn.prepare_cached(stored_occurrence_select!())?;
+    let mut rows = statement.query([max_payload_bytes])?;
+    while let Some(row) = rows.next()? {
+        let stored = decode_stored_occurrence(row, max_payload_bytes).map_err(occurrence_error)?;
+        verify_stored_identity(&stored)?;
+        visit(stored)?;
+    }
+    Ok(())
 }

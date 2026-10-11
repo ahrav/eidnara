@@ -65,15 +65,46 @@ replacement is selected, and retirement releases the old consumer.
 Kernel source holds belong to one lease, so a daemon restart followed by any
 commit rebuilds the projection under a fresh capture.
 
-Retirement certifies the old consumer through the replacement's fixed target:
-it removes the old family, records the retirement receipt, and acknowledges the
-old consumer through that target. The deregistering commit then calls
-`Envelope::retire_outbox_consumer`, which acknowledges the old consumer through
-the tip that commit finds and deregisters it in the same transaction. Commits
-that land after the target therefore complete the rebuild instead of holding
-it in its intent record. The replacement's consumer is acknowledged through
-the target, so it still reads those commits, and the Current family catches up
-to them under its construction hold.
+Retirement certifies the old consumer through the replacement's recorded
+target: it removes the old family, records the retirement receipt, and
+acknowledges the old consumer through that target. The deregistering commit
+then calls `Envelope::retire_outbox_consumer`, which acknowledges the old
+consumer through the tip that commit finds and deregisters it in the same
+transaction, recording the certified target in its audit. A commit that lands
+between the acknowledgement and that commit therefore completes the rebuild
+instead of holding it in its intent record. The replacement's consumer is
+acknowledged through the target, so it still reads those commits, and the
+Current family catches up to them under its construction hold.
+
+When the completion slice finds the old consumer still registered and the tip
+past the recorded target, it recertifies before retiring:
+
+1. The selected family catches up to that tip under its own hold and the
+   episode the slice consumed, and the new consumer acknowledges each window.
+2. `ProjectionLifecycle::recertify_target` moves the recorded target forward to
+   the tip the family applied. The attempt, allowance, and deadline stay as
+   recorded, so every recorded target is a commit the selected family holds.
+3. Retirement certifies the old consumer's obligations through the new target
+   and acknowledges it there. A receipt for the same retirement through an
+   earlier commit is replaced by the later one.
+
+A restart ends the selected family's hold, so a family that trails the tip
+after a restart cannot catch up under it. The slice then retires the old
+consumer through the commits the family applied, the deregistering commit
+acknowledges it through the tip, and the Current family catches up or
+rebuilds from there. A family that applied the tip before the restart
+recertifies and completes. Each slice that stops before the family reaches
+the tip spends one episode, so a record whose slices keep stopping short is
+blocked once its allowance is spent.
+
+The completion slice validates the selected family's rows against the kernel
+inventory before it retires the old consumer. The reopen at the start of the
+slice covers a family already at the target, and a family that caught up is
+validated again at the new target. The check before Current repeats that
+validation unless the family database's commit counters show the retirement
+receipt transaction as its only change since, the selected consumer's
+acknowledgement lies inside the validated prefix, and no pending job's episode
+deadline has passed.
 
 A record whose deadline passes before it completes stays in its intent record
 with every hook denied; `request_rebuild` records only over a Current record.

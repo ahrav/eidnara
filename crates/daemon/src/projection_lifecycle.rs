@@ -91,8 +91,8 @@ pub struct ConsumerBinding {
     pub generation_id: String,
 }
 
-/// The kernel commit the transition must reach; fixed when first established and never moved by a retry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The kernel commit the transition must reach; fixed when first established, never moved by a retry, and moved forward only by `ProjectionLifecycle::recertify_target` after selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryTarget {
     pub commit_seq: i64,
@@ -856,7 +856,7 @@ impl ProjectionLifecycle {
         Ok(intent)
     }
 
-    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a target moves only through a new intent.
+    /// Fixes the recorded intent's recovery target under the gate's admission, for a transition recorded before its target was known. The same target again changes nothing; another target is refused, because a fixed target moves only forward through `Self::recertify_target`.
     ///
     /// # Errors
     ///
@@ -885,6 +885,40 @@ impl ProjectionLifecycle {
         }
         intent.recovery_target = Some(target);
         fits_when_exhausted(&intent)?;
+        self.replace(&intent, &admission)?;
+        Ok(intent)
+    }
+
+    /// Moves the fixed recovery target of `expected`, whose staged seed is selected, forward to `target` under the gate's admission and within the recorded deadline. The caller passes a commit the selected family has applied, and the predecessor then retires there, so a retirement the moving tip left pending is certified again at a later commit. The episode the caller consumed for this attempt covers the move, so each retry still spends one episode of the allowance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IntentRefusal::Conflict`] when the record differs from `expected`, [`IntentRefusal::IllegalCombination`] when the record has no staged seed or fixed target or `target` is not later than it, [`IntentRefusal::DeadlineExpired`] past the recorded deadline, and the refusals of [`Self::admitted_intent`].
+    pub(crate) fn recertify_target(
+        &self,
+        gate: &HookGate,
+        expected: &LifecycleIntent,
+        target: RecoveryTarget,
+        now: i64,
+    ) -> Result<LifecycleIntent, IntentRefusal> {
+        let _lock = self.lock().map_err(io_refusal)?;
+        let (mut intent, admission) = self.admitted_intent(gate)?;
+        if intent != *expected {
+            return Err(IntentRefusal::Conflict {
+                attempt_id: intent.attempt_id,
+            });
+        }
+        if intent.staged_seed_digest.is_none()
+            || intent
+                .recovery_target
+                .is_none_or(|fixed| fixed.commit_seq >= target.commit_seq)
+        {
+            return Err(IntentRefusal::IllegalCombination);
+        }
+        if now > intent.episodes.deadline {
+            return Err(IntentRefusal::DeadlineExpired);
+        }
+        intent.recovery_target = Some(target);
         self.replace(&intent, &admission)?;
         Ok(intent)
     }
@@ -1345,7 +1379,7 @@ fn encode(intent: &LifecycleIntent) -> Result<Vec<u8>, IntentRefusal> {
 /// The hex SHA-256 a staged seed's digest takes; the record reserves room for one before any is pinned.
 const DIGEST_HEX_LEN: usize = 64;
 
-/// Reserves space for exhausted `episodes`, a staged seed digest, and a `recovery_target` so later valid updates do not make the intent [`IntentRefusal::Oversized`].
+/// Reserves space for exhausted `episodes`, a staged seed digest, and the widest `recovery_target`, which recertification moves forward, so later valid updates keep the intent within [`MAX_RECORD_BYTES`].
 fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
     let exhausted = LifecycleIntent {
         episodes: EpisodeAccounting {
@@ -1358,9 +1392,9 @@ fn fits_when_exhausted(intent: &LifecycleIntent) -> Result<(), IntentRefusal> {
                 .clone()
                 .unwrap_or_else(|| "0".repeat(DIGEST_HEX_LEN)),
         ),
-        recovery_target: Some(intent.recovery_target.unwrap_or(RecoveryTarget {
+        recovery_target: Some(RecoveryTarget {
             commit_seq: i64::MAX,
-        })),
+        }),
         ..intent.clone()
     };
     // `disable` wraps the active record and cleanup later fills every optional field, so the accepted intent must fit in that form too.

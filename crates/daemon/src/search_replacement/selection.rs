@@ -14,7 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
 use retrieval::batch::{VectorGeneration, read_checkpoint};
 use retrieval::coverage::{
-    CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active, verify_pages,
+    CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active_visiting,
+    verify_pages,
 };
 use retrieval::exact::{CompletenessCertificate, EXTRACTION_VERSION};
 use retrieval::{ProjectionError, ProjectionIdentity};
@@ -116,7 +117,9 @@ impl<'a> SelectionFailure<'a> {
                 "candidate belongs to another data home",
             ));
         }
-        selection.reopen_locked(owner.kernel, owner.gate, budget, &owner._transaction)
+        selection
+            .reopen_locked(owner.kernel, owner.gate, budget, &owner._transaction)
+            .map(drop)
     }
 }
 
@@ -125,6 +128,95 @@ impl<'a> SelectionFailure<'a> {
 pub struct SearchReader {
     family: Arc<SelectedFamily>,
     grant: Admission,
+}
+
+/// A family that passed `SearchSelection::validate_family`, with the database counters read where its scan began.
+struct Validated {
+    report: CoverageReport,
+    version: FamilyVersion,
+}
+
+/// The family database's counters inside the retirement receipt transaction, before and after its writes. That transaction writes only the receipt tables, which no validation reads.
+struct ReceiptWrite {
+    before: FamilyVersion,
+    after: FamilyVersion,
+}
+
+/// A commit on another connection moves `data_version`, and a write on the family's own connection moves `total_changes`, so equal values bound an unchanged database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FamilyVersion {
+    data_version: i64,
+    total_changes: u64,
+}
+
+impl FamilyVersion {
+    fn read(conn: &GuardedConn<'_>) -> Result<Self, ProjectionError> {
+        Ok(Self {
+            data_version: conn.query_row("PRAGMA data_version", [], |row| row.get(0))?,
+            total_changes: conn.total_changes(),
+        })
+    }
+}
+
+/// A verified occurrence as the kernel's live-descriptor inventory describes it: the columns both sides carry, so `validate_family` compares the inventory against the single scan that verified the family without rereading rows. A tombstoned row keeps nothing beyond its presence, since an inventory row naming it is a mismatch.
+enum InventoriedOccurrence {
+    Tombstoned,
+    Live {
+        tuple: Vec<u8>,
+        payload_id: String,
+        source_object_id: String,
+        domain_id: String,
+        sensitivity: kernel::Sensitivity,
+        created_commit_seq: i64,
+        source_evidence_id: String,
+        source_artifact_digest: String,
+    },
+}
+
+impl From<retrieval::StoredOccurrence> for InventoriedOccurrence {
+    fn from(row: retrieval::StoredOccurrence) -> Self {
+        if row.tombstone.is_some() {
+            return Self::Tombstoned;
+        }
+        Self::Live {
+            tuple: row.tuple,
+            payload_id: row.payload_id,
+            source_object_id: row.source_object_id,
+            domain_id: row.domain_id,
+            sensitivity: row.sensitivity,
+            created_commit_seq: row.created_commit_seq,
+            source_evidence_id: row.source_evidence_id,
+            source_artifact_digest: row.source_artifact_digest,
+        }
+    }
+}
+
+impl InventoriedOccurrence {
+    /// Whether this live row carries exactly the columns the kernel inventory records for `source`.
+    fn matches(&self, source: &kernel::LiveDescriptor) -> bool {
+        match self {
+            Self::Tombstoned => false,
+            Self::Live {
+                tuple,
+                payload_id,
+                source_object_id,
+                domain_id,
+                sensitivity,
+                created_commit_seq,
+                source_evidence_id,
+                source_artifact_digest,
+            } => {
+                *tuple == source.detail.occurrence_tuple
+                    && *payload_id == source.detail.payload_id
+                    && *source_object_id == source.object_id
+                    && *domain_id == source.domain_id
+                    && *sensitivity == source.sensitivity
+                    && *created_commit_seq == source.created_commit_seq
+                    && *source_evidence_id == source.detail.evidence_id
+                    && *source_artifact_digest == source.detail.artifact_digest
+            }
+        }
+    }
 }
 
 struct SelectedFamily {
@@ -468,7 +560,8 @@ impl SearchSelection {
         }
         open_directory(&home.join("search"))?.sync_all()?;
         open_directory(&home)?.sync_all()?;
-        let family = self.open_family(&candidate.staged.digest, candidate.owner.kernel, budget)?;
+        let (family, _) =
+            self.open_family(&candidate.staged.digest, candidate.owner.kernel, budget)?;
         let mut published = false;
         let mut retention_error = None;
         let result = candidate.owner.store.select_search(
@@ -524,28 +617,30 @@ impl SearchSelection {
         deadline(budget)?;
         let transaction = LifecycleTransactionLock::acquire_exclusive(Some(&self.data_home))?;
         self.reopen_locked(kernel, gate, budget, &transaction)
+            .map(drop)
     }
 
+    /// Returns the validation of the selected family, or `None` when no family is selected.
     fn reopen_locked(
         &self,
         kernel: &KernelStore,
         gate: &HookGate,
         budget: &EvalBudget,
         transaction: &LifecycleTransactionLock,
-    ) -> Result<(), BuildError> {
+    ) -> Result<Option<Validated>, BuildError> {
         self.admit(gate, budget)?;
         let store = GenerationStore::open(Some(&self.data_home))?;
         match store.reconcile_search(transaction)? {
             CurrentProfile::Absent => {
                 self.selected.store(None);
-                Ok(())
+                Ok(None)
             }
             CurrentProfile::Quarantined => {
                 self.selected.store(None);
                 Err(BuildError::Invalid("search selector quarantined"))
             }
             CurrentProfile::Current(digest) => {
-                let family = match self
+                let (family, validated) = match self
                     .selected
                     .load_full()
                     .filter(|family| family._seed_pin.digest == digest)
@@ -562,32 +657,35 @@ impl SearchSelection {
                             }
                             return Err(error);
                         }
-                        if let Err(error) = family
+                        match family
                             .projection
                             .read_within(deadline(budget)?, verify_pages)
                             .map_err(BuildError::from)
                             .and_then(|()| self.validate_family(&family, kernel, budget))
                         {
-                            if let Some(kind) = family_damage(&error) {
-                                family.projection.enter_quarantine(kind, &error);
-                                self.selected.store(None);
+                            Ok(validated) => (family, validated),
+                            Err(error) => {
+                                if let Some(kind) = family_damage(&error) {
+                                    family.projection.enter_quarantine(kind, &error);
+                                    self.selected.store(None);
+                                }
+                                return Err(error);
                             }
-                            return Err(error);
                         }
-                        family
                     }
                     None => {
                         // The durable pointer names a family this manager does not hold, so
                         // whatever is cached is stale whether or not the open succeeds.
                         self.require_unpinned()?;
                         self.selected.store(None);
-                        Arc::new(self.open_family(&digest, kernel, budget)?)
+                        let (family, validated) = self.open_family(&digest, kernel, budget)?;
+                        (Arc::new(family), validated)
                     }
                 };
                 self.admit(gate, budget)?;
                 admit_transition_hook(gate, &family.certificate)?;
                 self.selected.store(Some(family));
-                Ok(())
+                Ok(Some(validated))
             }
         }
     }
@@ -620,7 +718,7 @@ impl SearchSelection {
         digest: &str,
         kernel: &KernelStore,
         budget: &EvalBudget,
-    ) -> Result<SelectedFamily, BuildError> {
+    ) -> Result<(SelectedFamily, Validated), BuildError> {
         let home = self.family_home(digest)?;
         open_directory(&self.data_home.join(FAMILIES))?;
         open_directory(&home)?;
@@ -677,8 +775,8 @@ impl SearchSelection {
         family
             .projection
             .read_within(deadline(budget)?, verify_pages)?;
-        self.validate_family(&family, kernel, budget)?;
-        Ok(family)
+        let validated = self.validate_family(&family, kernel, budget)?;
+        Ok((family, validated))
     }
 
     fn validate_family(
@@ -686,19 +784,33 @@ impl SearchSelection {
         family: &SelectedFamily,
         kernel: &KernelStore,
         budget: &EvalBudget,
-    ) -> Result<(), BuildError> {
+    ) -> Result<Validated, BuildError> {
         family.check_kernel(kernel, budget)?;
         let now = wall_ms()?;
-        let report = family.projection.read_within(deadline(budget)?, |conn| {
-            verify_active(conn, &self.identity, &family.generation(), self.bounds, now).map_err(
-                |error| {
-                    match error {
-                        // `check_kernel` excludes a kernel change, so the stored identity row itself is corrupt.
-                        ProjectionError::IdentityMismatch => ProjectionError::CorruptRow,
-                        error => error,
-                    }
+        // The kernel inventory is compared with the rows this one transaction verified, each kept as the columns the inventory names.
+        let mut occurrences = std::collections::HashMap::new();
+        let (version, report) = family.projection.read_within(deadline(budget)?, |conn| {
+            let version = FamilyVersion::read(conn)?;
+            verify_active_visiting(
+                conn,
+                &self.identity,
+                &family.generation(),
+                self.bounds,
+                now,
+                |mut row| {
+                    let occurrence_id = std::mem::take(&mut row.occurrence_id);
+                    occurrences.insert(occurrence_id, InventoriedOccurrence::from(row));
+                    Ok(())
                 },
             )
+            .map(|report| (version, report))
+            .map_err(|error| {
+                match error {
+                    // `check_kernel` excludes a kernel change, so the stored identity row itself is corrupt.
+                    ProjectionError::IdentityMismatch => ProjectionError::CorruptRow,
+                    error => error,
+                }
+            })
         })?;
         let seed = &family.certificate.seed;
         if report.checkpoint.snapshot_commit_seq != seed.snapshot_commit_seq
@@ -737,33 +849,47 @@ impl SearchSelection {
                     "canonical prefix inventory mismatch",
                 ));
             }
-            family.projection.read_within(deadline(budget)?, |conn| {
-                if retrieval::batch::read_checkpoint(conn, &self.identity.kernel_incarnation_id)?
-                    .as_ref()
-                    != Some(&report.checkpoint)
+            for source in inventory.rows {
+                if occurrences
+                    .get(&source.detail.occurrence_id)
+                    .is_none_or(|row| !row.matches(&source))
                 {
-                    return Err(ProjectionError::MutationConflict);
+                    return Err(SearchProjectionError::from(ProjectionError::CorruptRow).into());
                 }
-                for source in inventory.rows {
-                    let row = retrieval::read_occurrence(conn, &source.detail.occurrence_id)?
-                        .ok_or(ProjectionError::CorruptRow)?;
-                    if row.tombstone.is_some()
-                        || row.tuple != source.detail.occurrence_tuple
-                        || row.payload_id != source.detail.payload_id
-                        || row.source_object_id != source.object_id
-                        || row.domain_id != source.domain_id
-                        || row.sensitivity != source.sensitivity
-                        || row.created_commit_seq != source.created_commit_seq
-                        || row.source_evidence_id != source.detail.evidence_id
-                        || row.source_artifact_digest != source.detail.artifact_digest
-                    {
-                        return Err(ProjectionError::CorruptRow);
-                    }
-                }
-                Ok(())
-            })?;
+            }
         }
-        family.check_kernel(kernel, budget)
+        family.check_kernel(kernel, budget)?;
+        Ok(Validated { report, version })
+    }
+
+    /// Whether `validate_family` would accept `family` again with `report`, given that the family database stands at `version` exactly when nothing that validation reads changed since it verified `report`. Equal counters mean no commit reached those rows, the kernel inventory at a fixed checkpoint does not change within one incarnation, and the checks that depend on the clock or on acknowledgements, which are not commits, run again.
+    fn unchanged_since(
+        &self,
+        family: &SelectedFamily,
+        kernel: &KernelStore,
+        budget: &EvalBudget,
+        report: &CoverageReport,
+        version: FamilyVersion,
+    ) -> Result<bool, BuildError> {
+        family.check_kernel(kernel, budget)?;
+        let now = wall_ms()?;
+        let (current, expired) = family.projection.read_within(deadline(budget)?, |conn| {
+            Ok((
+                FamilyVersion::read(conn)?,
+                retrieval::coverage::open_episode_expired(conn, now)?,
+            ))
+        })?;
+        if current != version || expired {
+            return Ok(false);
+        }
+        let ack = kernel.outbox_consumer_checkpoint_within_budget(
+            budget,
+            &family.certificate.intent.consumer.consumer_id,
+        )?;
+        Ok(ack.is_some_and(|ack| {
+            ack >= family.certificate.seed.checkpoint_commit_seq
+                && ack <= report.checkpoint.checkpoint_commit_seq
+        }))
     }
 
     pub fn reclaim(&self, digest: &str) -> Result<(), BuildError> {
@@ -1009,19 +1135,22 @@ fn certificate_bytes(home: &Path) -> Result<Vec<u8>, BuildError> {
 }
 
 impl SelectedFamily {
-    /// The record moves only its consumed episodes and its cleared construction history after selection.
+    /// Whether `intent` is the operation this family's certificate bound at selection. Consumed episodes, the capture record, and the prior disable move after selection, and a recertified recovery target moves only forward from the bound one.
     fn names_operation(&self, intent: &LifecycleIntent) -> bool {
         let bound = &self.certificate.intent;
-        *bound
-            == LifecycleIntent {
-                episodes: crate::projection_lifecycle::EpisodeAccounting {
-                    consumed: bound.episodes.consumed,
-                    ..intent.episodes
-                },
-                replacement_capture: bound.replacement_capture.clone(),
-                prior_disabled: bound.prior_disabled.clone(),
-                ..intent.clone()
-            }
+        bound.recovery_target.is_some()
+            && intent.recovery_target >= bound.recovery_target
+            && *bound
+                == LifecycleIntent {
+                    episodes: crate::projection_lifecycle::EpisodeAccounting {
+                        consumed: bound.episodes.consumed,
+                        ..intent.episodes
+                    },
+                    replacement_capture: bound.replacement_capture.clone(),
+                    prior_disabled: bound.prior_disabled.clone(),
+                    recovery_target: bound.recovery_target,
+                    ..intent.clone()
+                }
     }
 
     fn generation(&self) -> VectorGeneration {

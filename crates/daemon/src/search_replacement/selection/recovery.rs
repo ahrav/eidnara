@@ -1,6 +1,8 @@
 use super::super::{BuildEvent, BuildFailure, ReplacementBuilder, ReplacementSpec, wall_ms};
 use super::*;
-use crate::projection_lifecycle::{ControlState, IntentRefusal, LifecycleRequest, Transition};
+use crate::projection_lifecycle::{
+    ControlState, IntentRefusal, LifecycleRequest, RecoveryTarget, Transition,
+};
 use kernel::SourceHoldBinding;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +11,14 @@ pub enum RecoveryEvent {
     Selection(SelectionEvent),
     Retirement(retirement::RetirementEvent),
     BeforeEpisode,
+    /// The selected family is about to catch up to `target`, the tip a still-registered predecessor trailed.
+    BeforeCatchUp {
+        target: i64,
+    },
+    /// The selected family applied `target`, the tip a still-registered predecessor trailed, and the record now names it as the recovery target.
+    Recertified {
+        target: i64,
+    },
     BeforeFinalAcknowledgement,
     FinalAcknowledged,
     BeforeCurrent,
@@ -42,6 +52,14 @@ pub enum RecoveryFailure<'a> {
     Selection(Box<SelectionFailure<'a>>),
     #[error(transparent)]
     Blocked(#[from] BuildError),
+}
+
+/// How a selected family's catch-up toward a recertification target ended.
+enum CatchUp {
+    /// The family applied every commit through the target.
+    Reached,
+    /// The family's source hold belongs to an earlier lease or is gone, so the family stays at the commits it applied.
+    HoldLost,
 }
 
 impl SearchSelection {
@@ -257,12 +275,18 @@ impl SearchSelection {
             spec.identity
                 .require_compatible(&self.identity)
                 .map_err(BuildError::from)?;
-            self.reopen_locked(kernel, gate, budget, &transaction)?;
+            let validated = self
+                .reopen_locked(kernel, gate, budget, &transaction)?
+                .ok_or(BuildError::Invalid("missing selected owner"))?;
             let family = self
                 .selected
                 .load_full()
                 .ok_or(BuildError::Invalid("missing selected owner"))?;
+            // A completed target is a commit the family applied, so it lies at or before the checkpoint the reopen validated.
             if !family.names_operation(&intent)
+                || intent.recovery_target.is_none_or(|target| {
+                    target.commit_seq > validated.report.checkpoint.checkpoint_commit_seq
+                })
                 || lifecycle.read() != ControlState::Current(intent.clone())
             {
                 return Err(BuildError::Invalid("selected operation differs").into());
@@ -276,14 +300,34 @@ impl SearchSelection {
             .replacement_capture
             .as_deref()
             .and_then(|c| c.stage.as_deref())
-            && (intent
+        {
+            // A selected seed's target may have been recertified past its checkpoint, never past the kernel tip it was certified at.
+            let recertified = |target: RecoveryTarget| -> Result<bool, BuildError> {
+                if !is_selected || target.commit_seq <= stage.checkpoint_commit_seq {
+                    return Ok(false);
+                }
+                let tip = kernel.capture_commit_read_target_within_budget(budget)?;
+                Ok(self
+                    .recovery_incarnation
+                    .as_ref()
+                    .is_some_and(|(attempt, incarnation)| {
+                        *attempt == intent.attempt_id && *incarnation == tip.incarnation
+                    })
+                    && target.commit_seq <= tip.through_commit)
+            };
+            let target_bound = match intent.recovery_target {
+                Some(target) if target.commit_seq == stage.checkpoint_commit_seq => true,
+                Some(target) => recertified(target)?,
+                None => false,
+            };
+            if intent
                 .staged_seed_digest
                 .as_deref()
                 .is_some_and(|d| d != stage.stage_manifest().digest())
-                || intent.recovery_target.map(|t| t.commit_seq)
-                    != Some(stage.checkpoint_commit_seq))
-        {
-            return Err(BuildError::Invalid("construction operation differs").into());
+                || !target_bound
+            {
+                return Err(BuildError::Invalid("construction operation differs").into());
+            }
         }
         if !is_selected {
             if let Some(target) = intent.recovery_target {
@@ -329,7 +373,7 @@ impl SearchSelection {
         if lifecycle.read() != ControlState::Intent(intent.clone()) {
             return Err(BuildError::Invalid("recovery operation changed").into());
         }
-        self.reopen_locked(kernel, gate, budget, &transaction)?;
+        let reopened = self.reopen_locked(kernel, gate, budget, &transaction)?;
         let family = self
             .selected
             .load_full()
@@ -342,41 +386,97 @@ impl SearchSelection {
         intent.episodes = lifecycle
             .consume_expected_episode(gate, &intent, wall_ms()?)
             .map_err(BuildError::from)?;
-        let check = || {
+        let check_operation = |intent: &LifecycleIntent| {
             if lifecycle.read() != ControlState::Intent(intent.clone()) {
                 return Err(BuildError::Invalid("recovery operation changed"));
             }
-            self.check_recovery_admission(gate, spec, budget, &intent)?;
+            self.check_recovery_admission(gate, spec, budget, intent)?;
             family.check_kernel(kernel, budget)
         };
+        check_operation(&intent)?;
+        // The reopen above validated this family; a second scan runs only when its database, the clock, or the consumer's acknowledgement moved since.
+        let mut validated = match reopened {
+            Some(validated)
+                if self.unchanged_since(
+                    &family,
+                    kernel,
+                    budget,
+                    &validated.report,
+                    validated.version,
+                )? =>
+            {
+                validated
+            }
+            _ => self.validate_family(&family, kernel, budget)?,
+        };
+        // Recovery catches the selected family up before recertifying an advanced target, keeping the recorded target within the family's applied commits.
+        if let Some(old) = &family.certificate.retiring
+            && let Some(fixed) = intent.recovery_target
+            && kernel
+                .outbox_consumer_checkpoint_within_budget(budget, &old.consumer.consumer_id)
+                .map_err(BuildError::from)?
+                .is_some()
+        {
+            let tip = kernel
+                .capture_commit_read_target_within_budget(budget)
+                .map_err(BuildError::from)?
+                .through_commit;
+            if tip > fixed.commit_seq {
+                let mut certified = tip;
+                if validated.report.checkpoint.checkpoint_commit_seq < tip {
+                    observer(RecoveryEvent::BeforeCatchUp { target: tip });
+                    match self.catch_up_selected(&family, kernel, gate, spec, budget, tip)? {
+                        CatchUp::Reached => {
+                            check_operation(&intent)?;
+                            validated = self.validate_family(&family, kernel, budget)?;
+                        }
+                        // The family's hold belongs to an earlier lease, so the predecessor retires through the commits the family applied; the deregistering commit acknowledges it through the tip, and the Current family catches up or rebuilds from there.
+                        CatchUp::HoldLost => {
+                            certified = validated.report.checkpoint.checkpoint_commit_seq;
+                        }
+                    }
+                }
+                if certified > fixed.commit_seq {
+                    intent = lifecycle
+                        .recertify_target(
+                            gate,
+                            &intent,
+                            RecoveryTarget {
+                                commit_seq: certified,
+                            },
+                            wall_ms()?,
+                        )
+                        .map_err(BuildError::from)?;
+                    observer(RecoveryEvent::Recertified { target: certified });
+                }
+            }
+        }
+        let check = || check_operation(&intent);
         check()?;
-        self.validate_family(&family, kernel, budget)?;
         let target = intent
             .recovery_target
             .ok_or(BuildError::Invalid("missing fixed target"))?
             .commit_seq;
-        let now = wall_ms()?;
-        let report = family
-            .projection
-            .read_within(deadline(budget)?, |conn| {
-                verify_active(conn, &self.identity, &family.generation(), self.bounds, now)
-            })
-            .map_err(BuildError::from)?;
-        if report.checkpoint.checkpoint_commit_seq != target {
+        if validated.report.checkpoint.checkpoint_commit_seq != target {
             return Err(BuildError::Invalid("local prefix differs from target").into());
         }
-        if family.certificate.retiring.is_some() {
-            self.retire_bound(
+        // The counters the check before Current expects: the validation's, advanced by the receipt transaction when retirement wrote one right after it.
+        let mut expected = Some(validated.version);
+        if family.certificate.retiring.is_some()
+            && let Some(write) = self.retire_bound(
                 &family,
                 retirement::RetirementRun {
                     kernel,
+                    through: target,
                     spec,
                     budget,
                     transaction: &transaction,
                     check: &check,
                 },
                 &mut |event| observer(RecoveryEvent::Retirement(event)),
-            )?;
+            )?
+        {
+            expected = (write.before == validated.version).then_some(write.after);
         }
         observer(RecoveryEvent::BeforeFinalAcknowledgement);
         check()?;
@@ -412,7 +512,16 @@ impl SearchSelection {
             .map_err(BuildError::from)?;
         observer(RecoveryEvent::BeforeCurrent);
         self.check_recovery_admission(gate, spec, budget, &cleaned)?;
-        self.validate_family(&family, kernel, budget)?;
+        // The validation before retirement still holds when the receipt transaction is the family's only change since.
+        let still_valid = match expected {
+            Some(version) => {
+                self.unchanged_since(&family, kernel, budget, &validated.report, version)?
+            }
+            None => false,
+        };
+        if !still_valid {
+            self.validate_family(&family, kernel, budget)?;
+        }
         lifecycle
             .complete(gate, &cleaned)
             .map_err(BuildError::from)?;
@@ -440,6 +549,70 @@ impl SearchSelection {
         }
         self.recovery_incarnation = Some((attempt_id.to_owned(), fresh));
         Ok(())
+    }
+
+    /// Applies the commits after the selected family's checkpoint through `target` in one bounded episode under the family's own hold, acknowledging them for the consumer the family's certificate binds. The episode charges the catch-up hooks a Current family's catch-up charges. A hold the running lease cannot extend ends the episode as [`CatchUp::HoldLost`].
+    fn catch_up_selected(
+        &self,
+        family: &SelectedFamily,
+        kernel: &KernelStore,
+        gate: &HookGate,
+        spec: &ReplacementSpec,
+        budget: &EvalBudget,
+        target: i64,
+    ) -> Result<CatchUp, BuildError> {
+        let bound = &family.certificate.intent.consumer;
+        let checkpoint = family
+            .projection
+            .read_within(deadline(budget)?, |conn| {
+                read_checkpoint(conn, &self.identity.kernel_incarnation_id)
+            })?
+            .ok_or(BuildError::Invalid("selected family has no checkpoint"))?;
+        let grants = gate.admit_all(
+            &[
+                ProjectionHook::EmbeddingBootstrap,
+                ProjectionHook::GitDurableRows,
+            ],
+            EntryPoint::Dispatch,
+        )?;
+        let expected = InvalidationIdentity::from(&self.identity);
+        for grant in &grants {
+            gate.check_limits(grant, &expected, &spec.catchup_page_charges())?;
+        }
+        let consumer = crate::search_catchup::CatchUpConsumer {
+            binding: SourceHoldBinding {
+                consumer_id: bound.consumer_id.clone(),
+                lease_epoch: kernel.lease_epoch(),
+                source_policy_version: self.identity.projection_policy_version.clone(),
+            },
+            hold_id: checkpoint.hold_id,
+            kernel_incarnation_id: self.identity.kernel_incarnation_id.clone(),
+            generation_id: Some(bound.generation_id.clone()),
+        };
+        let episode = budget.linked();
+        let report = crate::search_catchup::SearchCatchUp::new(kernel, &family.projection)
+            .with_budget(episode.clone())
+            .run_episode_toward(
+                &consumer,
+                &spec.episode,
+                kernel::CommitReadTarget {
+                    through_commit: target,
+                    incarnation: family.incarnation,
+                },
+                wall_ms()?,
+                &mut |_| {
+                    if grants.iter().any(|grant| grant.invalidated.is_cancelled()) {
+                        episode.cancel();
+                    }
+                },
+            )?;
+        match report.end {
+            crate::search_catchup::EpisodeEnd::ReachedTarget => Ok(CatchUp::Reached),
+            end if crate::search_lifecycle_owner::catch_up_hold_lost(&end) => Ok(CatchUp::HoldLost),
+            crate::search_catchup::EpisodeEnd::Blocked(blocked) => {
+                Err(BuildError::Blocked(blocked))
+            }
+        }
     }
 
     fn check_recovery_admission(

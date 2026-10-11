@@ -1491,7 +1491,7 @@ fn with_followup(error: &BuildError, step: &str, followup: Option<BuildError>) -
 }
 
 /// Whether a catch-up episode ended because the family's source hold cannot cover the next window under the running lease: the hold is bound to another lease, or it is missing, released, expired, or degraded. A hold error that a retry may clear ends the episode without a rebuild.
-fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
+pub(crate) fn catch_up_hold_lost(end: &EpisodeEnd) -> bool {
     matches!(
         end,
         EpisodeEnd::Blocked(Blocked::HoldExtension(
@@ -1934,11 +1934,11 @@ fn replacement_spec(
             attempt_wait: Duration::from_millis(attempt_wait_ms),
             max_bytes: seed_bytes,
         },
-        // A retirement charges one disposition row per obligation plus the censused bytes and one record.
+        // A retirement charges rows for deleting a superseded receipt and disposition set and writing their replacements, plus the censused bytes and one record.
         retirement: RetirementBounds {
             max_obligations: nonzero_usize(
                 "local_transaction_rows",
-                (half_rows.get() as u64).min(quarter_local / DISPOSITION_ROW_BYTES),
+                (half_rows.get() as u64 - 1).min(quarter_local / DISPOSITION_ROW_BYTES),
             )?,
             max_obligation_bytes: obligation_bytes,
         },

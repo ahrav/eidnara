@@ -16,17 +16,17 @@ pub struct RetirementReceipt<'a> {
     pub through: i64,
 }
 
-/// Exact rows, not matching counts, establish completeness against the supplied authority.
+/// Exact rows, not matching counts, establish completeness against the supplied authority. A receipt for the same retirement through an earlier commit is superseded rather than conflicting: it answers `false`, and [`record_receipt`] replaces it with the later certification.
 pub fn verify_receipt(
     conn: &GuardedConn<'_>,
     receipt: &RetirementReceipt<'_>,
     authority: &[ConsumerObligation],
 ) -> Result<bool, ProjectionError> {
-    let valid = conn
+    let stored = conn
         .query_row(
             "SELECT generation_id=?2 AND old_consumer_id=?3 AND old_family=?1
-         AND selected_family=?4 AND kernel_incarnation_id=?5 AND through_commit_seq=?6
-         AND obligation_count=?7 AND reason='consumer_retired'
+         AND selected_family=?4 AND kernel_incarnation_id=?5 AND reason='consumer_retired',
+         through_commit_seq, obligation_count
          FROM retirement_receipts WHERE receipt_id=?1",
             params![
                 receipt.old_family,
@@ -34,14 +34,23 @@ pub fn verify_receipt(
                 receipt.old_consumer,
                 receipt.selected_family,
                 receipt.kernel_incarnation,
-                receipt.through,
-                authority.len() as i64
             ],
-            |row| row.get::<_, bool>(0),
+            |row| {
+                Ok((
+                    row.get::<_, bool>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let Some(valid) = valid else { return Ok(false) };
-    if !valid {
+    let Some((bound, through, count)) = stored else {
+        return Ok(false);
+    };
+    if bound && through < receipt.through {
+        return Ok(false);
+    }
+    if !bound || through != receipt.through || count != authority.len() as i64 {
         return Err(ProjectionError::MutationConflict);
     }
     let expected_bytes: usize = authority
@@ -85,6 +94,25 @@ pub fn verify_receipt(
     Ok(true)
 }
 
+/// The disposition rows recorded under `receipt_id`, counted up to `bound + 1`. A caller whose receipt transaction deletes a superseded set refuses one past its bound from this count, at a cost bounded by `bound` rows.
+///
+/// # Errors
+///
+/// Returns the SQLite error when the count fails.
+pub fn recorded_dispositions_within(
+    conn: &GuardedConn<'_>,
+    receipt_id: &str,
+    bound: usize,
+) -> Result<usize, ProjectionError> {
+    let limit = i64::try_from(bound.saturating_add(1)).map_err(|_| ProjectionError::CorruptRow)?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM retirement_dispositions WHERE receipt_id=?1 LIMIT ?2)",
+        params![receipt_id, limit],
+        |row| row.get(0),
+    )?;
+    usize::try_from(count).map_err(|_| ProjectionError::CorruptRow)
+}
+
 /// Calling this function attests that physical holders have drained and the whole old family is removed.
 /// The caller owns the transaction and releases it before taking the kernel writer.
 pub fn record_receipt(
@@ -105,6 +133,15 @@ pub fn record_receipt(
     if verify_receipt(conn, receipt, authority)? {
         return Ok(());
     }
+    // Only a receipt this certification supersedes can remain for the old family here.
+    conn.execute(
+        "DELETE FROM retirement_dispositions WHERE receipt_id=?1",
+        [receipt.old_family],
+    )?;
+    conn.execute(
+        "DELETE FROM retirement_receipts WHERE receipt_id=?1",
+        [receipt.old_family],
+    )?;
     conn.execute(
         "INSERT INTO retirement_receipts(receipt_id,generation_id,reason,retired_at,recorded_at,
          old_consumer_id,old_family,selected_family,kernel_incarnation_id,through_commit_seq,obligation_count)

@@ -18,13 +18,15 @@ pub enum RetirementEvent {
 
 pub(super) struct RetirementRun<'a> {
     pub kernel: &'a KernelStore,
+    /// The certified commit the old consumer retires through: the selected seed's checkpoint, or a later recertified commit the selected family has applied. Retirement refuses a commit past the family's checkpoint.
+    pub through: i64,
     pub spec: &'a super::super::ReplacementSpec,
     pub budget: &'a EvalBudget,
     pub transaction: &'a LifecycleTransactionLock,
     pub check: &'a dyn Fn() -> Result<(), BuildError>,
 }
 
-/// The `(local_transaction_rows, local_transaction_bytes)` a retirement transaction charges: one receipt plus every obligation disposition, and the censused bytes plus each row's fixed width and one record. Every path that runs `retire_bound` charges these.
+/// The `(local_transaction_rows, local_transaction_bytes)` a retirement transaction charges. Row capacity covers deleting a superseded receipt and its disposition set, recorded through an earlier target, and writing their replacements: two sets of one receipt plus every obligation disposition. Byte capacity covers the censused bytes, each written disposition's fixed width, and one record. Every path that runs `retire_bound` charges these.
 pub(super) fn retirement_transaction_charges(
     spec: &super::super::ReplacementSpec,
 ) -> Result<(u64, u64), BuildError> {
@@ -36,7 +38,9 @@ pub(super) fn retirement_transaction_charges(
         .and_then(|bytes| bytes.checked_add(MAX_RECORD_BYTES))
         .ok_or(BuildError::InventoryBound)?;
     Ok((
-        rows.checked_add(1).ok_or(BuildError::InventoryBound)?,
+        rows.checked_add(1)
+            .and_then(|set| set.checked_mul(2))
+            .ok_or(BuildError::InventoryBound)?,
         bytes,
     ))
 }
@@ -65,7 +69,7 @@ impl SearchSelection {
         Ok(Some(old))
     }
 
-    /// The fixed selection certificate bounds retirement; retries cannot acknowledge a later tip.
+    /// Retires the predecessor through the selected seed's checkpoint, the target of a record that was never recertified; retries cannot acknowledge a later tip. A record whose target moved retires through recovery, which certifies the moved target.
     pub fn retire(
         &self,
         kernel: &KernelStore,
@@ -96,6 +100,7 @@ impl SearchSelection {
             &family,
             RetirementRun {
                 kernel,
+                through: certificate.seed.checkpoint_commit_seq,
                 spec,
                 budget,
                 transaction: &transaction,
@@ -103,6 +108,7 @@ impl SearchSelection {
             },
             observer,
         )
+        .map(drop)
     }
 
     /// Rejects a budget that ends after `intent.episodes.deadline`.
@@ -143,14 +149,16 @@ impl SearchSelection {
         Ok(grants)
     }
 
+    /// Returns the receipt transaction's counters, or `None` when a recorded receipt left the family unwritten.
     pub(super) fn retire_bound(
         &self,
         family: &SelectedFamily,
         run: RetirementRun<'_>,
         observer: &mut dyn FnMut(RetirementEvent),
-    ) -> Result<(), BuildError> {
+    ) -> Result<Option<ReceiptWrite>, BuildError> {
         let RetirementRun {
             kernel,
+            through,
             spec,
             budget,
             transaction,
@@ -163,12 +171,33 @@ impl SearchSelection {
             .ok_or(BuildError::Invalid("no durable old consumer binding"))?;
         spec.identity.require_compatible(&self.identity)?;
         let target = CommitReadTarget {
-            through_commit: certificate.seed.checkpoint_commit_seq,
+            through_commit: through,
             incarnation: family.incarnation,
         };
         let old_digest = old.seed.stage_manifest().digest();
         if !certificate.retiring_is_bound(old) {
             return Err(BuildError::Invalid("retirement binding mismatch"));
+        }
+        let applied = family.projection.read_within(deadline(budget)?, |conn| {
+            retrieval::batch::read_checkpoint(conn, &certificate.seed.kernel_incarnation_id)?
+                .map(|checkpoint| checkpoint.checkpoint_commit_seq)
+                .ok_or(ProjectionError::CorruptRow)
+        })?;
+        if applied < through {
+            return Err(BuildError::Invalid(
+                "retirement target exceeds the selected family's checkpoint",
+            ));
+        }
+        // The receipt transaction deletes the set a superseded receipt recorded, so that set is held to the bound the transaction's row charge covers.
+        let superseded = family.projection.read_within(deadline(budget)?, |conn| {
+            retrieval::retirement::recorded_dispositions_within(
+                conn,
+                &old_digest,
+                spec.retirement.max_obligations.get(),
+            )
+        })?;
+        if superseded > spec.retirement.max_obligations.get() {
+            return Err(BuildError::InventoryBound);
         }
         let obligations = kernel
             .consumer_obligations_within_budget(
@@ -195,6 +224,7 @@ impl SearchSelection {
         })?;
         let checkpoint =
             kernel.outbox_consumer_checkpoint_within_budget(budget, receipt.old_consumer)?;
+        let mut written = None;
         if recovered {
             self.remove_retiring_family(old, transaction)?;
         } else {
@@ -266,7 +296,8 @@ impl SearchSelection {
             self.remove_retiring_family(old, transaction)?;
             observer(RetirementEvent::Removed);
             check()?;
-            family.projection.write_within(deadline(budget)?, |conn| {
+            written = Some(family.projection.write_within(deadline(budget)?, |conn| {
+                let before = FamilyVersion::read(conn)?;
                 record_receipt(
                     conn,
                     &receipt,
@@ -274,13 +305,17 @@ impl SearchSelection {
                     super::super::wall_ms().map_err(|_| ProjectionError::MutationConflict)?,
                 )?;
                 observer(RetirementEvent::BeforeReceiptCommit);
-                check().map_err(|_| ProjectionError::MutationConflict)
-            })?;
+                check().map_err(|_| ProjectionError::MutationConflict)?;
+                Ok(ReceiptWrite {
+                    before,
+                    after: FamilyVersion::read(conn)?,
+                })
+            })?);
         }
         observer(RetirementEvent::LocalReleased);
         check()?;
         if checkpoint.is_none() {
-            return Ok(());
+            return Ok(written);
         }
         observer(RetirementEvent::BeforeAcknowledgement);
         check()?;
@@ -312,7 +347,7 @@ impl SearchSelection {
                 Ok(String::new())
             },
         )?;
-        Ok(())
+        Ok(written)
     }
 
     fn remove_retiring_family(
