@@ -339,7 +339,7 @@ impl Scan<'_> {
     pub fn hit_ids(&mut self, budget: &EvalBudget) -> Result<Vec<String>, RetrievalRefusal> {
         let end = self.kept.len();
         match self.kept.name_through(self.conn, end, budget) {
-            Ok(_) => {}
+            Ok(steps) => self.retrieval.consumed.sql_steps += steps,
             Err(ScanStop::Budget) => return Err(RetrievalRefusal::BudgetExhausted),
             Err(ScanStop::Projection(error)) => return Err(error.into()),
         }
@@ -863,7 +863,8 @@ fn scan_common(
 ) -> Result<(bool, u64), ScanStop> {
     let mut pages = conn.prepare_cached(COMMON_SQL)?;
     pages.reset_status(StatementStatus::VmStep);
-    let page = i64::try_from(bound.saturating_add(1).min(COMMON_PAGE_ROWS)).unwrap_or(i64::MAX);
+    let page_rows = bound.saturating_add(1).min(COMMON_PAGE_ROWS);
+    let page = i64::try_from(page_rows).unwrap_or(i64::MAX);
     let mut streams: Vec<Descending<'_>> = probes
         .iter()
         .map(|&(ordinal, probe)| Descending {
@@ -874,8 +875,8 @@ fn scan_common(
             ended: false,
         })
         .collect();
-    // One row past the bound tells a truncated merge from one that ends exactly at it.
-    let mut merged: Vec<Hit> = Vec::with_capacity(bound + 1);
+    // One row past the bound tells a truncated merge from one that ends exactly at it. The initial capacity is one page, so the upfront allocation stays bounded for a large caller-supplied bound.
+    let mut merged: Vec<Hit> = Vec::with_capacity(page_rows);
     while merged.len() <= bound {
         let mut next: Option<(i64, usize)> = None;
         for stream in &mut streams {

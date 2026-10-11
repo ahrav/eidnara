@@ -112,7 +112,7 @@ reads `SQLITE_STMTSTATUS_VM_STEP` per statement.
 Production guard: `budget.check()` before each row in `count_probe`,
 `ranked_rows`, `identify`, `Descending::head`, and `resolve`, and after the
 window partition in `scan_ranked`
-(`retrieve.rs:624`, `:745`, `:778`, `:843`, `:935`, `:687`), and the connection's
+(`retrieve.rs:624`, `:745`, `:778`, `:843`, `:936`, `:687`), and the connection's
 progress handler at `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`).
 
 ## No payload reads (AC7)

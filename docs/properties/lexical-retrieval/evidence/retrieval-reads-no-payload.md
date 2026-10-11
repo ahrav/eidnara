@@ -14,10 +14,12 @@ catalog.
 
 Contract:
 
-- `crates/retrieval/AGENTS.md:15` through `:17`: `lexical::retrieve` reads
-  `lexical`, `occurrences`, and `occurrence_tombstones` only; the caller loads
-  bytes after its own authorization step. This is the documented obligation,
-  a claim under test, and the code below is the evidence for it.
+- `crates/retrieval/AGENTS.md:15` through `:21`: `lexical::retrieve` reads
+  `lexical`, the rowid and occurrence identifier columns of its FTS5 content
+  shadow table `lexical_content`, `occurrences`, and `occurrence_tombstones`
+  only; the caller loads bytes after its own authorization step. This is the
+  documented obligation, a claim under test, and the code below is the
+  evidence for it.
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 

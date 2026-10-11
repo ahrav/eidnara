@@ -36,8 +36,8 @@ Callers outside the kernel, the complete set the scan allows:
   `:217` in `judge_occurrences_within_budget` (`:210`).
 - The lexical lane reaches the kernel through `judge_tracked`
   (`crates/retrieval/src/eligibility.rs:296`), called by `judge_batch`
-  (`crates/retrieval/src/lexical/retrieve.rs:971`) from `admit_batches`
-  (`:1005`) and `revalidate` (`:1108`). Other product callers of the retrieval
+  (`crates/retrieval/src/lexical/retrieve.rs:972`) from `admit_batches`
+  (`:1006`) and `revalidate` (`:1109`). Other product callers of the retrieval
   adapter: `crates/daemon/src/coverage.rs:189`,
   `crates/daemon/src/packing/mod.rs:397`,
   `crates/daemon/src/search_replacement/selection.rs:1153`,

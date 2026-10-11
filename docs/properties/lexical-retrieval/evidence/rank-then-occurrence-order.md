@@ -27,8 +27,8 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   `identify` (`:759`), which sorts it by `by_id` then ordinal (`:811`), and
   `Kept::tail` is truncated at the bound, so identifiers decide which
   equal-rank matches the bound keeps. A dead row keeps its slot;
-  `admit_batches` (`:1005`) drops it unjudged.
-- `admit_batches` and `revalidate` (`:1108`) carry each accepted hit's
+  `admit_batches` (`:1006`) drops it unjudged.
+- `admit_batches` and `revalidate` (`:1109`) carry each accepted hit's
   `rank` and `ordinal` into `Contribution` unchanged.
 
 Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1099`)

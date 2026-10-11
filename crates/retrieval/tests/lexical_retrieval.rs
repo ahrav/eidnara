@@ -3199,3 +3199,66 @@ fn a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group() {
         Completion::Incomplete(IncompleteReason::ScanBound)
     );
 }
+
+/// `hit_ids` reads the identifiers admission would otherwise read, so a scan admitted after `hit_ids` reports the same `sql_steps` as `retrieve`.
+#[test]
+fn hit_ids_before_admission_charges_the_identifier_reads_to_sql_steps() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse fetch io");
+    let reference = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    let admitted = fixture
+        .store
+        .with_conn(|conn| {
+            let budget = EvalBudget::unbounded();
+            let mut scanned = scan(conn, &request, bounds(), &budget).unwrap();
+            assert_eq!(scanned.hit_ids(&budget).unwrap().len(), 6);
+            Ok(admit(
+                scanned,
+                &fixture.kernel,
+                fixture.authority(),
+                &budget,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.contributions, reference.contributions);
+    assert_eq!(
+        admitted.consumed.sql_steps, reference.consumed.sql_steps,
+        "the identifier reads `hit_ids` ran are retrieval work"
+    );
+}
+
+/// The scan bound limits the match window; `usize::MAX` keeps every match on both the ranked and the common path.
+#[test]
+fn a_scan_bound_of_usize_max_keeps_every_match_on_both_paths() {
+    let fixture = Fixture::all_admitted();
+    let unbounded_window = |thresholds: RetrievalBounds| RetrievalBounds {
+        scan_rows: NonZeroUsize::MAX,
+        ..thresholds
+    };
+    let ranked = fixture
+        .retrieve(
+            &probes("parse"),
+            unbounded_window(bounds()),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(ranked.completion, Completion::Complete);
+    assert_eq!(ranked.consumed.ranked_matches, 4);
+    assert_eq!(ids_of(&ranked), fixture.reference(&probes("parse")));
+    let common = fixture
+        .retrieve(
+            &probes("parse"),
+            unbounded_window(small_thresholds()),
+            &EvalBudget::unbounded(),
+        )
+        .unwrap();
+    assert_eq!(
+        common.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    assert_eq!(common.consumed.scanned_rows, 4);
+    assert_eq!(common.contributions.len(), 4);
+}

@@ -15,18 +15,18 @@ acceptance criteria and verifies it against the #391 branch.
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 
 - `admit` (`:499`) and `admit_inner` (`:508`) take the `Scan` and run
-  `admit_batches`, then `revalidate` (`:1108`), which re-judges the accepted
+  `admit_batches`, then `revalidate` (`:1109`), which re-judges the accepted
   set in one batch before any contribution is pushed.
-- `admit_batches` (`:1005`) stops at `accepted.len() == max_accepted`
-  (`:1021`) and otherwise takes at most `batch_rows` kept matches, sized from
-  the open slots scaled by the matches read per acceptance so far (`:1033`)
+- `admit_batches` (`:1006`) stops at `accepted.len() == max_accepted`
+  (`:1022`) and otherwise takes at most `batch_rows` kept matches, sized from
+  the open slots scaled by the matches read per acceptance so far (`:1034`)
   and, after a batch with no new acceptance, twice that batch,
-  reads their occurrence rows through `resolve` (`:920`), and sends the live
-  ones to `judge_batch` (`:971`) before reading any verdict. An `Eligible`
-  verdict pushes to `accepted` only while a slot is open (`:1091`), otherwise
+  reads their occurrence rows through `resolve` (`:921`), and sends the live
+  ones to `judge_batch` (`:972`) before reading any verdict. An `Eligible`
+  verdict pushes to `accepted` only while a slot is open (`:1092`), otherwise
   it records `AcceptedBound`; `PolicyExcluded` goes to `consumed.exclude`.
   An ineligible leader therefore consumes judgment work and no slot.
-- `judge_batch` (`:971`) calls `judge_tracked`
+- `judge_batch` (`:972`) calls `judge_tracked`
   (`crates/retrieval/src/eligibility.rs:296`), which calls the kernel's
   eligibility batch and reports a moved snapshot or incarnation.
 - Kernel policy: `judge` (`crates/kernel/src/eligibility.rs:198`) returns
@@ -82,7 +82,7 @@ disappears.
 
 Admission runs in kernel batches of at most `batch_rows`, each judged against one
 kernel read snapshot. The accepted bound is checked before each batch
-(`:947`) and per verdict inside a batch (`:999`), so a batch that crosses the
+(`:1022`) and per verdict inside a batch (`:1092`), so a batch that crosses the
 bound still judges its remaining rows. `revalidate` adds one batch over the
 accepted set. A snapshot or incarnation move between batches stops admission
 and is covered by other records. The equal-byte test uses one-row batches, so
@@ -108,7 +108,7 @@ the leader's verdict is known before the first sibling is judged.
 ### Q: Does a cited test judge a hidden leader and its eligible tail in one chunk?
 
 - Sources examined: `:797`, which uses `batch_rows` 4 over four `parse`
-  matches with gamma hidden first; `admit_batches` (`:1005`) verdict loop.
+  matches with gamma hidden first; `admit_batches` (`:1006`) verdict loop.
 - Findings: with `max_accepted` 2 the first batch holds gamma and the first
   eligible row, and the one slot left, scaled by one acceptance in two reads,
   sizes the second batch at the next two rows, so the tail fills two slots

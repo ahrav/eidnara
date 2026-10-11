@@ -43,14 +43,14 @@ Lexical lane, `crates/retrieval/src/lexical/retrieve.rs`:
 - Every statement loop calls `budget.check()` per row: `count_probe` (`:618`,
   check at `:624`), `ranked_rows` (`:730`, check at `:745`), `identify`
   (`:759`, check at `:778`), the common streams' `Descending::head` (`:833`,
-  check at `:843`), and admission's `resolve` (`:920`, check at `:935`);
+  check at `:843`), and admission's `resolve` (`:921`, check at `:936`);
   `scan_ranked` checks once more after partitioning the merged matches
   (`:687`).
 - `crates/retrieval/src/scan.rs` maps a SQLite `OperationInterrupted` error to
   `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:442`, `:442`),
   and `admit_inner` turns it into `exhausted` through `AdmitStop::Budget`
   (`:502`), so an interrupt and an exhausted budget share one exit.
-- `:971` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
+- `:972` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
   `IncompleteReason::BudgetExhausted`; `admit_inner` (`:508`) returns
   `exhausted` when the budget ends after revalidation.
 - `:582` `exhausted`: zero completed probes refuse

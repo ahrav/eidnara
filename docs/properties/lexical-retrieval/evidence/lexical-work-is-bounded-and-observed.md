@@ -32,11 +32,11 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
   (`crates/kernel/src/eligibility.rs:21`, 1024) as `BatchOverBound`, and
   refuses more probes than `max_probes` as `ProbesOverBound` (`:409`) before
   any statement runs. Each distinct probe is counted once; `counted_rows` and
-  `sql_steps` accumulate at `:397`. A probe over `qualifying_matches` is
-  common (`:412`); a qualifying probe whose count would exceed `rank_budget`
-  sets `RankBudget` and stops ranking (`:426`). The one window's steps add to
-  `sql_steps` at `:437`, `ScanBound` marks a truncated window (`:439`), and
-  `scanned_rows` is the kept window's size (`:452`).
+  `sql_steps` accumulate at `:437`. A probe over `qualifying_matches` is
+  common (`:452`); a qualifying probe whose count would exceed `rank_budget`
+  sets `RankBudget` and stops ranking (`:467`). The one window's steps add to
+  `sql_steps` at `:477`, `ScanBound` marks a truncated window (`:479`), and
+  `scanned_rows` is the kept window's size (`:485`).
 - `count_probe` (`:618`) reads at most `qualifying_matches + 1` rows in rowid
   order; `vm_steps` (`:636`) reads the reset statement counter.
   `scan_ranked` (`:650`) scores every ranked probe's matches with
@@ -47,14 +47,14 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
   content-table cursor and steps past at most `STEP_ALLOWANCE_MAX` (`:302`,
   four) rows between two kept rowids before seeking the next one, so a rank
   group's identification visits at most five table rows per kept row.
-- `admit` (`:499`) and `admit_batches` (`:1005`) take at most `batch_rows`
+- `admit` (`:499`) and `admit_batches` (`:1006`) take at most `batch_rows`
   kept matches per batch, sized from the open accepted slots and the
-  acceptance so far (`:1033`); a batch after one with no new acceptance
+  acceptance so far (`:1034`); a batch after one with no new acceptance
   takes twice that batch up to `batch_rows`, so a dry tail reaches whole batches after
   about log2(`batch_rows`) batches. They
-  read their occurrence rows through `resolve` (`:920`), count dead ones in
-  `dead_rows` (`:1068`), and stop at `max_accepted` (`:1021`); `judge_batch`
-  (`:971`) increments `batches` and `judged` (`:922`, `:994`).
+  read their occurrence rows through `resolve` (`:921`), count dead ones in
+  `dead_rows` (`:1069`), and stop at `max_accepted` (`:1022`); `judge_batch`
+  (`:972`) increments `batches` and `judged` (`:994`, `:995`).
 - The daemon installs the production bounds through
   `QueryRouteLimits::production` (`crates/daemon/src/query_route.rs:135`:
   16 probes, 4096 scan rows, 128 accepted, 10,000 qualifying, 15,000 rank
