@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Arm, armSpec, inheritedHarnessEnv, PiArm, type PromptResult } from "./arms";
+import { Arm, armSpec, inheritedHarnessEnv, OpencodeArm, PiArm, type PromptResult } from "./arms";
 import { descendants } from "./procs";
 
 describe("Pi arm process", () => {
@@ -169,5 +169,28 @@ describe("arm teardown", () => {
         };
         await expect(arm.stop()).rejects.toThrow("harness still running");
         expect(stopped.sort()).toEqual(["closure", "main"]);
+    });
+});
+
+describe("OpenCode arm process", () => {
+    it("drops a cached serve PID that now names another process", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-oc-arm-"));
+        try {
+            const arm = new OpencodeArm(armSpec("oc-off"), {
+                root,
+                resultsDir: root,
+                workdir: root,
+                sandboxDir: "",
+                enforceWindow: false,
+                onCall: () => {},
+                fixtureBin: "/nonexistent/fixture",
+            });
+            // A port no `opencode serve` listens on, and a live PID that is this test runner.
+            (arm as unknown as { oc: unknown; servePid: number }).oc = { port: 65_431 };
+            (arm as unknown as { servePid: number }).servePid = process.pid;
+            expect(arm.harnessPid()).toBeUndefined();
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });

@@ -3,6 +3,7 @@ import { realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { ensurePiInstall } from "../bedrock-peer/harness-runtime";
+import type { ArmSpec } from "./arms";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 
@@ -101,9 +102,19 @@ export function opencodeKeepRoot(binary: string): string {
     return dir;
 }
 
-/** Every kept path lies beside or below the masked paths; one that contains a masked path would expose it. */
-export function sharedKeep(): string[] {
-    const keep = [REPO_ROOT, nodeRoot(), ensurePiInstall(), opencodeKeepRoot(opencodeBinary())];
+/**
+ * The paths the selected arms need visible: the repository, the Node runtime on the sandbox
+ * PATH, the pinned Pi install for Pi arms, the OpenCode install for OpenCode arms, and both for
+ * an Eidnara arm, whose harness closures hold both. Every kept path lies beside or below the
+ * masked paths; one that contains a masked path would expose it.
+ */
+export function sharedKeep(specs: readonly ArmSpec[]): string[] {
+    const eidnara = specs.some((spec) => spec.eidnara);
+    const keep = [REPO_ROOT, nodeRoot()];
+    if (eidnara || specs.some((spec) => spec.harness === "pi")) keep.push(ensurePiInstall());
+    if (eidnara || specs.some((spec) => spec.harness === "opencode")) {
+        keep.push(opencodeKeepRoot(opencodeBinary()));
+    }
     const masked = ["/tmp", realpathSync(homedir())];
     const broad = keep.find((path) => masked.some((hidden) => within(hidden, path)));
     if (broad !== undefined) {
@@ -112,8 +123,8 @@ export function sharedKeep(): string[] {
     return keep;
 }
 
-export function sandboxKeep(armRoot: string): string[] {
-    return [...sharedKeep(), armRoot].map(plainPath);
+export function sandboxKeep(spec: ArmSpec, armRoot: string): string[] {
+    return [...sharedKeep([spec]), armRoot].map(plainPath);
 }
 
 export function sandboxPath(): string {

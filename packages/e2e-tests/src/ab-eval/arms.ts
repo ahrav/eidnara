@@ -357,7 +357,7 @@ export class PiArm extends Arm {
         const [command, argv] = this.ctx.sandboxDir
             ? [
                   ensureSandboxScript(this.ctx.sandboxDir),
-                  [...sandboxKeep(this.ctx.root), "--", node, ...args],
+                  [...sandboxKeep(this.spec, this.ctx.root), "--", node, ...args],
               ]
             : [node, args];
         const child = spawn(command, argv, {
@@ -500,7 +500,7 @@ export class OpencodeArm extends Arm {
         mkdirSync(sbin, { recursive: true });
         const binary = opencodeBinary();
         const launch = this.ctx.sandboxDir
-            ? `exec ${ensureSandboxScript(this.ctx.sandboxDir)} ${sandboxKeep(this.ctx.root).join(" ")} -- ${binary} "$@"`
+            ? `exec ${ensureSandboxScript(this.ctx.sandboxDir)} ${sandboxKeep(this.spec, this.ctx.root).join(" ")} -- ${binary} "$@"`
             : `exec ${binary} "$@"`;
         writeFileSync(
             join(sbin, "opencode"),
@@ -596,22 +596,26 @@ export class OpencodeArm extends Arm {
         await oc.kill();
     }
 
+    /** The `opencode serve` process for this arm's port; a cached PID is re-read by command line, since a PID can be reused. */
     harnessPid(): number | undefined {
         if (!this.oc) return undefined;
-        if (this.servePid !== undefined && existsSync(`/proc/${this.servePid}`)) {
-            return this.servePid;
-        }
         const port = String(this.oc.port);
+        const serves = (pid: number): boolean => {
+            try {
+                const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+                return cmd.includes("serve") && cmd.includes(port);
+            } catch {
+                return false;
+            }
+        };
+        if (this.servePid !== undefined && serves(this.servePid)) return this.servePid;
         this.servePid = undefined;
         for (const entry of readdirSync("/proc")) {
             if (!/^\d+$/.test(entry)) continue;
-            try {
-                const cmd = readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0");
-                if (cmd.includes("serve") && cmd.includes(port)) {
-                    this.servePid = Number(entry);
-                    break;
-                }
-            } catch {}
+            if (serves(Number(entry))) {
+                this.servePid = Number(entry);
+                break;
+            }
         }
         return this.servePid;
     }

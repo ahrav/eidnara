@@ -221,6 +221,38 @@ describe("eval-ab", () => {
 });
 
 describe("eval-ab-report", () => {
+    it("reports the harness closures' disk beside the other disk columns", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
+        try {
+            const arm = join(root, "results/pi-on");
+            mkdirSync(arm, { recursive: true });
+            writeFileSync(join(root, "options.json"), JSON.stringify({ arms: ["pi-on"] }));
+            writeFileSync(
+                join(root, "world.json"),
+                JSON.stringify({ sessions: [{ turns: [{}] }] }),
+            );
+            writeFileSync(
+                join(arm, "turns.jsonl"),
+                `${JSON.stringify({ arm: "pi-on", kind: "filler", ms: 1 })}\n`,
+            );
+            writeFileSync(
+                join(arm, "sessions.jsonl"),
+                `${JSON.stringify({ arm: "pi-on", session: 0, disk: { harness: 1e6, eidnara: 2e6, closures: 300e6 } })}\n`,
+            );
+            writeFileSync(join(arm, "done.json"), "{}");
+            const result = spawnSync(process.execPath, [REPORT, root], {
+                encoding: "utf8",
+                timeout: 60_000,
+            });
+            expect(result.status).toBe(0);
+            const resources = result.stdout.slice(result.stdout.indexOf("## Resources"));
+            expect(resources).toContain("closures disk MB");
+            expect(resources).toMatch(/\| pi-on \|.*\| 1 \| 2 \| 300 \|/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("diagnoses pi-onraw misses beside pi-on misses", () => {
         const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
         try {

@@ -3,13 +3,16 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { armSpec } from "./arms";
 import { stopOwnedTree } from "./procs";
 import {
     assertRunRootMaskable,
     ensureSandboxScript,
     maskedPaths,
+    opencodeBinary,
     opencodeKeepRoot,
     sandboxAvailable,
+    sharedKeep,
 } from "./sandbox";
 
 describe("sandbox masking plan", () => {
@@ -32,6 +35,18 @@ describe("sandbox masking plan", () => {
 });
 
 describe("sandbox keep list", () => {
+    it.skipIf(!Bun.which("opencode"))("keeps only the toolchains the selected arms launch", () => {
+        const piOff = sharedKeep([armSpec("pi-off")]);
+        const ocOff = sharedKeep([armSpec("oc-off")]);
+        const ocOn = sharedKeep([armSpec("oc-on")]);
+        expect(piOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
+        expect(piOff).not.toContain(opencodeKeepRoot(opencodeBinary()));
+        expect(ocOff).toContain(opencodeKeepRoot(opencodeBinary()));
+        expect(ocOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(false);
+        // An Eidnara arm materializes both harness closures.
+        expect(ocOn.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
+    });
+
     it("keeps the OpenCode install tree, never an ancestor such as the home directory", () => {
         expect(opencodeKeepRoot("/prefix/lib/node_modules/opencode-ai/bin/opencode")).toBe(
             "/prefix/lib/node_modules",

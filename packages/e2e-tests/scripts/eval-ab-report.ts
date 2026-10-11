@@ -227,18 +227,18 @@ function main(): void {
 
     lines.push("## Resources", "");
     lines.push(
-        "| arm | harness RSS max MB | harness RSS last MB | host RSS max MB | host CPU s | harness disk MB | eidnara disk MB |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| arm | harness RSS max MB | harness RSS last MB | host RSS max MB | host CPU s | harness disk MB | eidnara disk MB | closures disk MB |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     );
     for (const arm of arms) {
         const rows = turnsByArm.get(arm) ?? [];
-        const sessions = readJsonl<{ disk: { harness: number; eidnara: number } }>(
-            join(out, "results", arm, "sessions.jsonl"),
-        );
+        const sessions = readJsonl<{
+            disk: { harness: number; eidnara: number; closures: number };
+        }>(join(out, "results", arm, "sessions.jsonl"));
         const last = sessions[sessions.length - 1]?.disk;
         const mb = (b: number) => (b / 1e6).toFixed(0);
         lines.push(
-            `| ${arm} | ${mb(Math.max(0, ...rows.map((r) => r.harnessRss ?? 0)))} | ${mb(rows[rows.length - 1]?.harnessRss ?? 0)} | ${mb(Math.max(0, ...rows.map((r) => r.hostRss ?? 0)))} | ${(Math.max(0, ...rows.map((r) => r.hostCpuMs ?? 0)) / 1000).toFixed(0)} | ${mb(last?.harness ?? 0)} | ${mb(last?.eidnara ?? 0)} |`,
+            `| ${arm} | ${mb(Math.max(0, ...rows.map((r) => r.harnessRss ?? 0)))} | ${mb(rows[rows.length - 1]?.harnessRss ?? 0)} | ${mb(Math.max(0, ...rows.map((r) => r.hostRss ?? 0)))} | ${(Math.max(0, ...rows.map((r) => r.hostCpuMs ?? 0)) / 1000).toFixed(0)} | ${mb(last?.harness ?? 0)} | ${mb(last?.eidnara ?? 0)} | ${mb(last?.closures ?? 0)} |`,
         );
     }
     lines.push("");

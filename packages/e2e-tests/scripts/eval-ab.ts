@@ -262,7 +262,7 @@ async function main(): Promise<void> {
     }
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
-    if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep());
+    if (opts.sandbox) assertRunRootMaskable(realpathSync(opts.out), sharedKeep(specs));
     else console.warn("arms run unsandboxed: agents can read other arms and the answer key");
     writeFileSync(
         join(opts.out, "world.json"),
