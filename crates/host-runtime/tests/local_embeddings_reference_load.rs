@@ -4,7 +4,7 @@
 //! ONNX Runtime library at `EIDNARA_LOCAL_EMBEDDINGS_TEST_ORT_LIBRARY`, so it is `#[ignore]`d and a run without them
 //! fails. Activation certifies both against the digests `release/production-inputs.lock.json` pins, so a path to any
 //! other artifact fails before it is measured. Run it in release on the D21 host:
-//! `cargo test --release -p host-runtime --test local_embeddings_reference_load -- --ignored --nocapture`.
+//! `cargo test --release --locked -p host-runtime --test local_embeddings_reference_load -- --ignored --nocapture`.
 //! `EIDNARA_LOCAL_EMBEDDINGS_SAMPLES` names a file for the raw microsecond samples, kept outside the repository.
 //! The page cache is warm for every timed phase: activation reads the whole model and certification runs it.
 
