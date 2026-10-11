@@ -22,6 +22,10 @@ use crate::{CachedSql, current_time_ms, map_sqlite};
 const BUSY_TIMEOUT_MS: i64 = 5_000;
 const PREPARED_STATEMENT_CACHE_CAPACITY: usize = 128;
 const READ_POOL_SIZE: usize = 2;
+/// The bytes of the database file each pooled reader may memory-map (`PRAGMA mmap_size`), so eligibility judgments read the
+/// pages they visit from the shared page cache without one `pread` per page. SQLite caps the value at the library's
+/// compile-time limit, which `.cargo/config.toml` sets to the same 16 GiB.
+const READER_MMAP_BYTES: i64 = 0x4_0000_0000;
 const WRITER_ACQUIRE_POLL: std::time::Duration = std::time::Duration::from_millis(1);
 const SQL_BUDGET_PROGRESS_STEPS: i32 = 1_000;
 const RESTORE_MARKER_SUFFIX: &str = ".restore";
@@ -1094,6 +1098,8 @@ fn open_read_pool(path: &Path) -> Result<Vec<Mutex<Connection>>, KernelError> {
             conn.pragma_update(None, "query_only", "ON")
                 .map_err(|_| KernelError::Io)?;
             apply_preclassification_profile(&conn).map_err(|_| KernelError::Io)?;
+            conn.pragma_update(None, "mmap_size", READER_MMAP_BYTES)
+                .map_err(|_| KernelError::Io)?;
             let query_only: i64 = conn
                 .query_row("PRAGMA query_only", [], |row| row.get(0))
                 .map_err(|_| KernelError::Io)?;
@@ -1276,6 +1282,24 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// `with_reader` takes the pool's readers in turn, so two reads cover both.
+    #[test]
+    fn pooled_readers_memory_map_the_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KernelStore::open(directory.path()).unwrap();
+        for _ in 0..READ_POOL_SIZE {
+            store
+                .with_reader(|connection| {
+                    assert_eq!(
+                        connection.query_row("PRAGMA mmap_size", [], |row| row.get::<_, i64>(0))?,
+                        READER_MMAP_BYTES
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]

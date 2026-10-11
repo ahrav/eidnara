@@ -115,7 +115,7 @@ pub struct QueryRouteLimits {
     pub probes: NonZeroUsize,
     pub lexical_scan_rows: NonZeroUsize,
     pub lexical_accepted: NonZeroUsize,
-    /// A lexical probe matching at most this many rows qualifies to be ranked.
+    /// A lexical probe matching at most this many rows qualifies to be ranked. Production uses 10,000, with a ranked-match budget of 15,000: the owner-approved D26b values under which a request's bm25 pass fits the lexical lane's latency budget at one million occurrences.
     pub lexical_qualifying_matches: NonZeroUsize,
     /// The match counts of the lexical probes one request ranks sum to at most this many.
     pub lexical_rank_budget: NonZeroUsize,
@@ -139,8 +139,8 @@ impl QueryRouteLimits {
             probes: n(16),
             lexical_scan_rows: n(4096),
             lexical_accepted: n(128),
-            lexical_qualifying_matches: n(20_000),
-            lexical_rank_budget: n(30_000),
+            lexical_qualifying_matches: n(10_000),
+            lexical_rank_budget: n(15_000),
             validation_batch: n(128),
             exact_page_rows: n(32),
             exact_pages: n(4),
@@ -1240,6 +1240,7 @@ fn admit_exact(
 }
 
 fn admit_lexical(
+    conn: &GuardedConn<'_>,
     kernel: &KernelStore,
     authority: Authority<'_>,
     budget: &SharedBudget,
@@ -1255,7 +1256,7 @@ fn admit_lexical(
             });
         }
     };
-    let retrieval = match admit(kernel, authority, scanned, budget.eval()) {
+    let retrieval = match admit(conn, kernel, authority, scanned, budget.eval()) {
         Ok(retrieval) => retrieval,
         Err(refusal) => {
             return match retrieval_refusal(&refusal) {
@@ -1298,7 +1299,8 @@ fn admit_lexical(
 
 struct Scanned {
     exact: LaneRead<ExactHits>,
-    lexical: LaneRead<Scan>,
+    /// The admitted lexical lane and the candidate terms its contributions were judged on.
+    lexical: (LaneOutput, BTreeMap<OccurrenceId, OccurrenceCandidate>),
     dense: DenseHits,
 }
 
@@ -1365,7 +1367,7 @@ pub fn admit_lanes<'a>(
     let intent = classify(query, selector_bounds(limits))
         .map_err(|refusal| QueryFailure::InvalidQuery(refusal.to_string()))?;
 
-    // The exact and lexical lanes run only projection statements while the connection is held and take their kernel readers after it is released; the dense oracle judges each page it scores, so it is the one lane that reads the kernel under the connection.
+    // The exact lane runs only projection statements while the connection is held and takes its kernel readers after it is released. The lexical lane reads each candidate's occurrence row just before the kernel judges it, and the dense oracle judges each page it scores, so both read the kernel under the connection.
     let read = projection.read_under(budget, |conn| {
         let Some(identity) = retrieval::read_identity(conn)? else {
             return Ok(Err(QueryFailure::Unavailable("no_identity")));
@@ -1383,6 +1385,9 @@ pub fn admit_lanes<'a>(
             before_phase(Phase::Lexical);
             check(budget)?;
             let lexical = lexical_read(conn, &intent, query, limits, budget)?;
+            let mut lexical_terms = BTreeMap::new();
+            let lexical =
+                admit_lexical(conn, kernel, authority, budget, lexical, &mut lexical_terms)?;
             before_phase(Phase::Dense);
             check(budget)?;
             let dense = if has_prose(&intent, query, limits) {
@@ -1392,7 +1397,7 @@ pub fn admit_lanes<'a>(
             };
             Ok(Scanned {
                 exact,
-                lexical,
+                lexical: (lexical, lexical_terms),
                 dense,
             })
         };
@@ -1409,13 +1414,10 @@ pub fn admit_lanes<'a>(
         output: dense,
         candidates: dense_candidates,
     } = scanned.dense;
-    if matches!(
-        (&scanned.exact, &scanned.lexical),
-        (
-            LaneRead::Ended(LaneStatus::Undeclared),
-            LaneRead::Ended(LaneStatus::Undeclared)
-        )
-    ) && dense.status == LaneStatus::Undeclared
+    let (lexical, lexical_terms) = scanned.lexical;
+    if matches!(&scanned.exact, LaneRead::Ended(LaneStatus::Undeclared))
+        && lexical.status == LaneStatus::Undeclared
+        && dense.status == LaneStatus::Undeclared
     {
         return Err(QueryFailure::InvalidQuery(
             "the query yields no probe".to_string(),
@@ -1427,7 +1429,7 @@ pub fn admit_lanes<'a>(
     let mut terms: BTreeMap<OccurrenceId, OccurrenceCandidate> = BTreeMap::new();
     let (exact, exact_report) =
         admit_exact(kernel, authority, limits, budget, scanned.exact, &mut terms)?;
-    let lexical = admit_lexical(kernel, authority, budget, scanned.lexical, &mut terms)?;
+    terms.extend(lexical_terms);
     terms.extend(dense_candidates);
     if exact.ranking.is_none() && lexical.ranking.is_none() && dense.ranking.is_none() {
         return Err(QueryFailure::Unavailable("no_lane"));

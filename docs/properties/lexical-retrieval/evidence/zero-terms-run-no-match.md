@@ -19,18 +19,18 @@ Production code:
   true when the atom list is empty; its doc comment on `:47` states the
   contract: a successful empty analysis compiles to no probe and the caller
   issues no MATCH for it.
-- `scan` (`crates/retrieval/src/lexical/retrieve.rs:349`) initializes the
+- `scan` (`crates/retrieval/src/lexical/retrieve.rs:347`) initializes the
   result's completion on `:374` to `Completion::Empty` when `probes` is empty
   and `Completion::Complete` otherwise. The probe loop and the run loop that
   follow iterate zero times, so `count_probe`
-  (`crates/retrieval/src/lexical/retrieve.rs:566`) and the scan statements
+  (`crates/retrieval/src/lexical/retrieve.rs:575`) and the scan statements
   run for no probe. `Consumed` stays at its default of zero probes, zero
   counted rows, zero scanned rows.
-- `Completion::Empty` (`crates/retrieval/src/lexical/retrieve.rs:102`) is
+- `Completion::Empty` (`crates/retrieval/src/lexical/retrieve.rs:103`) is
   documented as "Zero probes: no MATCH ran and there is nothing to rank".
-  `incomplete` (`:538`) lets only `BudgetExhausted` replace it, so a
+  `incomplete` (`:548`) lets only `BudgetExhausted` replace it, so a
   zero-probe result reports `Empty` rather than a scan or rank reason.
-- `admit_inner` (`crates/retrieval/src/lexical/retrieve.rs:482`) judges the
+- `admit_inner` (`crates/retrieval/src/lexical/retrieve.rs:470`) judges the
   empty hit list in zero batches, so `batches` stays zero and `snapshot` and
   `incarnation` stay `None`.
 - The daemon ends the lane before `scan`: `lexical_read`
@@ -43,8 +43,8 @@ Production code:
 Tests cited by the record, read at the branch:
 
 - `zero_probes_run_no_match_while_a_control_probe_contributes`
-  (`crates/retrieval/tests/lexical_retrieval.rs:582`) runs `retrieve` over a
-  projection from `Fixture::all_admitted` (`:317`) with `probes("!!! ...")`,
+  (`crates/retrieval/tests/lexical_retrieval.rs:614`) runs `retrieve` over a
+  projection from `Fixture::all_admitted` (`:332`) with `probes("!!! ...")`,
   where `probes` (`:164`) runs `analyze` then `compile`. It asserts
   `completion == Completion::Empty`, no contributions, `consumed.probes == 0`,
   `consumed.scanned_rows == 0`, `consumed.batches == 0`, and `snapshot ==
@@ -98,8 +98,8 @@ statement is prepared, and the daemon's `is_empty` check runs before `scan`.
 ### Q: Can a zero-probe request reach `scan` through the daemon, and does `scan` still hold the guarantee if it does?
 
 - Sources examined: `crates/daemon/src/query_route.rs:1075` through `:1097`
-  and `:1412` through `:1423`; `crates/retrieval/src/lexical/retrieve.rs:349`
-  and `:374`; `crates/retrieval/tests/lexical_retrieval.rs:582`;
+  and `:1412` through `:1423`; `crates/retrieval/src/lexical/retrieve.rs:347`
+  and `:374`; `crates/retrieval/tests/lexical_retrieval.rs:614`;
   `crates/daemon/tests/query_route.rs:499`.
 - Findings: the daemon returns `Undeclared` on an empty analysis before
   calling `scan`, so production zero-term requests never reach the retrieval

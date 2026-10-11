@@ -429,11 +429,12 @@ its lanes finishes, the lifecycle pin and the projection connection it holds
 are released, and the request settles within an approved fault-free envelope;
 a permanently blocked read stays visible as unresolved work rather than being
 settled early. The projection connection is held only while the lanes read
-the projection; every kernel reader the exact and lexical lanes take is
-acquired after it is released, so those lanes never wait for a kernel reader
-while other projection readers and writers wait for it. The dense oracle
-judges each page it scores under the connection, so a dense request holds the
-connection across its eligibility batches.
+the projection; every kernel reader the exact lane takes is acquired after it
+is released, so that lane never waits for a kernel reader while other
+projection readers and writers wait for it. The lexical lane reads each
+candidate's occurrence row just before the kernel judges it, and the dense
+oracle judges each page it scores, both under the connection, so a lexical or
+dense request holds the connection across its eligibility batches.
 Check: `always` - the handler awaits `run_unit` with the budget guard alive
 and drops the guard only after the join; the closure owns the pin for its
 whole run; a second budgeted projection read placed by the `before_phase` hook

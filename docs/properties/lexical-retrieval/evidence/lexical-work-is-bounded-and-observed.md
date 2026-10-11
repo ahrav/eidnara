@@ -15,67 +15,77 @@ allocation evidence `partial` because RP2.9 has approved no allocation bound.
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
 
-- `RetrievalBounds` (`:42`) carries `max_probes`, `scan_rows`,
+- `RetrievalBounds` (`:47`) carries `max_probes`, `scan_rows`,
   `max_accepted`, `batch_rows`, `qualifying_matches`, and `rank_budget`, all
   `NonZeroUsize`, so every bound is caller-supplied and positive.
-- `Consumed` (`:107`) reports `probes`, `scanned_rows`, `counted_rows`,
-  `ranked_matches`, `judged`, `batches`, `sql_steps` (`:119`), and
+  `scan_rows` is one window per request: the distinct lexical matches the
+  request keeps across all of its probes.
+- `Consumed` (`:112`) reports `probes`, `scanned_rows`, `dead_rows`,
+  `counted_rows`, `ranked_matches`, `judged`, `batches`, `sql_steps`, and
   `excluded`. The `sql_steps` doc says it counts `SQLITE_STMTSTATUS_VM_STEP`
-  for the count, scan, and lookup statements of the probes that finished, and
-  that FTS5's rank function reads document sizes through a statement FTS5
-  keeps internal, so that scoring is observed only through `ranked_matches`.
-- `scan` (`:349`) checks the budget first (`:355`), refuses `max_accepted` or
+  for the count, scan, and identifier statements of the probes that finished
+  plus admission's occurrence reads, and that FTS5's rank function reads
+  document sizes through a statement FTS5 keeps internal, so that scoring is
+  observed only through `ranked_matches`.
+- `scan` (`:347`) checks the budget first (`:354`), refuses `max_accepted` or
   `batch_rows` above `MAX_ELIGIBILITY_CANDIDATES`
   (`crates/kernel/src/eligibility.rs:21`, 1024) as `BatchOverBound`, and
-  refuses more probes than `max_probes` as `ProbesOverBound` (`:366`) before
+  refuses more probes than `max_probes` as `ProbesOverBound` (`:365`) before
   any statement runs. Each distinct probe is counted once; `counted_rows` and
-  `sql_steps` accumulate at `:395`. A probe over `qualifying_matches` is
-  common (`:406`); a qualifying probe whose count would exceed `rank_budget`
-  sets `RankBudget` and stops ranking (`:423`). Each run adds `scanned_rows`
-  and `sql_steps` at `:446` and marks `ScanBound` when truncated.
-- `count_probe` (`:566`) reads at most `qualifying_matches + 1` rows in rowid
-  order; `vm_steps` (`:584`) reads the reset statement counter. `scan_probe`
-  (`:594`) dispatches to `scan_whole` (`:623`), `scan_ranked` (`:649`) with
-  `ranked_rows` (`:712`), or `scan_common` (`:828`), each bounded by
-  `scan_rows` and each returning its VM steps.
-- `admit` (`:473`) and `admit_batches` (`:958`) judge in `batch_rows` chunks
-  and stop at `max_accepted` (`:969`); `judge_batch` (`:925`) increments
-  `batches` and `judged` (`:947`, `:948`).
+  `sql_steps` accumulate at `:393`. A probe over `qualifying_matches` is
+  common (`:408`); a qualifying probe whose count would exceed `rank_budget`
+  sets `RankBudget` and stops ranking (`:422`). The one window's steps add to
+  `sql_steps` at `:433`, `ScanBound` marks a truncated window (`:435`), and
+  `scanned_rows` is the kept window's size (`:446`).
+- `count_probe` (`:575`) reads at most `qualifying_matches + 1` rows in rowid
+  order; `vm_steps` (`:593`) reads the reset statement counter.
+  `scan_ranked` (`:608`) scores every ranked probe's matches with
+  `ranked_rows` (`:648`), merges them, and keeps `scan_rows`; `scan_common`
+  (`:753`) merges the common probes' rowid streams and keeps `scan_rows` plus
+  one lookahead row. Both read only identifiers, through `identify` (`:672`).
+- `admit` (`:460`) and `admit_batches` (`:901`) take at most `batch_rows`
+  kept matches and no more than the open accepted slots per batch (`:926`),
+  read their occurrence rows through `resolve` (`:812`), count dead ones in
+  `dead_rows` (`:937`), and stop at `max_accepted` (`:915`); `judge_batch`
+  (`:867`) increments `batches` and `judged` (`:889`, `:890`).
 - The daemon installs the production bounds through
   `QueryRouteLimits::production` (`crates/daemon/src/query_route.rs:135`:
-  16 probes, 4096 scan rows, 128 accepted, 20,000 qualifying, 30,000 rank
+  16 probes, 4096 scan rows, 128 accepted, 10,000 qualifying, 15,000 rank
   budget, 128 validation batch) and `lexical_retrieval_bounds` (`:170`).
+  The owner approved 10,000 and 15,000 in place of D26b's 20,000 and 30,000
+  during #896 so the bm25 pass fits the lexical lane's 50 ms budget.
 
 Tests, `crates/retrieval/tests/lexical_retrieval.rs`:
 
-- `:789` `the_scan_bound_marks_incomplete_only_past_the_bound_and_refusals_precede_every_probe`:
+- `:825` `the_scan_bound_marks_incomplete_only_past_the_bound_and_refusals_precede_every_probe`:
   `parse` matches four corpus rows. `scan_rows` of one yields `ScanBound`, one
   contribution, `scanned_rows` 1; `scan_rows` of four yields `Complete` and
   `scanned_rows` 4. Three probes under `max_probes` 2 refuse with
   `ProbesOverBound { probes: 3, bound: 2 }`; `max_accepted` or `batch_rows` of
   1025 refuses with `BatchOverBound`; a cancelled budget refuses with
   `BudgetExhausted`.
-- `:1069` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`: 2500 bulk
+- `:1106` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`: 2500 bulk
   rows plus the corpus; `parse` four times reports `probes` 4 and the same
   `scanned_rows` (2504), `counted_rows`, and `ranked_matches` as one probe;
   every contribution keeps ordinal 0; the interrupt handler polls fewer than
   twice as often as for one probe.
-- `:1576` `ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`:
-  `project_thresholds` (`:1549`) builds 20,001 rows. Probes of 19,999 and
-  20,000 matches count and rank exactly; 20,001 counts one lookahead row,
+- `:1613` `ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`:
+  `project_thresholds` (`:1586`) builds 10,001 rows. Probes of 9,999 and
+  10,000 matches count and rank exactly; 10,001 counts one lookahead row,
   ranks zero, and is `CommonTerms` with `scanned_rows` equal to `scan_rows`.
-  Pairs summing to 29,999 and 30,000 rank both; 30,001 ranks only the 15,000
+  Pairs summing to 14,999 and 15,000 rank both; 15,001 ranks only the 7,500
   probe and is `RankBudget`, in either request order.
-- `:2381` `work_counters_report_exact_and_over_bound_work`: `parse parse` at
+- `:2550` `work_counters_report_exact_and_over_bound_work`: `parse parse` at
   `scan_rows` 4 reports probes 2, counted 4, scanned 4, ranked 4, `(judged,
   batches)` of `(8, 3)` under `batch_rows` 2 (`bounds()`, `:153`), and
   `sql_steps > 0`. `scan_rows` 3 and 2 keep counted 4 and scan fewer rows with
-  fewer steps. `max_accepted` 1 keeps scanned rows and steps equal to the
-  uncapped run. Under `small_thresholds` (`:2136`, qualifying 2, budget 2)
+  fewer steps. `max_accepted` 1 keeps scanned rows equal to the uncapped run
+  and runs fewer steps, because admission reads occurrence rows only for the
+  candidates it judges. Under `small_thresholds` (`:2299`, qualifying 2, budget 2)
   one more matching row adds one scanned row and more steps; a fifth ranked
   row adds steps over four.
-- `:2312` `allocations_follow_the_scan_bound_and_the_rank_budget`:
-  `retrieve_recorded` (`:418`) wraps only the `retrieve` call in
+- `:2481` `allocations_follow_the_scan_bound_and_the_rank_budget`:
+  `retrieve_recorded` (`:450`) wraps only the `retrieve` call in
   `alloc_recorder::record_window` (`crates/daemon/tests/support/alloc_recorder.rs:359`),
   included by `#[path]` (`:2`) as the binary's `#[global_allocator]` (`:6`).
   After a warm-up run, `scan_rows` 3 records fewer `allocation_events` and
@@ -83,7 +93,7 @@ Tests, `crates/retrieval/tests/lexical_retrieval.rs`:
   counted rows, scanned rows, SQL steps, and `allocation_events`; a ranked run
   reports `ranked_matches` 36 with `scanned_rows` 3 and more events than the
   three-row run. Each ledger asserts `!overflow` (`Ledger`, `:165`).
-- `:2542` `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group`:
+- `:2707` `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group`:
   64 head rows and 320 tail rows; a tied tail runs the same `sql_steps` as a
   tail with one rank per row, with `scanned_rows` 64 and `ranked_matches` 384.
 
@@ -109,7 +119,7 @@ row loop ends work at the original deadline, covered by
 ## What a test must construct
 
 - A populated fixture engine with a probe of known match count: four `parse`
-  rows in the corpus, 2500 bulk rows, or the 20,001 threshold rows.
+  rows in the corpus, 2500 bulk rows, or the 10,001 threshold rows.
 - A repeated probe (`parse parse`) to show repeats add no engine work.
 - `scan_rows` one below the match count, and one row more than the count.
 - A result cap (`max_accepted`) of one against the uncapped run.
@@ -125,7 +135,7 @@ row loop ends work at the original deadline, covered by
 
 - Sources examined: `Ledger` fields `allocation_events`, `requested_bytes`,
   and `overflow` (`alloc_recorder.rs:168`, `:172`, `:180`); the assertions in
-  `lexical_retrieval.rs:2312`; the PR #967 description; the catalog record.
+  `lexical_retrieval.rs:2481`; the PR #967 description; the catalog record.
 - Findings: the test compares runs with each other. One row below the scan
   bound allocates fewer events and bytes; 32 more common matches add no
   events; ranked work allocates more as `ranked_matches` grows to 36. No
@@ -150,10 +160,10 @@ row loop ends work at the original deadline, covered by
 
 ### Q: Is `sql_steps` exercised by a projection or only a fixture engine?
 
-- Sources examined: `Fixture::project` (`lexical_retrieval.rs:346`) and the
-  tests at `:2381` and `:2312`.
+- Sources examined: `Fixture::project` (`lexical_retrieval.rs:378`) and the
+  tests at `:2550` and `:2481`.
 - Findings: the fixture projects rows with the production `apply_batch`
-  (`:376`) into a `SqliteStore` and runs `retrieve` against it; the
+  (`:408`) into a `SqliteStore` and runs `retrieve` against it; the
   daemon handler test (`crates/daemon/tests/query_route_handler.rs:247`)
   runs the lexical lane but asserts only lane status.
 - Missing evidence: none for the counters themselves.

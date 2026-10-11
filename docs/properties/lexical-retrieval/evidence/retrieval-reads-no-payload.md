@@ -21,14 +21,15 @@ Contract:
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- Every statement the lane runs is one of the six constants at `:256`
-  `COUNT_SQL`, `:259` `RANKED_SQL`, `:264` `WHOLE_SQL`, `:270` `COMMON_SQL`,
-  `:276` `IDS_SQL`, and `:280` `DETAILS_SQL`. Their `FROM` and `JOIN` clauses
-  name `lexical`, `occurrences`, `occurrence_tombstones`, and `json_each`.
-  The selected columns are `rank`, `rowid`, `occurrence_id`, `class`,
-  `source_object_id`, `revision`, `source_artifact_digest`, and the tombstone
-  predicate. No statement names `payloads`, `payload_id`, or `bytes`, and none
-  selects the FTS5 `original` or `parts` text columns.
+- Every statement the lane runs is one of the five constants at `:261`
+  `COUNT_SQL`, `:264` `RANKED_SQL`, `:268` `COMMON_SQL`, `:273` `IDS_SQL`, and
+  `:278` `DETAILS_SQL`. Their `FROM` and `JOIN` clauses name `lexical`,
+  `lexical_content`, `occurrences`, `occurrence_tombstones`, and `json_each`.
+  The selected columns are `rank`, `rowid`, the content table's `c2`
+  occurrence identifier, `class`, `source_object_id`, `revision`,
+  `source_artifact_digest`, and the tombstone predicate. No statement names
+  `payloads`, `payload_id`, or `bytes`, and none selects the FTS5 `original`
+  or `parts` text columns or their content-table columns `c0` and `c1`.
 - `:59` `Contribution` carries `occurrence_id`, `class`, `rank`, `ordinal`,
   and the kernel `candidate`. `:131` `Retrieval` carries contributions,
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
@@ -52,10 +53,10 @@ Payload loading after authorization, `crates/daemon/src/packing/mod.rs`:
   `crates/daemon/src/query_route.rs:1` states the route reads no payload bytes
   and packing materializes them under its own bounds.
 
-Test, `crates/retrieval/tests/lexical_retrieval.rs:1275`
+Test, `crates/retrieval/tests/lexical_retrieval.rs:1312`
 `retrieval_reads_no_payload_bytes`:
 
-- `Fixture::all_admitted` (`:317`) opens a kernel and a projection store,
+- `Fixture::all_admitted` (`:332`) opens a kernel and a projection store,
   installs an identity, and projects the corpus through `apply_batch` with
   `Payload::Whole` rows, so the `payloads` table is populated.
 - The test retrieves `parse fetch io` with `bounds()` (`:153`: `scan_rows`
@@ -93,8 +94,8 @@ before the fault and an equality assertion on the full result afterward.
 
 ### Q: Is the test exercised against a real projection schema?
 
-- Sources examined: `crates/retrieval/tests/lexical_retrieval.rs:243`
-  through `:316` (`Fixture`, `Fixture::new`), `:346` (`Fixture::project`),
+- Sources examined: `crates/retrieval/tests/lexical_retrieval.rs:258`
+  through `:330` (`Fixture`, `Fixture::new`), `:378` (`Fixture::project`),
   `:109` (`open_store`).
 - Findings: the fixture opens a `SqliteStore` through `open_sqlite`, installs
   a `ProjectionIdentity`, and writes rows with `apply_batch`, the production
