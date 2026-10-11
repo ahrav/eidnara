@@ -22,7 +22,7 @@ use host_runtime::generation::{
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use retrieval::ProjectionIdentity;
 use retrieval::batch::{ProjectionCheckpoint, VectorGeneration};
-use retrieval::dense::codec::Metric;
+use retrieval::dense::codec::{self, Metric, RowLayout};
 use retrieval::dense::export::{ExportedRow, LiveRows};
 use retrieval::dense::scalar::{ScalarRecipe, Scales, encode, encode_codes};
 use sha2::{Digest, Sha256};
@@ -394,6 +394,26 @@ fn paired_fresh_builds_produce_identical_names_bytes_sidecar_manifest_and_digest
 }
 
 #[test]
+fn the_built_row_artifact_retains_every_exported_original_bit() {
+    let fixture = Fixture::new();
+    let built = fixture.build();
+    let layout = RowLayout {
+        dimension: DIMENSION,
+        metric: Metric::InnerProduct,
+        unit_norm_tolerance: TOLERANCE,
+    };
+    let retained = codec::decode_rows(&fs::read(built.dir.join(ROWS_FILE)).unwrap(), &layout)
+        .unwrap()
+        .rows;
+    let bits = |row: &[f32]| -> Vec<u32> { row.iter().map(|value| value.to_bits()).collect() };
+    let exported = export();
+    assert_eq!(retained.len(), exported.rows.len());
+    for (kept, row) in retained.iter().zip(&exported.rows) {
+        assert_eq!(bits(kept), bits(&row.vector), "{}", row.occurrence_id);
+    }
+}
+
+#[test]
 fn another_quantizer_recipe_over_the_same_rows_is_another_compatibility_and_sidecar_identity() {
     let fixture = Fixture::new();
     let built = fixture.build();
@@ -402,7 +422,6 @@ fn another_quantizer_recipe_over_the_same_rows_is_another_compatibility_and_side
         quantizer_recipe: "scalar-int8-symmetric.v2".to_owned(),
         ..current.clone()
     };
-    assert_eq!(other.files, current.files, "the payload bytes are the same");
 
     let current_identity = VectorIdentity::from_sidecar(current);
     let other_identity = VectorIdentity::from_sidecar(&other);
