@@ -447,7 +447,23 @@ interface PlannedFact {
     question: string;
 }
 
-export function buildWorld(seed: number, tierName: string): World {
+/** Component counts for `--project-size`; each component contributes four source files. */
+export const PROJECT_SIZES: Record<string, number> = { small: 16, medium: 64, large: 256 };
+
+/** `count` component names: the base list, then suffixed variants of it. */
+function componentNames(count: number): string[] {
+    const names: string[] = [];
+    for (let round = 0; names.length < count; round++) {
+        for (const base of COMPONENTS) {
+            if (names.length >= count) break;
+            names.push(round === 0 ? base : `${base}-${round + 1}`);
+        }
+    }
+    return names;
+}
+
+export function buildWorld(seed: number, tierName: string, componentCount = 16): World {
+    const components = componentNames(componentCount);
     const tier = TIERS[tierName];
     if (!tier) throw new Error(`unknown tier ${tierName}`);
     const r = rng(seed);
@@ -455,7 +471,7 @@ export function buildWorld(seed: number, tierName: string): World {
     const files: Record<string, string> = {};
     const repoFacts: { comp: string; key: string; value: string }[] = [];
 
-    for (const comp of COMPONENTS) {
+    for (const comp of components) {
         for (const role of ["handler", "client", "store"]) {
             files[`src/${comp}/${role}.ts`] = codeFile(r, t, comp, role);
         }
@@ -477,7 +493,7 @@ export function buildWorld(seed: number, tierName: string): World {
     const sessions: Session[] = [];
     const subject = (attrs: readonly string[]): { comp: string; attr: string } =>
         t.unique(
-            () => ({ comp: t.pick(COMPONENTS), attr: t.pick(attrs) }),
+            () => ({ comp: t.pick(components), attr: t.pick(attrs) }),
             ({ comp, attr }) => `subject:${comp} ${attr}`,
         );
     let factSeq = 0;
@@ -554,7 +570,7 @@ export function buildWorld(seed: number, tierName: string): World {
             }
             if (s < tier.sessions - 1) {
                 const comp = t.unique(
-                    () => `${t.pick(COMPONENTS)} ${t.pick(CONSUMERS)}`,
+                    () => `${t.pick(components)} ${t.pick(CONSUMERS)}`,
                     (consumer) => `hop:${consumer}`,
                 );
                 const queue = t.codename();
@@ -676,7 +692,7 @@ export function buildWorld(seed: number, tierName: string): World {
     return { seed, tier: tierName, files, facts, sessions };
 
     function fillerTurn(index: number): Turn {
-        const comp = t.pick(COMPONENTS);
+        const comp = t.pick(components);
         const roll = r();
         if (roll < 0.4) {
             const role = t.pick(["handler", "client", "store", "config"]);
@@ -796,7 +812,7 @@ export function buildWorld(seed: number, tierName: string): World {
         }
         if (kind === "rationale") {
             const { comp, lib } = t.unique(
-                () => ({ comp: t.pick(COMPONENTS), lib: t.pick(LIBS) }),
+                () => ({ comp: t.pick(components), lib: t.pick(LIBS) }),
                 ({ comp, lib }) => `rationale:${comp} ${lib}`,
             );
             const incident = t.incident();
@@ -817,8 +833,8 @@ export function buildWorld(seed: number, tierName: string): World {
         if (kind === "constraint") {
             const { comp, other } = t.unique(
                 () => {
-                    const comp = t.pick(COMPONENTS);
-                    return { comp, other: t.pick(COMPONENTS.filter((c) => c !== comp)) };
+                    const comp = t.pick(components);
+                    return { comp, other: t.pick(components.filter((c) => c !== comp)) };
                 },
                 ({ comp, other }) => `constraint:${comp} ${other}`,
             );
@@ -840,7 +856,7 @@ export function buildWorld(seed: number, tierName: string): World {
         if (kind === "tool_detail") {
             const { comp, test } = t.unique(
                 () => ({
-                    comp: t.pick(COMPONENTS),
+                    comp: t.pick(components),
                     test: `${t.pick(TESTS)}_${Math.floor(r() * 900)}`,
                 }),
                 ({ comp, test }) => `tool:${comp} ${test}`,

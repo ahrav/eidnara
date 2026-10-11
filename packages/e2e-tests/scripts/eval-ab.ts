@@ -7,7 +7,7 @@ import type { CallRecord } from "../src/ab-eval/gateway";
 import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
-import { buildWorld, grade, type World, writeRepo } from "../src/ab-eval/world";
+import { buildWorld, grade, PROJECT_SIZES, type World, writeRepo } from "../src/ab-eval/world";
 import {
     cargoBuildExampleArgs,
     DIRECT_HOST_FIXTURE,
@@ -28,6 +28,7 @@ interface Options {
     fixtureBin: string;
     sandbox: boolean;
     enforceWindow: boolean;
+    projectSize: string;
     /** `session:turn` keys before whose prompt the arm's daemon stops for `stallMs`. */
     stallAt: Set<string>;
     stallMs: number;
@@ -80,6 +81,7 @@ function parseArgs(argv: string[]): Options {
         ),
         stallMs: num("stall-ms", "6000"),
         enforceWindow: choice("enforce-window", ["on", "off"], "on") === "on",
+        projectSize: choice("project-size", Object.keys(PROJECT_SIZES), "small"),
     };
 }
 
@@ -215,7 +217,9 @@ async function main(): Promise<void> {
             `${opts.fixtureBin} is not an executable file; build the release fixture with \`cargo ${cargoBuildExampleArgs(DIRECT_HOST_FIXTURE).join(" ")} --release\` or pass --fixture-bin`,
         );
     }
-    const world = buildWorld(opts.seed, opts.tier);
+    const componentCount = PROJECT_SIZES[opts.projectSize];
+    if (componentCount === undefined) throw new Error(`unknown --project-size ${opts.projectSize}`);
+    const world = buildWorld(opts.seed, opts.tier, componentCount);
     const turnKeys = new Set(
         world.sessions.flatMap((s) => s.turns.map((t) => `${s.index}:${t.index}`)),
     );

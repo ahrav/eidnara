@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildWorld, grade, TIERS } from "./world";
+import { buildWorld, grade, PROJECT_SIZES, TIERS } from "./world";
 
 describe("A/B world", () => {
     it("builds the same world from the same seed", () => {
@@ -69,5 +69,19 @@ describe("A/B world", () => {
         const abstain = { ...fact, kind: "abstain" as const, answer: "UNKNOWN", stale: undefined };
         expect(grade(abstain, "UNKNOWN, we never settled it")).toBe("correct");
         expect(grade(abstain, "41234")).toBe("wrong");
+    });
+});
+
+describe("A/B project sizes", () => {
+    it("builds one source tree per component with distinct names at every size", () => {
+        for (const [size, components] of Object.entries(PROJECT_SIZES)) {
+            const world = buildWorld(3, "xs", components);
+            const dirs = new Set(
+                Object.keys(world.files)
+                    .filter((path) => path.startsWith("src/") && !path.startsWith("src/shared/"))
+                    .map((path) => path.split("/")[1]),
+            );
+            expect(dirs.size, size).toBe(components);
+        }
     });
 });
