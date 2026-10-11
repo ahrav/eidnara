@@ -62,7 +62,22 @@ No findings is a valid result. Keep the summary short and name verification gaps
 
 ## Sub-agents
 
-Use none for straightforward changes. Use at most two read-only sub-agents when
-independent risky areas justify them, not merely because the diff is large.
-Give each a distinct scope. They return location, severity, evidence, and rationale;
-they never post comments. The main reviewer verifies and deduplicates findings.
+The ticket's Pre-PR Gate names the review set for a change. This file sets no
+count. Always run `ponytail-review` and `/code-quality:reduce-complexity`. Run
+`/testing:test-strategy` for Rust changes; for other languages, run the
+testing-approach owner the router names. Use `/research-planning:ask-skills`
+against the ticket and the actual diff to select the additional skills the
+change needs, including architecture, language-design, concurrency, and
+security coverage where applicable. Record each selected skill, its scope, and
+the selection reason. When the host blocks nested router invocation, apply the
+`ask-skills` contract in-context and record `contract-applied; nested
+invocation unavailable`.
+
+Run every selected review concurrently in separate, fresh-context, read-only
+sub-agents against the same diff and base. Each returns location, severity,
+evidence, and rationale; none posts comments or edits code. The main reviewer
+consolidates and deduplicates findings, keeps the contributing reviewers, and
+verifies each finding against the implementation before reporting it. Rerun a
+review when fixes change its reviewed surface. If a required skill or the
+concurrent-agent capability is unavailable, report a blocked gate; never claim
+a review ran.
