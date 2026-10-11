@@ -10746,6 +10746,9 @@ fn projection_reasoning_ineligible_arc_ids(projection: &FlatProjection) -> HashS
             wire::BlockKind::ToolCall { .. } | wire::BlockKind::ToolResult { .. } => {
                 message.has_durable_non_tool_sibling = true;
             }
+            // Opaque blocks carry harness metadata, so the provider sees the reasoning alone
+            // once the arc is gone.
+            wire::BlockKind::Opaque(_) => {}
             _ => message.has_durable_non_tool_sibling = true,
         }
     }
@@ -19660,6 +19663,130 @@ pub(crate) mod tests {
         assert_eq!(native_assistant["parts"][0], raw[0]["parts"][0]);
         assert_eq!(native_assistant["parts"][1]["type"], "tool");
         assert_eq!(native_assistant["parts"][1]["callID"], "call-tool");
+    }
+
+    #[test]
+    fn step_markers_do_not_make_an_orphaning_tool_reduction_eligible() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let raw = vec![
+            json!({
+                "info": { "id": "assistant-tool", "role": "assistant" },
+                "parts": [
+                    { "type": "step-start" },
+                    {
+                        "type": "reasoning",
+                        "text": "signed thinking",
+                        "metadata": { "anthropic": { "signature": "tool-signature-verbatim" } }
+                    },
+                    {
+                        "type": "tool",
+                        "callID": "call-tool",
+                        "tool": "bash",
+                        "state": {
+                            "status": "completed",
+                            "input": { "command": "printf output" },
+                            "output": "large tool output"
+                        }
+                    },
+                    { "type": "step-finish", "reason": "tool-calls" }
+                ]
+            }),
+            json!({
+                "info": { "id": "user-after-tool", "role": "user" },
+                "parts": [{ "type": "text", "text": "continue" }]
+            }),
+        ];
+        let decoded = crate::codec::decode_opencode(&raw);
+        let sidecar = decoded.sidecar;
+        let mut request = with_usage(
+            active_opencode_req("reasoning-step-markers", "cfg0", decoded.messages),
+            70,
+            100,
+        );
+        request.provider_id = Some("anthropic".to_string());
+        request.serve_native = true;
+        request.native_messages = Some(raw.iter().cloned().map(Arc::new).collect());
+        request.protected_tags = 0;
+        let context = pctx("git:proj", "/nonexistent-docs", 0);
+        let estimate = |value: &str| value.len();
+
+        let boot =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
+        assert_eq!(boot.response.action, "HARD");
+        let active =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
+        assert_eq!(active.response.action, "SOFT+");
+        request.render_config = "cfg1".to_string();
+        let mut execute_context = pctx("git:proj", "/nonexistent-docs", 0);
+        execute_context.injected_reductions = with_reductions(vec![
+            reduce("assistant-tool#2", "drop", "[dropped]"),
+            reduce("assistant-tool#3", "drop", "[dropped]"),
+        ]);
+        let execute = apply_once_with_estimator(
+            &store,
+            &resolved(&store, &request),
+            &execute_context,
+            estimate,
+        )
+        .unwrap();
+        assert_eq!(execute.scheduler_pass, scheduler::PassDecision::Execute);
+        assert_eq!(execute.response.action, "HARD");
+        let frozen = frozen_red_targets(&store.load("reasoning-step-markers").unwrap().core);
+        assert!(
+            !frozen.contains("assistant-tool#2") && !frozen.contains("assistant-tool#3"),
+            "the whole tool arc is ineligible when removing it would strand signed reasoning"
+        );
+
+        request = with_usage(request, 20, 100);
+        let defer =
+            apply_once_with_estimator(&store, &resolved(&store, &request), &context, estimate)
+                .unwrap();
+        assert_eq!(defer.scheduler_pass, scheduler::PassDecision::Defer);
+        assert_eq!(defer.mutation_exempt_mid, None);
+        assert_eq!(defer.response.action, "SOFT+");
+        let served_messages = defer
+            .response
+            .messages()
+            .iter()
+            .map(|message| message.deref().clone())
+            .collect::<Vec<_>>();
+        let wire_assistant = served_messages
+            .iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some("assistant-tool"))
+            .unwrap();
+        let kinds = wire_assistant
+            .content()
+            .iter()
+            .filter_map(|block| match block.kind() {
+                wire::BlockKind::Reasoning { .. } => Some("reasoning"),
+                wire::BlockKind::ToolCall { .. } => Some("call"),
+                wire::BlockKind::ToolResult { .. } => Some("result"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, ["reasoning", "call", "result"]);
+        let native = crate::codec::encode_opencode_with_session(
+            &served_messages,
+            &sidecar,
+            Some("reasoning-step-markers"),
+            defer.mutation_exempt_mid.as_deref(),
+        );
+        let native_assistant = native
+            .iter()
+            .find(|message| message["info"]["id"] == "assistant-tool")
+            .unwrap();
+        let types = native_assistant["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|part| part["type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(types[1..3], ["reasoning", "tool"]);
+        assert_eq!(native_assistant["parts"][1], raw[0]["parts"][1]);
+        assert_eq!(native_assistant["parts"][2]["callID"], "call-tool");
     }
 
     #[test]

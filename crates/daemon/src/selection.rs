@@ -487,6 +487,9 @@ pub(crate) fn reasoning_ineligible_arc_ids(items: &[SelItem]) -> HashSet<String>
             SelKind::ToolCall { .. } | SelKind::ToolResult { .. } => {
                 message.has_durable_non_tool_sibling = true;
             }
+            // Opaque blocks carry harness metadata, so the provider sees the reasoning alone
+            // once the arc is gone.
+            SelKind::Opaque => {}
             _ => message.has_durable_non_tool_sibling = true,
         }
     }
@@ -2546,6 +2549,39 @@ mod tests {
         assert!(
             !out.is_empty(),
             "unrelated age-reclaim candidates must still reduce"
+        );
+    }
+
+    #[test]
+    fn opaque_step_markers_leave_a_reasoning_tool_arc_ineligible() {
+        let target_arc = "assistant#2";
+        let opaque = |id: &str| SelItem {
+            id: id.to_string(),
+            ordinal: 1,
+            message_role: SelMessageRole::Assistant,
+            kind: SelKind::Opaque,
+            provider_executed: false,
+            byte_size: 20,
+            token_count: None,
+            arc_id: None,
+        };
+        let items = vec![
+            opaque("assistant#0"),
+            reasoning_with_id("assistant#1", target_arc, 1, 100),
+            tool_call_with_ids(
+                target_arc,
+                target_arc,
+                1,
+                "eidnara_search",
+                serde_json::json!({"query": "shards"}),
+                50,
+            ),
+            tool_result_with_ids("assistant#3", target_arc, 1, "eidnara_search", 300),
+            opaque("assistant#4"),
+        ];
+        assert_eq!(
+            reasoning_ineligible_arc_ids(&items),
+            HashSet::from([target_arc.to_string()])
         );
     }
 
