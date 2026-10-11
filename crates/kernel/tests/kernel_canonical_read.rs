@@ -238,6 +238,7 @@ fn the_domain_selection_equals_the_filtered_full_read() {
             .visible_domain_decisions_as_of_in_scope(surface, tip, MEMORY, None)
             .unwrap();
         assert_eq!(ids(&selected), ids(&expected), "{surface:?}");
+        assert_eq!(selected.rows, expected.rows, "{surface:?}");
         if surface == Surface::ExplicitSearch {
             assert_eq!(selected.rows.len(), 40);
         }

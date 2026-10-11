@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const POLICY_REVISION: i64 = 1;
 #[cfg(test)]
 const REVISION_1_SOURCE_DIGEST: &str =
-    "0dd165ceb9e495cdd759a48aae095fb557beb21558c7402e04a72a7197247a78";
+    "f386b4db6414ea396353fcd764839f2e846fc9066e2fd2bc61a501be9ba22760";
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
@@ -928,7 +928,7 @@ impl Envelope<'_> {
     ) -> Result<HashMap<String, ServedRow>, KernelError> {
         let ids: Vec<String> = ids.iter().filter_map(|id| identity(id).ok()).collect();
         let ids = serde_json::to_string(&ids).map_err(|_| KernelError::InvalidInput)?;
-        Ok(served_classes(self.tx, self.commit_seq, Some(&ids), scope)?
+        Ok(served_classes(self.tx, self.commit_seq, &ids, scope)?
             .into_iter()
             .map(|row| (row.object.object_id.clone(), row))
             .collect())
@@ -2746,7 +2746,7 @@ struct DecidedColumns {
     sensitivity_class: usize,
     approval_object_id: usize,
     /// Whether the named approval's authority chain was intact at the
-    /// snapshot; selected after the contiguous groups.
+    /// snapshot; selected after every other served column, once per distinct approval.
     approval_valid: usize,
 }
 
@@ -2767,8 +2767,8 @@ impl DecidedColumns {
     }
 }
 
-const OWN_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(10, 33);
-const LINEAGE_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(19, 34);
+const OWN_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(10, 38);
+const LINEAGE_DECISION_COLUMNS: DecidedColumns = DecidedColumns::starting_at(19, 39);
 const ACCEPTED_DECISION_COLUMN: usize = 28;
 const HISTORY_SENSITIVITY_COLUMN: usize = 29;
 const OWN_HISTORY_INCONSISTENT_COLUMN: usize = 30;
@@ -2780,13 +2780,13 @@ const EVIDENCE_SENSITIVITY_COLUMN: usize = 32;
 /// The class of the evidence a decision or observation cites, read live for the
 /// same reason as [`EVIDENCE_SENSITIVITY_COLUMN`]: a replay can tighten it after
 /// the citing row was written, and the citing row is immutable.
-const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 35;
+const CITED_EVIDENCE_SENSITIVITY_COLUMN: usize = 33;
 /// The classes of the observation that triggered the object's own admission and
 /// of the evidence backing that observation, then the same pair for the lineage
 /// admission. The admission folded them once when it was decided; serving folds
 /// what they read today.
-const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [36, 37, 38, 39];
-const LAST_SERVED_COLUMN: usize = TRIGGER_SENSITIVITY_COLUMNS[3];
+const TRIGGER_SENSITIVITY_COLUMNS: [usize; 4] = [34, 35, 36, 37];
+const LAST_SERVED_COLUMN: usize = LINEAGE_DECISION_COLUMNS.approval_valid;
 
 /// A text column borrowed from the row, `None` for SQL NULL.
 fn text_column<'r>(row: &'r rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<&'r str>> {
@@ -3046,7 +3046,7 @@ pub(crate) fn egress_candidates_tx(
     // Hidden at `ExplicitSearch`, the widest surface, means hidden everywhere;
     // the narrower surfaces ride along from the same row so a per-surface
     // judgement needs no second serving read.
-    let served: HashMap<String, ServedClass> = served_classes(tx, tip, Some(&ids), None)?
+    let served: HashMap<String, ServedClass> = served_classes(tx, tip, &ids, None)?
         .into_iter()
         .map(|row| {
             (
@@ -3193,8 +3193,8 @@ pub struct ScopeTermFilter<'a> {
 }
 
 /// Every object admitted at `requested` with its served sensitivity and the
-/// visibility `surface` gives it, restricted to `ids` (a JSON string array)
-/// when given and to scopes that can match `scope` when given. Hidden rows
+/// visibility `surface` gives it, restricted to the objects `selection` names
+/// and to scopes that can match `scope` when given. Hidden rows
 /// are included so a caller can see the class of an object no surface serves.
 fn served_rows(
     tx: &Transaction<'_>,
@@ -3212,31 +3212,22 @@ fn served_rows(
         .collect())
 }
 
-/// Which objects a served-class query returns. Each shape is its own prepared statement, so every predicate it
-/// carries is a plain equality the planner can serve from an index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IdsPredicate {
-    /// `:ids` is a JSON string array and only those objects are returned.
-    Named,
-    /// Every object at the snapshot is returned.
-    All,
-    /// Only decision objects of the domain `:domain_id` are returned.
-    DomainDecisions,
-}
-
-/// The objects a served-class read returns, with the bound value its statement shape needs.
+/// The objects a served-class read returns, with the value its statement binds. Each variant is its own
+/// prepared statement, so its predicate is one the planner can serve from an index.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ServedSelection<'a> {
+    /// Every object at the snapshot.
     All,
-    /// A JSON string array of object identifiers.
+    /// The objects a JSON string array of identifiers names, bound as `:ids`.
     Named(&'a str),
-    /// Decision objects of one domain.
+    /// The decision objects of one domain, bound as `:domain_id`.
     DomainDecisions(&'a str),
 }
 
-/// The served-class query text for one `ids` shape. It embeds only constants, so each shape is identical on every call.
+/// The served-class query text for one selection shape; the bound value is not part of the text. It embeds only
+/// constants, so each shape is identical on every call.
 // policy-digest:serving-start
-fn served_classes_sql(ids: IdsPredicate) -> String {
+fn served_classes_sql(selection: ServedSelection<'_>) -> String {
     let own = latest_own_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
     let lineage = latest_lineage_decision_sql("a", "AND a.commit_seq<=:governing_as_of");
     let history = strictest_sensitivity_sql("AND h.commit_seq<=:governing_as_of");
@@ -3252,18 +3243,18 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
     let filter_redacted = crate::redaction::sql_contains_redaction_placeholder(":scope_value");
     // Each distinct approval is judged once, however many served rows name it as their own or lineage approval.
     let approval_valid = approval_chain_valid_at_snapshot_sql("ap.approval_object_id");
-    let ids_predicate = match ids {
-        IdsPredicate::Named => "AND o.object_id IN (SELECT value FROM json_each(:ids))",
-        IdsPredicate::All => "",
-        IdsPredicate::DomainDecisions => "AND o.domain_id=:domain_id AND o.object_kind='decision'",
+    let ids_predicate = match selection {
+        ServedSelection::Named(_) => "AND o.object_id IN (SELECT value FROM json_each(:ids))",
+        ServedSelection::All => "",
+        ServedSelection::DomainDecisions(_) => {
+            "AND o.domain_id=:domain_id AND o.object_kind='decision'"
+        }
     };
     format!(
         "WITH served AS MATERIALIZED (
-             SELECT o.object_id AS o_object_id,o.object_kind AS o_object_kind,
-                    o.domain_id AS o_domain_id,o.source_kind AS o_source_kind,
-                    o.source_id AS o_source_id,o.source_revision AS o_source_revision,
-                    o.created_commit_seq AS o_created_commit_seq,
-                    o.sensitivity_class AS o_sensitivity_class,
+             SELECT o.object_id,o.object_kind,o.domain_id,o.source_kind,o.source_id,
+                    o.source_revision,o.created_commit_seq,NULL AS invalidated_commit_seq,
+                    NULL AS superseded_by,o.sensitivity_class,
                     d.maturity AS d_maturity,
                     d.effective_maturity AS d_effective_maturity,
                     d.disposition AS d_disposition,d.visibility AS d_visibility,
@@ -3340,33 +3331,15 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
          approval_valid(approval_object_id,valid) AS MATERIALIZED (
              SELECT ap.approval_object_id,{approval_valid} FROM approvals ap
          )
-         SELECT served.o_object_id AS object_id,served.o_object_kind AS object_kind,
-                served.o_domain_id AS domain_id,served.o_source_kind AS source_kind,
-                served.o_source_id AS source_id,served.o_source_revision AS source_revision,
-                served.o_created_commit_seq AS created_commit_seq,NULL,NULL,
-                served.o_sensitivity_class AS sensitivity_class,
-                served.d_maturity,served.d_effective_maturity,served.d_disposition,
-                served.d_visibility,served.d_taint_class,served.d_source_class,
-                served.d_policy_revision,served.d_sensitivity_class,served.d_approval_object_id,
-                served.s_maturity,served.s_effective_maturity,served.s_disposition,
-                served.s_visibility,served.s_taint_class,served.s_source_class,
-                served.s_policy_revision,served.s_sensitivity_class,served.s_approval_object_id,
-                served.accepted_decision,served.history_sensitivity_class,
-                served.own_history_inconsistent,served.scope_id,
-                served.evidence_sensitivity_class,
+         SELECT served.*,
                 CASE WHEN served.d_approval_object_id IS NULL THEN 0 ELSE dv.valid END
                     AS d_approval_valid,
                 CASE WHEN served.s_approval_object_id IS NULL THEN 0 ELSE sv.valid END
-                    AS s_approval_valid,
-                served.cited_evidence_sensitivity_class,
-                served.d_trigger_sensitivity_class,
-                served.d_trigger_evidence_sensitivity_class,
-                served.s_trigger_sensitivity_class,
-                served.s_trigger_evidence_sensitivity_class
+                    AS s_approval_valid
          FROM served
          LEFT JOIN approval_valid dv ON dv.approval_object_id=served.d_approval_object_id
          LEFT JOIN approval_valid sv ON sv.approval_object_id=served.s_approval_object_id
-         ORDER BY served.o_object_id"
+         ORDER BY served.object_id"
     )
 }
 // policy-digest:serving-end
@@ -3375,11 +3348,10 @@ fn served_classes_sql(ids: IdsPredicate) -> String {
 pub(crate) fn served_classes(
     tx: &Transaction<'_>,
     requested: i64,
-    ids: Option<&str>,
+    ids: &str,
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<ServedRow>, KernelError> {
-    let selection = ids.map_or(ServedSelection::All, ServedSelection::Named);
-    served_classes_selected(tx, requested, selection, scope)
+    served_classes_selected(tx, requested, ServedSelection::Named(ids), scope)
 }
 
 /// [`served_classes`] for any [`ServedSelection`]; only the selected objects' rows are read and decoded.
@@ -3390,10 +3362,11 @@ pub(crate) fn served_classes_selected(
     scope: Option<ScopeTermFilter<'_>>,
 ) -> Result<Vec<ServedRow>, KernelError> {
     // Each shape's text is identical on every call, so building it once lets `prepare_cached` hash a stable string instead of a per-call `format!`.
-    static NAMED_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::Named));
-    static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(IdsPredicate::All));
+    static NAMED_SQL: LazyLock<String> =
+        LazyLock::new(|| served_classes_sql(ServedSelection::Named("")));
+    static ALL_SQL: LazyLock<String> = LazyLock::new(|| served_classes_sql(ServedSelection::All));
     static DOMAIN_SQL: LazyLock<String> =
-        LazyLock::new(|| served_classes_sql(IdsPredicate::DomainDecisions));
+        LazyLock::new(|| served_classes_sql(ServedSelection::DomainDecisions("")));
     let sql = match selection {
         ServedSelection::Named(_) => NAMED_SQL.as_str(),
         ServedSelection::All => ALL_SQL.as_str(),
@@ -3543,8 +3516,6 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
         (OWN_HISTORY_INCONSISTENT_COLUMN, "own_history_inconsistent"),
         (SCOPE_ID_COLUMN, "scope_id"),
         (EVIDENCE_SENSITIVITY_COLUMN, "evidence_sensitivity_class"),
-        (OWN_DECISION_COLUMNS.approval_valid, "d_approval_valid"),
-        (LINEAGE_DECISION_COLUMNS.approval_valid, "s_approval_valid"),
         (
             CITED_EVIDENCE_SENSITIVITY_COLUMN,
             "cited_evidence_sensitivity_class",
@@ -3565,6 +3536,8 @@ fn assert_served_columns(statement: &rusqlite::Statement<'_>) {
             TRIGGER_SENSITIVITY_COLUMNS[3],
             "s_trigger_evidence_sensitivity_class",
         ),
+        (OWN_DECISION_COLUMNS.approval_valid, "d_approval_valid"),
+        (LINEAGE_DECISION_COLUMNS.approval_valid, "s_approval_valid"),
     ];
     assert_eq!(
         statement.column_count(),
@@ -5325,7 +5298,7 @@ mod tests {
         let mut statement = connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                served_classes_sql(IdsPredicate::DomainDecisions)
+                served_classes_sql(ServedSelection::DomainDecisions(""))
             ))
             .unwrap();
         let plan = statement
@@ -5369,7 +5342,7 @@ mod tests {
         let mut statement = connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                served_classes_sql(IdsPredicate::Named)
+                served_classes_sql(ServedSelection::Named(""))
             ))
             .unwrap();
         let plan = statement

@@ -155,7 +155,10 @@ query and judges each distinct approval once.
 read with the full read filtered in Rust, on both surfaces, over approved
 dependents and other-domain rows; the `kernel_admission` approval, revocation,
 and lineage tests pass unchanged on the batched approval judgment. No
-comparison against the fixed baseline commit's rendered bytes runs yet.
+comparison against the fixed baseline commit's rendered bytes runs yet. A
+review-time differential ran the previous per-row approval query beside the
+batched one on every served read the kernel and daemon suites make (10,000
+calls, 203,000 kernel rows, 0 differences); it is not committed.
 Guarantee: Selection optimization preserves the canonical memory result for
 the same valid store state, requested snapshot, project, and budget.
 Check: `always` - Compare the ordered selected rows, rendered memory bytes,
@@ -215,11 +218,12 @@ Open questions:
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: yes -
+Exercised: partial -
 `the_domain_selection_reaches_a_target_past_the_row_cap_of_the_unfiltered_order`
 seeds 8,300 newer other-domain decisions under 8 MiB of payload, asserts the
 memory target ranks past 8,192 in the unfiltered serving order, and reads it
-through the domain selection.
+through the kernel's domain selection. The daemon's 8,192-row cap is not
+driven by this witness.
 Guarantee: A preservation campaign constructs row pressure independently of
 byte pressure to distinguish pre-cap filtering from premature row limiting.
 Check: `sometimes` - More than 8192 admitted visible candidates place an
@@ -243,11 +247,12 @@ Open questions: None.
 Type: reachability
 Reachability: default-production
 Status: active
-Exercised: yes -
+Exercised: partial -
 `the_domain_selection_reads_no_row_of_another_domains_payload_pressure` seeds
 140 newer other-domain decisions holding more than 8 MiB of stored payload,
-under 8,192 rows, ahead of the memory target, and reads only memory rows
-through the domain selection.
+under 8,192 rows, ahead of the memory target, and returns only memory rows
+from the kernel's domain selection. The daemon's payload-prefix cut is not
+driven by this witness.
 Guarantee: A preservation campaign constructs byte pressure independently of
 row pressure to distinguish pre-cap filtering from premature payload limiting.
 Check: `sometimes` - At most 8192 admitted visible candidates place excluded
