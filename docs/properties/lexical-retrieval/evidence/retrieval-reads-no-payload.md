@@ -34,9 +34,9 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   and the kernel `candidate`. `:131` `Retrieval` carries contributions,
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
   has a byte field.
-- `:321` `retrieve` is the lane entry; the daemon's `lexical_read`
-  (`crates/daemon/src/query_route.rs:1076`) calls `scan` (`:350`) and
-  `admit_lexical` (`query_route.rs:1242`) calls `admit`.
+- `:319` `retrieve` is the lane entry; the daemon's `lexical_read`
+  (`crates/daemon/src/query_route.rs:1076`) calls `scan` (`:1099`) and
+  `admit_lexical` (`query_route.rs:1243`) calls `admit` (`:1259`).
 
 Schema, `crates/retrieval/baseline.sql`:
 
@@ -53,7 +53,7 @@ Payload loading after authorization, `crates/daemon/src/packing/mod.rs`:
   `crates/daemon/src/query_route.rs:1` states the route reads no payload bytes
   and packing materializes them under its own bounds.
 
-Test, `crates/retrieval/tests/lexical_retrieval.rs:1324`
+Test, `crates/retrieval/tests/lexical_retrieval.rs:1325`
 `retrieval_reads_no_payload_bytes`:
 
 - `Fixture::all_admitted` (`:332`) opens a kernel and a projection store,

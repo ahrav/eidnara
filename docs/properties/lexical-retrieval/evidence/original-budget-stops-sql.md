@@ -42,18 +42,18 @@ Lexical lane, `crates/retrieval/src/lexical/retrieve.rs`:
   any probe.
 - Every statement loop calls `budget.check()` per row: `count_probe` (`:585`,
   check at `:591`), `ranked_rows` (`:666`, check at `:681`), `identify`
-  (`:694`, check at `:708`), the common streams' `Descending::head` (`:751`,
-  check at `:761`), and admission's `resolve` (`:838`, check at `:859`).
+  (`:694`, check at `:708`), the common streams' `Descending::head` (`:756`,
+  check at `:766`), and admission's `resolve` (`:843`, check at `:864`).
 - `crates/retrieval/src/scan.rs` maps a SQLite `OperationInterrupted` error to
-  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:398`, `:438`),
+  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:402`, `:442`),
   and `admit_inner` turns it into `exhausted` through `AdmitStop::Budget`
   (`:502`), so an interrupt and an exhausted budget share one exit.
-- `:895` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
+- `:900` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
   `IncompleteReason::BudgetExhausted`; `admit_inner` (`:475`) returns
   `exhausted` when the budget ends after revalidation.
-- `:528` `exhausted`: zero completed probes refuse
-  `RetrievalRefusal::BudgetExhausted` (`:530`); otherwise contributions clear
-  and the result is `Completion::Incomplete(BudgetExhausted)` (`:532`, `:533`).
+- `:549` `exhausted`: zero completed probes refuse
+  `RetrievalRefusal::BudgetExhausted` (`:551`); otherwise contributions clear
+  and the result is `Completion::Incomplete(BudgetExhausted)` (`:553`, `:554`).
 
 Tests:
 
@@ -70,7 +70,7 @@ Tests:
   `claim_validation_stops_waiting_for_a_held_connection_when_the_budget_ends`
   holds the projection connection for 3 s during claim validation and asserts
   a 400 ms deadline and a 200 ms cancellation each end the wait in under 2 s.
-- `crates/retrieval/tests/lexical_retrieval.rs:1456`
+- `crates/retrieval/tests/lexical_retrieval.rs:1457`
   `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`
   projects 2,500 `bulk parse` rows, runs under `with_conn_interruptible` with a
   stop closure that trips on its third poll, and asserts
@@ -79,15 +79,15 @@ Tests:
   eleventh poll while `parse` is counted: one probe consumed, counted rows
   above zero, zero scanned rows, `Incomplete(BudgetExhausted)`, no
   contributions, and the `EvalBudget` itself stays unexhausted.
-- `:2359`
+- `:2471`
   `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`
-  uses the 10,001-row threshold corpus (`project_thresholds`, `:1598`). For
+  uses the 10,001-row threshold corpus (`project_thresholds`, `:1599`). For
   `t20001` tight and wide, `t20000`, and `c15000 d15000`, it measures the
   total poll count of a complete run, then stops at eight evenly spaced poll
   counts. Each stop yields `Err(BudgetExhausted)` or
   `Incomplete(BudgetExhausted)` with no contributions, and the connection
   serves an unbudgeted request afterward.
-- `:1565` `a_held_kernel_reader_does_not_outlive_the_budget` holds kernel
+- `:1566` `a_held_kernel_reader_does_not_outlive_the_budget` holds kernel
   readers for 3 s and asserts a 300 ms deadline returns within 1.5 s with
   `Incomplete(BudgetExhausted)` and zero batches.
 
@@ -127,8 +127,8 @@ most of the work in a count, a ranked read, or a common scan.
 - Findings: the hook runs in `before_phase`, before `check(budget)` and before
   `lexical_read`. The cancel and the sleep therefore end the request at the
   phase entry check, not inside a MATCH statement. In-flight interruption is
-  proved only by the retrieval tests at `lexical_retrieval.rs:1456` and
-  `:2359`, which install the handler through `with_conn_interruptible`, the
+  proved only by the retrieval tests at `lexical_retrieval.rs:1457` and
+  `:2471`, which install the handler through `with_conn_interruptible`, the
   same storage entry `read_under` uses in production.
 - Missing evidence: a route-level test that cancels while a lexical statement
   is stepping.

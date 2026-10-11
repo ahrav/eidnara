@@ -15,7 +15,7 @@ admission (`crates/retrieval/src/lexical/retrieve.rs`), the retrieval batch
 adapter over the kernel's eligibility policy
 (`crates/retrieval/src/eligibility.rs`), and the daemon's lexical admission in
 `crates/daemon/src/query_route.rs`. The daemon reaches the lane through `scan`
-(`crates/daemon/src/query_route.rs:1099`) and `admit` (`:1258`), each under
+(`crates/daemon/src/query_route.rs:1099`) and `admit` (`:1259`), each under
 `QueryRouteLimits::lexical_retrieval_bounds` (`:170`); `retrieve` has no
 production caller, and `crates/retrieval/tests/lexical_retrieval.rs:652`
 `scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate`
@@ -143,8 +143,8 @@ dead rows inside a distinct-rank probe's window, which keep their slots.
 Confidence: high - [evidence](evidence/rank-then-occurrence-order.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:687`
 `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`;
-`:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:2270`
-`a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`; `:2780`
+`:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal`; `:2385`
+`a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`; `:2892`
 `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`.
 Impact: nondeterministic ranking across rebuilds.
 Open questions: None.
@@ -169,7 +169,7 @@ Confidence: high - [evidence](evidence/eligibility-before-accepted-slots.md).
 Existing check: `crates/retrieval/tests/lexical_retrieval.rs:762`
 `an_ineligible_leader_is_excluded_without_taking_an_accepted_slot`; `:797`
 `admission_batches_scale_the_open_slots_by_the_acceptance_so_far_and_an_exact_fill_stays_complete`;
-`:2558` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`.
+`:2670` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`.
 Impact: an eligible memory is dropped behind a hidden one.
 Open questions: None.
 
@@ -226,11 +226,11 @@ scan bound.
 Confidence: medium - [evidence](evidence/lexical-work-is-bounded-and-observed.md).
 Counters and Rust allocation events were read and asserted; RP2.9 has not
 approved an allocation bound to compare them with.
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:837`
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:838`
 `the_scan_bound_marks_incomplete_only_past_the_bound_and_refusals_precede_every_probe`;
-`:1118` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`; `:1625`
-`ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2617`
-`allocations_follow_the_scan_bound_and_the_rank_budget`; `:2686`
+`:1119` `a_repeated_probe_runs_the_engine_once_and_adds_no_work`; `:1626`
+`ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`; `:2729`
+`allocations_follow_the_scan_bound_and_the_rank_budget`; `:2798`
 `work_counters_report_exact_and_over_bound_work`;
 `crates/daemon/tests/query_route.rs:320`
 `each_bound_saturates_before_its_protected_work`; `:532`
@@ -261,9 +261,9 @@ the connection's interrupt.
 Confidence: high - [evidence](evidence/original-budget-stops-sql.md).
 Existing check: `crates/daemon/tests/query_route.rs:74`
 `cancellation_and_deadline_are_observed_in_every_phase`;
-`crates/retrieval/tests/lexical_retrieval.rs:1456`
+`crates/retrieval/tests/lexical_retrieval.rs:1457`
 `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion`;
-`:2359`
+`:2471`
 `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`.
 Impact: a cancelled request keeps the engine busy.
 Open questions: None.
@@ -288,7 +288,7 @@ Fault/timing angle: none.
 Required faults and enabling state: a projection whose `payloads` table is
 renamed, so any payload read fails.
 Confidence: high - [evidence](evidence/retrieval-reads-no-payload.md).
-Existing check: `crates/retrieval/tests/lexical_retrieval.rs:1324`
+Existing check: `crates/retrieval/tests/lexical_retrieval.rs:1325`
 `retrieval_reads_no_payload_bytes`.
 Impact: a denied request loads payload bytes.
 Open questions: None.

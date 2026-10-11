@@ -639,29 +639,31 @@ fn a_held_classification_window_makes_eligibility_unjoinable_never_absent() {
             StageVerdict::Indeterminate,
             "a loss behind the unjoinable window is never placed at eligibility"
         );
-        // A window opened before the lexical lane judges moves that lane's own admission.
+        // A window held only while the lexical lane judges moves that lane's own admission and no other lane's.
         let mut window = None;
         let lexical_window = drive(
             &fixture,
             &limits,
             QUERY,
             dense_ready(&query, &producer),
-            |phase| {
-                if phase == Phase::Lexical {
+            |phase| match phase {
+                Phase::Lexical => {
                     window = Some(fixture.store.hold_classification_change_for_test());
                 }
+                Phase::Dense => window = None,
+                _ => {}
             },
         );
         drop(window);
-        // Every lane judges after the window opens, so none keeps a ranking and the lexical lane reaches no row.
+        let moved = lexical_window
+            .view
+            .as_ref()
+            .expect("the lanes were admitted");
         assert_eq!(
-            lexical_window.outcome.as_ref().err(),
-            Some(&QueryFailure::Unavailable("no_lane"))
+            *moved.status(Lane::Lexical),
+            LaneStatus::Unavailable("snapshot_changed")
         );
-        assert_eq!(
-            lexical_window.ledger.presence(ChainStage::Lexical, &rule),
-            Some(Presence::NotReached)
-        );
+        assert_eq!(*moved.status(Lane::Exact), LaneStatus::Complete);
         fixture.daemon.shutdown().await;
     });
 }

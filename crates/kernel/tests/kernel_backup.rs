@@ -206,14 +206,7 @@ fn backup_restores_exact_snapshot_and_reclaims_writer_fence() {
     );
     assert_eq!(store.known_as_of(2).unwrap(), expected);
     // The readers a restore installs keep the pool's memory-mapped profile.
-    assert!(
-        store
-            .reader_mmap_sizes_for_test()
-            .iter()
-            .all(|&size| size == 0x4_0000_0000),
-        "{:?}",
-        store.reader_mmap_sizes_for_test()
-    );
+    assert_eq!(store.reader_mmap_sizes_for_test(), vec![0x4_0000_0000; 2]);
     digest(root.path(), Profile::SameRoot).assert_same(&expected_oracle, "restored state");
     assert_eq!(
         store.known_as_of(3).unwrap_err(),

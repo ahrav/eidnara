@@ -31,8 +31,8 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   identifiers through `identify` (`:694`), and sorts that prefix by
   `comparator` before truncating it to `scan_rows`, so identifiers decide
   which equal-rank matches the bound keeps. A dead row keeps its slot;
-  `admit_batches` (`:929`) drops it unjudged.
-- `admit_batches` and `revalidate` (`:1011`) carry each accepted hit's
+  `admit_batches` (`:934`) drops it unjudged.
+- `admit_batches` and `revalidate` (`:1016`) carry each accepted hit's
   `rank` and `ordinal` into `Contribution` unchanged.
 
 Daemon path: `lexical_read` calls `scan` (`crates/daemon/src/query_route.rs:1099`)
@@ -45,7 +45,7 @@ written through `apply_batch` (`Fixture::project`, `:378`) and a real
 `KernelStore` (`Fixture::new`, `:268`), with `bounds()` (`:153`): `scan_rows`
 64, `max_accepted` 64, `batch_rows` 2:
 
-- `keyed_reference` (`:523`) is the oracle: `ranks` (`:524`) reads every
+- `keyed_reference` (`:523`) is the oracle: `ranks` (`:556`) reads every
   match's `occurrence_id` and `rank` with a plain `MATCH`, keeps each
   identifier's minimum rank, and sorts by `total_cmp` then identifier.
 - `:687` `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation`
@@ -56,17 +56,17 @@ written through `apply_batch` (`Fixture::project`, `:378`) and a real
 - `:728` `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal` confirms
   `note` and `unrelated` rank delta equally, asserts ordinal 0 under both
   probe orders, and equal keyed output.
-- `:2270` `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`
+- `:2385` `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers`
   projects 3000 tied rows in reversed order over three batches, asserts the
   scan keeps exactly the 64 lowest identifiers, that the reference agrees,
   `ScanBound`, and `ranked_matches == 3000`.
-- `:2780` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`
+- `:2892` `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots`
   projects 150 rows with distinct ranks, tombstones indexes 0..10 and 60..70
   through `tombstone_raw` (`:1027`), asserts the scan keeps the first 64
   reference rows whatever their liveness, and asserts the contributions are
   the 50 live ones among them, with `dead_rows == 14`, `scanned_rows == 64`,
   and `ScanBound`.
-- `:2898` `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group`
+- `:3007` `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group`
   ends the bound at a rank change, stores the tail with its highest identifier
   first, tombstones the head's lowest identifier, and asserts the window is
   still the whole head with `dead_rows == 1` and `ScanBound`.

@@ -1828,6 +1828,13 @@ fn equal_ranks_from_two_probes_across_the_window_cut_keep_the_lowest_identifiers
     let mut lowest: Vec<String> = rows.iter().map(Row::occurrence_id).collect();
     lowest.sort();
     lowest.truncate(13);
+    for term in ["tiea", "tieb"] {
+        assert!(
+            rows.iter()
+                .any(|row| row.text.starts_with(term) && lowest.contains(&row.occurrence_id())),
+            "the cut keeps {term} rows"
+        );
+    }
     let tight = RetrievalBounds {
         scan_rows: NonZeroUsize::new(13).unwrap(),
         ..bounds()
@@ -1890,6 +1897,94 @@ fn an_ineligible_leader_of_a_common_probe_is_excluded_and_keeps_its_slot() {
     assert_eq!(
         retrieval.consumed.excluded,
         vec![(EligibilityVerdict::Retracted, 1)]
+    );
+}
+
+/// A common scan wider than one stream page refills each stream below its last rowid, so the window is exactly the highest rowids across pages and across probes.
+#[test]
+fn common_streams_refill_across_pages_without_repeating_or_skipping_rowids() {
+    let fixture = Fixture::all_admitted();
+    project_bulk(&fixture, 1100);
+    let wide = RetrievalBounds {
+        scan_rows: NonZeroUsize::new(1030).unwrap(),
+        ..small_thresholds()
+    };
+    let raw = fixture.raw();
+    let highest = |query: &str| {
+        let mut ids: Vec<String> = raw
+            .prepare(&format!(
+                "SELECT occurrence_id FROM lexical WHERE lexical MATCH '{query}' ORDER BY rowid DESC LIMIT 1030"
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        ids.sort();
+        ids
+    };
+    for (request, matched) in [("parse", "parse"), ("parse bulk", "parse OR bulk")] {
+        let mut kept = fixture.kept(&probes(request), wide);
+        kept.sort();
+        assert_eq!(kept, highest(matched), "{request}");
+        let retrieval = fixture
+            .retrieve(&probes(request), wide, &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(retrieval.consumed.scanned_rows, 1030, "{request}");
+        assert!(retrieval.reasons.contains(&IncompleteReason::ScanBound));
+    }
+}
+
+/// Each sizing rule decides a batch: a later batch with nothing accepted takes a whole batch, and a fractional ratio rounds up.
+#[test]
+fn admission_batch_sizes_follow_each_sizing_rule() {
+    let fixture = Fixture::all_admitted();
+    let bulk = project_bulk(&fixture, 12);
+    let request = probes("bulk");
+    let order = fixture.reference(&request);
+    assert_eq!(order.len(), 12);
+    // Leaves the first `hidden` comparator rows unadmitted and admits the rest.
+    let admit_after = |fixture: &Fixture, hidden: usize| {
+        let objects: Vec<&str> = order[hidden..]
+            .iter()
+            .map(|id| object_of(&bulk, id))
+            .collect();
+        fixture.admit(&objects);
+    };
+    let run = |fixture: &Fixture, max_accepted: usize, batch_rows: usize| {
+        fixture
+            .retrieve(
+                &request,
+                RetrievalBounds {
+                    max_accepted: NonZeroUsize::new(max_accepted).unwrap(),
+                    batch_rows: NonZeroUsize::new(batch_rows).unwrap(),
+                    ..bounds()
+                },
+                &EvalBudget::unbounded(),
+            )
+            .unwrap()
+    };
+
+    // Two open slots read two ineligible rows; with nothing accepted the next batch takes all eight rows, then revalidation re-judges two.
+    admit_after(&fixture, 2);
+    let empty_first = run(&fixture, 2, 8);
+    assert_eq!(empty_first.consumed.judged, 2 + 8 + 2);
+    assert_eq!(empty_first.consumed.batches, 3);
+    assert_eq!(ids_of(&empty_first), order[2..4].to_vec());
+
+    // A fresh fixture with one ineligible leader: three open slots accept two of three reads, so one open slot becomes ceil(1 * 3 / 2) = 2 rows.
+    let fixture = Fixture::all_admitted();
+    project_bulk(&fixture, 12);
+    assert_eq!(fixture.reference(&request), order);
+    admit_after(&fixture, 1);
+    let fractional = run(&fixture, 3, 8);
+    assert_eq!(fractional.consumed.judged, 3 + 2 + 3);
+    assert_eq!(fractional.consumed.batches, 3);
+    assert_eq!(ids_of(&fractional), order[1..4].to_vec());
+    assert!(
+        fractional
+            .reasons
+            .contains(&IncompleteReason::AcceptedBound)
     );
 }
 
@@ -2232,8 +2327,15 @@ fn lexical_scan_p99_at_one_million_occurrences() {
     for sample in &samples {
         assert!(sample.ranked <= RANK_BUDGET, "{}", sample.request);
         match sample.request {
-            "k3" => assert_eq!(sample.ranked, QUALIFYING_MATCHES),
-            "k3 k4" => assert!(sample.outcome.contains("RankBudget"), "{}", sample.outcome),
+            "k3" => assert_eq!(
+                sample.ranked, QUALIFYING_MATCHES,
+                "k3 matches exactly the qualifying threshold only at one million occurrences"
+            ),
+            "k3 k4" => assert!(
+                sample.outcome.contains("RankBudget"),
+                "k3 k4 passes the ranked budget only at one million occurrences: {}",
+                sample.outcome
+            ),
             _ => {}
         }
     }
