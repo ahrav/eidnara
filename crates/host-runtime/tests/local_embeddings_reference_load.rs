@@ -238,6 +238,57 @@ fn summarize(samples: &[Sample], phase: &str) -> Option<PhaseSummary> {
     })
 }
 
+/// The estimate upper-bounds a backfill query's queue wait when the fastest successful idle service for the same token
+/// count is at most that query's own service time. For token counts with zero successful idle samples, the full latency
+/// serves as the queue-wait bound.
+fn max_queue_wait_us(samples: &[Sample]) -> Option<u64> {
+    let mut fastest_service: BTreeMap<u32, u64> = BTreeMap::new();
+    for sample in samples
+        .iter()
+        .filter(|s| s.phase == "idle" && s.outcome == "ok")
+    {
+        fastest_service
+            .entry(sample.tokens)
+            .and_modify(|fastest| *fastest = (*fastest).min(sample.service_us()))
+            .or_insert(sample.service_us());
+    }
+    samples
+        .iter()
+        .filter(|s| s.phase == "backfill" && s.outcome == "ok")
+        .map(|s| {
+            let service = fastest_service.get(&s.tokens).copied().unwrap_or(0);
+            s.latency_us().saturating_sub(service)
+        })
+        .max()
+}
+
+#[test]
+fn the_queue_wait_never_understates_a_loaded_query_that_runs_faster_than_the_idle_median() {
+    let completed = |phase, done_us| Sample {
+        phase,
+        scheduled_us: 0,
+        sent_us: 0,
+        done_us,
+        tokens: 16,
+        outcome: "ok",
+    };
+    let fastest_idle_service_us = 20_000;
+    let mut samples: Vec<Sample> = [fastest_idle_service_us, 30_000, 40_000]
+        .into_iter()
+        .map(|service| completed("idle", service))
+        .collect();
+    let loaded_wait_us = 105_000;
+    samples.push(completed(
+        "backfill",
+        loaded_wait_us + fastest_idle_service_us,
+    ));
+    let wait = max_queue_wait_us(&samples).expect("one loaded query completed");
+    assert!(
+        wait >= loaded_wait_us,
+        "the proxy {wait}us understates the {loaded_wait_us}us queue wait"
+    );
+}
+
 /// Embeds one 76-token text through the job table as backfill does, from submission to its vector.
 async fn backfill_one(
     component: &LocalEmbeddingsComponent,
@@ -471,36 +522,11 @@ async fn production_lane_meets_the_reference_query_and_backfill_budgets() {
 
     let idle = summarize(&samples, "idle");
     let loaded = summarize(&samples, "backfill");
-    // A query's latency under backfill past the idle median service of a query of its length bounds its queue wait from above.
-    let mut idle_service: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
-    for sample in samples
-        .iter()
-        .filter(|s| s.phase == "idle" && s.outcome == "ok")
-    {
-        idle_service
-            .entry(sample.tokens)
-            .or_default()
-            .push(sample.service_us());
-    }
-    let median_service: BTreeMap<u32, u64> = idle_service
-        .into_iter()
-        .map(|(tokens, mut service)| {
-            service.sort_unstable();
-            (tokens, service[service.len() / 2])
-        })
-        .collect();
-    let max_queue_wait_us = samples
-        .iter()
-        .filter(|s| s.phase == "backfill" && s.outcome == "ok")
-        .map(|s| {
-            let service = median_service.get(&s.tokens).copied().unwrap_or(0);
-            s.latency_us().saturating_sub(service)
-        })
-        .max();
+    let max_queue_wait_us = max_queue_wait_us(&samples);
     eprintln!(
         "parallelism {parallelism}, threads {threads}, waiters {max_waiting_queries}; first query after activation {first_query_us} us; \
          backfill {throughput:.2} texts/s over {BACKFILL_TEXTS} texts of {BACKFILL_TOKENS} tokens, max single-text service {max_text_service_us} us; \
-         idle at {QUERY_RATE_PER_SECOND}/s {idle:?}; under backfill {loaded:?} with {backfill_embedded} texts embedded and max latency past idle median service {max_queue_wait_us:?} us; \
+         idle at {QUERY_RATE_PER_SECOND}/s {idle:?}; under backfill {loaded:?} with {backfill_embedded} texts embedded and max latency past the fastest idle service {max_queue_wait_us:?} us; \
          zero busy bounds the busy rate at 3/n by the rule of three"
     );
 
