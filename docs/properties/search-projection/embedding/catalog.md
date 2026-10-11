@@ -374,8 +374,14 @@ Status: active
 Exercised: partial - the scheduler queues, priority, the ninth grant, and the
 fifth-waiter refusal behind a background holder are constructed
 (`scheduler.rs:271-315`, `mod.rs:1798-1850`,
-`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). A saturated
-product backfill workload and the approved service bound are missing.
+`crates/host-runtime/tests/local_embeddings_protocol.rs:186-237`). The shipped
+lane lets four queries wait (`crates/daemon/src/bin/eidnara_host/serve.rs`
+`lane_limits`). The ignored
+`crates/host-runtime/tests/local_embeddings_reference_load.rs` drives the
+certified production bundle with continuous backfill and 1,000 open-loop
+queries at 2 per second; the #895 run on four pinned cores had zero busy
+queries and a longest queue wait under the longest backfill text's service.
+The approved service bound for the D21 runner is not measured there.
 Guarantee: Backfill saturation preserves the declared query admission capacity
 and bounded service opportunity under the approved workload contract.
 Check: `always` - with a healthy lane, query occupancy below L.query_capacity,
@@ -396,8 +402,11 @@ not yet measured.
 Existing check: `crates/host-runtime/tests/local_embeddings_protocol.rs:186-237` asserts a
 waiting query takes the slot ahead of a waiting batch text;
 `crates/host-runtime/src/local_embeddings/scheduler.rs:271-315` asserts query-first
-FIFO order, the ninth grant to background, and the fifth-waiter refusal. No
-saturated-workload service-bound check exists.
+FIFO order, the ninth grant to background, and the fifth-waiter refusal;
+`crates/host-runtime/tests/local_embeddings_reference_load.rs`
+`production_lane_meets_the_reference_query_and_backfill_budgets` (`#[ignore]`,
+real bundle) asserts zero busy queries under saturated backfill and a queue wait
+at most twice the longest single-text service.
 Impact: Offline backfill consumes the useful lifetime of interactive retrieval.
 Open questions:
 

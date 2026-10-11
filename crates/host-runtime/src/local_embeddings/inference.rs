@@ -215,9 +215,9 @@ pub fn inference_threads() -> usize {
     })
 }
 
-/// Half the host's parallelism, at least one thread and at most four.
+/// One thread fewer than the host's parallelism, so the daemon keeps a core while a native call runs, at least one thread and at most four.
 fn threads_for(parallelism: usize) -> usize {
-    (parallelism / 2).clamp(1, 4)
+    parallelism.saturating_sub(1).clamp(1, 4)
 }
 
 /// The intra-op thread count the last native session was built with; zero before any was built.
@@ -641,13 +641,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_thread_count_is_half_the_parallelism_within_one_to_four() {
+    fn the_thread_count_leaves_one_core_within_one_to_four() {
         let table = [
             (1, 1),
             (2, 1),
-            (3, 1),
-            (4, 2),
-            (7, 3),
+            (3, 2),
+            (4, 3),
+            (5, 4),
+            (7, 4),
             (8, 4),
             (9, 4),
             (64, 4),
