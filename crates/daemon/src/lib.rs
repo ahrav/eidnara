@@ -26616,12 +26616,14 @@ mod tests {
             .iter()
             .find(|message| message["info"]["id"] == json!("assistant-old"))
             .expect("tagged historical reasoning remains addressable");
+        // The tagged reasoning keeps its native slot, so its signed bytes pass through exactly.
         assert_eq!(
             preserved_reasoning["parts"][0],
             json!({
                 "type": "reasoning",
                 "text": "signed historical thinking",
-                "metadata": { "signature": "signature-assistant-old" }
+                "time": { "start": 1, "end": 2 },
+                "metadata": { "anthropic": { "signature": "signature-assistant-old" } }
             })
         );
 

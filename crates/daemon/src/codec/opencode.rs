@@ -583,7 +583,8 @@ fn encode_with_meta(
         .and_then(Value::as_array_mut)
         .map(std::mem::take)
         .unwrap_or_default();
-    let matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
+    let mut matched_metas = match_block_metas(msg.content(), &meta.blocks, block_matches_meta);
+    matched_metas.pair_in_place_edits(msg.content(), &meta.blocks, block_matches_meta);
 
     let mut block_index = 0;
     while block_index < msg.content().len() {
@@ -1580,6 +1581,47 @@ mod tests {
         );
         assert_eq!(encoded[0]["parts"][0]["state"]["status"], "completed");
         assert_eq!(encoded[0]["parts"][0]["state"]["output"], "done");
+    }
+
+    #[test]
+    fn overlay_edited_ingress_parts_keep_their_native_slots() {
+        let raw = vec![json!({
+            "info": { "id": "msg_tagged", "role": "assistant" },
+            "parts": [
+                { "id": "prt_start", "type": "step-start" },
+                { "id": "prt_text", "type": "text", "text": "Queue is x.", "time": { "start": 1, "end": 2 } },
+                { "id": "prt_tool", "type": "tool", "callID": "call_1", "tool": "bash",
+                  "state": { "status": "completed", "input": { "command": "ls" }, "output": "out",
+                             "time": { "start": 3, "end": 4 } } },
+                { "id": "prt_finish", "type": "step-finish", "reason": "tool-calls" }
+            ]
+        })];
+        let decoded = decode_opencode(&raw);
+        // Ingress blocks arrive from the plugin's wire build, which carries no codec stamp.
+        let mut message = decoded.messages[0].ck.clone();
+        for block in message.content_mut() {
+            block.provider_extras.clear();
+            match block.kind_mut() {
+                BlockKind::Text { text } => *text = format!("§3§ {text}"),
+                BlockKind::ToolResult { output, .. } => {
+                    output.kind = OutputKind::Text {
+                        text: "§4§ out".to_string(),
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        let served = encode_opencode(&[message], &decoded.sidecar, None);
+        let parts = served[0]["parts"].as_array().unwrap();
+        let ids = parts
+            .iter()
+            .map(|part| part["id"].as_str().unwrap_or("<fresh>"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["prt_start", "prt_text", "prt_tool", "prt_finish"]);
+        assert_eq!(parts[1]["text"], "§3§ Queue is x.");
+        assert_eq!(parts[1]["time"], raw[0]["parts"][1]["time"]);
+        assert_eq!(parts[2]["state"]["output"], "§4§ out");
     }
 
     #[test]
