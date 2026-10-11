@@ -23,9 +23,9 @@ Production code:
   (`crates/retrieval/src/lexical/compile.rs:16`), so the text binds as an SQL
   value and never splices into statement text.
 - Every engine statement binds the probe as `?1` after `MATCH`: `COUNT_SQL`
-  (`crates/retrieval/src/lexical/retrieve.rs:261`), `RANKED_SQL`, and
+  (`crates/retrieval/src/lexical/retrieve.rs:287`), `RANKED_SQL`, and
   `COMMON_SQL` on the following lines, run by `count_probe`
-  (`crates/retrieval/src/lexical/retrieve.rs:585`) and the scan functions.
+  (`crates/retrieval/src/lexical/retrieve.rs:618`) and the scan functions.
 - `analyze_segments` (`crates/retrieval/src/lexical/analysis.rs:78`) keeps
   only maximal runs of token characters, where `starts_atom`
   (`crates/retrieval/src/lexical/analysis.rs:113`) admits alphanumerics, `_`,

@@ -14,18 +14,18 @@ acceptance criteria and verifies it against the #391 branch.
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- `admit` (`:466`) and `admit_inner` (`:475`) take the `Scan` and run
-  `admit_batches`, then `revalidate` (`:1016`), which re-judges the accepted
+- `admit` (`:499`) and `admit_inner` (`:508`) take the `Scan` and run
+  `admit_batches`, then `revalidate` (`:1099`), which re-judges the accepted
   set in one batch before any contribution is pushed.
-- `admit_batches` (`:934`) stops at `accepted.len() == max_accepted`
-  (`:947`) and otherwise takes at most `batch_rows` kept matches, sized from
-  the open slots scaled by the matches read per acceptance so far (`:957`),
-  reads their occurrence rows through `resolve` (`:843`), and sends the live
-  ones to `judge_batch` (`:900`) before reading any verdict. An `Eligible`
-  verdict pushes to `accepted` only while a slot is open (`:999`), otherwise
+- `admit_batches` (`:1005`) stops at `accepted.len() == max_accepted`
+  (`:1019`) and otherwise takes at most `batch_rows` kept matches, sized from
+  the open slots scaled by the matches read per acceptance so far (`:1029`),
+  reads their occurrence rows through `resolve` (`:920`), and sends the live
+  ones to `judge_batch` (`:971`) before reading any verdict. An `Eligible`
+  verdict pushes to `accepted` only while a slot is open (`:1082`), otherwise
   it records `AcceptedBound`; `PolicyExcluded` goes to `consumed.exclude`.
   An ineligible leader therefore consumes judgment work and no slot.
-- `judge_batch` (`:900`) calls `judge_tracked`
+- `judge_batch` (`:971`) calls `judge_tracked`
   (`crates/retrieval/src/eligibility.rs:296`), which calls the kernel's
   eligibility batch and reports a moved snapshot or incarnation.
 - Kernel policy: `judge` (`crates/kernel/src/eligibility.rs:198`) returns
@@ -33,10 +33,10 @@ Production code, `crates/retrieval/src/lexical/retrieve.rs`:
   `Hidden` (`:229`); `judge_eligibility` (`:341`) is the public batch entry.
   `MAX_ELIGIBILITY_CANDIDATES` is 1024 (`:21`), and `scan` refuses
   `max_accepted` or `batch_rows` above it with `BatchOverBound`
-  (`retrieve.rs:151`).
-- Each `Hit` is a distinct occurrence identifier after `dedup_by` on `by_id`
-  (`:450`), so equal-byte occurrences of distinct objects stay separate hits
-  with bit-equal ranks under `comparator` (`:254`).
+  (`retrieve.rs:152`).
+- Each kept match is a distinct lexical rowid after `merge_best` (`:697`), and
+  a lexical row names one occurrence, so equal-byte occurrences of distinct
+  objects stay separate hits with bit-equal ranks under `rank.total_cmp`.
 
 Daemon path: the route calls `admit` (`crates/daemon/src/query_route.rs:1259`)
 with `validation_batch` 128 as `batch_rows` and `lexical_accepted` 128 as
@@ -58,7 +58,7 @@ through `apply_batch` (`Fixture::project`, `:378`) and a real `KernelStore`:
   `excluded == [(Hidden, 1)]`, so the fourth row in the batch is judged though
   no slot remains. With `max_accepted` 3 it asserts `Complete` and
   `reference[1..]`.
-- `:2670` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`
+- `:2709` `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader`
   projects three objects with identical text `sibling twin text`, sorts them
   by identifier, inserts the comparator's first as a decision with no
   admission so the kernel returns `Hidden`, and admits the other two through
@@ -107,11 +107,11 @@ the leader's verdict is known before the first sibling is judged.
 ### Q: Does a cited test judge a hidden leader and its eligible tail in one chunk?
 
 - Sources examined: `:797`, which uses `batch_rows` 4 over four `parse`
-  matches with gamma hidden first; `admit_batches` (`:934`) verdict loop.
+  matches with gamma hidden first; `admit_batches` (`:1005`) verdict loop.
 - Findings: with `max_accepted` 2 the first batch holds gamma and the first
   eligible row, and the one slot left, scaled by one acceptance in two reads,
   sizes the second batch at the next two rows, so the tail fills two slots
-  with the fourth judged past the bound. `:762` and `:2558` use one-row batches.
+  with the fourth judged past the bound. `:762` and `:2597` use one-row batches.
 - Missing evidence: none for the fixture bounds. No cited test runs the
   daemon's production `batch_rows` 128 against a hidden leader.
 - Conclusion: resolved with answer - yes, `:797` covers the in-batch case.

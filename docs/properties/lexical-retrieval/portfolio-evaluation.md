@@ -122,7 +122,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    implemented by `revalidate` (`crates/retrieval/src/lexical/retrieve.rs`,
    called from `admit_inner`) and witnessed by five uncredited tests
    `existing-checks.md` already lists: `lexical_retrieval.rs:1200`, `:1223`,
-   `:1253`, `:1293`, `:2592`. No catalog record owns them;
+   `:1253`, `:1293`, `:2631`. No catalog record owns them;
    `eligibility-before-accepted-slots` covers the pre-slot judgment and
    `one-kernel-eligibility-policy` the agreement, neither the re-judgment.
    Queue `accepted-set-is-revalidated-before-return` (`always`,
@@ -144,7 +144,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
    cancellation of A cannot interrupt healthy B" is checked for the dense lane
    (`crates/daemon/tests/query_route_compressed.rs:289`) and the storage
    handler (`crates/storage/src/lib.rs:5825`, `:5880`); the lexical evidence
-   is the trailing unbounded run in `lexical_retrieval.rs:2471` after the
+   is the trailing unbounded run in `lexical_retrieval.rs:2510` after the
    handler is removed, which is one connection in sequence, not a late
    cancel against a running peer. Either list the dense and storage checks
    under `original-budget-stops-sql` with a sentence saying the lane shares
@@ -170,7 +170,7 @@ a wildcard pass that questioned the framing against #391's AC1 to AC10.
 3. **One AC5 record holds deterministic counters and an unapproved
    allocation bound.** `lexical-work-is-bounded-and-observed` is `medium`
    because RP2.9 has approved no allocation bound, yet probes, rows, batches,
-   and `sql_steps` are asserted exactly (`lexical_retrieval.rs:2798`).
+   and `sql_steps` are asserted exactly (`lexical_retrieval.rs:2843`).
    Splitting the allocation clause into its own `partial` record would let the
    counter record be `high`; keeping one record preserves AC5's shape.
 4. **The ordering reference shares the engine.** `keyed_reference`

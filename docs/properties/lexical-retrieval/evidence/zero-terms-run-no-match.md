@@ -19,18 +19,18 @@ Production code:
   true when the atom list is empty; its doc comment on `:47` states the
   contract: a successful empty analysis compiles to no probe and the caller
   issues no MATCH for it.
-- `scan` (`crates/retrieval/src/lexical/retrieve.rs:351`) initializes the
-  result's completion on `:378` to `Completion::Empty` when `probes` is empty
+- `scan` (`crates/retrieval/src/lexical/retrieve.rs:391`) initializes the
+  result's completion on `:418` to `Completion::Empty` when `probes` is empty
   and `Completion::Complete` otherwise. The probe loop and the run loop that
   follow iterate zero times, so `count_probe`
-  (`crates/retrieval/src/lexical/retrieve.rs:585`) and the scan statements
+  (`crates/retrieval/src/lexical/retrieve.rs:618`) and the scan statements
   run for no probe. `Consumed` stays at its default of zero probes, zero
   counted rows, zero scanned rows.
-- `Completion::Empty` (`crates/retrieval/src/lexical/retrieve.rs:103`) is
+- `Completion::Empty` (`crates/retrieval/src/lexical/retrieve.rs:104`) is
   documented as "Zero probes: no MATCH ran and there is nothing to rank".
-  `incomplete` (`:558`) lets only `BudgetExhausted` replace it, so a
+  `incomplete` (`:591`) lets only `BudgetExhausted` replace it, so a
   zero-probe result reports `Empty` rather than a scan or rank reason.
-- `admit_inner` (`crates/retrieval/src/lexical/retrieve.rs:475`) judges the
+- `admit_inner` (`crates/retrieval/src/lexical/retrieve.rs:508`) judges the
   empty hit list in zero batches, so `batches` stays zero and `snapshot` and
   `incarnation` stay `None`.
 - The daemon ends the lane before `scan`: `lexical_read`
@@ -98,7 +98,7 @@ statement is prepared, and the daemon's `is_empty` check runs before `scan`.
 ### Q: Can a zero-probe request reach `scan` through the daemon, and does `scan` still hold the guarantee if it does?
 
 - Sources examined: `crates/daemon/src/query_route.rs:1076` through `:1098`
-  and `:1411` through `:1422`; `crates/retrieval/src/lexical/retrieve.rs:351`
+  and `:1494` through `:1505`; `crates/retrieval/src/lexical/retrieve.rs:391`
   and `:378`; `crates/retrieval/tests/lexical_retrieval.rs:627`;
   `crates/daemon/tests/query_route.rs:499`.
 - Findings: the daemon returns `Undeclared` on an empty analysis before

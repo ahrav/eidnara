@@ -294,10 +294,12 @@ const RANKED_SQL: &str =
 const COMMON_SQL: &str =
     "SELECT rowid FROM lexical WHERE lexical MATCH ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT ?3";
 
-/// `?1` is a JSON array of lexical rowids, and `j.key` is each rowid's index in it.
-/// The index's content table holds each row's columns as `c0`, `c1`, and `c2` in [`super::fts5_table_args`] order, so `c2` is the occurrence identifier and reading it by rowid is one table lookup.
-const IDS_SQL: &str =
-    "SELECT j.key, c.c2 FROM json_each(?1) j JOIN lexical_content c ON c.id=j.value";
+/// The content rows from lexical rowid `?1` upward, in rowid order.
+/// The index's content table holds each row's columns as `c0`, `c1`, and `c2` in [`super::fts5_table_args`] order, so `c2` is the occurrence identifier; seeking a rowid is one table lookup and the rows after it follow in table order.
+const IDS_FROM_SQL: &str = "SELECT id, c2 FROM lexical_content WHERE id >= ?1 ORDER BY id";
+
+/// The most rows [`identify`] steps past between two wanted rowids before it seeks the next one; a step costs about a fifth of a seek, so the allowance tracks how dense the group's rowids are in the table.
+const STEP_ALLOWANCE_MAX: u32 = 4;
 
 /// `?1` is a JSON array of occurrence identifiers, and `j.key` is each identifier's index in it. The occurrence columns are NULL for a missing occurrence and the last column is `false` for a tombstoned one.
 /// Under the [`super::index`] invariant that tombstoning deletes the lexical row, such a dead row means an inconsistent projection.
@@ -643,6 +645,8 @@ fn vm_steps(statement: &rusqlite::Statement<'_>) -> u64 {
 /// Keeps the request's best `bound` matches across the ranked probes, each given as its ordinal, probe, and counted matches, and returns `true` when more distinct matches exist, with the VM steps the statements ran.
 /// Every match of every probe is scored once, the matches merge in rank order, and an occurrence several probes match keeps its lowest rank, then its lowest probe ordinal.
 /// Identifiers are read for the rank group the bound cuts, so occurrence identifiers decide which equal-rank matches the bound keeps.
+///
+/// Each probe must yield matches in ascending rowid order so [`merge_best`] can deduplicate occurrences across probes.
 fn scan_ranked(
     conn: &GuardedConn<'_>,
     probes: &[(usize, &Probe, usize)],
@@ -650,42 +654,76 @@ fn scan_ranked(
     budget: &EvalBudget,
     kept: &mut Kept,
 ) -> Result<(bool, u64), ScanStop> {
-    let total: usize = probes.iter().map(|&(_, _, count)| count).sum();
-    let mut matches: Vec<Hit> = Vec::with_capacity(total);
+    let mut matches: Vec<Hit> = Vec::new();
     let mut steps = 0;
     for &(ordinal, probe, count) in probes {
-        steps += ranked_rows(conn, probe, ordinal, count, budget, &mut matches)?;
+        let mut rows: Vec<Hit> = Vec::with_capacity(count);
+        steps += ranked_rows(conn, probe, ordinal, count, budget, &mut rows)?;
+        matches = if matches.is_empty() {
+            rows
+        } else {
+            merge_best(&matches, &rows)
+        };
     }
-    matches.sort_by(|left, right| {
-        left.rank
-            .total_cmp(&right.rank)
-            .then(left.rowid.cmp(&right.rowid))
-            .then(left.ordinal.cmp(&right.ordinal))
-    });
-    // A lexical row names one occurrence, so the first of a rowid's matches in this order is its best.
-    let mut seen = HashSet::with_capacity(matches.len());
-    matches.retain(|matched| seen.insert(matched.rowid));
-    drop(seen);
+    let by_rank = |left: &Hit, right: &Hit| left.rank.total_cmp(&right.rank);
     if matches.len() <= bound {
+        matches.sort_unstable_by(by_rank);
         kept.pending.extend(matches);
         return Ok((false, steps));
     }
-    let cut = matches[bound - 1].rank;
-    let start = matches[..bound]
-        .iter()
-        .rposition(|hit| hit.rank.total_cmp(&cut) != Ordering::Equal)
-        .map_or(0, |last_before| last_before + 1);
-    let mut end = bound;
-    while end < matches.len() && matches[end].rank.total_cmp(&cut) == Ordering::Equal {
-        budget.check().map_err(|_| ScanStop::Budget)?;
-        end += 1;
+    // After the partition, every match below the cut rank precedes the cut element and every match above it follows, while the cut group may straddle it.
+    let (_, cut, _) = matches.select_nth_unstable_by(bound - 1, by_rank);
+    let cut = cut.rank;
+    let mut pending: Vec<Hit> = Vec::with_capacity(bound);
+    let mut group: Vec<Hit> = Vec::new();
+    for hit in &matches {
+        match hit.rank.total_cmp(&cut) {
+            Ordering::Less => pending.push(*hit),
+            Ordering::Equal => group.push(*hit),
+            Ordering::Greater => {}
+        }
     }
-    matches.truncate(end);
-    let group = matches.split_off(start);
-    kept.pending.extend(matches);
+    drop(matches);
+    budget.check().map_err(|_| ScanStop::Budget)?;
+    pending.sort_unstable_by(by_rank);
+    let start = pending.len();
+    kept.pending.extend(pending);
     steps += identify(conn, group, &mut kept.text, &mut kept.tail, budget)?;
     kept.tail.truncate(bound - start);
     Ok((true, steps))
+}
+
+/// A lexical row names one occurrence, so the match kept for a rowid is that occurrence's best across the two lists.
+fn merge_best(left: &[Hit], right: &[Hit]) -> Vec<Hit> {
+    let mut merged: Vec<Hit> = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].rowid.cmp(&right[j].rowid) {
+            Ordering::Less => {
+                merged.push(left[i]);
+                i += 1;
+            }
+            Ordering::Greater => {
+                merged.push(right[j]);
+                j += 1;
+            }
+            Ordering::Equal => {
+                let (a, b) = (left[i], right[j]);
+                let best = match a.rank.total_cmp(&b.rank) {
+                    Ordering::Less => a,
+                    Ordering::Greater => b,
+                    Ordering::Equal if a.ordinal <= b.ordinal => a,
+                    Ordering::Equal => b,
+                };
+                merged.push(best);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    merged
 }
 
 /// Appends every match of a ranked probe with its rank, rowid, and the probe's ordinal to `matches` and returns the VM steps the statement ran.
@@ -716,7 +754,8 @@ fn ranked_rows(
 }
 
 /// Appends one rank group, `group`, to `named` with each lexical row's occurrence identifier and returns the statement's VM step count.
-/// The statement reads the rows in ascending rowid order, which keeps successive lookups near each other in the table.
+/// The rows are visited in ascending rowid order through one cursor: a wanted rowid near the cursor is reached by stepping past the rows between, a distant one by a fresh seek, and the step allowance adapts to how often each happens.
+/// A rowid with no content row is a lexical row the index cannot name.
 fn identify(
     conn: &GuardedConn<'_>,
     mut group: Vec<Hit>,
@@ -724,23 +763,50 @@ fn identify(
     named: &mut Vec<Named>,
     budget: &EvalBudget,
 ) -> Result<u64, ScanStop> {
-    let mut statement = conn.prepare_cached(IDS_SQL)?;
+    let mut statement = conn.prepare_cached(IDS_FROM_SQL)?;
     statement.reset_status(StatementStatus::VmStep);
     group.sort_unstable_by_key(|hit| hit.rowid);
-    let json = json_array(group.iter().map(|hit| hit.rowid.to_string()));
-    let mut ids: Vec<Option<Id>> = vec![None; group.len()];
-    let mut cursor = statement.query([json])?;
-    while let Some(row) = cursor.next()? {
-        budget.check().map_err(|_| ScanStop::Budget)?;
-        let slot = ids.get_mut(key(row)?).ok_or(ProjectionError::CorruptRow)?;
-        *slot = Some(text.push(str_column(row, 1)?));
-    }
-    drop(cursor);
     let start = named.len();
-    for (hit, id) in group.into_iter().zip(ids) {
-        // A rowid with no content row is a lexical row the index cannot name.
-        let id = id.ok_or(ProjectionError::CorruptRow)?;
-        named.push(Named { hit, id });
+    let mut allowance: u32 = STEP_ALLOWANCE_MAX / 2;
+    let mut next = 0;
+    while next < group.len() {
+        // One run: a seek at the next wanted rowid, then steps while wanted rowids stay within the allowance.
+        let mut rows = statement.query([group[next].rowid])?;
+        let mut sought = true;
+        let mut stepped: u32 = 0;
+        loop {
+            budget.check().map_err(|_| ScanStop::Budget)?;
+            let wanted = group[next].rowid;
+            let Some(row) = rows.next()? else {
+                return Err(ProjectionError::CorruptRow.into());
+            };
+            match row.get::<_, i64>(0)?.cmp(&wanted) {
+                Ordering::Equal => {
+                    let id = text.push(str_column(row, 1)?);
+                    named.push(Named {
+                        hit: group[next],
+                        id,
+                    });
+                    next += 1;
+                    if !sought {
+                        allowance = (allowance + 1).min(STEP_ALLOWANCE_MAX);
+                    }
+                    if next == group.len() || allowance == 0 {
+                        break;
+                    }
+                    sought = false;
+                    stepped = 0;
+                }
+                Ordering::Less if !sought && stepped < allowance => stepped += 1,
+                Ordering::Less if !sought => {
+                    allowance /= 2;
+                    break;
+                }
+                Ordering::Less | Ordering::Greater => {
+                    return Err(ProjectionError::CorruptRow.into());
+                }
+            }
+        }
     }
     named[start..].sort_unstable_by(|left, right| {
         by_id(left.id, right.id, text).then(left.hit.ordinal.cmp(&right.hit.ordinal))
@@ -751,18 +817,6 @@ fn identify(
 /// The `j.key` array index in column 0 of a batched lookup row.
 fn key(row: &rusqlite::Row<'_>) -> Result<usize, ScanStop> {
     Ok(usize::try_from(row.get::<_, i64>(0)?).map_err(|_| ProjectionError::CorruptRow)?)
-}
-
-fn json_array(items: impl Iterator<Item = String>) -> String {
-    let mut json = String::from("[");
-    for (index, item) in items.enumerate() {
-        if index > 0 {
-            json.push(',');
-        }
-        json.push_str(&item);
-    }
-    json.push(']');
-    json
 }
 
 /// One common probe's rowids in descending order, read a page at a time below the last rowid seen.

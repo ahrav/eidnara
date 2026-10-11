@@ -21,27 +21,27 @@ Contract:
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- Every statement the lane runs is one of the five constants at `:261`
-  `COUNT_SQL`, `:264` `RANKED_SQL`, `:268` `COMMON_SQL`, `:273` `IDS_SQL`, and
-  `:278` `DETAILS_SQL`. Their `FROM` and `JOIN` clauses name `lexical`,
+- Every statement the lane runs is one of the five constants at `:287`
+  `COUNT_SQL`, `:290` `RANKED_SQL`, `:294` `COMMON_SQL`, `:299` `IDS_FROM_SQL`,
+  and `:306` `DETAILS_SQL`. Their `FROM` and `JOIN` clauses name `lexical`,
   `lexical_content`, `occurrences`, `occurrence_tombstones`, and `json_each`.
   The selected columns are `rank`, `rowid`, the content table's `c2`
   occurrence identifier, `class`, `source_object_id`, `revision`,
   `source_artifact_digest`, and the tombstone predicate. No statement names
   `payloads`, `payload_id`, or `bytes`, and none selects the FTS5 `original`
   or `parts` text columns or their content-table columns `c0` and `c1`.
-- `:59` `Contribution` carries `occurrence_id`, `class`, `rank`, `ordinal`,
-  and the kernel `candidate`. `:131` `Retrieval` carries contributions,
+- `:65` `Contribution` carries `occurrence_id`, `class`, `rank`, `ordinal`,
+  and the kernel `candidate`. `:139` `Retrieval` carries contributions,
   completion, reasons, snapshot, incarnation, and `consumed`. Neither type
   has a byte field.
-- `:319` `retrieve` is the lane entry; the daemon's `lexical_read`
+- `:359` `retrieve` is the lane entry; the daemon's `lexical_read`
   (`crates/daemon/src/query_route.rs:1076`) calls `scan` (`:1099`) and
   `admit_lexical` (`query_route.rs:1243`) calls `admit` (`:1259`).
 
 Schema, `crates/retrieval/baseline.sql`:
 
-- `:30` `payloads(payload_id, bytes, byte_length, created_at)` holds the
-  bytes; `:49` `occurrences.payload_id` references it. `:94` `lexical` is the
+- `:31` `payloads(payload_id, bytes, byte_length, created_at)` holds the
+  bytes; `:50` `occurrences.payload_id` references it. `:94` `lexical` is the
   FTS5 table with `occurrence_id UNINDEXED`.
 
 Payload loading after authorization, `crates/daemon/src/packing/mod.rs`:

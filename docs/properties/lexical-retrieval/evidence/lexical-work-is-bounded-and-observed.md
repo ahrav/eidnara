@@ -15,40 +15,44 @@ allocation evidence `partial` because RP2.9 has approved no allocation bound.
 
 Production code, `crates/retrieval/src/lexical/retrieve.rs` unless noted:
 
-- `RetrievalBounds` (`:47`) carries `max_probes`, `scan_rows`,
+- `RetrievalBounds` (`:48`) carries `max_probes`, `scan_rows`,
   `max_accepted`, `batch_rows`, `qualifying_matches`, and `rank_budget`, all
   `NonZeroUsize`, so every bound is caller-supplied and positive.
   `scan_rows` is one window per request: the distinct lexical matches the
   request keeps across all of its probes.
-- `Consumed` (`:112`) reports `probes`, `scanned_rows`, `dead_rows`,
+- `Consumed` (`:113`) reports `probes`, `scanned_rows`, `dead_rows`,
   `counted_rows`, `ranked_matches`, `judged`, `batches`, `sql_steps`, and
   `excluded`. The `sql_steps` doc says it counts `SQLITE_STMTSTATUS_VM_STEP`
   for the count, scan, and identifier statements of the probes that finished
   plus admission's occurrence reads, and that FTS5's rank function reads
   document sizes through a statement FTS5 keeps internal, so that scoring is
   observed only through `ranked_matches`.
-- `scan` (`:351`) checks the budget first (`:358`), refuses `max_accepted` or
+- `scan` (`:391`) checks the budget first (`:398`), refuses `max_accepted` or
   `batch_rows` above `MAX_ELIGIBILITY_CANDIDATES`
   (`crates/kernel/src/eligibility.rs:21`, 1024) as `BatchOverBound`, and
-  refuses more probes than `max_probes` as `ProbesOverBound` (`:369`) before
+  refuses more probes than `max_probes` as `ProbesOverBound` (`:409`) before
   any statement runs. Each distinct probe is counted once; `counted_rows` and
   `sql_steps` accumulate at `:397`. A probe over `qualifying_matches` is
   common (`:412`); a qualifying probe whose count would exceed `rank_budget`
   sets `RankBudget` and stops ranking (`:426`). The one window's steps add to
   `sql_steps` at `:437`, `ScanBound` marks a truncated window (`:439`), and
   `scanned_rows` is the kept window's size (`:452`).
-- `count_probe` (`:585`) reads at most `qualifying_matches + 1` rows in rowid
-  order; `vm_steps` (`:603`) reads the reset statement counter.
-  `scan_ranked` (`:624`) scores every ranked probe's matches with
-  `ranked_rows` (`:666`), merges them, and keeps `scan_rows`; `scan_common`
-  (`:780`) merges the common probes' rowid streams and keeps `scan_rows` plus
-  one lookahead row. Both read only identifiers, through `identify` (`:694`).
-- `admit` (`:466`) and `admit_batches` (`:934`) take at most `batch_rows`
+- `count_probe` (`:618`) reads at most `qualifying_matches + 1` rows in rowid
+  order; `vm_steps` (`:636`) reads the reset statement counter.
+  `scan_ranked` (`:650`) scores every ranked probe's matches with
+  `ranked_rows` (`:730`), merges them by rowid (`merge_best`, `:697`), and
+  keeps `scan_rows`; `scan_common` (`:857`) merges the common probes' rowid
+  streams and keeps `scan_rows` plus one lookahead row. Both read only
+  identifiers, through `identify` (`:759`), which walks one ascending
+  content-table cursor and steps past at most `STEP_ALLOWANCE_MAX` (`:302`,
+  four) rows between two kept rowids before seeking the next one, so a rank
+  group's identification visits at most five table rows per kept row.
+- `admit` (`:499`) and `admit_batches` (`:1005`) take at most `batch_rows`
   kept matches per batch, sized from the open accepted slots and the
-  acceptance so far (`:957`),
-  read their occurrence rows through `resolve` (`:843`), count dead ones in
-  `dead_rows` (`:976`), and stop at `max_accepted` (`:947`); `judge_batch`
-  (`:900`) increments `batches` and `judged` (`:922`, `:923`).
+  acceptance so far (`:1029`),
+  read their occurrence rows through `resolve` (`:920`), count dead ones in
+  `dead_rows` (`:1059`), and stop at `max_accepted` (`:1019`); `judge_batch`
+  (`:971`) increments `batches` and `judged` (`:922`, `:994`).
 - The daemon installs the production bounds through
   `QueryRouteLimits::production` (`crates/daemon/src/query_route.rs:135`:
   16 probes, 4096 scan rows, 128 accepted, 10,000 qualifying, 15,000 rank
@@ -71,12 +75,12 @@ Tests, `crates/retrieval/tests/lexical_retrieval.rs`:
   every contribution keeps ordinal 0; the interrupt handler polls fewer than
   twice as often as for one probe.
 - `:1626` `ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries`:
-  `project_thresholds` (`:1598`) builds 10,001 rows. Probes of 9,999 and
+  `project_thresholds` (`:1599`) builds 10,001 rows. Probes of 9,999 and
   10,000 matches count and rank exactly; 10,001 counts one lookahead row,
   ranks zero, and is `CommonTerms` with `scanned_rows` equal to `scan_rows`.
   Pairs summing to 14,999 and 15,000 rank both; 15,001 ranks only the 7,500
   probe and is `RankBudget`, in either request order.
-- `:2798` `work_counters_report_exact_and_over_bound_work`: `parse parse` at
+- `:2843` `work_counters_report_exact_and_over_bound_work`: `parse parse` at
   `scan_rows` 4 reports probes 2, counted 4, scanned 4, ranked 4, `(judged,
   batches)` of `(8, 3)` under `batch_rows` 2 (`bounds()`, `:153`), and
   `sql_steps > 0`. `scan_rows` 3 and 2 keep counted 4 and scan fewer rows with
@@ -85,16 +89,19 @@ Tests, `crates/retrieval/tests/lexical_retrieval.rs`:
   candidates it judges. Under `small_thresholds` (`:2446`, qualifying 2, budget 2)
   one more matching row adds one scanned row and more steps; a fifth ranked
   row adds steps over four.
-- `:2729` `allocations_follow_the_scan_bound_and_the_rank_budget`:
+- `:2768` `allocations_follow_the_scan_bound_and_the_rank_budget`:
   `retrieve_recorded` (`:463`) wraps only the `retrieve` call in
   `alloc_recorder::record_window` (`crates/daemon/tests/support/alloc_recorder.rs:359`),
   included by `#[path]` (`:2`) as the binary's `#[global_allocator]` (`:6`).
   After a warm-up run, `scan_rows` 3 records fewer `allocation_events` and
   `requested_bytes` than 4. After 32 more `parse` rows, a common scan keeps
-  counted rows, scanned rows, SQL steps, and `allocation_events`; a ranked run
-  reports `ranked_matches` 36 with `scanned_rows` 3 and more events than the
-  three-row run. Each ledger asserts `!overflow` (`Ledger`, `:165`).
-- `:2948` `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group`:
+  counted rows, scanned rows, and `allocation_events`, its SQL steps grow by
+  less than a two-row scan runs (the rows `identify` steps past between kept
+  rowids), and a two-row scan on the grown table runs fewer steps than the
+  three-row scan; a ranked run reports `ranked_matches` 36 with
+  `scanned_rows` 3 and more events than the three-row run. Each ledger asserts
+  `!overflow` (`Ledger`, `:165`).
+- `:3078` `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group`:
   64 head rows and 320 tail rows; a tied tail runs the same `sql_steps` as a
   tail with one rank per row, with `scanned_rows` 64 and `ranked_matches` 384.
 
@@ -136,7 +143,7 @@ row loop ends work at the original deadline, covered by
 
 - Sources examined: `Ledger` fields `allocation_events`, `requested_bytes`,
   and `overflow` (`alloc_recorder.rs:168`, `:172`, `:180`); the assertions in
-  `lexical_retrieval.rs:2729`; the PR #967 description; the catalog record.
+  `lexical_retrieval.rs:2768`; the PR #967 description; the catalog record.
 - Findings: the test compares runs with each other. One row below the scan
   bound allocates fewer events and bytes; 32 more common matches add no
   events; ranked work allocates more as `ranked_matches` grows to 36. No
@@ -162,7 +169,7 @@ row loop ends work at the original deadline, covered by
 ### Q: Is `sql_steps` exercised by a projection or only a fixture engine?
 
 - Sources examined: `Fixture::project` (`lexical_retrieval.rs:378`) and the
-  tests at `:2798` and `:2729`.
+  tests at `:2843` and `:2768`.
 - Findings: the fixture projects rows with the production `apply_batch`
   (`:408`) into a `SqliteStore` and runs `retrieve` against it; the
   daemon handler test (`crates/daemon/tests/query_route_handler.rs:247`)

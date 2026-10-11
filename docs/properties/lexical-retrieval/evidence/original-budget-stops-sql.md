@@ -37,23 +37,25 @@ Route-level budget, `crates/daemon/src/query_route.rs`:
 
 Lexical lane, `crates/retrieval/src/lexical/retrieve.rs`:
 
-- `:319` `retrieve` and `:351` `scan` take the caller's `&EvalBudget`. `scan`
-  checks it first (`:357` through `:359`) and refuses `BudgetExhausted` before
+- `:359` `retrieve` and `:391` `scan` take the caller's `&EvalBudget`. `scan`
+  checks it first (`:397` through `:399`) and refuses `BudgetExhausted` before
   any probe.
-- Every statement loop calls `budget.check()` per row: `count_probe` (`:585`,
-  check at `:591`), `ranked_rows` (`:666`, check at `:681`), `identify`
-  (`:694`, check at `:708`), the common streams' `Descending::head` (`:756`,
-  check at `:766`), and admission's `resolve` (`:843`, check at `:864`).
+- Every statement loop calls `budget.check()` per row: `count_probe` (`:618`,
+  check at `:624`), `ranked_rows` (`:730`, check at `:745`), `identify`
+  (`:759`, check at `:778`), the common streams' `Descending::head` (`:833`,
+  check at `:843`), and admission's `resolve` (`:920`, check at `:935`);
+  `scan_ranked` checks once more after partitioning the merged matches
+  (`:687`).
 - `crates/retrieval/src/scan.rs` maps a SQLite `OperationInterrupted` error to
-  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:402`, `:442`),
+  `ScanStop::Budget`; `scan` turns it into `exhausted_scan` (`:442`, `:442`),
   and `admit_inner` turns it into `exhausted` through `AdmitStop::Budget`
   (`:502`), so an interrupt and an exhausted budget share one exit.
-- `:900` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
-  `IncompleteReason::BudgetExhausted`; `admit_inner` (`:475`) returns
+- `:971` `judge_batch` maps `KernelError::Deadline` from the kernel reader to
+  `IncompleteReason::BudgetExhausted`; `admit_inner` (`:508`) returns
   `exhausted` when the budget ends after revalidation.
-- `:549` `exhausted`: zero completed probes refuse
-  `RetrievalRefusal::BudgetExhausted` (`:551`); otherwise contributions clear
-  and the result is `Completion::Incomplete(BudgetExhausted)` (`:553`, `:554`).
+- `:582` `exhausted`: zero completed probes refuse
+  `RetrievalRefusal::BudgetExhausted` (`:584`); otherwise contributions clear
+  and the result is `Completion::Incomplete(BudgetExhausted)` (`:586`, `:587`).
 
 Tests:
 
@@ -79,9 +81,9 @@ Tests:
   eleventh poll while `parse` is counted: one probe consumed, counted rows
   above zero, zero scanned rows, `Incomplete(BudgetExhausted)`, no
   contributions, and the `EvalBudget` itself stays unexhausted.
-- `:2471`
+- `:2554`
   `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion`
-  uses the 10,001-row threshold corpus (`project_thresholds`, `:1599`). For
+  uses the 10,001-row threshold corpus (`project_thresholds`, `:1682`). For
   `t20001` tight and wide, `t20000`, and `c15000 d15000`, it measures the
   total poll count of a complete run, then stops at eight evenly spaced poll
   counts. Each stop yields `Err(BudgetExhausted)` or
@@ -128,7 +130,7 @@ most of the work in a count, a ranked read, or a common scan.
   `lexical_read`. The cancel and the sleep therefore end the request at the
   phase entry check, not inside a MATCH statement. In-flight interruption is
   proved only by the retrieval tests at `lexical_retrieval.rs:1457` and
-  `:2471`, which install the handler through `with_conn_interruptible`, the
+  `:2510`, which install the handler through `with_conn_interruptible`, the
   same storage entry `read_under` uses in production.
 - Missing evidence: a route-level test that cancels while a lexical statement
   is stepping.

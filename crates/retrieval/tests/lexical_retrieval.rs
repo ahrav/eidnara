@@ -2414,6 +2414,45 @@ fn a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers() {
     assert_eq!(retrieval.consumed.ranked_matches, 3000);
 }
 
+/// Tie-breaking by occurrence identifier selects the same 64 rows whether the tie group fills the table or shares it with 3,000 unrelated rows.
+#[test]
+fn a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers() {
+    let fixture = Fixture::all_admitted();
+    let mut rows: Vec<Row> = (0..3000)
+        .map(|n| Row::claim(&format!("gap-{n}"), &format!("unrelated filler {n}")))
+        .collect();
+    let tied: Vec<Row> = (0..240)
+        .map(|n| Row::claim(&format!("tie-{n}"), &format!("tiegroup filler {n}")))
+        .collect();
+    rows.extend(tied.iter().cloned());
+    for chunk in rows.chunks(1000) {
+        fixture.project(chunk);
+    }
+    let request = probes("tiegroup");
+    let mut expected: Vec<String> = tied.iter().map(Row::occurrence_id).collect();
+    expected.sort();
+    let whole = fixture.kept(
+        &request,
+        RetrievalBounds {
+            scan_rows: NonZeroUsize::new(240).unwrap(),
+            ..bounds()
+        },
+    );
+    assert_eq!(whole, expected, "every tied row is identified");
+    expected.truncate(64);
+    let scanned = fixture.kept(&request, bounds());
+    assert_eq!(scanned, expected);
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+    assert_eq!(retrieval.consumed.ranked_matches, 240);
+    assert_eq!(retrieval.consumed.scanned_rows, 64);
+}
+
 #[test]
 fn dead_rows_in_a_large_tie_group_keep_their_window_slots() {
     let fixture = Fixture::all_admitted();
@@ -2772,17 +2811,23 @@ fn allocations_follow_the_scan_bound_and_the_rank_budget() {
         (
             common_grown.consumed.counted_rows,
             common_grown.consumed.scanned_rows,
-            common_grown.consumed.sql_steps,
         ),
-        (
-            common.consumed.counted_rows,
-            common.consumed.scanned_rows,
-            common.consumed.sql_steps,
-        ),
+        (common.consumed.counted_rows, common.consumed.scanned_rows),
     );
     assert_eq!(
         common_after.allocation_events, common_before.allocation_events,
         "a common scan stops counting at its threshold and scanning at its bound, so matches past both allocate nothing"
+    );
+    let (common_tighter, _) = measure(scan(2, small_thresholds()));
+    assert_eq!(common_tighter.consumed.scanned_rows, 2);
+    assert!(
+        common_tighter.consumed.sql_steps < common_grown.consumed.sql_steps
+            && common_grown.consumed.sql_steps
+                < common.consumed.sql_steps + common_tighter.consumed.sql_steps,
+        "the grown table's common scan follows its scan bound: {} steps at two rows, {} at three, {} at three before growth",
+        common_tighter.consumed.sql_steps,
+        common_grown.consumed.sql_steps,
+        common.consumed.sql_steps
     );
     let (ranked, ranked_after) = measure(scan(3, bounds()));
     assert_eq!(ranked.consumed.ranked_matches, 36);

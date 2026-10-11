@@ -12,7 +12,7 @@ and `populated()` (`:180`), with no projection, kernel, or admission.
 `open_store` (`crates/retrieval/tests/lexical_retrieval.rs:109`) under
 `bounds()` (`:153`: eight probes, 64 scan rows, 64 accepted, batches of two,
 the owner-approved 10,000 qualifying matches and 15,000 ranked matches); `production_bounds`
-(`:2000`) and `small_thresholds` (`:2558`) vary them. `claim_eligibility.rs` and
+(`:2000`) and `small_thresholds` (`:2597`) vary them. `claim_eligibility.rs` and
 `query_route.rs` drive the daemon's routes and the kernel.
 
 ## Literal probes (AC1)
@@ -43,14 +43,16 @@ Production guard: `compile` quotes every atom with `quote_atom` in
 | `contributions_follow_the_reference_order_and_survive_probe_duplication_and_permutation` | `lexical_retrieval.rs:687` | order equals an independent reference under duplicated and permuted probes | unaudited |
 | `equal_ranks_from_distinct_probes_keep_the_lowest_ordinal` | `lexical_retrieval.rs:728` | exact ties keep the lowest probe ordinal | unaudited |
 | `a_large_equal_rank_group_at_the_bound_keeps_the_lowest_identifiers` | `lexical_retrieval.rs:2385` | 3,000 equal-rank rows across a 64-row bound keep the lowest identifiers regardless of storage order | unaudited |
-| `dead_rows_in_a_large_tie_group_keep_their_window_slots` | `lexical_retrieval.rs:2418` | tombstoned leaders of a tie group | unaudited |
-| `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots` | `lexical_retrieval.rs:2892` | one rank per match, dead rows at the front and around the bound | unaudited |
-| `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group` | `lexical_retrieval.rs:2948` | a 320-row tie past a bound that ends at a rank change costs one witness row | unaudited |
-| `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group` | `lexical_retrieval.rs:2948` | a dead row at a rank change keeps its slot, so no next-group row enters the window | unaudited |
+| `a_tie_group_spread_thinly_through_the_table_keeps_the_lowest_identifiers` | `lexical_retrieval.rs:2419` | 240 equal-rank rows among 3,000 unmatched rows keep the lowest identifiers at a 240-row and a 64-row bound | unaudited |
+| `dead_rows_in_a_large_tie_group_keep_their_window_slots` | `lexical_retrieval.rs:2457` | tombstoned leaders of a tie group | unaudited |
+| `dead_rows_inside_a_distinct_rank_probe_keep_their_window_slots` | `lexical_retrieval.rs:2937` | one rank per match, dead rows at the front and around the bound | unaudited |
+| `a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group` | `lexical_retrieval.rs:3078` | a 320-row tie past a bound that ends at a rank change costs one witness row | unaudited |
+| `a_dead_row_at_a_rank_change_opens_no_slot_for_the_next_rank_group` | `lexical_retrieval.rs:3078` | a dead row at a rank change keeps its slot, so no next-group row enters the window | unaudited |
 | `common_probes_are_read_in_descending_rowid_order_and_a_mixed_query_ranks_only_the_qualifying_probe` | `lexical_retrieval.rs:1689` | common probes read in descending rowid order; only the qualifying probe is ranked | unaudited |
 
-Production comparator: `by_id` (`crates/retrieval/src/lexical/retrieve.rs:241`),
-`best_first` (`:248`), and `comparator` (`:254`).
+Production comparator: `by_id` (`crates/retrieval/src/lexical/retrieve.rs:280`),
+`rank.total_cmp` in `scan_ranked` (`:665`) and `merge_best` (`:697`), and
+`by_id` then ordinal in `identify` (`:811`).
 
 ## Eligibility before accepted slots (AC3, AC4)
 
@@ -58,15 +60,15 @@ Production comparator: `by_id` (`crates/retrieval/src/lexical/retrieve.rs:241`),
 | --- | --- | --- | --- |
 | `an_ineligible_leader_is_excluded_without_taking_an_accepted_slot` | `lexical_retrieval.rs:762` | an ineligible leader is judged before any slot is used | unaudited |
 | `admission_batches_scale_the_open_slots_by_the_acceptance_so_far_and_an_exact_fill_stays_complete` | `lexical_retrieval.rs:797` | the first batch judges the open slots and later ones scale them by the acceptance so far; an exact fill is complete | unaudited |
-| `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader` | `lexical_retrieval.rs:2558` | three equal-byte occurrences of distinct objects, one hidden, one-row batches, duplicated and permuted probes | unaudited |
+| `equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader` | `lexical_retrieval.rs:2597` | three equal-byte occurrences of distinct objects, one hidden, one-row batches, duplicated and permuted probes | unaudited |
 | `scan_then_admit_under_one_connection_equals_retrieve_and_carries_the_judged_candidate` | `lexical_retrieval.rs:652` | `scan` then `admit` equals `retrieve` | unaudited |
 | `revalidation_drops_an_occurrence_retired_after_admission` | `lexical_retrieval.rs:1200` | retirement between admission and revalidation | unaudited |
 | `a_snapshot_that_moves_between_admission_batches_stops_admission` | `lexical_retrieval.rs:1223` | a kernel snapshot move between batches | unaudited |
 | `a_moved_snapshot_batch_still_tallies_its_exclusions` | `lexical_retrieval.rs:1253` | exclusions tallied in the batch the move interrupts | unaudited |
 | `a_kernel_restore_before_revalidation_marks_the_incarnation_change` | `lexical_retrieval.rs:1293` | an incarnation change before revalidation | unaudited |
-| `an_authority_move_outranks_a_coverage_bound_already_recorded` | `lexical_retrieval.rs:2592` | incomplete-reason precedence | unaudited |
+| `an_authority_move_outranks_a_coverage_bound_already_recorded` | `lexical_retrieval.rs:2631` | incomplete-reason precedence | unaudited |
 
-Test seam: `retrieve_with_hook_for_test` (`retrieve.rs:333`) runs a hook after
+Test seam: `retrieve_with_hook_for_test` (`retrieve.rs:373`) runs a hook after
 every admission batch and before the final re-judgment.
 
 ## One kernel policy (AC3)
@@ -83,16 +85,16 @@ every admission batch and before the final re-judgment.
 | `the_scan_bound_marks_incomplete_only_past_the_bound_and_refusals_precede_every_probe` | `lexical_retrieval.rs:838` | incompleteness at the bound; refusals before any probe runs | unaudited |
 | `a_repeated_probe_runs_the_engine_once_and_adds_no_work` | `lexical_retrieval.rs:1119` | a repeated probe counts once | unaudited |
 | `ranking_work_is_admitted_by_exact_counts_at_the_d26b_boundaries` | `lexical_retrieval.rs:1626` | qualifying and rank-budget thresholds at exact counts | unaudited |
-| `a_mixed_query_records_both_its_common_skip_and_its_budget_skip` | `lexical_retrieval.rs:2567` | both skip reasons recorded under `small_thresholds` | unaudited |
+| `a_mixed_query_records_both_its_common_skip_and_its_budget_skip` | `lexical_retrieval.rs:2606` | both skip reasons recorded under `small_thresholds` | unaudited |
 | `a_probe_with_no_match_leaves_the_common_probe_to_its_bounded_scan` | `lexical_retrieval.rs:2358` | a no-match probe beside a common probe | unaudited |
-| `allocations_follow_the_scan_bound_and_the_rank_budget` | `lexical_retrieval.rs:2729` | Rust allocation events and bytes at the bound, one row below it, and 32 rows past the common thresholds; the daemon's `alloc_recorder` as the global allocator | unaudited |
-| `work_counters_report_exact_and_over_bound_work` | `lexical_retrieval.rs:2798` | probes, counted rows, scanned rows, ranked matches, judgments, batches, and `sql_steps` at the bound and one row below it; equal work under a result cap of one | unaudited |
+| `allocations_follow_the_scan_bound_and_the_rank_budget` | `lexical_retrieval.rs:2768` | Rust allocation events and bytes at the bound, one row below it, and 32 rows past the common thresholds; the daemon's `alloc_recorder` as the global allocator | unaudited |
+| `work_counters_report_exact_and_over_bound_work` | `lexical_retrieval.rs:2843` | probes, counted rows, scanned rows, ranked matches, judgments, batches, and `sql_steps` at the bound and one row below it; equal work under a result cap of one | unaudited |
 | `lexical_scan_p99_at_one_million_occurrences` | `lexical_retrieval.rs:2170` | D26b open-loop p99 at one million occurrences under production bounds; `#[ignore]`, release, D21 host | unaudited |
 | `each_bound_saturates_before_its_protected_work` | `crates/daemon/tests/query_route.rs:320` | each D23 limit refuses or truncates before the work it protects | unaudited |
 | `the_lexical_ranking_bounds_report_every_scope_they_skip` | `query_route.rs:679` | the route reports every skipped scope | unaudited |
 | `production_limits_are_the_d23_set` | `query_route.rs:532` | the daemon's limits equal D23 | unaudited |
 
-Production counters: `Consumed` in `retrieve.rs`; `vm_steps` (`retrieve.rs:603`)
+Production counters: `Consumed` in `retrieve.rs`; `vm_steps` (`retrieve.rs:636`)
 reads `SQLITE_STMTSTATUS_VM_STEP` per statement.
 
 ## Original budget (AC6)
@@ -101,14 +103,15 @@ reads `SQLITE_STMTSTATUS_VM_STEP` per statement.
 | --- | --- | --- | --- |
 | `cancellation_and_deadline_are_observed_in_every_phase` | `query_route.rs:74` | cancellation and a passed deadline before each `Phase`, including `Phase::Lexical` (`crates/daemon/src/query_route.rs:1383`) | unaudited |
 | `an_engine_interrupt_from_the_connection_ends_the_request_as_budget_exhaustion` | `lexical_retrieval.rs:1457` | a connection interrupt through `with_conn_interruptible` during the lexical scan | unaudited |
-| `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion` | `lexical_retrieval.rs:2471` | the progress handler fires at every point of counting, ranking, and a common scan; the connection serves the next request | unaudited |
+| `an_interrupt_anywhere_in_counting_ranking_or_a_common_scan_is_budget_exhaustion` | `lexical_retrieval.rs:2510` | the progress handler fires at every point of counting, ranking, and a common scan; the connection serves the next request | unaudited |
 | `a_budget_that_ends_after_a_probe_yields_an_incomplete_result_with_no_contributions` | `lexical_retrieval.rs:1350` | a budget that ends between probes | unaudited |
 | `a_held_kernel_reader_does_not_outlive_the_budget` | `lexical_retrieval.rs:1566` | the kernel reader is released at the budget's end | unaudited |
 | `claim_validation_stops_waiting_for_a_held_connection_when_the_budget_ends` | `query_route.rs:112` | a queue wait that outlives the budget | unaudited |
 
 Production guard: `budget.check()` before each row in `count_probe`,
-`ranked_rows`, `scan_ranked`, `identify`, `Descending::head`, and `resolve`
-(`retrieve.rs:591`, `:681`, `:652`, `:708`, `:766`, `:864`), and the connection's
+`ranked_rows`, `identify`, `Descending::head`, and `resolve`, and after the
+window partition in `scan_ranked`
+(`retrieve.rs:624`, `:745`, `:778`, `:843`, `:935`, `:687`), and the connection's
 progress handler at `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`).
 
 ## No payload reads (AC7)
@@ -124,8 +127,8 @@ progress handler at `READ_INTERRUPT_STEPS` (`crates/storage/src/lib.rs:191`).
 | `a_tombstoned_row_is_excluded_at_the_engine` | `lexical_retrieval.rs:916` | a tombstone excludes the row inside the scan | unaudited |
 | `an_orphaned_lexical_row_is_excluded_at_the_engine` | `lexical_retrieval.rs:934` | a lexical row with no occurrence | unaudited |
 | `tombstoned_rows_inside_the_scan_bound_are_dropped_without_replacement` | `lexical_retrieval.rs:1040` | dead rows at every scan bound via `assert_stale_row_excluded_at_every_scan_bound` (`:963`) | unaudited |
-| `a_dead_row_inside_the_window_still_counts_toward_the_bound` | `lexical_retrieval.rs:2892` | a dead row inside the window still counts toward the bound | unaudited |
-| `dead_rows_leading_a_common_probe_keep_their_window_slots` | `lexical_retrieval.rs:2621` | dead leaders of a common probe | unaudited |
+| `a_dead_row_inside_the_window_still_counts_toward_the_bound` | `lexical_retrieval.rs:2937` | a dead row inside the window still counts toward the bound | unaudited |
+| `dead_rows_leading_a_common_probe_keep_their_window_slots` | `lexical_retrieval.rs:2660` | dead leaders of a common probe | unaudited |
 
 Test seams: `project_bulk` (`lexical_retrieval.rs:1012`) and `tombstone_raw`
 (`:1028`) write rows and tombstones under the projection's own schema.
@@ -149,10 +152,10 @@ exact, lexical, f32, fusion, packing, and application path.
 - No check compares `sql_steps` with an approved bound; every step assertion is
   relative (fewer under a smaller bound, more with one more row). RP2.9 has
   approved no allocation or step bound.
-- No check observes the budget during the in-memory rank sort in `scan_ranked`
-  (`retrieve.rs:637`); the sort is bounded by `rank_budget` and the
-  next `budget.check()` follows it in `scan_ranked`, but no test times a
-  cancellation that lands inside it.
+- No check observes the budget during the in-memory merge and window partition
+  in `scan_ranked` (`retrieve.rs:675`); both are bounded by `rank_budget` and
+  the next `budget.check()` follows them (`:687`), but no test times a
+  cancellation that lands inside them.
 - SQLite's own allocations and FTS5's internal rank statements are outside the
   allocation recorder and `sql_steps`; no check bounds them.
 - `lexical_scan_p99_at_one_million_occurrences` is `#[ignore]`. The #896 runs
