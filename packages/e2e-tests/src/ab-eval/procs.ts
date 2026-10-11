@@ -162,3 +162,12 @@ export async function stopOwnedTree(rootPid: number, graceMs: number): Promise<v
     for (const pid of targets) signal(pid, "SIGKILL");
     await waitStopped(targets, 2_000);
 }
+
+/**
+ * Stops `pid` now and resumes it after `ms`. A process that exited in between needs no resume,
+ * and the pending resume never holds the runner open.
+ */
+export function stallFor(pid: number, ms: number): void {
+    process.kill(pid, "SIGSTOP");
+    setTimeout(() => signal(pid, "SIGCONT"), ms).unref();
+}

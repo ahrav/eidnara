@@ -43,19 +43,20 @@ interface Call {
 
 const PRICE = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
 
-const jsonl = <T>(path: string): T[] =>
-    existsSync(path)
-        ? readFileSync(path, "utf8")
-              .split("\n")
-              .filter((l) => l.trim().length > 0)
-              .flatMap((l) => {
-                  try {
-                      return [JSON.parse(l) as T];
-                  } catch {
-                      return [];
-                  }
-              })
-        : [];
+/** A record that does not parse fails the report, since a truncated file is a partial run. */
+const jsonl = <T>(path: string): T[] => {
+    if (!existsSync(path)) return [];
+    const out: T[] = [];
+    for (const [i, line] of readFileSync(path, "utf8").split("\n").entries()) {
+        if (line.trim().length === 0) continue;
+        try {
+            out.push(JSON.parse(line) as T);
+        } catch (error) {
+            throw new Error(`${path}:${i + 1}: ${String(error)}`);
+        }
+    }
+    return out;
+};
 
 function pct(values: number[], p: number): number {
     if (values.length === 0) return 0;

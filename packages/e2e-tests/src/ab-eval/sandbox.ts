@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { ensurePiInstall } from "../bedrock-peer/harness-runtime";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
@@ -88,8 +88,28 @@ export function opencodeBinary(): string {
     return realpathSync(found);
 }
 
+/**
+ * An npm-installed OpenCode is a launcher in `node_modules/opencode-ai/bin` that runs the platform
+ * package beside it, so the keep root is that `node_modules`; a standalone binary keeps only its
+ * own directory.
+ */
+export function opencodeKeepRoot(binary: string): string {
+    const dir = dirname(binary);
+    for (let up = dir; up !== dirname(up); up = dirname(up)) {
+        if (basename(up) === "node_modules") return up;
+    }
+    return dir;
+}
+
+/** Every kept path lies beside or below the masked paths; one that contains a masked path would expose it. */
 export function sharedKeep(): string[] {
-    return [REPO_ROOT, nodeRoot(), ensurePiInstall(), resolve(opencodeBinary(), "../../..")];
+    const keep = [REPO_ROOT, nodeRoot(), ensurePiInstall(), opencodeKeepRoot(opencodeBinary())];
+    const masked = ["/tmp", realpathSync(homedir())];
+    const broad = keep.find((path) => masked.some((hidden) => within(hidden, path)));
+    if (broad !== undefined) {
+        throw new Error(`kept path ${broad} contains a masked path; every arm could read it`);
+    }
+    return keep;
 }
 
 export function sandboxKeep(armRoot: string): string[] {

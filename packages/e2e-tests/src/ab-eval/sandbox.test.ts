@@ -8,6 +8,7 @@ import {
     assertRunRootMaskable,
     ensureSandboxScript,
     maskedPaths,
+    opencodeKeepRoot,
     sandboxAvailable,
 } from "./sandbox";
 
@@ -27,6 +28,15 @@ describe("sandbox masking plan", () => {
             /inside \/repo/,
         );
         expect(() => assertRunRootMaskable("/dev/shm/run", ["/repo", "/node"])).not.toThrow();
+    });
+});
+
+describe("sandbox keep list", () => {
+    it("keeps the OpenCode install tree, never an ancestor such as the home directory", () => {
+        expect(opencodeKeepRoot("/prefix/lib/node_modules/opencode-ai/bin/opencode")).toBe(
+            "/prefix/lib/node_modules",
+        );
+        expect(opencodeKeepRoot("/home/u/.opencode/bin/opencode")).toBe("/home/u/.opencode/bin");
     });
 });
 

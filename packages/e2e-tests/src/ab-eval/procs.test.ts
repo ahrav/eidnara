@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
-import { descendants, stopOwnedTree, treeStats } from "./procs";
+import { descendants, stallFor, stopOwnedTree, treeStats } from "./procs";
 
 const spawned: ChildProcess[] = [];
 
@@ -61,5 +61,17 @@ describe("stopping an owned tree", () => {
         });
         await stopOwnedTree(pid, 2_000);
         expect(treeStats(grandchild)).toBeNull();
+    });
+});
+
+describe("stalling a process", () => {
+    it("tolerates a stalled process that exits before the resume", async () => {
+        const child = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+        spawned.push(child);
+        const pid = child.pid as number;
+        stallFor(pid, 100);
+        child.kill("SIGKILL");
+        await Bun.sleep(300);
+        expect(treeStats(pid)).toBeNull();
     });
 });

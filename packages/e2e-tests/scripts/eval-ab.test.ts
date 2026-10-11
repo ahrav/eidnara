@@ -1,16 +1,26 @@
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const SCRIPT = join(import.meta.dir, "eval-ab.ts");
+const REPORT = join(import.meta.dir, "eval-ab-report.ts");
 
-function run(root: string, args: string[]) {
+function run(root: string, args: string[], extra: { path?: string; cwd?: string } = {}) {
     return spawnSync(process.execPath, [SCRIPT, ...args, "--out", join(root, "run")], {
         encoding: "utf8",
         // Without `opencode` on PATH an OpenCode arm fails as its first session opens.
-        env: { ...process.env, PATH: "/usr/bin:/bin" },
+        env: { ...process.env, PATH: extra.path ?? "/usr/bin:/bin" },
+        cwd: extra.cwd,
         timeout: 60_000,
     });
 }
@@ -60,6 +70,53 @@ describe("eval-ab", () => {
         }
     });
 
+    it("refuses a numeric flag without a usable number", () => {
+        for (const [flag, message] of [
+            [["--seed", "typo"], "--seed must be a non-negative number"],
+            [["--pace-ms", "-5"], "--pace-ms must be a non-negative number"],
+            [["--seed", "--tier"], "needs a value"],
+        ] as const) {
+            const result = run(fresh(), ["--arms", "pi-off", "--sandbox", "off", ...flag]);
+            try {
+                expect(result.status).not.toBe(0);
+                expect(result.stderr).toContain(message);
+                expect(existsSync(join(root, "run"))).toBe(false);
+            } finally {
+                cleanup();
+            }
+        }
+    });
+
+    it("fails an arm whose work directory could not become a repository", () => {
+        fresh();
+        // A PATH with `sh` and no `git` makes the repository setup fail.
+        const bin = join(root, "bin");
+        mkdirSync(bin);
+        symlinkSync("/bin/sh", join(bin, "sh"));
+        const result = run(root, ["--arms", "oc-off", "--sandbox", "off"], { path: bin });
+        try {
+            expect(result.status).not.toBe(0);
+            expect(result.stdout).toMatch(/oc-off: rejected .*git/);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it("records a relative fixture path as the absolute file it checked", () => {
+        fresh();
+        writeFileSync(join(root, "fx"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+        const result = run(root, ["--arms", "pi-on", "--sandbox", "off", "--fixture-bin", "./fx"], {
+            cwd: root,
+        });
+        try {
+            expect(result.status).not.toBe(0);
+            const options = JSON.parse(readFileSync(join(root, "run/options.json"), "utf8"));
+            expect(options.fixtureBin).toBe(join(root, "fx"));
+        } finally {
+            cleanup();
+        }
+    });
+
     it("refuses a missing host fixture before claiming the run directory", () => {
         const result = run(fresh(), [
             "--arms",
@@ -75,6 +132,28 @@ describe("eval-ab", () => {
             expect(existsSync(join(root, "run"))).toBe(false);
         } finally {
             cleanup();
+        }
+    });
+});
+
+describe("eval-ab-report", () => {
+    it("fails on a malformed record instead of dropping it", () => {
+        const root = mkdtempSync(join(tmpdir(), "ab-eval-report-"));
+        try {
+            const arm = join(root, "results/pi-off");
+            mkdirSync(arm, { recursive: true });
+            writeFileSync(
+                join(arm, "turns.jsonl"),
+                `${JSON.stringify({ arm: "pi-off", kind: "filler", ms: 1 })}\n{"arm":"pi-off","kind":"pro\n`,
+            );
+            const result = spawnSync(process.execPath, [REPORT, root], {
+                encoding: "utf8",
+                timeout: 60_000,
+            });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain("turns.jsonl:2");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
         }
     });
 });

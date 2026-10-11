@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type Arm, armRoot, armSpec, makeArm } from "../src/ab-eval/arms";
 import type { CallRecord } from "../src/ab-eval/gateway";
-import { procStats, treeStats } from "../src/ab-eval/procs";
+import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
 import { assertRunRootMaskable, sandboxAvailable, sharedKeep } from "../src/ab-eval/sandbox";
 import { buildWorld, grade, type World, writeRepo } from "../src/ab-eval/world";
@@ -36,7 +36,18 @@ interface Options {
 function parseArgs(argv: string[]): Options {
     const get = (name: string, fallback: string): string => {
         const i = argv.indexOf(`--${name}`);
-        return i >= 0 && argv[i + 1] !== undefined ? (argv[i + 1] as string) : fallback;
+        if (i < 0) return fallback;
+        const value = argv[i + 1];
+        if (value === undefined || value.startsWith("--"))
+            throw new Error(`--${name} needs a value`);
+        return value;
+    };
+    const num = (name: string, fallback: string): number => {
+        const value = Number(get(name, fallback));
+        if (!Number.isFinite(value) || value < 0) {
+            throw new Error(`--${name} must be a non-negative number`);
+        }
+        return value;
     };
     const choice = <T extends string>(name: string, values: readonly T[], fallback: T): T => {
         const value = get(name, fallback);
@@ -52,15 +63,14 @@ function parseArgs(argv: string[]): Options {
     const sandbox = choice("sandbox", ["auto", "on", "off"], "auto");
     return {
         tier: get("tier", "xs"),
-        seed: Number(get("seed", "7")),
+        seed: num("seed", "7"),
         arms,
         out: out ? resolve(out) : timestampedRunDir(join(tmpdir(), "ab-eval/runs")),
         linkLatest: !out,
-        paceMs: Number(get("pace-ms", "1500")),
-        sessionGapMs: Number(get("session-gap-ms", "30000")),
-        fixtureBin: get(
-            "fixture-bin",
-            join(REPO_ROOT, "target/release/examples/direct_host_fixture"),
+        paceMs: num("pace-ms", "1500"),
+        sessionGapMs: num("session-gap-ms", "30000"),
+        fixtureBin: resolve(
+            get("fixture-bin", join(REPO_ROOT, "target/release/examples/direct_host_fixture")),
         ),
         sandbox: sandbox === "auto" ? sandboxAvailable() : sandbox === "on",
         stallAt: new Set(
@@ -68,7 +78,7 @@ function parseArgs(argv: string[]): Options {
                 .split(",")
                 .filter((key) => key.length > 0),
         ),
-        stallMs: Number(get("stall-ms", "6000")),
+        stallMs: num("stall-ms", "6000"),
         enforceWindow: choice("enforce-window", ["on", "off"], "on") === "on",
     };
 }
@@ -77,16 +87,19 @@ function prepareWorkdir(world: World, dir: string): void {
     mkdirSync(dir, { recursive: true });
     writeRepo(world, dir);
     writeFileSync(join(dir, ".gitignore"), ".runs/\n");
-    spawnSync(
+    const init = spawnSync(
         "sh",
         [
             "-c",
             "git init -q . && git add -A && git -c user.email=ab@eval -c user.name=ab commit -qm init",
         ],
-        {
-            cwd: dir,
-        },
+        { cwd: dir, encoding: "utf8" },
     );
+    if (init.status !== 0) {
+        throw new Error(
+            `git setup of ${dir} failed (${init.status ?? init.error?.message}): ${init.stderr.trim()}`,
+        );
+    }
 }
 
 async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Promise<void> {
@@ -119,8 +132,7 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
             const forwardedBefore = arm.main.forwardedCalls;
             const hostPid = arm.hostPid();
             if (opts.stallAt.has(key) && hostPid !== undefined) {
-                process.kill(hostPid, "SIGSTOP");
-                setTimeout(() => process.kill(hostPid, "SIGCONT"), opts.stallMs);
+                stallFor(hostPid, opts.stallMs);
                 log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
             }
             const result = await arm.prompt(turn.user, timeout);
