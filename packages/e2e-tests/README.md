@@ -273,9 +273,12 @@ and tokens per caller, and memory.
   call. Eidnara arms run the release `direct_host_fixture` with the pinned
   harness closures: `target/release/examples/direct_host_fixture`, or the
   `--fixture-bin` path, built with `cargo build -p daemon --example
-  direct_host_fixture --features direct-host-fixture --locked --release`. An
-  unknown or repeated arm name, a flag value outside its documented set, or a
-  missing fixture fails the run before any arm starts.
+  direct_host_fixture --features direct-host-fixture --locked --release`, and
+  the shared-memory addon from `bun run --cwd packages/shm-native
+  build:native`. An unknown or repeated arm name, a flag value outside its
+  documented set, a missing fixture, or an addon that cannot load fails the
+  run before any arm starts, and an Eidnara arm whose daemon exits fails at
+  the next turn.
 - When passwordless `sudo` can create mount and PID namespaces, each harness
   runs in its own mount and PID namespace. Empty mounts cover `/tmp`, the home directory, and the run
   directory, and the arm's own directory is mounted back; the arm's `/proc`
@@ -286,15 +289,17 @@ and tokens per caller, and memory.
 - Each run writes to a fresh directory: `--out` must be missing or empty, and
   the default is a timestamped directory under `<tmp>/ab-eval/runs/` that
   `runs/latest` links to. The command exits nonzero when any arm fails, and
-  the other arms' results stay in the directory. The report refuses an arm
-  whose recorded turns differ from the world's count, and a record that does
-  not parse.
+  the other arms' results stay in the directory. An arm writes
+  `results/<arm>/done.json` once its teardown succeeds; the report refuses an
+  arm without it, one whose recorded turns differ from the world's count, and
+  a record that does not parse.
 - A turn that reaches its timeout is aborted, and the next turn starts once
   the harness has stopped it. The gateway retries throttled Bedrock calls
   until the turn's deadline.
 - `--stall-at <session:turn,...>` stops the daemon for `--stall-ms` before
   those prompts, to exercise a pass that misses its deadline. A key the world
-  has no turn for fails the run before it starts.
+  has no turn for, or a selection without an Eidnara arm, fails the run before
+  it starts.
 - The gateway answers a request whose estimated input exceeds the arms'
   200k window with `prompt is too long`, as a model with that window does;
   `--enforce-window off` forwards it to Bedrock.

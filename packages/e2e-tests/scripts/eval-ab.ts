@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { probeCapabilities } from "@eidnara/shm-native";
 import { type Arm, armRoot, armSpec, makeArm } from "../src/ab-eval/arms";
 import type { CallRecord } from "../src/ab-eval/gateway";
 import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
@@ -133,11 +134,13 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
             const mismatchesBefore = arm.main.scriptMismatches;
             const forwardedBefore = arm.main.forwardedCalls;
             const hostPid = arm.hostPid();
-            if (opts.stallAt.has(key) && hostPid !== undefined) {
+            if (opts.stallAt.has(key) && arm.spec.eidnara) {
+                if (hostPid === undefined) throw new Error(`no daemon PID to stall before ${key}`);
                 stallFor(hostPid, opts.stallMs);
                 log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
             }
             const result = await arm.prompt(turn.user, timeout);
+            arm.assertHostRunning(key);
             const harness = treeStats(arm.harnessPid());
             const host = procStats(arm.hostPid());
             const forwarded = arm.main.forwardedCalls - forwardedBefore;
@@ -206,17 +209,14 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
         writeFileSync(join(outDir, "host.log"), arm.host.hostLog());
     }
     await arm.stop();
+    writeFileSync(join(outDir, "done.json"), JSON.stringify({ ts: Date.now() }));
     log("done");
 }
 
 async function main(): Promise<void> {
     const opts = parseArgs(process.argv.slice(2));
     const specs = opts.arms.map(armSpec);
-    if (specs.some((spec) => spec.eidnara) && !isExecutableFile(opts.fixtureBin)) {
-        throw new Error(
-            `${opts.fixtureBin} is not an executable file; build the release fixture with \`cargo ${cargoBuildExampleArgs(DIRECT_HOST_FIXTURE).join(" ")} --release\` or pass --fixture-bin`,
-        );
-    }
+    const eidnaraArms = specs.some((spec) => spec.eidnara);
     const componentCount = PROJECT_SIZES[opts.projectSize];
     if (componentCount === undefined) throw new Error(`unknown --project-size ${opts.projectSize}`);
     const world = buildWorld(opts.seed, opts.tier, componentCount);
@@ -226,6 +226,20 @@ async function main(): Promise<void> {
     const missing = [...opts.stallAt].filter((key) => !turnKeys.has(key));
     if (missing.length > 0) {
         throw new Error(`--stall-at names turns the world does not have: ${missing.join(", ")}`);
+    }
+    if (opts.stallAt.size > 0 && !eidnaraArms) {
+        throw new Error("--stall-at stops an arm's daemon; no selected arm runs one");
+    }
+    if (eidnaraArms && !isExecutableFile(opts.fixtureBin)) {
+        throw new Error(
+            `${opts.fixtureBin} is not an executable file; build the release fixture with \`cargo ${cargoBuildExampleArgs(DIRECT_HOST_FIXTURE).join(" ")} --release\` or pass --fixture-bin`,
+        );
+    }
+    const channel = probeCapabilities();
+    if (eidnaraArms && !channel.available) {
+        throw new Error(
+            `the shared-memory channel cannot start here (${channel.reason}); build the addon with \`bun run --cwd packages/shm-native build:native\` so the Eidnara arms apply instead of failing open`,
+        );
     }
     claimRunDir(opts.out);
     if (opts.linkLatest) pointLatest(dirname(opts.out), opts.out);
