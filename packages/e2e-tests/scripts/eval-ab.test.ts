@@ -110,6 +110,8 @@ describe("eval-ab", () => {
     it("refuses a numeric flag without a usable number", () => {
         for (const [flag, message] of [
             [["--seed", "typo"], "--seed must be a non-negative number"],
+            [["--seed", "7.5"], "--seed must be an integer below 2^32"],
+            [["--seed", "4294967296"], "--seed must be an integer below 2^32"],
             [["--pace-ms", "-5"], "--pace-ms must be a non-negative number"],
             [["--seed", "--tier"], "needs a value"],
         ] as const) {

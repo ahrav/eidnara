@@ -73,6 +73,27 @@ describe("A/B world", () => {
 });
 
 describe("A/B project sizes", () => {
+    it("gives every work session exactly the tier's turn count", () => {
+        for (const [seed, tier] of [
+            [3, "xs"],
+            [7, "xs"],
+            [7, "s"],
+            [21, "m"],
+        ] as const) {
+            const world = buildWorld(seed, tier);
+            const expected = TIERS[tier]?.turnsPerSession;
+            for (const session of world.sessions.slice(0, -1)) {
+                const work = session.turns.filter((t) => t.probe?.scope !== "cross_session");
+                expect([seed, tier, session.index, work.length]).toEqual([
+                    seed,
+                    tier,
+                    session.index,
+                    expected,
+                ]);
+            }
+        }
+    });
+
     it("refuses a component count the facts cannot draw from", () => {
         expect(() => buildWorld(7, "xs", 1)).toThrow(/componentCount/);
         expect(() => buildWorld(7, "xs", 2.5)).toThrow(/componentCount/);

@@ -316,6 +316,6 @@ bun run eval:ab:report /tmp/ab-eval/runs/m1
 ```
 
 Tiers: `xs` (2 x 24 turns), `c` (1 x 170), `s` (3 x 110), `m` (12 x 260),
-`l` (40 x 600). The count is the work turns per session; a later session opens
-with the cross-session probes that are due, and one final session holds only
-probes. Run reports stay outside the repository.
+`l` (40 x 600). The count is the work turns of every work session, for every
+seed; a later session opens with the cross-session probes that are due, and
+one final session holds only probes. Run reports stay outside the repository.

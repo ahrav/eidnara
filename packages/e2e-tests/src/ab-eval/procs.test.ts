@@ -77,6 +77,21 @@ describe("stalling a process", () => {
         expect(running(pid)).toBe(false);
     });
 
+    it("hands back a resume that continues the process at once", async () => {
+        const child = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+        spawned.push(child);
+        const pid = child.pid as number;
+        const resume = await stallFor(pid, 60_000);
+        resume();
+        const state = () => {
+            const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+            return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+        };
+        const deadline = Date.now() + 2_000;
+        while (state() === "T" && Date.now() < deadline) await Bun.sleep(5);
+        expect(state()).not.toBe("T");
+    });
+
     it("returns once the process has stopped", async () => {
         const child = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
         spawned.push(child);

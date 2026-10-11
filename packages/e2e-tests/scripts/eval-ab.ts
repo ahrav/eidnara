@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { probeCapabilities } from "@eidnara/shm-native";
-import { type Arm, armRoot, armSpec, makeArm } from "../src/ab-eval/arms";
+import { type Arm, armRoot, armSpec, makeArm, type PromptResult } from "../src/ab-eval/arms";
 import type { CallRecord } from "../src/ab-eval/gateway";
 import { procStats, stallFor, treeStats } from "../src/ab-eval/procs";
 import { claimRunDir, pointLatest, timestampedRunDir } from "../src/ab-eval/run-dir";
@@ -60,6 +60,12 @@ function parseArgs(argv: string[]): Options {
         }
         return value;
     };
+    // The world's generator keeps the low 32 bits of the seed, so wider or fractional seeds
+    // would label one world with several seed values.
+    const seed = num("seed", "7");
+    if (!Number.isInteger(seed) || seed >= 2 ** 32) {
+        throw new Error("--seed must be an integer below 2^32");
+    }
     const choice = <T extends string>(name: string, values: readonly T[], fallback: T): T => {
         const value = get(name, fallback);
         if (!values.includes(value as T)) {
@@ -74,7 +80,7 @@ function parseArgs(argv: string[]): Options {
     const sandbox = choice("sandbox", ["auto", "on", "off"], "auto");
     const options: Options = {
         tier: get("tier", "xs"),
-        seed: num("seed", "7"),
+        seed,
         arms,
         out: out ? resolve(out) : timestampedRunDir(join(tmpdir(), "ab-eval/runs")),
         linkLatest: !out,
@@ -146,12 +152,19 @@ async function runArm(arm: Arm, world: World, opts: Options, outDir: string): Pr
             const mismatchesBefore = arm.main.scriptMismatches;
             const forwardedBefore = arm.main.forwardedCalls;
             const hostPid = arm.hostPid();
+            let resume = () => {};
             if (opts.stallAt.has(key) && arm.spec.eidnara) {
                 if (hostPid === undefined) throw new Error(`no daemon PID to stall before ${key}`);
-                await stallFor(hostPid, opts.stallMs);
+                resume = await stallFor(hostPid, opts.stallMs);
                 log(`stalled the daemon for ${opts.stallMs}ms before ${key}`);
             }
-            const result = await arm.prompt(turn.user, timeout);
+            let result: PromptResult;
+            try {
+                result = await arm.prompt(turn.user, timeout);
+            } finally {
+                // The stall belongs to this turn alone; the daemon runs again before the next one.
+                resume();
+            }
             arm.assertAlive(key);
             const harness = treeStats(arm.harnessPid());
             const host = procStats(arm.hostPid());

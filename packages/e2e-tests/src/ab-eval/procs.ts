@@ -165,12 +165,13 @@ export async function stopOwnedTree(rootPid: number, graceMs: number): Promise<v
 }
 
 /**
- * Stops `pid` and returns once it is in the stopped state, then resumes it after `ms`. Signal
- * delivery is asynchronous, so the caller's next request reaches a stopped daemon only after the
- * state is observed. A process that exited in between needs no resume, and the pending resume
- * never holds the runner open.
+ * Stops `pid` and returns once it is in the stopped state; the process resumes after `ms`, or
+ * when the returned function is called, whichever comes first. Signal delivery is asynchronous,
+ * so the caller's next request reaches a stopped daemon only after the state is observed. A
+ * process that exited in between needs no resume, and the pending resume never holds the runner
+ * open.
  */
-export async function stallFor(pid: number, ms: number): Promise<void> {
+export async function stallFor(pid: number, ms: number): Promise<() => void> {
     process.kill(pid, "SIGSTOP");
     const deadline = Date.now() + 2_000;
     while (!/^[Tt]$/.test(statFields(pid)?.[0] ?? "")) {
@@ -180,5 +181,10 @@ export async function stallFor(pid: number, ms: number): Promise<void> {
         }
         await Bun.sleep(5);
     }
-    setTimeout(() => signal(pid, "SIGCONT"), ms).unref();
+    const timer = setTimeout(() => signal(pid, "SIGCONT"), ms);
+    timer.unref();
+    return () => {
+        clearTimeout(timer);
+        signal(pid, "SIGCONT");
+    };
 }

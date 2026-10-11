@@ -627,19 +627,18 @@ export function buildWorld(seed: number, tierName: string, componentCount = 16):
 
             planned.sort((a, b) => a.at - b.at);
             const workTurns = turnCount - inSessionProbes.length - 1;
+            const slots = workTurns - 4;
             let p = 0;
-            for (let i = 0; turns.length < workTurns - 4; i++) {
+            // Each slot takes the next planned turn once its time has come, or once the slots
+            // left equal the plans left, so every plan lands inside the session's budget.
+            for (let i = 0; turns.length < slots; i++) {
                 const next = planned[p];
-                if (next && next.at <= i) {
+                if (next && (next.at <= i || planned.length - p >= slots - turns.length)) {
                     turns.push(next.make(turns.length));
                     p++;
                 } else {
                     turns.push(fillerTurn(turns.length));
                 }
-            }
-            while (p < planned.length) {
-                turns.push((planned[p] as { make: (n: number) => Turn }).make(turns.length));
-                p++;
             }
             turns.push(factTurn(turns.length, control));
             for (let k = 0; k < 3; k++) turns.push(fillerTurn(turns.length));
