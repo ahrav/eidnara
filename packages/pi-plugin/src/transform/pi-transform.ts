@@ -61,6 +61,27 @@ function entryIdFor(entry: SessionEntry, message: Json): string | null | undefin
     }
 }
 
+function isToolResultEntry(entry: SessionEntry | undefined): boolean {
+    return (
+        entry?.type === "message" &&
+        ((entry as unknown as Json).message as Json | undefined)?.role === "toolResult"
+    );
+}
+
+function separatesResultFromCall(entry: SessionEntry | undefined): boolean {
+    if (entry === undefined) return false;
+    switch (entry.type) {
+        case "message":
+            return isToolResultEntry(entry);
+        case "custom_message":
+        case "branch_summary":
+        case "compaction":
+            return false;
+        default:
+            return true;
+    }
+}
+
 function failedAssistant(entry: SessionEntry): boolean {
     const message = (entry as unknown as Json).message as Json | undefined;
     return (
@@ -309,11 +330,18 @@ export function createPiTransform(options: PiTransformOptions) {
         // so eviction requires a boundary on a message, custom message, or branch summary row.
         const row = rowEntry(ack.boundary.mid);
         if (!row || row.role === "compactionSummary") return undefined;
-        const kept = row.entryId;
         const branch = options.branchOf(sessionId);
         branch.sync(reader);
-        const keptAt = branch.indexOf(kept);
+        let keptAt = branch.indexOf(row.entryId);
         if (keptAt === undefined) return undefined;
+        // The walk skips intervening settings, labels, session info, extension entries, and
+        // sibling results to keep each `toolResult` with the assistant message carrying its
+        // call; Pi can append those entries while a tool runs.
+        while (keptAt > 0 && separatesResultFromCall(reader.getEntry(branch.idAt(keptAt) ?? ""))) {
+            keptAt -= 1;
+        }
+        const kept = branch.idAt(keptAt);
+        if (kept === undefined) return undefined;
         const committed = latestCompaction(branch, reader);
         // A compaction that already evicted through this boundary, or one that keeps less, leaves nothing to evict.
         if (

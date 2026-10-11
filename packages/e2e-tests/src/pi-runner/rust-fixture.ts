@@ -17,6 +17,7 @@ export const COVERED = 40;
 export const MESSAGES = 50;
 export const BASE_MS = Date.UTC(2026, 0, 1);
 export const body = (n: number) => `message ${n} body`;
+export const TOOL_CALL_ID = "call-covered-end";
 
 export function textOf(message: unknown): string {
     const record = message as { content?: unknown; parts?: unknown };
@@ -28,11 +29,16 @@ export function textOf(message: unknown): string {
         .join("");
 }
 
+/**
+ * Writes `m1`..`m<count>` alternating user and assistant text. With `toolResultAt`, message
+ * `toolResultAt - 1` is an assistant tool call and `toolResultAt` its `toolResult`.
+ */
 export function writeTextSession(
     path: string,
     sessionId: string,
     cwd: string,
     count: number,
+    toolResultAt?: number,
 ): void {
     const lines = [
         JSON.stringify({
@@ -46,25 +52,44 @@ export function writeTextSession(
     for (let n = 1; n <= count; n += 1) {
         const timestamp = BASE_MS + n * 1_000;
         const message =
-            n % 2 === 1
-                ? { role: "user", content: [{ type: "text", text: body(n) }], timestamp }
-                : {
-                      role: "assistant",
+            n === toolResultAt
+                ? {
+                      role: "toolResult",
+                      toolCallId: TOOL_CALL_ID,
+                      toolName: "read",
                       content: [{ type: "text", text: body(n) }],
-                      api: "anthropic-messages",
-                      provider: "anthropic",
-                      model: "claude-sonnet-4-5",
-                      usage: {
-                          input: 0,
-                          output: 0,
-                          cacheRead: 0,
-                          cacheWrite: 0,
-                          totalTokens: 0,
-                          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-                      },
-                      stopReason: "stop",
+                      isError: false,
                       timestamp,
-                  };
+                  }
+                : n % 2 === 1 && n !== (toolResultAt ?? 0) - 1
+                  ? { role: "user", content: [{ type: "text", text: body(n) }], timestamp }
+                  : {
+                        role: "assistant",
+                        content:
+                            n === (toolResultAt ?? 0) - 1
+                                ? [
+                                      {
+                                          type: "toolCall",
+                                          id: TOOL_CALL_ID,
+                                          name: "read",
+                                          arguments: { path: "notes.md" },
+                                      },
+                                  ]
+                                : [{ type: "text", text: body(n) }],
+                        api: "anthropic-messages",
+                        provider: "anthropic",
+                        model: "claude-sonnet-4-5",
+                        usage: {
+                            input: 0,
+                            output: 0,
+                            cacheRead: 0,
+                            cacheWrite: 0,
+                            totalTokens: 0,
+                            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                        },
+                        stopReason: n === (toolResultAt ?? 0) - 1 ? "toolUse" : "stop",
+                        timestamp,
+                    };
         lines.push(
             JSON.stringify({
                 type: "message",
@@ -195,13 +220,14 @@ export async function openPiSession(
     sessionId: string,
     project: string,
     settings?: Record<string, unknown>,
+    toolResultAt?: number,
 ): Promise<PiRun> {
     const modules = await pluginModules();
     const configHome = join(root, `${sessionId}-config`);
     mkdirSync(project, { recursive: true });
     userConfig(configHome, stack.connectionFile);
     const file = join(root, `${sessionId}.jsonl`);
-    writeTextSession(file, sessionId, project, MESSAGES);
+    writeTextSession(file, sessionId, project, MESSAGES, toolResultAt);
     const saved = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = configHome;
     modules.extension.__test.clearPiEidnaraActive();

@@ -2003,11 +2003,9 @@ impl HandlerCore {
                     return UnitOutcome::Terminal(terminal_response(exhaustion(&shared)));
                 }
                 Err(error) => {
-                    // A pin refused before the gate judged it reports the gate's current verdict; one the gate admits reports the missing family.
-                    let reason = crate::search_lifecycle_owner::refusal_code(&error)
-                        .or_else(|| lifecycle.admission_state().err())
-                        .unwrap_or("no_family");
-                    return UnitOutcome::Terminal(unavailable_response(reason));
+                    return UnitOutcome::Terminal(unavailable_response(
+                        lifecycle.pin_refusal(&error),
+                    ));
                 }
             };
             let producer: Option<Box<dyn DenseProducer>> =

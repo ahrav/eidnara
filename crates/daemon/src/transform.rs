@@ -615,6 +615,15 @@ pub(crate) struct WindowCoverage {
     cut_prefix: Vec<Arc<IngressMessage>>,
 }
 
+impl WindowCoverage {
+    pub(crate) fn resolution_only(&self) -> Self {
+        Self {
+            resolved: self.resolved.clone(),
+            cut_prefix: Vec::new(),
+        }
+    }
+}
+
 /// The host resolves context geometry into a shape shared by OpenCode and Claude Code.
 /// `derivation` records the rule and numeric inputs used to calculate the geometry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2438,6 +2447,42 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     fingerprints
 }
 
+/// The projection of a resolved window. An anchored window starts at its anchor's end message,
+/// which the anchor covers, so that message's tool results may answer calls before the window.
+pub(crate) fn window_projection(request: &TransformRequest) -> wire::MessageProjection<'_> {
+    let projection = wire::MessageProjection::new(&request.messages);
+    let head_covered = request
+        .coverage
+        .as_ref()
+        .and_then(|coverage| coverage.resolved.anchor.as_ref())
+        .and_then(|anchor| wire::split_block_id(&anchor.end_message_id))
+        .is_some_and(|(mid, _)| request.messages.first().is_some_and(|head| head.mid == mid));
+    if head_covered {
+        projection.with_covered_head()
+    } else {
+        projection
+    }
+}
+
+/// A segment end the host evicted. An empty id or a bare mid is a publisher-vocabulary error,
+/// which the fold reports instead of recovering from.
+fn names_evicted_block(id: &str, live: &[&FlatBlock]) -> bool {
+    wire::split_block_id(id).is_some() && !live.iter().any(|block| block.id() == id)
+}
+
+/// The sequence of the newest stored history segment whose end block is live, or `-1` when no
+/// segment ends on a live block.
+fn newest_live_segment_sequence(
+    store: &MemoryStore,
+    session_id: &str,
+    live: &[&FlatBlock],
+) -> Result<i64, TransformError> {
+    let live_ids: HashSet<&str> = live.iter().map(|block| block.id()).collect();
+    Ok(store
+        .newest_history_segment_ending_on(session_id, |end| live_ids.contains(end))?
+        .unwrap_or(-1))
+}
+
 /// Normalized decisions use `projection`, not raw message flags exposed through `Deref`.
 struct TransformIngress<'a> {
     request: &'a TransformRequest,
@@ -2448,7 +2493,7 @@ impl<'a> TransformIngress<'a> {
     fn original(request: &'a TransformRequest) -> Self {
         Self {
             request,
-            projection: wire::MessageProjection::new(&request.messages),
+            projection: window_projection(request),
         }
     }
 
@@ -2727,7 +2772,7 @@ fn apply_additive_only(
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
     let projection_started_at = Instant::now();
-    let projection = project_messages(&req.messages)?;
+    let projection = window_projection(req).project()?;
     let live = projection
         .blocks
         .iter()
@@ -4109,6 +4154,15 @@ fn apply_once(
     } else if lineage_state.force_hard {
         plan = PassPlan::Hard;
     }
+    let evicted_end_fold_due = !req.is_subagent
+        && matches!(plan, PassPlan::Soft)
+        && history_segment_seq_changed_since_meta
+        && store
+            .newest_history_segment(&req.session_id)?
+            .is_some_and(|newest| names_evicted_block(&newest.end_message_id, &live));
+    if evicted_end_fold_due {
+        plan = PassPlan::Hard;
+    }
     let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
         && loaded.meta.last_serializer_profile != req.serializer_profile;
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
@@ -4119,7 +4173,7 @@ fn apply_once(
         profile_transition,
         first_fold_due,
         ttl_expired: scheduler_outcome.idle_ttl_fired,
-        coverage_fold_due,
+        coverage_fold_due: coverage_fold_due || evicted_end_fold_due,
         project_memory_delta: external_revision_changed || project_memory_epoch_hard_due,
         reconcile_hard_due,
         coverage_delta: history_segment_seq_changed_since_meta,
@@ -4401,15 +4455,25 @@ fn apply_once(
                 if comp.coverage_ordinal.is_some() {
                     let minted = comp.boundary_id.as_str();
                     if minted.is_empty() || !live.iter().any(|block| block.id() == minted) {
-                        if loaded.core.reconcile_pending {
+                        // A well-formed anchor absent from the window names history the host
+                        // evicted, as a Pi compaction does before the first fold renders. The
+                        // fold keeps the newest segment whose end message is live and removes
+                        // the rest, or resets coverage when none is, as spec D10's reset does.
+                        let evicted_keep_through = (!loaded.core.reconcile_pending
+                            && names_evicted_block(minted, &live))
+                        .then(|| newest_live_segment_sequence(store, &req.session_id, &live))
+                        .transpose()?;
+                        if loaded.core.reconcile_pending || evicted_keep_through.is_some() {
                             // A revert keeps history through the effective anchor; with none
                             // (a revert through no anchor that the pending-rewrite arm does not
                             // take), it removes every segment, as the reset of spec D10 does.
-                            let keep_through_seq = coverage
-                                .resolved
-                                .anchor
-                                .as_ref()
-                                .map_or(-1, |anchor| anchor.sequence);
+                            let keep_through_seq = evicted_keep_through.unwrap_or_else(|| {
+                                coverage
+                                    .resolved
+                                    .anchor
+                                    .as_ref()
+                                    .map_or(-1, |anchor| anchor.sequence)
+                            });
                             let outcome = store.truncate_history_segments_for_revert(
                                 &req.session_id,
                                 keep_through_seq,
@@ -14300,8 +14364,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The three fresh-byte consumers must read `canonical_block_bytes`; a consumer
-    /// that serializes a block any other way changes identity silently.
     #[test]
     fn fresh_block_byte_consumers_call_the_canonical_producer() {
         let flatten = include_str!("wire.rs")
@@ -14313,7 +14375,7 @@ pub(crate) mod tests {
             .0;
         assert_eq!(
             flatten
-                .matches("served_json::canonical_block_bytes(")
+                .matches("served_json::canonical_block_text(")
                 .count(),
             1
         );
@@ -20817,6 +20879,109 @@ pub(crate) mod tests {
                 "{label}: the retry must fail the same way"
             );
         }
+    }
+
+    #[test]
+    fn a_fold_whose_segments_end_before_the_window_resets_coverage() {
+        // A Pi compaction evicted the folded history before the first fold rendered, so the
+        // window restarts at ordinal 1 and no segment's end message is live.
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let before = vec![item("gone", 1, "evicted"), item("g2", 2, "evicted too")];
+        run(&s, &req("ses", "cfg0", before), &spine());
+        s.replace_history_segments("ses", &[comp(0, 1, 2, "gone", "S0")])
+            .unwrap();
+        let live = vec![
+            item("k1", 1, "kept one"),
+            item("k2", 2, "kept two"),
+            item("k3", 3, "tail"),
+        ];
+        let served = run(&s, &req("ses", "cfg0", live.clone()), &spine());
+        assert_eq!(served.boundary_id, "");
+        assert_eq!(tail_ids(&served), vec!["k1", "k2", "k3"]);
+        assert!(s.load_history_segments("ses").unwrap().is_empty());
+        let again = run(&s, &req("ses", "cfg0", live), &spine());
+        assert_eq!(tail_ids(&again), vec!["k1", "k2", "k3"]);
+    }
+
+    #[test]
+    fn a_fold_keeps_the_newest_segment_whose_end_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let before = vec![item("a", 1, "raw"), item("gone", 2, "evicted")];
+        run(&s, &req("ses", "cfg0", before), &spine());
+        s.replace_history_segments(
+            "ses",
+            &[comp(0, 1, 1, "a", "S0"), comp(1, 2, 2, "gone", "S1")],
+        )
+        .unwrap();
+        let live = vec![
+            item("a", 1, "raw"),
+            item("k2", 2, "kept"),
+            item("k3", 3, "tail"),
+        ];
+        let served = run(&s, &req("ses", "cfg0", live), &spine());
+        assert_eq!(served.boundary_id, "a#0");
+        assert_eq!(tail_ids(&served), vec!["k2", "k3"]);
+        assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_soft_pass_over_a_segment_ending_on_an_evicted_message_folds_from_the_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_history_segments("ses", &[comp(0, 1, 1, "a", "S0")])
+            .unwrap();
+        let before = vec![item("a", 1, "raw"), item("gone", 2, "evicted")];
+        let boot = run(&s, &req("ses", "cfg0", before), &spine());
+        assert_eq!(boot.boundary_id, "a#0");
+        s.append_history_segments("ses", &[comp(1, 2, 2, "gone", "S1")])
+            .unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let live = vec![
+            item("a", 1, "raw"),
+            item("k2", 2, "kept"),
+            item("k3", 3, "tail"),
+        ];
+        let served = run(&s, &req("ses", "cfg0", live.clone()), &spine());
+        assert_eq!(served.boundary_id, "a#0");
+        assert_eq!(tail_ids(&served), vec!["k2", "k3"]);
+        assert_eq!(s.load_history_segments("ses").unwrap().len(), 1);
+        let again = run(&s, &req("ses", "cfg0", live), &spine());
+        assert_eq!(tail_ids(&again), vec!["k2", "k3"]);
+    }
+
+    #[test]
+    fn a_pressure_refold_over_a_segment_ending_on_an_evicted_message_folds_from_the_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let ids = ["a", "b", "c", "d", "e", "gone"];
+        let rows: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| comp(i as i64 + 1, i as i64 + 1, i as i64 + 1, id, "S"))
+            .collect();
+        s.replace_history_segments("ses", &rows).unwrap();
+        s.arm_soft_refresh("ses").unwrap();
+        let mut live: Vec<_> = ids[..5]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| item(id, i as u64 + 1, "raw"))
+            .collect();
+        live.push(item("k6", 6, "kept"));
+        live.push(item("tail", 7, "tail"));
+        let mut request = req("ses", "cfg0", live);
+        request.geometry = Some(TransformGeometry {
+            usable_soft: 1_024,
+            usable_hard: 1_024,
+            derivation: "test".to_string(),
+        });
+        let served = run(&s, &request, &spine());
+        assert_eq!(served.action, "HARD");
+        assert_eq!(served.boundary_id, "e#0");
+        assert_eq!(tail_ids(&served), vec!["k6", "tail"]);
+        assert_eq!(s.load_history_segments("ses").unwrap().len(), 5);
     }
 
     #[test]

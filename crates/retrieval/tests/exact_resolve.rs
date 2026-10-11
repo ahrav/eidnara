@@ -412,8 +412,14 @@ impl Fixture {
             .store
             .with_conn(|conn| Ok(read_checkpoint(conn, &self.incarnation).unwrap().unwrap()))
             .unwrap();
+        let kernel_incarnation = self
+            .kernel
+            .capture_commit_read_target_within_budget(&EvalBudget::unbounded())
+            .unwrap()
+            .incarnation;
         CompletenessCertificate {
             canonical_incarnation_id: self.incarnation.clone(),
+            kernel_incarnation,
             inventory_epoch: EPOCH.to_string(),
             identity_contract_version: CONTRACT.to_string(),
             extraction_version: retrieval::exact::EXTRACTION_VERSION,
@@ -1374,7 +1380,7 @@ fn final_use_refuses_a_restore_that_lands_during_its_kernel_batch() {
 }
 
 #[test]
-fn a_certificate_past_the_restored_kernel_tip_defeats_proof() {
+fn a_certificate_minted_past_the_restored_kernel_tip_is_refused() {
     let fixture = Fixture::new();
     fixture.decide("objects", &[ok("obj-1")]);
     fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
@@ -1400,26 +1406,54 @@ fn a_certificate_past_the_restored_kernel_tip_defeats_proof() {
     fixture.kernel.restore(&manifest.destination_path).unwrap();
     assert_eq!(fixture.tip(), restored_tip);
     let budget = EvalBudget::unbounded();
-    let resolution = fixture
-        .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+    assert_eq!(
+        fixture
+            .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+            .unwrap_err(),
+        ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch),
+        "a certificate issued past the restored tip describes rolled-back history"
+    );
+}
+
+/// An equal-tip restore changes the kernel incarnation, invalidating certificates issued against the displaced history.
+#[test]
+fn a_certificate_minted_before_an_equal_tip_restore_is_refused() {
+    let fixture = Fixture::new();
+    fixture.decide("objects", &[ok("obj-1")]);
+    fixture.project(&[claim("obj-1", 1, "decision_summary")], vec![]);
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = fixture
+        .kernel
+        .backup(BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
         .unwrap();
-    assert_eq!(resolution.completion, Completion::Complete);
+    let certificate = fixture.certificate();
+    let tip = fixture.tip();
+    fixture.kernel.restore(&manifest.destination_path).unwrap();
+    assert_eq!(fixture.tip(), tip, "the restore lands on the certified tip");
+    let budget = EvalBudget::unbounded();
     assert_eq!(
-        resolution.disqualified,
-        Some(Disqualification::ProjectionLag {
-            tip: restored_tip,
-            complete_through: certificate.complete_through_commit_seq,
-        }),
-        "a projection past the restored tip may describe rolled-back history"
+        fixture
+            .resolve(object_query("obj-1"), true, &certificate, bounds(), &budget)
+            .unwrap_err(),
+        ResolveRefusal::Certificate(CertificateRefusal::IncarnationMismatch),
+        "a certificate issued against the displaced history never reaches the rows"
     );
+    let fresh = fixture.certificate();
+    let resolution = fixture
+        .resolve(object_query("obj-1"), true, &fresh, bounds(), &budget)
+        .unwrap();
     assert!(
-        resolution.proof.is_none(),
-        "the restored kernel cannot certify the projected horizon"
-    );
-    assert_eq!(
-        resolution.retained.len(),
-        1,
-        "the eligible row still reaches hybrid"
+        resolution.proof.is_some(),
+        "a certificate issued against the restored history proves again"
     );
 }
 

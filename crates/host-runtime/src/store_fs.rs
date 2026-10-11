@@ -338,12 +338,95 @@ pub(crate) fn hash_copy_from(
     source: &OwnedFd,
     destination: Option<&OwnedFd>,
     cap: u64,
-    mut hasher: sha2::Sha256,
-    mut total: u64,
+    hasher: sha2::Sha256,
+    total: u64,
 ) -> io::Result<(u64, String)> {
     let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
+    hash_copy_with(source, destination, cap, hasher, total, &mut buffer)
+}
+
+/// Chunk size, and the number of chunks in flight, for [`hash_pipelined`].
+const PIPELINE_CHUNK_BYTES: usize = 1024 * 1024;
+const PIPELINE_CHUNKS: usize = 3;
+
+/// [`hash_copy`] without a destination, with one thread reading `source` while the calling thread hashes, so a
+/// large file costs about its hash time rather than its read time plus its hash time.
+///
+/// A reader thread that cannot start leaves the whole file to [`hash_copy`] on the calling thread.
+pub(crate) fn hash_pipelined(source: &OwnedFd, cap: u64) -> io::Result<(u64, String)> {
+    let (filled, chunks) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(PIPELINE_CHUNKS);
+    let (recycle, empties) = std::sync::mpsc::sync_channel::<Vec<u8>>(PIPELINE_CHUNKS);
+    for _ in 0..PIPELINE_CHUNKS {
+        recycle
+            .send(Vec::with_capacity(PIPELINE_CHUNK_BYTES))
+            .map_err(|_| io::Error::other("hash pipeline closed"))?;
+    }
+    std::thread::scope(|scope| {
+        let read_ahead = move || {
+            let mut total = 0u64;
+            while let Ok(mut chunk) = empties.recv() {
+                chunk.resize(PIPELINE_CHUNK_BYTES, 0);
+                let count = loop {
+                    match rustix::io::read(source, &mut chunk) {
+                        Err(rustix::io::Errno::INTR) => {}
+                        result => break result,
+                    }
+                };
+                let next = match count {
+                    Ok(count) => match total.checked_add(count as u64).filter(|sum| *sum <= cap) {
+                        Some(sum) => {
+                            total = sum;
+                            chunk.truncate(count);
+                            Ok(chunk)
+                        }
+                        None => Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "source grew past its cap",
+                        )),
+                    },
+                    Err(errno) => Err(errno.into()),
+                };
+                let last = next.as_ref().map_or(true, Vec::is_empty);
+                if filled.send(next).is_err() || last {
+                    return;
+                }
+            }
+        };
+        if std::thread::Builder::new()
+            .name("hash-read".to_owned())
+            .spawn_scoped(scope, read_ahead)
+            .is_err()
+        {
+            return hash_copy(source, None, cap);
+        }
+        let mut hasher = sha2::Sha256::new();
+        let mut total = 0u64;
+        loop {
+            let chunk = chunks
+                .recv()
+                .map_err(|_| io::Error::other("hash pipeline reader stopped"))??;
+            if chunk.is_empty() {
+                return Ok((total, hex(&hasher.finalize())));
+            }
+            hasher.update(&chunk);
+            total += chunk.len() as u64;
+            // The reader may already have finished, which drops the recycling receiver.
+            let _ = recycle.send(chunk);
+        }
+    })
+}
+
+/// [`hash_copy_from`] reading through caller-owned storage, so callers can reuse one buffer across files.
+pub(crate) fn hash_copy_with(
+    source: &OwnedFd,
+    destination: Option<&OwnedFd>,
+    cap: u64,
+    mut hasher: sha2::Sha256,
+    mut total: u64,
+    buffer: &mut [u8],
+) -> io::Result<(u64, String)> {
     loop {
-        let count = match rustix::io::read(source, &mut buffer) {
+        let count = match rustix::io::read(source, &mut *buffer) {
             Err(rustix::io::Errno::INTR) => continue,
             result => result?,
         };

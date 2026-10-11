@@ -913,34 +913,28 @@ fn incomplete_or_corrupt_receipts_and_missing_authority_refuse_acknowledgement()
 }
 
 #[test]
-fn tip_between_ack_and_deregister_retains_consumer_and_fixed_receipt() {
+fn a_tip_between_ack_and_deregister_retires_the_consumer_under_the_fixed_receipt() {
     let root = tempfile::tempdir().unwrap();
     let mut case = RetirementCase::new(root.path());
     drop(case.old.take());
     let memberships = barrier_memberships(root.path());
-    let result = case.retire(root.path(), &mut |event| {
+    case.retire(root.path(), &mut |event| {
         if event == RetirementEvent::Acknowledged {
             case.corpus
                 .kernel
                 .commit(intent("concurrent-tip"), |_| Ok(String::new()))
                 .unwrap();
         }
-    });
-    assert!(matches!(
-        result,
-        Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
-    ));
+    })
+    .unwrap();
     assert_eq!(
         case.corpus
             .kernel
             .outbox_consumer_checkpoint(CONSUMER)
             .unwrap(),
-        Some(case.target)
+        None
     );
-    assert!(matches!(
-        case.retire(root.path(), &mut |_| {}),
-        Err(BuildError::Kernel(kernel::KernelError::ConsumerPending))
-    ));
+    case.retire(root.path(), &mut |_| {}).unwrap();
     case.assert_receipt();
     assert_eq!(barrier_memberships(root.path()), memberships);
 }

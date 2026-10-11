@@ -1048,7 +1048,7 @@ fn interrupted_export_and_same_lineage_restore_complete_from_fresh_authority() {
     }
 }
 
-/// The kernel deregisters only a consumer at its tip, so a predecessor still registered behind a tip past the fixed target cannot retire there. The completion slice moves the target forward to that tip under its own episode, catches the selected family up, and retires the predecessor at the recertified target: the row published after selection is served, both consumers stand at the tip, and the record keeps its attempt, allowance, and deadline.
+/// A predecessor still registered behind a tip past the fixed target is retired at that tip, not at the fixed target. The completion slice moves the target forward to the tip under its own episode, catches the selected family up, and retires the predecessor at the recertified target: the row published after selection is served, both consumers stand at the tip, and the record keeps its attempt, allowance, and deadline.
 #[test]
 fn an_advancing_tip_recertifies_the_target_and_retires_the_predecessor_at_it() {
     let root = tempfile::tempdir().unwrap();
@@ -1113,9 +1113,9 @@ fn an_advancing_tip_recertifies_the_target_and_retires_the_predecessor_at_it() {
     assert_eq!(observed.checkpoint, tip);
 }
 
-/// A commit that lands after the predecessor's acknowledgement leaves its deregistration pending, with the receipt recorded at the first recertified target. The next slice recertifies the later tip under one more episode, replaces that receipt with one through the new target, and completes; a slice with no episode left refuses before recording anything.
+/// A commit that lands after the predecessor's acknowledgement is covered by the deregistering commit: `Envelope::retire_outbox_consumer` acknowledges the predecessor through the tip it finds and deregisters it in the same transaction. The slice completes with the recorded target and the receipt at the commit the selected family applied; the replacement's consumer still owes the later commit, which the Current family catches up to afterwards.
 #[test]
-fn a_tip_that_moves_during_retirement_is_recertified_by_the_next_slice() {
+fn a_tip_that_moves_during_retirement_completes_in_the_same_slice() {
     let root = tempfile::tempdir().unwrap();
     let corpus = Corpus::open(root.path());
     corpus.seed();
@@ -1126,47 +1126,9 @@ fn a_tip_that_moves_during_retirement_is_recertified_by_the_next_slice() {
     let mut selection = selector(root.path());
     finish(&mut selection, &corpus, &gate, &config);
     let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
-    corpus.publish("first-move", "recertified once");
+    corpus.publish("first-move", "recertified");
     let first = corpus.tip();
     let mut moved_during_retirement = None;
-    let pending = selection.recover_slice(
-        &corpus.kernel,
-        &gate,
-        &config,
-        &budget(Duration::from_secs(20)),
-        &mut |event| {
-            if event
-                == RecoveryEvent::Retirement(
-                    daemon::search_replacement::selection::retirement::RetirementEvent::Acknowledged,
-                )
-                && moved_during_retirement.is_none()
-            {
-                moved_during_retirement = Some(corpus.publish("second-move", "recertified twice"));
-            }
-        },
-    );
-    assert!(
-        matches!(
-            pending,
-            Err(RecoveryFailure::Blocked(BuildError::Kernel(
-                kernel::KernelError::ConsumerPending
-            )))
-        ),
-        "{pending:?}"
-    );
-    let second_object =
-        moved_during_retirement.expect("the retirement acknowledged the predecessor");
-    let interrupted = control(root.path());
-    assert_eq!(
-        interrupted.recovery_target,
-        Some(RecoveryTarget { commit_seq: first })
-    );
-    assert_eq!(
-        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
-        Some(first)
-    );
-    let second = corpus.tip();
-
     let mut events = Vec::new();
     let progress = selection
         .recover_slice(
@@ -1174,25 +1136,56 @@ fn a_tip_that_moves_during_retirement_is_recertified_by_the_next_slice() {
             &gate,
             &config,
             &budget(Duration::from_secs(20)),
-            &mut |event| events.push(event),
+            &mut |event| {
+                if event
+                    == RecoveryEvent::Retirement(
+                        daemon::search_replacement::selection::retirement::RetirementEvent::Acknowledged,
+                    )
+                    && moved_during_retirement.is_none()
+                {
+                    moved_during_retirement =
+                        Some(corpus.publish("second-move", "lands after the acknowledgement"));
+                }
+                events.push(event);
+            },
         )
         .unwrap();
     assert_eq!(progress, RecoveryProgress::Current);
-    assert!(events.contains(&RecoveryEvent::Recertified { target: second }));
+    assert!(
+        events.contains(&RecoveryEvent::Recertified { target: first }),
+        "{events:?}"
+    );
+    let second_object =
+        moved_during_retirement.expect("the retirement acknowledged the predecessor");
+    let second = corpus.tip();
+    assert!(second > first);
     let done = current(root.path());
     assert_eq!(
         done.recovery_target,
-        Some(RecoveryTarget { commit_seq: second })
+        Some(RecoveryTarget { commit_seq: first }),
+        "the recorded target stays at the commit the family applied"
     );
-    assert_eq!(done.episodes.consumed, fixed.episodes.consumed + 2);
+    assert_eq!(done.episodes.consumed, fixed.episodes.consumed + 1);
     assert_eq!(
         corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
-        None
+        None,
+        "the predecessor is deregistered past the commit it never read"
+    );
+    assert_eq!(certified_through(root.path(), CONSUMER), first);
+    assert_eq!(
+        corpus
+            .kernel
+            .outbox_consumer_checkpoint("next-consumer")
+            .unwrap(),
+        Some(first),
+        "the replacement's consumer still owes the commit after its target"
     );
     let reader = selection
         .pin(&corpus.kernel, &gate, &budget(Duration::from_secs(10)))
         .unwrap();
-    assert!(observe(&reader).rows.contains_key(&second_object));
+    let observed = observe(&reader);
+    assert!(!observed.rows.contains_key(&second_object), "{observed:?}");
+    assert_eq!(observed.checkpoint, first);
     let receipts: Vec<i64> = reader
         .read(&budget(Duration::from_secs(10)), |conn| {
             conn.prepare("SELECT through_commit_seq FROM retirement_receipts")?
@@ -1201,14 +1194,26 @@ fn a_tip_that_moves_during_retirement_is_recertified_by_the_next_slice() {
                 .map_err(retrieval::ProjectionError::from)
         })
         .unwrap();
-    assert_eq!(
-        receipts,
-        vec![second],
-        "the later certification replaced the first receipt"
-    );
+    assert_eq!(receipts, vec![first]);
 }
 
-/// A slice cancelled before its catch-up leaves the record's target at the commit the selected family applied. The next completion slice catches the family up, recertifies the tip, and completes. A disable at that point retires the predecessor through the recorded target, the commit the family applied, so its deregistration waits for the tip.
+/// The `certified_through` the kernel's deregistration audit records for `consumer`: the commit the owner certified the consumer's disposal through, as distinct from the tip it was acknowledged at.
+fn certified_through(root: &Path, consumer: &str) -> i64 {
+    rusqlite::Connection::open_with_flags(
+        root.join("kernel").join("kernel.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT json_extract(CAST(payload AS TEXT), '$.audit.certified_through') FROM change_event
+         WHERE change_kind='consumer_deregister' AND object_id=?1",
+        [consumer],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// A slice cancelled before its catch-up leaves the record's target at the commit the selected family applied. The next completion slice catches the family up, recertifies the tip, and completes. A disable at that point certifies the predecessor only through the recorded target, the commit the family applied; the deregistering commit acknowledges it through the tip and records that certified commit. The disabled family's own consumer, left at that commit behind the tip, keeps its deregistration pending.
 #[tokio::test]
 async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_applied() {
     for next in ["resume", "disable"] {
@@ -1269,15 +1274,41 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
         } else {
             gate.install(disable::cleanup_evaluator(root.path()));
             selection.begin_disable(&gate, &mut |_| {}).unwrap();
+            use daemon::search_replacement::selection::disable::DisableEvent;
+            use daemon::search_replacement::selection::retirement::RetirementEvent;
+            let mut acknowledged_through = None;
+            let mut events = Vec::new();
             let pending = selection
                 .reconcile_disabled(
                     &corpus.kernel,
                     &gate,
                     &config,
                     &budget(Duration::from_secs(20)),
-                    &mut |_| {},
+                    &mut |event| {
+                        if event == DisableEvent::Retirement(RetirementEvent::Acknowledged) {
+                            acknowledged_through =
+                                Some(corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap());
+                        }
+                        events.push(event);
+                    },
                 )
                 .await;
+            assert_eq!(
+                acknowledged_through,
+                Some(Some(seed_target)),
+                "the predecessor is acknowledged through the commit the family applied"
+            );
+            assert_eq!(
+                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+                None,
+                "the predecessor's deregistration acknowledges it through the tip"
+            );
+            assert_eq!(
+                certified_through(root.path(), CONSUMER),
+                seed_target,
+                "the deregistration certifies only the commit the family applied"
+            );
+            // The disabled family's own consumer stands at the applied commit, behind the tip, so its deregistration waits.
             assert!(
                 matches!(
                     pending,
@@ -1285,10 +1316,17 @@ async fn an_interrupted_recertification_resumes_or_retires_only_what_the_family_
                 ),
                 "{pending:?}"
             );
+            assert!(
+                events.contains(&DisableEvent::BeforeDeregister),
+                "{events:?}"
+            );
+            assert!(!events.contains(&DisableEvent::Deregistered), "{events:?}");
             assert_eq!(
-                corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
-                Some(seed_target),
-                "the predecessor is acknowledged through the commit the family applied"
+                corpus
+                    .kernel
+                    .outbox_consumer_checkpoint("next-consumer")
+                    .unwrap(),
+                Some(seed_target)
             );
         }
     }
@@ -1482,7 +1520,7 @@ fn an_episode_deadline_passing_after_retirement_is_refused_before_current() {
     ));
 }
 
-/// Recertification spends the attempt's episode, so a predecessor the tip keeps outrunning leaves the record blocked once its allowance is spent rather than retrying without bound.
+/// Recertification spends the attempt's episode, so a selected family that keeps trailing a tip its slices stop short of leaves the record blocked once its allowance is spent rather than retrying without bound. Every stopped slice leaves the recorded target at the commit the family applied.
 #[test]
 fn recertification_stops_when_the_allowance_is_spent() {
     let root = tempfile::tempdir().unwrap();
@@ -1495,40 +1533,38 @@ fn recertification_stops_when_the_allowance_is_spent() {
     let mut selection = selector(root.path());
     finish(&mut selection, &corpus, &gate, &config);
     let fixed = select_next(root.path(), &corpus, &gate, &mut selection, &mut config);
+    corpus.publish("outrun-0", "ahead of the selected family");
     let mut slices = 0;
     let refused = loop {
-        let key = format!("outrun-{slices}");
-        let result = selection.recover_slice(
-            &corpus.kernel,
-            &gate,
-            &config,
-            &budget(Duration::from_secs(20)),
-            &mut |event| {
-                if event
-                    == RecoveryEvent::Retirement(
-                        daemon::search_replacement::selection::retirement::RetirementEvent::Acknowledged,
-                    )
-                {
-                    corpus.publish(&key, "outruns the retirement");
+        let key = format!("outrun-{}", slices + 1);
+        let slice = budget(Duration::from_secs(20));
+        let result =
+            selection.recover_slice(&corpus.kernel, &gate, &config, &slice, &mut |event| {
+                if matches!(event, RecoveryEvent::BeforeCatchUp { .. }) {
+                    corpus.publish(&key, "lands before the catch-up is stopped");
+                    slice.cancel();
                 }
-            },
-        );
+            });
         slices += 1;
         match result {
             Err(RecoveryFailure::Blocked(BuildError::Intent(
                 daemon::projection_lifecycle::IntentRefusal::AllowanceExhausted,
             ))) => break slices,
-            Err(RecoveryFailure::Blocked(BuildError::Kernel(
-                kernel::KernelError::ConsumerPending,
-            ))) => {}
+            Err(RecoveryFailure::Blocked(BuildError::Expired)) => {}
             other => panic!("slice {slices}: {other:?}"),
         }
+        assert_eq!(
+            control(root.path()).recovery_target,
+            fixed.recovery_target,
+            "slice {slices}: the target moves only after the family applied it"
+        );
         assert!(slices <= 4, "the allowance did not bound recertification");
     };
     let left = fixed.episodes.allowance - fixed.episodes.consumed;
     assert_eq!(refused, usize::try_from(left).unwrap() + 1);
     let blocked = control(root.path());
     assert_eq!(blocked.episodes.consumed, blocked.episodes.allowance);
+    assert_eq!(blocked.recovery_target, fixed.recovery_target);
     assert!(
         corpus
             .kernel

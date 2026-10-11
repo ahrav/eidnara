@@ -137,7 +137,10 @@ describe("Pi daemon transport across runtime teardown", () => {
                 ),
             },
             hasUI: true,
-            ui: { setStatus: args.setStatus ?? mock(() => undefined) },
+            ui: {
+                setStatus: args.setStatus ?? mock(() => undefined),
+                notify: mock(() => undefined),
+            },
         };
     }
 

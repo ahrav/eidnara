@@ -14,7 +14,8 @@ use kernel::applicability::EvalBudget;
 use kernel::{ArtifactDestination, CommitReadIncarnation, KernelStore, ProjectScope};
 use retrieval::batch::{VectorGeneration, read_checkpoint};
 use retrieval::coverage::{
-    CoverageBounds, CoverageReport, observe, verify_active_visiting, verify_pages,
+    CoverageBounds, CoverageReport, CoverageUnavailable, observe, verify_active_visiting,
+    verify_pages,
 };
 use retrieval::exact::{CompletenessCertificate, EXTRACTION_VERSION};
 use retrieval::{ProjectionError, ProjectionIdentity};
@@ -174,7 +175,7 @@ pub struct SearchSelection {
     bounds: CoverageBounds,
     selected: ArcSwapOption<SelectedFamily>,
     maintenance: Option<disable::Maintenance>,
-    recovery_incarnation: Option<CommitReadIncarnation>,
+    recovery_incarnation: Option<(String, CommitReadIncarnation)>,
     #[cfg(feature = "test-support")]
     disable_barrier: Option<Arc<dyn Fn(crate::projection_lifecycle::WriteBarrier) + Send + Sync>>,
     #[cfg(feature = "test-support")]
@@ -225,7 +226,7 @@ impl SearchSelection {
     ///
     /// # Errors
     ///
-    /// Returns `BuildError::Invalid` when no family is selected or the family is unavailable or quarantined; propagates errors from `deadline` and `read_within`.
+    /// Returns `BuildError::Invalid` when no family is selected, the family is unavailable or quarantined, or a class exceeds the family's coverage bounds; propagates errors from `deadline` and `read_within`. Any other unavailable observation returns `ProjectionError::CorruptRow`, and an error `family_damage` classifies quarantines the family before it returns.
     pub fn observe_selected(&self, budget: &EvalBudget) -> Result<CoverageReport, BuildError> {
         let family = self
             .selected
@@ -238,34 +239,52 @@ impl SearchSelection {
         {
             return Err(BuildError::Invalid("selected family unavailable"));
         }
-        Ok(family.projection.read_within(deadline(budget)?, |conn| {
-            observe(
-                conn,
-                &family.certificate.seed.kernel_incarnation_id,
-                &family.generation(),
-                family.bounds,
-            )?
-            .map_err(|_| ProjectionError::CorruptRow)
-        })?)
+        let observed = family
+            .projection
+            .read_within(deadline(budget)?, |conn| {
+                observe(
+                    conn,
+                    &family.certificate.seed.kernel_incarnation_id,
+                    &family.generation(),
+                    family.bounds,
+                )
+            })
+            .map_err(BuildError::from)
+            .and_then(|observed| match observed {
+                Ok(report) => Ok(report),
+                Err(
+                    CoverageUnavailable::OverBound { .. }
+                    | CoverageUnavailable::TombstonedOverBound { .. },
+                ) => Err(BuildError::Invalid(
+                    "coverage exceeds its observation bound",
+                )),
+                Err(_) => Err(ProjectionError::CorruptRow.into()),
+            });
+        if let Err(error) = &observed
+            && let Some(kind) = family_damage(error)
+        {
+            family.projection.enter_quarantine(kind, error);
+        }
+        observed
     }
 
     /// Judges the selected family under the gate and the kernel without rehashing its seed or rereading its certificate.
     ///
     /// # Errors
     ///
-    /// Returns the gate's denial, the kernel mismatch, or `BuildError::Invalid` when no family is selected or it is quarantined.
+    /// Returns the kernel mismatch, the gate's denial, or `BuildError::Invalid` when no family is selected or it is quarantined. The kernel mismatch takes precedence over the gate's denial, so a selected checkpoint beyond a restored kernel's tip earns its rebuild.
     pub fn check_selected(
         &self,
         kernel: &KernelStore,
         gate: &HookGate,
         budget: &EvalBudget,
     ) -> Result<(), BuildError> {
-        self.admit(gate, budget)?;
         let family = self
             .selected
             .load_full()
             .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
         family.check_kernel(kernel, budget)?;
+        self.admit(gate, budget)?;
         if family.projection.quarantine().is_some() {
             return Err(BuildError::Invalid("search quarantined; rebuild required"));
         }
@@ -291,6 +310,15 @@ impl SearchSelection {
             .load()
             .as_ref()
             .is_some_and(|family| family.projection.quarantine().is_some())
+    }
+
+    pub fn selected_over_another_kernel(&self, kernel: &KernelStore, budget: &EvalBudget) -> bool {
+        self.selected.load().as_ref().is_some_and(|family| {
+            matches!(
+                family.check_kernel(kernel, budget),
+                Err(BuildError::Mutation(ProjectionError::IdentityMismatch))
+            )
+        })
     }
 
     pub fn pin(
@@ -324,6 +352,15 @@ impl SearchSelection {
         self.admit_reader(gate)
     }
 
+    pub(crate) fn admit_selected_hooks(&self, gate: &HookGate) -> Result<(), BuildError> {
+        self.admit_reader(gate)?;
+        let family = self
+            .selected
+            .load_full()
+            .ok_or(BuildError::Invalid("search unavailable; rebuild required"))?;
+        admit_transition_hook(gate, &family.certificate)
+    }
+
     /// The admission every reader of this manager's family takes: the gate's hook admission for this data home, then the family's limits.
     ///
     /// # Errors
@@ -331,10 +368,10 @@ impl SearchSelection {
     /// Returns the gate's denial.
     pub(crate) fn admit_reader(&self, gate: &HookGate) -> Result<Admission, BuildError> {
         gate.require_selection_home(&self.data_home)?;
-        let grant = gate.admit(ProjectionHook::EmbeddingBootstrap, EntryPoint::Reload)?;
-        gate.check_limits(
-            &grant,
-            &InvalidationIdentity::from(&self.identity),
+        Ok(gate.admit_within_limits(
+            ProjectionHook::EmbeddingBootstrap,
+            EntryPoint::Reload,
+            &self.identity,
             &[
                 ("local_transaction_rows", self.bounds.max_rows() as u64),
                 (
@@ -342,8 +379,7 @@ impl SearchSelection {
                     self.bounds.max_live_per_class.get() as u64,
                 ),
             ],
-        )?;
-        Ok(grant)
+        )?)
     }
 
     /// Publishes the durable pointer before swapping the in-process family; errors require reconciliation through `reopen`.
@@ -531,8 +567,6 @@ impl SearchSelection {
         budget: &EvalBudget,
         transaction: &LifecycleTransactionLock,
     ) -> Result<Option<Validated>, BuildError> {
-        // Refusing an infinite budget here keeps `family_damage`'s `Invalid` arm exact: past this
-        // point the only `Invalid` `validate_family` can raise is one of its own prefix checks.
         self.admit(gate, budget)?;
         let store = GenerationStore::open(Some(&self.data_home))?;
         match store.reconcile_search(transaction)? {
@@ -731,7 +765,7 @@ impl SearchSelection {
                     .capture_commit_read_target_within_budget(budget)?
                     .through_commit
         {
-            return Err(BuildError::Invalid(
+            return Err(BuildError::FamilyPrefix(
                 "active checkpoint differs from certified prefix",
             ));
         }
@@ -742,7 +776,9 @@ impl SearchSelection {
         if ack.is_none_or(|ack| {
             ack < seed.checkpoint_commit_seq || ack > report.checkpoint.checkpoint_commit_seq
         }) {
-            return Err(BuildError::Invalid("selected consumer checkpoint mismatch"));
+            return Err(BuildError::FamilyPrefix(
+                "selected consumer checkpoint mismatch",
+            ));
         }
         for class in kernel::source_identity::OccurrenceClass::ALL {
             let inventory = kernel.live_source_descriptors(
@@ -753,7 +789,9 @@ impl SearchSelection {
                 budget,
             )?;
             if inventory.next.is_some() || inventory.rows.len() != report.class(class).lexical {
-                return Err(BuildError::Invalid("canonical prefix inventory mismatch"));
+                return Err(BuildError::FamilyPrefix(
+                    "canonical prefix inventory mismatch",
+                ));
             }
             for source in inventory.rows {
                 if occurrences
@@ -1198,6 +1236,7 @@ impl SearchReader {
         }
         Ok(CompletenessCertificate {
             canonical_incarnation_id: observed.database_incarnation_id,
+            kernel_incarnation: observed.target.incarnation,
             inventory_epoch: self.inventory_epoch(kernel),
             identity_contract_version: seed.identity_contract_version.clone(),
             extraction_version: EXTRACTION_VERSION,
@@ -1274,18 +1313,19 @@ fn family_damage(error: &BuildError) -> Option<QuarantineKind> {
         BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow) => {
             Some(QuarantineKind::Integrity)
         }
-        BuildError::Invalid(_) => Some(QuarantineKind::Integrity),
+        BuildError::FamilyPrefix(_) => Some(QuarantineKind::Integrity),
         _ => None,
     }
 }
 
-/// `damages_family` identifies errors that report integrity damage to a family's own database or rows: a store integrity failure, a lost connection, or a stored row that contradicts itself.
+/// `damages_family` identifies errors that report integrity damage to a family's own database or rows: a store integrity failure, a lost connection, a stored row that contradicts itself, or a stored prefix that contradicts the kernel's census of it.
 pub(crate) fn damages_family(error: &BuildError) -> bool {
     match error {
         BuildError::Projection(SearchProjectionError::Store(store)) => {
             matches!(classify_store_failure(store), StoreFailure::Integrity)
         }
-        BuildError::Projection(SearchProjectionError::Connection(_)) => true,
+        BuildError::Projection(SearchProjectionError::Connection(_))
+        | BuildError::FamilyPrefix(_) => true,
         BuildError::Projection(SearchProjectionError::Projection(error))
         | BuildError::Mutation(error) => matches!(classify(error), Refusal::Integrity),
         _ => false,
@@ -1368,8 +1408,14 @@ mod tests {
             BuildError::Projection(SearchProjectionError::Projection(
                 ProjectionError::CorruptRow,
             )),
+            BuildError::Projection(SearchProjectionError::Connection("lost".to_owned())),
+            BuildError::FamilyPrefix("canonical prefix inventory mismatch"),
         ] {
             assert!(damages_family(&damaged), "{damaged:?}");
+            assert!(
+                matches!(family_damage(&damaged), Some(QuarantineKind::Integrity)),
+                "the reopen quarantine agrees: {damaged:?}"
+            );
         }
         for refused in [
             BuildError::Kernel(kernel::KernelError::CorruptCanonicalRow),

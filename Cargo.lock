@@ -898,6 +898,7 @@ dependencies = [
  "rcgen",
  "regex",
  "retrieval",
+ "ring",
  "rusqlite",
  "rustix",
  "rustls",

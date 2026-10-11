@@ -7,7 +7,13 @@
 //
 // It replaces the provider-native output-token fields and any explicitly
 // requested temperature. Generation revision 2 can leave temperature absent
-// so reasoning-only models keep their native decoding behavior. The hook preserves every
+// so reasoning-only models keep their native decoding behavior. A model whose
+// Pi registry entry sets `compat.supportsTemperature: false` receives no
+// temperature at all: the hook sends none, as Pi's own provider does, and
+// removes any `temperature` an earlier handler left in a spelling it owns,
+// since that API refuses the field and a refused request costs a whole
+// retried run.
+// The hook preserves every
 // unrelated payload field, and REJECTS (throws, failing the request)
 // payload shapes it does not recognize — silently dropping generation
 // controls would let a provider default exceed the caller's budget.
@@ -32,11 +38,24 @@ function isPlainObject(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Pi's model registry marks models whose API refuses `temperature`. A context
+// that cannot report its model counts as accepting, so the requested
+// temperature is sent and the host's refusal retry still applies.
+function modelRefusesTemperature(ctx) {
+	try {
+		return ctx?.model?.compat?.supportsTemperature === false;
+	} catch {
+		return false;
+	}
+}
+
 export default function (pi) {
-	pi.on("before_provider_request", (event) => {
+	pi.on("before_provider_request", (event, ctx) => {
 		const maxOutputTokens = requiredNumber(MAX_OUTPUT_TOKENS_ENV);
-		const temperature = process.env[TEMPERATURE_ENV] === undefined
+		const requestedTemperature = process.env[TEMPERATURE_ENV] === undefined
 			? undefined : requiredNumber(TEMPERATURE_ENV);
+		const refusesTemperature = modelRefusesTemperature(ctx);
+		const temperature = refusesTemperature ? undefined : requestedTemperature;
 		const payload = event.payload;
 		if (!isPlainObject(payload)) {
 			throw new Error(
@@ -82,12 +101,18 @@ export default function (pi) {
 		if (spellings.length > 0 && temperature !== undefined) {
 			next.temperature = temperature;
 		}
+		if (refusesTemperature) {
+			delete next.temperature;
+		}
 		if (generationConfig !== null) {
 			next.generationConfig = {
 				...generationConfig,
 				maxOutputTokens,
 				...(temperature === undefined ? {} : { temperature }),
 			};
+			if (refusesTemperature) {
+				delete next.generationConfig.temperature;
+			}
 		}
 		if (inferenceConfig !== null) {
 			next.inferenceConfig = {
@@ -95,6 +120,9 @@ export default function (pi) {
 				maxTokens: maxOutputTokens,
 				...(temperature === undefined ? {} : { temperature }),
 			};
+			if (refusesTemperature) {
+				delete next.inferenceConfig.temperature;
+			}
 		}
 		return next;
 	});

@@ -24,6 +24,7 @@ use daemon::search_replacement::BuildError;
 use daemon::search_replacement::selection::SearchReader;
 use daemon::search_replacement::selection::disable::DisableEvent;
 use daemon::search_replacement::selection::recovery::RecoveryProgress;
+use daemon::search_writer::QuarantineKind;
 use host_runtime::lifecycle::LifecycleTransactionLock;
 use host_runtime::local_embeddings::LaneInfo;
 use host_runtime::local_embeddings::{LocalEmbeddingsComponent, LocalEmbeddingsLimits};
@@ -118,6 +119,28 @@ fn identity_constants_match_the_construction_contract() {
         PROJECTION_POLICY_VERSION,
         support::embedding_fixtures::POLICY
     );
+}
+
+#[test]
+fn every_recorded_cause_keeps_the_name_a_lifecycle_record_stores() {
+    for (cause, name) in [
+        (Cause::Corruption, "Corruption"),
+        (Cause::SchemaMismatch, "SchemaMismatch"),
+        (Cause::TokenizerMismatch, "TokenizerMismatch"),
+        (Cause::AnalysisMismatch, "AnalysisMismatch"),
+        (Cause::EmbeddingModelMismatch, "EmbeddingModelMismatch"),
+        (Cause::ProjectionPolicyMismatch, "ProjectionPolicyMismatch"),
+        (Cause::IdentityContractMismatch, "IdentityContractMismatch"),
+        (Cause::LimitProtocolMismatch, "LimitProtocolMismatch"),
+        (Cause::KernelRestored, "KernelRestored"),
+        (Cause::DeletedAfterPruning, "DeletedAfterPruning"),
+        (Cause::DisabledRecovery, "DisabledRecovery"),
+        (Cause::Registration, "Registration"),
+        (Cause::CatchUpHoldLost, "CatchUpHoldLost"),
+    ] {
+        assert_eq!(serde_json::to_value(cause).unwrap(), name);
+        assert_eq!(serde_json::from_value::<Cause>(name.into()).unwrap(), cause);
+    }
 }
 
 /// AC1, AC2: without records or a ready lane the owner closes admission and refuses requests; with both, a recorded rebuild reaches Current only across successive slices, the selected family serves pinned reads whose coverage the gate then judges, and withholding the second slice leaves the record short of Current.
@@ -1184,6 +1207,205 @@ async fn a_refused_manifest_closes_admission_before_maintenance_drains() {
     owner.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_pin_refused_while_maintenance_drains_names_the_records_refusal() {
+    use support::embedding_fixtures::PROJECT;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(home, Arc::clone(&corpus.kernel), lane())
+        .with_roster(Arc::new(|| {
+            vec![("project:a".to_owned(), ProjectScope::new(PROJECT).unwrap())]
+        }));
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    drive(&owner, 40, || published(&owner).len() == 1).await;
+    assert!(owner.maintenance().is_some());
+
+    support::projection_gate::write_record(
+        home,
+        daemon::projection_admission::MANIFEST_RECORD,
+        b"{\"protocol_version\": malformed",
+    );
+    let outcome = owner.run_slice(&slice_budget());
+    let SliceOutcome::RotateMaintenance(handle) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(owner.admission_state(), Err("records_malformed"));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the gate is closed");
+    assert_eq!(owner.pin_refusal(&refused), "records_malformed");
+    owner.stop_maintenance(&handle).await.unwrap();
+    owner.shutdown().await.unwrap();
+}
+
+#[test]
+fn a_slice_refused_on_the_lane_names_the_lane_in_status_and_pin_refusals() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = SearchLifecycleOwner::for_home(
+        home,
+        Arc::clone(&corpus.kernel),
+        LocalEmbeddingsComponent::unsupported("no lane"),
+    );
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Closed(SpecRefusal::LaneNotReady("disabled"))
+    ));
+    assert_eq!(owner.admission_state(), Err("lane_not_ready"));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("no family is selected");
+    assert_eq!(owner.pin_refusal(&refused), "lane_not_ready");
+
+    std::fs::remove_dir_all(home.join(ADMISSION_DIR)).unwrap();
+    assert!(matches!(
+        owner.request(&rebuild(home), now(), &slice_budget()),
+        Err(BuildError::Intent(
+            daemon::projection_lifecycle::IntentRefusal::Denied(Denial::NoManifest)
+        ))
+    ));
+    assert_eq!(owner.admission_state(), Err("no_manifest"));
+}
+
+#[test]
+fn a_kernel_tip_unread_after_preparation_is_named_in_status() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    assert_eq!(owner.admission_state(), Err("no_family"));
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let budget = EvalBudget::new(
+        Some(Instant::now() + Duration::from_secs(20)),
+        Arc::clone(&cancel),
+    );
+    owner.tap_slice_events_for_test(move |event| {
+        if matches!(event, SliceEvent::Prepared { .. }) {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let outcome = owner.run_slice(&budget);
+    assert!(matches!(outcome, SliceOutcome::Blocked(_)), "{outcome:?}");
+    assert_eq!(owner.admission_state(), Err("kernel_unreadable"));
+}
+
+#[test]
+fn status_reports_no_family_until_a_family_is_selected() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    assert!(matches!(
+        owner.run_slice(&slice_budget()),
+        SliceOutcome::Unregistered
+    ));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("no family is selected");
+    assert_eq!(owner.pin_refusal(&refused), "no_family");
+    assert_eq!(owner.admission_state(), Err("no_family"));
+}
+
+#[test]
+fn a_selected_family_that_refuses_its_pin_is_named_apart_from_no_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    let staged = match control(home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.pin(&slice_budget()).unwrap();
+
+    std::fs::remove_file(
+        home.join("search-families")
+            .join(&staged)
+            .join("bootstrap.json"),
+    )
+    .unwrap();
+    assert_eq!(owner.admission_state(), Ok(()));
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the certificate is gone");
+    assert_eq!(owner.pin_refusal(&refused), "family_refused");
+}
+
+#[test]
+fn a_refused_request_over_an_unbounded_record_names_the_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        let _ = owner.run_slice(&slice_budget());
+    }
+    assert!(matches!(control(home), ControlState::Current(_)));
+
+    let identity = identity(&kernel_incarnation_id(home));
+    write_records(
+        home,
+        &manifest_json_with(&identity, &ProjectionHook::ALL, &[("retry_attempts", 2)]),
+        &campaign_json(&identity),
+    );
+    let mut foreign = rebuild(home);
+    foreign.kernel_incarnation_id = "another-kernel".to_owned();
+    assert!(matches!(
+        owner.request(&foreign, now(), &slice_budget()),
+        Err(BuildError::Invalid(_))
+    ));
+    assert_eq!(owner.admission_state(), Err("limits_unbounded"));
+}
+
 /// A Current family whose catch-up hold died with the earlier lease asks for a rebuild and still rotates its supervisor when the roster changes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn a_blocked_catch_up_still_reconciles_maintenance() {
@@ -1474,6 +1696,74 @@ async fn a_released_catch_up_hold_asks_for_a_rebuild_within_one_lease() {
     owner.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_commit_between_selection_and_retirement_still_completes_the_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let first = corpus.publish("a-row", "alpha text");
+    records(home);
+    converge_once(home, &corpus).await;
+    let (before, _) = current_attempt(home).unwrap();
+
+    drop(corpus);
+    let corpus = Corpus::open(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    corpus.publish("later", "later text");
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::CatchUpHoldLost)),
+        "{outcome:?}"
+    );
+    owner
+        .request_rebuild(Cause::CatchUpHoldLost, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    let mut selected = false;
+    for _ in 0..10 {
+        match owner.run_slice(&slice_budget()) {
+            SliceOutcome::Advanced(RecoveryProgress::Selected) => {
+                selected = true;
+                break;
+            }
+            SliceOutcome::Blocked(reason) => panic!("blocked: {reason}"),
+            _ => {}
+        }
+    }
+    assert!(selected, "the replacement was selected");
+    let raced = corpus.publish("raced", "raced text");
+
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(
+        slices < 20,
+        "the rebuild reached Current past the raced commit"
+    );
+    assert_eq!(
+        corpus.kernel.outbox_consumer_checkpoint(CONSUMER).unwrap(),
+        None,
+        "retirement deregisters the replaced family's consumer"
+    );
+    let mut settled = false;
+    for _ in 0..10 {
+        if matches!(owner.run_slice(&slice_budget()), SliceOutcome::Current) {
+            settled = true;
+            break;
+        }
+    }
+    assert!(settled, "the rebuilt family settles at the tip");
+    let indexed = indexed_objects(&owner);
+    assert!(
+        indexed.contains(&first) && indexed.contains(&raced),
+        "{indexed:?}"
+    );
+    owner.shutdown().await.unwrap();
+}
+
 /// Changes one dimension of the lane and of the identity its records name.
 type LaneChange = fn(&mut LaneInfo, &mut ProjectionIdentity);
 
@@ -1602,6 +1892,358 @@ async fn a_restart_over_a_damaged_family_rebuilds_for_corruption() {
         .unwrap();
     assert_eq!(damaged, 0, "the rebuilt family serves the canonical bytes");
     drop(reader);
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restart_over_a_family_missing_a_canonical_row_rebuilds_for_corruption() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let first = corpus.publish("a-row", "alpha text");
+    let second = corpus.publish("b-row", "beta text");
+    records(home);
+    let path = converge_once(home, &corpus).await;
+    let (before, _) = current_attempt(home).unwrap();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.execute_batch(&format!(
+        "CREATE TEMP TABLE lost AS SELECT occurrence_id FROM occurrences WHERE source_object_id='{second}';
+         DELETE FROM exact_associations WHERE occurrence_id IN (SELECT occurrence_id FROM lost);
+         DELETE FROM occurrence_vectors WHERE occurrence_id IN (SELECT occurrence_id FROM lost);
+         DELETE FROM embedding_jobs WHERE occurrence_id IN (SELECT occurrence_id FROM lost);
+         DELETE FROM occurrence_tombstones WHERE occurrence_id IN (SELECT occurrence_id FROM lost);
+         DELETE FROM lexical WHERE occurrence_id IN (SELECT occurrence_id FROM lost);
+         DELETE FROM occurrences WHERE occurrence_id IN (SELECT occurrence_id FROM lost);"
+    ))
+    .unwrap();
+    assert_eq!(raw.changes(), 1, "one occurrence was removed");
+    drop(raw);
+
+    let owner = owner(home, &corpus.kernel);
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+        "{outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the corruption rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::Corruption);
+    let indexed = indexed_objects(&owner);
+    assert!(
+        indexed.contains(&first) && indexed.contains(&second),
+        "{indexed:?}"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_family_quarantined_while_selected_records_its_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let first = corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let (before, _) = current_attempt(home).unwrap();
+    let reader = owner.pin(&slice_budget()).unwrap();
+    let path = reader.projection().path().to_owned();
+    reader
+        .projection()
+        .enter_quarantine_for_test(QuarantineKind::Integrity, &"damaged in place");
+    drop(reader);
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+        "{outcome:?}"
+    );
+    owner
+        .request_rebuild(Cause::Corruption, now(), &slice_budget())
+        .unwrap()
+        .expect("a Current record takes the rebuild");
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the corruption rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::Corruption);
+    assert!(indexed_objects(&owner).contains(&first));
+    assert_ne!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the rebuilt family is a new database"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_quarantined_family_keeps_earning_its_rebuild_until_one_is_recorded() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("a-row", "alpha text");
+    records(home);
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let reader = owner.pin(&slice_budget()).unwrap();
+    reader
+        .projection()
+        .enter_quarantine_for_test(QuarantineKind::Integrity, &"damaged in place");
+    drop(reader);
+
+    for slice in 0..3 {
+        let outcome = owner.run_slice(&slice_budget());
+        assert!(
+            matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+            "slice {slice} without a recorded rebuild: {outcome:?}"
+        );
+        assert!(
+            owner.pin(&slice_budget()).is_err(),
+            "slice {slice} serves the quarantined family"
+        );
+    }
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_same_lineage_kernel_restore_records_a_rebuild_of_the_current_family() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restore_behind_the_selected_checkpoint_records_a_kernel_restore_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::CaughtUp(_)),
+        "catch-up moves the family past the backup: {outcome:?}"
+    );
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel behind the selected checkpoint earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_restore_predating_the_current_consumer_still_rebuilds_to_current() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let backup_dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(backup_dir.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let manifest = corpus
+        .kernel
+        .backup(kernel::BackupRequest {
+            destination_directory: backup_dir.path().to_path_buf(),
+            deadline: Instant::now() + Duration::from_secs(10),
+            capture_pin_expires_at: None,
+        })
+        .unwrap();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    corpus.kernel.restore(&manifest.destination_path).unwrap();
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::KernelRestored)),
+        "a restored kernel earns a rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the rebuild reached Current");
+    assert!(owner.pin(&slice_budget()).is_ok());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_whose_coverage_turns_corrupt_records_its_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    let owner = current_owner(home, &corpus);
+    let (before, _) = current_attempt(home).unwrap();
+    let path = owner
+        .pin(&slice_budget())
+        .unwrap()
+        .projection()
+        .path()
+        .to_owned();
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.busy_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        raw.execute("DELETE FROM projection_checkpoint", [])
+            .unwrap(),
+        1,
+        "the open family loses its checkpoint row"
+    );
+    drop(raw);
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Rebuild(Cause::Corruption)),
+        "a family whose coverage cannot be observed earns a corruption rebuild: {outcome:?}"
+    );
+    let slices = drive_recording(&owner, 20, || {
+        current_attempt(home).is_some_and(|(attempt, _)| attempt != before)
+    })
+    .await;
+    assert!(slices < 20, "the corruption rebuild reached Current");
+    assert_eq!(current_attempt(home).unwrap().1, Cause::Corruption);
+    assert_ne!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the rebuilt family is a new database"
+    );
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_current_family_over_its_coverage_bound_blocks_without_a_corruption_rebuild() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    let corpus = Corpus::open(home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    let identity = identity(&kernel_incarnation_id(home));
+    let bounded = |rows| {
+        manifest_json_with(
+            &identity,
+            &ProjectionHook::ALL,
+            &[("export_page_rows", rows)],
+        )
+    };
+    write_records(home, &bounded(1), &campaign_json(&identity));
+    let owner = owner(home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(home), now(), &slice_budget())
+        .unwrap();
+    let slices = drive(&owner, 20, || current_attempt(home).is_some()).await;
+    assert!(slices < 20, "the rebuild reached Current");
+    let (before, _) = current_attempt(home).unwrap();
+    let projection = Arc::clone(owner.pin(&slice_budget()).unwrap().projection());
+    let path = projection.path().to_owned();
+
+    for index in 0..2 {
+        corpus.publish(&format!("later-{index}"), "later text");
+    }
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::CaughtUp(_)),
+        "catch-up moves the family past its one-row class bound: {outcome:?}"
+    );
+
+    let outcome = owner.run_slice(&slice_budget());
+    assert!(
+        matches!(outcome, SliceOutcome::Blocked(_)),
+        "a family over its coverage bound is blocked: {outcome:?}"
+    );
+    assert!(
+        projection.quarantine().is_none(),
+        "a coverage bound refusal leaves the family unquarantined"
+    );
+    assert_eq!(current_attempt(home).unwrap().0, before);
+    drop(projection);
+
+    write_records(home, &bounded(64), &campaign_json(&identity));
+    let slices = drive(&owner, 20, || owner.pin(&slice_budget()).is_ok()).await;
+    assert!(slices < 20, "the raised bound serves the family again");
+    assert_eq!(
+        owner.pin(&slice_budget()).unwrap().projection().path(),
+        path,
+        "the same family serves after the reload"
+    );
+    assert_eq!(current_attempt(home).unwrap().0, before);
     owner.shutdown().await.unwrap();
 }
 
@@ -4551,6 +5193,70 @@ fn admission_recovers_in_process_after_the_gate_denies_the_selected_family() {
     owner.pin(&slice_budget()).unwrap();
 }
 
+/// A family recovered under `AuthorizedRecovery` reads through `EmbeddingBackfill`; the status surface judges that hook as a reader's pin does, so disabling it in the manifest refuses both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_judges_the_recovered_family_on_its_transition_hook() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().to_owned();
+    let corpus = Corpus::open(&home);
+    corpus.seed();
+    corpus.publish("kept", "kept text");
+    records(&home);
+    let owner = owner(&home, &corpus.kernel);
+    let _ = owner.run_slice(&slice_budget());
+    owner
+        .request(&rebuild(&home), now(), &slice_budget())
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    let staged = match control(&home) {
+        ControlState::Current(intent) => intent.staged_seed_digest.unwrap(),
+        state => panic!("not Current: {state:?}"),
+    };
+    owner.disable(&slice_budget(), &mut |_| {}).await.unwrap();
+    let mut recovery = rebuild(&home);
+    recovery.transition = Transition::AuthorizedRecovery;
+    recovery.cause = Cause::DisabledRecovery;
+    recovery.selected_generation = staged;
+    recovery.attempt_id = "recovery-attempt".to_owned();
+    recovery.consumer.consumer_id = "search-recovered".to_owned();
+    recovery.consumer.generation_id = "gen-2".to_owned();
+    recovery.authorization_ref = Some("operator:recovery-ticket".to_owned());
+    owner.request(&recovery, now(), &slice_budget()).unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            owner.run_slice(&slice_budget()),
+            SliceOutcome::Advanced(_)
+        ));
+    }
+    assert!(matches!(control(&home), ControlState::Current(_)));
+    assert_eq!(owner.admission_state(), Ok(()));
+    owner.pin(&slice_budget()).unwrap();
+
+    let identity = identity(&kernel_incarnation_id(&home));
+    let without_backfill: Vec<ProjectionHook> = ProjectionHook::ALL
+        .iter()
+        .copied()
+        .filter(|hook| *hook != ProjectionHook::EmbeddingBackfill)
+        .collect();
+    write_records(
+        &home,
+        &manifest_json(&identity, &without_backfill),
+        &campaign_json(&identity),
+    );
+    let _ = owner.run_slice(&slice_budget());
+    let refused = owner
+        .pin(&slice_budget())
+        .err()
+        .expect("the disabled transition hook refuses the pin");
+    assert_eq!(owner.pin_refusal(&refused), "hook_disabled");
+    assert_eq!(owner.admission_state(), Err("hook_disabled"));
+}
+
 /// An active record past its deadline starts nothing. The slice still judges admission on the current observation, so it denies a selected family that trails the kernel instead of serving it on pre-deadline evidence.
 #[test]
 fn an_expired_active_record_is_still_judged_on_the_current_observation() {
@@ -4790,7 +5496,12 @@ fn limits_too_small_to_bound_a_slice_refuse_the_specification() {
             "{overrides:?}: {outcome:?}"
         );
         assert!(matches!(control(home), ControlState::Intent(_)));
-        assert!(owner.pin(&slice_budget()).is_err());
+        assert_eq!(owner.admission_state(), Err("limits_unbounded"));
+        let refused = owner
+            .pin(&slice_budget())
+            .err()
+            .expect("the gate is closed");
+        assert_eq!(owner.pin_refusal(&refused), "limits_unbounded");
     }
 }
 
@@ -5299,6 +6010,8 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         &manifest_json(&identity, &ProjectionHook::ALL),
         &campaign_json(&identity),
     );
+    // One handle polls the record: `read` takes no lock, while each `open` takes the directory's flock and can refuse a daemon write that spends an episode of the record's allowance.
+    let lifecycle = support::flock::open_lifecycle(&home);
     let daemon = KernelDaemon::start_with(support::kernel_daemon::StartOptions {
         data: Some(data),
         claim_sources: true,
@@ -5307,9 +6020,7 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
     .await;
     let started = Instant::now();
     let current = loop {
-        if let Ok(lifecycle) = ProjectionLifecycle::open(&home)
-            && let ControlState::Current(intent) = lifecycle.read()
-        {
+        if let ControlState::Current(intent) = lifecycle.read() {
             break intent;
         }
         assert!(
@@ -5365,8 +6076,6 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         assert!(started.elapsed() < Duration::from_secs(10));
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    // A commit landing after a replacement's retirement acknowledged the old consumer leaves the deregistration for a later slice to recertify, at one more episode. Pausing the claim-source runner keeps the kernel quiet so each rebuild here completes in the slice that starts it.
-    restarted.handler().pause_claim_sources_for_test();
     let reader = loop {
         let pinned = tokio::task::spawn_blocking({
             let owner = Arc::clone(&owner);
@@ -5409,9 +6118,8 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
     }
     drop(reader);
     // The restart renews nothing: the record is the registered one, or the claim-source runner's commits since the restart already left that family behind and the loop recorded its replacement.
-    // The running daemon holds the lifecycle directory's flock while it writes, so each read retries a held lock. A replacement the restart already recorded completes in the quiet kernel before the next commit.
     let settled = loop {
-        match control(&home) {
+        match lifecycle.read() {
             ControlState::Intent(_) => {}
             state => break state,
         }
@@ -5458,7 +6166,7 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         )
         .unwrap();
     let rebuilt = loop {
-        if let ControlState::Current(intent) = control(&home)
+        if let ControlState::Current(intent) = lifecycle.read()
             && intent.attempt_id != current.attempt_id
         {
             break intent;
@@ -5474,8 +6182,6 @@ async fn installed_records_register_the_projection_and_a_restart_resumes_it() {
         rebuilt.selected_generation,
         current.staged_seed_digest.unwrap()
     );
-    // The rebuilt family holds a live hold, so the claims the runner publishes now reach it by catch-up.
-    restarted.handler().resume_claim_sources_for_test();
     loop {
         let pinned = tokio::task::spawn_blocking({
             let owner = Arc::clone(&owner);

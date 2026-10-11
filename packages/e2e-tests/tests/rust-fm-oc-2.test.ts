@@ -45,8 +45,12 @@ describe.skipIf(!rustPrereqs.ok)("rust failure-mode drill FM-OC-2: host outage",
         const passes = await h.waitForRustPasses(beforeCount + OUTAGE_PASSES);
         const outage = passes.slice(beforeCount);
         expect(outage.length).toBeGreaterThanOrEqual(OUTAGE_PASSES);
-        // The failure path serves the input unchanged and labels the pass `raw`.
-        expect(outage.every((pass) => pass.servedFrom === "raw")).toBe(true);
+        // With native compaction off, a failed pass fails open from the last applied output
+        // with the messages appended since, or serves the input unchanged as `raw`.
+        expect(
+            outage.every((pass) => pass.servedFrom === "last_applied" || pass.servedFrom === "raw"),
+        ).toBe(true);
+        expect(outage.some((pass) => pass.servedFrom === "last_applied")).toBe(true);
 
         assertLoudModuleFailure(h, sessionId);
     }, 300_000);

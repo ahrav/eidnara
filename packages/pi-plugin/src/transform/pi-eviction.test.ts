@@ -51,7 +51,11 @@ const M0 = "<session-history>\n## 1-2 · folded\n</session-history>";
  * A daemon that folds every pass through the second-newest row. A `fixed` daemon renders the
  * boundary of its first pass on every later pass, so the acknowledged boundary never moves.
  */
-function foldingDaemon(fixed = false, otherCallMs = 0) {
+function foldingDaemon(
+    fixed = false,
+    otherCallMs = 0,
+    headOf: (rows: { id: string; message?: Json }[]) => number = (rows) => rows.length - 2,
+) {
     const transforms: Json[] = [];
     let sequence = 0;
     let pinned: string | undefined;
@@ -63,8 +67,8 @@ function foldingDaemon(fixed = false, otherCallMs = 0) {
             return { state: "accepted" };
         }
         transforms.push(body);
-        const rows = body.native_messages as { id: string }[];
-        let head = Math.max(0, rows.length - 2);
+        const rows = body.native_messages as { id: string; message?: Json }[];
+        let head = Math.max(0, headOf(rows));
         if (fixed && pinned !== undefined)
             head = Math.max(
                 0,
@@ -279,6 +283,47 @@ describe("Pi eviction", () => {
             expect(outcome).toBe("Compaction cancelled");
             expect(compactions(harness)).toEqual([evicted as CompactionEntry]);
             expect(harness.requests).toHaveLength(requests);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    it("hands an overflow over an Eidnara compaction back to Pi after a declined pass", async () => {
+        const { call } = foldingDaemon(true);
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension],
+                settings: SETTINGS,
+            });
+            await harness.session.prompt(`one ${"x".repeat(400)}`);
+            await harness.session.prompt(`two ${"x".repeat(400)}`);
+            await eventually(() => compactions(harness as TestAgentSession).length > 0);
+            const evicted = compactions(harness).length;
+            call.mockImplementation(async (input) => {
+                if (input.method === "transform") throw new Error("daemon down");
+                return input.method === "transform.boundary"
+                    ? { anchors: [] }
+                    : { state: "accepted" };
+            });
+            await harness.session.prompt(`three ${"x".repeat(400)}`);
+            const ends = compactionEnds(harness);
+            harness.respond([
+                fauxAssistantMessage("", {
+                    stopReason: "error",
+                    errorMessage: "prompt is too long: 213462 tokens > 200000 maximum",
+                }),
+                fauxAssistantMessage("pi summary"),
+                fauxAssistantMessage("pi summary"),
+                fauxAssistantMessage("after the recovery"),
+            ]);
+            await harness.session.prompt("overflowing");
+            await eventually(() => ends.some((end) => end.reason === "overflow"));
+            expect(ends.find((end) => end.reason === "overflow")?.aborted).toBe(false);
+            const latest = compactions(harness).at(-1);
+            expect(compactions(harness).length).toBeGreaterThan(evicted);
+            expect(latest?.fromHook).not.toBe(true);
+            expect(latest?.summary).not.toBe(M0);
         } finally {
             call.mockRestore();
         }
@@ -547,6 +592,69 @@ describe("Pi eviction", () => {
             expect(textOf(harness.session.messages.at(-1))).toBe("loop done");
             expect(transforms.length).toBeGreaterThanOrEqual(5);
             await eventually(() => compactions(harness as TestAgentSession).length > 0);
+        } finally {
+            call.mockRestore();
+        }
+    });
+
+    // Pi can append settings and extension entries while a tool runs, placing them on the
+    // branch between the assistant's tool call and its result.
+    it.each([
+        ["nothing", () => undefined],
+        [
+            "settings and custom entries",
+            () => {
+                const sessionManager = (harness as TestAgentSession).sessionManager;
+                sessionManager.appendThinkingLevelChange("high");
+                sessionManager.appendModelChange("faux", "other");
+                sessionManager.appendCustomEntry("probe-note", { n: 1 });
+                sessionManager.appendSessionInfo("probing");
+            },
+        ],
+    ])("keeps the call of a tool result the boundary lands on with %s between them", async (_, during) => {
+        const { call } = foldingDaemon(false, 0, (rows) =>
+            rows.findLastIndex((row) => row.message?.role === "toolResult"),
+        );
+        const probe = (pi: { registerTool: (tool: unknown) => void }) =>
+            pi.registerTool({
+                name: "probe",
+                label: "probe",
+                description: "probe",
+                parameters: Type.Object({ n: Type.Number() }),
+                execute: async () => {
+                    during();
+                    return { content: [{ type: "text", text: "probed" }], details: {} };
+                },
+            });
+        try {
+            harness = await createTestAgentSession({
+                cwd: root,
+                extensionFactories: [eidnaraPiExtension, probe as never],
+                tools: ["probe"],
+                settings: SETTINGS,
+            });
+            harness.respond([
+                fauxAssistantMessage(fauxToolCall("probe", { n: 1 })),
+                fauxAssistantMessage("probe done"),
+            ]);
+            await harness.session.prompt(`one ${"x".repeat(400)}`);
+            await harness.session.prompt(`two ${"x".repeat(400)}`);
+            await eventually(() => compactions(harness as TestAgentSession).length > 0);
+            const entries = harness.sessionManager.getEntries();
+            const kept = entries.find(
+                (entry) =>
+                    entry.id === compactions(harness as TestAgentSession)[0]?.firstKeptEntryId,
+            ) as { message?: Json } | undefined;
+            expect(kept?.message?.role).toBe("assistant");
+            const content = kept?.message?.content as Json[];
+            expect(content.some((part) => part.type === "toolCall")).toBe(true);
+
+            // Pi's own array, which it sends whenever a pass declines, keeps the call.
+            const roles = harness.session.messages.map((message) => (message as Json).role);
+            expect(roles[0]).toBe("compactionSummary");
+            const result = roles.indexOf("toolResult");
+            expect(result).toBeGreaterThan(0);
+            expect(roles[result - 1]).toBe("assistant");
         } finally {
             call.mockRestore();
         }
