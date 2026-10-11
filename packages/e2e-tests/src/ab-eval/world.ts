@@ -1010,9 +1010,14 @@ export function gradeOutcome(fact: Fact, result: { answer: string; error?: strin
 const ABSTAIN =
     /\bUNKNOWN\b|\b(don'?t|do not) (know|have|see)\b|\bnever (settled|decided|discussed|set|mentioned)\b|\bnot (sure|aware)\b|\bno record\b|\bcan(no|')t find\b/i;
 
-function carries(text: string, token: string): boolean {
+/** `token` as a whole word: letters, digits, and hyphens on either side would make it part of a larger token. */
+function standalone(token: string): RegExp {
     const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(^|[^A-Za-z0-9-])${escaped}($|[^A-Za-z0-9-])`, "i").test(text);
+    return new RegExp(`(^|(?<=[^A-Za-z0-9-]))${escaped}(?=$|[^A-Za-z0-9-])`, "gi");
+}
+
+function carries(text: string, token: string): boolean {
+    return standalone(token).test(text);
 }
 
 /** The shapes the world's answers take: five-digit numbers and `adjective-noun-NN` codenames. */
@@ -1025,7 +1030,7 @@ export function grade(fact: Fact, answer: string): Grade {
         const rest = fact.subject
             .split(/\s+/)
             .filter((word) => word.length > 0)
-            .reduce((text, word) => text.split(word).join(" "), answer);
+            .reduce((text, word) => text.replace(standalone(word), " "), answer);
         return ABSTAIN.test(answer) && !CANDIDATE_VALUE.test(rest) ? "correct" : "wrong";
     }
     if (carries(answer, fact.answer)) return "correct";

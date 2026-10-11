@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { ensurePiInstall } from "../bedrock-peer/harness-runtime";
+import { ensurePiInstall, pinnedOpencodeOnPath } from "../bedrock-peer/harness-runtime";
 import type { ArmSpec } from "./arms";
 
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
@@ -88,10 +88,11 @@ export function nodeRoot(): string {
     return resolve(realpathSync(Bun.which("node") as string), "../..");
 }
 
+/** The pinned OpenCode binary the preflight hashed, so the arms execute that file itself. */
 export function opencodeBinary(): string {
-    const found = Bun.which("opencode");
-    if (!found) throw new Error("opencode is not on PATH");
-    return realpathSync(found);
+    const pinned = pinnedOpencodeOnPath();
+    if (!pinned.ok) throw new Error(pinned.reason);
+    return pinned.binary;
 }
 
 /**

@@ -84,6 +84,9 @@ describe("A/B world", () => {
         expect(grade(sized, "We never settled rate-limiter-15; maybe amber-falcon-42")).toBe(
             "wrong",
         );
+        // A subject word inside a guessed codename leaves the guess intact.
+        const named = { ...abstain, subject: "billing release codename" };
+        expect(grade(named, "I don't know; maybe billing-falcon-42")).toBe("wrong");
         // A hedge beside a guessed value is a guess.
         expect(grade(abstain, "I don't know; maybe 41234")).toBe("wrong");
         expect(grade(abstain, "Not sure, perhaps amber-falcon-42")).toBe("wrong");

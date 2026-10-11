@@ -3,6 +3,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { pinnedOpencodeOnPath } from "../bedrock-peer/harness-runtime";
 import { armSpec } from "./arms";
 import { stopOwnedTree } from "./procs";
 import {
@@ -38,19 +39,22 @@ describe("sandbox masking plan", () => {
 });
 
 describe("sandbox keep list", () => {
-    it.skipIf(!Bun.which("opencode"))("keeps only the toolchains the selected arms launch", () => {
-        const piOff = sharedKeep([armSpec("pi-off")]);
-        const ocOff = sharedKeep([armSpec("oc-off")]);
-        const ocOn = sharedKeep([armSpec("oc-on")]);
-        expect(piOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
-        expect(piOff).not.toContain(opencodeKeepRoot(opencodeBinary()));
-        expect(ocOff).toContain(opencodeKeepRoot(opencodeBinary()));
-        expect(ocOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(false);
-        // An Eidnara arm materializes both harness closures.
-        expect(ocOn.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
-        expect(ocOff).not.toContain(nodeRoot());
-        expect(piOff).toContain(nodeRoot());
-    });
+    it.skipIf(!pinnedOpencodeOnPath().ok)(
+        "keeps only the toolchains the selected arms launch",
+        () => {
+            const piOff = sharedKeep([armSpec("pi-off")]);
+            const ocOff = sharedKeep([armSpec("oc-off")]);
+            const ocOn = sharedKeep([armSpec("oc-on")]);
+            expect(piOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
+            expect(piOff).not.toContain(opencodeKeepRoot(opencodeBinary()));
+            expect(ocOff).toContain(opencodeKeepRoot(opencodeBinary()));
+            expect(ocOff.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(false);
+            // An Eidnara arm materializes both harness closures.
+            expect(ocOn.some((p) => p.includes("eidnara-e2e-pi-install"))).toBe(true);
+            expect(ocOff).not.toContain(nodeRoot());
+            expect(piOff).toContain(nodeRoot());
+        },
+    );
 
     it.skipIf(!Bun.which("node"))(
         "puts the Node runtime on the sandbox PATH only for arms that launch it",
@@ -68,6 +72,16 @@ describe("sandbox keep list", () => {
         );
         expect(opencodeKeepRoot("/home/u/.opencode/bin/opencode")).toBe("/home/u/.opencode/bin");
     });
+});
+
+describe("OpenCode binary", () => {
+    it.skipIf(!pinnedOpencodeOnPath().ok)(
+        "launches the file the pinned-release check hashed",
+        () => {
+            const pinned = pinnedOpencodeOnPath();
+            expect(pinned.ok && opencodeBinary()).toBe(pinned.ok ? pinned.binary : "");
+        },
+    );
 });
 
 describe("shell quoting", () => {

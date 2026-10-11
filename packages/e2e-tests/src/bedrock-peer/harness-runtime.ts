@@ -76,8 +76,13 @@ export function detectHarnessRuntimeSources():
     return { ok: true, sources: { opencodeRoot: opencode.root, nodeRoot: node.root } };
 }
 
-/** The `opencode` on PATH is the release the OpenCode closure pins; `root` holds its binary. */
-export function pinnedOpencodeOnPath(): { ok: true; root: string } | { ok: false; reason: string } {
+/**
+ * The `opencode` on PATH is the release the OpenCode closure pins. `binary` is the file the
+ * check hashed and `root` its directory.
+ */
+export function pinnedOpencodeOnPath():
+    | { ok: true; root: string; binary: string }
+    | { ok: false; reason: string } {
     const opencode = readManifest(OPENCODE_MANIFEST);
     const opencodePath = onPath("opencode");
     if (!opencodePath) return { ok: false, reason: "opencode is not on PATH" };
@@ -86,7 +91,7 @@ export function pinnedOpencodeOnPath(): { ok: true; root: string } | { ok: false
     if (!existsSync(opencodeBinary) || sha256File(opencodeBinary) !== opencodeNode.sha256) {
         return { ok: false, reason: `opencode on PATH is not the pinned ${opencode.version}` };
     }
-    return { ok: true, root: dirname(opencodeBinary) };
+    return { ok: true, root: dirname(opencodeBinary), binary: opencodeBinary };
 }
 
 /** The `node` on PATH is the runtime the Pi closure pins; `root` holds its binary. */

@@ -618,11 +618,13 @@ export class BedrockGateway {
                         sink.write(encodeEvent(type, member));
                     }
                 }
-                // A disconnect between the last event and the stream's end leaves the same
-                // short response as one seen mid-stream.
-                if (sink.signal.aborted && !ended && status === 200) {
-                    status = 499;
-                    error = "client disconnected before the stream ended";
+                // A Converse stream ends with messageStop; one that stops short is incomplete,
+                // whether the harness went away or the provider's stream ended early.
+                if (!ended && status === 200) {
+                    status = sink.signal.aborted ? 499 : 502;
+                    error = sink.signal.aborted
+                        ? "client disconnected before the stream ended"
+                        : "the stream ended without messageStop";
                 }
             } else {
                 const response = await send(new ConverseCommand({ ...body, modelId } as never));
