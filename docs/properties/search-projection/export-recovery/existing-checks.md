@@ -120,6 +120,13 @@ infer test execution merely from a workspace test command in a plan.
 | `crates/host-runtime/src/generation.rs:1801-1854` | Current and caller-protected digests survive prune; unprotected old generation is removed. | unaudited |
 | `crates/host-runtime/src/generation.rs:1857-1896` | Protected corrupt target refuses repair; unprotected same-digest target can be repaired. | unaudited |
 | `crates/host-runtime/src/generation.rs:1899-1926` | Manually created partial staging/profile temp leaves old profile selected. This constructs residue, not actual crash execution. | unaudited |
+| `crates/daemon/tests/vector_staging_cuts.rs:328-373` | The vector and nested-directory staging traces equal the frozen 24-cell `StageEvent` table. | unaudited |
+| `crates/host-runtime/src/generation.rs:2121-2169` | Staging reports one `BeforeFileSyncs`/`AfterFileSyncs` pair per group of up to eight copied files, after that group's copies, and the last group follows the manifest write, for one file, exactly one full group, and more than two groups. | unaudited |
+| `crates/daemon/tests/vector_staging_cuts.rs:376-380` | Hook-simulated `EIO` at every staging cell selects nothing, reads back the same state on two reopenings, is refused by validate, verify, and both selectors before the rename, is reclaimed by prune, and a complete restage then succeeds. | unaudited |
+| `crates/daemon/tests/vector_staging_cuts.rs:384-390` | Hook-simulated `ENOSPC` and `EDQUOT` at every staging cell report insufficient storage with the same recovery. | unaudited |
+| `crates/daemon/tests/vector_staging_cuts.rs:394-415` | Hook-simulated `EIO` after each of the four sync events (the one file-sync group, the nested directory, the root, and the generations directory) reports a payload fault with the same recovery. | unaudited |
+| `crates/daemon/tests/vector_staging_cuts.rs:433-483` | A child that syncs a witness and aborts at each staging cell exits by `SIGABRT`; the next process sees the same recovery, with prune reclaiming the abandoned temp. Process crash, not power loss. | unaudited |
+| `crates/daemon/tests/vector_staging_cuts.rs:511-581` | Deployment `current-profile.json` bytes are unchanged across vector stage, select, prune, discard, exchange repair, and a cut staging. | unaudited |
 
 ## Existing model and canonical-digest seams
 

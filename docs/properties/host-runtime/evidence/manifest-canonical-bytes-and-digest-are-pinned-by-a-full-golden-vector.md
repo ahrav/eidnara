@@ -12,12 +12,12 @@ existing golden actually pins and to catalog the vector that would close it.
 The encoding is declaration order, with nothing between the struct and the bytes:
 
 ```
-// generation.rs:172-174
+// generation.rs:258-260
 pub fn canonical_bytes(&self) -> Vec<u8> {
     serde_json::to_vec(self).expect("manifest serialization cannot fail")
 }
 
-// generation.rs:176-178
+// generation.rs:262-264
 pub fn digest(&self) -> String {
     hex(&sha2::Sha256::digest(self.canonical_bytes()))
 }
@@ -26,10 +26,10 @@ pub fn digest(&self) -> String {
 `serde_json::to_vec` on a derived `Serialize` emits fields in declaration order,
 so the byte order is exactly:
 
-- `GenerationManifest`, `generation.rs:147-169`: `schema` (`:153`), `target`
+- `GenerationManifest`, `generation.rs:231-243`: `schema` (`:158`), `target`
   (`:154`), `release_contract_sha256` (`:155`), `inputs_lock_sha256` (`:156`),
   `source_payload_manifest_sha256` (`:167`, attribute at `:166`), `files` (`:168`).
-- `ManifestFile`, `generation.rs:138-145`: `path` (`:141`), `mode` (`:142`),
+- `ManifestFile`, `generation.rs:215-220`: `path` (`:146`), `mode` (`:147`),
   `size` (`:143`), `sha256` (`:144`).
 
 The struct's own doc comment at `:148-150` states the contract: "Serialization

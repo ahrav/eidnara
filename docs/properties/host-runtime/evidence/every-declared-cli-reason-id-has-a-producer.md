@@ -61,7 +61,7 @@ after admission has passed. Three sites turn a filesystem-capability failure int
 a payload verdict.
 
 The atomic exchange is the first. On Linux and macOS
-`exchange_dirs` (`crates/host-runtime/src/generation.rs:1195-1198`) maps every
+`exchange_dirs` (`crates/host-runtime/src/store_fs.rs:112-115`) maps every
 `renameat_with(..., RenameFlags::EXCHANGE)` error through
 `.map_err(|_| invalid("atomic digest-target exchange failed"))`, so `EINVAL`,
 `ENOSYS`, and `EOPNOTSUPP` from a filesystem without `RENAME_EXCHANGE` or

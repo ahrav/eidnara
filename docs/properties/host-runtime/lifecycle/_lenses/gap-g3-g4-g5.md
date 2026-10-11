@@ -20,13 +20,13 @@ The prompt's references are accurate except for these, which are narrowed:
 - `LivenessPolicy` is `config.rs:234-245`, not `234-300`. The `liveness` field is
   `config.rs:282`, its default `None` is `config.rs:296`, and validation is
   `config.rs:370-382`.
-- The manifest structs are `generation.rs:138-145` (`ManifestFile`) and
+- The manifest structs are `generation.rs:215-220` (`ManifestFile`) and
   `:147-169` (`GenerationManifest`), with `canonical_bytes` at `:172-174` and
   `digest` at `:176-178`. The prompt's `147-177` covers both correctly.
-- `exchange_dirs` is `generation.rs:1191-1198` (macOS and Linux arm) and
+- `exchange_dirs` is `store_fs.rs:112-115` (macOS and Linux arm) and
   `:1200-1205` (the fail-closed stub), so the prompt's `1191-1204` is right.
-- `rename_no_replace` is `generation.rs:1207-1242`: doc comment `:1207-1215`,
-  body `:1216-1242`.
+- `rename_no_replace` is `store_fs.rs:47-79`: doc comment `:47-52`,
+  body `:53-79`.
 - The golden test is `generation.rs:1395-1412`, confirmed.
 
 ## G3 observations: normal configured liveness
@@ -262,7 +262,7 @@ inserting an optional field in a natural-reading position and tidying
 
 ### O10. macOS compiles the exchange and never runs it
 
-`generation.rs:1191-1198` gives Linux and macOS one shared arm:
+`store_fs.rs:112-115` gives Linux and macOS one shared arm:
 
 ```
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -299,7 +299,7 @@ is occupied by a corrupt unprotected generation (`:886-905`).
 
 ### O11. The portable fallback is dead on Linux and load-bearing on macOS
 
-`rename_no_replace` (`generation.rs:1216-1242`) has a Linux-only flagged block at
+`rename_no_replace` (`store_fs.rs:53-79`) has a Linux-only flagged block at
 `:1217-1230` that returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`, and falls
 through only on `INVAL`, `NOSYS`, or `OPNOTSUPP`. On a current Linux kernel with
 ext4, tmpfs, or overlayfs, `RENAME_NOREPLACE` is supported, so the fallback at
@@ -619,7 +619,7 @@ Type: safety
 Reachability: default-production
 Status: active
 Exercised: not yet - the Linux arm has one test through `promote_temp`
-(`generation.rs:1689`), and the macOS arm has never executed under observation.
+(`generation.rs:2907`), and the macOS arm has never executed under observation.
 Guarantee: Wherever the digest-target exchange runs, the two names are swapped
 atomically inside one directory, or an error is returned and neither name is left
 unoccupied; on a platform without the primitive it fails closed.
@@ -633,7 +633,7 @@ digest target is occupied by a corrupt unprotected generation
 (`generation.rs:886-905`), so a run that never meets that condition owes nothing
 and the check must not fail.
 Fault/timing angle: the risk is platform divergence behind one expression.
-`generation.rs:1191-1198` gives Linux and macOS a shared arm calling
+`store_fs.rs:112-115` gives Linux and macOS a shared arm calling
 `rustix::fs::renameat_with(.., RenameFlags::EXCHANGE)`, and its own doc comment
 at `:1191-1193` records that this is `renameat2(RENAME_EXCHANGE)` on Linux and
 `renameatx_np(RENAME_SWAP)` on macOS. Those are two different kernel interfaces
@@ -645,13 +645,13 @@ depends on the exchange being all-or-nothing.
 Required faults and enabling state: a corrupt, unprotected generation already
 occupying the digest target, plus a restage of the same digest. The existing test
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-(`generation.rs:1689`) already builds that fixture, so the fault is available; the
+(`generation.rs:2907`) already builds that fixture, so the fault is available; the
 missing element is executing it on macOS. On the stub platforms the check is a
 compile-and-call assertion.
 Confidence: high - [evidence](../../evidence/the-atomic-directory-exchange-is-atomic-on-every-supported-platform.md). Both cfg arms, the call site, and the whole macOS CI job were
 read at HEAD; the claim that no macOS lifecycle or generation test executes is
 derived from the four host-runtime steps in that job rather than asserted.
-Existing check: partial, Linux only. `generation.rs:1689`
+Existing check: partial, Linux only. `generation.rs:2907`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives the
 branch. CI's macOS job (`the source repository`ci.yml`workflow:126-184`) runs only
 `cargo build -p host-runtime` (`:156`), `--test shm_soak` (`:178`), one filtered
@@ -688,7 +688,7 @@ portable path, forcing the portable path either by a filesystem that rejects
 unconditional, so an occupied target that gets replaced is a violation rather
 than a tolerated case.
 Fault/timing angle: this is a check-then-act window that is dead on one platform
-and load-bearing on another. `generation.rs:1216-1242`: the Linux block at
+and load-bearing on another. `store_fs.rs:53-79`: the Linux block at
 `:1217-1230` returns on `Ok`, `EXIST`, `NOTEMPTY`, and `NOSPC`, falling through
 only on `INVAL`, `NOSYS`, or `OPNOTSUPP`, so on a current kernel with ext4,
 tmpfs, or overlayfs the fallback never runs. On macOS that block is absent by

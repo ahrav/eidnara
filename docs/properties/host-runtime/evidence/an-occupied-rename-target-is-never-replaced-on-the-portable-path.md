@@ -11,7 +11,7 @@ macOS, and macOS is where no test in this scope runs.
 ## Evidence trail
 
 **The function has two paths that do not implement the same guarantee.**
-`generation.rs:1216-1242`. The Linux-only block, `:1217-1230`:
+`store_fs.rs:53-79`. The Linux-only block, `:58-67`:
 
 ```
 #[cfg(target_os = "linux")]
@@ -140,7 +140,7 @@ The occupancy assertion, which passes today and should exist anyway:
    `:872-875` names.
 2. Repeat with a **nonempty** corrupt directory. The existing
    `same_digest_corrupt_target_is_repaired_only_by_validated_exchange`
-   (`generation.rs:1689`) covers the nonempty case indirectly; the empty case has no
+   (`generation.rs:2907`) covers the nonempty case indirectly; the empty case has no
    coverage.
 
 Reaching the portable path deterministically needs one of:
@@ -186,7 +186,7 @@ question below resolves toward "yes, out-of-model writers exist".
 
 ### Q: Should the fallback be removed rather than justified?
 
-- Sources examined: `generation.rs:1216-1242`, `:1191-1205` (the exchange's
+- Sources examined: `store_fs.rs:53-79`, `:112-120` (the exchange's
   fail-closed stub as a precedent), `the source repository `ci.yml` workflow:126-184`.
 - Findings: the exchange already demonstrates the alternative shape. On an
   unsupported platform `exchange_dirs` returns an error rather than emulating the

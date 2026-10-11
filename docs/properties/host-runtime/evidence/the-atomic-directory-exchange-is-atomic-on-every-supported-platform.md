@@ -9,7 +9,7 @@ macOS.
 
 ## Evidence trail
 
-**Two kernel interfaces behind one expression.** `generation.rs:1191-1198`:
+**Two kernel interfaces behind one expression.** `store_fs.rs:112-115`:
 
 ```
 /// Atomic same-filesystem directory exchange. Rustix maps `EXCHANGE` to
@@ -119,7 +119,7 @@ reachable here.
 
 ## What a test must construct
 
-The fixture already exists. `generation.rs:1689`
+The fixture already exists. `generation.rs:2907`
 `same_digest_corrupt_target_is_repaired_only_by_validated_exchange` drives
 `promote_temp` into the exchange branch: `:1705` covers the protected corrupt
 target being refused and `:1714-1721` covers the unprotected case exchanging
@@ -147,7 +147,7 @@ portfolio evaluation asked a human to separate.
 
 ### Q: Is macOS a supported deployment target for the lifecycle store, or only a development platform?
 
-- Sources examined: `generation.rs:1191-1205` (both cfg arms),
+- Sources examined: `store_fs.rs:112-120` (both cfg arms),
   `the source repository `ci.yml` workflow:126-184` in full (the matrix, both platform branches,
   and the omission comment at `:171-174`), `src/generation.rs` and
   `src/lifecycle.rs` cfg inventory (`generation.rs:1217` and `lifecycle.rs:1839`,
