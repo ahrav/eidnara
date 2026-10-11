@@ -615,6 +615,15 @@ pub(crate) struct WindowCoverage {
     cut_prefix: Vec<Arc<IngressMessage>>,
 }
 
+impl WindowCoverage {
+    pub(crate) fn resolution_only(&self) -> Self {
+        Self {
+            resolved: self.resolved.clone(),
+            cut_prefix: Vec::new(),
+        }
+    }
+}
+
 /// The host resolves context geometry into a shape shared by OpenCode and Claude Code.
 /// `derivation` records the rule and numeric inputs used to calculate the geometry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2438,6 +2447,23 @@ fn served_output_fingerprints(messages: &[ServedMessage]) -> Vec<ServedBlockFing
     fingerprints
 }
 
+/// The projection of a resolved window. An anchored window starts at its anchor's end message,
+/// which the anchor covers, so that message's tool results may answer calls before the window.
+pub(crate) fn window_projection(request: &TransformRequest) -> wire::MessageProjection<'_> {
+    let projection = wire::MessageProjection::new(&request.messages);
+    let head_covered = request
+        .coverage
+        .as_ref()
+        .and_then(|coverage| coverage.resolved.anchor.as_ref())
+        .and_then(|anchor| wire::split_block_id(&anchor.end_message_id))
+        .is_some_and(|(mid, _)| request.messages.first().is_some_and(|head| head.mid == mid));
+    if head_covered {
+        projection.with_covered_head()
+    } else {
+        projection
+    }
+}
+
 /// A segment end the host evicted. An empty id or a bare mid is a publisher-vocabulary error,
 /// which the fold reports instead of recovering from.
 fn names_evicted_block(id: &str, live: &[&FlatBlock]) -> bool {
@@ -2467,7 +2493,7 @@ impl<'a> TransformIngress<'a> {
     fn original(request: &'a TransformRequest) -> Self {
         Self {
             request,
-            projection: wire::MessageProjection::new(&request.messages),
+            projection: window_projection(request),
         }
     }
 
@@ -2746,7 +2772,7 @@ fn apply_additive_only(
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
     let projection_started_at = Instant::now();
-    let projection = project_messages(&req.messages)?;
+    let projection = window_projection(req).project()?;
     let live = projection
         .blocks
         .iter()
@@ -14338,8 +14364,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The three fresh-byte consumers must read `canonical_block_bytes`; a consumer
-    /// that serializes a block any other way changes identity silently.
     #[test]
     fn fresh_block_byte_consumers_call_the_canonical_producer() {
         let flatten = include_str!("wire.rs")
@@ -14351,7 +14375,7 @@ pub(crate) mod tests {
             .0;
         assert_eq!(
             flatten
-                .matches("served_json::canonical_block_bytes(")
+                .matches("served_json::canonical_block_text(")
                 .count(),
             1
         );

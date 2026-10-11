@@ -11,6 +11,7 @@ import {
     pluginModules,
     segmentRanges,
     startFixture as startSeededFixture,
+    TOOL_CALL_ID,
     textOf,
     userConfig,
 } from "../src/pi-runner/rust-fixture";
@@ -63,7 +64,14 @@ async function recordTransforms() {
         this: unknown,
         args: { method: string; body: Json },
     ) {
-        const answer = await original.call(this, args);
+        let answer: unknown;
+        try {
+            answer = await original.call(this, args);
+        } catch (error) {
+            if (args.method === "transform")
+                calls.push({ body: args.body, answer: { status: "thrown", error: String(error) } });
+            throw error;
+        }
         if (args.method === "transform") calls.push({ body: args.body, answer: answer as Json });
         return answer;
     };
@@ -73,6 +81,26 @@ async function recordTransforms() {
             transport.HostModuleTransport.prototype.call = original;
         },
     };
+}
+
+/** The tool call ids each `toolResult` answers lack a call in the assistant message before it. */
+function unpairedToolResults(messages: unknown[]): string[] {
+    const unpaired: string[] = [];
+    let calls = new Set<string>();
+    for (const message of messages as Json[]) {
+        if (message.role === "assistant") {
+            calls = new Set(
+                ((message.content as Json[] | undefined) ?? [])
+                    .filter((part) => part.type === "toolCall")
+                    .map((part) => String(part.id)),
+            );
+        } else if (message.role === "toolResult") {
+            if (!calls.has(String(message.toolCallId))) unpaired.push(String(message.toolCallId));
+        } else {
+            calls = new Set();
+        }
+    }
+    return unpaired;
 }
 
 describe.skipIf(!active)("pi eviction and cold import against the direct-host fixture", () => {
@@ -125,6 +153,50 @@ describe.skipIf(!active)("pi eviction and cold import against the direct-host fi
             expect(down[0]).not.toBe(folded[0] as string);
             expect(down[0]).toStartWith("The conversation history before this point was compacted");
             expect(down[0]).toContain(folded[0] as string);
+        } finally {
+            recorded.restore();
+            await run.close();
+            await f.stack.stop().catch(() => undefined);
+        }
+    }, 300_000);
+
+    it("folds and evicts through a boundary that ends on a tool result", async () => {
+        const f = await startFixture(["pi-evict-tool"]);
+        const run = await openPiSession(
+            f.root,
+            f.stack,
+            "pi-evict-tool",
+            join(f.root, "evict-tool"),
+            EVICTING,
+            COVERED,
+        );
+        const harness = run.harness as unknown as Harness;
+        const recorded = await recordTransforms();
+        try {
+            await harness.session.prompt("first");
+            const folded = (harness.requests.at(-1)?.messages ?? []).map(textOf);
+            expect(segmentRanges(folded[0] as string)).toEqual(allRanges);
+            expect(unpairedToolResults(harness.requests.at(-1)?.messages ?? [])).toEqual([]);
+            await eventually(() => compactions(harness).length === 1);
+            // Pi keeps the assistant message that carries the boundary result's call.
+            expect(compactions(harness)[0]?.firstKeptEntryId).toBe(`m${COVERED - 1}`);
+
+            await harness.session.prompt("second");
+            const sent = recorded.calls.at(-1)?.body.native_messages as { id: string }[];
+            expect(sent[0]?.id).toBe(`m${COVERED}`);
+            expect(recorded.calls.every((call) => call.answer.status === "ok")).toBe(true);
+            const evicted = harness.requests.at(-1)?.messages ?? [];
+            expect(textOf(evicted[0])).toBe(folded[0] as string);
+            expect(unpairedToolResults(evicted)).toEqual([]);
+
+            await f.stack.stop();
+            await harness.session.prompt("with the daemon down");
+            const own = harness.requests.at(-1)?.messages ?? [];
+            expect(textOf(own[0])).toStartWith(
+                "The conversation history before this point was compacted",
+            );
+            expect(unpairedToolResults(own)).toEqual([]);
+            expect(JSON.stringify(own)).toContain(TOOL_CALL_ID);
         } finally {
             recorded.restore();
             await run.close();
