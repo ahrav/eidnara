@@ -11,6 +11,10 @@ assertions, not adequacy. Adequacy belongs to
 The U1 change adds `crates/retrieval/tests/dense_numerics.rs`; its tests are
 the records' `Exercised` lists in `catalog.md`, not existing checks.
 
+Rows whose check name ends in an issue number, such as `(#616)`, were added
+after the base by that issue's follow-up; their lines are read at the
+branch head that adds them.
+
 ## Quantized scoring
 
 | Location and check | Asserted behavior | Status | Limitation for this part |
@@ -39,6 +43,7 @@ the records' `Exercised` lists in `catalog.md`, not existing checks.
 | `crates/retrieval/tests/dense_oracle.rs:1464`, `rescore_over_retained_rows_agrees_with_the_exhaustive_ranking` | `rescore` over the retained rows returns the same ordered identities and scores as the oracle walk. | unaudited | Production versus production; the independent reference is in `dense_numerics.rs`. |
 | `crates/retrieval/tests/dense_oracle.rs:613`, `a_page_that_fills_a_scoring_block_yields_the_reference_prefix` | A page of exactly one scoring block ranks like the test's reference prefix. | unaudited | Walk-level; the reference is the fixture's expected order. |
 | `crates/retrieval/tests/dense_layered.rs:127`, `a_base_alone_ranks_like_the_oracle_over_the_same_rows` | The layered ranking over one base equals the oracle ranking. | unaudited | Production versus production. |
+| `crates/retrieval/tests/dense_layered.rs:194`, `winners_from_different_layers_with_equal_scores_order_by_identifier_bytes_whichever_layer_holds_the_smaller` (#616) | A base winner and a delta winner with equal scores order by identifier bytes in both identifier and layer orders, match the f64 reference, and `k = 1` keeps the smaller identifier. | unaudited | One tied pair; the tie vector is shared bit for bit, so near-ties are not exercised. |
 
 ## Query and row validation
 
@@ -59,6 +64,8 @@ the records' `Exercised` lists in `catalog.md`, not existing checks.
 | --- | --- | --- | --- |
 | `crates/daemon/src/vector_generation.rs:1315`, `resident_bytes_saturate_on_declared_sizes_that_overflow` | `resident_bytes` saturates at `u64::MAX` on overflowing declared sizes. | unaudited | Saturation only; the value for an ordinary manifest is not asserted. |
 | `crates/daemon/tests/vector_reader.rs:71`, resident census equality | The ledger's `LayerTables` charge equals `resident_bytes` summed over the composition. | unaudited | Both sides call `vector_generation::resident_bytes`, so the check pins consistency, not that the charge covers the bytes a decoded `Scales` holds. |
+| `crates/retrieval/tests/dense_resolve_allocations.rs:98`, `retained_memory_follows_winners_and_hidden_rows_add_only_scratch` (#616) | At 10,000 winners, live bytes at close equal the winner list's capacity, match across base-only, all-superseded, and half-masked shapes, add at most four allocator calls for two or three times the entries, and keep peak bytes per entry within twice the base-only figure. | unaudited | Relative bounds on one host shape; allocator rounding is not counted, and no absolute cap is asserted. |
+| `crates/retrieval/tests/dense_resolve_allocations.rs:145`, `retained_memory_grows_with_the_winner_count` (#616) | Retained bytes per winner stay between one and two `Winner`s at 10,000 and 40,000 winners. | unaudited | Two sizes only. |
 
 ## Capacity
 
