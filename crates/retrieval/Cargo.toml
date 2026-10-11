@@ -26,3 +26,5 @@ retrieval = { path = ".", features = ["test-support"] }
 kernel = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+# The daemon's allocation recorder, which `tests/lexical_retrieval.rs` shares, keys its window on `pthread_self`.
+libc = { workspace = true }

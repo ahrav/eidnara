@@ -1,3 +1,11 @@
+/// The daemon's allocation recorder: it records only on the thread that opened a window, so the other tests in this binary run unrecorded.
+#[path = "../../daemon/tests/support/alloc_recorder.rs"]
+#[allow(dead_code)]
+mod alloc_recorder;
+
+#[global_allocator]
+static GLOBAL: alloc_recorder::RecordingAlloc = alloc_recorder::RecordingAlloc;
+
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
@@ -402,6 +410,29 @@ impl Fixture {
                     bounds,
                     budget,
                 ))
+            })
+            .unwrap()
+    }
+
+    /// `retrieve` with the allocator recording only the retrieval call, after the connection is checked out.
+    fn retrieve_recorded(
+        &self,
+        probes: &[Probe],
+        bounds: RetrievalBounds,
+    ) -> (Retrieval, alloc_recorder::Ledger) {
+        self.store
+            .with_conn(|conn| {
+                Ok(alloc_recorder::record_window(|| {
+                    retrieve(
+                        conn,
+                        &self.kernel,
+                        probes,
+                        self.authority(),
+                        bounds,
+                        &EvalBudget::unbounded(),
+                    )
+                    .unwrap()
+                }))
             })
             .unwrap()
     }
@@ -2214,5 +2245,396 @@ fn dead_rows_leading_a_common_probe_neither_take_its_scan_bound_nor_hide_truncat
     assert_eq!(
         retrieval.reasons,
         vec![IncompleteReason::CommonTerms, IncompleteReason::ScanBound]
+    );
+}
+
+/// Equal-byte occurrences of distinct objects stay distinct contributions: they tie on raw rank, the occurrence comparator orders them, and with one-row batches the eligible siblings fill every accepted slot past an ineligible leader. Duplicate and permuted probes leave the result unchanged.
+#[test]
+fn equal_byte_siblings_stay_distinct_and_fill_past_an_ineligible_leader() {
+    let fixture = Fixture::all_admitted();
+    let objects = ["twin-a", "twin-b", "twin-c"];
+    let mut siblings: Vec<Row> = objects
+        .iter()
+        .map(|object| Row::claim(object, "sibling twin text"))
+        .collect();
+    siblings.sort_by_key(Row::occurrence_id);
+    // The comparator's first sibling stays an unadmitted decision, so the kernel hides it.
+    let leader = siblings[0].object.clone();
+    fixture
+        .kernel
+        .commit(intent("twin-leader"), |envelope| {
+            envelope.insert_decision(decision(&leader))?;
+            Ok(String::new())
+        })
+        .unwrap();
+    let admitted: Vec<&str> = siblings[1..]
+        .iter()
+        .map(|row| row.object.as_str())
+        .collect();
+    fixture.admit(&admitted);
+    fixture.project(&siblings);
+
+    let two_one_row_batches = RetrievalBounds {
+        max_accepted: NonZeroUsize::new(2).unwrap(),
+        batch_rows: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    };
+    let expected: Vec<String> = siblings[1..].iter().map(Row::occurrence_id).collect();
+    for request in ["sibling", "sibling sibling", "twin sibling", "sibling twin"] {
+        let retrieval = fixture
+            .retrieve(
+                &probes(request),
+                two_one_row_batches,
+                &EvalBudget::unbounded(),
+            )
+            .unwrap();
+        assert_eq!(ids_of(&retrieval), expected, "{request}");
+        assert_eq!(retrieval.completion, Completion::Complete, "{request}");
+        assert_eq!(
+            retrieval.consumed.excluded,
+            vec![(EligibilityVerdict::Hidden, 1)],
+            "{request}"
+        );
+        let ranks: Vec<f64> = keyed(&retrieval)
+            .into_iter()
+            .map(|(_, rank)| rank)
+            .collect();
+        assert_eq!(
+            ranks[0].to_bits(),
+            ranks[1].to_bits(),
+            "{request}: equal bytes tie"
+        );
+    }
+}
+
+/// Allocations follow the work the bounds admit. A scan bound one row lower allocates less. A common-term scan stops counting at its qualifying threshold and scanning at its scan bound, so matching rows past both add no allocation. A ranked probe scores every match within `rank_budget`, so its allocations grow with `ranked_matches`. The recorder sees Rust allocations on the calling thread; SQLite's own allocator stays outside it.
+#[test]
+fn allocations_follow_the_scan_bound_and_the_rank_budget() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse parse");
+    let measure = |bounds: RetrievalBounds| {
+        // The first run prepares and caches the statements, so the recorded run measures steady-state work.
+        fixture.retrieve_recorded(&request, bounds);
+        let (retrieval, ledger) = fixture.retrieve_recorded(&request, bounds);
+        assert!(!ledger.overflow);
+        (retrieval, ledger)
+    };
+    let scan = |scan_rows: usize, thresholds: RetrievalBounds| RetrievalBounds {
+        scan_rows: NonZeroUsize::new(scan_rows).unwrap(),
+        ..thresholds
+    };
+    let (exact, at_bound) = measure(scan(4, bounds()));
+    assert_eq!(exact.consumed.scanned_rows, 4);
+    let (below, under) = measure(scan(3, bounds()));
+    assert_eq!(below.consumed.scanned_rows, 3);
+    assert!(
+        under.allocation_events < at_bound.allocation_events
+            && under.requested_bytes < at_bound.requested_bytes,
+        "{under:?} against {at_bound:?}"
+    );
+    let (common, common_before) = measure(scan(3, small_thresholds()));
+    assert_eq!(
+        common.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+
+    let extra: Vec<String> = (0..32)
+        .map(|index| format!("parse-extra-{index}"))
+        .collect();
+    let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    fixture.admit(&extra_refs);
+    let rows: Vec<Row> = extra
+        .iter()
+        .map(|object| Row::claim(object, "parse past the bound"))
+        .collect();
+    fixture.project(&rows);
+
+    let (common_grown, common_after) = measure(scan(3, small_thresholds()));
+    // The common scan reads newest rows first, so it now scans three of the new rows; their text sets the requested bytes, and the count of allocations stays fixed.
+    assert_eq!(
+        (
+            common_grown.consumed.counted_rows,
+            common_grown.consumed.scanned_rows,
+            common_grown.consumed.sql_steps,
+        ),
+        (
+            common.consumed.counted_rows,
+            common.consumed.scanned_rows,
+            common.consumed.sql_steps,
+        ),
+    );
+    assert_eq!(
+        common_after.allocation_events, common_before.allocation_events,
+        "a common scan stops counting at its threshold and scanning at its bound, so matches past both allocate nothing"
+    );
+    let (ranked, ranked_after) = measure(scan(3, bounds()));
+    assert_eq!(ranked.consumed.ranked_matches, 36);
+    assert_eq!(ranked.consumed.scanned_rows, 3);
+    assert!(
+        ranked_after.allocation_events > under.allocation_events,
+        "ranked scoring allocates for each match within the rank budget: {ranked_after:?} against {under:?}"
+    );
+}
+
+/// Every counter reports the work the request did at the scan bound and one row below it: probes compiled, rows counted and scanned, kernel judgments in their batches, and the SQL steps the count and scan statements ran. Below the match count, a smaller scan bound runs fewer steps on the same counted rows, a result cap leaves the scan work unchanged, and one more matching row adds SQL steps on a ranked run and on a common run.
+#[test]
+fn work_counters_report_exact_and_over_bound_work() {
+    let fixture = Fixture::all_admitted();
+    let request = probes("parse parse");
+    let run = |bounds: RetrievalBounds| {
+        fixture
+            .retrieve(&request, bounds, &EvalBudget::unbounded())
+            .unwrap()
+    };
+    let exact = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(4).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(exact.completion, Completion::Complete);
+    let consumed = &exact.consumed;
+    assert_eq!(consumed.probes, 2, "a repeated probe is counted");
+    assert_eq!(consumed.counted_rows, 4, "a repeated probe is counted once");
+    assert_eq!(consumed.scanned_rows, 4);
+    assert_eq!(consumed.ranked_matches, 4);
+    // Four hits judged in batches of two, then the four accepted re-judged in one final batch.
+    assert_eq!((consumed.judged, consumed.batches), (8, 3));
+    assert!(consumed.sql_steps > 0);
+
+    let over = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(3).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(
+        over.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+    assert_eq!(over.consumed.scanned_rows, 3);
+    assert_eq!(over.consumed.counted_rows, 4);
+    let further = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(2).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(further.consumed.scanned_rows, 2);
+    assert_eq!(further.consumed.counted_rows, 4);
+    assert!(
+        further.consumed.sql_steps < over.consumed.sql_steps,
+        "the scan side stops at its bound: {} against {}",
+        further.consumed.sql_steps,
+        over.consumed.sql_steps
+    );
+
+    let capped = run(RetrievalBounds {
+        max_accepted: NonZeroUsize::new(1).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(capped.contributions.len(), 1);
+    assert_eq!(
+        capped.consumed.scanned_rows, consumed.scanned_rows,
+        "the result cap leaves the scan bound to bound scan work"
+    );
+    assert_eq!(capped.consumed.sql_steps, consumed.sql_steps);
+
+    // `parse` is common past two qualifying matches, so this run takes the common scan.
+    let common_before = run(small_thresholds());
+    assert_eq!(
+        common_before.completion,
+        Completion::Incomplete(IncompleteReason::CommonTerms)
+    );
+    fixture.admit(&["parse-more"]);
+    fixture.project(&[Row::claim("parse-more", "parse once more")]);
+    let common_after = run(small_thresholds());
+    assert_eq!(
+        common_after.consumed.scanned_rows,
+        common_before.consumed.scanned_rows + 1
+    );
+    assert!(
+        common_after.consumed.sql_steps > common_before.consumed.sql_steps,
+        "the common scan's steps grow with its rows"
+    );
+    let grown = run(RetrievalBounds {
+        scan_rows: NonZeroUsize::new(5).unwrap(),
+        ..bounds()
+    });
+    assert_eq!(grown.consumed.counted_rows, 5);
+    assert_eq!(grown.consumed.scanned_rows, 5);
+    assert!(
+        grown.consumed.sql_steps > consumed.sql_steps,
+        "{} steps for five rows against {} for four",
+        grown.consumed.sql_steps,
+        consumed.sql_steps
+    );
+}
+
+/// A ranked probe with more matches than the scan bound and one rank per match keeps the first `scan_rows` live matches of the reference order when dead rows sit at its front and inside its first `scan_rows + 1` matches, and reports truncation only while a live match lies past the bound.
+#[test]
+fn dead_rows_inside_a_distinct_rank_probe_neither_take_slots_nor_hide_truncation() {
+    let fixture = Fixture::all_admitted();
+    // Each row adds one more filler token, so every match has its own document length and rank.
+    let rows: Vec<Row> = (0..150)
+        .map(|n| {
+            Row::claim(
+                &format!("ladder-{n}"),
+                &format!("ladder{}", " pad".repeat(n)),
+            )
+        })
+        .collect();
+    fixture.project(&rows);
+    let request = probes("ladder");
+    let keyed = fixture.keyed_reference(&request);
+    assert_eq!(keyed.len(), 150);
+    assert!(
+        keyed.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "the oracle ranks every match distinctly"
+    );
+    let reference: Vec<String> = keyed.into_iter().map(|(id, _)| id).collect();
+    let scan_rows = bounds().scan_rows.get();
+    assert!(reference.len() > 2 * scan_rows);
+    let scanned = |fixture: &Fixture| {
+        fixture
+            .store
+            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+            .unwrap()
+            .unwrap()
+    };
+
+    let dead: Vec<usize> = (0..10).chain(scan_rows - 4..scan_rows + 6).collect();
+    for &index in &dead {
+        tombstone_raw(&fixture, &reference[index]);
+    }
+    let live: Vec<String> = (0..reference.len())
+        .filter(|index| !dead.contains(index))
+        .map(|index| reference[index].clone())
+        .collect();
+    let kept = scanned(&fixture);
+    assert_eq!(
+        kept.hit_ids().collect::<Vec<_>>(),
+        live[..scan_rows].to_vec()
+    );
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.ranked_matches, reference.len());
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
+    );
+
+    // Exactly `scan_rows` live matches remain, including three after the dead run, so retrieval reports `Completion::Complete`.
+    let survivors = scan_rows - 3;
+    for occurrence_id in &live[survivors..live.len() - 3] {
+        tombstone_raw(&fixture, occurrence_id);
+    }
+    let mut remaining = live[..survivors].to_vec();
+    remaining.extend_from_slice(&live[live.len() - 3..]);
+    assert_eq!(remaining.len(), scan_rows);
+    let kept = scanned(&fixture);
+    assert_eq!(kept.hit_ids().collect::<Vec<_>>(), remaining);
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(retrieval.completion, Completion::Complete);
+}
+
+/// When a ranked probe's `scan_rows` bound ends at a rank change, one match from the next rank group suffices to prove truncation, so that group's size leaves the probe's SQL steps unchanged.
+#[test]
+fn a_bound_that_ends_at_a_rank_change_reads_one_row_of_the_next_rank_group() {
+    let scan_rows = bounds().scan_rows.get();
+    let tail = 5 * scan_rows;
+    let run = |tail_text: &dyn Fn(usize) -> String| {
+        let fixture = Fixture::all_admitted();
+        let mut head: Vec<Row> = (0..scan_rows)
+            .map(|n| Row::claim(&format!("head-{n}"), "align align align"))
+            .collect();
+        let rows: Vec<Row> = (0..tail)
+            .map(|n| Row::claim(&format!("tail-{n}"), &tail_text(n)))
+            .collect();
+        fixture.project(&head);
+        fixture.project(&rows);
+        let request = probes("align");
+        let keyed = fixture.keyed_reference(&request);
+        assert_eq!(keyed.len(), scan_rows + tail);
+        assert!(
+            keyed[scan_rows - 1].1 < keyed[scan_rows].1,
+            "the bound ends at a rank change"
+        );
+        head.sort_by_key(Row::occurrence_id);
+        let expected: Vec<String> = head.iter().map(Row::occurrence_id).collect();
+        let scanned = fixture
+            .store
+            .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+            .unwrap()
+            .unwrap();
+        assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+        let retrieval = fixture
+            .retrieve(&request, bounds(), &EvalBudget::unbounded())
+            .unwrap();
+        assert_eq!(
+            retrieval.completion,
+            Completion::Incomplete(IncompleteReason::ScanBound)
+        );
+        assert_eq!(retrieval.consumed.ranked_matches, scan_rows + tail);
+        assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+        (keyed, retrieval.consumed.sql_steps)
+    };
+
+    let (tied, tied_steps) = run(&|n| format!("align filler {n}"));
+    assert!(
+        tied[scan_rows..]
+            .windows(2)
+            .all(|pair| pair[0].1.to_bits() == pair[1].1.to_bits()),
+        "every row past the bound shares one rank"
+    );
+    // Each row adds one more filler token, so every row past the bound has its own document length and rank.
+    let (distinct, distinct_steps) = run(&|n| format!("align{}", " pad".repeat(n + 1)));
+    assert!(
+        distinct[scan_rows..]
+            .windows(2)
+            .all(|pair| pair[0].1 < pair[1].1),
+        "every row past the bound has its own rank"
+    );
+    assert_eq!(
+        tied_steps, distinct_steps,
+        "one tied group past the bound costs the SQL steps of rows with one rank each"
+    );
+}
+
+/// A dead row inside a bound that ends at a rank change opens a slot for the next rank group, and that group's lowest occurrence identifier takes it, whichever of its rows was stored first.
+#[test]
+fn a_slot_a_dead_row_opens_goes_to_the_next_rank_groups_lowest_identifier() {
+    let fixture = Fixture::all_admitted();
+    let scan_rows = bounds().scan_rows.get();
+    let mut head: Vec<Row> = (0..scan_rows)
+        .map(|n| Row::claim(&format!("head-{n}"), "align align align"))
+        .collect();
+    let mut tail: Vec<Row> = (0..3 * scan_rows)
+        .map(|n| Row::claim(&format!("tail-{n}"), &format!("align filler {n}")))
+        .collect();
+    // Rowid order reaches the tail row with the highest occurrence identifier first.
+    tail.sort_by_key(|row| std::cmp::Reverse(row.occurrence_id()));
+    fixture.project(&head);
+    fixture.project(&tail);
+    let request = probes("align");
+    let keyed = fixture.keyed_reference(&request);
+    assert!(keyed[scan_rows - 1].1 < keyed[scan_rows].1);
+    head.sort_by_key(Row::occurrence_id);
+    tombstone_raw(&fixture, &head[0].occurrence_id());
+    let mut expected: Vec<String> = head[1..].iter().map(Row::occurrence_id).collect();
+    expected.push(tail.last().unwrap().occurrence_id());
+
+    let scanned = fixture
+        .store
+        .with_conn(|conn| Ok(scan(conn, &request, bounds(), &EvalBudget::unbounded())))
+        .unwrap()
+        .unwrap();
+    assert_eq!(scanned.hit_ids().collect::<Vec<_>>(), expected);
+    let retrieval = fixture
+        .retrieve(&request, bounds(), &EvalBudget::unbounded())
+        .unwrap();
+    assert_eq!(retrieval.consumed.scanned_rows, scan_rows);
+    assert_eq!(
+        retrieval.completion,
+        Completion::Incomplete(IncompleteReason::ScanBound)
     );
 }
