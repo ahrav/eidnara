@@ -171,7 +171,8 @@ type PendingControl = {
     timer: ReturnType<typeof setTimeout>;
 };
 
-function processStartTimeMs(pid: number): number | null {
+/** When the process at `pid` started, in epoch milliseconds, read from `ps`; `null` without a live process. */
+export function processStartTimeMs(pid: number): number | null {
     const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],

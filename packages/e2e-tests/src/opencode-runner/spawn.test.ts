@@ -515,6 +515,44 @@ describe("opencode child lifecycle", () => {
         }
     });
 
+    it("leaves provisioning to the caller when the spawn opts out of it", async () => {
+        const root = mkdtempSync(join(tmpdir(), "opencode-spawn-noprovision-"));
+        // A config directory under a regular file fails config writing before any child spawns.
+        const blocker = join(root, "blocker");
+        writeFileSync(blocker, "");
+        const env: IsolatedEnv = {
+            configDir: join(blocker, "config"),
+            dataDir: join(root, "data"),
+            cacheDir: join(root, "cache"),
+            workdir: root,
+        };
+        let provisionCalls = 0;
+        const previousMode = process.env.EIDNARA_E2E_MODE;
+        process.env.EIDNARA_E2E_MODE = "rust";
+        try {
+            const error = await __spawnOpencodeTest
+                .spawnOpencodeWithProvision(
+                    {
+                        mockProviderURL: "http://127.0.0.1:1",
+                        port: 1,
+                        existingEnv: env,
+                        provisionHost: false,
+                    },
+                    async () => {
+                        provisionCalls += 1;
+                        throw new Error("provision must not run");
+                    },
+                )
+                .catch((failure: unknown) => failure);
+            expect(String(error)).toContain("ENOTDIR");
+            expect(provisionCalls).toBe(0);
+        } finally {
+            if (previousMode === undefined) delete process.env.EIDNARA_E2E_MODE;
+            else process.env.EIDNARA_E2E_MODE = previousMode;
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("never provisions the Rust fixture when config serialization fails", async () => {
         const root = mkdtempSync(join(tmpdir(), "opencode-spawn-rollback-"));
         const env: IsolatedEnv = {
